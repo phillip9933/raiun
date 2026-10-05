@@ -19,7 +19,6 @@ internal fun BackupEditorHeading(
             style = MaterialTheme.typography.headlineSmall,
         )
         backup?.let {
-            Text(stringResource(R.string.backup_settings_source, it.sourceDisplayName))
             BackupSyncInfo(it, transfers)
         }
     }

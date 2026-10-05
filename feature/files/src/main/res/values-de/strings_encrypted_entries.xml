@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_encrypted_locked">Verschlüsselter Ordner, gesperrt</string>
+    <string name="browser_encrypted_load_failed">Verschlüsselte Ordner konnten nicht geprüft werden. Zum Wiederholen nach unten ziehen.</string>
+    <string name="browser_encrypted_actions">Aktionen für %1$s</string>
+</resources>

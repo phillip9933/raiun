@@ -81,9 +81,13 @@ internal fun ActionGroupDivider() {
 }
 
 @Composable
-internal fun FolderSummary(resources: List<ResourceEntity>) {
-    val folders = resources.count { it.kind == ResourceKind.FOLDER }
-    val files = resources.size - folders
+internal fun FolderSummary(
+    resources: List<ResourceEntity>,
+    encryptedFolderCount: Int = 0,
+) {
+    val ordinaryFolders = resources.count { it.kind == ResourceKind.FOLDER }
+    val folders = ordinaryFolders + encryptedFolderCount
+    val files = resources.size - ordinaryFolders
     Text(
         stringResource(
             R.string.browser_folder_summary,

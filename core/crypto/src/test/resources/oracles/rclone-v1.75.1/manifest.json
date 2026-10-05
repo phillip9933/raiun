@@ -1,0 +1,29 @@
+{
+  "source": "Official rclone v1.75.1 Linux amd64, release commit 687d264",
+  "source_zip_sha256": "982b5aa772841168f8e380f139e9e787b2a105403e32b94da8676a0e1c0a13ab",
+  "profile": "crypt remote, standard filename and directory name encryption, password potato, no password2",
+  "plaintext": "synthetic bytes i=(31*i+7) mod 256, lengths as keys",
+  "operation": "rclone copyto /tmp/plain-N.bin crypt:interop/写真🗃️-N.bin",
+  "files": {
+    "0": {
+      "encrypted_path": "f5qevq76he1rhpr8cjg4vbit6k/rpqc8vklnnj5nqtnhed844e6pqj5atv49gsh2holg2non2j2med0",
+      "ciphertext_sha256": "93f4058efea78e3fb8946c7550f33fc7825b579b2a82201ae3f80de9cad275b9"
+    },
+    "1": {
+      "encrypted_path": "f5qevq76he1rhpr8cjg4vbit6k/90pobgsfankmaqmn5mnk1g2q1euj0jdhvp4ftq6kvmm8l4uhll2g",
+      "ciphertext_sha256": "2a2790626f97836e3a7655a4137e1bc6c68baefff445dc3202f65e6f9175d8d8"
+    },
+    "65535": {
+      "encrypted_path": "f5qevq76he1rhpr8cjg4vbit6k/iitm83ecv3ls4i737ls5pmgd08e5l9r04e12gu7qgg4rqnphceb0",
+      "ciphertext_sha256": "5adbfbc563ac2c994c0a76b308f63bfdd86daa7f1dc1b55914b25a2972fd6e80"
+    },
+    "65536": {
+      "encrypted_path": "f5qevq76he1rhpr8cjg4vbit6k/br50ui52emjgajulgft36qvc7tf4ke7qa7dkvmlnfo4lu5uvn4qg",
+      "ciphertext_sha256": "cbcfecf61559652e8a390d4b3a18b33562e94ae722b3fe58ced6faeaa7c629a4"
+    },
+    "65537": {
+      "encrypted_path": "f5qevq76he1rhpr8cjg4vbit6k/1sjbdv65fk0ih90u44je3u9oo548bi5ppg9q023n6aklqemohseg",
+      "ciphertext_sha256": "cd3dc4e8a84ccfa8e0d8d7da1fb9f503d850840ee6ea722eb29afbfb364625e8"
+    }
+  }
+}

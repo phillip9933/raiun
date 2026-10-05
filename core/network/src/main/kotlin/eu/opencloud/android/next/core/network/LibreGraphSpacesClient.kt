@@ -38,10 +38,33 @@ class LibreGraphSpacesClient(
         serverUrl: String,
         authorization: String,
         name: String,
+    ): String = createSpace(serverUrl, authorization, name, contentType = null)
+
+    /** Creates a project drive carrying Web's vault marker and no default template. */
+    fun createVaultSpace(
+        serverUrl: String,
+        authorization: String,
+        name: String,
+    ): String = createSpace(serverUrl, authorization, name, VAULT_CONTENT_TYPE)
+
+    private fun createSpace(
+        serverUrl: String,
+        authorization: String,
+        name: String,
+        contentType: String?,
     ): String {
         require(name.isNotBlank())
-        val url = drivesUrl(serverUrl, includeMe = false).let(endpoints::endpoint)
-        val body = buildJsonObject { put("name", name.trim()) }.toString()
+        val url =
+            endpoints
+                .endpoint(drivesUrl(serverUrl, includeMe = false))
+                .newBuilder()
+                .apply { if (contentType != null) addQueryParameter("template", "none") }
+                .build()
+        val body =
+            buildJsonObject {
+                put("name", name.trim())
+                contentType?.let { put("@libre.graph.contentType", it) }
+            }.toString()
         val request =
             Request
                 .Builder()
@@ -207,9 +230,11 @@ class LibreGraphSpacesClient(
         serverUrl: String,
         authorization: String,
         includeAllSpaces: Boolean = false,
+        includeVaultDetails: Boolean = false,
     ): RemoteSpacesSnapshot {
         val spaces = mutableListOf<RemoteSpace>()
         val excluded = mutableSetOf<String>()
+        val vaultSpaces = mutableListOf<RemoteSpace>()
         val initial = endpoints.endpoint(drivesUrl(serverUrl, includeMe = !includeAllSpaces))
         val visited = mutableSetOf<String>()
         val ids = mutableSetOf<String>()
@@ -222,21 +247,23 @@ class LibreGraphSpacesClient(
             if (!visited.add(url.toString()) || visited.size > 1000) {
                 throw OpenCloudException(OpenCloudError.PreconditionFailed)
             }
-            val page = execute(url.toString(), authorization)
+            val page = execute(url.toString(), authorization, includeVaultDetails)
             requireCompletePage(page.spaces.map { it.id } + page.excludedVaultIds, ids)
             spaces += page.spaces
             excluded += page.excludedVaultIds
+            vaultSpaces += page.vaultSpaces
             nextUrl =
                 page.nextUrl?.let {
                     resolvePage(url, it)
                 }
         }
-        return RemoteSpacesSnapshot(spaces.toList(), excluded.toSet())
+        return RemoteSpacesSnapshot(spaces.toList(), excluded.toSet(), vaultSpaces.toList())
     }
 
     private fun execute(
         url: String,
         authorization: String,
+        includeVaultDetails: Boolean,
     ): SpacesPage {
         val request =
             Request
@@ -264,6 +291,7 @@ class LibreGraphSpacesClient(
             SpacesPage(
                 spaces = visible.map { it.toRemoteSpace() },
                 excludedVaultIds = vaults.map { it.vaultId() },
+                vaultSpaces = if (includeVaultDetails) vaults.map { it.toRemoteSpace() } else emptyList(),
                 nextUrl = payload.string("@odata.nextLink"),
             )
         }
@@ -271,6 +299,7 @@ class LibreGraphSpacesClient(
 
     private companion object {
         const val LOG_TAG = "OpenCloudSync"
+        const val VAULT_CONTENT_TYPE = "application/vnd.opencloud.vault"
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         val CLIENT_INITIATOR_ID = UUID.randomUUID().toString()
     }
@@ -296,6 +325,7 @@ private fun JsonObject.vaultId(): String =
 data class RemoteSpacesSnapshot(
     val spaces: List<RemoteSpace>,
     val excludedVaultIds: Set<String>,
+    val vaultSpaces: List<RemoteSpace> = emptyList(),
 )
 
 data class ProjectSpaceUpdate(
@@ -337,6 +367,7 @@ data class RemoteSpace(
 private data class SpacesPage(
     val spaces: List<RemoteSpace>,
     val excludedVaultIds: List<String>,
+    val vaultSpaces: List<RemoteSpace>,
     val nextUrl: String?,
 )
 

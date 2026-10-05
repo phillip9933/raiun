@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_offline_unavailable_title">Offline nicht verfügbar</string>
+    <string name="vault_offline_unavailable_space">Space</string>
+    <string name="vault_offline_unavailable_folder">Ordner</string>
+    <string name="vault_offline_unavailable_message">Der verschlüsselte %1$s „%2$s“ ist nicht auf diesem Gerät gespeichert und kann offline nicht entsperrt werden.</string>
+</resources>

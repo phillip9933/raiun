@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_biometric_cleanup_error">Der Tresor wurde gelöscht, aber dieser Gerät konnte den gespeicherten Biometrieschlüssel nicht entfernen. Wiederhole die lokale Bereinigung in den Einstellungen; der Löschvorgang auf dem Server wird nicht wiederholt.</string>
+</resources>

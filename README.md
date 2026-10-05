@@ -12,6 +12,12 @@ Making it public does not mean it is a polished production product or suitable f
 
 - Personal files and project Spaces, search, favorites, recents and offline access.
 - Uploads, downloads, copy/move, sharing links and Android file-picker integration.
+- End-to-end encrypted folders and Spaces using a Web-compatible rclone crypt format. Unlock with the encryption password; optionally store a biometric unlock key on the phone.
+- Keep encrypted folders or files offline for later password-authenticated access. Offline copies remain ciphertext on the device.
+- Encrypted folder and Space locations remain in their normal browser views when offline; without saved content, an item is visible but unavailable until you connect and save it offline.
+- Encrypted image, PDF and text previews use memory. Text editing is supported for files up to 256 KiB; image and PDF previews are limited to 8 MiB.
+- Scan PDFs and JPEGs directly into an encrypted folder or Space. Encrypted copy and move browse destinations within the same encrypted location.
+- Explicit “Open with” handoff to another app is available after a warning. It creates a temporary plaintext file; see the security limits below before using it.
 - Folder/camera backup, local cache controls and optional biometric/device locking.
 - Cloud folders for other apps, built-in text/PDF/image viewers and file version history.
 - File and folder activities showing changes reported by the server.
@@ -22,7 +28,7 @@ Making it public does not mean it is a polished production product or suitable f
 
 ## Install
 
-Download the signed APK from [GitHub Releases](https://github.com/phillip9933/raiun/releases) and verify it against the attached SHA256SUMS file. The previous OpenCloud Android Next release downloads have been retired.
+Download the 0.9.0 beta APK from [GitHub Releases](https://github.com/phillip9933/raiun/releases) and verify it against the attached SHA256SUMS file. Install over an existing Raiun release to keep its app data. The previous OpenCloud Android Next release downloads have been retired.
 
 ## Build and test
 
@@ -39,9 +45,13 @@ Translations use Android resource files. Missing translations fall back to Engli
 
 ## Known beta limitations
 
-- End-to-end encrypted Spaces are not currently supported. Raiun does not implement their client-side encryption, decryption or key management.
-- HTTP 502/timeouts have been observed on some server/network paths on larger files paired with inconsistent network stability
-- External editor, Office/server integrations and broader device/provider combinations have not been fully tested.
+- Encrypted storage follows the Web-compatible rclone crypt format. It authenticates content blocks, but the format does not authenticate filenames or a complete file manifest. Server metadata can be observed, and a malicious server can replay valid older ciphertext or alter metadata in ways the format cannot detect. See the [encrypted security review](docs/ENCRYPTED-SECURITY-REVIEW.md#format-limitations-preserved-for-web-compatibility).
+- Encrypted location identity and root labels may be visible while locked so locations can be listed; child names and file contents require unlock.
+- Encrypted internal previews support images/PDFs up to 8 MiB and text up to 256 KiB; encrypted text edits are limited to 256 KiB. These are preview/edit limits, not general encrypted copy or move limits.
+- “Open with” sends a temporary plaintext file to another app only after confirmation. Raiun revokes access and attempts cleanup on return; Android may delay physical deletion, and another app can retain an open descriptor or make its own copy. Deletion is not guaranteed forensic erasure.
+- Keep the encryption password as your recovery method. The security review is a focused source review, not an independent penetration test or certification.
+- HTTP 502/timeouts have been observed on some server/network paths, particularly when network stability is inconsistent.
+- External editor, Office/server integrations and some Android document-provider combinations have not been fully tested.
 - Folder backup queues uploads; it is not a bidirectional mirror and does not delete source files. Changed destination names can require conflict resolution.
 - Metadata comes from Android's supplied file representation; Raiun does not guarantee removal or preservation of GPS or other metadata.
 

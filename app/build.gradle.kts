@@ -41,8 +41,8 @@ android {
                 .toInt()
         // The scanner SDK ships native processing for 64-bit Android only.
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
-        versionCode = 23
-        versionName = "0.8.1"
+        versionCode = 39
+        versionName = "0.9.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "DEV_SERVER_URL", "\"\"")
@@ -52,6 +52,7 @@ android {
 
     buildTypes {
         debug {
+            versionNameSuffix = "-debug"
             buildConfigField("String", "DEV_SERVER_URL", localPropertyBuildConfigValue("dev.server.url"))
             buildConfigField("String", "DEV_SERVER_USERNAME", localPropertyBuildConfigValue("dev.server.username"))
             buildConfigField("String", "DEV_SERVER_PASSWORD", localPropertyBuildConfigValue("dev.server.password"))
@@ -122,14 +123,19 @@ dependencies {
     implementation(libs.androidx.compose.ui.graphics)
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.material.icons.extended)
+    implementation(libs.offline.scanner.compose)
 
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
+    androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     androidTestImplementation(libs.okhttp)
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.androidx.room.runtime)
+    testImplementation(libs.androidx.work.testing)
     testImplementation(libs.androidx.activity.compose)
     testImplementation(libs.androidx.compose.ui.test.junit4)
     testImplementation(libs.robolectric)

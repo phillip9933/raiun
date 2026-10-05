@@ -7,13 +7,16 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.lifecycle.Lifecycle
 import com.github.takahirom.roborazzi.captureRoboImage
 import eu.opencloud.android.next.core.datastore.PhotoMetadataPreferences
+import eu.opencloud.android.next.core.datastore.UserSettings
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudTheme
 import eu.opencloud.android.next.core.security.AppLock
 import eu.opencloud.android.next.feature.files.PhotoMetadataPermissionDialog
 import eu.opencloud.android.next.feature.settings.SecuritySettingsScreen
+import eu.opencloud.android.next.feature.settings.SettingsScreen
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -60,7 +63,8 @@ class SecurityGoldenTest {
     @Test fun metadataPermissionStatusRefreshesAfterReturningFromSettings() {
         val app = compose.activity.application
         Shadows.shadowOf(app).denyPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)
-        compose.setContent { OpenCloudTheme { SecuritySettingsScreen(onNavigateBack = {}) } }
+        compose.setContent { OpenCloudTheme { SettingsScreen(UserSettings(), {}, {}, {}) } }
+        compose.onNodeWithText("Permissions").performScrollTo().performClick()
         compose.onNodeWithText("Allow photo location").assertExists()
         compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
         Shadows.shadowOf(app).grantPermissions(Manifest.permission.ACCESS_MEDIA_LOCATION)

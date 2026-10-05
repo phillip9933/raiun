@@ -1,0 +1,11 @@
+<resources>
+    <string name="vault_scan_document">Scan document</string>
+    <string name="vault_scanner_failed">The scan could not be completed. Some files may already have been uploaded. Close this screen and refresh before scanning again.</string>
+    <string name="vault_scanner_uploading">Encrypting and uploading scan…</string>
+    <string name="vault_scanner_fixed_destination">This scan will be saved only in</string>
+    <string name="vault_scanner_discard">Discard scan</string>
+    <string name="vault_scanner_discard_title">Discard this encrypted scan?</string>
+    <string name="vault_scanner_discard_body">The temporary scan files will be removed from this device.</string>
+    <string name="vault_scanner_keep">Keep scan</string>
+    <string name="vault_scanner_close">Close</string>
+</resources>

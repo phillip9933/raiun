@@ -19,13 +19,18 @@ import eu.opencloud.android.next.core.datastore.SettingsBrowserLayout
 import eu.opencloud.android.next.core.datastore.SettingsRepository
 import eu.opencloud.android.next.core.designsystem.localizedString
 import eu.opencloud.android.next.core.model.ResourceKind
+import eu.opencloud.android.next.core.network.OpenCloudError
+import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.network.safeMessage
 import eu.opencloud.android.next.core.network.toOpenCloudError
 import eu.opencloud.android.next.core.sync.DISCOVERY_ERROR
+import eu.opencloud.android.next.core.sync.FileOperationNameConflictException
 import eu.opencloud.android.next.core.sync.SearchRepositoryResult
 import eu.opencloud.android.next.core.sync.SpaceCreationResult
 import eu.opencloud.android.next.core.sync.TransferManager
+import eu.opencloud.android.next.core.sync.VaultLocation
 import eu.opencloud.android.next.core.sync.createSearchRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -42,6 +47,8 @@ import kotlinx.coroutines.withContext
 import java.util.UUID
 
 @OptIn(ExperimentalCoroutinesApi::class)
+// Existing browser orchestration; encrypted discovery is isolated in EncryptedFolderDiscovery.
+@Suppress("LargeClass")
 class FileBrowserViewModel(
     application: Application,
     private val savedState: SavedStateHandle,
@@ -61,6 +68,8 @@ class FileBrowserViewModel(
         eu.opencloud.android.next.core.datastore
             .RecentFiles(application)
     private val mutableState = MutableStateFlow(FileBrowserUiState())
+    private var placementInFlight = false
+    private var placementTarget: FileOperationPlacementTarget? = null
     private val activeLocation = MutableStateFlow<BrowserLocation?>(null)
     private val backupPickerLocation = MutableStateFlow<BrowserLocation?>(null)
     private val searchQuery = MutableStateFlow("")
@@ -69,6 +78,42 @@ class FileBrowserViewModel(
     private var accountId: String? = null
     private var latestDiscovery: UUID? = null
     private var creatingSpace = false
+    private val encryptedFolders =
+        EncryptedFolderDiscovery(application, store, viewModelScope) { entries, error ->
+            reduce { withEncryptedFolders(entries, error) }
+        }
+    private val encryptedCreation =
+        EncryptedLocationCreation(
+            application,
+            store,
+            viewModelScope,
+            onBusy = { busy -> reduce { copy(encryptedCreationBusy = busy) } },
+            onCreated = { created, parent ->
+                if (accountId == created.accountId) {
+                    if (parent == null) {
+                        observeDiscovery(transfers.refreshAccount(created.accountId))
+                        reduce { copy(encryptedSpaceCreationRevision = encryptedSpaceCreationRevision + 1) }
+                    } else if (activeLocation.value ==
+                        BrowserLocation(parent.accountId, parent.driveId, parent.folderId)
+                    ) {
+                        observeDiscovery(transfers.refreshFolder(parent.accountId, parent.driveId, parent.folderId))
+                        encryptedFolders.refresh(parent.accountId, parent.driveId, parent.folderId)
+                    }
+                }
+            },
+            onUncertain = { account ->
+                if (accountId == account) {
+                    reduce {
+                        copy(
+                            error =
+                                getApplication<Application>().localizedString(
+                                    R.string.browser_encrypt_create_uncertain,
+                                ),
+                        )
+                    }
+                }
+            },
+        )
 
     init {
         transfers.scheduleCleanup()
@@ -246,6 +291,7 @@ class FileBrowserViewModel(
     fun refresh() {
         val location = activeLocation.value ?: return
         observeDiscovery(transfers.refreshFolder(location.accountId, location.spaceId, location.folderId))
+        encryptedFolders.refresh(location.accountId, location.spaceId, location.folderId)
     }
 
     fun open(resource: ResourceEntity) {
@@ -344,6 +390,30 @@ class FileBrowserViewModel(
     fun createFolder(name: String) =
         mutate { account, space, parent -> transfers.createFolder(account, space, parent, name) }
 
+    fun createEncryptedFolder(
+        name: String,
+        password: CharArray,
+    ) {
+        val location = activeLocation.value
+        if (location == null || location.accountId != accountId) {
+            password.fill('\u0000')
+            return
+        }
+        encryptedCreation.folder(location.accountId, location.spaceId, location.folderId, name, password)
+    }
+
+    fun createEncryptedSpace(
+        name: String,
+        password: CharArray,
+    ) {
+        val account = accountId
+        if (account == null) {
+            password.fill('\u0000')
+            return
+        }
+        encryptedCreation.space(account, name, password)
+    }
+
     fun createSpace(name: String) {
         val account = accountId ?: return
         if (creatingSpace) return
@@ -368,7 +438,15 @@ class FileBrowserViewModel(
     fun rename(
         resource: ResourceEntity,
         name: String,
-    ) = mutate { _, _, _ -> operations.enqueue(resource, resource.spaceId, resource.parentId, name, true) }
+    ) = mutate { _, _, _ ->
+        if (name != resource.name) {
+            try {
+                operations.enqueue(resource, resource.spaceId, resource.parentId, name, true)
+            } catch (_: FileOperationNameConflictException) {
+                throw OpenCloudException(OpenCloudError.Conflict)
+            }
+        }
+    }
 
     fun move(resource: ResourceEntity) =
         reduce {
@@ -398,22 +476,166 @@ class FileBrowserViewModel(
         }
     }
 
-    fun cancelPlacement() = reduce { copy(clipboard = null, clipboardItems = emptyList()) }
+    fun cancelPlacement() = reduce { copy(clipboard = null, clipboardItems = emptyList(), placementConflict = null) }
 
-    fun place() =
-        mutate { _, space, parent ->
-            val sources = state.value.clipboardItems.ifEmpty { listOfNotNull(state.value.clipboard) }
-            sources.forEach { source ->
-                operations.enqueue(source, space, parent, source.name, state.value.moving)
-                reduce {
-                    val remaining =
-                        clipboardItems.filterNot {
-                            it.remoteId == source.remoteId &&
-                                it.spaceId == source.spaceId
+    // Cancellation is rethrown; preserve explicit batch and stale-context exits.
+    @Suppress("TooGenericExceptionCaught", "CyclomaticComplexMethod", "ReturnCount")
+    fun place() {
+        val current = state.value
+        val account = accountId ?: return
+        val space = current.spaceId ?: return
+        val parent = current.currentFolderId
+        val sources = current.clipboardItems.ifEmpty { listOfNotNull(current.clipboard) }
+        if (sources.isEmpty() || placementInFlight) return
+        if (sources.any { it.accountId != account }) {
+            cancelPlacement()
+            return
+        }
+        placementInFlight = true
+        placementTarget = FileOperationPlacementTarget(account, space, parent)
+        reduce { copy(placementBusy = true) }
+        viewModelScope.launch {
+            try {
+                for (source in sources) {
+                    if (!isPlacementContextCurrent(account, space, parent)) return@launch
+                    val failure =
+                        try {
+                            withContext(Dispatchers.IO) {
+                                operations.enqueue(source, space, parent, source.name, current.moving)
+                            }
+                            null
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (error: Exception) {
+                            error
                         }
-                    copy(clipboard = remaining.firstOrNull(), clipboardItems = remaining)
+                    if (!isPlacementContextCurrent(account, space, parent)) return@launch
+                    if (failure is FileOperationNameConflictException) {
+                        reduce {
+                            copy(
+                                placementConflict =
+                                    FileOperationPlacementConflict(
+                                        source,
+                                        space,
+                                        parent,
+                                        current.moving,
+                                        failure.suggestedName,
+                                    ),
+                            )
+                        }
+                        return@launch
+                    }
+                    if (failure != null) {
+                        reduce { copy(error = failure.toOpenCloudError().safeMessage(getApplication())) }
+                        return@launch
+                    }
+                    removePlacementSource(source)
+                }
+                if (isPlacementContextCurrent(account, space, parent)) {
+                    reduce { copy(selectedIds = emptySet(), actionResource = null) }
+                }
+            } finally {
+                placementInFlight = false
+                if (isPlacementContextCurrent(account, space, parent)) {
+                    if (placementTarget == FileOperationPlacementTarget(account, space, parent)) {
+                        placementTarget = null
+                    }
+                    reduce { copy(placementBusy = false) }
                 }
             }
+        }
+    }
+
+    // Cancellation is rethrown; preserve explicit retry and stale-context exits.
+    @Suppress("TooGenericExceptionCaught", "ReturnCount")
+    fun keepBothPlacementConflict() {
+        val conflict = state.value.placementConflict ?: return
+        val account = accountId
+        val current = state.value
+        if (placementInFlight) return
+        if (account != conflict.source.accountId ||
+            current.spaceId != conflict.destinationSpaceId ||
+            current.currentFolderId != conflict.parentId
+        ) {
+            cancelPlacement()
+            return
+        }
+        val target =
+            FileOperationPlacementTarget(conflict.source.accountId, conflict.destinationSpaceId, conflict.parentId)
+        placementInFlight = true
+        placementTarget = target
+        reduce { copy(placementBusy = true) }
+        viewModelScope.launch {
+            try {
+                val failure =
+                    try {
+                        withContext(Dispatchers.IO) {
+                            operations.enqueue(
+                                conflict.source,
+                                conflict.destinationSpaceId,
+                                conflict.parentId,
+                                conflict.suggestedName,
+                                conflict.moving,
+                                namingBase = conflict.source.name,
+                            )
+                        }
+                        null
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        error
+                    }
+                if (!isPlacementContextCurrent(target.accountId, target.spaceId, target.parentId)) return@launch
+                when (failure) {
+                    is FileOperationNameConflictException ->
+                        reduce { copy(placementConflict = conflict.copy(suggestedName = failure.suggestedName)) }
+                    null -> {
+                        reduce { copy(placementConflict = null) }
+                        removePlacementSource(conflict.source)
+                    }
+                    else -> {
+                        reduce {
+                            copy(
+                                placementConflict = null,
+                                error = failure.toOpenCloudError().safeMessage(getApplication()),
+                            )
+                        }
+                    }
+                }
+            } finally {
+                placementInFlight = false
+                if (isPlacementContextCurrent(target.accountId, target.spaceId, target.parentId)) {
+                    if (placementTarget == target) placementTarget = null
+                    reduce { copy(placementBusy = false) }
+                }
+            }
+        }
+    }
+
+    private fun isPlacementContextCurrent(
+        account: String,
+        space: String,
+        parent: String?,
+    ): Boolean = accountId == account && state.value.spaceId == space && state.value.currentFolderId == parent
+
+    private fun clearPlacementBusyWhenContextChanges(
+        account: String,
+        space: String,
+        parent: String?,
+    ) {
+        val target = placementTarget ?: return
+        if (target != FileOperationPlacementTarget(account, space, parent)) {
+            reduce { copy(placementBusy = false, placementConflict = null) }
+        }
+    }
+
+    private fun removePlacementSource(source: ResourceEntity) =
+        reduce {
+            val remaining =
+                (clipboardItems.ifEmpty { listOfNotNull(clipboard) }).filterNot {
+                    it.remoteId == source.remoteId && it.spaceId == source.spaceId
+                }
+            copy(clipboard = remaining.firstOrNull(), clipboardItems = remaining, placementConflict = null)
         }
 
     fun retryOperation(id: String) =
@@ -632,7 +854,9 @@ class FileBrowserViewModel(
         folderId: String?,
     ) {
         accountId?.let { accountId ->
+            clearPlacementBusyWhenContextChanges(accountId, spaceId, folderId)
             activeLocation.value = BrowserLocation(accountId, spaceId, folderId)
+            encryptedFolders.refresh(accountId, spaceId, folderId)
             viewModelScope.launch(Dispatchers.Main.immediate) {
                 savedState["browser.account"] = accountId
                 savedState["browser.space"] = spaceId
@@ -678,7 +902,10 @@ class FileBrowserViewModel(
     private fun selectedResources(): List<ResourceEntity> =
         (state.value.resources + state.value.searchResults + state.value.offlineResources)
             .distinctBy { it.selectionKey }
-            .filter { it.selectionKey in state.value.selectedIds }
+            .filter {
+                it.selectionKey in state.value.selectedIds &&
+                    !it.matchesEncryptedFolder(state.value.encryptedFolders)
+            }
 
     @Suppress("TooGenericExceptionCaught") // Map failures at the UI boundary; the mapper rethrows cancellation.
     private fun batchAction(action: suspend (ResourceEntity) -> Unit) {
@@ -734,12 +961,18 @@ data class FileBrowserUiState(
     val clipboard: ResourceEntity? = null,
     val clipboardItems: List<ResourceEntity> = emptyList(),
     val moving: Boolean = false,
+    val placementConflict: FileOperationPlacementConflict? = null,
+    val placementBusy: Boolean = false,
     val operations: List<eu.opencloud.android.next.core.database.FileOperationEntity> = emptyList(),
     val spaces: List<SpaceEntity> = emptyList(),
     val spaceId: String? = null,
     val currentFolderId: String? = null,
     val folderTrail: List<FolderCrumb> = emptyList(),
     val resources: List<ResourceEntity> = emptyList(),
+    val encryptedFolders: List<VaultLocation> = emptyList(),
+    val encryptedFoldersError: String? = null,
+    val encryptedCreationBusy: Boolean = false,
+    val encryptedSpaceCreationRevision: Int = 0,
     val offlineResources: List<ResourceEntity> = emptyList(),
     val offlinePins: List<ResourceEntity> = emptyList(),
     val offlineBytes: Long = 0,
@@ -760,6 +993,20 @@ data class FileBrowserUiState(
     val error: String? = null,
     val refreshing: Boolean = false,
     val discoveryError: String? = null,
+)
+
+data class FileOperationPlacementConflict(
+    val source: ResourceEntity,
+    val destinationSpaceId: String,
+    val parentId: String?,
+    val moving: Boolean,
+    val suggestedName: String,
+)
+
+private data class FileOperationPlacementTarget(
+    val accountId: String,
+    val spaceId: String,
+    val parentId: String?,
 )
 
 data class FolderCrumb(

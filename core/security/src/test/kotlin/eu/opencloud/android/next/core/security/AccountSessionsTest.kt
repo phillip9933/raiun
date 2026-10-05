@@ -5,8 +5,10 @@ import eu.opencloud.android.next.core.model.auth.AuthTokens
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
@@ -92,6 +94,18 @@ class AccountSessionsTest {
             }
         }
         assertEquals(1, refreshes.get())
+    }
+
+    @Test fun `credential lease closes on removal and cannot revive with the same account id`() {
+        sessions.save("account", tokens(3600, "first"))
+        val original = sessions.beginLease("account")
+        assertTrue(original())
+        sessions.remove("account")
+        assertFalse(original())
+        assertFalse(sessions.beginLease("account")())
+        sessions.save("account", tokens(3600, "second"))
+        assertFalse(original())
+        assertTrue(sessions.beginLease("account")())
     }
 
     private fun tokens(

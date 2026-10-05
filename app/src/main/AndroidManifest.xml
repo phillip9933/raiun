@@ -59,5 +59,10 @@
                 <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
             </intent-filter>
         </provider>
+        <provider
+            android:name=".VaultExternalCopyProvider"
+            android:authorities="${applicationId}.vault-export"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>

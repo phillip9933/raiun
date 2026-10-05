@@ -9,6 +9,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -24,10 +25,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import eu.opencloud.android.next.core.database.ResourceEntity
+import eu.opencloud.android.next.core.datastore.FileDisplayOptions
 import eu.opencloud.android.next.core.designsystem.localizedString
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
 import eu.opencloud.android.next.core.model.resourceCacheDirectory
 import eu.opencloud.android.next.core.model.validatedCachedFile
+import eu.opencloud.android.next.core.ui.ResourceMetadataDetails
+import eu.opencloud.android.next.core.ui.browserDisplayName
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -40,8 +44,7 @@ import java.util.Date
 @Composable
 internal fun ResourceDetailsDialog(
     resource: ResourceEntity,
-    keptOffline: Boolean,
-    retentionHours: Int,
+    options: ResourceDetailsOptions,
     onDismiss: () -> Unit,
     prepareFile: (suspend (ResourceEntity) -> ResourceEntity)? = null,
 ) {
@@ -49,7 +52,10 @@ internal fun ResourceDetailsDialog(
     if (showVersions) {
         FileVersionHistoryDialog(resource, onDismiss = onDismiss)
     } else {
-        ResourceDetailsContent(resource, keptOffline, retentionHours, onDismiss, prepareFile) { showVersions = true }
+        ResourceDetailsContent(resource, options, onDismiss, prepareFile) {
+            showVersions =
+                true
+        }
     }
 }
 
@@ -57,12 +63,14 @@ internal fun ResourceDetailsDialog(
 @Composable
 private fun ResourceDetailsContent(
     resource: ResourceEntity,
-    keptOffline: Boolean,
-    retentionHours: Int,
+    options: ResourceDetailsOptions,
     onDismiss: () -> Unit,
     prepareFile: (suspend (ResourceEntity) -> ResourceEntity)?,
     onVersions: () -> Unit,
 ) {
+    val keptOffline = options.keptOffline
+    val retentionHours = options.retentionHours
+    val display = options.display
     val context = LocalContext.current
     var current by remember(resource) { mutableStateOf(resource) }
     var metadata by remember(resource) { mutableStateOf<List<String>>(emptyList()) }
@@ -94,20 +102,28 @@ private fun ResourceDetailsContent(
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(resource.name) },
+        title = {
+            Text(
+                browserDisplayName(
+                    resource.name,
+                    resource.kind == eu.opencloud.android.next.core.model.ResourceKind.FOLDER,
+                    display,
+                ),
+            )
+        },
         text = {
             Column(
                 Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingSm),
             ) {
-                BasicResourceDetails(resource)
+                BasicResourceDetails(resource, display)
                 eu.opencloud.android.next.core.ui.ItemActivitiesAction(
                     resource.accountId,
                     resource.remoteId,
                     resource.name,
                 )
                 if (resource.kind == eu.opencloud.android.next.core.model.ResourceKind.FILE) {
-                    TextButton(onClick = onVersions) { Text(stringResource(R.string.file_versions_title)) }
+                    FilledTonalButton(onClick = onVersions) { Text(stringResource(R.string.file_versions_title)) }
                 }
                 Text(localStatus)
                 if (resource.isImagePreview()) {
@@ -128,7 +144,7 @@ private fun ResourceDetailsContent(
                                 Text(stringResource(R.string.file_details_no_photo_metadata))
                             }
                             if (!locallyAvailable && prepareFile != null) {
-                                TextButton(enabled = !loading, onClick = {
+                                FilledTonalButton(enabled = !loading, onClick = {
                                     loading = true
                                     error = null
                                     scope.launch {
@@ -323,21 +339,28 @@ private fun formatEnglishTemplate(
     }
 
 @Composable
-private fun BasicResourceDetails(resource: ResourceEntity) {
-    Column(verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingSm)) {
-        Text(stringResource(R.string.file_details_location, resource.path))
-        Text(stringResource(R.string.file_details_type, resource.mimeType ?: resource.kind.name.lowercase()))
-        Text(
-            stringResource(
-                R.string.file_details_size,
-                android.text.format.Formatter
-                    .formatShortFileSize(LocalContext.current, resource.sizeBytes),
-            ),
-        )
-        val modified =
-            resource.modifiedAtEpochMillis.takeIf { it > 0 }?.let {
-                DateFormat.getDateTimeInstance().format(Date(it))
-            } ?: stringResource(R.string.file_details_unknown)
-        Text(stringResource(R.string.file_details_modified, modified))
-    }
+private fun BasicResourceDetails(
+    resource: ResourceEntity,
+    display: FileDisplayOptions,
+) {
+    val context = LocalContext.current
+    val modified =
+        resource.modifiedAtEpochMillis.takeIf { display.showModified && it > 0 }?.let {
+            DateFormat.getDateTimeInstance().format(Date(it))
+        }
+    ResourceMetadataDetails(
+        location = stringResource(R.string.file_details_location, resource.path),
+        type = stringResource(R.string.file_details_type, resource.mimeType ?: resource.kind.name.lowercase()),
+        size =
+            if (display.showSize) {
+                stringResource(
+                    R.string.file_details_size,
+                    android.text.format.Formatter
+                        .formatShortFileSize(context, resource.sizeBytes),
+                )
+            } else {
+                null
+            },
+        modified = modified?.let { stringResource(R.string.file_details_modified, it) },
+    )
 }

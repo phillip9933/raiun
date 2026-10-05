@@ -5,24 +5,32 @@ import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import eu.opencloud.android.next.BuildConfig
+import eu.opencloud.android.next.R
 import eu.opencloud.android.next.core.database.ResourceEntity
+import eu.opencloud.android.next.core.sync.VaultLocation
 import eu.opencloud.android.next.feature.account.AccountRoute
 import eu.opencloud.android.next.feature.auth.AuthScreen
 import eu.opencloud.android.next.feature.auth.AuthViewModel
@@ -36,6 +44,9 @@ import eu.opencloud.android.next.feature.shares.ResourceSharesRoute
 import eu.opencloud.android.next.feature.shares.TopLevelSharesRoute
 import eu.opencloud.android.next.feature.spaces.SpacesRoute
 import eu.opencloud.android.next.feature.transfers.TransfersRoute
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 @Suppress("CyclomaticComplexMethod", "LongMethod", "FunctionNaming", "ktlint:standard:function-naming")
@@ -47,11 +58,17 @@ fun OpenCloudNextApp(
     viewModel: AuthViewModel = viewModel(),
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var encryptedCleanupFailed by remember { mutableStateOf(false) }
     val state = viewModel.state.collectAsStateWithLifecycle()
     var destination by rememberSaveable(state.value.activeAccountId) { mutableStateOf(AppDestination.Files) }
     var nextBrowserAddRequest by remember(state.value.activeAccountId) { mutableIntStateOf(0) }
     var pendingBrowserAddRequest by remember(state.value.activeAccountId) { mutableIntStateOf(0) }
     var trashSpaceId by rememberSaveable(state.value.activeAccountId) { mutableStateOf<String?>(null) }
+    var encryptedLocation by remember(state.value.activeAccountId) { mutableStateOf<VaultLocation?>(null) }
+    var offlineUnavailableLocation by remember(state.value.activeAccountId) { mutableStateOf<VaultLocation?>(null) }
+    var encryptedReturnRevision by remember(state.value.activeAccountId) { mutableIntStateOf(0) }
+    var encryptedRootActions by remember(state.value.activeAccountId) { mutableStateOf(false) }
     var shareResource by remember(state.value.activeAccountId) { mutableStateOf<ResourceEntity?>(null) }
     var shortcutFolder by remember(state.value.activeAccountId) { mutableStateOf<ResourceEntity?>(null) }
 
@@ -92,6 +109,15 @@ fun OpenCloudNextApp(
                         Box(modifier = Modifier.fillMaxSize()) {
                             FileBrowserRoute(
                                 accountId = accountId,
+                                modifier =
+                                    if (encryptedLocation !=
+                                        null
+                                    ) {
+                                        Modifier.clearAndSetSemantics {}
+                                    } else {
+                                        Modifier
+                                    },
+                                encryptedReturnRevision = encryptedReturnRevision,
                                 shortcutFolder = shortcutFolder,
                                 sharedShortcut = sharedShortcut,
                                 onConsumeShortcutFolder = { shortcutFolder = null },
@@ -107,6 +133,27 @@ fun OpenCloudNextApp(
                                         },
                                         onOpenSettings = { destination = AppDestination.Settings },
                                         onOpenAccount = { destination = AppDestination.Account },
+                                        onOpenEncryptedOffline = { destination = AppDestination.Vaults },
+                                        onOpenEncryptedLocation = { location ->
+                                            dispatchOfflineAwareEncryptedLocation(
+                                                location,
+                                                onOpen = {
+                                                    encryptedRootActions = false
+                                                    encryptedLocation = it
+                                                },
+                                                onUnavailable = { offlineUnavailableLocation = it },
+                                            )
+                                        },
+                                        onEncryptedLocationActions = { location ->
+                                            dispatchOfflineAwareEncryptedLocation(
+                                                location,
+                                                onOpen = {
+                                                    encryptedRootActions = true
+                                                    encryptedLocation = it
+                                                },
+                                                onUnavailable = { offlineUnavailableLocation = it },
+                                            )
+                                        },
                                         onShareResource = { shareResource = it },
                                     ),
                                 sharesContent = { padding, onBrowseResource ->
@@ -118,10 +165,31 @@ fun OpenCloudNextApp(
                                         onConsumeInitialFolder = { sharedShortcut = null },
                                     )
                                 },
-                                spacesContent = { padding, onOpenSpace ->
+                                spacesContent = { padding, onOpenSpace, refreshToken ->
                                     SpacesRoute(
                                         accountId = accountId,
                                         onOpenSpace = onOpenSpace,
+                                        refreshToken = refreshToken + encryptedReturnRevision,
+                                        onOpenEncryptedLocation = { location ->
+                                            dispatchOfflineAwareEncryptedLocation(
+                                                location,
+                                                onOpen = {
+                                                    encryptedRootActions = false
+                                                    encryptedLocation = it
+                                                },
+                                                onUnavailable = { offlineUnavailableLocation = it },
+                                            )
+                                        },
+                                        onEncryptedLocationActions = { location ->
+                                            dispatchOfflineAwareEncryptedLocation(
+                                                location,
+                                                onOpen = {
+                                                    encryptedRootActions = true
+                                                    encryptedLocation = it
+                                                },
+                                                onUnavailable = { offlineUnavailableLocation = it },
+                                            )
+                                        },
                                         onOpenTrash = {
                                             trashSpaceId = it
                                             destination = AppDestination.DeletedFiles
@@ -130,6 +198,63 @@ fun OpenCloudNextApp(
                                     )
                                 },
                             )
+                            encryptedLocation?.let { location ->
+                                Surface(Modifier.fillMaxSize()) {
+                                    if (location.isDisabled) {
+                                        EncryptedDisabledSpaceManagementDialog(
+                                            accountId = accountId,
+                                            location = location,
+                                            onClose = { encryptedLocation = null },
+                                            onLifecycleChange = { changed ->
+                                                encryptedLocation = null
+                                                scope.launch {
+                                                    try {
+                                                        withContext(Dispatchers.IO) {
+                                                            val identity =
+                                                                eu.opencloud.android.next.core.security.VaultIdentity(
+                                                                    location.accountId,
+                                                                    location.canonicalServer,
+                                                                    location.driveId,
+                                                                    location.remoteVaultId,
+                                                                )
+                                                            eu.opencloud.android.next.core.sync
+                                                                .VaultOfflineStore(
+                                                                    context,
+                                                                ).remove(identity)
+                                                            if (changed == null) {
+                                                                eu.opencloud.android.next.core.security
+                                                                    .VaultKeyStore(
+                                                                        context,
+                                                                    ).forget(identity)
+                                                                eu.opencloud.android.next.core.security
+                                                                    .VaultPreferences(
+                                                                        context,
+                                                                    ).remove(identity)
+                                                            }
+                                                        }
+                                                        encryptedReturnRevision++
+                                                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                                                        throw cancelled
+                                                    } catch (_: Exception) {
+                                                        encryptedCleanupFailed = true
+                                                        encryptedReturnRevision++
+                                                    }
+                                                }
+                                            },
+                                        )
+                                    } else {
+                                        VaultRoute(
+                                            accountId = accountId,
+                                            initialLocation = location,
+                                            openMenuAfterUnlock = encryptedRootActions,
+                                            onNavigateBack = {
+                                                encryptedLocation = null
+                                                encryptedReturnRevision++
+                                            },
+                                        )
+                                    }
+                                }
+                            }
                             shareResource?.let { resource ->
                                 ResourceSharesRoute(
                                     accountId = accountId,
@@ -137,7 +262,15 @@ fun OpenCloudNextApp(
                                     onNavigateBack = { shareResource = null },
                                 )
                             }
+                            offlineUnavailableLocation?.let { location ->
+                                EncryptedOfflineUnavailableDialog(location) { offlineUnavailableLocation = null }
+                            }
                         }
+                    AppDestination.Vaults ->
+                        VaultRoute(accountId = accountId, offlineCatalog = true, onNavigateBack = {
+                            destination =
+                                AppDestination.Files
+                        })
                     AppDestination.Transfers ->
                         TransfersRoute(
                             accountId = accountId,
@@ -156,15 +289,16 @@ fun OpenCloudNextApp(
                         )
                     AppDestination.Settings ->
                         SettingsRoute(
+                            accountId = accountId,
                             onNavigateBack = { destination = AppDestination.Files },
                             onOpenBackupSettings = { destination = AppDestination.BackupSettings },
-                            onOpenSecurity = { destination = AppDestination.Security },
                         )
                     AppDestination.Security ->
-                        eu.opencloud.android.next.feature.settings.SecuritySettingsScreen(onNavigateBack = {
-                            destination =
-                                AppDestination.Settings
-                        })
+                        eu.opencloud.android.next.feature.settings
+                            .SecuritySettingsScreen(accountId = accountId, onNavigateBack = {
+                                destination =
+                                    AppDestination.Settings
+                            })
                     AppDestination.BackupSettings ->
                         BackupSettingsRoute(
                             accountId = accountId,
@@ -220,12 +354,31 @@ fun OpenCloudNextApp(
                 )
         }
     }
+    if (encryptedCleanupFailed) {
+        AlertDialog(
+            onDismissRequest = { encryptedCleanupFailed = false },
+            title = { Text(stringResource(R.string.vault_offline_cleanup_failed)) },
+            confirmButton = {
+                TextButton(onClick = { encryptedCleanupFailed = false }) {
+                    Text(stringResource(R.string.vault_close))
+                }
+            },
+        )
+    }
     BackHandler(
         enabled =
             state.value.activeAccountId != null &&
                 (
                     shareResource != null ||
-                        (destination != AppDestination.Files && destination != AppDestination.Settings)
+                        (
+                            destination !in
+                                listOf(
+                                    AppDestination.Files,
+                                    AppDestination.Settings,
+                                    AppDestination.Security,
+                                    AppDestination.Vaults,
+                                )
+                        )
                 ),
     ) {
         if (shareResource != null) {
@@ -251,4 +404,5 @@ private enum class AppDestination {
     BackupSettings,
     Security,
     Account,
+    Vaults,
 }

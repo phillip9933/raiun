@@ -3,6 +3,7 @@ package eu.opencloud.android.next.feature.settings
 import android.app.Application
 import androidx.activity.compose.BackHandler
 import androidx.appcompat.app.AppCompatDelegate
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -117,12 +118,13 @@ class SettingsViewModel(
 }
 
 @Composable
+@Suppress("LongParameterList") // Route dependencies and callbacks are explicit navigation inputs.
 fun SettingsRoute(
     onNavigateBack: () -> Unit,
     onOpenBackupSettings: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = viewModel(),
-    onOpenSecurity: () -> Unit = {},
+    accountId: String? = null,
 ) {
     val state by viewModel.state.collectAsState()
     val diagnostics by viewModel.diagnostics.collectAsState()
@@ -140,7 +142,7 @@ fun SettingsRoute(
                 viewModel::dismissDiagnostics,
             ),
         onSetAppearance = viewModel::setAppearance,
-        onOpenSecurity = onOpenSecurity,
+        accountId = accountId,
         onFileDisplay = viewModel::setFileDisplay,
         onFileOpening = viewModel::setFileOpening,
         onClearTemporary = viewModel::clearTemporaryCopies,
@@ -167,75 +169,97 @@ fun SettingsScreen(
     modifier: Modifier = Modifier,
     diagnostics: SettingsDiagnostics = SettingsDiagnostics(),
     onSetAppearance: (Appearance) -> Unit = {},
-    onOpenSecurity: () -> Unit = {},
     onFileDisplay: (eu.opencloud.android.next.core.datastore.FileDisplayOptions) -> Unit = {},
     onClearTemporary: () -> Unit = {},
     languageTag: String = "",
     onLanguage: (String) -> Unit = {},
     onFileOpening: (eu.opencloud.android.next.core.datastore.FileOpening) -> Unit = {},
+    accountId: String? = null,
 ) {
     var appearanceOpen by rememberSaveable { mutableStateOf(false) }
     var openingFiles by rememberSaveable { mutableStateOf(false) }
+    var temporaryFilesOpen by rememberSaveable { mutableStateOf(false) }
+    var encryptedPreferencesOpen by rememberSaveable { mutableStateOf(false) }
+    var permissionsOpen by rememberSaveable { mutableStateOf(false) }
     BackHandler {
         when {
             openingFiles -> openingFiles = false
             appearanceOpen -> appearanceOpen = false
+            temporaryFilesOpen -> temporaryFilesOpen = false
+            encryptedPreferencesOpen -> encryptedPreferencesOpen = false
+            permissionsOpen -> permissionsOpen = false
             else -> onNavigateBack()
         }
     }
-    if (openingFiles) {
-        OpeningFilesScreen(state.fileOpening, onFileOpening) { openingFiles = false }
-        return
-    }
-    if (appearanceOpen) {
-        AppearanceSettingsScreen(
-            state,
-            { appearanceOpen = false },
-            onSetAppearance,
-            onFileDisplay,
-            SettingsLanguage(languageTag, onLanguage),
-        )
-        return
-    }
-    diagnostics.text?.let { text ->
-        AlertDialog(
-            onDismissRequest = diagnostics.onDismiss,
-            title = { Text(stringResource(R.string.settings_title)) },
-            text = { Text(text, modifier = Modifier.verticalScroll(rememberScrollState())) },
-            confirmButton = {
-                TextButton(onClick = diagnostics.onDismiss) { Text(stringResource(R.string.settings_close)) }
-            },
-        )
-    }
-    Scaffold(
-        modifier = modifier,
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.settings_title)) },
-                navigationIcon = {
-                    IconButton(
-                        onClick = onNavigateBack,
-                    ) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = stringResource(R.string.settings_back),
+    Box(modifier = modifier.fillMaxSize()) {
+        when {
+            openingFiles -> OpeningFilesScreen(state.fileOpening, onFileOpening) { openingFiles = false }
+            appearanceOpen ->
+                AppearanceSettingsScreen(
+                    state,
+                    { appearanceOpen = false },
+                    onSetAppearance,
+                    onFileDisplay,
+                    SettingsLanguage(languageTag, onLanguage),
+                )
+            temporaryFilesOpen ->
+                TemporaryFilesSettingsScreen(
+                    retentionHours = state.temporaryCopyRetentionHours,
+                    onSetRetention = onSetRetention,
+                    onClearTemporary = onClearTemporary,
+                    onNavigateBack = { temporaryFilesOpen = false },
+                )
+            encryptedPreferencesOpen ->
+                EncryptedPreferencesScreen(
+                    accountId = accountId,
+                    onNavigateBack = { encryptedPreferencesOpen = false },
+                )
+            permissionsOpen ->
+                PermissionsSettingsScreen(
+                    onNavigateBack = { permissionsOpen = false },
+                )
+            else -> {
+                Scaffold(
+                    topBar = {
+                        TopAppBar(
+                            title = { Text(stringResource(R.string.settings_title)) },
+                            navigationIcon = {
+                                IconButton(onClick = onNavigateBack) {
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.ArrowBack,
+                                        contentDescription = stringResource(R.string.settings_back),
+                                    )
+                                }
+                            },
+                        )
+                    },
+                ) { padding ->
+                    Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState())) {
+                        SettingsSections(
+                            state,
+                            { appearanceOpen = true },
+                            onOpenBackupSettings,
+                            diagnostics,
+                            { encryptedPreferencesOpen = true },
+                            { permissionsOpen = true },
+                            { temporaryFilesOpen = true },
+                            { openingFiles = true },
                         )
                     }
-                },
-            )
-        },
-    ) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState())) {
-            SettingsSections(
-                state,
-                onSetRetention,
-                { appearanceOpen = true },
-                onOpenBackupSettings,
-                diagnostics,
-                onOpenSecurity,
-                onClearTemporary,
-                { openingFiles = true },
-            )
+                }
+                diagnostics.text?.let { text ->
+                    AlertDialog(
+                        onDismissRequest = diagnostics.onDismiss,
+                        title = { Text(stringResource(R.string.settings_title)) },
+                        text = { Text(text, modifier = Modifier.verticalScroll(rememberScrollState())) },
+                        confirmButton = {
+                            TextButton(
+                                onClick = diagnostics.onDismiss,
+                            ) { Text(stringResource(R.string.settings_close)) }
+                        },
+                    )
+                }
+            }
         }
     }
 }

@@ -52,9 +52,14 @@ fun BackupSettingsRoute(
 ) {
     val context = LocalContext.current
     val state by viewModel.state.collectAsState()
-    var pendingBackup by rememberSaveable(stateSaver = backupDraftSaver) { mutableStateOf<BackupDraft?>(null) }
-    var showEditor by rememberSaveable { mutableStateOf(false) }
-    var editingId by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingBackup by rememberSaveable(
+        accountId,
+        stateSaver = backupDraftSaver,
+    ) { mutableStateOf<BackupDraft?>(null) }
+    var showEditor by rememberSaveable(accountId) { mutableStateOf(false) }
+    var editingId by rememberSaveable(accountId) { mutableStateOf<String?>(null) }
+    var selectedSourceUri by rememberSaveable(accountId) { mutableStateOf<String?>(null) }
+    var sourcePickerAccountId by rememberSaveable(accountId) { mutableStateOf<String?>(null) }
     val editing = state.backups.firstOrNull { it.id == editingId }
     val mediaPermission =
         rememberOriginalMediaPermission(onCancel = { pendingBackup = null }) { files ->
@@ -74,55 +79,35 @@ fun BackupSettingsRoute(
     val scanPermission = rememberOriginalMediaPermission { viewModel.scanBackupsNow() }
     val backupLauncher =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-            val draft = pendingBackup
-            if (uri != null && draft != null) {
+            val activeNewEditor = showEditor && editingId == null && sourcePickerAccountId == accountId
+            if (uri != null && activeNewEditor) {
                 runCatching {
                     context.contentResolver.takePersistableUriPermission(
                         uri,
                         Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
                     )
                 }
-                mediaPermission(listOf(uri))
-            } else {
-                pendingBackup = null
+                selectedSourceUri = uri.toString()
             }
+            sourcePickerAccountId = null
         }
 
     LaunchedEffect(accountId) { viewModel.load(accountId) }
     Scaffold(
         modifier = modifier,
         floatingActionButton = {
-            FloatingActionButton(onClick = {
+            AddBackupButton {
                 editingId = null
+                selectedSourceUri = null
+                sourcePickerAccountId = null
                 showEditor = true
-            }) {
-                Icon(
-                    Icons.Default.Add,
-                    contentDescription = stringResource(R.string.backup_settings_add_accessibility),
-                )
             }
         },
         topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.backup_settings_title)) },
-                actions = {
-                    IconButton(onClick = {
-                        scanPermission(state.backups.map { android.net.Uri.parse(it.sourceTreeUri) })
-                    }, enabled = state.backups.isNotEmpty()) {
-                        Icon(
-                            Icons.Default.Refresh,
-                            contentDescription = stringResource(R.string.backup_settings_scan_accessibility),
-                        )
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = stringResource(R.string.backup_settings_back),
-                        )
-                    }
-                },
+            BackupSettingsTopBar(
+                onNavigateBack = onNavigateBack,
+                canScan = state.backups.isNotEmpty(),
+                onScan = { scanPermission(state.backups.map { android.net.Uri.parse(it.sourceTreeUri) }) },
             )
         },
     ) { padding ->
@@ -136,23 +121,38 @@ fun BackupSettingsRoute(
     if (showEditor) {
         ModalBottomSheet(onDismissRequest = {
             showEditor = false
+            selectedSourceUri = null
+            sourcePickerAccountId = null
         }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
             FolderBackupSettingsContent(
                 backups = emptyList(),
                 initialBackup = state.backups.firstOrNull { it.id == editing?.id } ?: editing,
                 transfers = state.transfers,
+                sourceDisplayName = selectedSourceUri?.let(::sourceNameFromTreeUri),
+                onChooseSource = {
+                    sourcePickerAccountId = accountId
+                    backupLauncher.launch(null)
+                },
                 pickerTrail = state.backupPickerTrail,
                 pickerFolders = state.backupPickerResources,
-                onDismiss = { showEditor = false },
+                onDismiss = {
+                    showEditor = false
+                    selectedSourceUri = null
+                    sourcePickerAccountId = null
+                },
                 onAdd = { draft ->
                     val existing = editing
                     if (existing != null) {
                         viewModel.updateBackup(existing, draft)
                     } else {
-                        pendingBackup = draft
-                        backupLauncher.launch(null)
+                        selectedSourceUri?.let { source ->
+                            pendingBackup = draft
+                            mediaPermission(listOf(android.net.Uri.parse(source)))
+                        }
                     }
                     showEditor = false
+                    selectedSourceUri = null
+                    sourcePickerAccountId = null
                 },
                 onDelete = viewModel::deleteBackup,
                 onOpenPicker = viewModel::openBackupPicker,
@@ -244,3 +244,38 @@ private val backupDraftSaver =
             }
         },
     )
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun BackupSettingsTopBar(
+    onNavigateBack: () -> Unit,
+    canScan: Boolean,
+    onScan: () -> Unit,
+) {
+    TopAppBar(
+        title = { Text(stringResource(R.string.backup_settings_title)) },
+        actions = {
+            IconButton(onClick = onScan, enabled = canScan) {
+                Icon(
+                    Icons.Default.Refresh,
+                    contentDescription = stringResource(R.string.backup_settings_scan_accessibility),
+                )
+            }
+        },
+        navigationIcon = {
+            IconButton(onClick = onNavigateBack) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = stringResource(R.string.backup_settings_back),
+                )
+            }
+        },
+    )
+}
+
+@Composable
+private fun AddBackupButton(onClick: () -> Unit) {
+    FloatingActionButton(onClick = onClick) {
+        Icon(Icons.Default.Add, contentDescription = stringResource(R.string.backup_settings_add_accessibility))
+    }
+}

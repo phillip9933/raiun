@@ -11,6 +11,11 @@
     <string name="backup_settings_manage">Manage</string>
     <string name="backup_settings_add">Add backup</string>
     <string name="backup_settings_source">Source: %1$s</string>
+    <string name="backup_settings_source_folder">Source folder on this device</string>
+    <string name="backup_settings_source_not_selected">No source folder selected</string>
+    <string name="backup_settings_destination_folder">Destination folder in the cloud</string>
+    <string name="backup_settings_files_to_back_up">Files to back up</string>
+    <string name="backup_settings_conditions">Backup settings</string>
 
     <!-- Date and time text uses the value formatted for the current device locale. -->
     <string name="backup_settings_last_checked_through">Last checked through %1$s</string>

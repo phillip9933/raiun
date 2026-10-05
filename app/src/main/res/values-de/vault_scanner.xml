@@ -1,0 +1,11 @@
+<resources>
+    <string name="vault_scan_document">Dokument scannen</string>
+    <string name="vault_scanner_failed">Der Scan konnte nicht abgeschlossen werden. Einige Dateien wurden möglicherweise bereits hochgeladen. Schließe diese Ansicht und aktualisiere, bevor du erneut scannst.</string>
+    <string name="vault_scanner_uploading">Scan wird verschlüsselt und hochgeladen …</string>
+    <string name="vault_scanner_fixed_destination">Dieser Scan wird nur hier gespeichert:</string>
+    <string name="vault_scanner_discard">Scan verwerfen</string>
+    <string name="vault_scanner_discard_title">Diesen verschlüsselten Scan verwerfen?</string>
+    <string name="vault_scanner_discard_body">Die temporären Scandateien werden von diesem Gerät entfernt.</string>
+    <string name="vault_scanner_keep">Scan behalten</string>
+    <string name="vault_scanner_close">Schließen</string>
+</resources>

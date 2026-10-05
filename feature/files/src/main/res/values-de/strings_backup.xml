@@ -10,6 +10,11 @@
     <string name="backup_settings_manage">Verwalten</string>
     <string name="backup_settings_add">Sicherung hinzufügen</string>
     <string name="backup_settings_source">Quelle: %1$s</string>
+    <string name="backup_settings_source_folder">Quellordner auf diesem Gerät</string>
+    <string name="backup_settings_source_not_selected">Kein Quellordner ausgewählt</string>
+    <string name="backup_settings_destination_folder">Zielordner in der Cloud</string>
+    <string name="backup_settings_files_to_back_up">Zu sichernde Dateien</string>
+    <string name="backup_settings_conditions">Sicherungseinstellungen</string>
     <string name="backup_settings_last_checked_through">Zuletzt geprüft bis %1$s</string>
     <string name="backup_settings_not_scanned">Noch nicht überprüft</string>
     <string name="backup_settings_last_completed_upload">Letzter abgeschlossener Upload %1$s</string>

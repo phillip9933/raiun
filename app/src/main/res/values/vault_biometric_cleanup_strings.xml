@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_biometric_cleanup_error">The vault was deleted, but this device could not remove its saved biometric key. Retry local cleanup in Settings; the remote delete will not be repeated.</string>
+</resources>

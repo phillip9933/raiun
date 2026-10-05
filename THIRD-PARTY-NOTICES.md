@@ -1,5 +1,7 @@
 # Third-party notices
 
+The 0.9.0 release inventory includes the vault codec dependencies. Native libsodium and the adapted EME transform have additional [component notices](core/crypto/src/main/assets/third-party/vault-crypto/NOTICE.md) bundled in the APK.
+
 This file records license declarations for the runtime coordinates in `docs/release-audit/runtime-dependencies.json`. POMs and artifacts are identified in the adjacent [runtime inventory](app/src/main/assets/third-party/runtime-notices/runtime-inventory.json). Full license texts and embedded upstream notices collected from the resolved artifacts are retained in that asset directory.
 
 The scanner SDK modules are maintained in the [scanner library reference](https://github.com/phillip9933/open-android-doc-scanner/blob/v0.1.0-rc11/THIRD-PARTY-NOTICES.md), which documents their native build provenance and additional notices.
@@ -147,6 +149,7 @@ The scanner SDK modules are maintained in the [scanner library reference](https:
 | `com.google.auto.value:auto-value-annotations` | `1.6.3` | [Apache 2.0](app/src/main/assets/third-party/runtime-notices/license-texts/Apache_2.0.txt) | inherited |
 | `com.google.guava:listenablefuture` | `1.0` | [The Apache Software License, Version 2.0](app/src/main/assets/third-party/runtime-notices/license-texts/The_Apache_Software_License_Version_2.0.txt) | inherited |
 | `com.google.protobuf:protobuf-javalite` | `3.25.8` | [BSD-3-Clause](app/src/main/assets/third-party/runtime-notices/license-texts/BSD-3-Clause.txt) | inherited |
+| `com.goterl:lazysodium-android` | `5.2.0` | [Mozilla Public License, Version 2.0](app/src/main/assets/third-party/runtime-notices/license-texts/Mozilla_Public_License_Version_2.0.txt) | declared |
 | `com.microsoft.onnxruntime:onnxruntime-android` | `1.24.1` | [MIT License](app/src/main/assets/third-party/runtime-notices/license-texts/MIT_License.txt) | declared |
 | `com.squareup.okhttp3:okhttp` | `4.12.0` | [The Apache Software License, Version 2.0](app/src/main/assets/third-party/runtime-notices/license-texts/The_Apache_Software_License_Version_2.0.txt) | declared |
 | `com.squareup.okio:okio` | `3.6.0` | [The Apache Software License, Version 2.0](app/src/main/assets/third-party/runtime-notices/license-texts/The_Apache_Software_License_Version_2.0.txt) | declared |
@@ -156,6 +159,8 @@ The scanner SDK modules are maintained in the [scanner library reference](https:
 | `dev.offlinescan:scanner-export` | `0.1.0-rc11` | [Apache License, Version 2.0](app/src/main/assets/third-party/runtime-notices/license-texts/Apache_License_Version_2.0.txt) (Apache 2.0; see scanner notices) | declared |
 | `dev.offlinescan:scanner-processing-opencv` | `0.1.0-rc11` | [Apache License, Version 2.0](app/src/main/assets/third-party/runtime-notices/license-texts/Apache_License_Version_2.0.txt) (Apache 2.0; see scanner notices) | declared |
 | `dev.offlinescan:scanner-ui-compose` | `0.1.0-rc11` | [Apache License, Version 2.0](app/src/main/assets/third-party/runtime-notices/license-texts/Apache_License_Version_2.0.txt) (Apache 2.0; see scanner notices) | declared |
+| `net.java.dev.jna:jna` | `5.17.0` | [LGPL-2.1-or-later](app/src/main/assets/third-party/runtime-notices/license-texts/LGPL-2.1-or-later.txt); [Apache-2.0](app/src/main/assets/third-party/runtime-notices/license-texts/Apache-2.0.txt) | declared |
+| `org.bouncycastle:bcprov-jdk18on` | `1.85.2` | [Bouncy Castle Licence](app/src/main/assets/third-party/runtime-notices/license-texts/Bouncy_Castle_Licence.txt) | declared |
 | `org.jetbrains.kotlin:kotlin-android-extensions-runtime` | `1.9.22` | [The Apache License, Version 2.0](app/src/main/assets/third-party/runtime-notices/license-texts/The_Apache_License_Version_2.0.txt) | declared |
 | `org.jetbrains.kotlin:kotlin-parcelize-runtime` | `1.9.22` | [The Apache License, Version 2.0](app/src/main/assets/third-party/runtime-notices/license-texts/The_Apache_License_Version_2.0.txt) | declared |
 | `org.jetbrains.kotlin:kotlin-stdlib` | `2.2.20` | [Apache-2.0](app/src/main/assets/third-party/runtime-notices/license-texts/Apache-2.0.txt) | declared |

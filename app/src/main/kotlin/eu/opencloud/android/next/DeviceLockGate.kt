@@ -2,7 +2,6 @@ package eu.opencloud.android.next
 
 import android.content.Intent
 import android.content.SharedPreferences
-import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -57,11 +56,7 @@ internal fun DeviceLockGate(
     DisposableEffect(activity) {
         fun update() {
             allowed = lock.canOpenApp()
-            if (lock.enabled) {
-                activity.window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-            } else {
-                activity.window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
-            }
+            SensitiveWindowProtection.update(activity)
         }
         val observer =
             lockLifecycleObserver(activity, lock, ::update, { resumed = it }) {

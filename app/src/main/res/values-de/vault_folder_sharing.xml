@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_folder_sharing_title">Verschlüsselten Ordner freigeben</string>
+    <string name="vault_folder_sharing_warning">Hier können nur bestimmte Personen oder Gruppen hinzugefügt werden. Um die Inhalte zu öffnen, benötigen sie weiterhin das Verschlüsselungspasswort. Beim Entfernen des Zugriffs werden bereits bekannte Schlüssel oder gespeicherte Kopien nicht gelöscht.</string>
+    <string name="vault_folder_sharing_uncertain">Der Server könnte die Änderung übernommen haben. Aktualisiere die Liste der Personen und Gruppen, bevor du eine weitere Änderung vornimmst.</string>
+    <string name="vault_folder_sharing_people">Personen und Gruppen mit Zugriff</string>
+    <string name="vault_folder_sharing_empty">Keine Freigaben für bestimmte Personen oder Gruppen.</string>
+    <string name="vault_folder_sharing_add">Person oder Gruppe hinzufügen</string>
+    <string name="vault_folder_sharing_search">Personen oder Gruppen suchen</string>
+    <string name="vault_folder_sharing_permissions">Zugriff</string>
+    <string name="vault_folder_sharing_viewer">Ansehen und herunterladen</string>
+    <string name="vault_folder_sharing_editor">Inhalte bearbeiten</string>
+    <string name="vault_folder_sharing_editor_reshare">Bearbeiten und weitergeben</string>
+    <string name="vault_folder_sharing_custom_permissions">Diese Freigabe hat eigene Berechtigungen. Wähle eine Zugriffsstufe, um sie zu ändern.</string>
+    <string name="vault_folder_sharing_person">Person</string>
+    <string name="vault_folder_sharing_group">Gruppe</string>
+    <string name="vault_folder_sharing_remove">Zugriff entfernen</string>
+    <string name="vault_folder_sharing_remove_confirm">Den Zugriff dieser Person oder Gruppe auf den verschlüsselten Ordner entfernen?</string>
+</resources>

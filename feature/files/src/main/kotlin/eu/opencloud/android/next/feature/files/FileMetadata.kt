@@ -13,11 +13,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.style.TextOverflow
 import eu.opencloud.android.next.core.database.ResourceEntity
 import eu.opencloud.android.next.core.designsystem.localizedString
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
 import eu.opencloud.android.next.core.model.ResourceKind
+import eu.opencloud.android.next.core.ui.BrowserItemMetadataText
 
 internal fun isKeptOffline(
     resource: ResourceEntity,
@@ -79,13 +79,9 @@ internal fun FileMetadataText(
                 .formatShortFileSize(context, resource.sizeBytes)
         }
     val modified = if (display.showModified) formattedModified(resource.modifiedAtEpochMillis) else null
-    Text(
+    BrowserItemMetadataText(
         listOfNotNull(size.takeIf { display.showSize }, modified).joinToString(" \u00b7 "),
         modifier,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        style = MaterialTheme.typography.bodySmall,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
     )
 }
 

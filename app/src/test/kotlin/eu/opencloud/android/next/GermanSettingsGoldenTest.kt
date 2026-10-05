@@ -51,7 +51,7 @@ class GermanSettingsGoldenTest {
         compose.onNodeWithText("Einstellungen").assertIsDisplayed()
         compose.onNodeWithText("Darstellung").assertIsDisplayed()
         compose.onRoot().captureRoboImage("src/test/snapshots/images/$name.png")
-        compose.onNodeWithText("Temporäre lokale Kopien löschen").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Temporäre lokale Dateien").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Darstellung").performScrollTo().performClick()
         compose.onNodeWithText("Design und Sprache").assertIsDisplayed()
         compose.onNodeWithContentDescription("Sprache ändern").assertIsDisplayed()

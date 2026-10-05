@@ -27,10 +27,7 @@ internal object PrivateCacheUse {
         val keys =
             files
                 .map {
-                    it.absoluteFile
-                        .toPath()
-                        .normalize()
-                        .toString()
+                    it.leaseKey()
                 }.distinct()
         gate.withLock { keys.forEach { active[it] = (active[it] ?: 0) + 1 } }
         return LocalCopyLease {
@@ -55,12 +52,11 @@ internal object PrivateCacheUse {
         action: suspend () -> Boolean,
     ): Boolean =
         gate.withLock {
-            val key =
-                file.absoluteFile
-                    .toPath()
-                    .normalize()
-                    .toString()
+            val key = file.leaseKey()
             if (key in active) return@withLock false
             action()
         }
 }
+
+/** Canonical identity merges filesystem aliases such as API 26's /data/user/0 -> /data/data. */
+private fun File.leaseKey(): String = canonicalFile.path

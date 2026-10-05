@@ -17,6 +17,7 @@ android {
             libs.versions.minSdk
                 .get()
                 .toInt()
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     compileOptions {
@@ -38,4 +39,7 @@ dependencies {
     implementation(libs.okhttp)
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
+    androidTestImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
 }

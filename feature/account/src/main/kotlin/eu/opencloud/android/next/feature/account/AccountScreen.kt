@@ -40,6 +40,8 @@ import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.datastore.SettingsRepository
 import eu.opencloud.android.next.core.network.safeMessage
 import eu.opencloud.android.next.core.network.toOpenCloudError
+import eu.opencloud.android.next.core.security.VaultKeyStore
+import eu.opencloud.android.next.core.security.VaultPreferences
 import eu.opencloud.android.next.core.sync.TransferManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -101,6 +103,11 @@ class AccountViewModel(
                     eu.opencloud.android.next.core.security.AccountSessions
                         .get(getApplication())
                         .remove(account.id)
+                    VaultKeyStore(getApplication()).forgetAccount(account.id)
+                    VaultPreferences(getApplication()).forgetAccount(account.id)
+                    eu.opencloud.android.next.core.sync
+                        .VaultOfflineStore(getApplication())
+                        .forgetAccount(account.id)
                     store.removeAccount(account.id)
                     eu.opencloud.android.next.core.sync
                         .clearAccountPrivateFiles(getApplication(), account.id)

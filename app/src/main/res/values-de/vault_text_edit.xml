@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_text_edit_label">UTF-8-Text</string>
+    <string name="vault_text_save">Auf dem Server speichern</string>
+    <string name="vault_text_edit_secure_note">Ungespeicherte Änderungen bleiben im Arbeitsspeicher und werden gelöscht, wenn dieser Speicherort gesperrt wird. Beim Speichern werden sie direkt in die verschlüsselte Datei geschrieben.</string>
+    <string name="vault_text_edit_too_large">Der Editor unterstützt UTF-8-Text bis zu 256 KB.</string>
+    <string name="vault_text_discard_title">Ungespeicherte Änderungen verwerfen?</string>
+    <string name="vault_text_discard_message">Dein ungespeicherter Text liegt nur im Arbeitsspeicher und wird gelöscht.</string>
+    <string name="vault_text_discard">Änderungen verwerfen</string>
+</resources>

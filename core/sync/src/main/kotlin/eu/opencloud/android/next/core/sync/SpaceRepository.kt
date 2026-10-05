@@ -12,6 +12,9 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
+/** A locally superseded discovery result must never be reported as a remote conflict. */
+class SupersededDiscovery : Exception()
+
 class SpaceRepository(
     private val store: FileBrowserStore,
     private val remote: LibreGraphSpacesClient? = null,
@@ -63,9 +66,7 @@ class SpaceRepository(
                 )
             }.also {
                 if (!store.replaceRemoteSpaces(accountId, it, token, discovery.excludedVaultIds)) {
-                    throw eu.opencloud.android.next.core.network.OpenCloudException(
-                        eu.opencloud.android.next.core.network.OpenCloudError.PreconditionFailed,
-                    )
+                    throw SupersededDiscovery()
                 }
             }
     }

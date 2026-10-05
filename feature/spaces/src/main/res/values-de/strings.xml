@@ -3,6 +3,9 @@
     <string name="spaces_load_failed">Spaces konnten nicht geladen werden.</string>
     <string name="spaces_none_available">Für dieses Konto sind keine Spaces verfügbar.</string>
     <string name="spaces_open_space">Space %1$s öffnen</string>
+    <string name="spaces_unlock_encrypted">Verschlüsselten Space %1$s entsperren</string>
+    <string name="spaces_encrypted_summary">Verschlüsselter Space · Zum Durchsuchen entsperren</string>
+    <string name="spaces_encrypted_load_failed">Verschlüsselte Spaces konnten nicht geladen werden. Zum erneuten Laden nach unten ziehen.</string>
     <string name="spaces_owner">Inhaber: %1$s</string>
     <string name="spaces_quota_summary">%1$s verwendet • %2$s verfügbar</string>
 </resources>

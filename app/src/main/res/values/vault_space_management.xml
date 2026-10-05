@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_manage_space_title">Manage encrypted Space</string>
+    <string name="vault_manage_disable_space">Disable encrypted Space</string>
+    <string name="vault_manage_disable_confirm">This Space will become inaccessible until a manager restores it. Its encrypted content remains stored.</string>
+    <string name="vault_manage_disable_confirm_action">Disable Space</string>
+    <string name="vault_disabled_management_title">Disabled encrypted Space</string>
+    <string name="vault_disabled_management_description">This Space is disabled. Management uses server metadata only; its encrypted files and keys remain closed.</string>
+    <string name="vault_disabled_restore">Restore Space</string>
+    <string name="vault_disabled_permanently_delete">Permanently delete</string>
+    <string name="vault_disabled_purge">Delete permanently</string>
+    <string name="vault_disabled_purge_confirm">Permanently delete “%1$s” and all content stored in it? This cannot be undone.</string>
+    <string name="vault_manage_space_uncertain">The save could not be confirmed. The server may have applied some changes. Refresh to check the current values before trying again.</string>
+    <string name="vault_manage_name">Name</string>
+    <string name="vault_manage_description">Description</string>
+    <string name="vault_manage_description_value">Description: %1$s</string>
+    <string name="vault_manage_quota_mib">Quota (MiB; optional update)</string>
+    <string name="vault_manage_quota_help">Leave blank to keep the current quota. Existing files are not removed if the quota is lowered.</string>
+    <string name="vault_manage_quota_value">Quota: %1$d MiB</string>
+    <string name="vault_manage_used_value">Used: %1$d MiB</string>
+    <string name="vault_manage_remaining_value">Remaining: %1$d MiB</string>
+    <string name="vault_manage_owner">Owner: %1$s</string>
+    <string name="vault_manage_unknown">Unknown</string>
+    <string name="vault_manage_edit_details">Edit Space details</string>
+    <string name="vault_manage_members">Members</string>
+    <string name="vault_manage_member_search">Search people or groups</string>
+    <string name="vault_manage_member_role">Space role</string>
+    <string name="vault_manage_member_add">Add member</string>
+    <string name="vault_manage_member_remove">Remove member</string>
+    <string name="vault_manage_member_remove_confirm">Remove %1$s from this Space?</string>
+    <string name="vault_manage_membership_warning">Membership does not provide the encryption password. Removing someone cannot revoke keys they already know.</string>
+    <string name="vault_manage_save">Save</string>
+</resources>

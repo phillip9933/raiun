@@ -1,0 +1,6 @@
+<resources>
+    <string name="encrypted_pdf_preview_error">Diese verschlüsselte PDF-Datei kann nicht angezeigt werden.</string>
+    <string name="encrypted_pdf_previous_page">Vorherige Seite</string>
+    <string name="encrypted_pdf_next_page">Nächste Seite</string>
+    <string name="encrypted_pdf_page">%1$d von %2$d</string>
+</resources>

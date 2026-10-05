@@ -11,6 +11,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -46,6 +47,7 @@ import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.OfflinePin
@@ -57,13 +59,14 @@ import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.People
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Checkbox
+import androidx.compose.material3.Button
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -80,6 +83,7 @@ import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
@@ -124,6 +128,7 @@ import eu.opencloud.android.next.core.datastore.SettingsBrowserLayout
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudColor
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
 import eu.opencloud.android.next.core.model.ResourceKind
+import eu.opencloud.android.next.core.sync.VaultLocation
 import eu.opencloud.android.next.core.ui.BrowserAction
 import eu.opencloud.android.next.core.ui.BrowserActionSheet
 import eu.opencloud.android.next.core.ui.BrowserContent
@@ -139,8 +144,9 @@ fun FileBrowserRoute(
     releaseVersion: String,
     destinations: FileBrowserDestinations,
     sharesContent: @Composable (PaddingValues, (ResourceEntity) -> Unit) -> Unit,
-    spacesContent: @Composable (PaddingValues, (String) -> Unit) -> Unit,
+    spacesContent: @Composable (PaddingValues, (String) -> Unit, Int) -> Unit,
     modifier: Modifier = Modifier,
+    encryptedReturnRevision: Int = 0,
     openAddMenuRequest: Int = 0,
     onConsumeAddMenuRequest: () -> Unit = {},
     sharedShortcut: eu.opencloud.android.next.core.sync.SharedFolderRequest? = null,
@@ -167,6 +173,9 @@ fun FileBrowserRoute(
                 .UserSettings(),
     )
     viewModel.load(accountId)
+    LaunchedEffect(accountId, encryptedReturnRevision) {
+        if (encryptedReturnRevision > 0) viewModel.refresh()
+    }
     favoritesViewModel.load(accountId)
     var folderOpenRequest by remember(accountId) { mutableIntStateOf(0) }
     ApplyFolderShortcut(shortcutFolder, state.spaces, accountId) {
@@ -221,6 +230,8 @@ fun FileBrowserRoute(
             onDismissActions = viewModel::dismissActions,
             onCreateFolder = viewModel::createFolder,
             onCreateSpace = viewModel::createSpace,
+            onCreateEncryptedFolder = viewModel::createEncryptedFolder,
+            onCreateEncryptedSpace = viewModel::createEncryptedSpace,
             onRename = viewModel::rename,
             onMove = viewModel::move,
             onCopy = viewModel::copy,
@@ -231,6 +242,7 @@ fun FileBrowserRoute(
                     viewModel::cancelPlacement,
                     viewModel::retryOperation,
                     viewModel::dismissOperation,
+                    viewModel::keepBothPlacementConflict,
                 )
             },
             onDelete = viewModel::delete,
@@ -262,6 +274,10 @@ fun FileBrowserRoute(
             onRefreshFavorites = favoritesViewModel::refresh,
             onOpenDeletedFiles = destinations.onOpenDeletedFiles,
             onOpenSettings = destinations.onOpenSettings,
+            onOpenVaults = destinations.onOpenVaults,
+            onOpenEncryptedOffline = destinations.onOpenEncryptedOffline,
+            onOpenEncryptedLocation = destinations.onOpenEncryptedLocation,
+            onEncryptedLocationActions = destinations.onEncryptedLocationActions,
             onOpenAccount = destinations.onOpenAccount,
             onShareResource = destinations.onShareResource,
             sharedShortcut = sharedShortcut,
@@ -306,6 +322,10 @@ data class FileBrowserDestinations(
     val onOpenSettings: () -> Unit,
     val onOpenAccount: () -> Unit,
     val onShareResource: (ResourceEntity) -> Unit,
+    val onOpenVaults: (() -> Unit)? = null,
+    val onOpenEncryptedOffline: (() -> Unit)? = null,
+    val onOpenEncryptedLocation: (VaultLocation) -> Unit = {},
+    val onEncryptedLocationActions: (VaultLocation) -> Unit = {},
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -344,10 +364,14 @@ fun FileBrowserScreen(
     onRefreshFavorites: () -> Unit = {},
     onOpenDeletedFiles: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenVaults: (() -> Unit)? = null,
+    onOpenEncryptedOffline: (() -> Unit)? = null,
+    onOpenEncryptedLocation: (VaultLocation) -> Unit = {},
+    onEncryptedLocationActions: (VaultLocation) -> Unit = {},
     onOpenAccount: () -> Unit,
     onShareResource: (ResourceEntity) -> Unit,
     sharesContent: @Composable (PaddingValues, (ResourceEntity) -> Unit) -> Unit = { _, _ -> },
-    spacesContent: @Composable (PaddingValues, (String) -> Unit) -> Unit = { _, _ -> },
+    spacesContent: @Composable (PaddingValues, (String) -> Unit, Int) -> Unit = { _, _, _ -> },
     sharedShortcut: eu.opencloud.android.next.core.sync.SharedFolderRequest? = null,
     notifications: @Composable (() -> Unit) -> Unit = {},
     modifier: Modifier = Modifier,
@@ -355,6 +379,8 @@ fun FileBrowserScreen(
     openFolderRequest: Int = 0,
     openAddMenuRequest: Int = 0,
     onConsumeAddMenuRequest: () -> Unit = {},
+    onCreateEncryptedFolder: ((String, CharArray) -> Unit)? = null,
+    onCreateEncryptedSpace: ((String, CharArray) -> Unit)? = null,
     operationControls: @Composable () -> Unit = {},
     onOpenWith: (ResourceEntity) -> Unit = {},
     onSend: (ResourceEntity) -> Unit = {},
@@ -495,6 +521,14 @@ fun FileBrowserScreen(
                     scope.launch { drawerState.close() }
                     onOpenSettings()
                 },
+                onVaults =
+                    onOpenVaults?.let { open ->
+                        {
+                            scope.launch { drawerState.close() }
+                            onClearSelection()
+                            open()
+                        }
+                    },
             )
         },
     ) {
@@ -803,11 +837,15 @@ fun FileBrowserScreen(
                     onBrowseShare(resource)
                 }
             } else if (selectedDestination == FileBrowserDestination.Spaces) {
-                spacesContent(outerPadding) { spaceId ->
-                    onClearSelection()
-                    selectedDestination = FileBrowserDestination.Personal
-                    onSelectSpace(spaceId)
-                }
+                spacesContent(
+                    outerPadding,
+                    { spaceId ->
+                        onClearSelection()
+                        selectedDestination = FileBrowserDestination.Personal
+                        onSelectSpace(spaceId)
+                    },
+                    state.encryptedSpaceCreationRevision,
+                )
             } else {
                 PullToRefreshBox(
                     isRefreshing =
@@ -850,8 +888,31 @@ fun FileBrowserScreen(
                                     ".",
                                 )
                         }
+                    val encryptedFolders =
+                        if (selectedDestination == FileBrowserDestination.Personal &&
+                            state.searchQuery.isBlank()
+                        ) {
+                            state.encryptedFolders.filter { state.fileDisplay.showHidden || !it.title.startsWith(".") }
+                        } else {
+                            emptyList()
+                        }
                     Column(Modifier.fillMaxSize()) {
+                        if (selectedDestination == FileBrowserDestination.Personal) {
+                            state.encryptedFoldersError?.let {
+                                Text(
+                                    stringResource(R.string.browser_encrypted_load_failed),
+                                    Modifier.padding(OpenCloudDimensions.SpacingMd),
+                                )
+                            }
+                        }
                         if (selectedDestination == FileBrowserDestination.Offline) {
+                            onOpenEncryptedOffline?.let { open ->
+                                Button(onClick = open, modifier = Modifier.fillMaxWidth()) {
+                                    Icon(Icons.Default.Lock, contentDescription = null)
+                                    Spacer(Modifier.width(OpenCloudDimensions.SpacingSm))
+                                    Text(stringResource(R.string.browser_encrypted_offline))
+                                }
+                            }
                             OfflineHeader(state.offlineBytes, offlineFilter) {
                                 offlineFilter = it
                                 onClearSelection()
@@ -881,6 +942,11 @@ fun FileBrowserScreen(
                                 BrowserGrid(
                                     offlinePins = state.offlinePins,
                                     resources = displayedResources,
+                                    encryptedFolders = encryptedFolders,
+                                    onOpenEncryptedLocation = onOpenEncryptedLocation,
+                                    onEncryptedLocationActions = onEncryptedLocationActions,
+                                    sortCriterion = sortCriterion,
+                                    sortAscending = sortAscending,
                                     display = state.fileDisplay,
                                     selectedIds = state.selectedIds,
                                     selectionMode = selectionMode,
@@ -893,6 +959,11 @@ fun FileBrowserScreen(
                                 BrowserList(
                                     offlinePins = state.offlinePins,
                                     resources = displayedResources,
+                                    encryptedFolders = encryptedFolders,
+                                    onOpenEncryptedLocation = onOpenEncryptedLocation,
+                                    onEncryptedLocationActions = onEncryptedLocationActions,
+                                    sortCriterion = sortCriterion,
+                                    sortAscending = sortAscending,
                                     display = state.fileDisplay,
                                     selectedIds = state.selectedIds,
                                     selectionMode = selectionMode,
@@ -916,12 +987,13 @@ fun FileBrowserScreen(
     state.message?.let { BrowserNotice(stringResource(R.string.browser_notice), it, onClearMessage) }
     details?.let { resource ->
         ResourceDetailsDialog(
-            resource,
-            isKeptOffline(
-                resource,
-                state.offlinePins,
-            ),
-            state.temporaryCopyRetentionHours,
+            resource = resource,
+            options =
+                ResourceDetailsOptions(
+                    keptOffline = isKeptOffline(resource, state.offlinePins),
+                    retentionHours = state.temporaryCopyRetentionHours,
+                    display = state.fileDisplay,
+                ),
             onDismiss = {
                 details =
                     null
@@ -1025,33 +1097,23 @@ fun FileBrowserScreen(
                 },
             )
         BrowserDialog.CreateFolder ->
-            NameDialog(
-                stringResource(
-                    R.string.browser_new_folder,
-                ),
-                stringResource(R.string.browser_create),
-                onDismiss = {
-                    dialog =
-                        null
-                },
-            ) { name ->
-                onCreateFolder(name)
-                dialog = null
-            }
+            BrowserCreationDialog(
+                title = stringResource(R.string.browser_new_folder),
+                encryptLabel = stringResource(R.string.browser_encrypt_folder),
+                onPlainCreate = onCreateFolder,
+                onEncryptedCreate = onCreateEncryptedFolder,
+                onDismiss = { dialog = null },
+                busy = state.encryptedCreationBusy,
+            )
         BrowserDialog.CreateSpace ->
-            NameDialog(
-                stringResource(
-                    R.string.browser_new_space,
-                ),
-                stringResource(R.string.browser_create),
-                onDismiss = {
-                    dialog =
-                        null
-                },
-            ) { name ->
-                onCreateSpace(name)
-                dialog = null
-            }
+            BrowserCreationDialog(
+                title = stringResource(R.string.browser_new_space),
+                encryptLabel = stringResource(R.string.browser_encrypt_space),
+                onPlainCreate = onCreateSpace,
+                onEncryptedCreate = onCreateEncryptedSpace,
+                onDismiss = { dialog = null },
+                busy = state.encryptedCreationBusy,
+            )
         is BrowserDialog.Rename ->
             NameDialog(
                 title = stringResource(R.string.browser_rename),
@@ -1362,6 +1424,7 @@ private fun BrowserNavigationDrawer(
     onSettings: () -> Unit,
     onShares: () -> Unit,
     personalSpace: eu.opencloud.android.next.core.database.SpaceEntity?,
+    onVaults: (() -> Unit)? = null,
 ) = ModalDrawerSheet(
     modifier =
         Modifier.width(
@@ -1426,6 +1489,9 @@ private fun BrowserNavigationDrawer(
                 .padding(horizontal = OpenCloudDimensions.SpacingSm)
                 .browserDescription(R.string.browser_navigate_to_deleted_files),
     )
+    onVaults?.let { open ->
+        VaultNavigationDrawerItem(open)
+    }
     Spacer(Modifier.weight(1f))
     HorizontalDivider()
     NavigationDrawerItem(
@@ -1473,6 +1539,17 @@ private fun BrowserNavigationDrawer(
         modifier = Modifier.padding(OpenCloudDimensions.SpacingXl),
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         style = MaterialTheme.typography.bodySmall,
+    )
+}
+
+@Composable
+private fun VaultNavigationDrawerItem(onOpen: () -> Unit) {
+    NavigationDrawerItem(
+        label = { Text(stringResource(R.string.browser_vaults)) },
+        selected = false,
+        onClick = onOpen,
+        icon = { Icon(Icons.Default.Lock, contentDescription = null) },
+        modifier = Modifier.padding(horizontal = OpenCloudDimensions.SpacingSm),
     )
 }
 
@@ -1557,6 +1634,11 @@ private fun BrowserList(
     onToggleSelection: (String) -> Unit,
     onShowActions: (ResourceEntity) -> Unit,
     display: FileDisplayOptions = FileDisplayOptions(),
+    encryptedFolders: List<VaultLocation> = emptyList(),
+    onOpenEncryptedLocation: (VaultLocation) -> Unit = {},
+    onEncryptedLocationActions: (VaultLocation) -> Unit = {},
+    sortCriterion: BrowserSortCriterion = BrowserSortCriterion.Name,
+    sortAscending: Boolean = true,
 ) = ResourceBrowserContent(
     offlinePins,
     resources,
@@ -1568,6 +1650,11 @@ private fun BrowserList(
     onToggleSelection,
     onShowActions,
     display,
+    encryptedFolders,
+    onOpenEncryptedLocation,
+    onEncryptedLocationActions,
+    sortCriterion,
+    sortAscending,
 )
 
 @Composable
@@ -1582,6 +1669,11 @@ private fun BrowserGrid(
     onToggleSelection: (String) -> Unit,
     onShowActions: (ResourceEntity) -> Unit,
     display: FileDisplayOptions = FileDisplayOptions(),
+    encryptedFolders: List<VaultLocation> = emptyList(),
+    onOpenEncryptedLocation: (VaultLocation) -> Unit = {},
+    onEncryptedLocationActions: (VaultLocation) -> Unit = {},
+    sortCriterion: BrowserSortCriterion = BrowserSortCriterion.Name,
+    sortAscending: Boolean = true,
 ) = ResourceBrowserContent(
     offlinePins,
     resources,
@@ -1593,6 +1685,11 @@ private fun BrowserGrid(
     onToggleSelection,
     onShowActions,
     display,
+    encryptedFolders,
+    onOpenEncryptedLocation,
+    onEncryptedLocationActions,
+    sortCriterion,
+    sortAscending,
 )
 
 @Composable
@@ -1608,14 +1705,31 @@ private fun ResourceBrowserContent(
     onToggleSelection: (String) -> Unit,
     onShowActions: (ResourceEntity) -> Unit,
     display: FileDisplayOptions,
+    encryptedFolders: List<VaultLocation>,
+    onOpenEncryptedLocation: (VaultLocation) -> Unit,
+    onEncryptedLocationActions: (VaultLocation) -> Unit,
+    sortCriterion: BrowserSortCriterion,
+    sortAscending: Boolean,
 ) {
     BrowserContent(
-        resources,
-        { it.selectionKey },
+        mixedBrowserEntries(resources, encryptedFolders, sortCriterion, sortAscending),
+        { it.key },
         layout,
         padding = contentPadding,
-        footer = { FolderSummary(resources) },
-    ) { item ->
+        footer = {
+            FolderSummary(resources.filterNot { it.matchesEncryptedFolder(encryptedFolders) }, encryptedFolders.size)
+        },
+    ) { entry ->
+        val item = entry.resource
+        if (item == null) {
+            EncryptedFolderEntry(
+                requireNotNull(entry.encrypted),
+                layout,
+                onOpenEncryptedLocation,
+                onEncryptedLocationActions,
+            )
+            return@BrowserContent
+        }
         val selected = item.selectionKey in selectedIds
         BrowserEntry(
             layout = layout,
@@ -1927,6 +2041,8 @@ fun FolderBackupSettingsDialog(
     onOpenFolder: (ResourceEntity) -> Unit,
     onNavigateUp: () -> Unit,
     onCreateFolder: (String) -> Unit,
+    sourceDisplayName: String? = null,
+    onChooseSource: () -> Unit = {},
 ) = AlertDialog(
     onDismissRequest = onDismiss,
     text = {
@@ -1941,6 +2057,8 @@ fun FolderBackupSettingsDialog(
             onOpenFolder = onOpenFolder,
             onNavigateUp = onNavigateUp,
             onCreateFolder = onCreateFolder,
+            sourceDisplayName = sourceDisplayName,
+            onChooseSource = onChooseSource,
         )
     },
     confirmButton = {},
@@ -1962,6 +2080,8 @@ fun FolderBackupSettingsContent(
     onCreateFolder: (String) -> Unit = {},
     initialBackup: FolderBackupEntity? = null,
     transfers: List<TransferEntity> = emptyList(),
+    sourceDisplayName: String? = null,
+    onChooseSource: () -> Unit = {},
 ) {
     var destination by rememberSaveable(initialBackup?.id) {
         mutableStateOf(
@@ -1979,46 +2099,65 @@ fun FolderBackupSettingsContent(
         )
     }
 
-    Column(
-        modifier = modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(OpenCloudDimensions.SpacingMd),
-        verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs),
-    ) {
-        BackupEditorHeading(initialBackup, transfers)
-        Text(stringResource(R.string.browser_remote_destination), style = MaterialTheme.typography.labelLarge)
-        Text(destination, style = MaterialTheme.typography.bodyMedium)
-        TextButton(
-            onClick = {
-                onOpenPicker()
-                showDestinationPicker = true
-            },
-        ) { Text(stringResource(R.string.browser_select_folder)) }
-        Text(stringResource(R.string.browser_sort_file_type), style = MaterialTheme.typography.labelLarge)
-        BackupMediaTypeOptions(mediaType) { mediaType = it }
-        BackupCheckbox(stringResource(R.string.browser_wifi_only), wifiOnly) { wifiOnly = it }
-        BackupCheckbox(stringResource(R.string.browser_charging_only), chargingOnly) { chargingOnly = it }
-        BackupCheckbox(stringResource(R.string.browser_organize_by_year_month), datedFolders) { datedFolders = it }
-        if (datedFolders) {
-            Text(
-                stringResource(R.string.browser_backup_date_organization),
-                style = MaterialTheme.typography.bodySmall,
+    Column(modifier = modifier.fillMaxWidth()) {
+        Column(
+            modifier =
+                Modifier
+                    .weight(1f, fill = false)
+                    .verticalScroll(rememberScrollState())
+                    .padding(OpenCloudDimensions.SpacingMd),
+            verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs),
+        ) {
+            BackupEditorHeading(initialBackup, transfers)
+            BackupLocationChoice(
+                label = stringResource(R.string.backup_settings_source_folder),
+                value =
+                    initialBackup?.let { it.sourceDisplayName.ifBlank { sourceNameFromTreeUri(it.sourceTreeUri) } }
+                        ?: sourceDisplayName ?: stringResource(R.string.backup_settings_source_not_selected),
+                action = if (initialBackup == null) stringResource(R.string.browser_choose_source_folder) else null,
+                onClick = onChooseSource,
             )
-        }
-        Text(stringResource(R.string.browser_original_files_stay_local), style = MaterialTheme.typography.bodySmall)
-        HorizontalDivider()
-        backups.forEach { backup -> BackupConfigurationItem(backup = backup, onDelete = { onDelete(backup.id) }) }
-        initialBackup?.let { backup ->
-            TextButton(onClick = {
-                onDelete(backup.id)
-                onDismiss()
-            }) { Text(stringResource(R.string.browser_remove_backup), color = MaterialTheme.colorScheme.error) }
+            BackupLocationChoice(
+                label = stringResource(R.string.backup_settings_destination_folder),
+                value = destination,
+                action = stringResource(R.string.browser_select_folder),
+                onClick = {
+                    onOpenPicker()
+                    showDestinationPicker = true
+                },
+            )
+            HorizontalDivider()
+            Text(stringResource(R.string.backup_settings_files_to_back_up), style = MaterialTheme.typography.titleSmall)
+            BackupMediaTypeOptions(mediaType) { mediaType = it }
+            HorizontalDivider()
+            Text(stringResource(R.string.backup_settings_conditions), style = MaterialTheme.typography.titleSmall)
+            BackupSwitch(stringResource(R.string.browser_wifi_only), wifiOnly) { wifiOnly = it }
+            BackupSwitch(stringResource(R.string.browser_charging_only), chargingOnly) { chargingOnly = it }
+            BackupSwitch(stringResource(R.string.browser_organize_by_year_month), datedFolders) { datedFolders = it }
+            if (datedFolders) {
+                Text(
+                    stringResource(R.string.browser_backup_date_organization),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            Text(stringResource(R.string.browser_original_files_stay_local), style = MaterialTheme.typography.bodySmall)
+            if (backups.isNotEmpty() || initialBackup != null) HorizontalDivider()
+            backups.forEach { backup -> BackupConfigurationItem(backup = backup, onDelete = { onDelete(backup.id) }) }
+            initialBackup?.let { backup ->
+                TextButton(onClick = {
+                    onDelete(backup.id)
+                    onDismiss()
+                }) { Text(stringResource(R.string.browser_remove_backup), color = MaterialTheme.colorScheme.error) }
+            }
         }
         HorizontalDivider()
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().padding(OpenCloudDimensions.SpacingMd),
             horizontalArrangement = Arrangement.End,
         ) {
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.browser_cancel)) }
             TextButton(
+                enabled = initialBackup != null || sourceDisplayName != null,
                 onClick = {
                     onAdd(
                         BackupDraft(
@@ -2032,15 +2171,7 @@ fun FolderBackupSettingsContent(
                     )
                 },
             ) {
-                Text(
-                    if (initialBackup ==
-                        null
-                    ) {
-                        stringResource(R.string.browser_choose_source_folder)
-                    } else {
-                        stringResource(R.string.browser_save)
-                    },
-                )
+                Text(stringResource(R.string.browser_save))
             }
         }
     }
@@ -2108,26 +2239,32 @@ private fun BackupPathLine(
 }
 
 @Composable
+private fun BackupLocationChoice(
+    label: String,
+    value: String,
+    action: String?,
+    onClick: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXxs)) {
+        Text(label, style = MaterialTheme.typography.titleSmall)
+        Text(value, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (action != null) TextButton(onClick = onClick) { Text(action) }
+    }
+}
+
+@Composable
 private fun BackupMediaTypeOptions(
     selected: String,
     onSelect: (String) -> Unit,
 ) {
-    Row {
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs)) {
         listOf(
             "IMAGE" to R.string.browser_photo_type,
             "VIDEO" to R.string.browser_video_type,
             "ALL" to R.string.browser_all_files_type,
         ).forEach { (value, labelId) ->
             val label = stringResource(labelId)
-            TextButton(onClick = { onSelect(value) }) {
-                Text(
-                    if (selected == value) {
-                        stringResource(R.string.browser_selected_type, label)
-                    } else {
-                        label
-                    },
-                )
-            }
+            FilterChip(selected = selected == value, onClick = { onSelect(value) }, label = { Text(label) })
         }
     }
 }
@@ -2197,25 +2334,29 @@ private fun RemoteFolderPickerDialog(
                     )
                 }
             }
-            TextButton(onClick = onCreateFolder) {
+            FilledTonalButton(onClick = onCreateFolder) {
                 Icon(Icons.Default.Add, contentDescription = null)
                 Text(stringResource(R.string.browser_new_folder))
             }
         }
     },
-    confirmButton = { TextButton(onClick = onSelect) { Text(stringResource(R.string.browser_select_this_folder)) } },
+    confirmButton = { Button(onClick = onSelect) { Text(stringResource(R.string.browser_select_this_folder)) } },
     dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.browser_cancel)) } },
 )
 
 @Composable
-private fun BackupCheckbox(
+private fun BackupSwitch(
     label: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
 ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Checkbox(checked = checked, onCheckedChange = onCheckedChange)
-        Text(label)
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, modifier = Modifier.weight(1f))
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            modifier = Modifier.semantics { contentDescription = label },
+        )
     }
 }
 
@@ -2240,7 +2381,7 @@ private fun NameDialog(
             )
         },
         confirmButton = {
-            TextButton(onClick = { onConfirm(name) }, enabled = name.isNotBlank()) { Text(confirm) }
+            Button(onClick = { onConfirm(name) }, enabled = name.isNotBlank()) { Text(confirm) }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.browser_cancel)) } },
     )

@@ -5,10 +5,14 @@ Start with [README](../README.md) for installation and current beta limits, and 
 | Document | Purpose |
 | --- | --- |
 | [Testing](TESTING.md) | Quality commands, device requirements and validation limits |
+| [Linux development](LINUX-DEVELOPMENT.md) | Installed local toolchain, commands and validation evidence |
+| [Encrypted vault plan](ENCRYPTED-VAULTS-PLAN.md) | Web-compatible encryption, biometric key access and phased delivery |
 | [Scanner SDK](OFFLINE-SCANNER-SDK.md) | Pinned dependency setup and host ownership |
 | [Screenshot testing](SCREENSHOT_TESTING.md) | Golden ownership and review |
 | [Release procedure](RELEASING.md) | Packaging, signing continuity and release checks |
-| [Release notes](RELEASE-NOTES-0.8.1.md) | Version-specific behavior and limitations |
+| [Release notes](RELEASE-NOTES-0.9.0.md) | Current beta behavior, limits and handoff disclosure |
+| [Changelog](../CHANGELOG.md) | Version history |
+| [Encrypted security review](ENCRYPTED-SECURITY-REVIEW.md) | Encryption compatibility, local key handling and explicit plaintext handoff boundaries |
 | [Security](../SECURITY.md) and [Privacy](../PRIVACY.md) | Reporting and data-handling boundaries |
 | [Third-party notices](../THIRD-PARTY-NOTICES.md) | Dependency declarations and retained evidence |
 | [Phase 0 architecture proposal](ARCHITECTURE.md) | Historical design intent, not the current module inventory |

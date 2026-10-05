@@ -18,6 +18,7 @@ android {
             libs.versions.minSdk
                 .get()
                 .toInt()
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     compileOptions {
@@ -41,6 +42,7 @@ dependencies {
     implementation(project(":core:database"))
     implementation(project(":core:model"))
     implementation(project(":core:network"))
+    implementation(project(":core:crypto"))
     implementation(project(":core:security"))
     implementation(project(":core:datastore"))
     implementation(libs.androidx.work.runtime)
@@ -54,4 +56,7 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.okhttp.mockwebserver)
     testImplementation(libs.robolectric)
+    androidTestImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
 }

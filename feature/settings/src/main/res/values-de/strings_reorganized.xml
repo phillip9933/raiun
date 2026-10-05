@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_data">Daten</string>
+    <string name="settings_temporary_files">Temporäre lokale Dateien</string>
+    <string name="settings_app_lock">App-Sperre</string>
+    <string name="settings_app_lock_summary">Zum Öffnen von Raiun ist die Bildschirmsperre deines Geräts erforderlich.</string>
+    <string name="settings_app_lock_setup_device">Richte zuerst in den Android-Einstellungen eine Bildschirmsperre ein.</string>
+    <string name="settings_encrypted_preferences">Verschlüsselte Bereiche</string>
+    <string name="settings_encrypted_preferences_summary">Biometrische Auswahl für verschlüsselte Ordner und Spaces</string>
+    <string name="settings_permissions">Berechtigungen</string>
+    <string name="settings_permissions_summary">Zugriff auf Foto- und Videometadaten</string>
+    <string name="settings_encrypted_preferences_explanation">Diese Auswahl wird auf diesem Gerät gespeichert. Beim Zurücksetzen wird ein gespeicherter biometrischer Schlüssel entfernt. Nach dem nächsten Entsperren mit dem Passwort kann Raiun erneut fragen.</string>
+    <string name="settings_encrypted_preferences_empty">Für dieses Konto gibt es keine biometrischen Einstellungen für verschlüsselte Orte.</string>
+    <string name="settings_encrypted_preferences_failed">Die Verschlüsselte Bereiche konnten nicht gelesen werden.</string>
+    <string name="settings_encrypted_folder">Ordner</string>
+    <string name="settings_encrypted_space">Space</string>
+    <string name="settings_encrypted_unknown_location">Verschlüsselter Ort</string>
+    <string name="settings_encrypted_declined">Biometrische Speicherung abgelehnt</string>
+    <string name="settings_encrypted_enrolled">Biometrischer Schlüssel gespeichert</string>
+    <string name="settings_encrypted_key_unavailable">Biometrischer Schlüssel nicht verfügbar</string>
+    <string name="settings_encrypted_entry_description">%1$s · %2$s</string>
+    <string name="settings_encrypted_reset_title">Biometrischen Zugriff zurücksetzen?</string>
+    <string name="settings_encrypted_reset_explanation">Der gespeicherte biometrische Schlüssel für %1$s wird von diesem Gerät entfernt. Verwende beim nächsten Mal das Passwort; danach fragt Raiun erneut, ob ein biometrischer Schlüssel gespeichert werden soll.</string>
+    <string name="settings_encrypted_reset_files_unchanged">Verschlüsselte Dateien und Ordner bleiben unverändert.</string>
+    <string name="settings_encrypted_use_password">Nächstes Mal Passwort verwenden</string>
+    <string name="settings_encrypted_ask_again">Erneut fragen</string>
+    <string name="settings_encrypted_reset_failed">Die biometrische Auswahl konnte nicht zurückgesetzt werden. Bitte versuche es erneut.</string>
+</resources>

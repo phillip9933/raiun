@@ -2,6 +2,7 @@ package eu.opencloud.android.next.core.sync
 
 import eu.opencloud.android.next.core.database.FileOperationEntity
 import eu.opencloud.android.next.core.network.DavOperationClient
+import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
@@ -24,6 +25,45 @@ class FileOperationTest {
         assertEquals("Project.v2 (1)", numberedCopyName("Project.v2", true, 1))
         assertEquals(".hidden (1)", numberedCopyName(".hidden", false, 1))
     }
+
+    @Test fun `numbered destination skips reserved siblings in the target folder`() =
+        runTest {
+            val probes = mutableListOf<String>()
+            val chosen =
+                availableOperationName("photo.jpg", false, "/target") {
+                    probes += it
+                    it in setOf("/target/photo (1).jpg", "/target/photo (2).jpg")
+                }
+            assertEquals("photo (3).jpg", chosen)
+            assertEquals(listOf("/target/photo (1).jpg", "/target/photo (2).jpg", "/target/photo (3).jpg"), probes)
+        }
+
+    @Test fun `destination collision in copy or move never journals sends or deletes`() =
+        runTest {
+            for (move in listOf(false, true)) {
+                MockWebServer().use { server ->
+                    val backend = Backend()
+                    backend.files["/target"] = "existing"
+                    server.dispatcher = backend
+                    var sent = false
+                    try {
+                        executeFileOperation(
+                            operation(server).copy(move = move),
+                            DavOperationClient(OkHttpClient()),
+                            "Bearer test",
+                            {},
+                        ) { sent = true }
+                        org.junit.Assert.fail("Collision must be surfaced")
+                    } catch (failure: OpenCloudException) {
+                        assertEquals(OpenCloudError.Conflict, failure.error)
+                        assertFalse(sent)
+                        assertEquals(emptyList<String>(), backend.mutations)
+                        assertEquals("hello", backend.files["/source"])
+                        assertEquals("existing", backend.files["/target"])
+                    }
+                }
+            }
+        }
 
     @Test fun `server checksum verifies copy without downloading file bytes`() =
         runTest {

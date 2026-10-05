@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_encrypt_folder">Ordner verschlüsseln</string>
+    <string name="browser_encrypt_space">Space verschlüsseln</string>
+    <string name="browser_encrypt_new_summary">Zusätzlicher Schutz: Ohne dieses Passwort sind die Dateien unlesbar. Bei Verlust des Passworts gehen die Dateien verloren. Funktionen zur Zusammenarbeit sind eingeschränkt.</string>
+    <string name="browser_encrypt_keep_password">Bewahre dieses Passwort sicher auf. Raiun kann es nicht wiederherstellen. Ohne Passwort verlierst du den Zugriff auf die verschlüsselten Dateien.</string>
+    <string name="browser_encrypt_password">Tresorpasswort</string>
+    <string name="browser_encrypt_confirm_password">Tresorpasswort bestätigen</string>
+    <string name="browser_encrypt_password_mismatch">Die Passwörter stimmen nicht überein.</string>
+    <string name="browser_encrypt_show_password">Passwort anzeigen</string>
+    <string name="browser_encrypt_hide_password">Passwort ausblenden</string>
+    <string name="browser_encrypt_create_uncertain">Raiun konnte nicht bestätigen, ob der verschlüsselte Ort erstellt wurde. Prüfe den Ordner oder die Spaces-Liste, bevor du es erneut versuchst, um ein Duplikat zu vermeiden.</string>
+</resources>

@@ -6,11 +6,15 @@ import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.SpaceEntity
 import eu.opencloud.android.next.core.network.LibreGraphSpacesClient
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -19,6 +23,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 class SpaceRepositoryTest {
@@ -73,6 +79,40 @@ class SpaceRepositoryTest {
             assertEquals("Alice", synchronized.ownerName)
             assertEquals(25L, synchronized.quotaUsedBytes)
             assertEquals(synchronized, store.space("account", "project"))
+            assertTrue(requireNotNull(store.space("account", "stale")).isDisabled)
+        }
+
+    @Test
+    fun `superseded synchronization cannot overwrite a newer local space snapshot`() =
+        runTest {
+            store.replaceRemoteSpaces("account", listOf(staleSpace()))
+            val releaseResponse = CountDownLatch(1)
+            server.dispatcher =
+                object : Dispatcher() {
+                    override fun dispatch(request: RecordedRequest): MockResponse {
+                        check(releaseResponse.await(5, TimeUnit.SECONDS))
+                        return MockResponse().setBody(
+                            """{"value":[{"id":"delayed","name":"Delayed","driveType":"project","root":{"id":"root","webDavUrl":"${server.url(
+                                "dav/spaces/delayed",
+                            )}"}}]}""",
+                        )
+                    }
+                }
+
+            val delayedSync =
+                async(Dispatchers.IO) {
+                    runCatching { repository.synchronize("account", server.url("/").toString(), "Bearer token") }
+                }
+            assertTrue(server.takeRequest(2, TimeUnit.SECONDS) != null)
+            val newer = space("newer", "project")
+            val newerToken = store.beginSnapshot("account")
+            assertTrue(store.replaceRemoteSpaces("account", listOf(newer), newerToken))
+            releaseResponse.countDown()
+
+            assertTrue(delayedSync.await().exceptionOrNull() is SupersededDiscovery)
+
+            assertEquals(newer, store.space("account", "newer"))
+            assertEquals(null, store.space("account", "delayed"))
             assertTrue(requireNotNull(store.space("account", "stale")).isDisabled)
         }
 

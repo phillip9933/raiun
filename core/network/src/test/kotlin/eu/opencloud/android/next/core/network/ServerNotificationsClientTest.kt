@@ -8,6 +8,19 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class ServerNotificationsClientTest {
+    @Test fun openCloudNilInboxIsEmptyButMalformedEnvelopesStillFail() {
+        MockWebServer().use { server ->
+            server.start()
+            val client = ServerNotificationsClient(OkHttpClient(), EndpointPolicy(true))
+            server.enqueue(MockResponse().setBody("""{"ocs":{"meta":{"statuscode":200},"data":null}}"""))
+            assertEquals(emptyList<ServerNotification>(), client.list(server.url("/").toString(), "test"))
+            server.enqueue(MockResponse().setBody("""{"ocs":{"meta":{"statuscode":200}}}"""))
+            assertThrows(OpenCloudException::class.java) { client.list(server.url("/").toString(), "test") }
+            server.enqueue(MockResponse().setBody("""{"ocs":{"meta":{"statuscode":403},"data":null}}"""))
+            assertThrows(OpenCloudException::class.java) { client.list(server.url("/").toString(), "test") }
+        }
+    }
+
     @Test fun parsesOcsInboxAndSubstitutesRichNamesAsPlainText() {
         MockWebServer().use { server ->
             server.start()

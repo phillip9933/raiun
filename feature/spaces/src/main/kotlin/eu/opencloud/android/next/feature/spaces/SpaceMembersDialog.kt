@@ -1,13 +1,18 @@
 package eu.opencloud.android.next.feature.spaces
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -126,7 +131,7 @@ internal fun SpaceMembersDialog(space: SpaceEntity, onClose: () -> Unit) {
                         label = { Text(stringResource(R.string.spaces_member_search)) },
                         enabled = !busy,
                     )
-                    TextButton(enabled = !busy && query.trim().length >= 2, onClick = {
+                    FilledTonalButton(enabled = !busy && query.trim().length >= 2, onClick = {
                         search()
                     }) { Text(stringResource(R.string.spaces_member_search)) }
                     RecipientChoices(results, recipient, busy) { recipient = it }
@@ -142,7 +147,10 @@ internal fun SpaceMembersDialog(space: SpaceEntity, onClose: () -> Unit) {
                     recipient = null
                     role = null
                 })
-                TextButton(enabled = !busy, onClick = { perform {} }) { Text(stringResource(R.string.spaces_refresh)) }
+                OutlinedButton(
+                    enabled = !busy,
+                    onClick = { perform {} },
+                ) { Text(stringResource(R.string.spaces_refresh)) }
             }
         }
     }, confirmButton = {
@@ -178,17 +186,20 @@ private fun SpaceMemberList(
     Column {
         Text(stringResource(R.string.spaces_members_scope))
         data.members.forEach { member ->
-            TextButton(enabled = !busy, onClick = { onSelect(member) }) {
-                Text(
-                    member.name + " · " +
+            ListItem(
+                headlineContent = { Text(member.name) },
+                supportingContent = {
+                    Text(
                         member.roles.joinToString { id ->
                             data.roles.firstOrNull { it.id == id }?.name ?: unknownRole
                         },
-                )
-            }
+                    )
+                },
+                modifier = Modifier.clickable(enabled = !busy) { onSelect(member) },
+            )
         }
         if (data.roles.isNotEmpty()) {
-            TextButton(enabled = !busy, onClick = onAdd) { Text(stringResource(R.string.spaces_member_add)) }
+            FilledTonalButton(enabled = !busy, onClick = onAdd) { Text(stringResource(R.string.spaces_member_add)) }
         }
     }
 }
@@ -228,7 +239,7 @@ private fun MemberRemoveAction(
     onRemove: () -> Unit,
 ) {
     if (member != null) {
-        TextButton(enabled = !busy, onClick = onRemove) { Text(stringResource(R.string.spaces_member_remove)) }
+        OutlinedButton(enabled = !busy, onClick = onRemove) { Text(stringResource(R.string.spaces_member_remove)) }
     }
 }
 
@@ -271,7 +282,7 @@ private fun MemberSaveButton(
     onSave: () -> Unit,
 ) {
     if (editing) {
-        TextButton(enabled = canSave, onClick = onSave) {
+        Button(enabled = canSave, onClick = onSave) {
             Text(stringResource(if (removing) R.string.spaces_member_remove else R.string.spaces_save))
         }
     } else {

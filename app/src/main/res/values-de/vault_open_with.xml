@@ -1,0 +1,5 @@
+<resources>
+    <string name="vault_open_with">Öffnen mit</string>
+    <string name="vault_open_with_warning">Wenn diese verschlüsselte Datei in einer anderen App geöffnet wird, entsteht eine vorübergehende entschlüsselte Kopie auf diesem Telefon. Die andere App kann sie lesen, speichern oder teilen. Raiun kann Kopien in dieser App nicht löschen. Raiun entfernt seine vorübergehende Kopie bei der Rückkehr oder beendet den Zugriff nach 10 Minuten. Verwende nur eine App, der du vertraust.</string>
+    <string name="vault_open_with_continue">Entschlüsselte Kopie öffnen</string>
+</resources>

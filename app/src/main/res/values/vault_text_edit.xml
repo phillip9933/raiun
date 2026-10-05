@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_text_edit_label">UTF-8 text</string>
+    <string name="vault_text_save">Save to server</string>
+    <string name="vault_text_edit_secure_note">Unsaved changes stay in memory and are cleared when this location locks. Saving writes directly to the encrypted file.</string>
+    <string name="vault_text_edit_too_large">The editor supports UTF-8 text up to 256 KB.</string>
+    <string name="vault_text_discard_title">Discard unsaved changes?</string>
+    <string name="vault_text_discard_message">Your unsaved text is held only in memory and will be cleared.</string>
+    <string name="vault_text_discard">Discard changes</string>
+</resources>

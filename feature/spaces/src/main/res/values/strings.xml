@@ -4,6 +4,9 @@
     <string name="spaces_none_available">No Spaces are available for this account.</string>
     <!-- %1$s is the displayed Space name in the accessibility description. -->
     <string name="spaces_open_space">Open Space %1$s</string>
+    <string name="spaces_unlock_encrypted">Unlock encrypted Space %1$s</string>
+    <string name="spaces_encrypted_summary">Encrypted Space · Unlock to browse</string>
+    <string name="spaces_encrypted_load_failed">Encrypted Spaces could not be loaded. Pull to refresh to try again.</string>
     <!-- %1$s is the name of the Space owner. -->
     <string name="spaces_owner">Owner: %1$s</string>
     <!-- %1$s is used storage and %2$s is available storage. -->

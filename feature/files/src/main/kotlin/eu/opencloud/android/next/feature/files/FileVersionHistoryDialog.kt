@@ -7,6 +7,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -101,7 +103,7 @@ fun FileVersionHistoryDialog(
                 ) { Text(stringResource(R.string.file_versions_cancel)) }
             },
             confirmButton = {
-                TextButton(onClick = {
+                Button(onClick = {
                     selection = null
                     restoring = true
                     scope.launch {
@@ -133,7 +135,7 @@ private fun VersionResults(
         if (message == null && versions.isEmpty()) Text(stringResource(R.string.file_versions_empty))
         VersionRows(versions, !restoring, select)
         if (message != null) {
-            TextButton(onClick = retry, enabled = !restoring) {
+            FilledTonalButton(onClick = retry, enabled = !restoring) {
                 Text(stringResource(R.string.file_versions_retry))
             }
         }
@@ -171,7 +173,7 @@ private fun VersionRows(
                 version.sizeBytes?.let { Formatter.formatFileSize(context, it) }
                     ?: stringResource(R.string.file_versions_unknown_size),
             )
-            TextButton(
+            FilledTonalButton(
                 onClick = { onRestore(version) },
                 enabled = enabled,
             ) { Text(stringResource(R.string.file_versions_restore)) }

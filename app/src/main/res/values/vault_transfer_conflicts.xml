@@ -1,0 +1,7 @@
+<resources>
+    <string name="vault_transfer_conflict_title">An item with this name already exists</string>
+    <string name="vault_transfer_conflict_body">%1$s already exists in this folder. Keep both using the name %2$s, or cancel.</string>
+    <string name="vault_transfer_keep_both">Keep both</string>
+    <string name="vault_entry_cloud_only_status">Cloud only</string>
+    <string name="vault_entry_unknown_size">Unknown size</string>
+</resources>

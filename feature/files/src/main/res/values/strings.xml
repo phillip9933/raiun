@@ -1,4 +1,5 @@
 <resources>
+    <string name="browser_vaults">Encrypted vaults</string>
     <string name="favorites_sync_running">Checking favorites. Waiting for a connection if needed.</string>
     <string name="favorites_sync_more">More favorites may remain to be checked.</string>
     <string name="favorites_sync_failed">Favorites could not be fully refreshed. Try again.</string>

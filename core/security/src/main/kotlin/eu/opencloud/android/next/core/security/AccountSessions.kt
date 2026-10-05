@@ -8,6 +8,7 @@ import eu.opencloud.android.next.core.model.auth.OidcClientRegistration
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 
 /** Process-wide account ownership. Network refresh is serialized only within the same account. */
 class AccountSessions(
@@ -15,6 +16,15 @@ class AccountSessions(
     private val clock: AppClock = SystemAppClock,
 ) {
     private val accounts = ConcurrentHashMap<String, Any>()
+    private val generations = ConcurrentHashMap<String, AtomicLong>()
+
+    /** A cheap process-local lease revoked before account credentials are removed or replaced. */
+    fun beginLease(accountId: String): () -> Boolean =
+        synchronized(lock(accountId)) {
+            val generation = generation(accountId).get()
+            val present = credentials.readTokens(accountId) != null || credentials.readBasicPassword(accountId) != null
+            ({ present && generation(accountId).get() == generation })
+        }
 
     fun tokens(
         accountId: String,
@@ -35,13 +45,17 @@ class AccountSessions(
                     refresh(current)
                 } catch (exception: OpenCloudException) {
                     if (exception.error == OpenCloudError.ClientRegistrationRequired) {
+                        generation(accountId).incrementAndGet()
                         credentials
                             .readClientRegistration(
                                 "account:$accountId",
                             )?.let(credentials::invalidateClientRegistration)
                         credentials.remove(accountId)
                     }
-                    if (exception.error == OpenCloudError.AuthenticationRequired) credentials.remove(accountId)
+                    if (exception.error == OpenCloudError.AuthenticationRequired) {
+                        generation(accountId).incrementAndGet()
+                        credentials.remove(accountId)
+                    }
                     throw exception
                 }
             if (refreshed.expiresAtEpochSeconds <= now) reauthenticate()
@@ -54,18 +68,27 @@ class AccountSessions(
         accountId: String,
         tokens: AuthTokens,
         registration: OidcClientRegistration? = null,
-    ) = synchronized(lock(accountId)) {
-        if (registration == null) {
-            credentials.saveTokens(accountId, tokens)
-        } else {
-            credentials.saveRegisteredTokens(accountId, tokens, registration)
+    ): Unit =
+        synchronized(lock(accountId)) {
+            generation(accountId).incrementAndGet()
+            if (registration == null) {
+                credentials.saveTokens(accountId, tokens)
+            } else {
+                credentials.saveRegisteredTokens(accountId, tokens, registration)
+            }
+            Unit
         }
-    }
 
     /** Returns only after any in-flight refresh has finished, then removes its committed result. */
-    fun remove(accountId: String) = synchronized(lock(accountId)) { credentials.remove(accountId) }
+    fun remove(accountId: String) =
+        synchronized(lock(accountId)) {
+            generation(accountId).incrementAndGet()
+            credentials.remove(accountId)
+        }
 
     private fun lock(accountId: String): Any = accounts.computeIfAbsent(accountId) { Any() }
+
+    private fun generation(accountId: String): AtomicLong = generations.computeIfAbsent(accountId) { AtomicLong() }
 
     private fun reauthenticate(): Nothing = throw OpenCloudException(OpenCloudError.AuthenticationRequired)
 

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_biometric_offer_title">Mit Biometrie entsperren?</string>
+    <string name="vault_biometric_offer_message">Öffne diesen verschlüsselten Ordner oder Space mit deinem Fingerabdruck oder unterstützter Gesichtserkennung. Das funktioniert nur auf diesem Smartphone. Bewahre eine sichere Kopie deines Verschlüsselungspassworts auf: Du brauchst es weiterhin auf anderen Geräten, nach dem Zurücksetzen der Biometrie oder beim Verlust dieses Smartphones.</string>
+    <string name="vault_biometric_offer_accept">Biometrie einrichten</string>
+    <string name="vault_biometric_offer_decline">Jetzt nicht</string>
+    <string name="vault_biometric_setup_error">Die biometrische Bestätigung war erfolgreich, aber Raiun konnte den Verschlüsselungsschlüssel nicht speichern oder verwenden. Entsperre mit deinem Verschlüsselungspasswort und richte die Biometrie erneut ein.</string>
+    <string name="vault_biometric_diagnostic">Diagnosecode: %1$s</string>
+</resources>

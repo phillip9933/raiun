@@ -59,6 +59,7 @@ val LocalOpenCloudExtendedColors =
     }
 
 object OpenCloudDimensions {
+    val DestinationPickerHeight = 320.dp
     val VersionHistoryListHeight = 360.dp
     val DocumentPreviewHeight = 180.dp
     val WordmarkWidth = 170.dp

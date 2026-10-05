@@ -59,94 +59,81 @@ class FileOperationManager(
         accountId: String,
     ) = operations.dismiss(id, accountId)
 
+    // Destination inputs stay explicit; namingBase preserves the original name during conflict retries.
+    @Suppress("LongParameterList")
     suspend fun enqueue(
         source: ResourceEntity,
         destinationSpace: String,
         parentId: String?,
         name: String,
         move: Boolean,
-    ) = enqueueMutex.withLock {
-        require(
-            name.isNotBlank() &&
-                name !in
-                setOf(
-                    ".",
-                    "..",
-                ) &&
-                name.none { it == '/' || it == '\\' || it.isISOControl() },
-        )
-        val from = requireNotNull(store.space(source.accountId, source.spaceId))
-        val to = requireNotNull(store.space(source.accountId, destinationSpace))
-        val parent = parentId?.let { requireNotNull(store.resource(source.accountId, destinationSpace, it)) }
-        require(parent == null || parent.kind == eu.opencloud.android.next.core.model.ResourceKind.FOLDER)
-        var destinationPath = "${parent?.path?.trimEnd('/').orEmpty()}/$name"
-        if (!move && source.spaceId == destinationSpace && source.path.trimEnd('/') == destinationPath.trimEnd('/')) {
+        namingBase: String = name,
+    ) = withContext(Dispatchers.IO) {
+        enqueueMutex.withLock {
+            requireOperationName(name)
+            requireOperationName(namingBase)
+            val from = requireNotNull(store.space(source.accountId, source.spaceId))
+            val to = requireNotNull(store.space(source.accountId, destinationSpace))
+            val parent = parentId?.let { requireNotNull(store.resource(source.accountId, destinationSpace, it)) }
+            require(parent == null || parent.kind == eu.opencloud.android.next.core.model.ResourceKind.FOLDER)
+            val parentPath = parent?.path?.trimEnd('/').orEmpty()
+            val destinationPath = "$parentPath/$name"
+            val sourceUrl = operationUrl(webDavRoot(from), source.path).toHttpUrl()
+            val destinationUrl = operationUrl(webDavRoot(to), destinationPath).toHttpUrl()
+            require(
+                sourceUrl.scheme == destinationUrl.scheme &&
+                    sourceUrl.host == destinationUrl.host &&
+                    sourceUrl.port == destinationUrl.port,
+            ) {
+                "This server does not support operations between these storage hosts."
+            }
             val account = requireNotNull(store.account(source.accountId))
             val authorization = WorkerAuthorizationProvider(context).authorization(account)
             val client =
                 DavOperationClient(TlsPolicy(context).applyTo(OkHttpClient.Builder().build(), account.serverUrl))
-            destinationPath = availableCopyPath(source, webDavRoot(to), client, authorization)
-        }
-        val sourceUrl = operationUrl(webDavRoot(from), source.path).toHttpUrl()
-        val destinationUrl = operationUrl(webDavRoot(to), destinationPath).toHttpUrl()
-        require(
-            sourceUrl.scheme == destinationUrl.scheme &&
-                sourceUrl.host == destinationUrl.host &&
-                sourceUrl.port == destinationUrl.port,
-        ) {
-            "This server does not support operations between these storage hosts."
-        }
-        require(
-            sourceUrl != destinationUrl &&
-                !destinationUrl.encodedPath.startsWith(sourceUrl.encodedPath.trimEnd('/') + "/"),
-        ) {
-            "Choose a different destination outside the source folder."
-        }
-        val eTag =
-            DownloadExpectation(source.sizeBytes, source.eTag).strongETag
-                ?: throw OpenCloudException(OpenCloudError.PreconditionFailed)
-        operations.enqueue(
-            FileOperationEntity(
-                UUID.randomUUID().toString(),
-                source.accountId,
-                source.spaceId,
-                destinationSpace,
-                source.remoteId,
-                source.parentId,
-                parentId,
-                webDavRoot(from),
-                webDavRoot(to),
-                source.path,
-                destinationPath,
-                eTag,
-                move,
-                source.kind == eu.opencloud.android.next.core.model.ResourceKind.FOLDER,
-            ),
-        )
-        reconcile()
-    }
 
-    private suspend fun availableCopyPath(
-        source: ResourceEntity,
-        root: String,
-        client: DavOperationClient,
-        authorization: String,
-    ): String {
-        for (number in 1..10000) {
-            val name =
-                numberedCopyName(
-                    source.name,
-                    source.kind == eu.opencloud.android.next.core.model.ResourceKind.FOLDER,
-                    number,
+            suspend fun occupied(path: String): Boolean =
+                operations.dao.destinationReserved(source.accountId, destinationSpace, path) != 0 ||
+                    client.stat(operationUrl(webDavRoot(to), path), authorization) != null
+            if (occupied(destinationPath)) {
+                throw FileOperationNameConflictException(
+                    availableOperationName(
+                        namingBase,
+                        source.kind == eu.opencloud.android.next.core.model.ResourceKind.FOLDER,
+                        parentPath,
+                        ::occupied,
+                    ),
                 )
-            val candidate = "${source.path.trimEnd('/').substringBeforeLast('/', "")}/$name"
-            if (operations.dao.destinationReserved(source.accountId, source.spaceId, candidate) == 0 &&
-                client.stat(operationUrl(root, candidate), authorization) == null
-            ) {
-                return candidate
             }
+            require(
+                sourceUrl != destinationUrl &&
+                    !destinationUrl.encodedPath.startsWith(sourceUrl.encodedPath.trimEnd('/') + "/"),
+            ) {
+                "Choose a different destination outside the source folder."
+            }
+            val eTag =
+                DownloadExpectation(source.sizeBytes, source.eTag).strongETag
+                    ?: throw OpenCloudException(OpenCloudError.PreconditionFailed)
+            operations.enqueue(
+                FileOperationEntity(
+                    UUID.randomUUID().toString(),
+                    source.accountId,
+                    source.spaceId,
+                    destinationSpace,
+                    source.remoteId,
+                    source.parentId,
+                    parentId,
+                    webDavRoot(from),
+                    webDavRoot(to),
+                    source.path,
+                    destinationPath,
+                    eTag,
+                    move,
+                    source.kind == eu.opencloud.android.next.core.model.ResourceKind.FOLDER,
+                ),
+            )
+            reconcile()
         }
-        throw OpenCloudException(OpenCloudError.Conflict)
     }
 
     suspend fun reconcile() {
@@ -349,7 +336,7 @@ private fun prepareOperation(
     val destination = operationUrl(operation.destinationRoot, operation.destinationPath)
     val before = client.stat(source, authorization) ?: throw OpenCloudException(OpenCloudError.NotFound)
     requireOperation(before.eTag == operation.sourceETag && before.folder == operation.sourceFolder)
-    requireOperation(client.stat(destination, authorization) == null)
+    if (client.stat(destination, authorization) != null) throw OpenCloudException(OpenCloudError.Conflict)
     val fingerprint = client.verificationFingerprint(source, authorization, checkActive)
     requireOperation(client.stat(source, authorization)?.eTag == operation.sourceETag)
     return fingerprint
@@ -373,3 +360,29 @@ private fun operationUrl(
             }
         }.build()
         .toString()
+
+/** A known destination collision is resolved before any operation is journaled or sent. */
+class FileOperationNameConflictException(
+    val suggestedName: String,
+) : Exception("A destination item already exists.")
+
+internal suspend fun availableOperationName(
+    baseName: String,
+    folder: Boolean,
+    parentPath: String,
+    occupied: suspend (String) -> Boolean,
+): String {
+    for (number in 1..10000) {
+        val candidate = numberedCopyName(baseName, folder, number)
+        if (!occupied("$parentPath/$candidate")) return candidate
+    }
+    throw OpenCloudException(OpenCloudError.Conflict)
+}
+
+private fun requireOperationName(name: String) {
+    require(
+        name.isNotBlank() &&
+            name !in setOf(".", "..") &&
+            name.none { it == '/' || it == '\\' || it.isISOControl() },
+    )
+}

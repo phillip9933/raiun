@@ -87,7 +87,7 @@ class ScannerLocationGoldenTest {
             OpenCloudTheme {
                 ScannerDestinationScreen(
                     ScannerDestinationPickerState(
-                        accountLabel = "Phil Rogers · drive.rogers.ltd",
+                        accountLabel = "Alex Example · cloud.example",
                         spaces = listOf(space),
                         spaceId = "team",
                         path = "/Notes",
@@ -101,7 +101,7 @@ class ScannerLocationGoldenTest {
             }
         }
         compose.onNodeWithText("Save in this folder").assertIsEnabled()
-        compose.onNodeWithText("Phil Rogers · drive.rogers.ltd").assertExists()
+        compose.onNodeWithText("Alex Example · cloud.example").assertExists()
         compose.onRoot().captureRoboImage("src/test/snapshots/rendered/scanner_destination_folder.png")
         compose.onNodeWithText("Change").performClick()
         assertEquals(true, changed)
@@ -117,7 +117,7 @@ class ScannerLocationGoldenTest {
             OpenCloudTheme(darkTheme = true) {
                 ScannerDestinationScreen(
                     ScannerDestinationPickerState(
-                        accountLabel = "Phil Rogers · drive.rogers.ltd",
+                        accountLabel = "Alex Example · cloud.example",
                         spaces =
                             listOf(
                                 personal,

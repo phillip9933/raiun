@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_refresh">Refresh</string>
+    <string name="vault_new_folder">New folder</string>
+    <string name="vault_upload_file">Upload file</string>
+    <string name="vault_new_actions">New actions</string>
+    <string name="vault_close_actions">Close new actions</string>
+    <string name="vault_edit_location">Edit encrypted location</string>
+    <string name="vault_copy_to_folder">Copy to folder</string>
+    <string name="vault_move_to_folder">Move to folder</string>
+    <string name="vault_destination_root">Encrypted location</string>
+    <string name="vault_destination_up">Up one level</string>
+    <string name="vault_destination_open">Open</string>
+    <string name="vault_details_path">Path: %1$s</string>
+    <string name="vault_details_type">Type: %1$s</string>
+    <string name="vault_details_size">Size: %1$s</string>
+    <string name="vault_entry_size">%1$s · %2$s</string>
+    <string name="vault_preview_memory_only_note">Preview content is decrypted in memory. Raiun does not store a plaintext preview copy.</string>
+    <string name="vault_destination_choose">Choose a destination for %1$s</string>
+    <string name="vault_copy_here">Copy here</string>
+    <string name="vault_move_here">Move here</string>
+    <string name="vault_destination_empty">No folders in this location.</string>
+    <string name="vault_encrypted_space_header">Encrypted Space</string>
+    <string name="vault_encrypted_folder_header">Encrypted folder</string>
+    <string name="vault_entry_actions">Actions for %1$s</string>
+    <string name="vault_rename">Rename</string>
+    <string name="vault_delete">Delete</string>
+    <string name="vault_copy">Copy</string>
+    <string name="vault_move">Move</string>
+    <string name="vault_save_copy">Save a decrypted copy</string>
+    <string name="vault_details">Details</string>
+    <string name="vault_delete_confirm">Delete this item from the encrypted location?</string>
+    <string name="vault_details_content">Name: %1$s\nPath: %2$s\nSize: %3$d bytes</string>
+    <string name="vault_cancel">Cancel</string>
+    <string name="vault_confirm">Confirm</string>
+    <string name="vault_operation_failed">The operation did not complete. Refresh before trying again; the server may already have received a change.</string>
+    <string name="vault_unlock_to_finish">Unlock again to finish the file operation.</string>
+    <string name="vault_export_failed">The copy did not finish. The destination may contain an incomplete file.</string>
+    <string name="vault_save_copy_warning">The saved copy will no longer be encrypted by this folder or Space. Only save it to a location you trust.</string>
+    <string name="vault_root_delete_warning">Delete “%1$s”? Only an empty encrypted folder can be deleted here. Remove or move its contents first.</string>
+    <string name="vault_space_management_web">Manage the Space’s name, members and deletion in the web app. File and folder actions are available inside this Space.</string>
+    <string name="vault_name">Name</string>
+    <string name="vault_entry_folder_type">Folder</string>
+    <string name="vault_entry_unknown_type">Unknown type</string>
+    <string name="vault_entry_offline_status">Available in encrypted offline copy</string>
+    <string name="vault_entry_online_unknown_status">Encrypted item; offline availability unknown</string>
+</resources>

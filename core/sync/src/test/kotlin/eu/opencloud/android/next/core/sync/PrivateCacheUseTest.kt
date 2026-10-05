@@ -12,6 +12,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import java.io.File
+import java.nio.file.Files
 
 class PrivateCacheUseTest {
     @get:Rule val temporary = TemporaryFolder()
@@ -75,5 +77,22 @@ class PrivateCacheUseTest {
                 assertFalse(PrivateCacheUse.removeIfUnused(file) { true })
             }
             assertTrue(PrivateCacheUse.removeIfUnused(file) { true })
+        }
+
+    @Test fun `symlink aliases share the same lease identity`() =
+        runTest {
+            val realDirectory = temporary.newFolder("real-cache")
+            val aliasDirectory = File(temporary.root, "cache-alias")
+            Files.createSymbolicLink(aliasDirectory.toPath(), realDirectory.toPath())
+            val file = File(realDirectory, "cached-copy").apply { writeText("cached") }
+            val aliasedFile = File(aliasDirectory, file.name)
+            val lease = LocalCopyLease.acquire(file)
+
+            assertFalse(PrivateCacheUse.removeIfUnused(aliasedFile) { true })
+            assertTrue(file.exists())
+
+            lease.close()
+            assertTrue(PrivateCacheUse.removeIfUnused(aliasedFile) { true })
+            assertFalse(file.exists())
         }
 }

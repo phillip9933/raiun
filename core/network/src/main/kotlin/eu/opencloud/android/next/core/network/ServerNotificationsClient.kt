@@ -2,6 +2,7 @@ package eu.opencloud.android.next.core.network
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -37,7 +38,9 @@ class ServerNotificationsClient(
         authorization: String,
     ): List<ServerNotification> {
         val request = base(server, authorization).get().build()
-        val data = execute(request, allowEmpty = true) ?: return emptyList()
+        val data = execute(request, allowEmpty = true) ?: JsonNull
+        // OpenCloud userlog serializes its nil notification slice as JSON null when the inbox is empty.
+        if (data == JsonNull) return emptyList()
         val rows = data as? JsonArray ?: invalid()
         if (rows.size > 10000) invalid()
         val result = rows.map { parse(it as? JsonObject ?: invalid()) }
@@ -97,6 +100,7 @@ class ServerNotificationsClient(
             val meta = ocs["meta"] as? JsonObject ?: invalid()
             val status = (meta["statuscode"] as? JsonPrimitive)?.intOrNull ?: invalid()
             if (status !in setOf(100, 200)) throw OpenCloudException(OpenCloudError.InvalidResponse)
+            if (!ocs.containsKey("data")) invalid()
             ocs["data"]
         }
 

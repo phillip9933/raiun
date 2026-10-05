@@ -76,9 +76,11 @@ class DavOperationClient(
                 .header("Depth", "infinity")
                 .method(if (move) "MOVE" else "COPY", ByteArray(0).toRequestBody())
                 .build()
-        client.newCall(request).execute().use { response ->
-            if (response.code !in setOf(201, 204)) throw TransferHttpException(response.code)
+        val status = client.newCall(request).execute().use { it.code }
+        if (status == 412 && stat(source, authorization)?.eTag == version && stat(destination, authorization) != null) {
+            throw OpenCloudException(OpenCloudError.Conflict)
         }
+        if (status !in setOf(201, 204)) throw TransferHttpException(status)
     }
 
     fun fingerprint(

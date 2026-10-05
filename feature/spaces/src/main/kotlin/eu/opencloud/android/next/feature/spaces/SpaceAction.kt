@@ -5,7 +5,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.DataUsage
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FolderOpen
@@ -95,16 +100,7 @@ internal fun SpaceActionsMenu(
                         if (action == SpaceAction.RENAME) HorizontalDivider()
                         BrowserAction(
                             label = stringResource(action.label),
-                            icon =
-                                when (action) {
-                                    SpaceAction.OPEN -> Icons.Default.FolderOpen
-                                    SpaceAction.TRASH, SpaceAction.DELETE -> Icons.Default.DeleteOutline
-                                    SpaceAction.DETAILS -> Icons.Default.Info
-                                    SpaceAction.MEMBERS -> Icons.Default.Group
-                                    SpaceAction.DOWNLOAD -> Icons.Default.Download
-                                    SpaceAction.WEB -> Icons.Default.OpenInBrowser
-                                    else -> Icons.Default.Edit
-                                },
+                            icon = action.icon(),
                             onClick = {
                                 expanded = false
                                 onAction(action)
@@ -115,6 +111,22 @@ internal fun SpaceActionsMenu(
         }
     }
 }
+
+private fun SpaceAction.icon() =
+    when (this) {
+        SpaceAction.OPEN -> Icons.Default.FolderOpen
+        SpaceAction.TRASH -> Icons.Default.Delete
+        SpaceAction.DELETE -> Icons.Default.DeleteOutline
+        SpaceAction.DETAILS -> Icons.Default.Info
+        SpaceAction.MEMBERS -> Icons.Default.Group
+        SpaceAction.DOWNLOAD -> Icons.Default.Download
+        SpaceAction.WEB -> Icons.Default.OpenInBrowser
+        SpaceAction.RENAME -> Icons.Default.Edit
+        SpaceAction.SUBTITLE -> Icons.Default.Description
+        SpaceAction.QUOTA -> Icons.Default.DataUsage
+        SpaceAction.DISABLE -> Icons.Default.Block
+        SpaceAction.ENABLE -> Icons.Default.CheckCircle
+    }
 
 @Composable
 internal fun SpaceActionDialog(

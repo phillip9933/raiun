@@ -3,8 +3,8 @@ package eu.opencloud.android.next
 import android.content.Intent
 import android.graphics.Bitmap
 import android.os.SystemClock
-import androidx.annotation.RequiresApi
 import androidx.core.view.WindowCompat
+import androidx.test.filters.SdkSuppress
 import androidx.test.platform.app.InstrumentationRegistry
 import eu.opencloud.android.next.core.datastore.Appearance
 import eu.opencloud.android.next.core.datastore.SettingsRepository
@@ -14,7 +14,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 
-@RequiresApi(29)
+@SdkSuppress(minSdkVersion = 29)
 class SystemBarsTest {
     @Test fun explicitDarkModeControlsSystemBars() =
         runBlocking {

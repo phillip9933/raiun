@@ -1,7 +1,18 @@
 {
-  "reviewDate": "2026-10-02",
+  "reviewDate": "2026-10-06",
   "source": "https://api.osv.dev/v1/querybatch",
-  "queried": 160,
+  "queried": 165,
   "excluded": "dev.offlinescan prerelease modules; native/model assets require separate review",
-  "findings": []
+  "findings": [],
+  "remediation": {
+    "package": "org.bouncycastle:bcprov-jdk18on",
+    "previous": "1.81",
+    "current": "1.85.2",
+    "advisories": [
+      "GHSA-574f-3g2m-x479",
+      "GHSA-9pwp-9qqc-pr26",
+      "GHSA-c3fc-8qff-9hwx",
+      "GHSA-qp49-qgx5-5m26"
+    ]
+  }
 }

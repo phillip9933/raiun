@@ -1,0 +1,5 @@
+<resources>
+    <string name="vault_open_with">Open with</string>
+    <string name="vault_open_with_warning">Opening this encrypted file in another app creates a temporary decrypted copy on this phone. The other app can read, save or share it, and Raiun cannot remove copies that app keeps. Raiun attempts to delete its temporary copy when you return. New access expires after 10 minutes; Android may delay background deletion. A file already opened by the other app can remain readable. Use only an app you trust.</string>
+    <string name="vault_open_with_continue">Open decrypted copy</string>
+</resources>

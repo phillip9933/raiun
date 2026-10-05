@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_biometric_offer_title">Unlock with biometrics?</string>
+    <string name="vault_biometric_offer_message">Use your fingerprint or supported face recognition to reopen this encrypted folder or Space. This works only on this phone. Keep a secure backup of your encryption password: you will still need it on other devices, if biometrics are reset, or if this phone is lost.</string>
+    <string name="vault_biometric_offer_accept">Set up biometrics</string>
+    <string name="vault_biometric_offer_decline">Not now</string>
+    <string name="vault_biometric_setup_error">Biometric confirmation finished, but Raiun could not save or use the encryption key. Unlock with your encryption password and set up biometrics again.</string>
+    <string name="vault_biometric_diagnostic">Diagnostic code: %1$s</string>
+</resources>

@@ -343,5 +343,3 @@ internal suspend fun refreshFolder(request: FolderRefresh) {
         throw SupersededDiscovery()
     }
 }
-
-private class SupersededDiscovery : Exception()

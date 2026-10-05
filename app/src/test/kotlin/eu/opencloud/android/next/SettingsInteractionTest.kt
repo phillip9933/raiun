@@ -11,11 +11,17 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import com.github.takahirom.roborazzi.captureRoboImage
 import eu.opencloud.android.next.core.datastore.Appearance
 import eu.opencloud.android.next.core.datastore.UserSettings
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudTheme
+import eu.opencloud.android.next.core.security.VaultIdentity
+import eu.opencloud.android.next.core.security.VaultPreferenceStatus
+import eu.opencloud.android.next.core.security.VaultPreferenceTargetKind
+import eu.opencloud.android.next.core.security.VaultPreferences
 import eu.opencloud.android.next.feature.settings.SettingsDiagnostics
 import eu.opencloud.android.next.feature.settings.SettingsScreen
 import org.junit.Assert.assertEquals
@@ -24,11 +30,23 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.annotation.GraphicsMode
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [35])
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
+@Config(sdk = [35], qualifiers = "w360dp-h800dp")
 class SettingsInteractionTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
+
+    @Test fun appLockSettingsRowHasNoSecuritySubmenuNavigation() {
+        compose.setContent {
+            OpenCloudTheme {
+                SettingsScreen(UserSettings(), {}, {}, {})
+            }
+        }
+        compose.onNodeWithText("App lock").performScrollTo().assertExists()
+        compose.onNodeWithContentDescription("Open security settings").assertDoesNotExist()
+    }
 
     @Test fun openingPreferencesChangeOnlyTheSelectedFileType() {
         val state = mutableStateOf(UserSettings())
@@ -87,6 +105,7 @@ class SettingsInteractionTest {
         compose.onNodeWithContentDescription("Hidden files").performScrollTo().performClick()
         assertEquals(true, state.value.fileDisplay.showHidden)
         compose.onNodeWithContentDescription("Back").performClick()
+        compose.onNodeWithText("Temporary local files").performScrollTo().performClick()
         compose.onNodeWithText("Clear temporary copies now").performScrollTo().performClick()
         assertEquals(0, cleared)
         compose.onNodeWithText("Cancel").performClick()
@@ -148,6 +167,7 @@ class SettingsInteractionTest {
         compose.onNodeWithText("System default").performClick()
         assertEquals("", language.value)
         compose.onNodeWithContentDescription("Back").performClick()
+        compose.onNodeWithText("Temporary local files").performScrollTo().performClick()
         compose.onNodeWithText("Clear temporary copies now").performScrollTo()
     }
 
@@ -163,11 +183,83 @@ class SettingsInteractionTest {
                 )
             }
         }
+        compose.onNodeWithText("Temporary local files").performScrollTo().performClick()
         compose.onNodeWithContentDescription("Change temporary copy retention").performScrollTo().performClick()
         compose.onNode(hasText("Never") and hasAnyAncestor(isPopup())).assertIsSelected()
         compose.onNodeWithText("1 hour").performClick()
         assertEquals(1, state.value.temporaryCopyRetentionHours)
         compose.onNodeWithContentDescription("Change temporary copy retention").performScrollTo().performClick()
         compose.onNode(hasText("1 hour") and hasAnyAncestor(isPopup())).assertIsSelected()
+    }
+
+    @Test fun dataAndSecuritySubmenusReturnToSettingsWithoutLosingActions() {
+        var backups = 0
+        var exits = 0
+        compose.setContent {
+            OpenCloudTheme {
+                SettingsScreen(
+                    UserSettings(),
+                    onNavigateBack = { exits++ },
+                    onOpenBackupSettings = { backups++ },
+                    onSetRetention = {},
+                    accountId = "settings-test-account",
+                )
+            }
+        }
+        compose.onNodeWithText("Data").assertExists()
+        compose.onNodeWithText("Folder & camera backup").performScrollTo().performClick()
+        assertEquals(1, backups)
+        compose.onNodeWithText("Temporary local files").performScrollTo().performClick()
+        compose.onNodeWithText("Clear temporary copies now").assertExists()
+        compose.onRoot().captureRoboImage("src/test/snapshots/rendered/temporary_files_settings.png")
+        compose.onNodeWithContentDescription("Back").performClick()
+        compose.onNodeWithText("Encrypted preferences").performScrollTo().performClick()
+        compose.waitUntil(5_000) {
+            compose
+                .onAllNodesWithText("No biometric choices for encrypted locations on this account.")
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText("No biometric choices for encrypted locations on this account.").assertExists()
+        compose.onNodeWithContentDescription("Back").performClick()
+        compose.onNodeWithText("Permissions").performScrollTo().performClick()
+        compose.onNodeWithText("Photo and video metadata").assertExists()
+        compose.onRoot().captureRoboImage("src/test/snapshots/rendered/permissions_settings.png")
+        compose.onNodeWithContentDescription("Back").performClick()
+        compose.onNodeWithText("Temporary local files").assertExists()
+        assertEquals(0, exits)
+    }
+
+    @Test fun encryptedChoiceShowsFolderStatusAndCancelKeepsPreference() {
+        val identity =
+            VaultIdentity(
+                accountId = "settings-entry-test",
+                canonicalServer = "https://cloud.example",
+                driveId = "drive",
+                remoteVaultId = "vault",
+            )
+        val preferences = VaultPreferences(compose.activity)
+        preferences.decline(identity, "Private papers", VaultPreferenceTargetKind.FOLDER)
+        try {
+            compose.setContent {
+                OpenCloudTheme {
+                    SettingsScreen(UserSettings(), {}, {}, {}, accountId = identity.accountId)
+                }
+            }
+            compose.onNodeWithText("Encrypted preferences").performScrollTo().performClick()
+            compose.waitUntil(5_000) {
+                compose.onAllNodesWithText("Private papers").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Folder · cloud.example").assertExists()
+            compose.onNodeWithText("Biometric offer declined").assertExists()
+            compose.onRoot().captureRoboImage("src/test/snapshots/rendered/encrypted_preferences.png")
+            compose.onNodeWithText("Ask me again").performClick()
+            compose.onNodeWithText("Reset biometric access?").assertExists()
+            compose.onNodeWithText("Encrypted files and folders will not change.").assertExists()
+            compose.onNodeWithText("Cancel").performClick()
+            assertEquals(VaultPreferenceStatus.DECLINED, preferences.status(identity))
+        } finally {
+            preferences.remove(identity)
+        }
     }
 }

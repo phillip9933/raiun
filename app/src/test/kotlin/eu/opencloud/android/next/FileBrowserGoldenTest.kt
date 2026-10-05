@@ -535,6 +535,7 @@ class FileBrowserGoldenTest {
         onClearSelection: () -> Unit = {},
         onRemoveLocalSelection: () -> Unit = {},
         onScan: () -> Unit = {},
+        onOpenEncryptedOffline: () -> Unit = {},
     ) {
         val content: @Composable () -> Unit = {
             OpenCloudTheme {
@@ -572,6 +573,7 @@ class FileBrowserGoldenTest {
                     onOpenDeletedFiles = {},
                     onOpenSettings = {},
                     onOpenAccount = onOpenAccount,
+                    onOpenEncryptedOffline = onOpenEncryptedOffline,
                     onShareResource = {},
                     onExport = onExport,
                     initialDestination = initialDestination,
@@ -606,6 +608,18 @@ class FileBrowserGoldenTest {
             "src/test/snapshots/rendered/offline_filters.png",
             browserRoborazziOptions(),
         )
+    }
+
+    @Test fun offlineScreenClearlyRoutesToEncryptedOfflineCopies() {
+        var openedEncryptedCatalog = false
+        render(
+            browserState().copy(resources = emptyList(), offlineResources = emptyList()),
+            initialDestination = FileBrowserDestination.Offline,
+            onOpenEncryptedOffline = { openedEncryptedCatalog = true },
+        )
+
+        composeRule.onNodeWithText("Encrypted offline copies").assertIsDisplayed().performClick()
+        assertEquals(true, openedEncryptedCatalog)
     }
 
     @Test fun offlineStorageAndBulkActions_matchesGolden() {

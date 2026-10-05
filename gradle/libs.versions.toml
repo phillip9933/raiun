@@ -27,6 +27,9 @@ datastore = "1.1.7"
 protobuf = "3.25.8"
 protobufPlugin = "0.9.4"
 offlineScanner = "0.1.0-rc11"
+bcprov = "1.85.2"
+lazysodium = "5.2.0"
+jna = "5.17.0"
 
 [libraries]
 androidx-core = { module = "androidx.core:core", version = "1.16.0" }
@@ -71,6 +74,10 @@ androidx-work-testing = { module = "androidx.work:work-testing", version.ref = "
 androidx-datastore = { module = "androidx.datastore:datastore", version.ref = "datastore" }
 protobuf-javalite = { module = "com.google.protobuf:protobuf-javalite", version.ref = "protobuf" }
 offline-scanner-compose = { module = "dev.offlinescan:scanner-ui-compose", version.ref = "offlineScanner" }
+bcprov = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bcprov" }
+lazysodium-android = { module = "com.goterl:lazysodium-android", version.ref = "lazysodium" }
+lazysodium-java = { module = "com.goterl:lazysodium-java", version.ref = "lazysodium" }
+jna-android = { module = "net.java.dev.jna:jna", version.ref = "jna" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "androidGradlePlugin" }

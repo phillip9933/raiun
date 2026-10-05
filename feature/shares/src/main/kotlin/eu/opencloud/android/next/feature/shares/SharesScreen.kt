@@ -683,7 +683,7 @@ private fun ManageShareDialog(
             }
         },
         confirmButton = {
-            TextButton(
+            Button(
                 onClick = {
                     onUpdate(share, permissions)
                     onDismiss()
@@ -968,7 +968,7 @@ private fun ShareNotice(
             confirmButton = {
                 Row {
                     state.createdPublicLink?.let { link ->
-                        TextButton(
+                        Button(
                             onClick = {
                                 context.copyPublicLink(link)
                                 onDismiss()

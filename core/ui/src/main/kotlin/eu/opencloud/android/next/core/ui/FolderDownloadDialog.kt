@@ -2,6 +2,7 @@ package eu.opencloud.android.next.core.ui
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -43,7 +44,7 @@ fun FolderDownloadDialog(
             if (failed) Text(stringResource(R.string.folder_download_failed))
         }
     }, confirmButton = {
-        TextButton(enabled = !started || done, onClick = {
+        Button(enabled = !started || done, onClick = {
             if (done) {
                 onClose()
             } else {

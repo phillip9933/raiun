@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_offline_copies">Encrypted offline copies</string>
+    <string name="vault_offline_copy">Encrypted offline copy · read only</string>
+    <string name="vault_offline_explanation">Saved copies may be older than the server. Unlock to read them on this phone.</string>
+    <string name="vault_keep_offline">Keep encrypted copy offline</string>
+    <string name="vault_keep_offline_warning">Save this item and its contents securely on this phone. The copy stays encrypted and requires your encryption password or biometrics. It is a snapshot; save it again to update it.</string>
+    <string name="vault_remove_offline">Remove offline copy</string>
+    <string name="vault_remove_offline_warning">Remove this encrypted offline copy from this phone. Files on the server are unchanged.</string>
+    <string name="vault_offline_cleanup_failed">The server change succeeded, but some local encrypted data could not be removed.</string>
+</resources>

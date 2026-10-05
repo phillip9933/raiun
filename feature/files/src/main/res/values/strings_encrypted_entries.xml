@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_encrypted_locked">Encrypted folder, locked</string>
+    <string name="browser_encrypted_load_failed">Encrypted folders could not be checked. Pull down to retry.</string>
+    <string name="browser_encrypted_actions">Actions for %1$s</string>
+</resources>

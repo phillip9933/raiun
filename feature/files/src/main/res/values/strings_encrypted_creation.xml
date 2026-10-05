@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_encrypt_folder">Encrypt folder</string>
+    <string name="browser_encrypt_space">Encrypt Space</string>
+    <string name="browser_encrypt_new_summary">Extra secure: unreadable without this password. Losing it means losing access to the files. Collaboration features are limited.</string>
+    <string name="browser_encrypt_keep_password">Keep this password safe. Raiun cannot recover it, and losing it means losing access to the encrypted files.</string>
+    <string name="browser_encrypt_password">Vault password</string>
+    <string name="browser_encrypt_confirm_password">Confirm vault password</string>
+    <string name="browser_encrypt_password_mismatch">Passwords do not match.</string>
+    <string name="browser_encrypt_show_password">Show password</string>
+    <string name="browser_encrypt_hide_password">Hide password</string>
+    <string name="browser_encrypt_create_uncertain">Raiun could not confirm whether the encrypted location was created. Check the folder or Spaces list before trying again to avoid a duplicate.</string>
+</resources>

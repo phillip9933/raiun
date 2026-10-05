@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_offline_copies">Verschlüsselte Offline-Kopien</string>
+    <string name="vault_offline_copy">Verschlüsselte Offline-Kopie · nur lesen</string>
+    <string name="vault_offline_explanation">Gespeicherte Kopien können älter als die Serverdateien sein. Zum Lesen auf diesem Gerät entsperren.</string>
+    <string name="vault_keep_offline">Verschlüsselte Kopie offline behalten</string>
+    <string name="vault_keep_offline_warning">Dieses Element und seinen Inhalt sicher auf diesem Gerät speichern. Die Kopie bleibt verschlüsselt und erfordert das Verschlüsselungspasswort oder Biometrie. Sie ist eine Momentaufnahme; zum Aktualisieren erneut speichern.</string>
+    <string name="vault_remove_offline">Offline-Kopie entfernen</string>
+    <string name="vault_remove_offline_warning">Diese verschlüsselte Offline-Kopie von diesem Gerät entfernen. Die Dateien auf dem Server bleiben erhalten.</string>
+    <string name="vault_offline_cleanup_failed">Die Serveränderung war erfolgreich, aber einige lokale verschlüsselte Daten konnten nicht entfernt werden.</string>
+</resources>

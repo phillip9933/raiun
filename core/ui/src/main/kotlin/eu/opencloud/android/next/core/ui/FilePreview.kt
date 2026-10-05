@@ -106,9 +106,9 @@ fun FilePreviewScreen(
     name: String,
     state: FilePreviewState,
     onClose: () -> Unit,
-    onOpenWith: () -> Unit,
+    onOpenWith: (() -> Unit)?,
     onPage: (Int) -> Unit,
-    onRetry: () -> Unit,
+    onRetry: (() -> Unit)?,
     modifier: Modifier = Modifier,
     onEdit: (() -> Unit)? = null,
 ) {
@@ -121,7 +121,9 @@ fun FilePreviewScreen(
     }) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             Row {
-                TextButton(onClick = onOpenWith) { Text(stringResource(R.string.preview_open_with)) }
+                onOpenWith?.let { openWith ->
+                    TextButton(onClick = openWith) { Text(stringResource(R.string.preview_open_with)) }
+                }
                 onEdit?.let { edit ->
                     TextButton(
                         onClick = edit,
@@ -135,7 +137,9 @@ fun FilePreviewScreen(
                 } else if (state.failed) {
                     Column(Modifier.padding(OpenCloudDimensions.SpacingMd)) {
                         Text(stringResource(R.string.preview_failed))
-                        TextButton(onClick = onRetry) { Text(stringResource(R.string.preview_retry)) }
+                        onRetry?.let { retry ->
+                            TextButton(onClick = retry) { Text(stringResource(R.string.preview_retry)) }
+                        }
                     }
                 } else {
                     state.text?.let { text ->

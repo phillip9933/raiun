@@ -10,6 +10,26 @@ import org.junit.Before
 import org.junit.Test
 
 class LibreGraphSpacesClientTest {
+    @Test fun `explicit vault discovery keeps encrypted spaces separate from ordinary spaces`() {
+        val vault =
+            drive("vault").replace(
+                "\"driveType\":\"project\"",
+                "\"driveType\":\"project\",\"@libre.graph.contentType\":\"application/vnd.opencloud.vault\"",
+            )
+        val body = """{"value":[${drive("visible")},$vault]}"""
+        server.enqueue(MockResponse().setBody(body))
+        server.enqueue(MockResponse().setBody(body))
+
+        val ordinary = client.snapshot(server.url("/").toString(), "Bearer token")
+        val explicit = client.snapshot(server.url("/").toString(), "Bearer token", includeVaultDetails = true)
+
+        assertEquals(emptyList<RemoteSpace>(), ordinary.vaultSpaces)
+        assertEquals(listOf("visible"), explicit.spaces.map { it.id })
+        assertEquals(setOf("vault"), explicit.excludedVaultIds)
+        assertEquals(listOf("vault"), explicit.vaultSpaces.map { it.id })
+        assertEquals("vault-root", explicit.vaultSpaces.single().rootId)
+    }
+
     @Test fun `snapshot retains explicit vault exclusions across pages without exposing drives`() {
         server.enqueue(
             MockResponse().setBody(

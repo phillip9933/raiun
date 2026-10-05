@@ -1,6 +1,7 @@
 package eu.opencloud.android.next.feature.settings
 
 import android.content.Intent
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -39,9 +40,11 @@ import eu.opencloud.android.next.core.security.AppLock
 fun SecuritySettingsScreen(
     onNavigateBack: () -> Unit,
     modifier: Modifier = Modifier,
+    accountId: String? = null,
 ) {
+    BackHandler(onBack = onNavigateBack)
     val context = LocalContext.current
-    val lock = remember { AppLock(context) }
+    val lock = remember(context, accountId) { AppLock(context) }
     var revision by remember { mutableIntStateOf(0) }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { revision++ }
     androidx.lifecycle.compose.LifecycleEventEffect(androidx.lifecycle.Lifecycle.Event.ON_RESUME) { revision++ }
@@ -50,7 +53,7 @@ fun SecuritySettingsScreen(
         modifier = modifier,
         topBar = {
             TopAppBar(
-                title = { Text(stringResource(R.string.settings_security)) },
+                title = { Text(stringResource(R.string.settings_app_lock)) },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Icon(
@@ -66,7 +69,6 @@ fun SecuritySettingsScreen(
             Modifier.padding(padding).verticalScroll(rememberScrollState()).padding(OpenCloudDimensions.SpacingMd),
             verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingMd),
         ) {
-            MetadataPermissionSettings()
             AppLockSettingsCard(lock, enabled, onAuthenticate = { launcher.launch(it) }, onChange = { revision++ })
         }
     }
@@ -90,13 +92,13 @@ private fun AppLockSettingsCard(
                 ListItemDefaults.colors(
                     containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
                 ),
-            headlineContent = { Text(stringResource(R.string.settings_lock_opencloud)) },
+            headlineContent = { Text(stringResource(R.string.settings_app_lock)) },
             supportingContent = {
                 Text(
                     if (lock.deviceSecure) {
-                        stringResource(R.string.settings_lock_description_secure)
+                        stringResource(R.string.settings_app_lock_summary)
                     } else {
-                        stringResource(R.string.settings_lock_description_insecure)
+                        stringResource(R.string.settings_app_lock_setup_device)
                     },
                 )
             },

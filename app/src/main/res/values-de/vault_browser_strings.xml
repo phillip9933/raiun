@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_refresh">Aktualisieren</string>
+    <string name="vault_new_folder">Neuer Ordner</string>
+    <string name="vault_upload_file">Datei hochladen</string>
+    <string name="vault_new_actions">Neue Aktionen</string>
+    <string name="vault_close_actions">Neue Aktionen schließen</string>
+    <string name="vault_edit_location">Verschlüsselten Speicherort bearbeiten</string>
+    <string name="vault_copy_to_folder">In Ordner kopieren</string>
+    <string name="vault_move_to_folder">In Ordner verschieben</string>
+    <string name="vault_destination_root">Verschlüsselter Speicherort</string>
+    <string name="vault_destination_up">Eine Ebene nach oben</string>
+    <string name="vault_destination_open">Öffnen</string>
+    <string name="vault_details_path">Pfad: %1$s</string>
+    <string name="vault_details_type">Typ: %1$s</string>
+    <string name="vault_details_size">Größe: %1$s</string>
+    <string name="vault_entry_size">%1$s · %2$s</string>
+    <string name="vault_preview_memory_only_note">Vorschauinhalte werden im Arbeitsspeicher entschlüsselt. Raiun speichert keine unverschlüsselte Vorschaukopie.</string>
+    <string name="vault_destination_choose">Ziel für %1$s auswählen</string>
+    <string name="vault_copy_here">Hierher kopieren</string>
+    <string name="vault_move_here">Hierher verschieben</string>
+    <string name="vault_destination_empty">Keine Ordner an diesem Speicherort.</string>
+    <string name="vault_encrypted_space_header">Verschlüsselter Space</string>
+    <string name="vault_encrypted_folder_header">Verschlüsselter Ordner</string>
+    <string name="vault_entry_actions">Aktionen für %1$s</string>
+    <string name="vault_rename">Umbenennen</string>
+    <string name="vault_delete">Löschen</string>
+    <string name="vault_copy">Kopieren</string>
+    <string name="vault_move">Verschieben</string>
+    <string name="vault_save_copy">Entschlüsselte Kopie speichern</string>
+    <string name="vault_details">Details</string>
+    <string name="vault_delete_confirm">Dieses Element aus dem verschlüsselten Speicherort löschen?</string>
+    <string name="vault_details_content">Name: %1$s\nPfad: %2$s\nGröße: %3$d Bytes</string>
+    <string name="vault_cancel">Abbrechen</string>
+    <string name="vault_confirm">Bestätigen</string>
+    <string name="vault_operation_failed">Der Vorgang wurde nicht abgeschlossen. Vor einem weiteren Versuch aktualisieren; der Server könnte die Änderung bereits erhalten haben.</string>
+    <string name="vault_unlock_to_finish">Erneut entsperren, um den Dateivorgang abzuschließen.</string>
+    <string name="vault_export_failed">Die Kopie wurde nicht fertiggestellt. Am Ziel kann eine unvollständige Datei liegen.</string>
+    <string name="vault_save_copy_warning">Die gespeicherte Kopie wird nicht mehr durch diesen Ordner oder Space verschlüsselt. Speichere sie nur an einem vertrauenswürdigen Ort.</string>
+    <string name="vault_root_delete_warning">„%1$s“ löschen? Hier können nur leere verschlüsselte Ordner gelöscht werden. Entferne oder verschiebe zuerst den Inhalt.</string>
+    <string name="vault_space_management_web">Verwalte den Namen, die Mitglieder und das Löschen des Spaces in der Web-App. Datei- und Ordneraktionen sind innerhalb dieses Spaces verfügbar.</string>
+    <string name="vault_name">Name</string>
+    <string name="vault_entry_folder_type">Ordner</string>
+    <string name="vault_entry_unknown_type">Unbekannter Typ</string>
+    <string name="vault_entry_offline_status">In verschlüsselter Offline-Kopie verfügbar</string>
+    <string name="vault_entry_online_unknown_status">Verschlüsseltes Element; Offline-Verfügbarkeit unbekannt</string>
+</resources>

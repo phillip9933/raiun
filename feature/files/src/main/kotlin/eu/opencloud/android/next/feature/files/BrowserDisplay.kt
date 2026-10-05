@@ -3,6 +3,7 @@ package eu.opencloud.android.next.feature.files
 import eu.opencloud.android.next.core.database.ResourceEntity
 import eu.opencloud.android.next.core.datastore.FileDisplayOptions
 import eu.opencloud.android.next.core.model.ResourceKind
+import eu.opencloud.android.next.core.ui.browserDisplayName
 import java.text.DateFormat
 import java.util.Date
 
@@ -30,18 +31,7 @@ internal enum class OfflineFilter(
 internal fun displayFileName(
     resource: ResourceEntity,
     options: FileDisplayOptions,
-): String {
-    val name = resource.name
-    val dot = name.lastIndexOf('.')
-    return if (!options.showExtensions &&
-        resource.kind == ResourceKind.FILE &&
-        dot > 0
-    ) {
-        name.substring(0, dot)
-    } else {
-        name
-    }
-}
+): String = browserDisplayName(resource.name, resource.kind == ResourceKind.FOLDER, options)
 
 internal fun formattedModified(
     timestamp: Long,

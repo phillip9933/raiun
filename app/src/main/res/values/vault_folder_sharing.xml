@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_folder_sharing_title">Share encrypted folder</string>
+    <string name="vault_folder_sharing_warning">Only named people or groups can be added here. They still need the encryption password to open the contents. Removing access does not erase keys or copies they already have.</string>
+    <string name="vault_folder_sharing_uncertain">The server may have applied the change. Refresh the collaborator list before trying another change.</string>
+    <string name="vault_folder_sharing_people">Collaborators</string>
+    <string name="vault_folder_sharing_empty">No named collaborators.</string>
+    <string name="vault_folder_sharing_add">Add collaborator</string>
+    <string name="vault_folder_sharing_search">Search people or groups</string>
+    <string name="vault_folder_sharing_permissions">Access</string>
+    <string name="vault_folder_sharing_viewer">View and download</string>
+    <string name="vault_folder_sharing_editor">Edit contents</string>
+    <string name="vault_folder_sharing_editor_reshare">Edit and reshare</string>
+    <string name="vault_folder_sharing_custom_permissions">This share has custom permissions. Choose an access level to change it.</string>
+    <string name="vault_folder_sharing_person">Person</string>
+    <string name="vault_folder_sharing_group">Group</string>
+    <string name="vault_folder_sharing_remove">Remove access</string>
+    <string name="vault_folder_sharing_remove_confirm">Remove this collaborator’s access to the encrypted folder?</string>
+</resources>
