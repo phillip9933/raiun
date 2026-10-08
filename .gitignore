@@ -1,0 +1,14 @@
+/target/
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+*.log
+/private/
+*.p12
+*.pfx
+*.keystore
+/desktop-shell/node_modules/
+/desktop-shell/dist/
+/desktop-shell/src-tauri/target/
+/desktop-shell/src-tauri/gen/

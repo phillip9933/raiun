@@ -1,0 +1,22 @@
+[package]
+name = "raiun-opencloud"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+quick-xml = "0.38"
+percent-encoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+raiun-core = { path = "../raiun-core" }
+serde_json.workspace = true
+url = "2"
+tempfile.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+raiun-engine = { path = "../raiun-engine" }
+
+[lints]
+workspace = true
