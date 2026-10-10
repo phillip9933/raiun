@@ -192,6 +192,9 @@
     <string name="capture_mode_card">Karte</string>
     <string name="capture_mode_status">%1$s · %2$s</string>
     <string name="capture_photo_hint">Tippe auf den Auslöser, um ein Foto aufzunehmen.</string>
+    <string name="capture_quality_hint">Diese Seite könnte unscharf sein. Prüfe sie und nimm sie bei Bedarf erneut auf.</string>
+    <string name="review_diagnostic_preview">Detailvorschau · zum Prüfen mit zwei Fingern vergrößern</string>
+    <string name="review_original_dimensions">Original: %1$d × %2$d Pixel</string>
     <string name="zoom_fit">Seite einpassen</string>
     <string name="zoom_in">Vergrößern</string>
     <plurals name="save_page_position">

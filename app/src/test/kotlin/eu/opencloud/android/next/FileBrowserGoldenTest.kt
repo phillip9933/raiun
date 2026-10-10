@@ -25,6 +25,7 @@ import eu.opencloud.android.next.core.database.TransferEntity
 import eu.opencloud.android.next.core.database.TransferState
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudTheme
 import eu.opencloud.android.next.core.model.ResourceKind
+import eu.opencloud.android.next.feature.files.BackupDestination
 import eu.opencloud.android.next.feature.files.BackupFolderCrumb
 import eu.opencloud.android.next.feature.files.BrowserLayout
 import eu.opencloud.android.next.feature.files.FavoritesSyncStatus
@@ -45,6 +46,7 @@ import org.robolectric.annotation.GraphicsMode
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @Config(sdk = [35], qualifiers = "w360dp-h800dp")
+@Suppress("LargeClass") // Golden scenarios and conflict regressions share this Compose test harness.
 class FileBrowserGoldenTest {
     @get:Rule
     val composeRule = createAndroidComposeRule<ComponentActivity>()
@@ -409,8 +411,24 @@ class FileBrowserGoldenTest {
             OpenCloudTheme {
                 FolderBackupSettingsContent(
                     backups = emptyList(),
-                    pickerTrail = listOf(BackupFolderCrumb("photos", "Photos", "/Photos")),
-                    pickerFolders = listOf(resource("camera", "Camera", ResourceKind.FOLDER, parentId = "photos")),
+                    pickerState =
+                        FileBrowserUiState(
+                            backupPickerDestination =
+                                BackupDestination(
+                                    "personal",
+                                    "/Photos",
+                                    "SPACE",
+                                    null,
+                                    null,
+                                    "Personal",
+                                ),
+                            backupPickerTrail = listOf(BackupFolderCrumb("photos", "Photos", "/Photos")),
+                            backupPickerResources =
+                                listOf(
+                                    resource("camera", "Camera", ResourceKind.FOLDER, parentId = "photos"),
+                                ),
+                            backupPickerCanSelect = true,
+                        ),
                     onDismiss = {},
                     onAdd = {},
                     onDelete = {},
@@ -418,7 +436,7 @@ class FileBrowserGoldenTest {
             }
         }
         composeRule.onNodeWithText("Select folder").performClick()
-        composeRule.onNodeWithText("Select remote folder").fetchSemanticsNode()
+        composeRule.onNodeWithText("Choose backup destination").fetchSemanticsNode()
         composeRule.onRoot().captureRoboImage(
             filePath = "src/test/snapshots/rendered/file_browser_backup_folder_picker.png",
             roborazziOptions = browserRoborazziOptions(),
@@ -450,6 +468,37 @@ class FileBrowserGoldenTest {
             ),
             "file_browser_upload_conflict",
         )
+
+    @Test
+    fun persistedConflictReappearsForActiveAccountWhileBrowsingAnotherFolder() {
+        val conflict =
+            TransferEntity(
+                id = "backup-conflict",
+                accountId = "account",
+                spaceId = "personal",
+                resourceId = null,
+                direction = TransferDirection.UPLOAD.name,
+                sourceUri = "content://example/DCIM/photo.jpg",
+                destinationPath = "/Photos/2026/09/photo.jpg",
+                displayName = "photo.jpg",
+                mimeType = "image/jpeg",
+                bytesTotal = 42,
+                state = TransferState.CONFLICT.name,
+                error = "An item with this name already exists.",
+                errorCode = "CONFLICT",
+                createdAtEpochMillis = 0,
+                updatedAtEpochMillis = 0,
+            )
+        render(
+            browserState(
+                folderTrail = listOf(FolderCrumb("other", "Other folder")),
+                transfers = listOf(conflict),
+            ),
+        )
+
+        composeRule.onNodeWithText("Upload conflict").assertIsDisplayed()
+        composeRule.onNodeWithText("photo.jpg already exists. Choose which version to keep.").assertIsDisplayed()
+    }
 
     @Test
     fun fileBrowserSortOptions_matchesGolden() =

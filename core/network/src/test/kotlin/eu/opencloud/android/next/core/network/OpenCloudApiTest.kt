@@ -10,6 +10,9 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.TimeUnit
+import java.util.zip.GZIPOutputStream
 
 class OpenCloudApiTest {
     private lateinit var server: MockWebServer
@@ -65,6 +68,32 @@ class OpenCloudApiTest {
     }
 
     @Test
+    fun `oversized oauth error is rejected before response parsing`() {
+        server.enqueue(
+            MockResponse().setResponseCode(400).setChunkedBody(
+                "x".repeat(
+                    ERROR_METADATA_LIMIT_BYTES.toInt() + 1,
+                ),
+                2048,
+            ),
+        )
+        val configuration =
+            eu.opencloud.android.next.core.model.auth.OidcConfiguration(
+                server.url("/").toString(),
+                server.url("authorize").toString(),
+                server.url("token").toString(),
+                null,
+                "registered",
+                emptyList(),
+            )
+        val failure =
+            org.junit.Assert.assertThrows(
+                OpenCloudException::class.java,
+            ) { api.refresh(configuration, "secret") }
+        assertEquals(OpenCloudError.InvalidResponse, failure.error)
+    }
+
+    @Test
     fun `discovery preserves an explicit canonical server scheme`() {
         server.enqueue(MockResponse().setResponseCode(200).setBody("{}"))
 
@@ -72,6 +101,61 @@ class OpenCloudApiTest {
 
         assertEquals(server.url("/").toString().trimEnd('/'), result.canonicalServerUrl)
         assertEquals("/status.php", server.takeRequest().path)
+    }
+
+    @Test
+    fun `metadata cap rejects chunked and compressed expansion beyond decoded byte limit`() {
+        val oversized = metadataJsonOfSize(SMALL_METADATA_LIMIT_BYTES.toInt() + 1)
+        server.enqueue(MockResponse().setChunkedBody(oversized, 4096))
+        val chunkedFailure =
+            org.junit.Assert.assertThrows(OpenCloudException::class.java) {
+                api.webFinger(server.url("/").toString().trimEnd('/'))
+            }
+        assertEquals(OpenCloudError.InvalidResponse, chunkedFailure.error)
+
+        val compressed =
+            ByteArrayOutputStream()
+                .also { output ->
+                    GZIPOutputStream(output).use { it.write(oversized.toByteArray()) }
+                }.toByteArray()
+        server.enqueue(
+            MockResponse()
+                .setHeader("Content-Encoding", "gzip")
+                .setHeader("Content-Type", "application/json")
+                .setBody(okio.Buffer().write(compressed)),
+        )
+        val gzipFailure =
+            org.junit.Assert.assertThrows(OpenCloudException::class.java) {
+                api.webFinger(server.url("/").toString().trimEnd('/'))
+            }
+        assertEquals(OpenCloudError.InvalidResponse, gzipFailure.error)
+    }
+
+    @Test
+    fun `metadata reader accepts exact byte limit and strips utf8 bom`() {
+        server.enqueue(MockResponse().setBody(metadataJsonOfSize(SMALL_METADATA_LIMIT_BYTES.toInt())))
+        assertEquals("https://issuer.example", api.webFinger(server.url("/").toString().trimEnd('/'))?.issuer)
+
+        server.enqueue(
+            MockResponse().setBody(
+                "\uFEFF" +
+                    """{"links":[{"rel":"http://opencloud.eu/ns/oidc/issuer","href":"https://issuer.example"}]}""",
+            ),
+        )
+        assertEquals("https://issuer.example", api.webFinger(server.url("/").toString().trimEnd('/'))?.issuer)
+    }
+
+    @Test
+    fun `metadata deadline preserves a shorter caller timeout`() {
+        assertEquals(
+            50,
+            OkHttpClient
+                .Builder()
+                .callTimeout(50, TimeUnit.MILLISECONDS)
+                .build()
+                .withMetadataDeadline()
+                .callTimeoutMillis,
+        )
     }
 
     @Test
@@ -212,6 +296,13 @@ class OpenCloudApiTest {
 
     private fun userResponse() =
         """{"ocs":{"data":{"id":"alice","display-name":"Alice","email":"alice@example.test"}}}"""
+
+    private fun metadataJsonOfSize(size: Int): String {
+        val prefix =
+            """{"links":[{"rel":"http://opencloud.eu/ns/oidc/issuer","href":"https://issuer.example"}],"padding":""""
+        val suffix = "\"}"
+        return prefix + "x".repeat(size - prefix.length - suffix.length) + suffix
+    }
 
     private fun capabilitiesResponse(trashbin: String = "\"1.0\"") =
         """{"ocs":{"data":{"version":{"string":"7.4.0"},"capabilities":{"dav":{"reports":["search-files"],"trashbin":$trashbin},"files":{"tus_support":{"version":"1.0.0","resumable":"1.0.0"}},"files_sharing":{"api_enabled":true,"public":{"enabled":true,"password":{"enforced":true},"expire_date":{"enabled":true,"days":30,"enforced":false}}},"spaces":{"enabled":true}}}}}"""

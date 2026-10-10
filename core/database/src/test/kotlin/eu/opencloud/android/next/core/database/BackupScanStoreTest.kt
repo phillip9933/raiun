@@ -25,6 +25,39 @@ class BackupScanStoreTest {
             deleteAfterUpload = false,
         )
 
+    @Test fun `destination changes advance receipt namespace while unchanged settings keep it`() =
+        runTest {
+            val db =
+                Room
+                    .inMemoryDatabaseBuilder(
+                        RuntimeEnvironment.getApplication(),
+                        FileBrowserDatabase::class.java,
+                    ).build()
+            try {
+                val scans = BackupScanStore(db)
+                scans.save(pair)
+                val original = requireNotNull(db.folderBackupDao().findById(pair.id))
+                assertEquals(0L, original.destinationRevision)
+                db.backupReceiptDao().save(BackupReceipt(pair.id, "legacy-receipt", acceptedSignature = "accepted"))
+
+                scans.save(original.copy(wifiOnly = true))
+                assertEquals(0L, db.folderBackupDao().findById(pair.id)?.destinationRevision)
+                assertEquals("accepted", db.backupReceiptDao().find(pair.id, "legacy-receipt")?.acceptedSignature)
+
+                scans.save(original.copy(spaceId = "different"))
+                val moved = requireNotNull(db.folderBackupDao().findById(pair.id))
+                assertEquals(1L, moved.destinationRevision)
+                assertEquals(null, db.backupReceiptDao().find(pair.id, "legacy-receipt"))
+                // A stale scan can write its old receipt after the edit; the revision still isolates it.
+                db.backupReceiptDao().save(BackupReceipt(pair.id, "legacy-receipt", acceptedSignature = "late"))
+                assertEquals(1L, db.folderBackupDao().findById(pair.id)?.destinationRevision)
+                scans.save(moved.copy(destinationPath = "/new"))
+                assertEquals(2L, db.folderBackupDao().findById(pair.id)?.destinationRevision)
+            } finally {
+                db.close()
+            }
+        }
+
     @Test fun `vault exclusion disables overlapping pairs with literal boundaries`() =
         runTest {
             val db =

@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_paged_text_part">Part %1$d of this file</string>
+</resources>

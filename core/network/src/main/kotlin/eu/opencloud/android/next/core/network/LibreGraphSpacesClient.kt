@@ -27,6 +27,7 @@ class LibreGraphSpacesClient(
             .followRedirects(false)
             .followSslRedirects(false)
             .build()
+            .withMetadataDeadline()
 
     fun listSpaces(
         serverUrl: String,
@@ -78,11 +79,11 @@ class LibreGraphSpacesClient(
                 .post(body.toRequestBody(JSON_MEDIA_TYPE))
                 .build()
         return client.newCall(request).execute().use { response ->
-            val responseBody = response.body?.string().orEmpty()
             if (response.code != 201) {
                 runCatching { Log.e(LOG_TAG, "POST failed with HTTP ${response.code}") }
                 throw TransferHttpException(response.code)
             }
+            val responseBody = response.readBoundedMetadata(SMALL_METADATA_LIMIT_BYTES)
             val drive = json.parseToJsonElement(responseBody).jsonObject
             val id =
                 drive.string("id")?.takeIf { it.isNotBlank() }
@@ -208,7 +209,7 @@ class LibreGraphSpacesClient(
         try {
             client.newCall(request).execute().use { response ->
                 if (response.code != expectedCode) throw TransferHttpException(response.code)
-                response.body?.string().orEmpty()
+                response.readBoundedMetadata(AUTH_METADATA_LIMIT_BYTES)
             }
         } catch (failure: java.io.IOException) {
             throw OpenCloudException(failure.toOpenCloudError())
@@ -277,11 +278,11 @@ class LibreGraphSpacesClient(
                 .get()
                 .build()
         return client.newCall(request).execute().use { response ->
-            val body = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
                 runCatching { Log.e(LOG_TAG, "GET failed with HTTP ${response.code}") }
                 throw TransferHttpException(response.code)
             }
+            val body = response.readBoundedMetadata(LISTING_METADATA_LIMIT_BYTES)
             val payload = json.parseToJsonElement(body).jsonObject
             val records =
                 (payload["value"] ?: throw OpenCloudException(OpenCloudError.Unsupported))

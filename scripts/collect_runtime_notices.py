@@ -2,6 +2,7 @@
 """Collect release runtime license evidence from the resolved dependency list.
 
 Run from any directory. POMs and archives are read from the Gradle module cache;
+the pinned scanner SDK is read from the installer's verified Maven cache;
 when a POM is absent, the script requests it from the official Google or Maven
 Central repository and follows parent POMs for inherited license declarations.
 Unknown or unavailable declarations are recorded as gaps, never guessed.
@@ -11,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import re
 import shutil
@@ -25,7 +27,7 @@ from xml.etree import ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 INVENTORY = ROOT / "docs/release-audit/runtime-dependencies.json"
 DEFAULT_CACHE = Path.home() / ".gradle/caches/modules-2/files-2.1"
-DEFAULT_SCANNER = ROOT.parent / "scanner-library-reference"
+SCANNER_LOCK = ROOT / "scripts/offline-scanner-sdk.lock.json"
 OUTPUT = ROOT / "app/src/main/assets/third-party/runtime-notices"
 RUNTIME_JSON = OUTPUT / "runtime-inventory.json"
 THIRD_PARTY_MD = ROOT / "THIRD-PARTY-NOTICES.md"
@@ -38,6 +40,33 @@ LICENSE_FILENAMES = re.compile(
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def scanner_release(scanner: Path, lock: dict[str, str]) -> dict[str, tuple[bytes, str]]:
+    """Validate the installed Maven tree and retain license evidence from the pinned ZIP."""
+    archive = scanner / lock["archive"]
+    if not archive.is_file() or sha256(archive.read_bytes()) != lock["sha256"].lower():
+        raise SystemExit(f"Scanner SDK archive missing or SHA-256 mismatch: {archive}")
+    maven = scanner / "maven"
+    with zipfile.ZipFile(archive) as bundle:
+        expected = {name.removeprefix("maven/") for name in bundle.namelist() if name.startswith("maven/") and not name.endswith("/")}
+        actual = {path.relative_to(maven).as_posix() for path in maven.rglob("*") if path.is_file()}
+        if actual != expected:
+            raise SystemExit(f"Scanner SDK Maven cache differs from pinned archive: {maven}")
+        for relative in expected:
+            if (maven / relative).read_bytes() != bundle.read("maven/" + relative):
+                raise SystemExit(f"Scanner SDK Maven cache differs from pinned archive: {maven / relative}")
+        processing = f"maven/dev/offlinescan/scanner-processing-opencv/{lock['version']}/scanner-processing-opencv-{lock['version']}.aar"
+        with zipfile.ZipFile(io.BytesIO(bundle.read(processing))) as aar:
+            sources = {
+                "apache": (bundle.read("LICENSE"), f"scanner SDK {lock['version']} Maven ZIP / LICENSE"),
+            }
+            for key, name in {
+                "libyuv": "assets/offline-scanner-notices/libyuv-LICENSE.txt",
+                "onnxruntime": "assets/third_party_licenses/onnxruntime/LICENSE.txt",
+            }.items():
+                sources[key] = (aar.read(name), f"scanner SDK {lock['version']} processing AAR / {name}")
+    return sources
 
 
 def parse_pom(data: bytes) -> tuple[list[dict[str, str]], dict[str, str] | None]:
@@ -81,7 +110,7 @@ def maven_path(group: str, artifact: str, version: str) -> str:
     return f"{group.replace('.', '/')}/{artifact}/{version}/{artifact}-{version}.pom"
 
 
-def portable_source(source: str, cache: Path, scanner: Path) -> str:
+def portable_source(source: str, cache: Path, scanner: Path, version: str) -> str:
     if not source or source.startswith(("https://", "http://", "POM unavailable")):
         return source
     path = Path(source)
@@ -90,7 +119,7 @@ def portable_source(source: str, cache: Path, scanner: Path) -> str:
     except (ValueError, OSError):
         pass
     try:
-        return "scanner-library-reference / " + path.resolve().relative_to(scanner.resolve()).as_posix()
+        return f"scanner SDK {version} Maven ZIP / " + path.resolve().relative_to(scanner.resolve()).as_posix()
     except (ValueError, OSError):
         return "local source file (path omitted)"
 
@@ -117,16 +146,16 @@ def local_pom(cache: Path, group: str, artifact: str, version: str) -> Path | No
 def scanner_pom(scanner: Path, group: str, artifact: str, version: str) -> Path | None:
     if group != "dev.offlinescan":
         return None
-    candidate = scanner / "release/maven" / group.replace(".", "/") / artifact / version / f"{artifact}-{version}.pom"
+    candidate = scanner / "maven" / group.replace(".", "/") / artifact / version / f"{artifact}-{version}.pom"
     return candidate if candidate.is_file() else None
 
 
 def pom_evidence(
-    cache: Path, scanner: Path, group: str, artifact: str, version: str
+    cache: Path, scanner: Path, group: str, artifact: str, version: str, scanner_version: str
 ) -> tuple[bytes | None, str]:
-    local = local_pom(cache, group, artifact, version) or scanner_pom(scanner, group, artifact, version)
+    local = (scanner_pom(scanner, group, artifact, version) if group == "dev.offlinescan" else local_pom(cache, group, artifact, version))
     if local:
-        return local.read_bytes(), portable_source(str(local), cache, scanner)
+        return local.read_bytes(), portable_source(str(local), cache, scanner, scanner_version)
     relative = maven_path(group, artifact, version)
     for repository in repositories(group):
         data = fetch_url(f"{repository}/{relative}")
@@ -136,9 +165,9 @@ def pom_evidence(
 
 
 def inherited_licenses(
-    cache: Path, scanner: Path, group: str, artifact: str, version: str
+    cache: Path, scanner: Path, group: str, artifact: str, version: str, scanner_version: str
 ) -> tuple[list[dict[str, str]], list[str], str, str]:
-    data, source = pom_evidence(cache, scanner, group, artifact, version)
+    data, source = pom_evidence(cache, scanner, group, artifact, version, scanner_version)
     if data is None:
         return [], [], source, "missing_pom"
     try:
@@ -153,7 +182,7 @@ def inherited_licenses(
         if key in seen:
             break
         seen.add(key)
-        pdata, psource = pom_evidence(cache, scanner, *key)
+        pdata, psource = pom_evidence(cache, scanner, *key, scanner_version)
         if pdata is None:
             chain.append(psource)
             break
@@ -176,16 +205,14 @@ def artifact_file(cache: Path, group: str, artifact: str, version: str) -> Path 
 
 
 def find_artifact(cache: Path, scanner: Path, group: str, artifact: str, version: str) -> Path | None:
-    found = artifact_file(cache, group, artifact, version)
-    if found:
-        return found
     if group == "dev.offlinescan":
-        base = scanner / "release/maven" / group.replace(".", "/") / artifact / version
+        base = scanner / "maven" / group.replace(".", "/") / artifact / version
         if base.exists():
             candidates = [p for p in base.glob(f"{artifact}-{version}.*") if p.suffix.lower() in {".aar", ".jar"}]
             candidates.sort(key=lambda p: (p.suffix.lower() != ".aar", p.name))
             return candidates[0] if candidates else None
-    return None
+        return None
+    return artifact_file(cache, group, artifact, version)
 
 
 def extract_notices(archive: Path | None, coordinate: str, dest: Path) -> list[dict[str, str]]:
@@ -197,7 +224,8 @@ def extract_notices(archive: Path | None, coordinate: str, dest: Path) -> list[d
         with zipfile.ZipFile(archive) as zf:
             for info in zf.infolist():
                 name = info.filename.replace("\\", "/")
-                if info.is_dir() or not LICENSE_FILENAMES.search(name):
+                scanner_notice = coordinate.startswith("dev.offlinescan:") and name.startswith(("assets/offline-scanner-notices/", "assets/third_party_licenses/"))
+                if info.is_dir() or not (LICENSE_FILENAMES.search(name) or scanner_notice):
                     continue
                 data = zf.read(info)
                 if not data:
@@ -216,41 +244,24 @@ def extract_notices(archive: Path | None, coordinate: str, dest: Path) -> list[d
     return found
 
 
-def license_texts(licenses: list[dict[str, str]], scanner: Path, dest: Path, coordinate: str, version: str) -> list[dict[str, str]]:
+def license_texts(licenses: list[dict[str, str]], sources: dict[str, tuple[bytes, str]], dest: Path, coordinate: str, version: str) -> list[dict[str, str]]:
     resolved: list[dict[str, str]] = []
-    candidates = [
-        scanner / "LICENSE",
-        scanner / "third-party/libyuv-LICENSE.txt",
-        scanner / "third-party/libcxx-LICENSE.TXT",
-        scanner / "third-party/native-source-notices/OpenCV-LICENSE.txt",
-    ]
-    transform_cache = scanner / ".gradle/caches/8.13/transforms"
-    if transform_cache.is_dir():
-        candidates.extend(transform_cache.rglob("third_party_licenses/onnxruntime/LICENSE.txt"))
     for lic in licenses:
         name, url = lic.get("name", ""), lic.get("url", "")
         data = None
         source = ""
         lower = (name + " " + url).lower()
         if "apache" in lower:
-            for candidate in candidates:
-                if candidate.is_file():
-                    raw = candidate.read_bytes()
-                    if b"Apache License" in raw and b"Version 2.0" in raw:
-                        data, source = raw, str(candidate)
-                        break
+            raw, candidate_source = sources["apache"]
+            if b"Apache License" in raw and b"Version 2.0" in raw:
+                data, source = raw, candidate_source
             if data is None:
                 data = fetch_url("https://www.apache.org/licenses/LICENSE-2.0.txt")
                 source = "https://www.apache.org/licenses/LICENSE-2.0.txt" if data else ""
         if data is None and "libyuv" in lower:
-            candidate = scanner / "third-party/libyuv-LICENSE.txt"
-            if candidate.is_file():
-                data, source = candidate.read_bytes(), str(candidate)
+            data, source = sources["libyuv"]
         if data is None and "mit" in lower:
-            for candidate in candidates:
-                if "onnxruntime/LICENSE.txt" in candidate.as_posix() and candidate.is_file():
-                    data, source = candidate.read_bytes(), str(candidate)
-                    break
+            data, source = sources["onnxruntime"]
         if data is None and coordinate == "com.google.protobuf:protobuf-javalite" and version == "3.25.8":
             upstream = "https://raw.githubusercontent.com/protocolbuffers/protobuf/v25.8/LICENSE"
             raw = fetch_url(upstream)
@@ -268,23 +279,29 @@ def license_texts(licenses: list[dict[str, str]], scanner: Path, dest: Path, coo
             path.parent.mkdir(parents=True, exist_ok=True)
             if not path.exists():
                 path.write_bytes(data)
-            resolved.append({"name": name, "url": url, "path": path.relative_to(OUTPUT).as_posix(), "source": portable_source(source, DEFAULT_CACHE, scanner) if source and not source.startswith("https://") else source, "sha256": sha256(data)})
+            resolved.append({"name": name, "url": url, "path": path.relative_to(OUTPUT).as_posix(), "source": source, "sha256": sha256(data)})
     return resolved
 
 
 def main() -> int:
+    lock = json.loads(SCANNER_LOCK.read_text(encoding="utf-8"))
+    scanner_version = lock["version"]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache", type=Path, default=DEFAULT_CACHE)
-    parser.add_argument("--scanner", type=Path, default=DEFAULT_SCANNER)
+    parser.add_argument("--scanner", type=Path, default=ROOT / ".gradle" / f"open-android-doc-scanner-{scanner_version}", help="verified SDK installer cache")
     parser.add_argument("--offline", action="store_true", help="do not fetch official POMs or license texts")
     args = parser.parse_args()
     global fetch_url
     if args.offline:
         fetch_url = lambda _url: None  # type: ignore[assignment]
 
+    sources = scanner_release(args.scanner, lock)
+
     deps = json.loads(INVENTORY.read_text(encoding="utf-8"))
     if not isinstance(deps, dict):
         raise SystemExit("runtime-dependencies.json must be a coordinate-to-version object")
+    if any(version != scanner_version for coordinate, version in deps.items() if coordinate.startswith("dev.offlinescan:")):
+        raise SystemExit(f"Scanner inventory version differs from pinned SDK {scanner_version}")
     if (OUTPUT / "embedded").exists():
         shutil.rmtree(OUTPUT / "embedded")
     if (OUTPUT / "license-texts").exists():
@@ -297,10 +314,11 @@ def main() -> int:
             records.append({"coordinate": coordinate, "version": version, "status": "invalid_inventory_entry"})
             continue
         group, artifact = coordinate.split(":", 1)
-        licenses, pom_sources, pom_source, license_status = inherited_licenses(args.cache, args.scanner, group, artifact, version)
+        licenses, pom_sources, pom_source, license_status = inherited_licenses(args.cache, args.scanner, group, artifact, version, scanner_version)
+        pom = scanner_pom(args.scanner, group, artifact, version) if group == "dev.offlinescan" else local_pom(args.cache, group, artifact, version)
         archive = find_artifact(args.cache, args.scanner, group, artifact, version)
         embedded = extract_notices(archive, coordinate, OUTPUT / "embedded")
-        texts = license_texts(licenses, args.scanner, OUTPUT / "license-texts", coordinate, version)
+        texts = license_texts(licenses, sources, OUTPUT / "license-texts", coordinate, version)
         recorded_names = {(x.get("name", "").lower(), x.get("url", "").lower()) for x in texts}
         for lic in licenses:
             if (lic.get("name", "").lower(), lic.get("url", "").lower()) not in recorded_names:
@@ -310,10 +328,10 @@ def main() -> int:
             "version": version,
             "pom_source": pom_source,
             "pom_chain": pom_sources,
-            "pom_sha256": sha256(local_pom(args.cache, group, artifact, version).read_bytes()) if local_pom(args.cache, group, artifact, version) else (sha256(scanner_pom(args.scanner, group, artifact, version).read_bytes()) if scanner_pom(args.scanner, group, artifact, version) else None),
+            "pom_sha256": sha256(pom.read_bytes()) if pom else None,
             "license_status": license_status,
             "licenses": licenses,
-            "artifact": portable_source(str(archive), args.cache, args.scanner) if archive else None,
+            "artifact": portable_source(str(archive), args.cache, args.scanner, scanner_version) if archive else None,
             "artifact_sha256": sha256(archive.read_bytes()) if archive else None,
             "embedded_notice_files": embedded,
             "license_texts": texts,
@@ -323,7 +341,7 @@ def main() -> int:
         "source_inventory": "docs/release-audit/runtime-dependencies.json",
         "dependency_count": len(records),
         "cache_root": "Gradle module cache at ~/.gradle/caches/modules-2/files-2.1",
-        "scanner_reference": "https://github.com/phillip9933/open-android-doc-scanner/blob/v0.1.0-rc11/THIRD-PARTY-NOTICES.md",
+        "scanner_reference": f"https://github.com/phillip9933/open-android-doc-scanner/blob/v{scanner_version}/THIRD-PARTY-NOTICES.md",
         "missing_full_license_texts": sorted(missing_full_text),
         "dependencies": records,
     }
@@ -333,7 +351,7 @@ def main() -> int:
         "",
         "This file records license declarations for the runtime coordinates in `docs/release-audit/runtime-dependencies.json`. POMs and artifacts are identified in the adjacent [runtime inventory](app/src/main/assets/third-party/runtime-notices/runtime-inventory.json). Full license texts and embedded upstream notices collected from the resolved artifacts are retained in that asset directory.",
         "",
-        "The scanner SDK modules are maintained in the [scanner library reference](https://github.com/phillip9933/open-android-doc-scanner/blob/v0.1.0-rc11/THIRD-PARTY-NOTICES.md), which documents their native build provenance and additional notices.",
+        f"The scanner SDK modules are maintained in the [scanner library reference](https://github.com/phillip9933/open-android-doc-scanner/blob/v{scanner_version}/THIRD-PARTY-NOTICES.md), which documents their native build provenance and additional notices.",
         "",
         "| Coordinate | Version | Declared license(s) | Evidence status |",
         "| --- | --- | --- | --- |",

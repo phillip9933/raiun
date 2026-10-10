@@ -49,6 +49,17 @@ class OpenCloudErrorTest {
         assertNull(failure.cause)
     }
 
+    @Test fun `download integrity has a distinct safe message`() {
+        assertEquals(
+            "The downloaded file could not be verified. Try downloading it again.",
+            OpenCloudError.DownloadIntegrity.safeMessage(),
+        )
+        assertEquals(
+            OpenCloudError.DownloadIntegrity,
+            OpenCloudException(OpenCloudError.DownloadIntegrity).toOpenCloudError(),
+        )
+    }
+
     @Test fun `cancellation is rethrown unchanged`() {
         val cancelled = CancellationException("cancelled")
         assertSame(cancelled, assertThrows(CancellationException::class.java) { cancelled.toOpenCloudError() })

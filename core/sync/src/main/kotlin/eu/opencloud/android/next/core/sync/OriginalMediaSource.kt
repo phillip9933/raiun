@@ -3,11 +3,18 @@ package eu.opencloud.android.next.core.sync
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.content.res.AssetFileDescriptor
 import android.net.Uri
 import android.os.Build
+import android.os.CancellationSignal
 import android.provider.MediaStore
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
+import android.system.StructPollfd
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
+import java.io.IOException
 import java.io.InputStream
 
 fun isSystemMediaSource(uri: Uri): Boolean =
@@ -92,3 +99,81 @@ fun openUploadSource(
     return context.contentResolver.openInputStream(original)
         ?: throw OpenCloudException(OpenCloudError.SourceUnavailable)
 }
+
+/** Incoming shares use a provider cancellation signal so a dismissed share can stop a blocked open. */
+internal fun openIncomingUploadSource(
+    context: Context,
+    uri: Uri,
+    signal: CancellationSignal,
+    isStopped: () -> Boolean,
+    pollReady: (StructPollfd, Int) -> Boolean = { descriptor, timeout -> Os.poll(arrayOf(descriptor), timeout) > 0 },
+): InputStream {
+    val source =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && requestsOriginalMedia(context, uri)) {
+            MediaStore.setRequireOriginal(uri)
+        } else {
+            uri
+        }
+    val descriptor =
+        context.contentResolver.openAssetFileDescriptor(source, "r", signal)
+            ?: throw OpenCloudException(OpenCloudError.SourceUnavailable)
+    return cancellableAssetInputStream(descriptor, signal, isStopped, pollReady)
+}
+
+/** Polling avoids a blocked pipe read that Android does not release when its descriptor is closed. */
+@Suppress("NestedBlockDepth")
+internal fun cancellableAssetInputStream(
+    descriptor: AssetFileDescriptor,
+    signal: CancellationSignal,
+    isStopped: () -> Boolean,
+    pollReady: (StructPollfd, Int) -> Boolean = { candidate, timeout -> Os.poll(arrayOf(candidate), timeout) > 0 },
+): InputStream =
+    object : InputStream() {
+        private val content = descriptor.createInputStream()
+        private var remaining = descriptor.length
+        private val pollfd =
+            StructPollfd().apply {
+                fd = descriptor.parcelFileDescriptor.fileDescriptor
+                events = (OsConstants.POLLIN or OsConstants.POLLHUP or OsConstants.POLLERR).toShort()
+            }
+
+        override fun read(): Int {
+            if (remaining == 0L) return -1
+            awaitReadable()
+            return content.read().also { if (it >= 0 && remaining > 0) remaining-- }
+        }
+
+        @Suppress("ReturnCount") // Zero-length reads and the declared asset end complete without polling.
+        override fun read(
+            bytes: ByteArray,
+            offset: Int,
+            length: Int,
+        ): Int {
+            if (offset < 0 || length < 0 || offset > bytes.size - length) {
+                throw IndexOutOfBoundsException("Invalid shared-source buffer range")
+            }
+            if (length == 0) return 0
+            if (remaining == 0L) return -1
+            awaitReadable()
+            val limit = if (remaining > 0) minOf(length.toLong(), remaining).toInt() else length
+            return content.read(bytes, offset, limit).also { if (it > 0 && remaining > 0) remaining -= it }
+        }
+
+        override fun close() = content.close()
+
+        @Suppress("ThrowsCount") // Cancellation and descriptor failures must end the read before publication.
+        private fun awaitReadable() {
+            while (true) {
+                if (isStopped() || signal.isCanceled) throw IOException("Incoming share stopped")
+                try {
+                    if (pollReady(pollfd, 250)) {
+                        if (isStopped() || signal.isCanceled) throw IOException("Incoming share stopped")
+                        return
+                    }
+                } catch (failure: ErrnoException) {
+                    if (isStopped() || signal.isCanceled) throw IOException("Incoming share stopped")
+                    throw IOException("Could not read the shared source", failure)
+                }
+            }
+        }
+    }

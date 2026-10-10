@@ -164,6 +164,7 @@ private fun VaultScannerSurface(
                 ScannerFlow(
                     outputDirectory = session.outputDirectory,
                     saveDestination = { _ -> VaultScannerDestination(destinationLabel) },
+                    includeDiagnostics = false,
                 ) { result ->
                     when (result) {
                         is ScanResult.Completed -> onComplete(result.output)

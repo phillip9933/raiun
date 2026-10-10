@@ -1,9 +1,11 @@
 package eu.opencloud.android.next.feature.shares
 
 import android.content.Intent
+import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -27,6 +29,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -34,6 +37,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
@@ -45,6 +50,7 @@ import eu.opencloud.android.next.core.network.safeMessage
 import eu.opencloud.android.next.core.ui.BrowserContent
 import eu.opencloud.android.next.core.ui.BrowserEntry
 import eu.opencloud.android.next.core.ui.BrowserToolbar
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 @Composable
@@ -323,22 +329,39 @@ private fun IncomingBrowserRow(
     layout: SettingsBrowserLayout,
     onFolderActions: (IncomingBrowserItem.Folder) -> Unit,
 ) {
+    val context = LocalContext.current
+    val videoThumbnail = incomingVideoThumbnail(context, item)
     BrowserEntry(
         layout = layout,
         onOpen = { onOpen(item) },
         name = { Text(item.name, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis) },
         thumbnail = { modifier ->
             Box(modifier, contentAlignment = Alignment.Center) {
-                Icon(
-                    if (item is IncomingBrowserItem.Folder) {
-                        Icons.Default.Folder
-                    } else {
-                        Icons.AutoMirrored.Filled.InsertDriveFile
-                    },
-                    contentDescription = null,
-                    modifier = Modifier.size(OpenCloudDimensions.TouchTarget),
-                    tint = androidx.compose.material3.MaterialTheme.colorScheme.primary,
-                )
+                val thumbnail = videoThumbnail
+                if (thumbnail != null) {
+                    Image(
+                        thumbnail.asImageBitmap(),
+                        contentDescription = null,
+                        modifier =
+                            if (layout == SettingsBrowserLayout.TILES) {
+                                Modifier.fillMaxSize()
+                            } else {
+                                Modifier.size(OpenCloudDimensions.TouchTarget)
+                            },
+                        contentScale = ContentScale.Crop,
+                    )
+                } else {
+                    Icon(
+                        if (item is IncomingBrowserItem.Folder) {
+                            Icons.Default.Folder
+                        } else {
+                            Icons.AutoMirrored.Filled.InsertDriveFile
+                        },
+                        contentDescription = null,
+                        modifier = Modifier.size(OpenCloudDimensions.TouchTarget),
+                        tint = androidx.compose.material3.MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
         },
         metadata = {
@@ -364,6 +387,34 @@ private fun IncomingBrowserRow(
         },
     )
 }
+
+@Composable
+private fun incomingVideoThumbnail(
+    context: android.content.Context,
+    item: IncomingBrowserItem,
+): Bitmap? {
+    val thumbnail by produceState<Bitmap?>(null, item) {
+        val file = item as? IncomingBrowserItem.File
+        if (file == null || !file.isVideoPreview()) {
+            value = null
+            return@produceState
+        }
+        value =
+            try {
+                loadIncomingVideoThumbnail(context, file.request, file.localCopy != null)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            }
+    }
+    return thumbnail
+}
+
+private fun IncomingBrowserItem.File.isVideoPreview(): Boolean =
+    mimeType?.substringBefore(';')?.startsWith("video/", ignoreCase = true) == true ||
+        name.substringAfterLast('.', "").lowercase() in
+        setOf("3gp", "avi", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "webm")
 
 @Composable
 private fun FolderActionsButton(

@@ -15,6 +15,7 @@
     <string name="error_not_found">Das entfernte Element wurde nicht gefunden.</string>
     <string name="error_conflict">Ein Element mit diesem Namen ist bereits vorhanden.</string>
     <string name="error_precondition_failed">Das entfernte Element wurde geändert. Aktualisieren Sie es, bevor Sie es erneut versuchen.</string>
+    <string name="error_download_integrity">Die heruntergeladene Datei konnte nicht überprüft werden. Versuchen Sie erneut, sie herunterzuladen.</string>
     <string name="error_invalid_response">Der Server hat unvollständige oder unerwartete Metadaten zurückgegeben.</string>
     <string name="error_quota_exceeded">Auf dem Server ist nicht genügend Speicherplatz verfügbar.</string>
     <string name="error_local_storage">Auf dem Gerät ist nicht genügend Speicherplatz verfügbar.</string>

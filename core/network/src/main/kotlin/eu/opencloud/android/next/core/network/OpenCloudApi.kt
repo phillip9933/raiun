@@ -28,6 +28,7 @@ class OpenCloudApi(
             .followRedirects(false)
             .followSslRedirects(false)
             .build()
+            .withMetadataDeadline()
 
     fun registerClient(
         serverUrl: String,
@@ -42,6 +43,7 @@ class OpenCloudApi(
                 .url("$normalized/status.php")
                 .get()
                 .build(),
+            consumeBody = false,
         )
         return DiscoveryResult(normalized)
     }
@@ -234,39 +236,71 @@ class OpenCloudApi(
 
     private fun bodyJson(request: Request) = json.parseToJsonElement(execute(request).body)
 
-    private fun execute(request: Request): HttpResponse {
+    private fun execute(
+        request: Request,
+        consumeBody: Boolean = true,
+    ): HttpResponse {
         endpoints.endpoint(request.url.toString())
         return client.newCall(request).execute().use { response ->
-            val body = response.body?.string().orEmpty()
+            val tokenRequest = request.isTokenRequest()
+            val body = readResponseBody(request, response, consumeBody, tokenRequest)
             if (!response.isSuccessful) {
-                val tokenRequest =
-                    (request.body as? FormBody)?.let { form ->
-                        (0 until form.size).any { form.name(it) == "grant_type" }
-                    } == true
-                val oauthError =
-                    if (tokenRequest && response.code in setOf(400, 401)) {
-                        runCatching {
-                            json
-                                .parseToJsonElement(
-                                    body,
-                                ).jsonObject["error"]
-                                ?.jsonPrimitive
-                                ?.content
-                        }.getOrNull()
-                    } else {
-                        null
-                    }
-                val failure =
-                    when (oauthError) {
-                        "invalid_grant" -> OpenCloudError.AuthenticationRequired
-                        "invalid_client" -> OpenCloudError.ClientRegistrationRequired
-                        else -> httpError(response.code)
-                    }
-                throw TransferHttpException(response.code, error = failure)
+                throw response.toHttpException(tokenRequest, body)
             }
             HttpResponse(response.headers, body)
         }
     }
+
+    private fun readResponseBody(
+        request: Request,
+        response: okhttp3.Response,
+        consumeBody: Boolean,
+        tokenRequest: Boolean,
+    ): String {
+        if (!consumeBody) {
+            if (!response.isSuccessful) throw TransferHttpException(response.code)
+            return ""
+        }
+        val limit =
+            when {
+                !response.isSuccessful -> ERROR_METADATA_LIMIT_BYTES
+                tokenRequest -> AUTH_METADATA_LIMIT_BYTES
+                request.url.encodedPath.endsWith("/.well-known/webfinger") ||
+                    request.url.encodedPath.endsWith("/.well-known/openid-configuration") -> SMALL_METADATA_LIMIT_BYTES
+                else -> LISTING_METADATA_LIMIT_BYTES
+            }
+        return response.readBoundedMetadata(limit)
+    }
+
+    private fun okhttp3.Response.toHttpException(
+        tokenRequest: Boolean,
+        body: String,
+    ): TransferHttpException {
+        val oauthError =
+            if (tokenRequest && code in setOf(400, 401)) {
+                runCatching {
+                    json
+                        .parseToJsonElement(body)
+                        .jsonObject["error"]
+                        ?.jsonPrimitive
+                        ?.content
+                }.getOrNull()
+            } else {
+                null
+            }
+        val failure =
+            when (oauthError) {
+                "invalid_grant" -> OpenCloudError.AuthenticationRequired
+                "invalid_client" -> OpenCloudError.ClientRegistrationRequired
+                else -> httpError(code)
+            }
+        return TransferHttpException(code, error = failure)
+    }
+
+    private fun Request.isTokenRequest() =
+        (body as? FormBody)?.let { form ->
+            (0 until form.size).any { form.name(it) == "grant_type" }
+        } == true
 
     private fun normalizeServerUrl(value: String): String {
         val withScheme = if ("://" in value) value else "https://$value"

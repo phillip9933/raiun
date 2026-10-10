@@ -80,6 +80,7 @@ class OcsSharingClient(
             .followRedirects(false)
             .followSslRedirects(false)
             .build()
+            .withMetadataDeadline()
 
     fun listShares(
         serverUrl: String,
@@ -250,8 +251,8 @@ class OcsSharingClient(
 
     private fun execute(request: Request): JsonElement =
         client.newCall(request).execute().use { response ->
-            val body = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
+                val body = response.readBoundedMetadata(ERROR_METADATA_LIMIT_BYTES)
                 if (response.code in setOf(403, 404, 405)) onPolicyUncertain()
                 runCatching {
                     Log.e(
@@ -264,6 +265,7 @@ class OcsSharingClient(
                     error = publicLinkPasswordError(response.code, body),
                 )
             }
+            val body = response.readBoundedMetadata(LISTING_METADATA_LIMIT_BYTES)
             val root = json.parseToJsonElement(body)
             val meta = root.jsonObject["ocs"]?.jsonObject?.get("meta") as? JsonObject
             val ocsStatus = meta?.get("statuscode")?.jsonPrimitive?.intOrNull

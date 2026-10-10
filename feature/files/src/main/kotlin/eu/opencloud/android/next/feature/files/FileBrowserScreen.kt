@@ -7,7 +7,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,7 +24,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.DriveFileMove
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
@@ -121,6 +119,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import eu.opencloud.android.next.core.database.FolderBackupEntity
 import eu.opencloud.android.next.core.database.ResourceEntity
+import eu.opencloud.android.next.core.database.SpaceEntity
 import eu.opencloud.android.next.core.database.TransferEntity
 import eu.opencloud.android.next.core.database.TransferState
 import eu.opencloud.android.next.core.datastore.FileDisplayOptions
@@ -129,6 +128,8 @@ import eu.opencloud.android.next.core.designsystem.theme.OpenCloudColor
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
 import eu.opencloud.android.next.core.model.ResourceKind
 import eu.opencloud.android.next.core.sync.VaultLocation
+import eu.opencloud.android.next.core.sync.formatBackupDateFolder
+import eu.opencloud.android.next.core.sync.isVideoPreview
 import eu.opencloud.android.next.core.ui.BrowserAction
 import eu.opencloud.android.next.core.ui.BrowserActionSheet
 import eu.opencloud.android.next.core.ui.BrowserContent
@@ -1752,7 +1753,7 @@ private fun ResourceBrowserContent(
                 Box(modifier, contentAlignment = Alignment.Center) {
                     BadgedResourceThumbnail(
                         item,
-                        if (layout == SettingsBrowserLayout.TILES && !item.isImagePreview()) {
+                        if (layout == SettingsBrowserLayout.TILES && !item.isImagePreview() && !item.isVideoPreview()) {
                             Modifier.size(OpenCloudDimensions.TouchTarget)
                         } else {
                             Modifier.fillMaxSize()
@@ -2065,7 +2066,7 @@ fun FolderBackupSettingsDialog(
 )
 
 @Composable
-@Suppress("LongParameterList", "CyclomaticComplexMethod")
+@Suppress("LongParameterList", "CyclomaticComplexMethod", "LongMethod", "UnusedParameter")
 fun FolderBackupSettingsContent(
     backups: List<FolderBackupEntity>,
     onDismiss: () -> Unit,
@@ -2075,6 +2076,9 @@ fun FolderBackupSettingsContent(
     pickerTrail: List<BackupFolderCrumb> = emptyList(),
     pickerFolders: List<ResourceEntity> = emptyList(),
     onOpenPicker: () -> Unit = {},
+    onOpenPickerSpace: (SpaceEntity) -> Unit = {},
+    onOpenPickerShare: (BackupSharedRoot) -> Unit = {},
+    onOpenSharedFolder: (BackupSharedFolder) -> Unit = {},
     onOpenFolder: (ResourceEntity) -> Unit = {},
     onNavigateUp: () -> Unit = {},
     onCreateFolder: (String) -> Unit = {},
@@ -2082,6 +2086,9 @@ fun FolderBackupSettingsContent(
     transfers: List<TransferEntity> = emptyList(),
     sourceDisplayName: String? = null,
     onChooseSource: () -> Unit = {},
+    pickerState: FileBrowserUiState = FileBrowserUiState(),
+    defaultSpaceId: String? = null,
+    requireDestinationBinding: Boolean = false,
 ) {
     var destination by rememberSaveable(initialBackup?.id) {
         mutableStateOf(
@@ -2089,16 +2096,33 @@ fun FolderBackupSettingsContent(
         )
     }
     var showDestinationPicker by rememberSaveable { mutableStateOf(false) }
+    var destinationSpaceId by rememberSaveable(initialBackup?.id) {
+        mutableStateOf(
+            initialBackup?.spaceId ?: defaultSpaceId,
+        )
+    }
+    var destinationKind by rememberSaveable(initialBackup?.id) {
+        mutableStateOf(
+            initialBackup?.destinationKind ?: "SPACE",
+        )
+    }
+    var sharedShareId by rememberSaveable(initialBackup?.id) { mutableStateOf(initialBackup?.sharedShareId) }
+    var sharedFolderId by rememberSaveable(initialBackup?.id) { mutableStateOf(initialBackup?.sharedFolderId) }
+    var destinationName by rememberSaveable(initialBackup?.id) { mutableStateOf<String?>(null) }
+    LaunchedEffect(defaultSpaceId, initialBackup?.id) {
+        if (initialBackup == null && destinationSpaceId == null) destinationSpaceId = defaultSpaceId
+    }
     var showCreateFolder by rememberSaveable { mutableStateOf(false) }
     var mediaType by rememberSaveable(initialBackup?.id) { mutableStateOf(initialBackup?.mediaType ?: "IMAGE") }
     var wifiOnly by rememberSaveable(initialBackup?.id) { mutableStateOf(initialBackup?.wifiOnly ?: true) }
     var chargingOnly by rememberSaveable(initialBackup?.id) { mutableStateOf(initialBackup?.chargingOnly ?: false) }
     var datedFolders by rememberSaveable(initialBackup?.id) {
-        mutableStateOf(
-            initialBackup?.dateOrganization == "YEAR_MONTH",
-        )
+        mutableStateOf(initialBackup?.dateOrganization?.let { it != "NONE" } ?: false)
     }
-
+    var datePattern by rememberSaveable(initialBackup?.id) {
+        mutableStateOf(initialBackupDatePattern(initialBackup?.dateOrganization))
+    }
+    val datePreview = formatBackupDateFolder(datePattern, 1_790_687_999_000L)
     Column(modifier = modifier.fillMaxWidth()) {
         Column(
             modifier =
@@ -2119,7 +2143,31 @@ fun FolderBackupSettingsContent(
             )
             BackupLocationChoice(
                 label = stringResource(R.string.backup_settings_destination_folder),
-                value = destination,
+                value =
+                    if (destinationKind == "SHARED_FOLDER") {
+                        val name =
+                            pickerState.backupPickerSharedRoots.firstOrNull { it.shareId == sharedShareId }?.name
+                                ?: sharedShareId?.let(pickerState.backupPickerSharedNames::get)
+                        val category = stringResource(R.string.backup_destination_shared_with_me)
+                        val label = destinationName ?: if (name == null) category else "$category · $name"
+                        "$label · $destination"
+                    } else {
+                        val space = pickerState.spaces.firstOrNull { it.driveId == destinationSpaceId }
+                        val category =
+                            stringResource(
+                                if (space?.type.equals(
+                                        "personal",
+                                        true,
+                                    )
+                                ) {
+                                    R.string.backup_destination_personal
+                                } else {
+                                    R.string.backup_destination_spaces
+                                },
+                            )
+                        val label = destinationName ?: space?.name?.let { "$category · $it" } ?: category
+                        "$label · $destination"
+                    },
                 action = stringResource(R.string.browser_select_folder),
                 onClick = {
                     onOpenPicker()
@@ -2130,25 +2178,22 @@ fun FolderBackupSettingsContent(
             Text(stringResource(R.string.backup_settings_files_to_back_up), style = MaterialTheme.typography.titleSmall)
             BackupMediaTypeOptions(mediaType) { mediaType = it }
             HorizontalDivider()
-            Text(stringResource(R.string.backup_settings_conditions), style = MaterialTheme.typography.titleSmall)
-            BackupSwitch(stringResource(R.string.browser_wifi_only), wifiOnly) { wifiOnly = it }
-            BackupSwitch(stringResource(R.string.browser_charging_only), chargingOnly) { chargingOnly = it }
-            BackupSwitch(stringResource(R.string.browser_organize_by_year_month), datedFolders) { datedFolders = it }
-            if (datedFolders) {
-                Text(
-                    stringResource(R.string.browser_backup_date_organization),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
+            BackupDateOrganizationOptions(
+                wifiOnly = wifiOnly,
+                onWifiOnlyChange = { wifiOnly = it },
+                chargingOnly = chargingOnly,
+                onChargingOnlyChange = { chargingOnly = it },
+                enabled = datedFolders,
+                onEnabledChange = { datedFolders = it },
+                pattern = datePattern,
+                onPatternChange = { datePattern = it },
+                preview = datePreview,
+                destination = destination,
+            )
             Text(stringResource(R.string.browser_original_files_stay_local), style = MaterialTheme.typography.bodySmall)
             if (backups.isNotEmpty() || initialBackup != null) HorizontalDivider()
             backups.forEach { backup -> BackupConfigurationItem(backup = backup, onDelete = { onDelete(backup.id) }) }
-            initialBackup?.let { backup ->
-                TextButton(onClick = {
-                    onDelete(backup.id)
-                    onDismiss()
-                }) { Text(stringResource(R.string.browser_remove_backup), color = MaterialTheme.colorScheme.error) }
-            }
+            BackupRemoveButton(initialBackup, onDelete, onDismiss)
         }
         HorizontalDivider()
         Row(
@@ -2157,7 +2202,10 @@ fun FolderBackupSettingsContent(
         ) {
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.browser_cancel)) }
             TextButton(
-                enabled = initialBackup != null || sourceDisplayName != null,
+                enabled =
+                    (initialBackup != null || sourceDisplayName != null) &&
+                        (!requireDestinationBinding || destinationSpaceId != null) &&
+                        (!datedFolders || datePreview != null),
                 onClick = {
                     onAdd(
                         BackupDraft(
@@ -2166,7 +2214,11 @@ fun FolderBackupSettingsContent(
                             wifiOnly,
                             chargingOnly,
                             false,
-                            if (datedFolders) "YEAR_MONTH" else "NONE",
+                            if (datedFolders) datePattern else "NONE",
+                            destinationSpaceId,
+                            destinationKind,
+                            sharedShareId,
+                            sharedFolderId,
                         ),
                     )
                 },
@@ -2176,15 +2228,23 @@ fun FolderBackupSettingsContent(
         }
     }
     if (showDestinationPicker) {
-        RemoteFolderPickerDialog(
-            trail = pickerTrail,
-            folders = pickerFolders,
+        BackupDestinationPickerDialog(
+            state = pickerState,
             onDismiss = { showDestinationPicker = false },
+            onOpenSpace = onOpenPickerSpace,
+            onOpenShare = onOpenPickerShare,
             onOpenFolder = onOpenFolder,
+            onOpenSharedFolder = onOpenSharedFolder,
             onNavigateUp = onNavigateUp,
+            onRetry = onOpenPicker,
             onCreateFolder = { showCreateFolder = true },
-            onSelect = {
-                destination = pickerTrail.lastOrNull()?.path ?: "/"
+            onSelect = { selected ->
+                destination = selected.path
+                destinationSpaceId = selected.spaceId
+                destinationKind = selected.destinationKind
+                sharedShareId = selected.sharedShareId
+                sharedFolderId = selected.sharedFolderId
+                destinationName = selected.name
                 showDestinationPicker = false
             },
         )
@@ -2197,6 +2257,62 @@ fun FolderBackupSettingsContent(
         ) { name ->
             onCreateFolder(name)
             showCreateFolder = false
+        }
+    }
+}
+
+@Composable
+private fun BackupRemoveButton(
+    backup: FolderBackupEntity?,
+    onDelete: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    backup?.let {
+        TextButton(onClick = {
+            onDelete(it.id)
+            onDismiss()
+        }) { Text(stringResource(R.string.browser_remove_backup), color = MaterialTheme.colorScheme.error) }
+    }
+}
+
+@Composable
+@Suppress("LongParameterList") // The option state and callbacks are independent editor controls.
+private fun BackupDateOrganizationOptions(
+    wifiOnly: Boolean,
+    onWifiOnlyChange: (Boolean) -> Unit,
+    chargingOnly: Boolean,
+    onChargingOnlyChange: (Boolean) -> Unit,
+    enabled: Boolean,
+    onEnabledChange: (Boolean) -> Unit,
+    pattern: String,
+    onPatternChange: (String) -> Unit,
+    preview: String?,
+    destination: String,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs)) {
+        Text(stringResource(R.string.backup_settings_conditions), style = MaterialTheme.typography.titleSmall)
+        BackupSwitch(stringResource(R.string.browser_wifi_only), wifiOnly, onWifiOnlyChange)
+        BackupSwitch(stringResource(R.string.browser_charging_only), chargingOnly, onChargingOnlyChange)
+        BackupSwitch(stringResource(R.string.backup_date_folders), enabled, onEnabledChange)
+        if (enabled) {
+            OutlinedTextField(
+                value = pattern,
+                onValueChange = onPatternChange,
+                label = { Text(stringResource(R.string.backup_date_pattern)) },
+                supportingText = { Text(stringResource(R.string.backup_date_tokens)) },
+                singleLine = true,
+                isError = preview == null,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Text(
+                if (preview == null) {
+                    stringResource(R.string.backup_date_invalid)
+                } else {
+                    stringResource(R.string.backup_date_preview, "$destination/$preview")
+                },
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Text(stringResource(R.string.backup_date_fallback), style = MaterialTheme.typography.bodySmall)
         }
     }
 }
@@ -2295,56 +2411,6 @@ internal fun backupDetails(
 }
 
 @Composable
-@Suppress("LongParameterList")
-private fun RemoteFolderPickerDialog(
-    trail: List<BackupFolderCrumb>,
-    folders: List<ResourceEntity>,
-    onDismiss: () -> Unit,
-    onOpenFolder: (ResourceEntity) -> Unit,
-    onNavigateUp: () -> Unit,
-    onCreateFolder: () -> Unit,
-    onSelect: () -> Unit,
-) = AlertDialog(
-    onDismissRequest = onDismiss,
-    title = { Text(stringResource(R.string.browser_select_remote_folder)) },
-    text = {
-        Column(verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs)) {
-            Text(
-                trail.lastOrNull()?.path ?: "/",
-                style = MaterialTheme.typography.bodySmall,
-            )
-            if (trail.isNotEmpty()) {
-                ListItem(
-                    headlineContent = { Text(stringResource(R.string.browser_up)) },
-                    leadingContent = { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null) },
-                    modifier = Modifier.fillMaxWidth().combinedClickable(onClick = onNavigateUp, onLongClick = {}),
-                )
-            }
-            if (folders.isEmpty()) {
-                Text(stringResource(R.string.browser_no_folders_here), style = MaterialTheme.typography.bodyMedium)
-            } else {
-                folders.forEach { folder ->
-                    ListItem(
-                        headlineContent = { Text(folder.name) },
-                        leadingContent = { Icon(Icons.Default.Folder, contentDescription = null) },
-                        modifier =
-                            Modifier
-                                .fillMaxWidth()
-                                .combinedClickable(onClick = { onOpenFolder(folder) }, onLongClick = {}),
-                    )
-                }
-            }
-            FilledTonalButton(onClick = onCreateFolder) {
-                Icon(Icons.Default.Add, contentDescription = null)
-                Text(stringResource(R.string.browser_new_folder))
-            }
-        }
-    },
-    confirmButton = { Button(onClick = onSelect) { Text(stringResource(R.string.browser_select_this_folder)) } },
-    dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.browser_cancel)) } },
-)
-
-@Composable
 private fun BackupSwitch(
     label: String,
     checked: Boolean,
@@ -2406,6 +2472,10 @@ data class BackupDraft(
     val chargingOnly: Boolean,
     val deleteAfterUpload: Boolean,
     val dateOrganization: String = "NONE",
+    val spaceId: String? = null,
+    val destinationKind: String = "SPACE",
+    val sharedShareId: String? = null,
+    val sharedFolderId: String? = null,
 )
 
 internal enum class BrowserSortCriterion(
@@ -2469,3 +2539,9 @@ private fun ApplyFolderShortcut(
             ?.let(currentOpen)
     }
 }
+
+private fun initialBackupDatePattern(organization: String?): String =
+    when (organization) {
+        null, "NONE", "YEAR_MONTH" -> "[YYYY]/[MM]"
+        else -> organization
+    }

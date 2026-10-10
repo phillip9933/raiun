@@ -79,8 +79,20 @@ internal fun backupSignature(
 internal fun backupParent(
     destination: String,
     relativeParent: String,
-): String =
-    listOf(destination.trim('/'), relativeParent.trim('/')).filter(String::isNotEmpty).joinToString("/", prefix = "/")
+): String {
+    val parts = listOf(destination.trim('/'), relativeParent.trim('/')).filter(String::isNotEmpty)
+    val segments = parts.flatMap { it.split('/') }
+    require(segments.size <= 64 && segments.sumOf(String::length) <= 4096) { "The backup folder path is too long." }
+    require(
+        segments.all { part ->
+            part.isNotEmpty() &&
+                part.length <= 255 &&
+                part !in setOf(".", "..") &&
+                part.none { it == '\\' || it.isISOControl() }
+        },
+    ) { "The backup folder path is invalid." }
+    return parts.joinToString("/", prefix = "/")
+}
 
 /** Historical outcomes must not suppress discovery of a changed local source. */
 internal fun eu.opencloud.android.next.core.database.TransferEntity.blocksBackupScan(

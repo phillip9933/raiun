@@ -29,6 +29,7 @@ import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -635,6 +636,33 @@ class VaultViewModelTransferTest {
             model.leaveRoute()
         }
 
+    @Test fun cancelledThumbnailAwaiterWipesLateNonCancellablePreviewBytes() =
+        runTest {
+            Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+            var pending: Continuation<ByteArray>? = null
+            val opened = TestSession(identity, entries = listOf(fileEntry("photo.jpg")))
+            opened.previewBlock = { suspendCoroutine { pending = it } }
+            val model = newViewModel(ApplicationProvider.getApplicationContext(), TestRepository(mutableListOf(opened)))
+            enterAndUnlock(model)
+            val loading =
+                async {
+                    model.loadThumbnail(
+                        model.state.value.entries
+                            .single()
+                            .id,
+                    )
+                }
+            runCurrent()
+            loading.cancel()
+            val bytes = byteArrayOf(9, 8, 7)
+            requireNotNull(pending).resume(bytes)
+            advanceUntilIdle()
+            assertTrue(loading.isCancelled)
+            assertTrue(bytes.all { it == 0.toByte() })
+            assertEquals(null, model.state.value.preview)
+            model.leaveRoute()
+        }
+
     @Test fun unlockedThumbnailIsReturnedOnlyToItsCaller() =
         runTest {
             Dispatchers.setMain(StandardTestDispatcher(testScheduler))
@@ -679,6 +707,117 @@ class VaultViewModelTransferTest {
             assertEquals("updated ü", opened.replacedText)
             assertTrue(bytes.all { it == 0.toByte() })
             assertEquals(null, model.state.value.preview)
+            model.leaveRoute()
+        }
+
+    @Test fun largeImageAndPdfUseStreamedBackingWithoutCallingSmallPreview() =
+        runTest {
+            Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+            listOf("photo.jpg", "manual.pdf").forEach { name ->
+                val opened = TestSession(identity, entries = listOf(fileEntry(name, 9L * 1024 * 1024)))
+                opened.previewBlock = { error("Small preview must not be used for $name") }
+                opened.downloadBlock = { _, sink, _ ->
+                    sink.write(byteArrayOf(1, 2, 3, 4))
+                    4L
+                }
+                val model =
+                    newViewModel(ApplicationProvider.getApplicationContext(), TestRepository(mutableListOf(opened)))
+                enterAndUnlock(model)
+                model.openPreview(
+                    model.state.value.entries
+                        .single()
+                        .id,
+                )
+                advanceUntilIdle()
+                val preview = requireNotNull(model.state.value.preview)
+                assertEquals(1, opened.downloadCalls)
+                assertEquals(4L, requireNotNull(preview.backing).size)
+                assertTrue(preview.bytes.isEmpty())
+                model.leaveRoute()
+            }
+        }
+
+    @Test fun largeStreamedTextRangeSaveKeepsSurroundingBytesAndIssuedEtag() =
+        runTest {
+            Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+            val prefixSize = 64 * 1024 - 1
+            val suffixSize = 9 * 1024 * 1024
+            val old = "🗝️".toByteArray(Charsets.UTF_8)
+            val replacement = "🔒".toByteArray(Charsets.UTF_8)
+            val total = prefixSize.toLong() + old.size + suffixSize
+            val entry = fileEntry("notes.txt", total)
+            val opened = TestSession(identity, entries = listOf(entry))
+            opened.previewBlock = { error("Large text must use the backing") }
+            opened.downloadBlock = { _, sink, _ ->
+                writeRepeated(sink, 'a'.code.toByte(), prefixSize)
+                sink.write(old)
+                writeRepeated(sink, 'b'.code.toByte(), suffixSize)
+                total
+            }
+            opened.replaceBlock = { source, size ->
+                assertEquals(total - old.size + replacement.size, size)
+                assertRepeated(source, 'a'.code.toByte(), prefixSize)
+                val edited = ByteArray(replacement.size)
+                assertEquals(edited.size, source.read(edited))
+                assertArrayEquals(replacement, edited)
+                assertRepeated(source, 'b'.code.toByte(), suffixSize)
+                assertEquals(-1, source.read())
+            }
+            val model = newViewModel(ApplicationProvider.getApplicationContext(), TestRepository(mutableListOf(opened)))
+            enterAndUnlock(model)
+            model.openPreview(
+                model.state.value.entries
+                    .single()
+                    .id,
+            )
+            advanceUntilIdle()
+            val preview = requireNotNull(model.state.value.preview)
+            assertTrue(preview.editable)
+            assertEquals(total, requireNotNull(preview.backing).size)
+            val page = readEncryptedTextPage(requireNotNull(preview.backing), 0)
+            assertEquals(prefixSize, page.length)
+            model.savePreviewTextRange(preview, prefixSize.toLong(), old.size.toLong(), replacement)
+            advanceUntilIdle()
+            assertEquals(1, opened.replaceCalls)
+            assertTrue(opened.replacedEntry === entry)
+            assertEquals("\"v1\"", opened.replacedEntry?.strongETag)
+            assertTrue(replacement.all { it == 0.toByte() })
+            assertEquals(null, model.state.value.preview)
+            model.leaveRoute()
+        }
+
+    @Test fun lockDuringLargePreviewDownloadDeletesUnpublishedCiphertext() =
+        runTest {
+            Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+            val context = ApplicationProvider.getApplicationContext<Application>()
+            val cache = File(context.cacheDir, "encrypted-previews")
+            val started = CompletableDeferred<Unit>()
+            val unwound = CompletableDeferred<Unit>()
+            val opened = TestSession(identity, entries = listOf(fileEntry("large.pdf", 9L * 1024 * 1024)))
+            opened.downloadBlock = { _, sink, _ ->
+                sink.write(ByteArray(64 * 1024) { 7 })
+                started.complete(Unit)
+                try {
+                    suspendCancellableCoroutine { }
+                } finally {
+                    unwound.complete(Unit)
+                }
+            }
+            val model = newViewModel(context, TestRepository(mutableListOf(opened)))
+            enterAndUnlock(model)
+            model.openPreview(
+                model.state.value.entries
+                    .single()
+                    .id,
+            )
+            runCurrent()
+            started.await()
+            assertTrue(cache.listFiles().orEmpty().any { it.isFile })
+            model.lock()
+            advanceUntilIdle()
+            unwound.await()
+            assertEquals(null, model.state.value.preview)
+            assertTrue(cache.listFiles().isNullOrEmpty())
             model.leaveRoute()
         }
 
@@ -761,6 +900,45 @@ class VaultViewModelTransferTest {
         assertTrue(validEditableText("hello ü".toByteArray()))
         assertFalse(validEditableText(byteArrayOf(0xc3.toByte(), 0x28)))
         assertFalse(validEditableText(ByteArray(MAX_VAULT_EDIT_TEXT_BYTES + 1)))
+    }
+
+    private fun writeRepeated(
+        sink: OutputStream,
+        byte: Byte,
+        count: Int,
+    ) {
+        val block = ByteArray(8192) { byte }
+        var remaining = count
+        while (remaining > 0) {
+            val length = minOf(block.size, remaining)
+            sink.write(block, 0, length)
+            remaining -= length
+        }
+        block.fill(0)
+    }
+
+    private fun assertRepeated(
+        source: InputStream,
+        byte: Byte,
+        count: Int,
+    ) {
+        val block = ByteArray(8192)
+        var remaining = count
+        while (remaining > 0) {
+            val requested = minOf(block.size, remaining)
+            val read = source.read(block, 0, requested)
+            assertTrue("Expected $remaining more bytes", read > 0)
+            var mismatch = -1
+            for (index in 0 until read) {
+                if (block[index] != byte) {
+                    mismatch = index
+                    break
+                }
+            }
+            assertEquals("Unexpected byte in streamed range", -1, mismatch)
+            remaining -= read
+        }
+        block.fill(0)
     }
 
     private suspend fun kotlinx.coroutines.test.TestScope.enterAndUnlock(viewModel: VaultViewModel) {
@@ -886,6 +1064,7 @@ class VaultViewModelTransferTest {
         var replacedEntry: VaultFolder? = null
         var replacedText: String? = null
         var replaceFailure: Throwable? = null
+        var replaceBlock: ((InputStream, Long) -> Unit)? = null
 
         override suspend fun replaceText(
             entry: VaultFolder,
@@ -894,7 +1073,8 @@ class VaultViewModelTransferTest {
         ): VaultFolder {
             replaceCalls++
             replacedEntry = entry
-            replacedText = source.readBytes().decodeToString()
+            val custom = replaceBlock
+            if (custom == null) replacedText = source.readBytes().decodeToString() else custom(source, size)
             replaceFailure?.let { throw it }
             return entry
         }

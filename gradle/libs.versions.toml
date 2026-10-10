@@ -26,7 +26,7 @@ targetSdk = "36"
 datastore = "1.1.7"
 protobuf = "3.25.8"
 protobufPlugin = "0.9.4"
-offlineScanner = "0.1.0-rc11"
+offlineScanner = "0.7.0"
 bcprov = "1.85.2"
 lazysodium = "5.2.0"
 jna = "5.17.0"
@@ -73,6 +73,8 @@ androidx-work-runtime-ktx = { module = "androidx.work:work-runtime-ktx", version
 androidx-work-testing = { module = "androidx.work:work-testing", version.ref = "work" }
 androidx-datastore = { module = "androidx.datastore:datastore", version.ref = "datastore" }
 protobuf-javalite = { module = "com.google.protobuf:protobuf-javalite", version.ref = "protobuf" }
+offline-scanner-processing = { module = "dev.offlinescan:scanner-processing-opencv", version.ref = "offlineScanner" }
+offline-scanner-export = { module = "dev.offlinescan:scanner-export", version.ref = "offlineScanner" }
 offline-scanner-compose = { module = "dev.offlinescan:scanner-ui-compose", version.ref = "offlineScanner" }
 bcprov = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bcprov" }
 lazysodium-android = { module = "com.goterl:lazysodium-android", version.ref = "lazysodium" }

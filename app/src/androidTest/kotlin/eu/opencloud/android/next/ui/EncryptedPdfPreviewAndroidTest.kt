@@ -34,8 +34,38 @@ class EncryptedPdfPreviewAndroidTest {
             }
         }
 
-    private fun singlePagePdf(): ByteArray {
-        val content = StringBuilder("%PDF-1.4\n")
+    @Test
+    fun rendersLargeEncryptedCacheAndCanReopenBorrowedBacking() =
+        runBlocking {
+            val context = InstrumentationRegistry.getInstrumentation().targetContext
+            val pdf = singlePagePdf(9 * 1024 * 1024)
+            val backing = EncryptedPreviewBacking.create(context) { true }
+            try {
+                backing.outputStream().use { it.write(pdf) }
+                assertTrue(backing.size > 8 * 1024 * 1024)
+                repeat(2) {
+                    val document = EncryptedPdfDocument.open(context, backing)
+                    try {
+                        val page = document.render(0)
+                        try {
+                            assertEquals(1, page.pages)
+                            assertTrue(page.bitmap.width <= 2048)
+                        } finally {
+                            page.bitmap.recycle()
+                        }
+                    } finally {
+                        document.close()
+                        assertTrue(document.isBackingCleared())
+                    }
+                }
+            } finally {
+                backing.close()
+                pdf.fill(0)
+            }
+        }
+
+    private fun singlePagePdf(padding: Int = 0): ByteArray {
+        val content = StringBuilder("%PDF-1.4\n").append(" ".repeat(padding)).append("\n")
         val offsets = mutableListOf<Int>()
         listOf(
             "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",

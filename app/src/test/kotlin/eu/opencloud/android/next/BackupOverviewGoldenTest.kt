@@ -82,7 +82,7 @@ class BackupOverviewGoldenTest {
 
         composeRule.onNodeWithContentDescription("Active backup configurations").performScrollToIndex(5)
         composeRule.onNodeWithText("Folder 6").fetchSemanticsNode()
-        composeRule.onNodeWithText("/Backups/Folder 6").fetchSemanticsNode()
+        composeRule.onNodeWithText("/Backups/Folder 6", substring = true).fetchSemanticsNode()
     }
 
     private fun browserRoborazziOptions() =

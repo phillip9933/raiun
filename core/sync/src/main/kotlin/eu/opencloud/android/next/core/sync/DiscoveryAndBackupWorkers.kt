@@ -209,19 +209,43 @@ class FolderBackupScanWorker(
         }
         val inventory = BackupInventory(applicationContext, backup.id)
         val active = store.activeTransfers(backup.accountId)
-        manager.ensureBackupDestination(backup.accountId, backup.spaceId, backup.destinationPath)
+        val sharedBase = if (backup.destinationKind == "SHARED_FOLDER") backup.sharedRequest() else null
+        val scanStore =
+            eu.opencloud.android.next.core.database.BackupScanStore(
+                FileBrowserDatabase.create(applicationContext),
+            )
+        val sharedCollections = sharedBase?.let { SharedBackupCollections.create(applicationContext) }
+        if (sharedBase == null) {
+            manager.ensureBackupDestination(backup.accountId, backup.spaceId, backup.destinationPath)
+        } else {
+            scanStore.requireCurrent(backup)
+            SharedUploadDestinationResolver.create(applicationContext).prepare(sharedBase)
+        }
         val coroutine = kotlinx.coroutines.currentCoroutineContext()
         val documents =
             queryBackupTree(applicationContext, Uri.parse(backup.sourceTreeUri)) { coroutine.ensureActive() }
+        val preparedParents = mutableSetOf(backup.destinationPath)
+        val sharedParents = mutableMapOf<String, SharedFolderRequest>()
+        if (sharedBase != null) sharedParents[backup.destinationPath] = sharedBase
         documents.forEach { document ->
             coroutine.ensureActive()
-            val selected = backup.mediaType == "ALL" || document.mimeType.startsWith(backup.mediaType.lowercase() + "/")
-            if (!selected) return@forEach
+            if (!backup.accepts(document)) return@forEach
             val signature =
                 backupSignature(document.size, document.modified, { coroutine.ensureActive() }) {
                     openUploadSource(applicationContext, document.uri)
                 }
-            val parent = backupDestination(backup, document)
+            val dateMillis = backupScanDate(applicationContext, backup, document)
+            val parent = backupDestination(backup, document, dateMillis)
+            if (preparedParents.add(parent)) {
+                if (sharedBase == null) {
+                    manager.ensureBackupDestination(backup.accountId, backup.spaceId, parent)
+                } else {
+                    sharedParents[parent] =
+                        requireNotNull(sharedCollections).ensure(sharedBase, parent) {
+                            scanStore.requireCurrent(backup)
+                        }
+                }
+            }
             val receipt = backupReceiptKey(backup, document)
             val destination = "${parent.trimEnd('/')}/${document.name}"
             val busy =
@@ -230,19 +254,21 @@ class FolderBackupScanWorker(
                 inventory.needsUpload(receipt, signature) &&
                 inventory.stable(receipt, signature, document.modified, now)
             ) {
-                manager.enqueueUpload(
-                    backup.accountId,
-                    backup.spaceId,
-                    parent,
-                    document.uri,
-                    backup,
-                )
+                if (sharedBase == null) {
+                    manager.enqueueUpload(
+                        backup.accountId,
+                        backup.spaceId,
+                        parent,
+                        document.uri,
+                        backup,
+                    )
+                } else {
+                    manager.enqueueSharedUpload(requireNotNull(sharedParents[parent]), document.uri, backup)
+                }
                 inventory.queued(receipt, signature)
             }
         }
-        eu.opencloud.android.next.core.database
-            .BackupScanStore(FileBrowserDatabase.create(applicationContext))
-            .complete(backup, now)
+        scanStore.complete(backup, now)
     }
 
     private fun isUnmetered(): Boolean {
@@ -263,6 +289,15 @@ internal object BackupExecutionPolicy {
         charging: Boolean,
     ): Boolean = (!wifiOnly || unmetered) && (!chargingOnly || charging)
 }
+
+private fun backupScanDate(
+    context: Context,
+    backup: FolderBackupEntity,
+    document: BackupDocument,
+): Long = if (backup.dateOrganization == "NONE") document.modified else backupDateEpochMillis(context, document)
+
+private fun FolderBackupEntity.accepts(document: BackupDocument): Boolean =
+    mediaType == "ALL" || document.mimeType.startsWith(mediaType.lowercase() + "/")
 
 private fun CoroutineWorker.discoveryFailure(
     operation: String,

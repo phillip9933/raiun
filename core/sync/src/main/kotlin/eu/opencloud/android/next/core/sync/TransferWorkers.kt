@@ -631,6 +631,17 @@ class DownloadWorker(
                 require(partial.length() == transfer.bytesTotal) {
                     "The downloaded file size did not match the server metadata."
                 }
+                verifyCheckpointedDownloadChecksum(
+                    client,
+                    DownloadChecksumSource(
+                        webDavRoot(space).childUrl(transfer.destinationPath),
+                        authorization,
+                        expectation,
+                    ),
+                    partial,
+                    validator,
+                    { downloadContext.ensureActive() },
+                )
                 require(partial.renameTo(target)) { "The downloaded file could not be published to the local cache." }
                 if (!store.publishDownload(transfer, resource, target.absolutePath)) {
                     throw OpenCloudException(OpenCloudError.PreconditionFailed)

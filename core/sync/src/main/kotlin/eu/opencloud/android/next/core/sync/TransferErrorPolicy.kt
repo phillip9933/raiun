@@ -45,6 +45,7 @@ internal fun OpenCloudError.diagnosticCode(): String =
         OpenCloudError.NotFound -> "NOT_FOUND"
         OpenCloudError.Conflict -> "CONFLICT"
         OpenCloudError.PreconditionFailed -> "PRECONDITION_FAILED"
+        OpenCloudError.DownloadIntegrity -> "DOWNLOAD_INTEGRITY"
         OpenCloudError.InvalidResponse -> "INVALID_RESPONSE"
         OpenCloudError.QuotaExceeded -> "REMOTE_QUOTA"
         OpenCloudError.LocalStorage -> "LOCAL_STORAGE"

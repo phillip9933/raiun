@@ -14,8 +14,22 @@
     <string name="backup_settings_source_folder">Source folder on this device</string>
     <string name="backup_settings_source_not_selected">No source folder selected</string>
     <string name="backup_settings_destination_folder">Destination folder in the cloud</string>
+    <string name="backup_destination_choose">Choose backup destination</string>
+    <string name="backup_destination_personal">Personal</string>
+    <string name="backup_destination_spaces">Spaces</string>
+    <string name="backup_destination_shared_with_me">Shared with me</string>
+    <string name="backup_destination_change_location">Change location</string>
+    <string name="backup_destination_retry">Retry</string>
+    <string name="backup_destination_upload_unavailable">Uploads are unavailable for this folder.</string>
+    <string name="backup_destination_encrypted_unavailable">Encrypted locations cannot be used for backups yet.</string>
     <string name="backup_settings_files_to_back_up">Files to back up</string>
     <string name="backup_settings_conditions">Backup settings</string>
+    <string name="backup_date_folders">Organize files into date folders</string>
+    <string name="backup_date_pattern">Date folder pattern</string>
+    <string name="backup_date_tokens">Use [YYYY], [YY], [MMMM], [MMM], [MM], [M], [DD] and [D]; use / to create nested folders.</string>
+    <string name="backup_date_preview">Preview: %1$s</string>
+    <string name="backup_date_invalid">Enter a valid folder pattern without empty or traversal path segments.</string>
+    <string name="backup_date_fallback">Photos and videos use their capture date, then modified date. Other files use their provider-added date when available, then modified date. Missing dates go into Undated.</string>
 
     <!-- Date and time text uses the value formatted for the current device locale. -->
     <string name="backup_settings_last_checked_through">Last checked through %1$s</string>

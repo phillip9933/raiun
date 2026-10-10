@@ -45,6 +45,70 @@ class DavChecksumTest {
         }
     }
 
+    @Test fun `download checksum prefers SHA256 and rejects changed metadata`() {
+        MockWebServer().use { server ->
+            server.start()
+            val client = TransferClient(OkHttpClient())
+            val url = server.url("/file").toString()
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(
+                        207,
+                    ).setBody(xml("<oc:checksums><oc:checksum>MD5:$MD5 SHA256:$SHA256</oc:checksum></oc:checksums>")),
+            )
+            assertEquals(
+                "SHA-256" to SHA256,
+                client.downloadChecksum(url, "Bearer test", DownloadExpectation(5, "\"v1\"")),
+            )
+            assertEquals("PROPFIND", server.takeRequest().method)
+            server.enqueue(MockResponse().setResponseCode(207).setBody(xml("")))
+            assertThrows(OpenCloudException::class.java) {
+                client.downloadChecksum(url, "Bearer test", DownloadExpectation(5, "\"v2\""))
+            }
+        }
+    }
+
+    @Test fun `only unsupported and missing checksums are optional`() {
+        MockWebServer().use { server ->
+            server.start()
+            val client = TransferClient(OkHttpClient())
+            val url = server.url("/file").toString()
+            server.enqueue(MockResponse().setResponseCode(405))
+            assertEquals(null, client.downloadChecksum(url, "Bearer test", DownloadExpectation(5, "\"v1\"")))
+            server.enqueue(MockResponse().setResponseCode(207).setBody(xml("")))
+            assertEquals(null, client.downloadChecksum(url, "Bearer test", DownloadExpectation(5, "\"v1\"")))
+            server.enqueue(MockResponse().setResponseCode(207).setBody(xmlWithChecksumStatus(404)))
+            assertEquals(null, client.downloadChecksum(url, "Bearer test", DownloadExpectation(5, "\"v1\"")))
+            server.enqueue(MockResponse().setResponseCode(401))
+            assertThrows(TransferHttpException::class.java) {
+                client.downloadChecksum(url, "Bearer test", DownloadExpectation(5, "\"v1\""))
+            }
+            server.enqueue(MockResponse().setResponseCode(207).setBody("broken"))
+            assertThrows(OpenCloudException::class.java) {
+                client.downloadChecksum(url, "Bearer test", DownloadExpectation(5, "\"v1\""))
+            }
+        }
+    }
+
+    @Test fun `checksum property denial and server error fail closed`() {
+        MockWebServer().use { server ->
+            server.start()
+            val client = TransferClient(OkHttpClient())
+            val url = server.url("/file").toString()
+            for (status in listOf(403, 500)) {
+                server.enqueue(MockResponse().setResponseCode(207).setBody(xmlWithChecksumStatus(status)))
+                val failure =
+                    assertThrows(TransferHttpException::class.java) {
+                        client.downloadChecksum(url, "Bearer test", DownloadExpectation(5, "\"v1\""))
+                    }
+                assertEquals(status, failure.statusCode)
+            }
+        }
+    }
+
+    private fun xmlWithChecksumStatus(status: Int) =
+        """<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response><d:href>/file</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>5</d:getcontentlength><d:getetag>"v1"</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat><d:propstat><d:prop><oc:checksums/></d:prop><d:status>HTTP/1.1 $status unavailable</d:status></d:propstat></d:response></d:multistatus>"""
+
     private fun xml(checksums: String) =
         """
         <d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response><d:href>/file</d:href>
@@ -54,6 +118,7 @@ class DavChecksumTest {
 
     private companion object {
         const val MD5 = "5d41402abc4b2a76b9719d911017c592"
+        const val SHA256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         const val URL = "https://cloud.example/file"
     }
 }

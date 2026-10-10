@@ -46,6 +46,7 @@ internal fun ScannerRoute(
                 saveDestination = { enabled ->
                     ScannerLocationButton(state.locationLabel, enabled, openLocation)
                 },
+                includeDiagnostics = false,
             ) { result ->
                 when (result) {
                     is ScanResult.Completed -> model.completed(result.output)

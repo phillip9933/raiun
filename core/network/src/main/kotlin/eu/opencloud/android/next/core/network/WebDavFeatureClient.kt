@@ -35,6 +35,7 @@ class WebDavFeatureClient(
             .followSslRedirects(false)
             .retryOnConnectionFailure(false)
             .build()
+            .withMetadataDeadline()
 
     fun renameFile(
         resourceUrl: String,
@@ -192,14 +193,13 @@ class WebDavFeatureClient(
         expected: Set<Int>,
     ): String =
         client.newCall(request).execute().use { response ->
-            val body = response.body?.string().orEmpty()
             if (response.code !in expected) {
                 runCatching {
                     Log.e("OpenCloudSync", "${request.method} failed with HTTP ${response.code}")
                 }
                 throw TransferHttpException(response.code)
             }
-            body
+            response.readBoundedMetadata(LISTING_METADATA_LIMIT_BYTES)
         }
 
     private companion object {

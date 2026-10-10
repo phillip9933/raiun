@@ -14,6 +14,7 @@
     <string name="error_not_found">The remote item was not found.</string>
     <string name="error_conflict">An item with this name already exists.</string>
     <string name="error_precondition_failed">The remote item changed. Refresh before trying again.</string>
+    <string name="error_download_integrity">The downloaded file could not be verified. Try downloading it again.</string>
     <string name="error_invalid_response">The server returned incomplete or unexpected metadata.</string>
     <string name="error_quota_exceeded">The server has insufficient storage.</string>
     <string name="error_local_storage">The device has insufficient storage.</string>

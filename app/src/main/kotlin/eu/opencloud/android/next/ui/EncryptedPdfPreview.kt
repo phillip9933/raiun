@@ -64,20 +64,24 @@ import eu.opencloud.android.next.core.ui.R as UiR
 fun EncryptedPdfPreview(
     pdfBytes: ByteArray,
     modifier: Modifier = Modifier,
+    encryptedBacking: EncryptedPreviewBacking? = null,
 ) {
     val context = LocalContext.current
-    var page by remember(pdfBytes) { mutableIntStateOf(0) }
-    var document by remember(pdfBytes) { mutableStateOf<EncryptedPdfDocument?>(null) }
-    var state by remember(pdfBytes) { mutableStateOf<EncryptedPdfState>(EncryptedPdfState.Loading) }
+    var page by remember(pdfBytes, encryptedBacking) { mutableIntStateOf(0) }
+    var document by remember(pdfBytes, encryptedBacking) { mutableStateOf<EncryptedPdfDocument?>(null) }
+    var state by remember(pdfBytes, encryptedBacking) { mutableStateOf<EncryptedPdfState>(EncryptedPdfState.Loading) }
 
-    LaunchedEffect(pdfBytes) {
+    LaunchedEffect(pdfBytes, encryptedBacking) {
         var opened: EncryptedPdfDocument? = null
         var opening: EncryptedPdfDocument? = null
         state = EncryptedPdfState.Loading
         try {
             opened =
                 withContext(Dispatchers.IO) {
-                    EncryptedPdfDocument.open(context, pdfBytes).also { opening = it }
+                    (
+                        encryptedBacking?.let { EncryptedPdfDocument.open(context, it) }
+                            ?: EncryptedPdfDocument.open(context, pdfBytes)
+                    ).also { opening = it }
                 }
             document = opened
             awaitCancellation()
@@ -193,6 +197,7 @@ internal data class EncryptedPdfPage(
 internal class EncryptedPdfDocument private constructor(
     private val context: Context,
     private var backing: ByteArray,
+    private var encryptedBacking: EncryptedPreviewBacking? = null,
 ) {
     private val callbackLock = Any()
     private val renderExecutor =
@@ -213,7 +218,7 @@ internal class EncryptedPdfDocument private constructor(
             override fun onGetSize(): Long =
                 synchronized(callbackLock) {
                     if (closeStarted.get()) throw ErrnoException("onGetSize", OsConstants.EBADF)
-                    backing.size.toLong()
+                    encryptedBacking?.size ?: backing.size.toLong()
                 }
 
             override fun onRead(
@@ -224,6 +229,7 @@ internal class EncryptedPdfDocument private constructor(
                 synchronized(callbackLock) {
                     if (closeStarted.get()) throw ErrnoException("onRead", OsConstants.EBADF)
                     if (offset < 0L || size < 0) throw ErrnoException("onRead", OsConstants.EINVAL)
+                    encryptedBacking?.let { return@synchronized it.read(offset, size, data) }
                     if (offset >= backing.size) return@synchronized 0
                     val copied = minOf(size, data.size, backing.size - offset.toInt())
                     System.arraycopy(backing, offset.toInt(), data, 0, copied)
@@ -248,7 +254,7 @@ internal class EncryptedPdfDocument private constructor(
                 check(!closeStarted.get())
                 val opened = PdfRenderer(requireNotNull(descriptor))
                 descriptor = null // PdfRenderer owns the descriptor after successful construction.
-                if (opened.pageCount !in 1..MAX_PDF_PAGES) {
+                if (opened.pageCount < 1) {
                     opened.close()
                     throw IllegalArgumentException("PDF page count is outside the supported limit.")
                 }
@@ -341,16 +347,42 @@ internal class EncryptedPdfDocument private constructor(
         if (rendererClosed) {
             backing.fill(0)
             backing = ByteArray(0)
+            encryptedBacking = null
         }
     }
 
-    internal fun isBackingCleared(): Boolean = synchronized(callbackLock) { backing.isEmpty() }
+    internal fun isBackingCleared(): Boolean =
+        synchronized(callbackLock) {
+            backing.isEmpty() &&
+                encryptedBacking == null
+        }
 
     companion object {
-        private const val MAX_PLAINTEXT_BYTES = 8 * 1024 * 1024
         private const val MAX_BITMAP_EDGE = 2048
         private const val MAX_BITMAP_PIXELS = 4_000_000
-        private const val MAX_PDF_PAGES = 256
+
+        @Suppress("TooGenericExceptionCaught") // Every failure releases the renderer and proxy owners.
+        suspend fun open(
+            context: Context,
+            encryptedBacking: EncryptedPreviewBacking,
+        ): EncryptedPdfDocument {
+            require(encryptedBacking.size >= 6)
+            val signature = ByteArray(5)
+            try {
+                require(encryptedBacking.read(0, signature.size, signature) == signature.size)
+                require(signature.contentEquals(byteArrayOf(37, 80, 68, 70, 45)))
+            } finally {
+                signature.fill(0)
+            }
+            val document = EncryptedPdfDocument(context.applicationContext, ByteArray(0), encryptedBacking)
+            try {
+                document.initialize()
+                return document
+            } catch (failure: Throwable) {
+                document.close()
+                throw failure
+            }
+        }
 
         @Suppress("TooGenericExceptionCaught") // Ensure descriptor/thread cleanup for every construction failure.
         suspend fun open(
@@ -358,7 +390,7 @@ internal class EncryptedPdfDocument private constructor(
             pdfBytes: ByteArray,
         ): EncryptedPdfDocument {
             require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
-            require(pdfBytes.size in 6..MAX_PLAINTEXT_BYTES)
+            require(pdfBytes.size >= 6)
             require(
                 pdfBytes[0] == '%'.code.toByte() &&
                     pdfBytes[1] == 'P'.code.toByte() &&

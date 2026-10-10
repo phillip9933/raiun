@@ -13,6 +13,14 @@
     <string name="backup_settings_source_folder">Quellordner auf diesem Gerät</string>
     <string name="backup_settings_source_not_selected">Kein Quellordner ausgewählt</string>
     <string name="backup_settings_destination_folder">Zielordner in der Cloud</string>
+    <string name="backup_destination_choose">Sicherungsziel auswählen</string>
+    <string name="backup_destination_personal">Persönlich</string>
+    <string name="backup_destination_spaces">Spaces</string>
+    <string name="backup_destination_shared_with_me">Mit mir geteilt</string>
+    <string name="backup_destination_change_location">Ort ändern</string>
+    <string name="backup_destination_retry">Erneut versuchen</string>
+    <string name="backup_destination_upload_unavailable">Für diesen Ordner sind Uploads nicht verfügbar.</string>
+    <string name="backup_destination_encrypted_unavailable">Verschlüsselte Orte können noch nicht für Sicherungen verwendet werden.</string>
     <string name="backup_settings_files_to_back_up">Zu sichernde Dateien</string>
     <string name="backup_settings_conditions">Sicherungseinstellungen</string>
     <string name="backup_settings_last_checked_through">Zuletzt geprüft bis %1$s</string>
@@ -28,4 +36,10 @@
     </plurals>
     <string name="backup_settings_watching">Suche nach Änderungen</string>
     <string name="backup_settings_paused">Sicherung pausiert</string>
+    <string name="backup_date_folders">Dateien in Datumsordnern organisieren</string>
+    <string name="backup_date_pattern">Muster für Datumsordner</string>
+    <string name="backup_date_tokens">Verwende [YYYY], [YY], [MMMM], [MMM], [MM], [M], [DD] und [D]. Mit / legst du Unterordner an.</string>
+    <string name="backup_date_preview">Vorschau: %1$s</string>
+    <string name="backup_date_invalid">Gib ein gültiges Ordnermuster ohne leere oder ungültige Pfadabschnitte ein.</string>
+    <string name="backup_date_fallback">Fotos und Videos verwenden das Aufnahmedatum, danach das Änderungsdatum. Andere Dateien verwenden nach Möglichkeit das Hinzufügedatum des Anbieters, danach das Änderungsdatum. Ohne Datum kommen sie in „Undated“.</string>
 </resources>

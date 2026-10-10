@@ -16,6 +16,9 @@ import eu.opencloud.android.next.core.database.TransferState
 import eu.opencloud.android.next.core.network.TransferClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.test.runTest
+import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -161,6 +164,35 @@ class TransferWorkerTest {
             assertEquals(attempt.id.toString(), pending.workId)
         }
 
+    @Test fun `pre-existing backup target becomes a persisted conflict for user resolution`() =
+        runTest {
+            seed()
+            MockWebServer().use { server ->
+                server.start()
+                server.enqueue(MockResponse().setResponseCode(200))
+                val attempt =
+                    TestListenableWorkerBuilder<ExistingTargetConflictWorker>(context)
+                        .setInputData(workDataOf(TransferWorker.TRANSFER_ID to "transfer"))
+                        .setWorkerFactory(
+                            object : WorkerFactory() {
+                                override fun createWorker(
+                                    appContext: Context,
+                                    workerClassName: String,
+                                    workerParameters: WorkerParameters,
+                                ): ListenableWorker =
+                                    ExistingTargetConflictWorker(appContext, workerParameters, store, server)
+                            },
+                        ).build()
+
+                assertEquals(ListenableWorker.Result.failure(), attempt.doWork())
+                val persisted = requireNotNull(store.transfer("transfer"))
+                assertEquals(TransferState.CONFLICT.name, persisted.state)
+                assertEquals("CONFLICT", persisted.errorCode)
+                assertEquals("An item with this name already exists.", persisted.error)
+                assertEquals("HEAD", server.takeRequest().method)
+            }
+        }
+
     @Test fun `acknowledged replacement verification timeout retries without losing checkpoint`() =
         runTest {
             seed()
@@ -272,6 +304,41 @@ class TransferWorkerTest {
         ) {
             beforeFailure(transfer)
             throw failure
+        }
+    }
+
+    class ExistingTargetConflictWorker(
+        context: Context,
+        params: WorkerParameters,
+        store: FileBrowserStore,
+        private val server: MockWebServer,
+    ) : TransferWorker(context, params, store, network = NetworkStatus { true }) {
+        override fun authorization(account: AccountEntity) = "Bearer test"
+
+        override fun client(account: AccountEntity) = TransferClient(OkHttpClient())
+
+        override suspend fun execute(
+            transfer: TransferEntity,
+            account: AccountEntity,
+            space: SpaceEntity,
+            client: TransferClient,
+            authorization: String,
+        ) {
+            uploadAndVerify(
+                transfer,
+                upload = {
+                    client.upload(
+                        server.url("existing/photo.jpg").toString(),
+                        authorization,
+                        transfer.mimeType,
+                        transfer.bytesTotal,
+                        overwrite = false,
+                        source = { "photo".byteInputStream() },
+                        onProgress = {},
+                    )
+                },
+                verify = { error("A pre-existing first-attempt target must not be reconciled automatically") },
+            )
         }
     }
 }

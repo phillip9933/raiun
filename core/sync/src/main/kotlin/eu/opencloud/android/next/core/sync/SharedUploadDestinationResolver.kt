@@ -31,7 +31,7 @@ class SharedUploadDestinationResolver(
         if (!identity || !browser.isCurrent(page)) throw OpenCloudException(OpenCloudError.PreconditionFailed)
         requireUploadAccess(target)
         validateAddress(page, request, target)
-        return PreparedSharedUploadDestination(request, page, target.webDavUrl)
+        return PreparedSharedUploadDestination(request, page, target.webDavUrl, target.access.canCreateFolder)
     }
 
     suspend fun isCurrent(destination: PreparedSharedUploadDestination): Boolean = browser.isCurrent(destination.page)
@@ -94,4 +94,5 @@ class PreparedSharedUploadDestination internal constructor(
     val request: SharedFolderRequest,
     internal val page: SharedFolderPage,
     val webDavUrl: String,
+    val canCreateFolder: Boolean,
 )

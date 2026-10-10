@@ -6,6 +6,7 @@ import org.w3c.dom.Element
 internal fun parseDavObject(
     xml: String,
     url: String,
+    strictChecksumStatus: Boolean = false,
 ): DavObject {
     val document = parseSafeXml(xml)
     val root = document.documentElement
@@ -14,11 +15,31 @@ internal fun parseDavObject(
     if (entries.length != 1) invalidProperties()
     val entry = entries.item(0) as Element
     validateHref(entry, url)
+    if (strictChecksumStatus) rejectChecksumPropertyErrors(entry)
     val prop = resourceProperties(entry)
     val folder = prop.getElementsByTagNameNS(DAV, "collection").length > 0
     val length = if (folder) 0 else prop.text("getcontentlength")?.toLongOrNull() ?: invalidProperties()
     if (length < 0) invalidProperties()
     return DavObject(folder, length, prop.text("getetag"), parseDavChecksums(prop))
+}
+
+/** A denied or failed checksum property is an error, not evidence that checksums are absent. */
+private fun rejectChecksumPropertyErrors(entry: Element) {
+    val stats = entry.getElementsByTagNameNS(DAV, "propstat")
+    for (index in 0 until stats.length) {
+        val stat = stats.item(index) as Element
+        val prop = stat.getElementsByTagNameNS(DAV, "prop").item(0) as? Element ?: invalidProperties()
+        if (prop.getElementsByTagNameNS(OC, "checksums").length == 0) continue
+        val status =
+            stat
+                .text("status")
+                ?.trim()
+                ?.split(Regex("\\s+"))
+                ?.getOrNull(1)
+                ?.toIntOrNull()
+                ?: invalidProperties()
+        if (status !in setOf(200, 404, 405, 501)) throw TransferHttpException(status)
+    }
 }
 
 private fun parseDavChecksums(prop: Element): Map<String, String> {
@@ -96,3 +117,4 @@ private fun Element.text(name: String): String? = getElementsByTagNameNS(DAV, na
 private fun invalidProperties(): Nothing = throw OpenCloudException(OpenCloudError.InvalidResponse)
 
 private const val DAV = "DAV:"
+private const val OC = "http://owncloud.org/ns"

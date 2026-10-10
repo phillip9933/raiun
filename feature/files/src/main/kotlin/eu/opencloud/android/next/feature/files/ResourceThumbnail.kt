@@ -11,7 +11,9 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import eu.opencloud.android.next.core.database.ResourceEntity
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
+import eu.opencloud.android.next.core.model.ResourceKind
 import eu.opencloud.android.next.core.sync.ImagePreviews
+import eu.opencloud.android.next.core.sync.isVideoPreview
 import kotlinx.coroutines.CancellationException
 
 @Composable
@@ -20,15 +22,25 @@ internal fun ResourceThumbnail(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    val imageFile = resource.isImagePreview()
+    val previewable =
+        resource.kind == ResourceKind.FILE &&
+            (resource.isImagePreview() || resource.isVideoPreview())
     val bitmap by produceState<android.graphics.Bitmap?>(
         null,
         resource.accountId,
         resource.spaceId,
         resource.remoteId,
+        resource.path,
+        resource.kind,
         resource.eTag,
+        resource.modifiedAtEpochMillis,
+        resource.sizeBytes,
+        resource.hasLocalCopy,
+        resource.localPath,
+        resource.mimeType,
+        resource.name,
     ) {
-        if (imageFile) {
+        if (previewable) {
             value =
                 try {
                     ImagePreviews.load(context, resource)

@@ -2,6 +2,7 @@ package eu.opencloud.android.next.core.sync
 
 import android.content.ContentProvider
 import android.content.ContentValues
+import android.content.Context
 import android.database.MatrixCursor
 import android.net.Uri
 import android.os.ParcelFileDescriptor
@@ -28,13 +29,38 @@ import java.util.UUID
 
 @RunWith(RobolectricTestRunner::class)
 class IncomingShareStoreTest {
+    private fun store(
+        context: Context,
+        availableBytes: (File) -> Long = { it.usableSpace },
+    ) = IncomingShareStore(context, availableBytes) { _, _ -> true }
+
+    @Test fun `misleading size does not weaken streamed limit and failed low-space intake removes partial files`() =
+        runBlocking<Unit> {
+            val context = RuntimeEnvironment.getApplication()
+            val source = File(context.cacheDir, "budget-original").apply { writeBytes(ByteArray(64 * 1024)) }
+            val uri = Uri.parse("content://incoming.test/source")
+            val mismatched = UUID.randomUUID().toString()
+            register(SharedProvider(source, declaredSize = 1))
+            val full = store(context).stage(mismatched, listOf(uri)) {}
+            assertEquals(64L * 1024, full.single().payload.length())
+            store(context).discard(mismatched)
+
+            val lowSpace = UUID.randomUUID().toString()
+            register(SharedProvider(source))
+            val store = store(context) { 256L * 1024 * 1024 + 64 * 1024 }
+            assertThrows(Exception::class.java) {
+                runBlocking { store.stage(lowSpace, listOf(uri)) {} }
+            }
+            assertFalse(File(context.noBackupFilesDir, "incoming-shares/$lowSpace").exists())
+        }
+
     @Test fun `submission retains a failed batch and retries the same identities and destination`() =
         runBlocking<Unit> {
             val context = RuntimeEnvironment.getApplication()
             val original = File(context.cacheDir, "submit-original").apply { writeText("bytes") }
             register(SharedProvider(original))
             val id = UUID.randomUUID().toString()
-            val store = IncomingShareStore(context)
+            val store = store(context)
             val files = store.stage(id, listOf(Uri.parse("content://incoming.test/source"))) {}
             val destination = IncomingShareDestination("account", "space", "/target")
             var failed = false
@@ -58,7 +84,7 @@ class IncomingShareStoreTest {
             val original = File(context.cacheDir, "submit-concurrent").apply { writeText("bytes") }
             register(SharedProvider(original))
             val id = UUID.randomUUID().toString()
-            val store = IncomingShareStore(context)
+            val store = store(context)
             store.stage(id, listOf(Uri.parse("content://incoming.test/source"))) {}
             val started = CompletableDeferred<Unit>()
             val release = CompletableDeferred<Unit>()
@@ -73,7 +99,7 @@ class IncomingShareStoreTest {
             withTimeout(5_000) { started.await() }
             val discard =
                 async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
-                    IncomingShareStore(context).discard(id)
+                    store(context).discard(id)
                 }
             assertFalse(discard.isCompleted)
             release.complete(Unit)
@@ -99,7 +125,7 @@ class IncomingShareStoreTest {
                         setLastModified(1)
                     }
                 var checks = 0
-                IncomingShareStore(context).stage(id, listOf(Uri.parse("content://incoming.test/source"))) {
+                store(context).stage(id, listOf(Uri.parse("content://incoming.test/source"))) {
                     if (++checks == 2) {
                         runBlocking<Unit> {
                             maintainPrivateCache(
@@ -128,7 +154,7 @@ class IncomingShareStoreTest {
             var checks = 0
             val staging =
                 async(Dispatchers.IO) {
-                    IncomingShareStore(context).stage(id, listOf(Uri.parse("content://incoming.test/source"))) {
+                    store(context).stage(id, listOf(Uri.parse("content://incoming.test/source"))) {
                         if (++checks == 2) {
                             started.complete(Unit)
                             runBlocking<Unit> { withTimeout(5_000) { release.await() } }
@@ -138,7 +164,7 @@ class IncomingShareStoreTest {
             withTimeout(5_000) { started.await() }
             val discard =
                 async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
-                    IncomingShareStore(context).discard(id)
+                    store(context).discard(id)
                 }
             assertFalse(discard.isCompleted)
             release.complete(Unit)
@@ -147,7 +173,7 @@ class IncomingShareStoreTest {
                 discard.await()
             }
             assertFalse(File(context.noBackupFilesDir, "incoming-shares/$id").exists())
-            IncomingShareStore(context).discard(id)
+            store(context).discard(id)
         }
 
     @Test fun `unknown mime filenames survive staging and restart after provider access disappears`() =
@@ -156,7 +182,7 @@ class IncomingShareStoreTest {
             val original = File(context.cacheDir, "original").apply { writeText("exact original bytes") }
             register(SharedProvider(original))
             val id = UUID.randomUUID().toString()
-            val store = IncomingShareStore(context)
+            val store = store(context)
             val files =
                 store.stage(
                     id,
@@ -167,7 +193,7 @@ class IncomingShareStoreTest {
                 ) {}
             assertEquals(listOf("database.dbf", "backup.jwlibrary"), files.map { it.name })
             original.delete()
-            val restored = IncomingShareStore(context).stage(id, emptyList()) {}
+            val restored = store(context).stage(id, emptyList()) {}
             assertEquals(files.map { it.id }, restored.map { it.id })
             restored.forEach { assertEquals("exact original bytes", it.payload.readText()) }
             store.discard(id)
@@ -176,7 +202,7 @@ class IncomingShareStoreTest {
     @Test fun `unsafe source schemes filenames and cancelled reads never publish a batch`() =
         runBlocking<Unit> {
             val context = RuntimeEnvironment.getApplication()
-            val store = IncomingShareStore(context)
+            val store = store(context)
             assertThrows(IllegalArgumentException::class.java) {
                 runBlocking<Unit> {
                     store.stage(
@@ -195,13 +221,28 @@ class IncomingShareStoreTest {
                     ) {}
                 }
             }
+            val cancelledBatch = UUID.randomUUID().toString()
             assertThrows(java.util.concurrent.CancellationException::class.java) {
                 runBlocking<Unit> {
-                    store.stage(UUID.randomUUID().toString(), listOf(Uri.parse("content://incoming.test/source"))) {
+                    store.stage(cancelledBatch, listOf(Uri.parse("content://incoming.test/source"))) {
                         throw java.util.concurrent.CancellationException()
                     }
                 }
             }
+            assertFalse(File(context.noBackupFilesDir, "incoming-shares/$cancelledBatch").exists())
+            register(
+                SharedProvider(File(context.cacheDir, "cancel-original").apply { writeBytes(ByteArray(256 * 1024)) }),
+            )
+            val interruptedBatch = UUID.randomUUID().toString()
+            var checks = 0
+            assertThrows(java.util.concurrent.CancellationException::class.java) {
+                runBlocking<Unit> {
+                    store.stage(interruptedBatch, listOf(Uri.parse("content://incoming.test/source"))) {
+                        if (++checks >= 6) throw java.util.concurrent.CancellationException()
+                    }
+                }
+            }
+            assertFalse(File(context.noBackupFilesDir, "incoming-shares/$interruptedBatch").exists())
         }
 
     private fun register(provider: SharedProvider) {
@@ -220,13 +261,13 @@ class IncomingShareStoreTest {
             val original = File(context.cacheDir, "original").apply { writeText("bytes") }
             register(SharedProvider(original))
             val batch = UUID.randomUUID().toString()
-            val store = IncomingShareStore(context)
+            val store = store(context)
             store.stage(batch, listOf(Uri.parse("content://incoming.test/photo.jpg"))) {}
             val destination = IncomingShareDestination("account", "space", "/Photos/Camera")
             store.rememberDestination(batch, destination)
             val manifest = File(context.noBackupFilesDir, "incoming-shares/$batch/manifest.json")
             org.junit.Assert.assertTrue(manifest.renameTo(File(manifest.path + ".bak")))
-            val restored = IncomingShareStore(context)
+            val restored = store(context)
             assertEquals(1, restored.stage(batch, emptyList()) {}.size)
             assertEquals(destination, restored.destination(batch))
             restored.rememberDestination(batch, destination)
@@ -238,6 +279,7 @@ class IncomingShareStoreTest {
     private class SharedProvider(
         private val source: File,
         private val name: String? = null,
+        private val declaredSize: Long? = null,
     ) : ContentProvider() {
         override fun onCreate() = true
 
@@ -254,7 +296,9 @@ class IncomingShareStoreTest {
             selection: String?,
             selectionArgs: Array<out String>?,
             sortOrder: String?,
-        ) = MatrixCursor(arrayOf(OpenableColumns.DISPLAY_NAME)).apply { addRow(arrayOf(name ?: uri.lastPathSegment)) }
+        ) = MatrixCursor(arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE)).apply {
+            addRow(arrayOf(name ?: uri.lastPathSegment, declaredSize))
+        }
 
         override fun insert(
             uri: Uri,

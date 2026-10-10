@@ -49,8 +49,15 @@ class SharedDownloadExecutor(
             val target = File(directory, "${UUID.randomUUID()}.blob")
             var published = false
             try {
+                val downloadContext = currentCoroutineContext()
                 withRequestCancellation(client::cancelRequests) {
                     download(source, partial, client, authorization, progress)
+                    verifyDownloadChecksum(
+                        client,
+                        DownloadChecksumSource(source.url, authorization, source.expectation),
+                        partial,
+                        { downloadContext.ensureActive() },
+                    )
                 }
                 currentCoroutineContext().ensureActive()
                 check(!target.exists() && partial.renameTo(target)) { "The downloaded file could not be sealed." }

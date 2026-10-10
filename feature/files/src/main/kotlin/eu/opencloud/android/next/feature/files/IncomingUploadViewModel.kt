@@ -37,6 +37,7 @@ class IncomingUploadViewModel(
     private var batchId: String? = null
     private var browseJob: Job? = null
     private var intakeJob: Job? = null
+    private var pendingSources: List<Uri> = emptyList()
 
     fun load(
         id: String,
@@ -44,13 +45,18 @@ class IncomingUploadViewModel(
     ) {
         if (batchId != null) return
         batchId = id
+        pendingSources = sources
         intakeJob =
             viewModelScope.launch(Dispatchers.IO) {
                 incomingAction({
-                    val coroutine = currentCoroutineContext()
-                    val files = intake.stage(id, sources) { coroutine.ensureActive() }
+                    val files = if (intake.isStaged(id)) intake.stage(id, emptyList()) {} else emptyList()
                     val accounts = store.activeAccounts()
-                    mutableState.value = restoredState(id, files, accounts)
+                    mutableState.value =
+                        restoredState(
+                            id,
+                            files,
+                            accounts,
+                        ).copy(sourceCount = if (files.isEmpty()) sources.size else files.size)
                     if (!state.value.destinationLocked) accounts.firstOrNull()?.let { selectAccount(it.id) }
                 }) {
                     mutableState.value =
@@ -154,10 +160,16 @@ class IncomingUploadViewModel(
         if (selected.busy || selected.accountId == null || selected.spaceId == null) return
         val account = selected.accountId
         val space = selected.spaceId
-        mutableState.value = state.value.copy(busy = true, destinationLocked = true, error = null)
+        mutableState.value = state.value.copy(busy = true, error = null)
         intakeJob =
             viewModelScope.launch(Dispatchers.IO) {
                 incomingAction({
+                    val coroutine = currentCoroutineContext()
+                    if (!intake.isStaged(requireNotNull(batchId))) {
+                        require(pendingSources.isNotEmpty()) { "The shared files are unavailable." }
+                        val staged = intake.stage(requireNotNull(batchId), pendingSources) { coroutine.ensureActive() }
+                        mutableState.value = state.value.copy(files = staged)
+                    }
                     val queue = SharedUploadQueue(getApplication())
                     val path =
                         selected.restoredPath ?: selected.trail
@@ -169,8 +181,18 @@ class IncomingUploadViewModel(
                     }
                     mutableState.value = state.value.copy(busy = false, complete = true)
                 }) {
+                    val accepted =
+                        runCatching {
+                            intake.destination(
+                                requireNotNull(batchId),
+                            ) != null
+                        }.getOrDefault(false)
                     mutableState.value =
-                        state.value.copy(busy = false, error = it.toOpenCloudError().safeMessage(getApplication()))
+                        state.value.copy(
+                            busy = false,
+                            destinationLocked = accepted,
+                            error = it.toOpenCloudError().safeMessage(getApplication()),
+                        )
                 }
             }
     }
@@ -187,6 +209,7 @@ class IncomingUploadViewModel(
 
 data class IncomingUploadState(
     val files: List<SharedUploadSource> = emptyList(),
+    val sourceCount: Int = 0,
     val accounts: List<AccountEntity> = emptyList(),
     val accountId: String? = null,
     val spaces: List<SpaceEntity> = emptyList(),

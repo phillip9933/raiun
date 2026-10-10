@@ -3,7 +3,7 @@
   "source_inventory": "docs/release-audit/runtime-dependencies.json",
   "dependency_count": 170,
   "cache_root": "Gradle module cache at ~/.gradle/caches/modules-2/files-2.1",
-  "scanner_reference": "https://github.com/phillip9933/open-android-doc-scanner/blob/v0.1.0-rc11/THIRD-PARTY-NOTICES.md",
+  "scanner_reference": "https://github.com/phillip9933/open-android-doc-scanner/blob/v0.7.0/THIRD-PARTY-NOTICES.md",
   "missing_full_license_texts": [],
   "dependencies": [
     {
@@ -36,7 +36,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -71,7 +71,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -106,7 +106,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -134,7 +134,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -162,7 +162,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -197,7 +197,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -225,7 +225,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -253,7 +253,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -281,7 +281,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -309,7 +309,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -337,7 +337,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -365,7 +365,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -393,7 +393,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -428,7 +428,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -467,14 +467,14 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         },
         {
           "name": "BSD License",
           "url": "https://chromium.googlesource.com/libyuv/libyuv/+/refs/heads/main/README.chromium",
           "path": "license-texts/BSD_License.txt",
-          "source": "scanner-library-reference / third-party/libyuv-LICENSE.txt",
+          "source": "scanner SDK 0.7.0 processing AAR / assets/offline-scanner-notices/libyuv-LICENSE.txt",
           "sha256": "2b2cc1180c7e6988328ad2033b04b80117419db9c4c584918bbb3cfec7e9364f"
         }
       ]
@@ -509,7 +509,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -544,7 +544,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -579,7 +579,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -607,7 +607,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -642,7 +642,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -677,7 +677,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -705,7 +705,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -740,7 +740,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -768,7 +768,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -803,7 +803,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -831,7 +831,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -866,7 +866,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -894,7 +894,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -929,7 +929,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -957,7 +957,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -992,7 +992,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1020,7 +1020,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1048,7 +1048,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1076,7 +1076,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1104,7 +1104,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1132,7 +1132,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1167,7 +1167,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1195,7 +1195,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1230,7 +1230,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1258,7 +1258,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1293,7 +1293,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1321,7 +1321,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1356,7 +1356,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1384,7 +1384,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1419,7 +1419,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1447,7 +1447,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1482,7 +1482,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1510,7 +1510,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1545,7 +1545,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1573,7 +1573,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1608,7 +1608,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1636,7 +1636,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1671,7 +1671,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1699,7 +1699,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1734,7 +1734,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1762,7 +1762,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1797,7 +1797,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1825,7 +1825,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1860,7 +1860,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1888,7 +1888,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1916,7 +1916,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1944,7 +1944,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -1979,7 +1979,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2014,7 +2014,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2049,7 +2049,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2077,7 +2077,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2105,7 +2105,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2133,7 +2133,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2161,7 +2161,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2189,7 +2189,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2217,7 +2217,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2245,7 +2245,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2273,7 +2273,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2301,7 +2301,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2329,7 +2329,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2357,7 +2357,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2385,7 +2385,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2413,7 +2413,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2441,7 +2441,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2476,7 +2476,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2504,7 +2504,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2532,7 +2532,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2560,7 +2560,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2588,7 +2588,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2616,7 +2616,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2651,7 +2651,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2686,7 +2686,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2721,7 +2721,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2756,7 +2756,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2791,7 +2791,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2826,7 +2826,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2854,7 +2854,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2889,7 +2889,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2917,7 +2917,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2952,7 +2952,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -2980,7 +2980,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3015,7 +3015,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3050,7 +3050,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3085,7 +3085,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3120,7 +3120,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3148,7 +3148,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3183,7 +3183,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3218,7 +3218,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3253,7 +3253,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3288,7 +3288,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3316,7 +3316,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3344,7 +3344,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3372,7 +3372,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3407,7 +3407,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3435,7 +3435,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3463,7 +3463,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3498,7 +3498,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3533,7 +3533,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3561,7 +3561,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3596,7 +3596,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3624,7 +3624,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3659,7 +3659,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3687,7 +3687,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3722,7 +3722,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3757,7 +3757,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3785,7 +3785,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3820,7 +3820,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3848,7 +3848,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3883,7 +3883,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3911,7 +3911,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3939,7 +3939,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -3967,7 +3967,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4002,7 +4002,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4030,7 +4030,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4058,7 +4058,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4086,7 +4086,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4114,7 +4114,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4149,7 +4149,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4184,7 +4184,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4212,7 +4212,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4247,7 +4247,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4282,7 +4282,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4317,7 +4317,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4347,7 +4347,7 @@
           "name": "Apache 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/Apache_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4376,7 +4376,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4461,7 +4461,7 @@
           "name": "MIT License",
           "url": "https://opensource.org/licenses/MIT",
           "path": "license-texts/MIT_License.txt",
-          "source": "scanner-library-reference / .gradle/caches/8.13/transforms/6311122e958e598cd5c60700386ee7a5/transformed/out/assets/third_party_licenses/onnxruntime/LICENSE.txt",
+          "source": "scanner SDK 0.7.0 processing AAR / assets/third_party_licenses/onnxruntime/LICENSE.txt",
           "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
         }
       ]
@@ -4496,7 +4496,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4524,7 +4524,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4552,19 +4552,19 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
     },
     {
       "coordinate": "dev.offlinescan:scanner-camera",
-      "version": "0.1.0-rc11",
-      "pom_source": "local source file (path omitted)",
+      "version": "0.7.0",
+      "pom_source": "scanner SDK 0.7.0 Maven ZIP / maven/dev/offlinescan/scanner-camera/0.7.0/scanner-camera-0.7.0.pom",
       "pom_chain": [
-        "local source file (path omitted)"
+        "scanner SDK 0.7.0 Maven ZIP / maven/dev/offlinescan/scanner-camera/0.7.0/scanner-camera-0.7.0.pom"
       ],
-      "pom_sha256": "788e29f319a3889ee00d8816ce620bc87b8ca103c742242ab3135c37e7ae07bc",
+      "pom_sha256": "4bef77ad468d0765dc97dc926bbabcb6321fb090107567cc81d8eaeb36b5031c",
       "license_status": "declared",
       "licenses": [
         {
@@ -4572,27 +4572,27 @@
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": "local source file (path omitted)",
-      "artifact_sha256": "d447b1c61a5eac8411be7d11c86db3ac727527c53794e2870ce1f6c8c82c60fd",
+      "artifact": "scanner SDK 0.7.0 Maven ZIP / maven/dev/offlinescan/scanner-camera/0.7.0/scanner-camera-0.7.0.aar",
+      "artifact_sha256": "96d9fcbecd3fdff394e7807c822767440fc340bf15b9036d20a3e41e94240772",
       "embedded_notice_files": [],
       "license_texts": [
         {
           "name": "Apache License, Version 2.0",
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/Apache_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
     },
     {
       "coordinate": "dev.offlinescan:scanner-core",
-      "version": "0.1.0-rc11",
-      "pom_source": "local source file (path omitted)",
+      "version": "0.7.0",
+      "pom_source": "scanner SDK 0.7.0 Maven ZIP / maven/dev/offlinescan/scanner-core/0.7.0/scanner-core-0.7.0.pom",
       "pom_chain": [
-        "local source file (path omitted)"
+        "scanner SDK 0.7.0 Maven ZIP / maven/dev/offlinescan/scanner-core/0.7.0/scanner-core-0.7.0.pom"
       ],
-      "pom_sha256": "32c5923a2e12971f1150ca8773bc14e9b8361748a2d284a97f9a6b267b536abb",
+      "pom_sha256": "9b88da9c23716ce9f69bd19fab2b2639b62a3872fb4b80c5d4111e10aa24d35d",
       "license_status": "declared",
       "licenses": [
         {
@@ -4600,27 +4600,27 @@
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": "local source file (path omitted)",
-      "artifact_sha256": "e5775241e8e1ceedde751d47a2fce05ffdf53e39ff9b05ec4ee2dff6f2027df1",
+      "artifact": "scanner SDK 0.7.0 Maven ZIP / maven/dev/offlinescan/scanner-core/0.7.0/scanner-core-0.7.0.jar",
+      "artifact_sha256": "355b2ebb56775fc1ac74d7ac6a3ab7e1604a36a5b8630ea4a94b0b9c912f9ce1",
       "embedded_notice_files": [],
       "license_texts": [
         {
           "name": "Apache License, Version 2.0",
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/Apache_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
     },
     {
       "coordinate": "dev.offlinescan:scanner-export",
-      "version": "0.1.0-rc11",
-      "pom_source": "local source file (path omitted)",
+      "version": "0.7.0",
+      "pom_source": "scanner SDK 0.7.0 Maven ZIP / maven/dev/offlinescan/scanner-export/0.7.0/scanner-export-0.7.0.pom",
       "pom_chain": [
-        "local source file (path omitted)"
+        "scanner SDK 0.7.0 Maven ZIP / maven/dev/offlinescan/scanner-export/0.7.0/scanner-export-0.7.0.pom"
       ],
-      "pom_sha256": "167b90486362a2f55507270a91e0334e3607c7e381740e02afc63c8a662cdb58",
+      "pom_sha256": "700074b879b6aeb84b00a75feb7b8de49298b01c301c92999abd92c1fc9aa562",
       "license_status": "declared",
       "licenses": [
         {
@@ -4628,27 +4628,27 @@
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": "local source file (path omitted)",
-      "artifact_sha256": "1d48892214112b3193c9f953dbd8d62ef1e2911e3bccd73827779ccf33b2123a",
+      "artifact": "scanner SDK 0.7.0 Maven ZIP / maven/dev/offlinescan/scanner-export/0.7.0/scanner-export-0.7.0.aar",
+      "artifact_sha256": "29556167b61b199da66349d4e2a08a22ec209cbf26d8d793b5316208991e5970",
       "embedded_notice_files": [],
       "license_texts": [
         {
           "name": "Apache License, Version 2.0",
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/Apache_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
     },
     {
       "coordinate": "dev.offlinescan:scanner-processing-opencv",
-      "version": "0.1.0-rc11",
-      "pom_source": "local source file (path omitted)",
+      "version": "0.7.0",
+      "pom_source": "scanner SDK 0.7.0 Maven ZIP / maven/dev/offlinescan/scanner-processing-opencv/0.7.0/scanner-processing-opencv-0.7.0.pom",
       "pom_chain": [
-        "local source file (path omitted)"
+        "scanner SDK 0.7.0 Maven ZIP / maven/dev/offlinescan/scanner-processing-opencv/0.7.0/scanner-processing-opencv-0.7.0.pom"
       ],
-      "pom_sha256": "5a5c09457b68c281cb76bcb3ea16aee74d3dae58605717226557a7b69a51a0ea",
+      "pom_sha256": "85a515a73a904ecb524520d14bd8f31cf573d25ce9ccbde5f6f3e15ebd2d0cb1",
       "license_status": "declared",
       "licenses": [
         {
@@ -4656,14 +4656,38 @@
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": "local source file (path omitted)",
-      "artifact_sha256": "655d7274c2c22b7bece152a3048a22b676a69150b21dd4c559e78d068b532ea4",
+      "artifact": "scanner SDK 0.7.0 Maven ZIP / maven/dev/offlinescan/scanner-processing-opencv/0.7.0/scanner-processing-opencv-0.7.0.aar",
+      "artifact_sha256": "390c873ce6db66c1cadb7134d1ce55c62bb9200ae93718bb25eec393b0d09d89",
       "embedded_notice_files": [
+        {
+          "archive_entry": "assets/offline-scanner-notices/Android-NDK-NOTICE.toolchain.txt",
+          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/offline-scanner-notices/Android-NDK-NOTICE.toolchain.txt",
+          "sha256": "789714a9076571c580cf531bdcebec776a4d889c12c3c1108adafc6e4338710a",
+          "size_bytes": 799639
+        },
+        {
+          "archive_entry": "assets/offline-scanner-notices/Android-NDK-NOTICE.txt",
+          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/offline-scanner-notices/Android-NDK-NOTICE.txt",
+          "sha256": "faf0dc52cf6ce9ab09a04b0c074a378dd2565ee1ed9bc1179d83793bcdba012e",
+          "size_bytes": 516438
+        },
         {
           "archive_entry": "assets/offline-scanner-notices/NOTICE",
           "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/offline-scanner-notices/NOTICE",
           "sha256": "ff933d54e05dc6311121169d8e628c83b4b22c4765e2df5989b20f256b47d6c0",
           "size_bytes": 472
+        },
+        {
+          "archive_entry": "assets/offline-scanner-notices/OpenCV-LICENSE.txt",
+          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/offline-scanner-notices/OpenCV-LICENSE.txt",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "size_bytes": 11358
+        },
+        {
+          "archive_entry": "assets/offline-scanner-notices/OpenCV-core-imgproc-java-SOURCE-NOTICES.txt",
+          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/offline-scanner-notices/OpenCV-core-imgproc-java-SOURCE-NOTICES.txt",
+          "sha256": "266449046c916ece845706adbc237d5325dce7855cf6e1f7a479e15cce15f287",
+          "size_bytes": 1268486
         },
         {
           "archive_entry": "assets/offline-scanner-notices/THIRD-PARTY-NOTICES.md",
@@ -4672,16 +4696,46 @@
           "size_bytes": 3074
         },
         {
+          "archive_entry": "assets/offline-scanner-notices/libyuv-LICENSE.txt",
+          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/offline-scanner-notices/libyuv-LICENSE.txt",
+          "sha256": "2b2cc1180c7e6988328ad2033b04b80117419db9c4c584918bbb3cfec7e9364f",
+          "size_bytes": 1506
+        },
+        {
           "archive_entry": "assets/third_party_licenses/docquad/LICENSE.txt",
           "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/third_party_licenses/docquad/LICENSE.txt",
           "sha256": "e1ee574b63dcde94cbee75a53aefed0a3f3bcf0966464cad85a8968b052ce13a",
           "size_bytes": 11679
         },
         {
+          "archive_entry": "assets/third_party_licenses/docquad/README.txt",
+          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/third_party_licenses/docquad/README.txt",
+          "sha256": "67cab6fb0f6748c32587840830e3dcf3babc6155e7f00f0864c3e5d1b61e884b",
+          "size_bytes": 2188
+        },
+        {
+          "archive_entry": "assets/third_party_licenses/docquad/UPSTREAM-NOTICE.txt",
+          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/third_party_licenses/docquad/UPSTREAM-NOTICE.txt",
+          "sha256": "4a2935e00dfcb9aaa612706153108ce2f2ee3c6e39b05b67c956660c2a492fe9",
+          "size_bytes": 12261
+        },
+        {
           "archive_entry": "assets/third_party_licenses/onnxruntime/LICENSE.txt",
           "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/third_party_licenses/onnxruntime/LICENSE.txt",
           "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c",
           "size_bytes": 1073
+        },
+        {
+          "archive_entry": "assets/third_party_licenses/onnxruntime/README.txt",
+          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/third_party_licenses/onnxruntime/README.txt",
+          "sha256": "0faf4e2e796c8b01dc70dcb466b7c030dbd21677cb53b70405d6ecaf5276d30a",
+          "size_bytes": 655
+        },
+        {
+          "archive_entry": "assets/third_party_licenses/onnxruntime/ThirdPartyNotices.txt",
+          "path": "embedded/dev_offlinescan_scanner-processing-opencv/assets/third_party_licenses/onnxruntime/ThirdPartyNotices.txt",
+          "sha256": "0e07b95f3a8d6230037707c5c4a2b554d12c4cb67369669ac255635528ffcee2",
+          "size_bytes": 325054
         }
       ],
       "license_texts": [
@@ -4689,19 +4743,19 @@
           "name": "Apache License, Version 2.0",
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/Apache_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
     },
     {
       "coordinate": "dev.offlinescan:scanner-ui-compose",
-      "version": "0.1.0-rc11",
-      "pom_source": "local source file (path omitted)",
+      "version": "0.7.0",
+      "pom_source": "scanner SDK 0.7.0 Maven ZIP / maven/dev/offlinescan/scanner-ui-compose/0.7.0/scanner-ui-compose-0.7.0.pom",
       "pom_chain": [
-        "local source file (path omitted)"
+        "scanner SDK 0.7.0 Maven ZIP / maven/dev/offlinescan/scanner-ui-compose/0.7.0/scanner-ui-compose-0.7.0.pom"
       ],
-      "pom_sha256": "37d81c5d63bc3bf85eb9b02c779be0f9a3f7f4a52d51b1534df54a84ad4b11ac",
+      "pom_sha256": "2232eec5d9652cbbb662f31ca2a2820b73b6c9e1acf5d43bce881b65c76ae4a5",
       "license_status": "declared",
       "licenses": [
         {
@@ -4709,15 +4763,15 @@
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": "local source file (path omitted)",
-      "artifact_sha256": "a040cb7811779dec073735499ad9268f91c0e8f2c2bdc1682a0dd3b1af359839",
+      "artifact": "scanner SDK 0.7.0 Maven ZIP / maven/dev/offlinescan/scanner-ui-compose/0.7.0/scanner-ui-compose-0.7.0.aar",
+      "artifact_sha256": "8fe9f1e7591e806e9319a3745faaa1bb78dc2678f3adb907460c4571b0d55edc",
       "embedded_notice_files": [],
       "license_texts": [
         {
           "name": "Apache License, Version 2.0",
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/Apache_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4749,7 +4803,7 @@
           "name": "Apache-2.0",
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/Apache-2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         },
         {
@@ -4825,7 +4879,7 @@
           "name": "The Apache License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4853,7 +4907,7 @@
           "name": "The Apache License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4881,7 +4935,7 @@
           "name": "Apache-2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/Apache-2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4909,7 +4963,7 @@
           "name": "Apache-2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/Apache-2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4937,7 +4991,7 @@
           "name": "The Apache License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4965,7 +5019,7 @@
           "name": "The Apache License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -4993,7 +5047,7 @@
           "name": "Apache-2.0",
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/Apache-2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -5021,7 +5075,7 @@
           "name": "Apache-2.0",
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/Apache-2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -5049,7 +5103,7 @@
           "name": "Apache-2.0",
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/Apache-2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -5077,7 +5131,7 @@
           "name": "Apache-2.0",
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/Apache-2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -5105,7 +5159,7 @@
           "name": "Apache-2.0",
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/Apache-2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -5133,7 +5187,7 @@
           "name": "Apache-2.0",
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/Apache-2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -5161,7 +5215,7 @@
           "name": "Apache-2.0",
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/Apache-2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -5189,7 +5243,7 @@
           "name": "Apache-2.0",
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/Apache-2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -5217,7 +5271,7 @@
           "name": "Apache-2.0",
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/Apache-2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -5245,7 +5299,7 @@
           "name": "The Apache Software License, Version 2.0",
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_Software_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]
@@ -5273,7 +5327,7 @@
           "name": "The Apache License, Version 2.0",
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/The_Apache_License_Version_2.0.txt",
-          "source": "scanner-library-reference / LICENSE",
+          "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
         }
       ]

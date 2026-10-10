@@ -171,6 +171,7 @@ fun VaultRoute(
             onDismissPreview = vaultViewModel::dismissPreview,
             onOpenWithPreview = { openWith(null) },
             onSavePreviewText = vaultViewModel::savePreviewText,
+            onSavePreviewTextRange = vaultViewModel::savePreviewTextRange,
             onUp = vaultViewModel::up,
             onLock = ::lockVault,
             onRetry = vaultViewModel::retry,
@@ -500,6 +501,7 @@ fun VaultScreen(
                 saving = state.previewSaving,
                 saveError = state.previewSaveError,
                 onSaveText = callbacks.onSavePreviewText,
+                onSaveRange = callbacks.onSavePreviewTextRange,
                 onOpenWith = callbacks.onOpenWithPreview,
                 onDismiss = callbacks.onDismissPreview,
             )
@@ -809,11 +811,16 @@ private fun VaultPreviewDialog(
     saving: Boolean,
     saveError: VaultRouteError?,
     onSaveText: (VaultRoutePreview, ByteArray) -> Unit,
+    onSaveRange: (VaultRoutePreview, Long, Long, ByteArray) -> Unit,
     onOpenWith: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     if (preview.kind == VaultPreviewKind.TEXT) {
-        EncryptedTextPreviewDialog(preview, saving, saveError, onSaveText, onDismiss, onOpenWith)
+        if (preview.backing != null) {
+            EncryptedPagedTextPreview(preview, saving, saveError, onSaveRange, onDismiss, onOpenWith)
+        } else {
+            EncryptedTextPreviewDialog(preview, saving, saveError, onSaveText, onDismiss, onOpenWith)
+        }
         return
     }
     BackHandler(onBack = onDismiss)
@@ -843,7 +850,7 @@ private fun VaultPreviewDialog(
             ) {
                 when (preview.kind) {
                     VaultPreviewKind.IMAGE -> {
-                        val owner = remember(preview.bytes) { OwnedBitmap() }
+                        val owner = remember(preview.bytes, preview.backing) { OwnedBitmap() }
                         DisposableEffect(owner) { onDispose { owner.close() } }
                         var decoded by remember(owner) { mutableStateOf(DecodedBitmap(false, null)) }
                         LaunchedEffect(owner) {
@@ -851,7 +858,9 @@ private fun VaultPreviewDialog(
                             var bitmap: Bitmap? = null
                             try {
                                 // Cancellation may discard withContext's result on its return dispatch.
-                                withContext(Dispatchers.Default) { bitmap = decodeBoundedBitmap(copy) }
+                                withContext(Dispatchers.IO) {
+                                    bitmap = preview.backing?.let(::decodeBoundedBitmap) ?: decodeBoundedBitmap(copy)
+                                }
                                 currentCoroutineContext().ensureActive()
                                 val ready = bitmap
                                 if (ready != null && !owner.adopt(ready)) return@LaunchedEffect
@@ -870,7 +879,7 @@ private fun VaultPreviewDialog(
                             VaultPreviewImage(requireNotNull(decoded.bitmap), preview.title)
                         }
                     }
-                    VaultPreviewKind.PDF -> EncryptedPdfPreview(preview.bytes)
+                    VaultPreviewKind.PDF -> EncryptedPdfPreview(preview.bytes, encryptedBacking = preview.backing)
                     else -> Text(stringResource(R.string.vault_preview_unavailable))
                 }
             }
@@ -899,6 +908,32 @@ private fun VaultPreviewImage(
                 scaleY = scale
                 translationX = offset.x
                 translationY = offset.y
+            },
+        )
+    }
+}
+
+internal fun decodeBoundedBitmap(
+    backing: EncryptedPreviewBacking,
+    maximumDimension: Int = MAX_IMAGE_DIMENSION,
+): Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    backing.inputStream().use { BitmapFactory.decodeStream(it, null, bounds) }
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    var sample = 1
+    while (bounds.outWidth / sample > maximumDimension ||
+        bounds.outHeight / sample > maximumDimension ||
+        bounds.outWidth.toLong() * bounds.outHeight / (sample.toLong() * sample) > MAX_DECODED_PIXELS
+    ) {
+        sample *= 2
+    }
+    return backing.inputStream().use { input ->
+        BitmapFactory.decodeStream(
+            input,
+            null,
+            BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = Bitmap.Config.ARGB_8888
             },
         )
     }
@@ -1069,6 +1104,7 @@ data class VaultRoutePreview(
     val bytes: ByteArray,
     val kind: VaultPreviewKind,
     val editable: Boolean = false,
+    val backing: EncryptedPreviewBacking? = null,
 )
 
 data class VaultRouteState(
@@ -1114,6 +1150,12 @@ data class VaultRouteCallbacks(
     val onDismissPreview: () -> Unit,
     val onOpenWithPreview: () -> Unit = {},
     val onSavePreviewText: (VaultRoutePreview, ByteArray) -> Unit = { _, bytes -> bytes.fill(0) },
+    val onSavePreviewTextRange: (
+        VaultRoutePreview,
+        Long,
+        Long,
+        ByteArray,
+    ) -> Unit = { _, _, _, bytes -> bytes.fill(0) },
     val onLoadThumbnail: suspend (String) -> ByteArray? = { null },
     val onUp: () -> Unit,
     val onLock: () -> Unit,

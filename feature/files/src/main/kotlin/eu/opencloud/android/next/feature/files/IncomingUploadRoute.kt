@@ -72,22 +72,17 @@ fun IncomingUploadRoute(
         ) {
             if (state.busy) {
                 CircularProgressIndicator()
-                Text(
-                    if (state.destinationLocked) {
-                        stringResource(
-                            R.string.document_preparing_uploads,
-                        )
-                    } else {
-                        stringResource(R.string.document_saving_shared)
-                    },
-                )
+                Text(stringResource(R.string.document_preparing_uploads))
             }
             state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             Text(
-                pluralStringResource(R.plurals.document_incoming_files, state.files.size, state.files.size),
+                pluralStringResource(R.plurals.document_incoming_files, state.sourceCount, state.sourceCount),
                 style = MaterialTheme.typography.titleMedium,
             )
             Text(state.files.take(3).joinToString { it.name }, maxLines = 3)
+            if (!state.busy && state.files.isEmpty() && state.sourceCount > 0) {
+                Text(stringResource(R.string.document_shared_copy_on_upload))
+            }
             if (!state.busy &&
                 state.accounts.isEmpty()
             ) {
@@ -103,7 +98,7 @@ fun IncomingUploadRoute(
             Button(
                 onClick = viewModel::upload,
                 enabled =
-                    !state.busy && state.spaceId != null && state.files.isNotEmpty(),
+                    !state.busy && state.spaceId != null && state.sourceCount > 0,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(

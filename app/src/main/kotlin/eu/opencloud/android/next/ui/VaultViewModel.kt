@@ -3,6 +3,7 @@ package eu.opencloud.android.next.ui
 import android.app.Application
 import android.app.KeyguardManager
 import android.content.ContentResolver
+import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
@@ -38,6 +39,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.nio.ByteBuffer
@@ -577,9 +579,26 @@ class VaultViewModel internal constructor(
     fun savePreviewText(
         preview: VaultRoutePreview,
         bytes: ByteArray,
+    ) = savePreviewTextContent(preview, bytes)
+
+    fun savePreviewTextRange(
+        preview: VaultRoutePreview,
+        offset: Long,
+        length: Long,
+        bytes: ByteArray,
+    ) = savePreviewTextContent(preview, bytes, offset, length)
+
+    @Suppress("TooGenericExceptionCaught") // Server, stream and crypto failures share cancellation-safe cleanup.
+    private fun savePreviewTextContent(
+        preview: VaultRoutePreview,
+        bytes: ByteArray,
+        offset: Long? = null,
+        length: Long = 0,
     ) {
         val request = loadedPreviewRequest
-        if (request == null || !canSavePreview(preview, request)) {
+        val backing = preview.backing
+        val rangeValid = validPreviewTextRange(backing, offset, length, bytes.size)
+        if (request == null || !canSavePreview(preview, request) || !rangeValid) {
             bytes.fill(0)
             return
         }
@@ -594,8 +613,25 @@ class VaultViewModel internal constructor(
             viewModelScope.launch {
                 try {
                     withContext(ioDispatcher) {
-                        ByteArrayInputStream(bytes).use { input ->
-                            request.session.replaceText(request.remoteEntry, input, bytes.size.toLong())
+                        val input =
+                            if (offset == null) {
+                                ByteArrayInputStream(bytes)
+                            } else {
+                                EncryptedTextReplacementStream(
+                                    requireNotNull(backing).inputStream(),
+                                    offset,
+                                    length,
+                                    bytes,
+                                )
+                            }
+                        input.use {
+                            val total =
+                                if (offset == null) {
+                                    bytes.size.toLong()
+                                } else {
+                                    requireNotNull(backing).size - length + bytes.size
+                                }
+                            request.session.replaceText(request.remoteEntry, it, total)
                         }
                     }
                     if (!isCurrent(token, request.account) || session !== request.session) return@launch
@@ -627,6 +663,22 @@ class VaultViewModel internal constructor(
         // Also covers cancellation before the launched coroutine has entered its try/finally.
         operationJob?.invokeOnCompletion { bytes.fill(0) }
     }
+
+    private fun validPreviewTextRange(
+        backing: EncryptedPreviewBacking?,
+        offset: Long?,
+        length: Long,
+        replacementSize: Int,
+    ): Boolean =
+        offset == null ||
+            runCatching {
+                val size = requireNotNull(backing).size
+                offset >= 0 &&
+                    length >= 0 &&
+                    offset <= size &&
+                    length <= size - offset &&
+                    replacementSize.toLong() <= Long.MAX_VALUE - (size - length)
+            }.getOrDefault(false)
 
     private fun canSavePreview(
         preview: VaultRoutePreview,
@@ -1486,18 +1538,27 @@ class VaultViewModel internal constructor(
         return contentsRequest(entry.path)
     }
 
-    /** Visible-row previews are memory-only and become unusable when their originating lease changes. */
+    /** Decoded thumbnails stay in memory and become unusable when their originating lease changes. */
     @Suppress("TooGenericExceptionCaught") // Optional thumbnails must not block directory browsing.
     suspend fun loadThumbnail(id: String): ByteArray? {
         val request = thumbnailRequest(id) ?: return null
         var bytes: ByteArray? = null
         return try {
-            bytes =
-                thumbnailMutex.withLock {
-                    if (isThumbnailCurrent(request)) request.session.preview(request.entry.remote) else null
-                }
-            if (bytes != null && bytes.size <= MAX_VAULT_IMAGE_BYTES && isThumbnailCurrent(request)) {
-                bytes.also { bytes = null }
+            withContext(ioDispatcher) {
+                bytes =
+                    thumbnailMutex.withLock {
+                        if (!isThumbnailCurrent(request)) return@withLock null
+                        if (!isVaultVideo(request.entry.route.name) &&
+                            request.entry.route.size <= IN_MEMORY_PREVIEW_BYTES
+                        ) {
+                            return@withLock request.session.preview(request.entry.remote)
+                        }
+                        streamedThumbnail(request)
+                    }
+            }
+            val ready = bytes
+            if (ready != null && ready.size <= MAX_VAULT_IMAGE_BYTES && isThumbnailCurrent(request)) {
+                ready.also { bytes = null }
             } else {
                 null
             }
@@ -1510,13 +1571,38 @@ class VaultViewModel internal constructor(
         }
     }
 
+    private suspend fun streamedThumbnail(request: ThumbnailRequest): ByteArray? {
+        val backing = EncryptedPreviewBacking.create(getApplication()) { isThumbnailCurrent(request) }
+        return try {
+            request.session.download(request.entry.remote, backing.outputStream(), Long.MAX_VALUE)
+            backing.seal()
+            val bitmap =
+                if (isVaultVideo(request.entry.route.name)) {
+                    loadEncryptedVideoThumbnail(getApplication(), backing)
+                } else {
+                    decodeBoundedBitmap(backing, maximumDimension = 256)
+                }
+            bitmap?.let(::encodeThumbnail)
+        } finally {
+            backing.close()
+        }
+    }
+
+    private fun encodeThumbnail(bitmap: Bitmap): ByteArray? =
+        try {
+            ByteArrayOutputStream().use { output ->
+                if (bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) output.toByteArray() else null
+            }
+        } finally {
+            bitmap.recycle()
+        }
+
     @Suppress("ReturnCount") // Reject unsupported images before decrypting or allocating thumbnail data.
     private fun thumbnailRequest(id: String): ThumbnailRequest? {
         if (mutableState.value.mode != VaultRouteMode.CONTENTS || mutableState.value.loading) return null
         val entry = findEntry(id) ?: return null
         if (entry.route.isFolder ||
-            previewKind(entry.route.name) != VaultPreviewKind.IMAGE ||
-            entry.route.size > MAX_VAULT_IMAGE_BYTES
+            (previewKind(entry.route.name) != VaultPreviewKind.IMAGE && !isVaultVideo(entry.route.name))
         ) {
             return null
         }
@@ -1544,8 +1630,8 @@ class VaultViewModel internal constructor(
         val entry = presented.route
         if (entry.isFolder) return null
         val kind = previewKind(entry.name)
-        val maximumBytes = kind.maximumEncryptedBytes() ?: return failPreviewRequest()
-        if (entry.size > maximumBytes) return failPreviewRequest()
+        if (kind == VaultPreviewKind.UNSUPPORTED) return failPreviewRequest()
+        val maximumBytes = Long.MAX_VALUE
         val opened = session ?: return null
         val account = accountId ?: return null
         return VaultPreviewRequest(
@@ -1565,10 +1651,46 @@ class VaultViewModel internal constructor(
     }
 
     // These boundaries expose heterogeneous failures; CancellationException is rethrown explicitly.
-    @Suppress("TooGenericExceptionCaught")
+    // Early exits reject stale or unsupported previews before publication.
+    @Suppress("TooGenericExceptionCaught", "ReturnCount", "CyclomaticComplexMethod")
     private suspend fun loadPreview(request: VaultPreviewRequest) {
         var bytes: ByteArray? = null
+        var backing: EncryptedPreviewBacking? = null
         try {
+            val memoryThreshold =
+                if (request.kind == VaultPreviewKind.TEXT) {
+                    minOf(IN_MEMORY_PREVIEW_BYTES, MAX_VAULT_EDIT_TEXT_BYTES)
+                } else {
+                    IN_MEMORY_PREVIEW_BYTES
+                }
+            if (request.remoteEntry.size > memoryThreshold) {
+                backing =
+                    EncryptedPreviewBacking.create(getApplication()) {
+                        accountId == request.account && session === request.session && routeActive
+                    }
+                request.session.download(request.remoteEntry, backing.outputStream(), Long.MAX_VALUE)
+                backing.seal()
+                if (!isCurrent(request.token, request.account) || session !== request.session) return
+                loadedPreviewRequest = request
+                mutableState.value =
+                    mutableState.value.copy(
+                        loading = false,
+                        error = null,
+                        preview =
+                            VaultRoutePreview(
+                                request.title,
+                                ByteArray(0),
+                                request.kind,
+                                editable =
+                                    request.kind == VaultPreviewKind.TEXT &&
+                                        !request.session.isOffline &&
+                                        request.remoteEntry.strongETag != null,
+                                backing = backing,
+                            ),
+                    )
+                backing = null
+                return
+            }
             bytes = request.session.preview(request.remoteEntry)
             if (
                 bytes.size > request.maximumBytes ||
@@ -1598,7 +1720,6 @@ class VaultViewModel internal constructor(
                             kind,
                             editable =
                                 kind == VaultPreviewKind.TEXT &&
-                                    bytes.size <= MAX_VAULT_EDIT_TEXT_BYTES &&
                                     !request.session.isOffline &&
                                     request.remoteEntry.strongETag != null,
                         ),
@@ -1614,6 +1735,7 @@ class VaultViewModel internal constructor(
             )
         } finally {
             bytes?.fill(0)
+            backing?.close()
         }
     }
 
@@ -2131,9 +2253,10 @@ class VaultViewModel internal constructor(
     private fun clearPreview() {
         loadedPreviewRequest = null
         mutableState.value = mutableState.value.copy(previewSaving = false, previewSaveError = null)
-        mutableState.value.preview
-            ?.bytes
-            ?.fill(0)
+        mutableState.value.preview?.let { preview ->
+            preview.bytes.fill(0)
+            preview.backing?.close()
+        }
     }
 
     private fun clearVerifiedKeyMaterial() {
@@ -2518,7 +2641,7 @@ private class AndroidVaultOfferPreferences(
 
 private fun ByteArray.toHex(): String = joinToString(separator = "") { byte -> "%02x".format(byte) }
 
-private const val MAX_VAULT_TEXT_BYTES = 256 * 1024
+private const val IN_MEMORY_PREVIEW_BYTES = 8 * 1024 * 1024
 private const val MAX_VAULT_IMAGE_BYTES = 8 * 1024 * 1024
 
 internal fun classifyVaultFailure(
@@ -2634,19 +2757,8 @@ private fun readDocumentMetadata(
     )
 }
 
-private fun VaultPreviewKind.maximumEncryptedBytes(): Long? =
-    when (this) {
-        VaultPreviewKind.TEXT -> MAX_VAULT_TEXT_BYTES + 65_584L
-        VaultPreviewKind.IMAGE, VaultPreviewKind.PDF -> MAX_VAULT_IMAGE_BYTES.toLong()
-        VaultPreviewKind.UNSUPPORTED -> null
-    }
-
 private fun VaultPreviewKind.decodedKind(size: Int): VaultPreviewKind =
-    when {
-        this == VaultPreviewKind.TEXT && size <= MAX_VAULT_TEXT_BYTES -> VaultPreviewKind.TEXT
-        this in setOf(VaultPreviewKind.IMAGE, VaultPreviewKind.PDF) && size <= MAX_VAULT_IMAGE_BYTES -> this
-        else -> VaultPreviewKind.UNSUPPORTED
-    }
+    if (size >= 0) this else VaultPreviewKind.UNSUPPORTED
 
 private class AndroidOfflineVaultRouteSession(
     private val session: VaultOfflineSession,
@@ -2701,7 +2813,8 @@ internal fun encryptedPlaintextSize(ciphertextSize: Long): Long? {
     return if (remainder in 1..16) null else (payload / 65552) * 65536 + if (remainder == 0L) 0 else remainder - 16
 }
 
-internal const val MAX_VAULT_EDIT_TEXT_BYTES = 256 * 1024
+internal val MAX_VAULT_EDIT_TEXT_BYTES: Int
+    get() = (Runtime.getRuntime().maxMemory() / 16).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
 
 internal fun validEditableText(bytes: ByteArray): Boolean {
     if (bytes.size > MAX_VAULT_EDIT_TEXT_BYTES) return false
@@ -2719,3 +2832,7 @@ internal fun validEditableText(bytes: ByteArray): Boolean {
         false
     }
 }
+
+private fun isVaultVideo(name: String): Boolean =
+    name.substringAfterLast('.', "").lowercase(java.util.Locale.ROOT) in
+        setOf("mp4", "m4v", "mov", "webm", "mkv", "3gp", "avi", "mpeg", "mpg")

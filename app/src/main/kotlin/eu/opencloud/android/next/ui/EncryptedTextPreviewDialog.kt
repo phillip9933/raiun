@@ -228,4 +228,5 @@ private fun encodeStrictText(text: String): ByteArray? {
     }.getOrNull()
 }
 
-private const val MAX_TEXT_PREVIEW_BYTES = 256 * 1024
+private val MAX_TEXT_PREVIEW_BYTES: Int
+    get() = MAX_VAULT_EDIT_TEXT_BYTES

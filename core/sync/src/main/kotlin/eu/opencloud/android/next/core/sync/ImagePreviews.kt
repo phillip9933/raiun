@@ -3,6 +3,8 @@ package eu.opencloud.android.next.core.sync
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
+import android.os.Build
 import android.util.LruCache
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
@@ -19,7 +21,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.util.concurrent.TimeUnit
 
-/** Small image previews; never fall back to downloading full cloud files for a thumbnail. */
+/** Small image and video previews; never fall back to downloading full cloud files for a thumbnail. */
 object ImagePreviews {
     private val slots = Semaphore(3)
     private val cache =
@@ -64,15 +66,13 @@ object ImagePreviews {
                 val bitmap =
                     if (local != null) {
                         LocalCopyLease.read(local) {
-                            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                            BitmapFactory.decodeFile(local.path, bounds)
-                            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@read null
-                            val options =
-                                BitmapFactory.Options().apply {
-                                    inSampleSize =
-                                        sampleSize(bounds.outWidth, bounds.outHeight)
-                                }
-                            BitmapFactory.decodeFile(local.path, options)
+                            if (resource.isVideoPreview()) {
+                                loadLocalVideoFrame(
+                                    local.path,
+                                )
+                            } else {
+                                loadLocalImage(local.path)
+                            }
                         }
                     } else {
                         loadCloudPreview(context, resource, space, account)
@@ -129,6 +129,29 @@ object ImagePreviews {
         }
     }
 
+    private fun loadLocalImage(path: String): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(path, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        val options =
+            BitmapFactory.Options().apply {
+                inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight)
+            }
+        return BitmapFactory.decodeFile(path, options)
+    }
+
+    /** API 27+ can request a scaled frame without materializing the source frame at full resolution. */
+    private fun loadLocalVideoFrame(path: String): Bitmap? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) return null
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(path)
+            retriever.getScaledFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 256, 256)
+        } finally {
+            retriever.release()
+        }
+    }
+
     private fun previewUrl(
         root: okhttp3.HttpUrl,
         resource: ResourceEntity,
@@ -157,3 +180,8 @@ object ImagePreviews {
         return sample
     }
 }
+
+fun ResourceEntity.isVideoPreview(): Boolean =
+    mimeType?.substringBefore(';')?.startsWith("video/", ignoreCase = true) == true ||
+        name.substringAfterLast('.', "").lowercase() in
+        setOf("3gp", "avi", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "webm")

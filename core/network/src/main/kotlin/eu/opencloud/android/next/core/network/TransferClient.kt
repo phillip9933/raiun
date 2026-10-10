@@ -63,6 +63,42 @@ class TransferClient(
         }
     }
 
+    /** Optional DAV checksum for the exact version already accepted by a conditional GET. */
+    fun downloadChecksum(
+        url: String,
+        authorization: String,
+        expectation: DownloadExpectation,
+    ): Pair<String, String>? {
+        val version = expectation.strongETag ?: return null
+        val properties =
+            """<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:prop><d:resourcetype/><d:getcontentlength/><d:getetag/><oc:checksums/></d:prop></d:propfind>"""
+        val request =
+            Request
+                .Builder()
+                .url(url)
+                .header("Authorization", authorization)
+                .header("Depth", "0")
+                .header("Cache-Control", "no-cache")
+                .method("PROPFIND", properties.toRequestBody("application/xml".toMediaType()))
+                .build()
+        return execute(request, metadata = true).use { response ->
+            if (response.code in setOf(405, 501)) return@use null
+            requireSuccessful(response, setOf(207))
+            val xml = response.readBoundedMetadata(64 * 1024)
+            if (xml.contains("<!DOCTYPE", true) || xml.contains("<!ENTITY", true)) {
+                throw OpenCloudException(OpenCloudError.InvalidResponse)
+            }
+            val metadata = parseDavObject(xml, url, strictChecksumStatus = true)
+            if (metadata.folder || metadata.size != expectation.length || metadata.eTag != version) {
+                throw OpenCloudException(OpenCloudError.PreconditionFailed)
+            }
+            listOf("SHA-256", "SHA-1", "MD5")
+                .firstNotNullOfOrNull { algorithm ->
+                    metadata.checksums[algorithm]?.let { algorithm to it }
+                }
+        }
+    }
+
     @Suppress("LongParameterList")
     fun upload(
         url: String,
@@ -421,9 +457,12 @@ class TransferClient(
 
     // Drop causes deliberately: network and source exceptions can contain credentials and paths.
     @Suppress("TooGenericExceptionCaught", "SwallowedException")
-    private fun execute(request: Request): Response =
+    private fun execute(
+        request: Request,
+        metadata: Boolean = false,
+    ): Response =
         try {
-            client.newCall(request).execute()
+            (if (metadata) client.withMetadataDeadline() else client).newCall(request).execute()
         } catch (exception: CancellationException) {
             throw exception
         } catch (exception: java.net.SocketException) {

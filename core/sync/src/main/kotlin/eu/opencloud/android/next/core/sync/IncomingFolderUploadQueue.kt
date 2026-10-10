@@ -3,6 +3,7 @@ package eu.opencloud.android.next.core.sync
 import android.content.Context
 import androidx.room.withTransaction
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
+import eu.opencloud.android.next.core.database.FolderBackupEntity
 import eu.opencloud.android.next.core.database.SharedFolderCacheStore
 import eu.opencloud.android.next.core.database.TransferEntity
 import eu.opencloud.android.next.core.network.OpenCloudError
@@ -21,6 +22,7 @@ class IncomingFolderUploadQueue(
     suspend fun enqueue(
         request: SharedFolderRequest,
         transfer: TransferEntity,
+        backup: FolderBackupEntity? = null,
     ): TransferEntity {
         validate(transfer)
         require(transfer.state == "QUEUED" && transfer.workId == null && transfer.attemptCount == 0)
@@ -29,6 +31,17 @@ class IncomingFolderUploadQueue(
         val destination = resolver.prepare(request)
         return database.withTransaction {
             requireCurrent(destination, transfer.destinationPath)
+            if (backup != null) {
+                require(backup.enabled && database.folderBackupDao().findById(backup.id) == backup) {
+                    "The backup configuration changed."
+                }
+                require(backup.destinationKind == "SHARED_FOLDER" && backup.accountId == request.account)
+                require(backup.spaceId == request.scope && backup.sharedShareId == request.share)
+                require(
+                    transfer.destinationPath.startsWith(backup.destinationPath.trimEnd('/') + "/") ||
+                        backup.destinationPath == "/",
+                )
+            }
             val duplicate =
                 transfers.findActiveUpload(
                     transfer.accountId,

@@ -10,13 +10,12 @@ Start with [README](../README.md) for installation and current beta limits, and 
 | [Scanner SDK](OFFLINE-SCANNER-SDK.md) | Pinned dependency setup and host ownership |
 | [Screenshot testing](SCREENSHOT_TESTING.md) | Golden ownership and review |
 | [Release procedure](RELEASING.md) | Packaging, signing continuity and release checks |
-| [Release notes](RELEASE-NOTES-0.9.0.md) | Current beta behavior, limits and handoff disclosure |
+| [Release notes](RELEASE-NOTES-0.9.1.md) | Current beta behavior, limits and handoff disclosure |
 | [Changelog](../CHANGELOG.md) | Version history |
 | [Encrypted security review](ENCRYPTED-SECURITY-REVIEW.md) | Encryption compatibility, local key handling and explicit plaintext handoff boundaries |
 | [Security](../SECURITY.md) and [Privacy](../PRIVACY.md) | Reporting and data-handling boundaries |
 | [Third-party notices](../THIRD-PARTY-NOTICES.md) | Dependency declarations and retained evidence |
 | [Phase 0 architecture proposal](ARCHITECTURE.md) | Historical design intent, not the current module inventory |
-| [Reengineering analysis](../ocis-architecture-reengineering.md) | Historical reference analysis |
 
 ## Repository layout
 

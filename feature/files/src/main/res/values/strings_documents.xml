@@ -26,6 +26,7 @@
     <string name="document_upload_title">Upload with Raiun</string>
     <string name="document_preparing_uploads">Preparing uploads…</string>
     <string name="document_saving_shared">Saving shared files…</string>
+    <string name="document_shared_copy_on_upload">Shared files will be copied after you choose a destination and tap Upload.</string>
     <string name="document_sign_in_to_share">Open Raiun and sign in, then share these files again.</string>
     <string name="document_retry_uploads">Retry uploads</string>
     <string name="document_upload_here">Upload here</string>

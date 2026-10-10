@@ -39,6 +39,8 @@ sealed interface OpenCloudError {
 
     data object PreconditionFailed : OpenCloudError
 
+    data object DownloadIntegrity : OpenCloudError
+
     data object InvalidResponse : OpenCloudError
 
     data object QuotaExceeded : OpenCloudError
@@ -180,6 +182,7 @@ fun OpenCloudError.safeMessage(): String =
         OpenCloudError.NotFound -> "The remote item was not found."
         OpenCloudError.Conflict -> "An item with this name already exists."
         OpenCloudError.PreconditionFailed -> "The remote item changed. Refresh before trying again."
+        OpenCloudError.DownloadIntegrity -> "The downloaded file could not be verified. Try downloading it again."
         OpenCloudError.InvalidResponse -> "The server returned incomplete or unexpected metadata."
         OpenCloudError.QuotaExceeded -> "The server has insufficient storage."
         OpenCloudError.LocalStorage -> "The device has insufficient storage."
@@ -217,6 +220,7 @@ fun OpenCloudError.safeMessage(context: Context): String =
         OpenCloudError.NotFound -> context.getString(R.string.error_not_found)
         OpenCloudError.Conflict -> context.getString(R.string.error_conflict)
         OpenCloudError.PreconditionFailed -> context.getString(R.string.error_precondition_failed)
+        OpenCloudError.DownloadIntegrity -> context.getString(R.string.error_download_integrity)
         OpenCloudError.InvalidResponse -> context.getString(R.string.error_invalid_response)
         OpenCloudError.QuotaExceeded -> context.getString(R.string.error_quota_exceeded)
         OpenCloudError.LocalStorage -> context.getString(R.string.error_local_storage)

@@ -64,6 +64,7 @@ class TransferManager(
     suspend fun enqueueSharedUpload(
         destination: SharedFolderRequest,
         source: Uri,
+        backup: eu.opencloud.android.next.core.database.FolderBackupEntity? = null,
     ): String {
         require(source.scheme == "content") { "Choose a readable local file." }
         val metadata = sourceMetadata(source)
@@ -85,7 +86,7 @@ class TransferManager(
                 createdAtEpochMillis = now,
                 updatedAtEpochMillis = now,
             )
-        val accepted = IncomingFolderUploadQueue.create(context).enqueue(destination, transfer)
+        val accepted = IncomingFolderUploadQueue.create(context).enqueue(destination, transfer, backup)
         enqueueUploadWork(accepted)
         return accepted.id
     }
@@ -389,7 +390,14 @@ class TransferManager(
     }
 
     suspend fun saveBackup(configuration: eu.opencloud.android.next.core.database.FolderBackupEntity) {
-        require(configuration.dateOrganization in setOf("NONE", "YEAR_MONTH"))
+        require(
+            configuration.dateOrganization == "NONE" ||
+                configuration.dateOrganization == "YEAR_MONTH" ||
+                isValidBackupDateTemplate(configuration.dateOrganization),
+        ) { "Choose a valid date folder pattern." }
+        if (configuration.destinationKind == "SHARED_FOLDER") {
+            SharedUploadDestinationResolver.create(context).prepare(configuration.sharedRequest())
+        }
         store.saveBackup(configuration)
         scheduleBackups()
         scanBackupsNow()
@@ -628,13 +636,14 @@ internal fun ensureBackupCollections(
     authorization: String,
     checkActive: () -> Unit = {},
 ): Boolean {
-    path.split('/').filter(String::isNotBlank).forEach { it.requireValidSegment() }
+    val safePath = backupParent(path, "")
+    safePath.split('/').filter(String::isNotBlank).forEach { it.requireValidSegment() }
     val dav =
         eu.opencloud.android.next.core.network
             .DavOperationClient(http)
     val client = TransferClient(http)
     var created = false
-    destinationCollectionPaths("${path.trimEnd('/')}/placeholder").forEach { collection ->
+    destinationCollectionPaths("${safePath.trimEnd('/')}/placeholder").forEach { collection ->
         val url = root.mutationChildUrl(collection)
         checkActive()
         var metadata = dav.stat(url, authorization)

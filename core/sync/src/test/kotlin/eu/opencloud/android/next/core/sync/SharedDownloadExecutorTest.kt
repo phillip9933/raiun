@@ -21,6 +21,7 @@ import eu.opencloud.android.next.core.database.SpaceEntity
 import eu.opencloud.android.next.core.database.TransferEntity
 import eu.opencloud.android.next.core.model.AppClock
 import eu.opencloud.android.next.core.network.IncomingSharedItem
+import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.network.RemoteResource
 import eu.opencloud.android.next.core.network.SharedFolderAccess
@@ -35,6 +36,9 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
@@ -52,6 +56,7 @@ import org.robolectric.RuntimeEnvironment
 import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
+@Suppress("LargeClass")
 class SharedDownloadExecutorTest {
     @get:Rule val temporary = TemporaryFolder()
     private val database =
@@ -80,17 +85,32 @@ class SharedDownloadExecutorTest {
     private val queue = SharedDownloadQueue(SharedDownloadStore(database), resolver)
     private lateinit var source: PreparedSharedDownload
     private lateinit var client: TransferClient
+    private var checksumResponseCode = 405
+    private var checksumXml = ""
 
     @Before fun seed() =
         runBlocking {
             server.start()
+            checksumResponseCode = 405
+            checksumXml = ""
             client =
                 TransferClient(
                     OkHttpClient
                         .Builder()
                         .addInterceptor { chain ->
                             val request = chain.request()
-                            chain.proceed(request.newBuilder().url(server.url(request.url.encodedPath)).build())
+                            if (request.method == "PROPFIND") {
+                                Response
+                                    .Builder()
+                                    .request(request)
+                                    .protocol(Protocol.HTTP_1_1)
+                                    .code(checksumResponseCode)
+                                    .message("Checksum probe")
+                                    .body(checksumXml.toResponseBody())
+                                    .build()
+                            } else {
+                                chain.proceed(request.newBuilder().url(server.url(request.url.encodedPath)).build())
+                            }
                         }.build(),
                 )
             database.accountDao().upsert(AccountEntity("a", "https://example.test", "u", "User", "BASIC", false))
@@ -128,6 +148,47 @@ class SharedDownloadExecutorTest {
             assertEquals(1, directory().listFiles()?.size)
             SharedDownloadFiles.clearAccount(temporary.root, "a")
             assertFalse(File(copy.localPath).exists())
+        }
+
+    @Test fun serverChecksumMatchesAndMismatchesBeforePublication() =
+        runBlocking {
+            checksumResponseCode = 207
+            checksumXml = checksumProperties("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+            server.enqueue(response())
+            executor().execute("transfer", "worker", client, "Bearer test")
+            assertEquals(
+                "hello",
+                File(
+                    checkNotNull(database.sharedLocalFileDao().find("a", source.location.scopeId, "file")).localPath,
+                ).readText(),
+            )
+
+            val previous = checkNotNull(database.sharedLocalFileDao().find("a", source.location.scopeId, "file"))
+            queue.enqueue(resolver.prepare(source.request), "replacement", true, 50)
+            checkNotNull(database.transferDao().claim("replacement", "replacement-worker", 51))
+            checksumXml = checksumProperties("0000000000000000000000000000000000000000000000000000000000000000")
+            server.enqueue(response())
+            val mismatch =
+                assertThrows(OpenCloudException::class.java) {
+                    runBlocking { executor().execute("replacement", "replacement-worker", client, "Bearer test") }
+                }
+            assertEquals(OpenCloudError.DownloadIntegrity, mismatch.error)
+            assertEquals(previous, database.sharedLocalFileDao().find("a", source.location.scopeId, "file"))
+            assertEquals("hello", File(previous.localPath).readText())
+        }
+
+    @Test fun changedChecksumMetadataFailsClosed() =
+        runBlocking {
+            checksumResponseCode = 207
+            checksumXml =
+                checksumProperties("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", "\"v2\"")
+            server.enqueue(response())
+            val changed =
+                assertThrows(OpenCloudException::class.java) {
+                    runBlocking { executor().execute("transfer", "worker", client, "Bearer test") }
+                }
+            assertEquals(OpenCloudError.PreconditionFailed, changed.error)
+            assertUnpublished()
         }
 
     @Test fun rejectedResponse() =
@@ -701,6 +762,12 @@ class SharedDownloadExecutorTest {
     }
 
     private fun response() = MockResponse().setBody("hello").setHeader("ETag", "\"v1\"")
+
+    private fun checksumProperties(
+        sha256: String,
+        eTag: String = "\"v1\"",
+    ) =
+        """<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response><d:href>/dav/root/file.txt</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>5</d:getcontentlength><d:getetag>$eTag</d:getetag><oc:checksums><oc:checksum>SHA256:$sha256</oc:checksum></oc:checksums></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"""
 
     private fun executor(space: Long = Long.MAX_VALUE) =
         SharedDownloadExecutor(

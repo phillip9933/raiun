@@ -11,6 +11,7 @@ import androidx.work.WorkManager
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.FolderBackupEntity
+import eu.opencloud.android.next.core.database.IncomingShareStore
 import eu.opencloud.android.next.core.database.ResourceEntity
 import eu.opencloud.android.next.core.database.SpaceEntity
 import eu.opencloud.android.next.core.database.TransferEntity
@@ -26,9 +27,14 @@ import eu.opencloud.android.next.core.network.toOpenCloudError
 import eu.opencloud.android.next.core.sync.DISCOVERY_ERROR
 import eu.opencloud.android.next.core.sync.FileOperationNameConflictException
 import eu.opencloud.android.next.core.sync.SearchRepositoryResult
+import eu.opencloud.android.next.core.sync.SharedFolderBrowser
+import eu.opencloud.android.next.core.sync.SharedFolderRequest
+import eu.opencloud.android.next.core.sync.SharedRootDiscovery
+import eu.opencloud.android.next.core.sync.SharedUploadDestinationResolver
 import eu.opencloud.android.next.core.sync.SpaceCreationResult
 import eu.opencloud.android.next.core.sync.TransferManager
 import eu.opencloud.android.next.core.sync.VaultLocation
+import eu.opencloud.android.next.core.sync.VaultRepository
 import eu.opencloud.android.next.core.sync.createSearchRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -48,7 +54,8 @@ import java.util.UUID
 
 @OptIn(ExperimentalCoroutinesApi::class)
 // Existing browser orchestration; encrypted discovery is isolated in EncryptedFolderDiscovery.
-@Suppress("LargeClass")
+// Picker guards reject stale account and location transitions.
+@Suppress("LargeClass", "ComplexCondition", "ReturnCount")
 class FileBrowserViewModel(
     application: Application,
     private val savedState: SavedStateHandle,
@@ -72,6 +79,13 @@ class FileBrowserViewModel(
     private var placementTarget: FileOperationPlacementTarget? = null
     private val activeLocation = MutableStateFlow<BrowserLocation?>(null)
     private val backupPickerLocation = MutableStateFlow<BrowserLocation?>(null)
+    private var backupPickerRevision = 0
+    private var backupPickerVaultRevision = 0
+    private val backupPickerVaults = VaultRepository(application, store)
+    private val sharedRoots = SharedRootDiscovery.create(application)
+    private val sharedInventory = IncomingShareStore(FileBrowserDatabase.create(application))
+    private val sharedBrowser = SharedFolderBrowser.create(application)
+    private val sharedDestinationResolver = SharedUploadDestinationResolver.create(application)
     private val searchQuery = MutableStateFlow("")
     val state: StateFlow<FileBrowserUiState> = mutableState.asStateFlow()
 
@@ -132,7 +146,8 @@ class FileBrowserViewModel(
             activeLocation
                 .filterNotNull()
                 .flatMapLatest { location ->
-                    store.observeChildren(location.accountId, location.spaceId, location.folderId)
+                    store
+                        .observeChildren(location.accountId, location.spaceId, location.folderId)
                 }.collectLatest { resources ->
                     reduce { copy(resources = resources) }
                 }
@@ -162,17 +177,110 @@ class FileBrowserViewModel(
             backupPickerLocation
                 .filterNotNull()
                 .flatMapLatest { location ->
-                    store.observeChildren(location.accountId, location.spaceId, location.folderId)
-                }.collectLatest { resources ->
-                    reduce { copy(backupPickerResources = resources.filter { it.kind == ResourceKind.FOLDER }) }
+                    store
+                        .observeChildren(location.accountId, location.spaceId, location.folderId)
+                        .map { resources -> location to resources }
+                }.collectLatest { (location, resources) ->
+                    if (location.accountId == accountId &&
+                        state.value.backupPickerDestination?.destinationKind == "SPACE" &&
+                        state.value.backupPickerDestination?.spaceId == backupPickerLocation.value?.spaceId &&
+                        state.value.backupPickerTrail
+                            .lastOrNull()
+                            ?.id == backupPickerLocation.value?.folderId
+                    ) {
+                        val revision = ++backupPickerVaultRevision
+                        val pickerRevision = backupPickerRevision
+                        reduce {
+                            copy(
+                                backupPickerLoading = true,
+                                backupPickerCanSelect = false,
+                                backupPickerError = null,
+                            )
+                        }
+                        viewModelScope.launch {
+                            runCatching {
+                                backupPickerVaults.encryptedFolders(
+                                    location.accountId,
+                                    location.spaceId,
+                                    state.value.backupPickerTrail
+                                        .lastOrNull()
+                                        ?.path
+                                        ?.trim('/') ?: "",
+                                )
+                            }.onSuccess { encrypted ->
+                                if (revision == backupPickerVaultRevision &&
+                                    pickerRevision == backupPickerRevision &&
+                                    backupPickerLocation.value == location
+                                ) {
+                                    reduce {
+                                        copy(
+                                            backupPickerResources =
+                                                resources.filter {
+                                                    it.kind ==
+                                                        ResourceKind.FOLDER &&
+                                                        !it.matchesEncryptedFolder(encrypted)
+                                                },
+                                            backupPickerLoading = false,
+                                            backupPickerCanSelect = true,
+                                            backupPickerError = null,
+                                        )
+                                    }
+                                }
+                            }.onFailure { failure ->
+                                if (revision == backupPickerVaultRevision &&
+                                    pickerRevision == backupPickerRevision &&
+                                    backupPickerLocation.value == location
+                                ) {
+                                    reduce {
+                                        copy(
+                                            backupPickerResources = emptyList(),
+                                            backupPickerLoading = false,
+                                            backupPickerCanSelect = false,
+                                            backupPickerError =
+                                                failure.toOpenCloudError().safeMessage(
+                                                    getApplication(),
+                                                ),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
         }
     }
 
     fun load(accountId: String) {
         if (this.accountId == accountId) return
+        backupPickerRevision++
+        backupPickerLocation.value = null
+        reduce {
+            copy(
+                backupPickerDestination = null,
+                backupPickerSharedRoots = emptyList(),
+                backupPickerSharedNames = emptyMap(),
+                backupPickerSharedFolders = emptyList(),
+                backupPickerResources = emptyList(),
+                backupPickerTrail = emptyList(),
+            )
+        }
         this.accountId = accountId
         viewModelScope.launch(Dispatchers.IO) {
+            launch {
+                sharedInventory.observe(accountId).collectLatest { shares ->
+                    if (this@FileBrowserViewModel.accountId == accountId) {
+                        reduce {
+                            copy(
+                                backupPickerSharedNames =
+                                    shares.filter { it.isFolder }.associate {
+                                        it.id to
+                                            it.name
+                                    },
+                            )
+                        }
+                    }
+                }
+            }
             launch {
                 store.observeOffline(accountId).collectLatest { values ->
                     val bytes = downloadedBytes(getApplication<Application>(), values)
@@ -692,15 +800,10 @@ class FileBrowserViewModel(
     @Suppress("LongParameterList")
     fun saveBackup(
         sourceTreeUri: Uri,
-        destinationPath: String,
-        mediaType: String,
-        wifiOnly: Boolean,
-        chargingOnly: Boolean,
-        deleteAfterUpload: Boolean,
-        dateOrganization: String = "NONE",
+        draft: BackupDraft,
     ) {
         val account = accountId ?: return
-        val space = state.value.spaceId ?: return
+        val space = draft.spaceId ?: return
         viewModelScope.launch {
             val backup =
                 FolderBackupEntity(
@@ -709,15 +812,18 @@ class FileBrowserViewModel(
                     space,
                     sourceTreeUri.toString(),
                     getApplication<Application>().sourceDirectoryName(sourceTreeUri),
-                    destinationPath
+                    draft.destinationPath
                         .ifBlank {
                             "/Camera Uploads"
                         },
-                    mediaType,
-                    wifiOnly,
-                    chargingOnly,
-                    deleteAfterUpload,
-                    dateOrganization = dateOrganization,
+                    draft.mediaType,
+                    draft.wifiOnly,
+                    draft.chargingOnly,
+                    draft.deleteAfterUpload,
+                    dateOrganization = draft.dateOrganization,
+                    destinationKind = draft.destinationKind,
+                    sharedShareId = draft.sharedShareId,
+                    sharedFolderId = draft.sharedFolderId,
                 )
             runCatching { withContext(Dispatchers.IO) { transfers.saveBackup(backup) } }
                 .onSuccess {
@@ -747,6 +853,10 @@ class FileBrowserViewModel(
                     transfers.saveBackup(
                         backup.copy(
                             destinationPath = draft.destinationPath,
+                            spaceId = draft.spaceId ?: backup.spaceId,
+                            destinationKind = draft.destinationKind,
+                            sharedShareId = draft.sharedShareId,
+                            sharedFolderId = draft.sharedFolderId,
                             mediaType = draft.mediaType,
                             wifiOnly = draft.wifiOnly,
                             chargingOnly = draft.chargingOnly,
@@ -762,19 +872,181 @@ class FileBrowserViewModel(
 
     fun openBackupPicker() {
         val account = accountId ?: return
-        val space = state.value.spaceId ?: return
-        reduce { copy(backupPickerTrail = emptyList(), backupPickerResources = emptyList()) }
-        backupPickerLocation.value = BrowserLocation(account, space, null)
-        observeDiscovery(transfers.refreshFolder(account, space, null))
+        backupPickerRevision++
+        backupPickerLocation.value = null
+        reduce {
+            copy(
+                backupPickerDestination = null,
+                backupPickerTrail = emptyList(),
+                backupPickerResources = emptyList(),
+                backupPickerSharedFolders = emptyList(),
+                backupPickerSharedRoots = emptyList(),
+                backupPickerLoading = true,
+                backupPickerCanSelect = false,
+                backupPickerError = null,
+            )
+        }
+        val revision = backupPickerRevision
+        viewModelScope.launch {
+            runCatching { withContext(Dispatchers.IO) { sharedRoots.discover(account) } }
+                .onSuccess { catalog ->
+                    if (accountId == account &&
+                        revision == backupPickerRevision
+                    ) {
+                        reduce {
+                            copy(
+                                backupPickerSharedRoots =
+                                    catalog.roots.map {
+                                        BackupSharedRoot(it.name, it.shareId, it.scopeId, it.rootItemId)
+                                    },
+                                backupPickerLoading = false,
+                            )
+                        }
+                    }
+                }.onFailure {
+                    if (accountId == account &&
+                        revision == backupPickerRevision
+                    ) {
+                        reduce {
+                            copy(
+                                backupPickerLoading = false,
+                                backupPickerError = it.toOpenCloudError().safeMessage(getApplication()),
+                            )
+                        }
+                    }
+                }
+        }
+    }
+
+    fun openBackupPickerSpace(space: SpaceEntity) {
+        val account = accountId ?: return
+        if (space.accountId != account ||
+            space.isDisabled ||
+            space.isDeleted ||
+            space.type.contains("encrypted", true)
+        ) {
+            return
+        }
+        backupPickerRevision++
+        val category =
+            if (space.type.equals(
+                    "personal",
+                    true,
+                )
+            ) {
+                R.string.backup_destination_personal
+            } else {
+                R.string.backup_destination_spaces
+            }
+        val label = "${getApplication<Application>().localizedString(category)} · ${space.name}"
+        reduce {
+            copy(
+                backupPickerDestination = BackupDestination(space.driveId, "/", "SPACE", null, null, label),
+                backupPickerTrail = emptyList(),
+                backupPickerResources = emptyList(),
+                backupPickerSharedFolders = emptyList(),
+                backupPickerLoading = true,
+                backupPickerCanSelect = false,
+                backupPickerError = null,
+            )
+        }
+        backupPickerLocation.value = BrowserLocation(account, space.driveId, null)
+        observeDiscovery(transfers.refreshFolder(account, space.driveId, null))
+    }
+
+    fun openBackupPickerShare(root: BackupSharedRoot) {
+        val account = accountId ?: return
+        backupPickerLocation.value = null
+        val label = "${getApplication<Application>().localizedString(
+            R.string.backup_destination_shared_with_me,
+        )} · ${root.name}"
+        val destination = BackupDestination(root.scopeId, "/", "SHARED_FOLDER", root.shareId, root.rootItemId, label)
+        loadSharedBackupFolder(account, destination, emptyList())
+    }
+
+    private fun loadSharedBackupFolder(
+        account: String,
+        destination: BackupDestination,
+        trail: List<BackupFolderCrumb>,
+    ) {
+        val revision = ++backupPickerRevision
+        reduce {
+            copy(
+                backupPickerDestination = destination,
+                backupPickerTrail = trail,
+                backupPickerResources = emptyList(),
+                backupPickerSharedFolders = emptyList(),
+                backupPickerLoading = true,
+                backupPickerError = null,
+                backupPickerCanSelect = false,
+            )
+        }
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    val request =
+                        SharedFolderRequest(
+                            account,
+                            requireNotNull(destination.sharedShareId),
+                            destination.spaceId,
+                            requireNotNull(destination.sharedFolderId),
+                            destination.path,
+                        )
+                    val page = sharedBrowser.openFolder(request)
+                    val selectable = runCatching { sharedDestinationResolver.prepare(request) }.isSuccess
+                    page.items.filter { it.folder }.map { BackupSharedFolder(it.id, it.name, it.path) } to selectable
+                }
+            }.onSuccess { (folders, selectable) ->
+                if (accountId == account &&
+                    revision == backupPickerRevision
+                ) {
+                    reduce {
+                        copy(
+                            backupPickerSharedFolders = folders,
+                            backupPickerCanSelect = selectable,
+                            backupPickerLoading = false,
+                        )
+                    }
+                }
+            }.onFailure {
+                if (accountId == account &&
+                    revision == backupPickerRevision
+                ) {
+                    reduce {
+                        copy(
+                            backupPickerLoading = false,
+                            backupPickerError = it.toOpenCloudError().safeMessage(getApplication()),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun openBackupPickerSharedFolder(folder: BackupSharedFolder) {
+        val account = accountId ?: return
+        val current = state.value.backupPickerDestination ?: return
+        if (current.destinationKind != "SHARED_FOLDER") return
+        loadSharedBackupFolder(
+            account,
+            current.copy(path = folder.path, sharedFolderId = folder.id),
+            state.value.backupPickerTrail + BackupFolderCrumb(folder.id, folder.name, folder.path),
+        )
     }
 
     fun openBackupPickerFolder(folder: ResourceEntity) {
         if (folder.kind != ResourceKind.FOLDER) return
         val account = accountId ?: return
+        val current = state.value.backupPickerDestination ?: return
+        if (current.destinationKind != "SPACE" || folder.spaceId != current.spaceId) return
         reduce {
             copy(
+                backupPickerDestination = current.copy(path = folder.path),
                 backupPickerTrail = backupPickerTrail + BackupFolderCrumb(folder.remoteId, folder.name, folder.path),
                 backupPickerResources = emptyList(),
+                backupPickerLoading = true,
+                backupPickerCanSelect = false,
+                backupPickerError = null,
             )
         }
         backupPickerLocation.value = BrowserLocation(account, folder.spaceId, folder.remoteId)
@@ -783,16 +1055,42 @@ class FileBrowserViewModel(
 
     fun navigateBackupPickerUp() {
         val account = accountId ?: return
-        val space = state.value.spaceId ?: return
+        val current = state.value.backupPickerDestination ?: return
         val nextTrail = state.value.backupPickerTrail.dropLast(1)
-        reduce { copy(backupPickerTrail = nextTrail, backupPickerResources = emptyList()) }
-        backupPickerLocation.value = BrowserLocation(account, space, nextTrail.lastOrNull()?.id)
-        observeDiscovery(transfers.refreshFolder(account, space, nextTrail.lastOrNull()?.id))
+        if (current.destinationKind == "SHARED_FOLDER") {
+            val root = state.value.backupPickerSharedRoots.firstOrNull { it.shareId == current.sharedShareId } ?: return
+            val last = nextTrail.lastOrNull()
+            loadSharedBackupFolder(
+                account,
+                current.copy(
+                    path = last?.path ?: "/",
+                    sharedFolderId =
+                        last?.id ?: root.rootItemId,
+                ),
+                nextTrail,
+            )
+        } else {
+            reduce {
+                copy(
+                    backupPickerDestination = current.copy(path = nextTrail.lastOrNull()?.path ?: "/"),
+                    backupPickerTrail = nextTrail,
+                    backupPickerResources = emptyList(),
+                    backupPickerLoading = true,
+                    backupPickerCanSelect = false,
+                    backupPickerError = null,
+                )
+            }
+            backupPickerLocation.value = BrowserLocation(account, current.spaceId, nextTrail.lastOrNull()?.id)
+            observeDiscovery(transfers.refreshFolder(account, current.spaceId, nextTrail.lastOrNull()?.id))
+        }
     }
 
     fun createBackupPickerFolder(name: String) {
         val account = accountId ?: return
-        val space = state.value.spaceId ?: return
+        val space =
+            state.value.backupPickerDestination
+                ?.takeIf { it.destinationKind == "SPACE" }
+                ?.spaceId ?: return
         val parentId =
             state.value.backupPickerTrail
                 .lastOrNull()
@@ -981,6 +1279,13 @@ data class FileBrowserUiState(
     val backups: List<FolderBackupEntity> = emptyList(),
     val backupPickerTrail: List<BackupFolderCrumb> = emptyList(),
     val backupPickerResources: List<ResourceEntity> = emptyList(),
+    val backupPickerDestination: BackupDestination? = null,
+    val backupPickerSharedRoots: List<BackupSharedRoot> = emptyList(),
+    val backupPickerSharedNames: Map<String, String> = emptyMap(),
+    val backupPickerSharedFolders: List<BackupSharedFolder> = emptyList(),
+    val backupPickerLoading: Boolean = false,
+    val backupPickerCanSelect: Boolean = false,
+    val backupPickerError: String? = null,
     val layout: BrowserLayout = BrowserLayout.DEFAULT_TABLE,
     val selectedIds: Set<String> = emptySet(),
     val searchQuery: String = "",

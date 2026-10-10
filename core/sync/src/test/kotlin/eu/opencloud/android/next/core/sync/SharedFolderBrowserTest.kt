@@ -4,6 +4,7 @@ import androidx.room.Room
 import eu.opencloud.android.next.core.database.AccountEntity
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
+import eu.opencloud.android.next.core.database.FolderBackupEntity
 import eu.opencloud.android.next.core.database.IncomingShareStore
 import eu.opencloud.android.next.core.database.SharedFolderCacheStore
 import eu.opencloud.android.next.core.database.TransferEntity
@@ -40,8 +41,145 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 
 @RunWith(RobolectricTestRunner::class)
+@Suppress("LargeClass") // Shared browser and queue scenarios reuse one revocable share fixture.
 class SharedFolderBrowserTest {
     @get:Rule val temporary = TemporaryFolder()
+
+    @Test fun `shared backup creates nested folders only under a freshly resolved scoped parent`() =
+        runBlocking {
+            val children = mutableMapOf<String, MutableList<RemoteResource>>()
+            val browser = SharedFolderBrowser(access) { _, _, path -> children[path].orEmpty() }
+            val root = browser.open("a", "one").location
+            val base = SharedFolderRequest("a", "one", root.scopeId, root.rootItemId, "/")
+            val resolver =
+                SharedUploadDestinationResolver(browser) { page, remote ->
+                    val path =
+                        when (remote) {
+                            root.rootItemId -> "/"
+                            "dated" -> "/2026"
+                            "camera" -> "/2026/Camera"
+                            else -> error("Unexpected folder")
+                        }
+                    SharedFolderResolution.Resolved(
+                        page.location.serverDriveId,
+                        remote,
+                        page.location.rootWebDavUrl.trimEnd('/') + (if (path == "/") "/" else "$path/"),
+                        SharedFolderAccess(
+                            setOf("libre.graph/driveItem/upload/create", "libre.graph/driveItem/children/create"),
+                        ),
+                    )
+                }
+            val created = mutableListOf<String>()
+            var backupEnabled = true
+            val folders =
+                SharedBackupCollections(browser, resolver) { parent, name, checkCurrent ->
+                    if (name == "Blocked") backupEnabled = false
+                    checkCurrent()
+                    created += "${parent.request.path}/$name"
+                    val path = if (parent.request.path == "/") "/$name" else "${parent.request.path}/$name"
+                    val id = if (name == "2026") "dated" else "camera"
+                    children.getOrPut(parent.request.path) { mutableListOf() } +=
+                        RemoteResource(id, path, name, true, null, 0, null, 0, 0)
+                }
+            assertEquals("/2026/Camera", folders.ensure(base, "/2026/Camera").path)
+            assertEquals(listOf("//2026", "/2026/Camera"), created)
+            assertEquals("/2026/Camera", folders.ensure(base, "/2026/Camera").path)
+            assertEquals(2, created.size)
+            assertThrows(IllegalArgumentException::class.java) {
+                runBlocking { folders.ensure(base, "/Blocked") { require(backupEnabled) } }
+            }
+            assertEquals(2, created.size)
+            permitted = false
+            assertThrows(
+                OpenCloudException::class.java,
+            ) { runBlocking { folders.ensure(base, "/2026/Camera/Revoked") } }
+            assertEquals(2, created.size)
+        }
+
+    @Test fun `shared backup refuses vault excluded child before mkdir`() =
+        runBlocking {
+            val browser =
+                SharedFolderBrowser(
+                    access = access,
+                    fetchSnapshot = { _, _, _ -> RemoteFolderSnapshot(emptyList(), setOf("/vault")) },
+                    fetch = { _, _, _ -> error("No fallback listing") },
+                )
+            val root = browser.open("a", "one").location
+            val base = SharedFolderRequest("a", "one", root.scopeId, root.rootItemId, "/")
+            val resolver =
+                SharedUploadDestinationResolver(browser) { page, remote ->
+                    SharedFolderResolution.Resolved(
+                        page.location.serverDriveId,
+                        remote,
+                        page.location.rootWebDavUrl,
+                        SharedFolderAccess(
+                            setOf("libre.graph/driveItem/upload/create", "libre.graph/driveItem/children/create"),
+                        ),
+                    )
+                }
+            var created = false
+            val folders = SharedBackupCollections(browser, resolver) { _, _, _ -> created = true }
+            val failure =
+                assertThrows(OpenCloudException::class.java) { runBlocking { folders.ensure(base, "/vault") } }
+            assertEquals(OpenCloudError.Unsupported, failure.error)
+            assertFalse(created)
+        }
+
+    @Test fun `shared backup queue rejects edited configuration without ordinary drive fallback`() =
+        runBlocking {
+            val browser =
+                SharedFolderBrowser(
+                    access,
+                    SharedFolderPageCache(SharedFolderCacheStore(database)),
+                ) { _, _, _ -> emptyList() }
+            val root = browser.open("a", "one").location
+            val request = SharedFolderRequest("a", "one", root.scopeId, root.rootItemId, "/")
+            val resolver =
+                SharedUploadDestinationResolver(browser) { page, remote ->
+                    SharedFolderResolution.Resolved(
+                        page.location.serverDriveId,
+                        remote,
+                        page.location.rootWebDavUrl,
+                        SharedFolderAccess(setOf("libre.graph/driveItem/upload/create")),
+                    )
+                }
+            val backup =
+                FolderBackupEntity(
+                    id = "backup",
+                    accountId = "a",
+                    spaceId = root.scopeId,
+                    sourceTreeUri = "content://source/tree",
+                    destinationPath = "/",
+                    mediaType = "ALL",
+                    wifiOnly = false,
+                    chargingOnly = false,
+                    deleteAfterUpload = false,
+                    destinationKind = "SHARED_FOLDER",
+                    sharedShareId = "one",
+                    sharedFolderId = root.rootItemId,
+                )
+            database.folderBackupDao().upsert(backup.copy(enabled = false))
+            val transfer =
+                TransferEntity(
+                    id = "backup-upload",
+                    accountId = "a",
+                    spaceId = root.scopeId,
+                    resourceId = root.rootItemId,
+                    direction = "UPLOAD",
+                    sourceUri = "content://source/file",
+                    destinationPath = "/file",
+                    displayName = "file",
+                    mimeType = "text/plain",
+                    bytesTotal = 1,
+                    locationKind = "SHARED_FOLDER",
+                    createdAtEpochMillis = 1,
+                    updatedAtEpochMillis = 1,
+                )
+            assertThrows(IllegalArgumentException::class.java) {
+                runBlocking { IncomingFolderUploadQueue(database, resolver).enqueue(request, transfer, backup) }
+            }
+            assertNull(database.transferDao().findById(transfer.id))
+        }
 
     @Test fun incomingUploadUsesConditionalCreateAndVerifiesRemoteBytes() =
         runBlocking {

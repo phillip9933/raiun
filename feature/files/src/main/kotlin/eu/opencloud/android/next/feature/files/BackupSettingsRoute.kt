@@ -40,10 +40,12 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.viewmodel.compose.viewModel
 import eu.opencloud.android.next.core.database.FolderBackupEntity
+import eu.opencloud.android.next.core.database.SpaceEntity
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
+@Suppress("LongMethod") // The route keeps source permission and editor lifecycle together.
 fun BackupSettingsRoute(
     accountId: String,
     onNavigateBack: () -> Unit,
@@ -66,12 +68,7 @@ fun BackupSettingsRoute(
             pendingBackup?.let { draft ->
                 viewModel.saveBackup(
                     files.single(),
-                    draft.destinationPath,
-                    draft.mediaType,
-                    draft.wifiOnly,
-                    draft.chargingOnly,
-                    draft.deleteAfterUpload,
-                    draft.dateOrganization,
+                    draft,
                 )
             }
             pendingBackup = null
@@ -111,12 +108,18 @@ fun BackupSettingsRoute(
             )
         },
     ) { padding ->
-        BackupOverview(state.backups, transfers = state.transfers, onManage = { backup ->
-            editingId = backup.id
-            viewModel.selectSpace(backup.spaceId)
-            showEditor =
-                true
-        }, modifier = Modifier.padding(padding))
+        BackupOverview(
+            backups = state.backups,
+            spaces = state.spaces,
+            sharedRoots = state.backupPickerSharedRoots,
+            sharedNames = state.backupPickerSharedNames,
+            transfers = state.transfers,
+            onManage = { backup ->
+                editingId = backup.id
+                showEditor = true
+            },
+            modifier = Modifier.padding(padding),
+        )
     }
     if (showEditor) {
         ModalBottomSheet(onDismissRequest = {
@@ -135,6 +138,9 @@ fun BackupSettingsRoute(
                 },
                 pickerTrail = state.backupPickerTrail,
                 pickerFolders = state.backupPickerResources,
+                pickerState = state,
+                defaultSpaceId = state.spaces.firstOrNull { it.type.equals("personal", true) }?.driveId,
+                requireDestinationBinding = true,
                 onDismiss = {
                     showEditor = false
                     selectedSourceUri = null
@@ -156,6 +162,9 @@ fun BackupSettingsRoute(
                 },
                 onDelete = viewModel::deleteBackup,
                 onOpenPicker = viewModel::openBackupPicker,
+                onOpenPickerSpace = viewModel::openBackupPickerSpace,
+                onOpenPickerShare = viewModel::openBackupPickerShare,
+                onOpenSharedFolder = viewModel::openBackupPickerSharedFolder,
                 onOpenFolder = viewModel::openBackupPickerFolder,
                 onNavigateUp = viewModel::navigateBackupPickerUp,
                 onCreateFolder = viewModel::createBackupPickerFolder,
@@ -170,11 +179,15 @@ fun BackupSettingsRoute(
 }
 
 @Composable
+@Suppress("LongParameterList") // Overview data and callbacks are independent UI inputs.
 fun BackupOverview(
     backups: List<FolderBackupEntity>,
     onManage: (FolderBackupEntity) -> Unit,
     modifier: Modifier = Modifier,
     transfers: List<eu.opencloud.android.next.core.database.TransferEntity> = emptyList(),
+    spaces: List<SpaceEntity> = emptyList(),
+    sharedRoots: List<BackupSharedRoot> = emptyList(),
+    sharedNames: Map<String, String> = emptyMap(),
 ) {
     val backupListDescription = stringResource(R.string.backup_settings_active_configurations)
     LazyColumn(
@@ -199,7 +212,7 @@ fun BackupOverview(
                 },
                 supportingContent = {
                     Column(verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXxs)) {
-                        Text(backup.destinationPath)
+                        Text(backupDestinationLabel(backup, spaces, sharedRoots, sharedNames))
                         Text(backupDetails(backup, LocalContext.current))
                         BackupSyncInfo(backup, transfers)
                     }
@@ -210,6 +223,39 @@ fun BackupOverview(
             )
         }
     }
+}
+
+@Composable
+private fun backupDestinationLabel(
+    backup: FolderBackupEntity,
+    spaces: List<SpaceEntity>,
+    roots: List<BackupSharedRoot>,
+    sharedNames: Map<String, String>,
+): String {
+    val name =
+        if (backup.destinationKind == "SHARED_FOLDER") {
+            val category = stringResource(R.string.backup_destination_shared_with_me)
+            val root =
+                roots.firstOrNull { it.shareId == backup.sharedShareId }?.name
+                    ?: backup.sharedShareId?.let(sharedNames::get)
+            if (root == null) category else "$category · $root"
+        } else {
+            val space = spaces.firstOrNull { it.driveId == backup.spaceId }
+            val category =
+                stringResource(
+                    if (space?.type.equals(
+                            "personal",
+                            true,
+                        )
+                    ) {
+                        R.string.backup_destination_personal
+                    } else {
+                        R.string.backup_destination_spaces
+                    },
+                )
+            if (space == null) category else "$category · ${space.name}"
+        }
+    return "$name · ${backup.destinationPath}"
 }
 
 private val backupDraftSaver =
@@ -223,14 +269,16 @@ private val backupDraftSaver =
                     it.chargingOnly,
                     it.deleteAfterUpload,
                     it.dateOrganization,
+                    it.spaceId ?: "",
+                    it.destinationKind,
+                    it.sharedShareId ?: "",
+                    it.sharedFolderId ?: "",
                 )
             }
                 ?: emptyList()
         },
         restore = { values ->
-            if (values.size ==
-                6
-            ) {
+            if (values.size == 10) {
                 BackupDraft(
                     values[0] as String,
                     values[1] as String,
@@ -238,6 +286,10 @@ private val backupDraftSaver =
                     values[3] as Boolean,
                     values[4] as Boolean,
                     values[5] as String,
+                    (values[6] as String).ifBlank { null },
+                    values[7] as String,
+                    (values[8] as String).ifBlank { null },
+                    (values[9] as String).ifBlank { null },
                 )
             } else {
                 null

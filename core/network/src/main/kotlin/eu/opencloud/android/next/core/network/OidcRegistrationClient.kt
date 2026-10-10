@@ -23,6 +23,7 @@ class OidcRegistrationClient(
             .followRedirects(false)
             .followSslRedirects(false)
             .build()
+            .withMetadataDeadline()
     private val json =
         Json {
             ignoreUnknownKeys = true
@@ -44,7 +45,7 @@ class OidcRegistrationClient(
             if (response.code != 201) throw TransferHttpException(response.code)
             val metadata =
                 try {
-                    json.decodeFromString<RegistrationResponse>(response.body?.string().orEmpty())
+                    json.decodeFromString<RegistrationResponse>(response.readBoundedMetadata(AUTH_METADATA_LIMIT_BYTES))
                 } catch (_: kotlinx.serialization.SerializationException) {
                     unsupported()
                 }

@@ -14,7 +14,7 @@ import org.robolectric.RuntimeEnvironment
 class HistoricalMigrationTest {
     @Test
     fun `every exported historical schema migrates and retains all seeded column values`() {
-        for (version in 1..22) verifyMigration(version)
+        for (version in 1..23) verifyMigration(version)
     }
 
     // Walks schema tables, rows and columns for exhaustive preservation.
@@ -107,6 +107,19 @@ class HistoricalMigrationTest {
                         }
                     }
                 }
+            }
+            if ("folder_backups" in expected) {
+                db
+                    .query(
+                        "SELECT destinationKind, sharedShareId, sharedFolderId, destinationRevision FROM folder_backups",
+                    ).use {
+                        while (it.moveToNext()) {
+                            assertEquals("SPACE", it.getString(0))
+                            assertEquals(null, it.getString(1))
+                            assertEquals(null, it.getString(2))
+                            assertEquals(0L, it.getLong(3))
+                        }
+                    }
             }
             db.query("PRAGMA foreign_key_check").use { assertEquals(0, it.count) }
             db.query("SELECT transferId FROM transfer_queue ORDER BY sequence").use { cursor ->
