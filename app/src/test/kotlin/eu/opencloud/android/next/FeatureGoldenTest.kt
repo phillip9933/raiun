@@ -437,10 +437,10 @@ class FeatureGoldenTest {
             "transfers_failed",
         )
 
-    @Test fun transfersOverflow_exposesClearAndRetryAllActions() {
+    @Test fun transfers_exposesRetryButtonAndClearOverflowAction() {
         renderTransfers(failedTransfersState())
+        composeRule.onNodeWithText("Retry eligible uploads").fetchSemanticsNode()
         composeRule.onNodeWithContentDescription("Transfer actions").performClick()
-        composeRule.onNodeWithText("Retry all failed").fetchSemanticsNode()
         composeRule.onNodeWithText("Clear all").fetchSemanticsNode()
     }
 
