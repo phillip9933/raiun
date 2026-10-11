@@ -10,9 +10,11 @@ internal fun queryBackupTree(
     context: Context,
     tree: Uri,
     checkActive: () -> Unit = {},
+    exclusions: BackupExclusions = BackupExclusions.parse(""),
 ): List<BackupDocument> {
     val result = mutableListOf<BackupDocument>()
     val pending = java.util.ArrayDeque<Pair<String, String>>()
+    val traversal = BackupTraversal(tree, pending, checkActive, exclusions)
     val visited = mutableSetOf<String>()
     pending.add(DocumentsContract.getTreeDocumentId(tree) to "")
     while (pending.isNotEmpty()) {
@@ -23,33 +25,44 @@ internal fun queryBackupTree(
         val cursor =
             context.contentResolver.query(children, BACKUP_PROJECTION, null, null, null)
                 ?: throw OpenCloudException(OpenCloudError.SourceUnavailable)
-        readBackupChildren(cursor, tree, path, pending, checkActive).also { result.addAll(it) }
+        readBackupChildren(cursor, path, traversal).also { result.addAll(it) }
         requireBackupListing(result.size <= 100_000)
     }
     return result
 }
 
+private data class BackupTraversal(
+    val tree: Uri,
+    val pending: java.util.ArrayDeque<Pair<String, String>>,
+    val checkActive: () -> Unit,
+    val exclusions: BackupExclusions,
+)
+
 private fun readBackupChildren(
     cursor: android.database.Cursor,
-    tree: Uri,
     path: String,
-    pending: java.util.ArrayDeque<Pair<String, String>>,
-    checkActive: () -> Unit,
+    traversal: BackupTraversal,
 ): List<BackupDocument> {
     val result = mutableListOf<BackupDocument>()
     cursor.use {
         while (it.moveToNext()) {
-            checkActive()
+            traversal.checkActive()
             val childId = it.getString(0)
             val name = validBackupName(it.getString(1))
             val mime = it.getString(2).orEmpty()
-            if (name.startsWith(".trashed-", true) || name.startsWith(".pending-", true)) continue
-            if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
-                pending.add(childId to listOf(path, name).filter(String::isNotEmpty).joinToString("/"))
+            val relative = listOf(path, name).filter(String::isNotEmpty).joinToString("/")
+            val directory = mime == DocumentsContract.Document.MIME_TYPE_DIR
+            val skipped =
+                name.startsWith(".trashed-", true) ||
+                    name.startsWith(".pending-", true) ||
+                    traversal.exclusions.excludes(relative, directory)
+            if (skipped) continue
+            if (directory) {
+                traversal.pending.add(childId to relative)
             } else {
                 result +=
                     BackupDocument(
-                        DocumentsContract.buildDocumentUriUsingTree(tree, childId),
+                        DocumentsContract.buildDocumentUriUsingTree(traversal.tree, childId),
                         name,
                         path,
                         mime,

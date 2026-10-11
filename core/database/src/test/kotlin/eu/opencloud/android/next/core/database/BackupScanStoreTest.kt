@@ -44,6 +44,10 @@ class BackupScanStoreTest {
                 assertEquals(0L, db.folderBackupDao().findById(pair.id)?.destinationRevision)
                 assertEquals("accepted", db.backupReceiptDao().find(pair.id, "legacy-receipt")?.acceptedSignature)
 
+                scans.save(original.copy(exclusionPatterns = "Private/"))
+                assertEquals(0L, db.folderBackupDao().findById(pair.id)?.destinationRevision)
+                assertEquals("accepted", db.backupReceiptDao().find(pair.id, "legacy-receipt")?.acceptedSignature)
+
                 scans.save(original.copy(spaceId = "different"))
                 val moved = requireNotNull(db.folderBackupDao().findById(pair.id))
                 assertEquals(1L, moved.destinationRevision)
@@ -121,6 +125,7 @@ class BackupScanStoreTest {
                 for (replacement in listOf(
                     pair.copy(enabled = false),
                     pair.copy(destinationPath = "/elsewhere"),
+                    pair.copy(exclusionPatterns = "Private/"),
                     null,
                 )) {
                     if (replacement == null) dao.delete(pair.id) else dao.upsert(replacement)

@@ -222,8 +222,14 @@ class FolderBackupScanWorker(
             SharedUploadDestinationResolver.create(applicationContext).prepare(sharedBase)
         }
         val coroutine = kotlinx.coroutines.currentCoroutineContext()
+        val exclusions = BackupExclusions.parse(backup.exclusionPatterns)
         val documents =
-            queryBackupTree(applicationContext, Uri.parse(backup.sourceTreeUri)) { coroutine.ensureActive() }
+            queryBackupTree(
+                applicationContext,
+                Uri.parse(backup.sourceTreeUri),
+                { coroutine.ensureActive() },
+                exclusions,
+            )
         val preparedParents = mutableSetOf(backup.destinationPath)
         val sharedParents = mutableMapOf<String, SharedFolderRequest>()
         if (sharedBase != null) sharedParents[backup.destinationPath] = sharedBase

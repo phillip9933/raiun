@@ -22,7 +22,9 @@ import eu.opencloud.android.next.core.model.AppClock
 import eu.opencloud.android.next.core.model.SystemAppClock
 import eu.opencloud.android.next.core.network.TransferClient
 import eu.opencloud.android.next.core.security.TlsPolicy
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -318,7 +320,7 @@ class TransferManager(
         retried?.let { enqueueUploadWork(it) }
     }
 
-    suspend fun retry(transfer: TransferEntity) {
+    suspend fun retry(transfer: TransferEntity): Boolean {
         require(
             transfer.state in
                 setOf(
@@ -357,7 +359,39 @@ class TransferManager(
                 enqueueDownloadWork(accepted)
             }
         }
+        return retried != null
     }
+
+    /** Retries uploads that can be replayed without changing their destination or permissions. */
+    @Suppress("TooGenericExceptionCaught") // One failed upload must not stop the remaining retry candidates.
+    suspend fun retryFailedUploads(accountId: String): BulkUploadRetryResult {
+        val needsAttention =
+            store.observeTransfers(accountId).first().filter { transfer ->
+                transfer.direction == TransferDirection.UPLOAD.name &&
+                    transfer.state in
+                    setOf(TransferState.FAILED.name, TransferState.RETRY.name, TransferState.CONFLICT.name)
+            }
+        val candidates =
+            needsAttention.filter {
+                it.state != TransferState.CONFLICT.name &&
+                    it.errorCode.isSafeForBulkRetry()
+            }
+        var accepted = 0
+        candidates.forEach { transfer ->
+            try {
+                if (retry(transfer)) accepted++
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Keep this upload in needsAttention and continue with the next candidate.
+            }
+        }
+        return BulkUploadRetryResult(retried = accepted, needsAttention = needsAttention.size - accepted)
+    }
+
+    private fun String?.isSafeForBulkRetry(): Boolean =
+        this in setOf("CONNECTIVITY", "TIMEOUT", "RATE_LIMITED", "REMOTE_NOT_READY") ||
+            this?.matches(Regex("SERVER_(500|502|503|504)")) == true
 
     suspend fun cancel(transfer: TransferEntity) {
         store.cancelTransfer(transfer.id)
@@ -390,6 +424,7 @@ class TransferManager(
     }
 
     suspend fun saveBackup(configuration: eu.opencloud.android.next.core.database.FolderBackupEntity) {
+        BackupExclusions.parse(configuration.exclusionPatterns)
         require(
             configuration.dateOrganization == "NONE" ||
                 configuration.dateOrganization == "YEAR_MONTH" ||
@@ -626,6 +661,11 @@ class TransferManager(
         const val BACKUP_SCAN_WORK = "opencloud-folder-backup-scan"
     }
 }
+
+data class BulkUploadRetryResult(
+    val retried: Int,
+    val needsAttention: Int,
+)
 
 fun accountWorkTag(accountId: String) = "opencloud-account-$accountId"
 

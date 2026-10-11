@@ -32,6 +32,20 @@ class BackupTreeTest {
         }
     }
 
+    @Test fun `excluded directories are never queried and allowed siblings remain`() {
+        val provider = TreeProvider(exclusionFixture = true)
+        register(provider)
+        val files =
+            queryBackupTree(
+                RuntimeEnvironment.getApplication(),
+                tree,
+                exclusions = BackupExclusions.parse("Private/\n*.tmp"),
+            )
+        assertEquals(listOf("root", "public"), provider.queriedIds)
+        assertEquals(listOf("Public"), files.map { it.relativeParent })
+        assertEquals(listOf("photo.jpg"), files.map { it.name })
+    }
+
     private val tree = DocumentsContract.buildTreeDocumentUri("backup.test", "root")
 
     private fun register(provider: TreeProvider) {
@@ -47,7 +61,10 @@ class BackupTreeTest {
     private class TreeProvider(
         private val fail: Boolean = false,
         private val cycle: Boolean = false,
+        private val exclusionFixture: Boolean = false,
     ) : ContentProvider() {
+        val queriedIds = mutableListOf<String>()
+
         override fun onCreate() = true
 
         override fun getType(uri: Uri) = DocumentsContract.Document.MIME_TYPE_DIR
@@ -62,6 +79,22 @@ class BackupTreeTest {
             if (fail) return null
             return MatrixCursor(projection).apply {
                 val id = DocumentsContract.getDocumentId(uri)
+                queriedIds += id
+                if (exclusionFixture) {
+                    when (id) {
+                        "root" -> {
+                            addRow(arrayOf("private", "Private", getType(uri), 0L, null))
+                            addRow(arrayOf("public", "Public", getType(uri), 0L, null))
+                            addRow(arrayOf("root-temp", "notes.tmp", "text/plain", 0L, 5L))
+                        }
+                        "public" -> {
+                            addRow(arrayOf("public-file", "photo.jpg", "image/jpeg", 0L, 5L))
+                            addRow(arrayOf("public-temp", "draft.tmp", "text/plain", 0L, 5L))
+                        }
+                        "private" -> addRow(arrayOf("private-file", "secret.jpg", "image/jpeg", 0L, 5L))
+                    }
+                    return@apply
+                }
                 if (id == "root") {
                     addRow(arrayOf(if (cycle) "root" else "camera", "Camera", getType(uri), 0L, null))
                     addRow(arrayOf("edited", "Edited", getType(uri), 0L, null))

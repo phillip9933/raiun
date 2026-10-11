@@ -21,17 +21,19 @@ class TransfersStateTest {
         assertEquals(listOf("done"), result.history.map(TransferEntity::id))
     }
 
-    @Test fun `retry all includes failed transfers but excludes conflicts`() {
+    @Test fun `bulk retry target list includes only failed or waiting uploads`() {
         val result =
-            retryableTransfers(
+            bulkUploadRetryTargets(
                 listOf(
                     transfer("failed", TransferState.FAILED),
                     transfer("conflict", TransferState.CONFLICT),
+                    transfer("waiting", TransferState.RETRY),
                     transfer("done", TransferState.SUCCEEDED),
+                    transfer("download", TransferState.FAILED).copy(direction = "DOWNLOAD"),
                 ),
             )
 
-        assertEquals(listOf("failed"), result.map(TransferEntity::id))
+        assertEquals(listOf("failed", "waiting"), result.map(TransferEntity::id))
     }
 
     private fun transfer(

@@ -19,12 +19,10 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -122,11 +120,7 @@ fun BackupSettingsRoute(
         )
     }
     if (showEditor) {
-        ModalBottomSheet(onDismissRequest = {
-            showEditor = false
-            selectedSourceUri = null
-            sourcePickerAccountId = null
-        }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+        BackupEditorDialog {
             FolderBackupSettingsContent(
                 backups = emptyList(),
                 initialBackup = state.backups.firstOrNull { it.id == editing?.id } ?: editing,
@@ -273,12 +267,14 @@ private val backupDraftSaver =
                     it.destinationKind,
                     it.sharedShareId ?: "",
                     it.sharedFolderId ?: "",
+                    it.exclusionPatterns,
+                    it.enabled,
                 )
             }
                 ?: emptyList()
         },
         restore = { values ->
-            if (values.size == 10) {
+            if (values.size in 10..12) {
                 BackupDraft(
                     values[0] as String,
                     values[1] as String,
@@ -290,6 +286,8 @@ private val backupDraftSaver =
                     values[7] as String,
                     (values[8] as String).ifBlank { null },
                     (values[9] as String).ifBlank { null },
+                    (values.getOrNull(10) as? String).orEmpty(),
+                    (values.getOrNull(11) as? Boolean) ?: true,
                 )
             } else {
                 null

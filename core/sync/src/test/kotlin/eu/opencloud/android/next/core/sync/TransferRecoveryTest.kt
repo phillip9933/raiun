@@ -84,6 +84,74 @@ class TransferRecoveryTest {
             org.junit.Assert.assertTrue(obsolete == null || obsolete.state == androidx.work.WorkInfo.State.CANCELLED)
         }
 
+    @Test fun `bulk upload retry skips conflicts and failures requiring human action`() =
+        runTest {
+            seedAccount()
+            val transient = intent().copy(state = "FAILED", errorCode = "CONNECTIVITY")
+            val permission = intent().copy(id = "permission", state = "FAILED", errorCode = "SOURCE_PERMISSION")
+            val conflict = intent().copy(id = "conflict", state = "CONFLICT", errorCode = "CONFLICT")
+            val download =
+                intent().copy(
+                    id = "download",
+                    direction = "DOWNLOAD",
+                    state = "FAILED",
+                    errorCode = "TIMEOUT",
+                )
+            val waiting = intent().copy(id = "waiting", state = "RETRY", errorCode = "REMOTE_NOT_READY")
+            val unknown = intent().copy(id = "unknown", state = "FAILED", errorCode = null)
+            val cancelled = intent().copy(id = "cancelled", state = "CANCELLED", errorCode = "CONNECTIVITY")
+            listOf(
+                transient,
+                permission,
+                conflict,
+                download,
+                waiting,
+                unknown,
+                cancelled,
+            ).forEach { store.createTransfer(it) }
+
+            val result = manager.retryFailedUploads("account")
+            assertEquals(2, result.retried)
+            assertEquals(3, result.needsAttention)
+            assertEquals("QUEUED", store.transfer("transfer")?.state)
+            assertEquals("FAILED", store.transfer("permission")?.state)
+            assertEquals("CONFLICT", store.transfer("conflict")?.state)
+            assertEquals("FAILED", store.transfer("download")?.state)
+            assertEquals("QUEUED", store.transfer("waiting")?.state)
+            assertEquals("FAILED", store.transfer("unknown")?.state)
+            assertEquals("CANCELLED", store.transfer("cancelled")?.state)
+        }
+
+    @Test fun `bulk upload retry continues after one candidate can no longer be retried`() =
+        runTest {
+            seedAccount()
+            val inaccessible =
+                intent().copy(
+                    id = "inaccessible",
+                    locationKind = "SHARED_FOLDER",
+                    resourceId = "old-shared-parent",
+                    state = "FAILED",
+                    errorCode = "CONNECTIVITY",
+                    createdAtEpochMillis = 2,
+                )
+            val eligible =
+                intent().copy(
+                    id = "eligible",
+                    state = "FAILED",
+                    errorCode = "CONNECTIVITY",
+                    createdAtEpochMillis = 1,
+                )
+            store.createTransfer(inaccessible)
+            store.createTransfer(eligible)
+
+            val result = manager.retryFailedUploads("account")
+
+            assertEquals(1, result.retried)
+            assertEquals(1, result.needsAttention)
+            assertEquals("FAILED", store.transfer("inaccessible")?.state)
+            assertEquals("QUEUED", store.transfer("eligible")?.state)
+        }
+
     @Test fun `keep both clears the previous resumable address and stale actions cannot reset the new intent`() =
         runTest {
             seedAccount()

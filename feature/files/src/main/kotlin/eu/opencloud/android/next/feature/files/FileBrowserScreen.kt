@@ -16,9 +16,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -50,6 +54,7 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.OfflinePin
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
@@ -57,6 +62,7 @@ import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.outlined.People
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
@@ -78,6 +84,7 @@ import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -104,6 +111,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -111,7 +120,9 @@ import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -127,6 +138,7 @@ import eu.opencloud.android.next.core.datastore.SettingsBrowserLayout
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudColor
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
 import eu.opencloud.android.next.core.model.ResourceKind
+import eu.opencloud.android.next.core.sync.BackupExclusions
 import eu.opencloud.android.next.core.sync.VaultLocation
 import eu.opencloud.android.next.core.sync.formatBackupDateFolder
 import eu.opencloud.android.next.core.sync.isVideoPreview
@@ -2122,6 +2134,17 @@ fun FolderBackupSettingsContent(
     var datePattern by rememberSaveable(initialBackup?.id) {
         mutableStateOf(initialBackupDatePattern(initialBackup?.dateOrganization))
     }
+    var showDatePatternEditor by rememberSaveable(initialBackup?.id) { mutableStateOf(false) }
+    var backupEnabled by rememberSaveable(initialBackup?.id) { mutableStateOf(initialBackup?.enabled ?: true) }
+    var exclusionPatterns by rememberSaveable(initialBackup?.id) {
+        mutableStateOf(initialBackup?.exclusionPatterns.orEmpty())
+    }
+    var showExclusions by rememberSaveable(initialBackup?.id) { mutableStateOf(false) }
+    var exclusionRows by rememberSaveable(initialBackup?.id) { mutableStateOf(arrayListOf("")) }
+    var exclusionRowIds by rememberSaveable(initialBackup?.id) { mutableStateOf(arrayListOf(0)) }
+    var nextExclusionRowId by rememberSaveable(initialBackup?.id) { mutableIntStateOf(1) }
+    var focusExclusionRowId by rememberSaveable(initialBackup?.id) { mutableStateOf<Int?>(null) }
+    val exclusionError = BackupExclusions.validate(exclusionPatterns)
     val datePreview = formatBackupDateFolder(datePattern, 1_790_687_999_000L)
     Column(modifier = modifier.fillMaxWidth()) {
         Column(
@@ -2132,7 +2155,32 @@ fun FolderBackupSettingsContent(
                     .padding(OpenCloudDimensions.SpacingMd),
             verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs),
         ) {
-            BackupEditorHeading(initialBackup, transfers)
+            Text(
+                stringResource(
+                    if (initialBackup ==
+                        null
+                    ) {
+                        R.string.backup_settings_add
+                    } else {
+                        R.string.backup_settings_manage
+                    },
+                ),
+                style = MaterialTheme.typography.headlineSmall,
+            )
+            BackupSwitch(stringResource(R.string.backup_pause_option), !backupEnabled) { backupEnabled = !it }
+            if (!backupEnabled) {
+                Text(
+                    stringResource(
+                        if (initialBackup?.enabled == false) {
+                            R.string.backup_settings_paused
+                        } else {
+                            R.string.backup_pause_pending
+                        },
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
             BackupLocationChoice(
                 label = stringResource(R.string.backup_settings_source_folder),
                 value =
@@ -2184,13 +2232,22 @@ fun FolderBackupSettingsContent(
                 chargingOnly = chargingOnly,
                 onChargingOnlyChange = { chargingOnly = it },
                 enabled = datedFolders,
-                onEnabledChange = { datedFolders = it },
                 pattern = datePattern,
-                onPatternChange = { datePattern = it },
-                preview = datePreview,
-                destination = destination,
+                onEditPattern = { showDatePatternEditor = true },
             )
-            Text(stringResource(R.string.browser_original_files_stay_local), style = MaterialTheme.typography.bodySmall)
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(stringResource(R.string.backup_exclusions_label), modifier = Modifier.weight(1f))
+                OutlinedButton(onClick = {
+                    val patterns = exclusionPatterns.lines().filter(String::isNotBlank).ifEmpty { listOf("") }
+                    exclusionRows = ArrayList(patterns)
+                    exclusionRowIds = ArrayList(patterns.indices.map { nextExclusionRowId + it })
+                    nextExclusionRowId += patterns.size
+                    focusExclusionRowId = null
+                    showExclusions = true
+                }) {
+                    Text(stringResource(R.string.backup_exclusions_button))
+                }
+            }
             if (backups.isNotEmpty() || initialBackup != null) HorizontalDivider()
             backups.forEach { backup -> BackupConfigurationItem(backup = backup, onDelete = { onDelete(backup.id) }) }
             BackupRemoveButton(initialBackup, onDelete, onDismiss)
@@ -2205,7 +2262,8 @@ fun FolderBackupSettingsContent(
                 enabled =
                     (initialBackup != null || sourceDisplayName != null) &&
                         (!requireDestinationBinding || destinationSpaceId != null) &&
-                        (!datedFolders || datePreview != null),
+                        (!datedFolders || datePreview != null) &&
+                        exclusionError == null,
                 onClick = {
                     onAdd(
                         BackupDraft(
@@ -2219,6 +2277,8 @@ fun FolderBackupSettingsContent(
                             destinationKind,
                             sharedShareId,
                             sharedFolderId,
+                            exclusionPatterns,
+                            backupEnabled,
                         ),
                     )
                 },
@@ -2259,6 +2319,142 @@ fun FolderBackupSettingsContent(
             showCreateFolder = false
         }
     }
+    if (showExclusions) {
+        BackupExclusionsDialog(
+            rows = exclusionRows,
+            rowIds = exclusionRowIds,
+            focusRowId = focusExclusionRowId,
+            onRowChange = { index, value ->
+                exclusionRows =
+                    ArrayList(exclusionRows).apply { this[index] = value.replace("\n", "").replace("\r", "") }
+            },
+            onAddRow = {
+                val id = nextExclusionRowId++
+                exclusionRows = ArrayList(exclusionRows).apply { add("") }
+                exclusionRowIds = ArrayList(exclusionRowIds).apply { add(id) }
+                focusExclusionRowId = id
+            },
+            onRemoveRow = { index ->
+                if (focusExclusionRowId == exclusionRowIds[index]) focusExclusionRowId = null
+                exclusionRows = ArrayList(exclusionRows).apply { removeAt(index) }
+                exclusionRowIds = ArrayList(exclusionRowIds).apply { removeAt(index) }
+            },
+            onCancel = {
+                focusExclusionRowId = null
+                showExclusions = false
+            },
+            onDone = {
+                exclusionPatterns = exclusionRows.filter(String::isNotBlank).joinToString("\n")
+                focusExclusionRowId = null
+                showExclusions = false
+            },
+        )
+    }
+    if (showDatePatternEditor) {
+        BackupDatePatternDialog(
+            enabled = datedFolders,
+            pattern = datePattern,
+            destination = destination,
+            onCancel = { showDatePatternEditor = false },
+            onDone = { selectedEnabled, selectedPattern ->
+                datedFolders = selectedEnabled
+                datePattern = selectedPattern
+                showDatePatternEditor = false
+            },
+        )
+    }
+}
+
+@Composable
+@Suppress("LongParameterList") // Dialog rows and their editor actions are independent inputs.
+private fun BackupExclusionsDialog(
+    rows: List<String>,
+    rowIds: List<Int>,
+    focusRowId: Int?,
+    onRowChange: (Int, String) -> Unit,
+    onAddRow: () -> Unit,
+    onRemoveRow: (Int) -> Unit,
+    onCancel: () -> Unit,
+    onDone: () -> Unit,
+) {
+    val error = BackupExclusions.validate(rows.filter(String::isNotBlank).joinToString("\n"))
+    val listState = rememberLazyListState()
+    LaunchedEffect(focusRowId) {
+        val index = rowIds.indexOf(focusRowId)
+        if (index >= 0) listState.scrollToItem(index)
+    }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text(stringResource(R.string.backup_exclusions_button)) },
+        text = {
+            LazyColumn(
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = OpenCloudDimensions.BackupExclusionsListHeight),
+                state = listState,
+                verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs),
+            ) {
+                itemsIndexed(rows, key = { index, _ -> rowIds[index] }) { index, pattern ->
+                    val rowId = rowIds[index]
+                    val focusRequester = remember { FocusRequester() }
+                    LaunchedEffect(focusRowId, rowId) {
+                        if (focusRowId == rowId) {
+                            focusRequester.requestFocus()
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        OutlinedTextField(
+                            value = pattern,
+                            onValueChange = { onRowChange(index, it) },
+                            label = { Text(stringResource(R.string.backup_exclusions_pattern, index + 1)) },
+                            singleLine = true,
+                            modifier =
+                                Modifier
+                                    .weight(1f)
+                                    .focusRequester(focusRequester),
+                        )
+                        IconButton(onClick = { onRemoveRow(index) }) {
+                            Icon(
+                                Icons.Default.Remove,
+                                contentDescription = stringResource(R.string.backup_exclusions_remove, index + 1),
+                            )
+                        }
+                    }
+                }
+                item(key = "add") {
+                    IconButton(onClick = onAddRow) {
+                        Icon(Icons.Default.Add, contentDescription = stringResource(R.string.backup_exclusions_add))
+                    }
+                }
+                item(key = "help") {
+                    Text(stringResource(R.string.backup_exclusions_help), style = MaterialTheme.typography.bodySmall)
+                }
+                if (error != null) {
+                    item(key = "error") {
+                        Text(
+                            stringResource(R.string.backup_exclusions_invalid),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+                item(key = "effect") {
+                    Text(stringResource(R.string.backup_exclusions_effect), style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onDone,
+                enabled = error == null,
+            ) { Text(stringResource(R.string.backup_exclusions_done)) }
+        },
+        dismissButton = { TextButton(onClick = onCancel) { Text(stringResource(R.string.browser_cancel)) } },
+    )
 }
 
 @Composable
@@ -2283,38 +2479,143 @@ private fun BackupDateOrganizationOptions(
     chargingOnly: Boolean,
     onChargingOnlyChange: (Boolean) -> Unit,
     enabled: Boolean,
-    onEnabledChange: (Boolean) -> Unit,
     pattern: String,
-    onPatternChange: (String) -> Unit,
-    preview: String?,
-    destination: String,
+    onEditPattern: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs)) {
         Text(stringResource(R.string.backup_settings_conditions), style = MaterialTheme.typography.titleSmall)
         BackupSwitch(stringResource(R.string.browser_wifi_only), wifiOnly, onWifiOnlyChange)
         BackupSwitch(stringResource(R.string.browser_charging_only), chargingOnly, onChargingOnlyChange)
-        BackupSwitch(stringResource(R.string.backup_date_folders), enabled, onEnabledChange)
-        if (enabled) {
-            OutlinedTextField(
-                value = pattern,
-                onValueChange = onPatternChange,
-                label = { Text(stringResource(R.string.backup_date_pattern)) },
-                supportingText = { Text(stringResource(R.string.backup_date_tokens)) },
-                singleLine = true,
-                isError = preview == null,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Text(
-                if (preview == null) {
-                    stringResource(R.string.backup_date_invalid)
-                } else {
-                    stringResource(R.string.backup_date_preview, "$destination/$preview")
-                },
-                style = MaterialTheme.typography.bodySmall,
-            )
-            Text(stringResource(R.string.backup_date_fallback), style = MaterialTheme.typography.bodySmall)
+        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(stringResource(R.string.backup_date_pattern), style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    if (enabled) pattern else stringResource(R.string.backup_date_off),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            OutlinedButton(onClick = onEditPattern) { Text(stringResource(R.string.backup_date_edit)) }
         }
     }
+}
+
+@Composable
+private fun BackupDatePatternDialog(
+    enabled: Boolean,
+    pattern: String,
+    destination: String,
+    onCancel: () -> Unit,
+    onDone: (Boolean, String) -> Unit,
+) {
+    var selectedEnabled by rememberSaveable(enabled) { mutableStateOf(enabled) }
+    var input by rememberSaveable(pattern, stateSaver = TextFieldValue.Saver) {
+        mutableStateOf(TextFieldValue(pattern, TextRange(pattern.length)))
+    }
+    val preview = formatBackupDateFolder(input.text, 1_790_687_999_000L)
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text(stringResource(R.string.backup_date_pattern)) },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs),
+            ) {
+                Text(stringResource(R.string.backup_date_editor_help), style = MaterialTheme.typography.bodySmall)
+                BackupSwitch(stringResource(R.string.backup_date_folders), selectedEnabled) { selectedEnabled = it }
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = { input = it },
+                    label = { Text(stringResource(R.string.backup_date_pattern)) },
+                    singleLine = true,
+                    isError = preview == null,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(stringResource(R.string.backup_date_presets), style = MaterialTheme.typography.labelMedium)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs)) {
+                    listOf("[YYYY]/[MM]", "[YYYY]/[MM]/[DD]", "[YYYY]-[MM]-[DD]").forEach { preset ->
+                        FilterChip(
+                            selected = input.text == preset,
+                            onClick = { input = TextFieldValue(preset, TextRange(preset.length)) },
+                            label = { Text(preset) },
+                        )
+                    }
+                }
+                Text(stringResource(R.string.backup_date_insert_token), style = MaterialTheme.typography.labelMedium)
+                listOf(
+                    R.string.backup_date_group_year to
+                        listOf(
+                            Triple("[YYYY]", "2026", R.string.backup_date_token_year),
+                            Triple("[YY]", "26", R.string.backup_date_token_short_year),
+                        ),
+                    R.string.backup_date_group_month to
+                        listOf(
+                            Triple("[MMMM]", "October", R.string.backup_date_token_month_name),
+                            Triple("[MMM]", "Oct", R.string.backup_date_token_short_month_name),
+                            Triple("[MM]", "01–12", R.string.backup_date_token_month),
+                            Triple("[M]", "1–12", R.string.backup_date_token_short_month),
+                        ),
+                    R.string.backup_date_group_day to
+                        listOf(
+                            Triple("[DD]", "01–31", R.string.backup_date_token_day),
+                            Triple("[D]", "1–31", R.string.backup_date_token_short_day),
+                        ),
+                ).forEach { (groupLabel, tokens) ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            stringResource(groupLabel),
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.weight(1f),
+                        )
+                        FlowRow(
+                            modifier = Modifier.weight(4f),
+                            horizontalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs),
+                        ) {
+                            tokens.forEach { (token, example, description) ->
+                                val descriptionText = stringResource(description)
+                                AssistChip(
+                                    onClick = {
+                                        val start = input.selection.min.coerceIn(0, input.text.length)
+                                        val end = input.selection.max.coerceIn(start, input.text.length)
+                                        val updated = input.text.replaceRange(start, end, token)
+                                        input = TextFieldValue(updated, TextRange(start + token.length))
+                                    },
+                                    label = { Text(example, style = MaterialTheme.typography.labelSmall) },
+                                    modifier = Modifier.semantics { contentDescription = descriptionText },
+                                )
+                            }
+                        }
+                    }
+                }
+                Text(
+                    if (preview == null) {
+                        stringResource(R.string.backup_date_invalid)
+                    } else {
+                        stringResource(R.string.backup_date_preview, "$destination/$preview")
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color =
+                        if (preview ==
+                            null
+                        ) {
+                            MaterialTheme.colorScheme.error
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                )
+                Text(stringResource(R.string.backup_date_fallback), style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onDone(selectedEnabled, input.text) },
+                enabled = !selectedEnabled || preview != null,
+            ) {
+                Text(stringResource(R.string.backup_exclusions_done))
+            }
+        },
+        dismissButton = { TextButton(onClick = onCancel) { Text(stringResource(R.string.browser_cancel)) } },
+    )
 }
 
 @Composable
@@ -2476,6 +2777,8 @@ data class BackupDraft(
     val destinationKind: String = "SPACE",
     val sharedShareId: String? = null,
     val sharedFolderId: String? = null,
+    val exclusionPatterns: String = "",
+    val enabled: Boolean = true,
 )
 
 internal enum class BrowserSortCriterion(

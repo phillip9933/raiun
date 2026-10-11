@@ -824,6 +824,8 @@ class FileBrowserViewModel(
                     destinationKind = draft.destinationKind,
                     sharedShareId = draft.sharedShareId,
                     sharedFolderId = draft.sharedFolderId,
+                    exclusionPatterns = draft.exclusionPatterns,
+                    enabled = draft.enabled,
                 )
             runCatching { withContext(Dispatchers.IO) { transfers.saveBackup(backup) } }
                 .onSuccess {
@@ -863,6 +865,8 @@ class FileBrowserViewModel(
                             deleteAfterUpload = false,
                             lastSafeScanEpochMillis = 0,
                             dateOrganization = draft.dateOrganization,
+                            exclusionPatterns = draft.exclusionPatterns,
+                            enabled = draft.enabled,
                         ),
                     )
                 }

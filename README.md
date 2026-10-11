@@ -18,7 +18,7 @@ Making it public does not mean it is a polished production product or suitable f
 - Encrypted image, PDF and text previews decrypt only in memory. Larger previews use a temporary encrypted cache; large text files can be viewed and edited in sections.
 - Scan PDFs and JPEGs directly into an encrypted folder or Space. Encrypted copy and move browse destinations within the same encrypted location.
 - Explicit “Open with” handoff to another app is available after a warning. It creates a temporary plaintext file; see the security limits below before using it.
-- Folder/camera backup with custom date-based destination folders, local cache controls and optional biometric/device locking.
+- Folder/camera backup with custom date-based destination folders, per-backup file and folder exclusions, pause controls and optional biometric/device locking.
 - Video thumbnails from supported server previews or local files, including encrypted locations.
 - Cloud folders for other apps, built-in text/PDF/image viewers and file version history.
 - File and folder activities showing changes reported by the server.
@@ -29,7 +29,7 @@ Making it public does not mean it is a polished production product or suitable f
 
 ## Install
 
-Download the 0.9.1 beta APK from [GitHub Releases](https://github.com/phillip9933/raiun/releases), read the [0.9.1 beta release notes](docs/RELEASE-NOTES-0.9.1.md), and verify the APK against the attached SHA256SUMS file. Install over an existing Raiun release to keep its app data. The previous OpenCloud Android Next release downloads have been retired.
+Download the 0.9.2 beta APK from [GitHub Releases](https://github.com/phillip9933/raiun/releases), read the [0.9.2 beta release notes](docs/RELEASE-NOTES-0.9.2.md), and verify the APK against the attached SHA256SUMS file. Install over an existing Raiun release to keep its app data. Raiun is still beta; please report problems through the project's issue tracker. The previous OpenCloud Android Next release downloads have been retired.
 
 ## Build and test
 
@@ -54,6 +54,7 @@ Translations use Android resource files. Missing translations fall back to Engli
 - HTTP 502/timeouts have been observed on some server/network paths, particularly when network stability is inconsistent.
 - External editor, Office/server integrations and some Android document-provider combinations have not been fully tested.
 - Folder backup queues uploads; it is not a bidirectional mirror and does not delete source files. Changed destination names can require conflict resolution.
+- Exclusions apply during future scans. They do not remove files already in the cloud, and uploads already queued may still finish after you pause a backup.
 - Metadata comes from Android's supplied file representation; Raiun does not guarantee removal or preservation of GPS or other metadata.
 
 The project is provided without warranties; test your server and workflow before relying on it.

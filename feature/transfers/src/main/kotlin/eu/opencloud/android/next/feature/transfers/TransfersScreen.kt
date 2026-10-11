@@ -32,6 +32,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -54,7 +55,6 @@ import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.TransferDirection
 import eu.opencloud.android.next.core.database.TransferEntity
 import eu.opencloud.android.next.core.database.TransferState
-import eu.opencloud.android.next.core.designsystem.localizedQuantityString
 import eu.opencloud.android.next.core.designsystem.localizedString
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
 import eu.opencloud.android.next.core.sync.TransferManager
@@ -63,6 +63,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -113,7 +114,16 @@ class TransfersViewModel(
                     store.observeSpaces(accountId),
                 ) { transfers, spaces ->
                     categorizeTransfers(transfers).copy(spaceNames = spaces.associate { it.driveId to it.name })
-                }.collectLatest { mutableState.value = it }
+                }.collectLatest { snapshot ->
+                    mutableState.update { current ->
+                        current.copy(
+                            spaceNames = snapshot.spaceNames,
+                            active = snapshot.active,
+                            failed = snapshot.failed,
+                            history = snapshot.history,
+                        )
+                    }
+                }
         }
     }
 
@@ -138,18 +148,36 @@ class TransfersViewModel(
     }
 
     fun retryAll() {
-        val failed = retryableTransfers(state.value.failed)
-        if (failed.isEmpty()) return
-        runAction {
-            val failures = failed.mapNotNull { transfer -> runCatching { manager.retry(transfer) }.exceptionOrNull() }
-            check(failures.isEmpty()) {
-                getApplication<Application>().localizedQuantityString(
-                    R.plurals.transfers_retry_failures,
-                    failed.size,
-                    failures.size,
-                    failed.size,
-                )
-            }
+        val accountId = loadedAccountId ?: return
+        if (state.value.bulkRetrying ||
+            bulkUploadRetryTargets(state.value.active + state.value.failed).isEmpty()
+        ) {
+            return
+        }
+        mutableState.value = mutableState.value.copy(bulkRetrying = true, bulkRetryFeedback = null, error = null)
+        viewModelScope.launch {
+            runCatching { withContext(Dispatchers.IO) { manager.retryFailedUploads(accountId) } }
+                .onSuccess { result ->
+                    val application = getApplication<Application>()
+                    mutableState.value =
+                        mutableState.value.copy(
+                            bulkRetrying = false,
+                            bulkRetryFeedback =
+                                application.localizedString(
+                                    R.string.transfers_bulk_retry_result,
+                                    result.retried,
+                                    result.needsAttention,
+                                ),
+                        )
+                }.onFailure {
+                    mutableState.value =
+                        mutableState.value.copy(
+                            bulkRetrying = false,
+                            error =
+                                it.message
+                                    ?: getApplication<Application>().localizedString(R.string.transfers_action_failed),
+                        )
+                }
         }
     }
 
@@ -160,7 +188,7 @@ class TransfersViewModel(
     }
 
     fun dismissError() {
-        mutableState.value = mutableState.value.copy(error = null)
+        mutableState.value = mutableState.value.copy(error = null, bulkRetryFeedback = null)
     }
 
     private fun runAction(action: suspend () -> Unit) {
@@ -184,6 +212,8 @@ data class TransfersUiState(
     val failed: List<TransferEntity> = emptyList(),
     val history: List<TransferEntity> = emptyList(),
     val error: String? = null,
+    val bulkRetryFeedback: String? = null,
+    val bulkRetrying: Boolean = false,
 )
 
 enum class TransferConflictDecision { REPLACE, KEEP_BOTH, CANCEL }
@@ -195,8 +225,11 @@ internal fun categorizeTransfers(transfers: List<TransferEntity>): TransfersUiSt
         history = transfers.filter { it.state in HISTORY_STATES },
     )
 
-internal fun retryableTransfers(transfers: List<TransferEntity>): List<TransferEntity> =
-    transfers.filter { it.state == TransferState.FAILED.name }
+internal fun bulkUploadRetryTargets(transfers: List<TransferEntity>): List<TransferEntity> =
+    transfers.filter {
+        it.direction == TransferDirection.UPLOAD.name &&
+            it.state in setOf(TransferState.FAILED.name, TransferState.RETRY.name)
+    }
 
 private val ACTIVE_STATES = setOf(TransferState.QUEUED.name, TransferState.RUNNING.name, TransferState.RETRY.name)
 private val FAILED_STATES = setOf(TransferState.FAILED.name, TransferState.CONFLICT.name)
@@ -220,7 +253,7 @@ fun TransfersScreen(
 ) {
     var showActions by remember { mutableStateOf(false) }
     var confirmClearAll by remember { mutableStateOf(false) }
-    val hasFailedTransfers = state.failed.any { it.state == TransferState.FAILED.name }
+    val hasBulkRetryTargets = bulkUploadRetryTargets(state.active + state.failed).isNotEmpty()
     val hasTransfers = state.active.isNotEmpty() || state.failed.isNotEmpty() || state.history.isNotEmpty()
     val activeQueuedTitle = stringResource(R.string.transfers_active_queued)
     val needsAttentionTitle = stringResource(R.string.transfers_needs_attention)
@@ -264,15 +297,6 @@ fun TransfersScreen(
                             }
                             DropdownMenu(expanded = showActions, onDismissRequest = { showActions = false }) {
                                 DropdownMenuItem(
-                                    text = { Text(stringResource(R.string.transfers_retry_all_failed)) },
-                                    leadingIcon = { Icon(Icons.Default.Refresh, contentDescription = null) },
-                                    enabled = hasFailedTransfers,
-                                    onClick = {
-                                        showActions = false
-                                        onRetryAll()
-                                    },
-                                )
-                                DropdownMenuItem(
                                     text = { Text(stringResource(R.string.transfers_clear_all)) },
                                     leadingIcon = { Icon(Icons.Default.Cancel, contentDescription = null) },
                                     onClick = {
@@ -302,6 +326,11 @@ fun TransfersScreen(
                         spaceName = state.spaceNames[transfer.spaceId],
                     )
                 }
+                if (hasBulkRetryTargets) {
+                    item(key = "bulk-upload-retry") {
+                        BulkUploadRetryButton(enabled = !state.bulkRetrying, onClick = onRetryAll)
+                    }
+                }
                 transferSection(needsAttentionTitle, state.failed) { transfer ->
                     FailedTransferRow(transfer, onRetry, onResolveConflict)
                 }
@@ -316,6 +345,14 @@ fun TransfersScreen(
             onDismissRequest = onDismissError,
             title = { Text(stringResource(R.string.transfers_action_title)) },
             text = { Text(error) },
+            confirmButton = { TextButton(onClick = onDismissError) { Text(stringResource(R.string.transfers_ok)) } },
+        )
+    }
+    state.bulkRetryFeedback?.let { feedback ->
+        AlertDialog(
+            onDismissRequest = onDismissError,
+            title = { Text(stringResource(R.string.transfers_bulk_retry_title)) },
+            text = { Text(feedback) },
             confirmButton = { TextButton(onClick = onDismissError) { Text(stringResource(R.string.transfers_ok)) } },
         )
     }
@@ -536,3 +573,21 @@ private fun transferDate(timestamp: Long) =
             java.text.DateFormat.MEDIUM,
             java.text.DateFormat.SHORT,
         ).format(java.util.Date(timestamp))
+
+@Composable
+private fun BulkUploadRetryButton(
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    OutlinedButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier =
+            Modifier.fillMaxWidth().padding(
+                horizontal = OpenCloudDimensions.SpacingMd,
+                vertical = OpenCloudDimensions.SpacingSm,
+            ),
+    ) {
+        Text(stringResource(R.string.transfers_retry_all_failed))
+    }
+}

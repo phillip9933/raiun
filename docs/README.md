@@ -10,7 +10,7 @@ Start with [README](../README.md) for installation and current beta limits, and 
 | [Scanner SDK](OFFLINE-SCANNER-SDK.md) | Pinned dependency setup and host ownership |
 | [Screenshot testing](SCREENSHOT_TESTING.md) | Golden ownership and review |
 | [Release procedure](RELEASING.md) | Packaging, signing continuity and release checks |
-| [Release notes](RELEASE-NOTES-0.9.1.md) | Current beta behavior, limits and handoff disclosure |
+| [Release notes](RELEASE-NOTES-0.9.2.md) | Current beta changes, limits and feedback |
 | [Changelog](../CHANGELOG.md) | Version history |
 | [Encrypted security review](ENCRYPTED-SECURITY-REVIEW.md) | Encryption compatibility, local key handling and explicit plaintext handoff boundaries |
 | [Security](../SECURITY.md) and [Privacy](../PRIVACY.md) | Reporting and data-handling boundaries |

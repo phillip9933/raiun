@@ -47,6 +47,36 @@ These checks match CI. Missing translations may fall back to English. Review cha
 
 Record the revision, commands, environment and outcomes. Separate current results from historical evidence, and unit/screenshot checks from device or server acceptance. Do not include credentials, private URLs, machine-specific paths or personal files in public reports. See [beta limitations](ENCRYPTED-VAULTS-PLAN.md#not-included-in-this-beta) even when automated checks pass.
 
+## 0.9.2 beta: backup editor and upload retry
+
+On a disposable backup, check these interactions:
+
+- Add a new backup and open the date-pattern editor. Enable date folders, choose a preset, insert a date part, and check the preview. Cancel must leave the saved pattern unchanged; Done followed by Save must retain it. Repeat with an existing backup.
+- Repeatedly scroll up and down in both backup forms. The form must remain fixed, with Save and Cancel accessible; swiping down and pressing Back must not dismiss it.
+- Pause an existing backup and save. Reopen it and confirm the paused indicator. Resume and save to allow scanning again. Uploads queued before pausing may still finish.
+- In Transfers, retry recoverable failed uploads together. Downloads, canceled uploads, name conflicts and permission failures must not be silently restarted or resolved. Confirm the feedback and resolve remaining attention items individually.
+
+Local validation for this follow-up: 13 backup-editor host tests, 15 transfer-recovery host tests, two Transfers state tests, and seven backup screenshot tests passed. Five Android 15 emulator tests passed, covering fixed-window scrolling/back behavior, explicit Save/Cancel, new-backup date presets and light/dark exclusions dialogs. Affected Kotlin style/static checks and German resource structure validation passed. Main editor and date-dialog screenshots were reviewed. These checks do not establish phone/server acceptance.
+
+## 0.9.2 beta: backup exclusions
+
+In a backup's settings, open **Exclusions** and enter one pattern in each row. Use the plus control to add a row and the minus control beside a row to remove it. Confirm the dialog, then save the backup. Matching is case-sensitive and uses paths inside the chosen source folder, before date-folder organization. A name without `/` matches anywhere; a pattern containing `/` matches from the source root. `*` matches within a name, `?` matches one character, and `**` can match across folders. A trailing `/` applies only to folders. Matching a folder skips its contents too.
+
+Use a disposable source and destination to check:
+
+- Select all files and add `*.tmp` and `.thumbnail`. Put matching files at the root and in nested folders, and put a normal photo inside `.thumbnail`. None should be uploaded; an ordinary sibling photo should upload.
+- Use `Cache/` and confirm it skips a directory named Cache but permits a file with that name. Confirm `cache` remains distinct.
+- Use `Camera/*.tmp` and confirm it applies relative to the source root. Check matching before enabling date folders so destination organization cannot hide a matching error.
+- Add and remove rows, confirm the dialog, save, leave, and reopen the backup editor. Rules should survive app restart. Canceling the dialog must discard its edits; canceling the backup editor must preserve saved rules. Rotate while the dialog is open and confirm its draft survives.
+- Remove a rule and rescan. Previously excluded files should become eligible under the existing backup rules. Files already uploaded must remain in the cloud when exclusions are added. Previously queued uploads may still complete.
+- Upgrade from a database created by 0.9.1. Existing backups should retain their destinations, history, and empty exclusion rules.
+
+These instructions describe acceptance checks, not completed device/server testing.
+
+The initial exclusions implementation based on `9668f3f` passed 562 focused host tests (database, sync and files), affected-module ktlint/Detekt checks, debug assembly, locale-validator tests and German resource structure validation.
+
+The subsequent row-dialog UI passed all 58 files-module host tests, affected static checks, backup editor/picker screenshot verification and debug assembly. Two Android 15 emulator instrumentation tests passed for light/dark rendering and add/remove/apply/cancel interactions; both screenshots were visually reviewed. Native-graphics Robolectric dialog rendering timed out, so popup rendering was verified on Android instead. These are uncommitted development results, not a release gate or physical-device/server acceptance result.
+
 ## 0.9.1 beta: date folders, video thumbnails and large encrypted previews
 
 Test with synthetic files before using a real backup source:

@@ -29,7 +29,9 @@
     <string name="transfers_recover_edits">Recover edits</string>
     <string name="transfers_upload_files">Upload files</string>
     <string name="transfers_actions_description">Transfer actions</string>
-    <string name="transfers_retry_all_failed">Retry all failed</string>
+    <string name="transfers_retry_all_failed">Retry eligible uploads</string>
+    <string name="transfers_bulk_retry_title">Upload retry results</string>
+    <string name="transfers_bulk_retry_result">Queued %1$d uploads for retry. %2$d still need attention; resolve conflicts and permissions individually.</string>
     <string name="transfers_clear_all">Clear all</string>
     <string name="transfers_active_queued">Active &amp; queued</string>
     <string name="transfers_needs_attention">Needs attention</string>

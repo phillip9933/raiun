@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.2 beta
+
+- Added file and folder exclusions to folder and camera backups, and made backup settings easier to use with clearer date controls and pause status.
+- Added retry for failed uploads and fixed scrolling in backup settings.
+
 ## 0.9.1 beta
 
 - Updated the document scanner to 0.7.0 for sharper JPEG/PDF output, improved paper and shadow cleanup, and capture-quality warnings. Extra diagnostic image copies remain disabled in Raiun.

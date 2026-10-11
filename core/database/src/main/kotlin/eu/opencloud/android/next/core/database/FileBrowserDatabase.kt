@@ -51,7 +51,7 @@ import kotlinx.coroutines.flow.Flow
         ExcludedCacheEntity::class,
         VaultExclusion::class,
     ],
-    version = 24,
+    version = 25,
     exportSchema = true,
 )
 @TypeConverters(FileBrowserConverters::class)
@@ -278,6 +278,7 @@ abstract class FileBrowserDatabase : RoomDatabase() {
                 MIGRATION_21_22,
                 MIGRATION_22_23,
                 MIGRATION_23_24,
+                MIGRATION_24_25,
             )
     }
 }
@@ -432,6 +433,7 @@ data class FolderBackupEntity(
     val sharedShareId: String? = null,
     val sharedFolderId: String? = null,
     @androidx.room.ColumnInfo(defaultValue = "0") val destinationRevision: Long = 0,
+    @androidx.room.ColumnInfo(defaultValue = "''") val exclusionPatterns: String = "",
 )
 
 @Entity(

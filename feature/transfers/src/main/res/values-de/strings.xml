@@ -27,7 +27,9 @@
     <string name="transfers_recover_edits">Änderungen wiederherstellen</string>
     <string name="transfers_upload_files">Dateien hochladen</string>
     <string name="transfers_actions_description">Aktionen für Übertragungen</string>
-    <string name="transfers_retry_all_failed">Alle fehlgeschlagenen erneut versuchen</string>
+    <string name="transfers_retry_all_failed">Mögliche Uploads erneut versuchen</string>
+    <string name="transfers_bulk_retry_title">Ergebnisse der Upload-Wiederholung</string>
+    <string name="transfers_bulk_retry_result">%1$d Uploads wurden für einen erneuten Versuch vorgemerkt. Bei %2$d ist weiterhin eine Aktion erforderlich. Löse Konflikte und Berechtigungen einzeln.</string>
     <string name="transfers_clear_all">Alle entfernen</string>
     <string name="transfers_active_queued">Aktiv und vorgemerkt</string>
     <string name="transfers_needs_attention">Aktion erforderlich</string>
