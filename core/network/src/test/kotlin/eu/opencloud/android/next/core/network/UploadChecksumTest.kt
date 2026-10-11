@@ -43,6 +43,7 @@ class UploadChecksumTest {
         MockWebServer().use { server ->
             val hash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
             server.enqueue(MockResponse().setResponseCode(404))
+            server.enqueue(MockResponse().setResponseCode(404))
             server.enqueue(MockResponse().setResponseCode(207).setBody(properties(hash)))
             val fingerprint = ContentFingerprint.read("hello".byteInputStream(), 5)
 
@@ -53,9 +54,33 @@ class UploadChecksumTest {
                 useServerChecksum = true,
             )
 
-            assertEquals(2, server.requestCount)
+            assertEquals(3, server.requestCount)
             assertEquals("PROPFIND", server.takeRequest().method)
+            assertEquals("GET", server.takeRequest().method)
             assertEquals("PROPFIND", server.takeRequest().method)
+        }
+    }
+
+    @Test fun `transient metadata failures can still verify readable bytes`() {
+        for (status in listOf(404, 425, 500, 503)) {
+            MockWebServer().use { server ->
+                server.enqueue(MockResponse().setResponseCode(status))
+                server.enqueue(MockResponse().setBody("hello").setHeader("ETag", "\"v1\""))
+                val fingerprint = ContentFingerprint.read("hello".byteInputStream(), 5)
+
+                assertEquals(
+                    "\"v1\"",
+                    TransferClient(OkHttpClient()).verifyUpload(
+                        server.url("file").toString(),
+                        "Bearer test",
+                        fingerprint,
+                        useServerChecksum = true,
+                    ),
+                )
+                assertEquals("PROPFIND", server.takeRequest().method)
+                assertEquals("GET", server.takeRequest().method)
+                assertEquals(2, server.requestCount)
+            }
         }
     }
 

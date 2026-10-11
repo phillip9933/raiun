@@ -9,10 +9,15 @@ import eu.opencloud.android.next.core.network.TransferConflictException
 import eu.opencloud.android.next.core.network.TransferHttpException
 import kotlinx.coroutines.test.runTest
 import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 class UploadRecoveryTest {
     @Test fun `manual retry retains verification intent even with a reset attempt counter`() =
@@ -83,6 +88,94 @@ class UploadRecoveryTest {
                 assertEquals("HEAD", server.takeRequest().method)
                 assertEquals("*", server.takeRequest().getHeader("If-None-Match"))
                 assertEquals("GET", server.takeRequest().method)
+            }
+        }
+
+    @Test fun `checksum verification of missing target safely recreates it once`() =
+        runTest {
+            MockWebServer().use { server ->
+                val present = AtomicBoolean(false)
+                val writes = AtomicInteger()
+                val condition = AtomicReference<String?>()
+                server.dispatcher =
+                    object : Dispatcher() {
+                        override fun dispatch(request: RecordedRequest): MockResponse =
+                            when (request.method) {
+                                "PROPFIND", "GET", "HEAD" ->
+                                    if (!present.get()) {
+                                        MockResponse().setResponseCode(404)
+                                    } else if (request.method == "GET") {
+                                        MockResponse().setBody("hello")
+                                    } else {
+                                        MockResponse().setResponseCode(405)
+                                    }
+                                "PUT" -> {
+                                    writes.incrementAndGet()
+                                    condition.set(request.getHeader("If-None-Match"))
+                                    present.set(true)
+                                    MockResponse().setResponseCode(201)
+                                }
+                                else -> MockResponse().setResponseCode(500)
+                            }
+                    }
+
+                execute(server, intent, useServerChecksum = true)
+
+                assertEquals(1, writes.get())
+                assertEquals("*", condition.get())
+            }
+        }
+
+    @Test fun `checksum verification of a pending target never replays a completed upload`() =
+        runTest {
+            MockWebServer().use { server ->
+                val writes = AtomicInteger()
+                server.dispatcher =
+                    object : Dispatcher() {
+                        override fun dispatch(request: RecordedRequest): MockResponse =
+                            if (request.method == "PUT") {
+                                writes.incrementAndGet()
+                                MockResponse().setResponseCode(201)
+                            } else {
+                                MockResponse().setResponseCode(425)
+                            }
+                    }
+
+                try {
+                    execute(server, intent, useServerChecksum = true)
+                    org.junit.Assert.fail("A pending target must still require verification")
+                } catch (failure: TransferHttpException) {
+                    assertEquals(425, failure.statusCode)
+                }
+                assertEquals(0, writes.get())
+            }
+        }
+
+    @Test fun `checksum verification of changed remote bytes never overwrites`() =
+        runTest {
+            MockWebServer().use { server ->
+                val writes = AtomicInteger()
+                server.dispatcher =
+                    object : Dispatcher() {
+                        override fun dispatch(request: RecordedRequest): MockResponse =
+                            when (request.method) {
+                                "PROPFIND" -> MockResponse().setResponseCode(405)
+                                "GET" -> MockResponse().setBody("other")
+                                "PUT" -> {
+                                    writes.incrementAndGet()
+                                    MockResponse().setResponseCode(201)
+                                }
+                                else -> MockResponse().setResponseCode(500)
+                            }
+                    }
+
+                try {
+                    execute(server, intent, useServerChecksum = true)
+                    org.junit.Assert.fail("Changed remote bytes must require attention")
+                } catch (failure: OpenCloudException) {
+                    assertEquals(OpenCloudError.PreconditionFailed, failure.error)
+                }
+                assertEquals(0, writes.get())
             }
         }
 
@@ -214,6 +307,7 @@ class UploadRecoveryTest {
     private suspend fun execute(
         server: MockWebServer,
         transfer: TransferEntity,
+        useServerChecksum: Boolean = false,
     ) {
         val client = TransferClient(OkHttpClient())
         val url = server.url("file").toString()
@@ -222,7 +316,7 @@ class UploadRecoveryTest {
         uploadAndVerify(
             transfer,
             upload = { client.upload(url, "Bearer test", null, 5, false, { bytes.inputStream() }) {} },
-            verify = { client.verifyUpload(url, "Bearer test", fingerprint) {} },
+            verify = { client.verifyUpload(url, "Bearer test", fingerprint, useServerChecksum) {} },
         )
     }
 }

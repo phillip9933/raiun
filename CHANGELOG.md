@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.3 beta
+
+- Fixed uploads getting stuck on “Verifying transfer” when the destination file is missing. Retries can safely upload the missing file without overwriting existing content.
+
 ## 0.9.2 beta
 
 - Added file and folder exclusions to folder and camera backups, and made backup settings easier to use with clearer date controls and pause status.

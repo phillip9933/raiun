@@ -168,16 +168,17 @@ class TransferClient(
         checkActive: () -> Unit = {},
     ): String? {
         if (!useServerChecksum) return verifyUploadBytes(url, authorization, expected, checkActive)
-        var lastMismatch = false
+        var lastFailure: OpenCloudException? = null
         for (wait in POST_WRITE_VERIFICATION_DELAYS_MS) {
             awaitVerificationDelay(wait, checkActive)
             when (val attempt = verifyUploadAttempt(url, authorization, expected, checkActive)) {
                 is UploadAttempt.Verified -> return attempt.eTag
-                is UploadAttempt.Retry -> lastMismatch = attempt.mismatch
+                is UploadAttempt.Retry -> lastFailure = attempt.failure
             }
         }
-        if (lastMismatch) throw OpenCloudException(OpenCloudError.PreconditionFailed)
-        throw OpenCloudException(OpenCloudError.NotReady(5))
+        // Preserve confirmed absence for guarded upload recovery, and retain the actual
+        // server failure instead of describing every unsuccessful probe as processing.
+        throw checkNotNull(lastFailure)
     }
 
     private fun verifyUploadAttempt(
@@ -190,10 +191,10 @@ class TransferClient(
             try {
                 verifyServerChecksum(url, authorization, expected)
             } catch (failure: OpenCloudException) {
-                if (failure.error == OpenCloudError.InvalidResponse) {
+                if (failure.isPostWriteTransient()) {
+                    // DAV metadata can lag behind readable content. A full byte check
+                    // remains authoritative; never infer success from metadata failure.
                     null
-                } else if (failure.isPostWriteTransient()) {
-                    return UploadAttempt.Retry(mismatch = false)
                 } else {
                     throw failure
                 }
@@ -216,8 +217,7 @@ class TransferClient(
             UploadAttempt.Verified(verifyUploadBytes(url, authorization, expected, checkActive))
         } catch (failure: OpenCloudException) {
             when {
-                failure.error == OpenCloudError.PreconditionFailed -> UploadAttempt.Retry(mismatch = true)
-                failure.isPostWriteTransient() -> UploadAttempt.Retry(mismatch = false)
+                failure.isPostWriteTransient() -> UploadAttempt.Retry(failure)
                 else -> throw failure
             }
         }
@@ -501,7 +501,7 @@ private sealed interface UploadAttempt {
     ) : UploadAttempt
 
     data class Retry(
-        val mismatch: Boolean,
+        val failure: OpenCloudException,
     ) : UploadAttempt
 }
 

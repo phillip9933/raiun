@@ -29,7 +29,7 @@ Making it public does not mean it is a polished production product or suitable f
 
 ## Install
 
-Download the 0.9.2 beta APK from [GitHub Releases](https://github.com/phillip9933/raiun/releases), read the [0.9.2 beta release notes](docs/RELEASE-NOTES-0.9.2.md), and verify the APK against the attached SHA256SUMS file. Install over an existing Raiun release to keep its app data. Raiun is still beta; please report problems through the project's issue tracker. The previous OpenCloud Android Next release downloads have been retired.
+Download the 0.9.3 beta APK from [GitHub Releases](https://github.com/phillip9933/raiun/releases), read the [0.9.3 beta release notes](docs/RELEASE-NOTES-0.9.3.md), and verify the APK against the attached SHA256SUMS file. Install over an existing Raiun release to keep its app data. Raiun is still beta; please report problems through the project's issue tracker. The previous OpenCloud Android Next release downloads have been retired.
 
 ## Build and test
 
