@@ -432,7 +432,8 @@ impl Engine {
                job_id TEXT NOT NULL, account_id TEXT NOT NULL, origin TEXT NOT NULL,
                space_id TEXT NOT NULL, source_root TEXT NOT NULL, relative_path TEXT NOT NULL,
                destination_path TEXT NOT NULL, generation INTEGER NOT NULL,
-               job_revision INTEGER NOT NULL DEFAULT 0, run_generation INTEGER NOT NULL,
+               job_revision INTEGER NOT NULL DEFAULT 0, destination_root_id TEXT,
+               run_generation INTEGER NOT NULL,
                state TEXT NOT NULL, source_size INTEGER NOT NULL,
                mtime_seconds INTEGER NOT NULL, mtime_nanoseconds INTEGER NOT NULL,
                source_sha256 TEXT NOT NULL, base_remote_id TEXT, base_etag TEXT,
@@ -460,6 +461,7 @@ impl Engine {
         )
         .map_err(db_error)?;
         ensure_media_job_revision_column(&db)?;
+        ensure_media_attempt_destination_root_column(&db)?;
         // An operation that was still running at process death has an unknown
         // remote outcome. Keep it visible as failed; a later reconciliation
         // must inspect the destination before attempting another mutation.
@@ -5686,6 +5688,30 @@ fn ensure_media_job_revision_column(db: &Connection) -> Result<(), CloudError> {
     db.execute_batch("PRAGMA user_version=3").map_err(db_error)
 }
 
+// Legacy attempts deliberately remain unbound: a path or current configuration
+// cannot establish the destination identity used by an earlier upload.
+fn ensure_media_attempt_destination_root_column(db: &Connection) -> Result<(), CloudError> {
+    let mut statement = db
+        .prepare("PRAGMA table_info(media_upload_attempts)")
+        .map_err(db_error)?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(db_error)?;
+    let mut has_root = false;
+    for column in columns {
+        if column.map_err(db_error)? == "destination_root_id" {
+            has_root = true;
+            break;
+        }
+    }
+    drop(statement);
+    if !has_root {
+        db.execute_batch("ALTER TABLE media_upload_attempts ADD COLUMN destination_root_id TEXT")
+            .map_err(db_error)?;
+    }
+    db.execute_batch("PRAGMA user_version=4").map_err(db_error)
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
@@ -5724,6 +5750,26 @@ mod tests {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
         assert_eq!(user_version, 3);
+    }
+
+    #[test]
+    fn media_attempt_root_migration_preserves_legacy_uncertainty() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE media_upload_attempts (job_id TEXT NOT NULL, state TEXT NOT NULL);
+             INSERT INTO media_upload_attempts VALUES('legacy','uncertain');",
+        )
+        .unwrap();
+        ensure_media_attempt_destination_root_column(&db).unwrap();
+        ensure_media_attempt_destination_root_column(&db).unwrap();
+        let row: (String, Option<String>) = db
+            .query_row(
+                "SELECT state,destination_root_id FROM media_upload_attempts WHERE job_id='legacy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("uncertain".into(), None));
     }
 
     #[derive(Default)]

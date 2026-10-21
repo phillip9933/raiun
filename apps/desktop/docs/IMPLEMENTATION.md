@@ -10,6 +10,17 @@ below are historical engineering evidence, not semantic release versions or
 claims that each workflow is verified on this beta. Local evidence/output paths
 refer to maintainer archives that are not part of this public source tree.
 
+## Next-release media recovery preparation — 22 October 2026 JST
+
+New media upload attempts retain the destination root resource identity alongside
+the existing account, origin, Space, job revision and attempt generation. The
+additive database migration preserves older attempts with an unknown (`NULL`)
+root identity; it does not infer one from current settings. This prepares exact
+scope checks for later recovery. Explicit remote verification and recovery UI
+actions are not implemented by this change, and uncertain uploads remain blocked
+with their staged copies retained. Linux source checks pass; this change is not
+in the published beta or the Windows candidate currently being checked.
+
 
 ## Current recorded state — R180 installed and left closed, 18 October 2026 JST
 

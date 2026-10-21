@@ -516,6 +516,19 @@ fn collision_is_never_overwritten_and_lost_response_stays_uncertain_across_resta
         .run_media_import_job_at(&lost_job, 211)
         .expect("ambiguous upload is reported");
     assert_eq!(report.needs_attention, 1);
+    let retained_root: Option<String> = first_attempt_engine
+        .db()
+        .unwrap()
+        .query_row(
+            "SELECT destination_root_id FROM media_upload_attempts WHERE job_id=?1",
+            [&lost_job.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        retained_root.as_deref(),
+        Some(lost_job.destination_root_resource_id.as_str())
+    );
     let recovery =
         Engine::media_import_recovery_at(state.path(), &lost_job.id, "account-1", 100, None)
             .expect("scoped recovery inspection");
