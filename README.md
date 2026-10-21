@@ -2,7 +2,7 @@
 
 Independent OpenCloud apps for Android and desktop, built around the same product and design. This is not an official OpenCloud GmbH product or supported client.
 
-I build projects to solve problems I run into in my own life. I share them because I believe in open source and hope others can learn from them, adapt them or find them useful. Making them public does not mean they are suitable for every setup, and I can't promise a support schedule.
+I build projects to solve problems I run into in my own life. I share them because I believe in open source and hope others can learn from them, adapt them or find them useful. Making them public does not mean they are suitable for every setup, and I can't promise a support schedule. Bug reports and feature requests are welcome—please open an issue to share problems, ideas or suggestions and help make these projects better.
 
 ## Apps
 
@@ -14,6 +14,20 @@ I build projects to solve problems I run into in my own life. I share them becau
 Android and desktop have independent versions and release pages. This coordinated release pairs Android 1.0.0 with the first Linux Desktop 0.7 beta. Windows and macOS are not released.
 
 Android includes Personal files and Spaces, encrypted folders and Spaces, offline access, transfers, folder/camera backup and document scanning. See its [features and limitations](apps/android/README.md), [privacy notice](apps/android/PRIVACY.md) and [changelog](apps/android/CHANGELOG.md).
+
+## Screenshots
+
+Android settings, rendered from the app with test data:
+
+| Light | Dark |
+| --- | --- |
+| <img src="docs/screenshots/android-light.png" alt="Android light interface" width="260"> | <img src="docs/screenshots/android-dark.png" alt="Android dark interface" width="260"> |
+
+Desktop light and dark interfaces (browser layout previews; no account connected):
+
+| Light | Dark |
+| --- | --- |
+| ![Desktop light interface](docs/screenshots/desktop-light.png) | ![Desktop dark interface](docs/screenshots/desktop-dark.png) |
 
 ## Develop
 

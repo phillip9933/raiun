@@ -68,7 +68,8 @@ jobs:
             :core:documentsprovider:connectedDebugAndroidTest
             :core:ui:connectedDebugAndroidTest
             :feature:files:connectedDebugAndroidTest
-            --no-daemon
+            --no-daemon --stacktrace --max-workers=2
+            '-Dorg.gradle.jvmargs=-Xmx4g -Dfile.encoding=UTF-8'
 
       - name: Upload instrumentation reports
         if: always()

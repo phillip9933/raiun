@@ -24,6 +24,14 @@ advanced encrypted/offline controls remain unverified. Media preview and backup
 job creation were observed; a click alone is not proof of an upload. See the
 [beta changelog](CHANGELOG.md) and [acceptance records](docs/MVP-ACCEPTANCE.md).
 
+## Screenshots
+
+Browser layout previews of the Desktop interface; no account connected. These show the themes, not a running native connection.
+
+| Light | Dark |
+| --- | --- |
+| <img src="https://raw.githubusercontent.com/phillip9933/raiun/main/docs/screenshots/desktop-light.png" alt="Desktop light interface" width="420"> | <img src="https://raw.githubusercontent.com/phillip9933/raiun/main/docs/screenshots/desktop-dark.png" alt="Desktop dark interface" width="420"> |
+
 ## Components
 
 - `raiun-core`: configuration validation, cloud backend contracts, namespace names.

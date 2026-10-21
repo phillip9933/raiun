@@ -6,7 +6,15 @@ An independent Android client for OpenCloud. It is not an official OpenCloud Gmb
 
 I build projects to solve problems I run into in my own life. I share them because I believe in open source and hope others can learn from them, adapt them or find them useful.
 
-Making it public does not mean it is a polished production product or suitable for every setup. Please read the documented limitations and decide whether it fits your needs. I'm happy to help where I can, but I can't promise a support schedule.
+Making it public does not mean it is a polished production product or suitable for every setup. Please read the documented limitations and decide whether it fits your needs. I'm happy to help where I can, but I can't promise a support schedule. Bug reports and feature requests are welcome—please open an issue to share problems, ideas or suggestions and help make these projects better.
+
+## Screenshots
+
+Settings rendered from the Android app with test data.
+
+| Light | Dark |
+| --- | --- |
+| <img src="https://raw.githubusercontent.com/phillip9933/raiun/main/docs/screenshots/android-light.png" alt="Android light interface" width="420"> | <img src="https://raw.githubusercontent.com/phillip9933/raiun/main/docs/screenshots/android-dark.png" alt="Android dark interface" width="420"> |
 
 ## Features
 
@@ -29,7 +37,7 @@ Making it public does not mean it is a polished production product or suitable f
 
 ## Install
 
-Download the 0.9.3 beta APK from [GitHub Releases](https://github.com/phillip9933/raiun/releases), read the [0.9.3 beta release notes](docs/RELEASE-NOTES-0.9.3.md), and verify the APK against the attached SHA256SUMS file. Install over an existing Raiun release to keep its app data. Raiun is still beta; please report problems through the project's issue tracker. The previous OpenCloud Android Next release downloads have been retired.
+Download the Android 1.0.0 APK from [GitHub Releases](https://github.com/phillip9933/raiun/releases/tag/android-v1.0.0) and verify it against the attached SHA256SUMS file. Install over an existing Raiun release to keep its app data. Please report problems through the project issue tracker.
 
 ## Build and test
 

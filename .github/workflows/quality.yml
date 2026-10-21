@@ -56,11 +56,8 @@ jobs:
       - name: Run static analysis
         run: ./gradlew detekt --no-daemon
 
-      - name: Verify Compose goldens
-        run: ./gradlew :app:verifyRoborazziDebug --no-daemon
-
-      - name: Run all unit tests
-        run: ./gradlew testDebugUnitTest --no-daemon --stacktrace
+      - name: Run all unit tests and verify Compose goldens
+        run: ./gradlew testDebugUnitTest :app:verifyRoborazziDebug --no-daemon --stacktrace
 
       - name: Lint release
         run: ./gradlew :app:lintRelease --no-daemon --stacktrace

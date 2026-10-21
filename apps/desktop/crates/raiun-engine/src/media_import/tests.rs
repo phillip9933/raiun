@@ -221,7 +221,7 @@ fn job(root: &Path) -> MediaImportJob {
         id: "phone-import".into(),
         revision: 1,
         account_id: "account-1".into(),
-        source_root: root.to_path_buf(),
+        source_root: root.canonicalize().expect("canonical fixture source root"),
         space_id: "space-1".into(),
         destination_root: "/Photos".into(),
         destination_root_resource_id: "id:/Photos".into(),
