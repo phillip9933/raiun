@@ -416,6 +416,45 @@ fn begin_integrated_plaintext_file_pin(
     (pin, version)
 }
 
+// Ordinary app tokens create user-owned files. Elevated CI tokens can use
+// Administrators as the default owner. Set up only these synthetic fixtures
+// with the intended owner; retain the exact inherited DACL and all validators.
+fn set_ordinary_fixture_owner(path: &Path) {
+    let script = r#"
+$ErrorActionPreference = 'Stop'
+$path = $env:RAIUN_TEST_FIXTURE_PATH
+$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$acl = Get-Acl -LiteralPath $path
+$owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier])
+if ($owner.Value -ne $identity.User.Value) {
+    $principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
+    if ($owner.Value -ne 'S-1-5-32-544' -or
+        -not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'Unexpected synthetic fixture owner'
+    }
+    $section = [System.Security.AccessControl.AccessControlSections]::Access
+    $before = $acl.GetSecurityDescriptorSddlForm($section)
+    $acl.SetOwner($identity.User)
+    Set-Acl -LiteralPath $path -AclObject $acl
+    $after = Get-Acl -LiteralPath $path
+    if ($after.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $identity.User.Value -or
+        $after.GetSecurityDescriptorSddlForm($section) -cne $before) {
+        throw 'Synthetic fixture owner setup changed the access policy'
+    }
+}
+"#;
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("RAIUN_TEST_FIXTURE_PATH", path)
+        .output()
+        .expect("set up synthetic Windows fixture owner");
+    assert!(
+        output.status.success(),
+        "synthetic owner setup failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn sqlite_wal_members_validate_with_private_directory_policy() {
     let state = tempfile::tempdir().expect("create synthetic state directory");
@@ -438,7 +477,9 @@ fn sqlite_wal_members_validate_with_private_directory_policy() {
         .unwrap();
 
     for sidecar in ["cache.sqlite3-wal", "cache.sqlite3-shm"] {
-        assert!(directories.root.path().join(sidecar).is_file(), "{sidecar}");
+        let path = directories.root.path().join(sidecar);
+        assert!(path.is_file(), "{sidecar}");
+        set_ordinary_fixture_owner(&path);
     }
     directories.validate_sqlite_members().unwrap();
 }
@@ -471,6 +512,7 @@ fn sqlite_rollback_journal_validates_with_private_directory_policy() {
             .is_file(),
         "SQLite should create the rollback journal while the write is pending"
     );
+    set_ordinary_fixture_owner(&directories.root.path().join("cache.sqlite3-journal"));
     directories.validate_sqlite_members().unwrap();
     transaction.commit().unwrap();
 }
@@ -999,6 +1041,7 @@ fn integrated_eviction_counts_unknown_bytes_before_evicting_indexed_recent_conte
         .content_dir
         .join(format!("{}.blob", "b".repeat(64)));
     std::fs::write(&unknown, b"xyz").unwrap();
+    set_ordinary_fixture_owner(&unknown);
 
     let report = cache.evict_recent(10).unwrap();
     assert_eq!(report.removed_bytes, indexed.byte_len);
