@@ -17,6 +17,12 @@ Android includes Personal files and Spaces, encrypted folders and Spaces, offlin
 
 ## Screenshots
 
+Android folder browsing in list and grid views (app renders with demo files):
+
+| List view | Grid view |
+| --- | --- |
+| <img src="docs/screenshots/android-files-list.png" alt="Android folder list view" width="260"> | <img src="docs/screenshots/android-files-grid.png" alt="Android folder grid view" width="260"> |
+
 Android settings, rendered from the app with test data:
 
 | Light | Dark |

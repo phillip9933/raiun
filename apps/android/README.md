@@ -10,6 +10,12 @@ Making it public does not mean it is a polished production product or suitable f
 
 ## Screenshots
 
+Android folder browsing in list and grid views (app renders with demo files):
+
+| List view | Grid view |
+| --- | --- |
+| <img src="https://raw.githubusercontent.com/phillip9933/raiun/main/docs/screenshots/android-files-list.png" alt="Android folder list view" width="260"> | <img src="https://raw.githubusercontent.com/phillip9933/raiun/main/docs/screenshots/android-files-grid.png" alt="Android folder grid view" width="260"> |
+
 Settings rendered from the Android app with test data.
 
 | Light | Dark |
