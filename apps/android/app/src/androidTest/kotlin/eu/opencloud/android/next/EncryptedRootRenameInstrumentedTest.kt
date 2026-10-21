@@ -53,6 +53,8 @@ class EncryptedRootRenameInstrumentedTest {
 
     @Test fun createFolderDialogCancelAndConfirmSubmitOnlyTheConfirmedName() {
         var created: String? = null
+        val newActionsLabel = compose.activity.getString(FilesR.string.browser_new)
+        val createFolderLabel = compose.activity.getString(FilesR.string.browser_create_folder)
         val state =
             VaultRouteState(
                 mode = VaultRouteMode.CONTENTS,
@@ -71,13 +73,13 @@ class EncryptedRootRenameInstrumentedTest {
             }
         }
 
-        compose.onNodeWithContentDescription(compose.activity.getString(FilesR.string.browser_new)).performClick()
-        compose.onNodeWithContentDescription(compose.activity.getString(FilesR.string.browser_create_folder)).performClick()
+        compose.onNodeWithContentDescription(newActionsLabel).performClick()
+        compose.onNodeWithContentDescription(createFolderLabel).performClick()
         compose.onNodeWithText("Cancel").performClick()
         compose.runOnIdle { assertEquals(null, created) }
 
-        compose.onNodeWithContentDescription(compose.activity.getString(FilesR.string.browser_new)).performClick()
-        compose.onNodeWithContentDescription(compose.activity.getString(FilesR.string.browser_create_folder)).performClick()
+        compose.onNodeWithContentDescription(newActionsLabel).performClick()
+        compose.onNodeWithContentDescription(createFolderLabel).performClick()
         compose.onNode(hasSetTextAction()).performTextInput("Quarterly records")
         compose.onNodeWithText("Confirm").performClick()
         compose.runOnIdle { assertEquals("Quarterly records", created) }
