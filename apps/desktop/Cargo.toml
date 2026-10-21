@@ -1,0 +1,22 @@
+[workspace]
+members = ["crates/raiun-core", "crates/raiun-cli", "crates/raiun-opencloud", "crates/raiun-engine", "crates/raiun-agent", "crates/raiun-fuse", "crates/raiun-vault", "crates/raiun-cache", "crates/raiun-control", "crates/raiun-control-windows", "crates/raiun-cloudfiles-windows", "crates/raiun-sqlite-windows"]
+exclude = ["desktop-shell/src-tauri"]
+resolver = "2"
+
+[workspace.package]
+version = "0.7.0-beta.1"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+clap = { version = "4", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"

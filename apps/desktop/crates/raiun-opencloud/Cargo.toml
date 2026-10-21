@@ -1,0 +1,34 @@
+[package]
+name = "raiun-opencloud"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+# Test-only trust root for the isolated native synthetic-auth fixture.
+synthetic-test-ca = []
+
+[dependencies]
+quick-xml = "0.38"
+percent-encoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
+bytes = "1"
+futures-util = "0.3"
+tokio = { version = "1", features = ["rt", "time", "sync", "net", "io-util"] }
+raiun-core = { path = "../raiun-core" }
+raiun-cache = { path = "../raiun-cache" }
+raiun-vault = { path = "../raiun-vault" }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+zeroize = "1"
+url = "2"
+tempfile.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+raiun-engine = { path = "../raiun-engine" }
+
+[lints]
+workspace = true

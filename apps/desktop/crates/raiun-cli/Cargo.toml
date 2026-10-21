@@ -1,0 +1,20 @@
+[package]
+name = "raiun-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "raiun"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+serde.workspace = true
+raiun-core = { path = "../raiun-core" }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

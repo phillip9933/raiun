@@ -1,0 +1,25 @@
+[package]
+name = "raiun-fuse"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+fuser = "=0.18.0"
+libc = "0.2"
+nix = { version = "0.31.3", features = ["fs"] }
+raiun-core = { path = "../raiun-core" }
+raiun-cache = { path = "../raiun-cache" }
+raiun-engine = { path = "../raiun-engine" }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+tempfile.workspace = true
+url = "2"
+
+[dev-dependencies]
+raiun-cache = { path = "../raiun-cache" }
+
+[lints]
+workspace = true

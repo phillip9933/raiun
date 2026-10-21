@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "identifier": "main-capability",
+  "description": "Narrow settings window permissions for Raiun Desktop",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "dialog:allow-message"
+  ]
+}

@@ -1,0 +1,22 @@
+[package]
+name = "raiun-cache"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+raiun-core = { path = "../raiun-core" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+tempfile.workspace = true
+url = "2.5"
+getrandom = "0.4"
+fs2 = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+raiun-sqlite-windows = { path = "../raiun-sqlite-windows", features = ["trusted-cache-integration"] }
+raiun-control-windows = { path = "../raiun-control-windows" }
+
+[lints]
+workspace = true
