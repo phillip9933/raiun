@@ -77,22 +77,28 @@ struct CopyPutGate {
 }
 
 impl CopyPutGate {
-    fn wait_for_body_prefix(&self) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    fn wait_for_body_prefix<T>(&self, worker: &JoinHandle<T>) -> bool {
+        // Downloading, staging and encrypting the source precede the gated PUT.
+        // Allow slower debug Windows builds to prepare it; revocation itself
+        // still happens only after the fixture observes the real upload body.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         let mut state = self.state.lock().unwrap();
         while !state.0 {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            assert!(
-                !remaining.is_zero(),
-                "copy PUT body prefix was not received"
-            );
-            let (next, timeout) = self.changed.wait_timeout(state, remaining).unwrap();
+            if remaining.is_zero() || worker.is_finished() {
+                // Never leave the fixture blocked if preparation fails or
+                // reaches this gate just after the readiness deadline.
+                state.1 = true;
+                self.changed.notify_all();
+                return false;
+            }
+            let (next, _) = self
+                .changed
+                .wait_timeout(state, remaining.min(Duration::from_millis(100)))
+                .unwrap();
             state = next;
-            assert!(
-                !timeout.timed_out() || state.0,
-                "copy PUT body prefix timed out"
-            );
         }
+        true
     }
 
     fn release(&self) {
@@ -1765,7 +1771,11 @@ fn cross_vault_copy_cancels_stalled_upload_when_either_scope_generation_rotates(
         request.destination_auth_generation = destination_client.token_generation();
         let gate = destination_fixture.pause_next_copy_put_body();
         let worker = thread::spawn(move || source.copy_file_to(&destination, &request));
-        gate.wait_for_body_prefix();
+        assert!(
+            gate.wait_for_body_prefix(&worker),
+            "copy did not reach the upload gate; worker outcome: {:?}",
+            worker.join()
+        );
         if rotate_source {
             source_client
                 .set_bearer_token("rotated-source-token".to_owned())
@@ -1868,7 +1878,11 @@ fn cross_vault_copy_caller_cancellation_aborts_stalled_put_and_retains_journal()
             )
         });
 
-        gate.wait_for_body_prefix();
+        assert!(
+            gate.wait_for_body_prefix(&worker),
+            "copy did not reach the upload gate; worker outcome: {:?}",
+            worker.join()
+        );
         cancelled.store(true, Ordering::Release);
         gate.release();
         let outcome = worker.join().unwrap().unwrap();
