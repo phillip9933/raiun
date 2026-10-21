@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+APPDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+export APPDIR
+# Preserve the host environment before the upstream launcher configures GTK.
+for key in PATH LD_LIBRARY_PATH LD_PRELOAD GTK_PATH GTK_EXE_PREFIX GTK_DATA_PREFIX GDK_PIXBUF_MODULE_FILE GSETTINGS_SCHEMA_DIR GI_TYPELIB_PATH WEBKIT_EXEC_PATH WEBKIT_INJECTED_BUNDLE_PATH XDG_DATA_DIRS GST_PLUGIN_SYSTEM_PATH GST_PLUGIN_PATH GST_PLUGIN_SCANNER GDK_BACKEND GTK_THEME; do
+  if value=$(printenv "$key"); then
+    export "RAIUN_APPIMAGE_HOST_${key}_SET=1" "RAIUN_APPIMAGE_HOST_${key}=$value"
+  else
+    export "RAIUN_APPIMAGE_HOST_${key}_SET=0"
+  fi
+done
+PATH="$APPDIR/usr/bin:${PATH:-/usr/bin:/bin}"
+export PATH
+if [ "${1:-}" = --version ]; then exec "$APPDIR/usr/bin/raiun" --version; fi
+exec "$APPDIR/AppRun.tauri" "$@"

@@ -78,6 +78,10 @@ rejection and preservation using temporary synthetic bundles. These unsigned
 hashes detect corruption or mismatch; they do not authenticate the publisher.
 Commit plus dirty status is not a reproducible identity for uncommitted source.
 
+## AppImage
+
+An additional x86_64 AppImage is available from the [Linux beta release](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.0-beta.1). It targets Ubuntu 24.04-era systems (glibc 2.39 or newer), bundles the interface and background agent, and uses the same existing account/settings locations. Cloud-drive mounting still needs system FUSE 3; persistent sign-in needs a desktop keyring. See [AppImage setup](docs/APPIMAGE.md) for launch, startup and integration details.
+
 ## Development operation
 
 `raiun-agent serve` runs the per-user agent. The installed shell starts its

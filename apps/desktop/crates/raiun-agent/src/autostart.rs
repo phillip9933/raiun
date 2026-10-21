@@ -29,6 +29,28 @@ fn desktop_entry(shell: &std::path::Path) -> Result<String, String> {
     ))
 }
 
+fn startup_executable(
+    agent: &std::path::Path,
+    appdir: Option<&std::ffi::OsStr>,
+    appimage: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf, String> {
+    if let (Some(directory), Some(image)) = (appdir, appimage) {
+        let directory = std::path::Path::new(directory);
+        // Only use AppImage metadata when this agent actually runs inside its AppDir.
+        if directory.is_absolute() && directory.parent().is_some() && agent.starts_with(directory) {
+            let image = PathBuf::from(image);
+            if !image.is_absolute() {
+                return Err("AppImage path must be absolute before enabling autostart".into());
+            }
+            return Ok(image);
+        }
+    }
+    Ok(agent
+        .parent()
+        .ok_or("Invalid executable path")?
+        .join("raiun-desktop"))
+}
+
 pub fn is_enabled() -> bool {
     entry_path()
         .and_then(|path| {
@@ -57,14 +79,14 @@ pub fn configure(enabled: bool) -> Result<(), String> {
             Err(e) => return Err(e.to_string()),
         }
     }
-    let shell = std::env::current_exe()
-        .map_err(|e| e.to_string())?
-        .parent()
-        .ok_or("Invalid executable path")?
-        .join("raiun-desktop");
+    let shell = startup_executable(
+        &std::env::current_exe().map_err(|e| e.to_string())?,
+        std::env::var_os("APPDIR").as_deref(),
+        std::env::var_os("APPIMAGE").as_deref(),
+    )?;
     if !shell.is_file() {
         return Err(
-            "Install the desktop shell beside raiun-agent before enabling autostart".into(),
+            "Raiun startup executable is unavailable; keep Raiun at a permanent path before enabling start at login".into(),
         );
     }
     let contents = desktop_entry(&shell)?;
@@ -79,7 +101,7 @@ pub fn configure(enabled: bool) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::desktop_entry;
+    use super::{desktop_entry, startup_executable};
     use std::path::Path;
 
     #[test]
@@ -105,4 +127,37 @@ mod tests {
 
         assert!(error.contains("control characters"));
     }
+
+    #[test]
+    fn appimage_startup_uses_persistent_image_not_temporary_mount() {
+        let shell = startup_executable(
+            Path::new("/tmp/.mount_Raiun/usr/bin/raiun-agent"),
+            Some(std::ffi::OsStr::new("/tmp/.mount_Raiun")),
+            Some(std::ffi::OsStr::new("/home/demo/Applications/Raiun.AppImage")),
+        )
+        .expect("absolute AppImage path");
+        assert_eq!(shell, Path::new("/home/demo/Applications/Raiun.AppImage"));
+    }
+
+    #[test]
+    fn ordinary_install_ignores_unrelated_appimage_environment() {
+        let shell = startup_executable(
+            Path::new("/opt/raiun/raiun-agent"),
+            Some(std::ffi::OsStr::new("/tmp/.mount_Other")),
+            Some(std::ffi::OsStr::new("/home/demo/Other.AppImage")),
+        )
+        .expect("ordinary sibling shell");
+        assert_eq!(shell, Path::new("/opt/raiun/raiun-desktop"));
+    }
+
+    #[test]
+    fn appimage_startup_rejects_relative_image_path() {
+        assert!(startup_executable(
+            Path::new("/tmp/.mount_Raiun/usr/bin/raiun-agent"),
+            Some(std::ffi::OsStr::new("/tmp/.mount_Raiun")),
+            Some(std::ffi::OsStr::new("Raiun.AppImage")),
+        )
+        .is_err());
+    }
+
 }

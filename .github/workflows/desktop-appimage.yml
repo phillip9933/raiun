@@ -1,0 +1,66 @@
+name: Desktop AppImage
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+defaults:
+  run:
+    working-directory: apps/desktop
+jobs:
+  appimage:
+    name: Ubuntu 24.04 AppImage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Install build and packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libfuse3-dev libsecret-tools zenity librsvg2-bin librsvg2-dev patchelf squashfs-tools file dpkg-dev binutils desktop-file-utils curl python3
+      - name: Restore AppImage compilation cache
+        id: rust-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop/target/debug
+            apps/desktop/target/release
+            apps/desktop/desktop-shell/src-tauri/target/release
+          key: raiun-appimage-ubuntu24-v1-${{ hashFiles('apps/desktop/**/Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            raiun-appimage-ubuntu24-v1-${{ hashFiles('apps/desktop/**/Cargo.lock') }}-
+      - name: Check Rust formatting
+        run: cargo fmt --all --check
+      - name: Check Rust code
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Run Rust tests
+        run: cargo test --workspace --locked
+      - name: Build AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: scripts/build-appimage.sh
+      - name: Upload AppImage and provenance
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: raiun-desktop-appimage-x86_64
+          path: apps/desktop/target/appimage/
+          if-no-files-found: error
+          compression-level: 0
+      - name: Save compilation work for packaging retries
+        if: always()
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop/target/debug
+            apps/desktop/target/release
+            apps/desktop/desktop-shell/src-tauri/target/release
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}

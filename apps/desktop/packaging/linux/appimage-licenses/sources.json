@@ -1,0 +1,53 @@
+{
+  "note": "Redistribution license texts for runtime-declared components; tagged license sources do not assert exact runtime dependency versions. Runtime binary is pinned separately.",
+  "files": [
+    {
+      "path": "AppImageKit-LICENSE",
+      "sha256": "9cb22a08334c3a108ec4da96c1d6aea7a17a732fa9f5ca3413a9b4ce651397d8",
+      "bytes": 1491,
+      "source_url": "https://raw.githubusercontent.com/AppImage/AppImageKit/13/LICENSE"
+    },
+    {
+      "path": "appimagetool-LICENSE",
+      "sha256": "d726eb47bb96b7e7f8971a1431575ab4fd8780b5d2efde3552c70ef71469015f",
+      "bytes": 1513,
+      "source_url": "https://raw.githubusercontent.com/AppImage/appimagetool/1.9.1/LICENSE"
+    },
+    {
+      "path": "runtime-LICENSE",
+      "sha256": "aa154fc9070614bbe7921f89db11efd1dba7a1f3a41685958110e2230f9c0ca1",
+      "bytes": 1678,
+      "source_url": "https://raw.githubusercontent.com/AppImage/type2-runtime/20251108/LICENSE"
+    },
+    {
+      "path": "musl-COPYRIGHT",
+      "sha256": "f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af",
+      "bytes": 6204,
+      "source_url": "https://raw.githubusercontent.com/ifduyue/musl/v1.2.5/COPYRIGHT"
+    },
+    {
+      "path": "libfuse-LGPL2.txt",
+      "sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551",
+      "bytes": 26530,
+      "source_url": "https://raw.githubusercontent.com/libfuse/libfuse/fuse-3.16.2/LGPL2.txt"
+    },
+    {
+      "path": "squashfuse-LICENSE",
+      "sha256": "9e909cc8a8ba27b1a649c964cf9eda37de911f3138c2b64e6d2f01703904ac13",
+      "bytes": 1592,
+      "source_url": "https://raw.githubusercontent.com/vasi/squashfuse/0.5.2/LICENSE"
+    },
+    {
+      "path": "zstd-LICENSE",
+      "sha256": "7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8",
+      "bytes": 1549,
+      "source_url": "https://raw.githubusercontent.com/facebook/zstd/v1.5.6/LICENSE"
+    },
+    {
+      "path": "zlib-LICENSE",
+      "sha256": "845efc77857d485d91fb3e0b884aaa929368c717ae8186b66fe1ed2495753243",
+      "bytes": 1002,
+      "source_url": "https://raw.githubusercontent.com/madler/zlib/v1.3.1/LICENSE"
+    }
+  ]
+}

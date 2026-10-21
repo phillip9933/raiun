@@ -13,3 +13,4 @@ apps/android/app/src/main/assets/third-party/** -text
 
 # Preserve third-party notice bytes and upstream whitespace verbatim.
 apps/desktop/legal/** -text -whitespace
+apps/desktop/packaging/linux/appimage-licenses/** -text -whitespace
