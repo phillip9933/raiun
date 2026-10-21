@@ -1945,13 +1945,11 @@ mod tests {
             ordinary.write_all(b"test").unwrap();
             ordinary.sync_all().unwrap();
             drop(ordinary);
-            // QGA tests run as SYSTEM, whose default file owner is its
-            // Administrators owner group. Normalize only that harness case;
-            // under an ordinary app token, the unmodified file owner is
-            // validated directly along with its inherited DACL.
-            if super::super::win32::current_user_sid_for_storage().unwrap() == "S-1-5-18" {
-                set_test_file_owner_to_token_user(&path);
-            }
+            // SYSTEM and elevated CI tokens may default to an Administrators
+            // owner. Set only this synthetic file's owner to the token user;
+            // the owner-only API leaves the inherited DACL under test intact.
+            // Production validation never repairs ownership or access rules.
+            set_test_file_owner_to_token_user(&path);
             let (mut opened, _) = private
                 .open_regular_file(OsStr::new(name))
                 .expect("accept exact current-user-only inherited ACL");

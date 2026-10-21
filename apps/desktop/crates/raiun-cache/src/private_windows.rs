@@ -434,12 +434,28 @@ if ($owner.Value -ne $identity.User.Value) {
     }
     $section = [System.Security.AccessControl.AccessControlSections]::Access
     $before = $acl.GetSecurityDescriptorSddlForm($section)
-    $acl.SetOwner($identity.User)
-    Set-Acl -LiteralPath $path -AclObject $acl
+    # Set-Acl writes the whole descriptor and can normalize inherited ACEs.
+    # Change only OWNER_SECURITY_INFORMATION; the access rules are not supplied.
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class RaiunFixtureOwner {
+    [DllImport("advapi32.dll", EntryPoint="SetNamedSecurityInfoW", CharSet=CharSet.Unicode)]
+    public static extern uint SetOwner(string path, int objectType, uint securityInfo,
+        byte[] owner, IntPtr group, IntPtr dacl, IntPtr sacl);
+}
+'@
+    $sid = [byte[]]::new($identity.User.BinaryLength)
+    $identity.User.GetBinaryForm($sid, 0)
+    $result = [RaiunFixtureOwner]::SetOwner($path, 1, 1, $sid,
+        [IntPtr]::Zero, [IntPtr]::Zero, [IntPtr]::Zero)
+    if ($result -ne 0) { throw [System.ComponentModel.Win32Exception]::new([int]$result) }
     $after = Get-Acl -LiteralPath $path
     if ($after.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $identity.User.Value -or
         $after.GetSecurityDescriptorSddlForm($section) -cne $before) {
-        throw 'Synthetic fixture owner setup changed the access policy'
+        throw ('Synthetic owner setup failed: ownerMatches={0}, accessRulesMatch={1}' -f
+            ($after.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -eq $identity.User.Value),
+            ($after.GetSecurityDescriptorSddlForm($section) -ceq $before))
     }
 }
 "#;
