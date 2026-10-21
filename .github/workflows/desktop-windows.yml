@@ -36,12 +36,13 @@ jobs:
             raiun-windows2022-v1-${{ hashFiles('apps/desktop/**/Cargo.lock') }}-
       - name: Check formatting
         run: cargo fmt --all --check
+      # FUSE is the Unix adapter; Windows uses the Cloud Files adapter.
       - name: Compile Windows workspace tests first
-        run: cargo test --workspace --locked --no-run
+        run: cargo test --workspace --exclude raiun-fuse --locked --no-run
       - name: Check Windows workspace
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --exclude raiun-fuse --all-targets --locked -- -D warnings
       - name: Run workspace tests
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --exclude raiun-fuse --locked
       - name: Build unsigned candidate installer
         run: |
           $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
