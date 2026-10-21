@@ -666,7 +666,7 @@ mod tests {
                 .any(|warning| warning.kind == MediaScanWarningKind::DepthLimit)
         );
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn nonblocking_open_allows_rejecting_an_entry_replaced_by_a_fifo() {
         let temp = tempfile::tempdir().unwrap();
