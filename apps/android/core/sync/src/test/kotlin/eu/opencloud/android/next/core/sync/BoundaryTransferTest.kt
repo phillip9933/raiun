@@ -7,14 +7,17 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 
@@ -80,26 +83,88 @@ class BoundaryTransferTest {
 
     @Test fun `cancelling a consumer closes a producer blocked on the bounded pipe`() =
         runBlocking {
-            val source = MemoryEndpoint("source", encrypted = true)
-            val entry = source.file("large", ByteArray(1024 * 1024))
-            val waiting = CompletableDeferred<Unit>()
-            val destination = MemoryEndpoint("destination", encrypted = false).apply { stall = waiting }
-            val task =
-                launch {
-                    BoundaryTransfer(RuntimeEnvironment.getApplication()).execute(source, entry, destination, "", true)
-                }
             withTimeout(10_000) {
-                waiting.await()
-                task.cancelAndJoin()
+                repeat(8) {
+                    val source = MemoryEndpoint("source", encrypted = true)
+                    val entry = source.file("large", ByteArray(1024 * 1024))
+                    val waiting = CompletableDeferred<Unit>()
+                    val destination = MemoryEndpoint("destination", encrypted = false).apply { stall = waiting }
+                    val task =
+                        launch {
+                            BoundaryTransfer(RuntimeEnvironment.getApplication()).execute(
+                                source,
+                                entry,
+                                destination,
+                                "",
+                                true,
+                            )
+                        }
+                    waiting.await()
+                    task.cancelAndJoin()
+                    assertTrue(source.deleted.isEmpty())
+                    assertTrue(source.entries.containsKey("large"))
+                    assertTrue(
+                        RuntimeEnvironment.getApplication().noBackupFilesDir.listFiles().orEmpty().none {
+                            it.name.startsWith("backup-traversal-")
+                        },
+                    )
+                }
             }
-            assertTrue(source.deleted.isEmpty())
-            assertTrue(source.entries.containsKey("large"))
-            assertTrue(
-                RuntimeEnvironment.getApplication().noBackupFilesDir.listFiles().orEmpty().none {
-                    it.name.startsWith("backup-traversal-")
-                },
-            )
         }
+
+    @Test fun `consumer failure preserves its original error when the producer pipe is full`() {
+        val body = ByteArray(1024 * 1024)
+        val source = MemoryEndpoint("source", encrypted = true)
+        val entry = source.file("large", body)
+        val pipeFilled = CompletableDeferred<Unit>()
+        val producer =
+            object : BoundaryEndpoint by source {
+                override suspend fun read(
+                    entry: BoundaryEntry,
+                    sink: OutputStream,
+                ) {
+                    source.requireUnchanged(entry)
+                    sink.write(body, 0, 64 * 1024)
+                    pipeFilled.complete(Unit)
+                    sink.write(body, 64 * 1024, body.size - 64 * 1024)
+                }
+            }
+        val destination = MemoryEndpoint("destination", encrypted = false)
+        val expected = IOException("synthetic destination failure")
+        val consumer =
+            object : BoundaryEndpoint by destination {
+                override suspend fun write(
+                    parent: String,
+                    name: String,
+                    source: InputStream,
+                    size: Long,
+                    mimeType: String?,
+                ): BoundaryEntry {
+                    pipeFilled.await()
+                    throw expected
+                }
+            }
+        val observed =
+            assertThrows(IOException::class.java) {
+                runBlocking {
+                    withTimeout(10_000) {
+                        BoundaryTransfer(RuntimeEnvironment.getApplication()).execute(
+                            producer,
+                            entry,
+                            consumer,
+                            "",
+                            true,
+                        )
+                    }
+                }
+            }
+        assertEquals(expected.message, observed.message)
+        // Coroutine stack-trace recovery may wrap the same error with its original as the cause.
+        assertSame(expected, generateSequence<Throwable>(observed) { it.cause }.last())
+        assertTrue(source.deleted.isEmpty())
+        assertArrayEquals(body, source.contents.getValue("large"))
+        assertTrue(destination.entries.isEmpty())
+    }
 
     @Test fun `moving into own descendant is rejected before any write`() {
         val source = sourceTree()

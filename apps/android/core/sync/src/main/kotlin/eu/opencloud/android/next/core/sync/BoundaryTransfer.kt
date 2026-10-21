@@ -3,6 +3,7 @@ package eu.opencloud.android.next.core.sync
 import android.content.Context
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -144,10 +145,11 @@ private suspend fun streamCopy(
     targetName: String,
 ): Pair<BoundaryEntry, BoundaryDigestSink> =
     coroutineScope {
+        val scopeContext = currentCoroutineContext()
         val output = PipedOutputStream()
         val input = PipedInputStream(output, 64 * 1024)
         val cancellation =
-            currentCoroutineContext()[kotlinx.coroutines.Job]!!.invokeOnCompletion(
+            scopeContext[kotlinx.coroutines.Job]!!.invokeOnCompletion(
                 onCancelling = true,
                 invokeImmediately = true,
             ) { failure ->
@@ -161,8 +163,11 @@ private suspend fun streamCopy(
                 try {
                     source.read(entry, fingerprint)
                 } catch (failure: Exception) {
+                    // The scope closes the pipe before cancellation necessarily reaches this child.
+                    scopeContext.ensureActive()
                     currentCoroutineContext().ensureActive()
-                    if (!stopped.get()) sourceFailure.set(failure)
+                    if (stopped.get()) throw CancellationException("Boundary consumer stopped", failure)
+                    sourceFailure.set(failure)
                     throw failure
                 } finally {
                     output.close()
