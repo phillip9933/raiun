@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="spaces_actions">Actions pour %1$s</string>
+    <string name="spaces_open">Ouvrir</string>
+    <string name="spaces_trash">Ouvrir la corbeille</string>
+    <string name="spaces_details">Détails</string>
+    <string name="spaces_rename">Renommer</string>
+    <string name="spaces_subtitle">Modifier le sous-titre</string>
+    <string name="spaces_quota">Modifier le quota</string>
+    <string name="spaces_disable">Désactiver le Space</string>
+    <string name="spaces_enable">Activer le Space</string>
+    <string name="spaces_delete">Supprimer définitivement le Space</string>
+    <string name="spaces_web">Gérer dans l’application web</string>
+    <string name="spaces_web_summary">Membres, image du Space, description, duplication et téléchargement</string>
+    <string name="spaces_name">Nom du Space</string>
+    <string name="spaces_subtitle_label">Sous-titre</string>
+    <string name="spaces_quota_label">Limite de stockage (Gio)</string>
+    <string name="spaces_quota_hint">1 Gio = 1 073 741 824 octets. Saisissez un nombre positif.</string>
+    <string name="spaces_save">Enregistrer</string>
+    <string name="spaces_cancel">Annuler</string>
+    <string name="spaces_close">Fermer</string>
+    <string name="spaces_disabled">Désactivé</string>
+    <string name="spaces_enabled">Activé</string>
+    <string name="spaces_disable_message">Désactiver %1$s ? Ses fichiers resteront sur le serveur, mais les membres perdront l’accès jusqu’à la réactivation du Space.</string>
+    <string name="spaces_enable_message">Activer %1$s et rétablir l’accès de ses membres ?</string>
+    <string name="spaces_delete_message">Supprimer définitivement %1$s et tous ses fichiers ? Cette action est irréversible. Saisissez le nom du Space pour confirmer.</string>
+    <string name="spaces_operation_failed">Impossible de mettre à jour le Space.</string>
+    <string name="spaces_last_activity">Dernière activité : %1$s</string>
+    <string name="spaces_working">Mise à jour du Space…</string>
+    <string name="spaces_web_unavailable">Le serveur n’a pas fourni d’adresse web de confiance pour ce Space.</string>
+</resources>

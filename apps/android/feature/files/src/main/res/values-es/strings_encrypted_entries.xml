@@ -1,0 +1,6 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="browser_encrypted_locked">Carpeta cifrada, bloqueada</string>
+    <string name="browser_encrypted_load_failed">No se pudieron comprobar las carpetas cifradas. Desliza hacia abajo para reintentar.</string>
+    <string name="browser_encrypted_actions">Acciones para %1$s</string>
+</resources>

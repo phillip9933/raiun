@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_parent">Niveau supérieur</string>
+    <string name="browser_compact">Passer à la liste compacte</string>
+    <string name="browser_tiles">Passer à la grille</string>
+    <string name="browser_regular">Passer à la liste standard</string>
+</resources>

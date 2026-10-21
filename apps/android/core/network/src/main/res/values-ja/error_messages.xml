@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="error_connectivity">サーバーに接続できませんでした。</string>
+    <string name="error_timeout">接続がタイムアウトしました。</string>
+    <string name="error_authentication_required">続行するには再度ログインしてください。</string>
+    <string name="error_client_registration_required">有効なログインクライアントの登録が必要です。管理者にモバイル用クライアントIDをお問い合わせください。</string>
+    <string name="error_access_denied">アクセスが拒否されました。</string>
+    <string name="error_public_link_password_required">このサーバーでは公開リンクにパスワードが必要です。</string>
+    <string name="error_share_permissions">サーバーが指定した共有権限を拒否しました。</string>
+    <string name="error_share_resource_reference">サーバーがファイルの共有参照を解決できませんでした。</string>
+    <string name="error_share_space_root">サーバーはこの個人用Spaceのルートの共有を許可していません。</string>
+    <string name="error_share_expiration">サーバーがリンクの有効期限を拒否しました。</string>
+    <string name="error_share_request_format">サーバーが共有リクエストを読み取れませんでした。</string>
+    <string name="error_share_unknown">サーバーが共有リクエストを拒否しました（HTTP 400 · 原因不明）。</string>
+    <string name="error_not_found">サーバー上の項目が見つかりません。</string>
+    <string name="error_conflict">同じ名前の項目がすでに存在します。</string>
+    <string name="error_precondition_failed">サーバー上の項目が変更されました。再試行する前に更新してください。</string>
+    <string name="error_download_integrity">ダウンロードしたファイルを検証できませんでした。もう一度ダウンロードしてください。</string>
+    <string name="error_invalid_response">サーバーから不完全または想定外のメタデータが返されました。</string>
+    <string name="error_quota_exceeded">サーバーの空き容量が不足しています。</string>
+    <string name="error_local_storage">端末の空き容量が不足しています。</string>
+    <string name="error_source_unavailable">選択したファイルは利用できなくなりました。</string>
+    <string name="error_source_permission_denied">選択したファイルの読み取り権限が失われました。</string>
+    <string name="error_unsupported">サーバーはこの操作に対応していません。</string>
+    <string name="error_trust">安全な接続を検証できませんでした。</string>
+    <string name="error_unknown">操作を完了できませんでした。</string>
+    <string name="error_not_ready">サーバーがこのファイルを準備中です。まもなく再試行します。</string>
+    <string name="error_rate_limited">サーバーが混雑しています。しばらくしてからお試しください。</string>
+    <string name="error_http_status">サーバーからHTTP %1$dが返されました。</string>
+    <string name="error_password_policy">リンクのパスワードがサーバーのパスワード規則を満たしていません。</string>
+    <string name="error_password_policy_with_requirements">リンクのパスワードに必要な条件: %1$s。</string>
+    <string name="error_password_policy_separator">"、"</string>
+    <string name="error_password_requirement">%2$sを%1$d個以上</string>
+    <string name="error_password_characters">文字</string>
+    <string name="error_password_lowercase">小文字</string>
+    <string name="error_password_uppercase">大文字</string>
+    <string name="error_password_numbers">数字</string>
+    <string name="error_password_special">特殊文字</string>
+    <string name="error_directory_listing_too_large">サーバーから返されたフォルダーの一覧が、Raiunで安全に処理できる量を超えています。より小さいサブフォルダーを開いてください。</string>
+    <string name="error_local_storage_write_failed">この端末にファイルを保存できませんでした。端末のストレージを確認し、もう一度お試しください。</string>
+    <string name="error_source_changed">アップロードの準備中に選択したファイルが変更されました。アップロードする前に選択し直してください。</string>
+</resources>

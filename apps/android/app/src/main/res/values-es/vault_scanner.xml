@@ -1,0 +1,12 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="vault_scan_document">Escanear documento</string>
+    <string name="vault_scanner_failed">No se pudo completar el escaneo. Puede que ya se hayan subido algunos archivos. Cierra esta pantalla y actualiza antes de escanear de nuevo.</string>
+    <string name="vault_scanner_uploading">Cifrando y subiendo escaneo…</string>
+    <string name="vault_scanner_fixed_destination">Este escaneo se guardará solo en</string>
+    <string name="vault_scanner_discard">Descartar escaneo</string>
+    <string name="vault_scanner_discard_title">¿Descartar este escaneo cifrado?</string>
+    <string name="vault_scanner_discard_body">Los archivos temporales del escaneo se eliminarán de este dispositivo.</string>
+    <string name="vault_scanner_keep">Conservar escaneo</string>
+    <string name="vault_scanner_close">Cerrar</string>
+</resources>

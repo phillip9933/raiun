@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="spaces_heading">Spaces</string>
+    <string name="spaces_members">メンバー</string>
+    <string name="spaces_download">Spaceをダウンロード</string>
+    <string name="spaces_refresh">更新</string>
+    <string name="spaces_member_add">メンバーを追加</string>
+    <string name="spaces_member_remove">メンバーを削除</string>
+    <string name="spaces_member_remove_confirmation">このSpaceから%1$sを削除しますか？</string>
+    <string name="spaces_member_search">ユーザーまたはグループを検索</string>
+    <string name="spaces_members_scope">このアカウントで閲覧できるメンバー情報です。メンバーの追加、変更、削除の可否はサーバーが確認します。</string>
+    <string name="spaces_custom_role">カスタムの役割</string>
+</resources>

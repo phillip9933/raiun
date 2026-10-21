@@ -14,7 +14,9 @@ Third-party components retain their original licenses. See THIRD-PARTY-NOTICES.m
 and the bundled third-party assets. The OpenCloud name and logo belong to their
 respective owners; this independent client is not an official OpenCloud release.
 
-Corresponding application source and build scripts:
+Corresponding Raiun application source and build scripts:
 https://github.com/phillip9933/raiun
-Versioned scanner source and build scripts:
-https://github.com/phillip9933/open-android-doc-scanner/tree/v0.1.0-rc11
+Android source, build scripts and dependency notices are in apps/android/.
+See apps/android/scripts/offline-scanner-sdk.lock.json and
+apps/android/THIRD-PARTY-NOTICES.md for the pinned scanner source and notices.
+Desktop source and notices will be included with its later platform import.

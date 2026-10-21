@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_opening_summary">プレビューと既定のアプリ</string>
+    <string name="settings_opening_files">ファイルの開き方</string>
+    <string name="settings_opening_description">ファイルをタップしたときの動作を選択します。既定の外部アプリはAndroidが管理します。「他のアプリで開く」では毎回アプリを選択できます。</string>
+    <string name="settings_opening_text">テキストファイル</string>
+    <string name="settings_opening_pdf">PDF文書</string>
+    <string name="settings_opening_images">画像</string>
+    <string name="settings_opening_raiun">Raiunのプレビュー</string>
+    <string name="settings_opening_external">外部アプリ</string>
+</resources>

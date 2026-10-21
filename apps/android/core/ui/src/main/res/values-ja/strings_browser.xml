@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_parent">親フォルダーへ</string>
+    <string name="browser_compact">コンパクトな一覧に切り替え</string>
+    <string name="browser_tiles">グリッド表示に切り替え</string>
+    <string name="browser_regular">通常の一覧に切り替え</string>
+</resources>

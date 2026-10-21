@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_refresh">Actualiser</string>
+    <string name="vault_new_folder">Nouveau dossier</string>
+    <string name="vault_upload_file">Envoyer un fichier</string>
+    <string name="vault_new_actions">Nouvelles actions</string>
+    <string name="vault_close_actions">Fermer les nouvelles actions</string>
+    <string name="vault_edit_location">Modifier l’emplacement chiffré</string>
+    <string name="vault_copy_to_folder">Copier vers un dossier</string>
+    <string name="vault_move_to_folder">Déplacer vers un dossier</string>
+    <string name="vault_destination_root">Emplacement chiffré</string>
+    <string name="vault_destination_up">Niveau supérieur</string>
+    <string name="vault_destination_open">Ouvrir</string>
+    <string name="vault_details_path">Chemin : %1$s</string>
+    <string name="vault_details_type">Type : %1$s</string>
+    <string name="vault_details_size">Taille : %1$s</string>
+    <string name="vault_entry_size">%1$s · %2$s</string>
+    <string name="vault_preview_memory_only_note">Le contenu de l’aperçu est déchiffré en mémoire. Raiun n’enregistre aucune copie d’aperçu en clair.</string>
+    <string name="vault_destination_choose">Choisissez une destination pour %1$s</string>
+    <string name="vault_copy_here">Copier ici</string>
+    <string name="vault_move_here">Déplacer ici</string>
+    <string name="vault_destination_empty">Aucun dossier dans cet emplacement.</string>
+    <string name="vault_encrypted_space_header">Space chiffré</string>
+    <string name="vault_encrypted_folder_header">Dossier chiffré</string>
+    <string name="vault_entry_actions">Actions pour %1$s</string>
+    <string name="vault_rename">Renommer</string>
+    <string name="vault_delete">Supprimer</string>
+    <string name="vault_copy">Copier</string>
+    <string name="vault_move">Déplacer</string>
+    <string name="vault_save_copy">Enregistrer une copie déchiffrée</string>
+    <string name="vault_details">Détails</string>
+    <string name="vault_delete_confirm">Supprimer cet élément de l’emplacement chiffré ?</string>
+    <string name="vault_details_content">Nom : %1$s\nChemin : %2$s\nTaille : %3$d octets</string>
+    <string name="vault_cancel">Annuler</string>
+    <string name="vault_confirm">Confirmer</string>
+    <string name="vault_operation_failed">L’opération n’a pas abouti. Actualisez avant de réessayer ; le serveur a peut-être déjà reçu une modification.</string>
+    <string name="vault_unlock_to_finish">Déverrouillez à nouveau pour terminer l’opération sur le fichier.</string>
+    <string name="vault_export_failed">La copie n’a pas abouti. La destination peut contenir un fichier incomplet.</string>
+    <string name="vault_save_copy_warning">La copie enregistrée ne sera plus chiffrée par ce dossier ou Space. Enregistrez-la uniquement dans un emplacement de confiance.</string>
+    <string name="vault_root_delete_warning">Supprimer « %1$s » ? Seul un dossier chiffré vide peut être supprimé ici. Supprimez ou déplacez d’abord son contenu.</string>
+    <string name="vault_space_management_web">Gérez le nom, les membres et la suppression du Space dans l’application web. Les actions sur les fichiers et dossiers sont disponibles dans ce Space.</string>
+    <string name="vault_name">Nom</string>
+    <string name="vault_entry_folder_type">Dossier</string>
+    <string name="vault_entry_unknown_type">Type inconnu</string>
+    <string name="vault_entry_offline_status">Disponible dans une copie hors connexion chiffrée</string>
+    <string name="vault_entry_online_unknown_status">Élément chiffré ; disponibilité hors connexion inconnue</string>
+</resources>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="spaces_encrypted_actions">Actions pour %1$s</string>
+    <string name="spaces_disabled_encrypted">Space chiffré désactivé</string>
+    <string name="spaces_manage_disabled_encrypted">Gérer le Space chiffré désactivé %1$s</string>
+</resources>

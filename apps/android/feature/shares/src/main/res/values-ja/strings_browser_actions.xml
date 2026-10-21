@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="incoming_preparing">ファイルを準備中…</string>
+    <string name="incoming_cancel">キャンセル</string>
+    <string name="incoming_close">閉じる</string>
+    <string name="incoming_open_with">他のアプリで開く</string>
+    <string name="incoming_send">ファイルを送信</string>
+    <string name="incoming_details">詳細</string>
+    <string name="incoming_layout">レイアウトを変更</string>
+    <string name="incoming_layout_list">一覧</string>
+    <string name="incoming_layout_compact">コンパクトな一覧</string>
+    <string name="incoming_layout_tiles">タイル</string>
+</resources>

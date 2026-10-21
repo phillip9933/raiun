@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="spaces_actions">%1$sの操作</string>
+    <string name="spaces_open">開く</string>
+    <string name="spaces_trash">ゴミ箱を開く</string>
+    <string name="spaces_details">詳細</string>
+    <string name="spaces_rename">名前を変更</string>
+    <string name="spaces_subtitle">サブタイトルを編集</string>
+    <string name="spaces_quota">容量上限を編集</string>
+    <string name="spaces_disable">Spaceを無効化</string>
+    <string name="spaces_enable">Spaceを有効化</string>
+    <string name="spaces_delete">Spaceを完全に削除</string>
+    <string name="spaces_web">Webアプリで管理</string>
+    <string name="spaces_web_summary">メンバー、Spaceの画像、説明、複製、ダウンロード</string>
+    <string name="spaces_name">Space名</string>
+    <string name="spaces_subtitle_label">サブタイトル</string>
+    <string name="spaces_quota_label">容量上限（GiB）</string>
+    <string name="spaces_quota_hint">1 GiB = 1,073,741,824バイトです。正の数を入力してください。</string>
+    <string name="spaces_save">保存</string>
+    <string name="spaces_cancel">キャンセル</string>
+    <string name="spaces_close">閉じる</string>
+    <string name="spaces_disabled">無効</string>
+    <string name="spaces_enabled">有効</string>
+    <string name="spaces_disable_message">%1$sを無効にしますか？ファイルはサーバーに残りますが、Spaceを再度有効にするまでメンバーはアクセスできなくなります。</string>
+    <string name="spaces_enable_message">%1$sを有効にしてメンバーのアクセスを復元しますか？</string>
+    <string name="spaces_delete_message">%1$sとすべてのファイルを完全に削除しますか？この操作は取り消せません。確認するにはSpace名を入力してください。</string>
+    <string name="spaces_operation_failed">Spaceを更新できませんでした。</string>
+    <string name="spaces_last_activity">最終アクティビティ: %1$s</string>
+    <string name="spaces_working">Spaceを更新中…</string>
+    <string name="spaces_web_unavailable">サーバーからこのSpaceの信頼できるWebアドレスが提供されませんでした。</string>
+</resources>

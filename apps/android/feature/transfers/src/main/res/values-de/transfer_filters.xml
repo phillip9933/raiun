@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="transfers_screen_title">Übertragungen</string>
+    <string name="transfers_filter_all">Alle Übertragungen</string>
+    <string name="transfers_filter_uploads">Uploads</string>
+    <string name="transfers_filter_downloads">Downloads</string>
+    <string name="transfers_filter_all_statuses">Alle Status</string>
+    <string name="transfers_filter_any_date">Beliebiges Datum</string>
+    <string name="transfers_filter_today">Heute</string>
+    <string name="transfers_filter_week">Letzte 7 Tage</string>
+    <string name="transfers_filter_month">Letzte 30 Tage</string>
+    <string name="transfers_filter_custom">Eigener Zeitraum…</string>
+    <string name="transfers_filter_reset">Filter zurücksetzen</string>
+    <string name="transfers_filter_started_hint">Nach Startdatum filtern</string>
+    <string name="transfers_filter_date_range">%1$s – %2$s</string>
+    <string name="transfers_filter_empty">Keine passenden Übertragungen</string>
+    <string name="transfers_filter_empty_hint">Ändere die Filter oder setze sie zurück, um mehr Übertragungen zu sehen.</string>
+    <string name="transfers_filter_all_types">Alle Dateitypen</string>
+    <string name="transfers_filter_images">Bilder</string>
+    <string name="transfers_filter_videos">Videos</string>
+    <string name="transfers_filter_documents">Dokumente</string>
+    <string name="transfers_filter_audio">Audio</string>
+    <string name="transfers_filter_other">Andere</string>
+    <string name="document_edits_transfer_queued">Speichern vorgemerkt — Fortschritt unter Übertragungen prüfen</string>
+</resources>

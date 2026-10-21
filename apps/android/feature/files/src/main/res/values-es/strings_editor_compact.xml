@@ -1,0 +1,9 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="editor_saved">Borrador guardado en este dispositivo</string>
+    <string name="editor_saving">Guardando borrador…</string>
+    <string name="editor_upload_queued">Subida en cola</string>
+    <string name="editor_changed_title">El archivo ha cambiado</string>
+    <string name="editor_changed_message">El archivo del servidor ha cambiado. Sigue trabajando en tu borrador o consulta el archivo actual.</string>
+    <string name="editor_older_draft">Estás editando un borrador anterior. Guardarlo puede requerir resolver un conflicto.</string>
+</resources>

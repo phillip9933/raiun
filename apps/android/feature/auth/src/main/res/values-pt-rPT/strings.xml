@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="auth_connect_title">Ligar ao OpenCloud</string>
+    <string name="auth_server_discovery_description">Introduza o endereço do servidor OpenCloud para descobrir o método de início de sessão.</string>
+    <string name="auth_server_address">Endereço do servidor</string>
+    <string name="auth_use_browser_sign_in">Iniciar sessão no navegador</string>
+    <string name="auth_use_app_password">Usar uma palavra-passe de aplicação ou um token</string>
+    <string name="auth_client_id">ID de cliente fornecido pelo administrador (opcional)</string>
+    <string name="auth_continue">Continuar</string>
+    <string name="auth_dev_login">Início de sessão de desenvolvimento</string>
+    <string name="auth_dev_login_configuration">Configure dev.server.url, dev.server.username e dev.server.password em local.properties.</string>
+    <string name="auth_server_label">Servidor: %1$s</string>
+    <string name="auth_username">Nome de utilizador</string>
+    <string name="auth_password">Palavra-passe</string>
+    <string name="auth_sign_in">Iniciar sessão</string>
+    <string name="auth_sign_in_browser">Iniciar sessão no navegador</string>
+    <string name="auth_app_token_description">Use uma palavra-passe de aplicação ou um token emitido pelo servidor. O início de sessão no navegador continua disponível.</string>
+    <string name="auth_app_password_or_token">Palavra-passe de aplicação ou token</string>
+    <string name="auth_signed_in_as">Sessão iniciada como %1$s</string>
+    <string name="auth_server_version">Versão do servidor: %1$s</string>
+    <string name="auth_unknown">Desconhecido</string>
+    <string name="auth_sharing_available">Partilha: disponível</string>
+    <string name="auth_sharing_unavailable">Partilha: indisponível</string>
+    <string name="auth_required_fields">Introduza o endereço do servidor, o nome de utilizador e a palavra-passe de aplicação ou token.</string>
+    <string name="auth_oidc_session_expired">A sessão expirou ou não pôde ser verificada. Inicie sessão novamente.</string>
+    <string name="auth_sign_in_cancelled">O início de sessão foi cancelado ou rejeitado.</string>
+    <string name="auth_certificate_untrusted">Não foi possível confiar no certificado do servidor. Verifique a impressão digital do certificado antes de aprovar a sua fixação explícita.</string>
+</resources>

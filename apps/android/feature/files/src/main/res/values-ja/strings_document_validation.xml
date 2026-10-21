@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="document_not_utf8">このファイルはUTF-8テキストではありません。「他のアプリで開く」で別のエディターを選択してください。</string>
+    <string name="document_text_too_large">エディターは256 KBまでのUTF-8テキストに対応しています。</string>
+</resources>

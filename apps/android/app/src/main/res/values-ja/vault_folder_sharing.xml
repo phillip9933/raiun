@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_folder_sharing_title">暗号化フォルダーを共有</string>
+    <string name="vault_folder_sharing_warning">ここでは指定したユーザーまたはグループのみ追加できます。内容を開くには暗号化パスワードが必要です。アクセスを削除しても、すでに持っているキーやコピーは消去されません。</string>
+    <string name="vault_folder_sharing_uncertain">サーバーで変更が適用された可能性があります。別の変更を試す前に共同編集者の一覧を更新してください。</string>
+    <string name="vault_folder_sharing_people">共同編集者</string>
+    <string name="vault_folder_sharing_empty">指定された共同編集者はいません。</string>
+    <string name="vault_folder_sharing_add">共同編集者を追加</string>
+    <string name="vault_folder_sharing_search">ユーザーまたはグループを検索</string>
+    <string name="vault_folder_sharing_permissions">アクセス権</string>
+    <string name="vault_folder_sharing_viewer">閲覧とダウンロード</string>
+    <string name="vault_folder_sharing_editor">内容の編集</string>
+    <string name="vault_folder_sharing_editor_reshare">編集と再共有</string>
+    <string name="vault_folder_sharing_custom_permissions">この共有にはカスタム権限があります。変更するにはアクセスレベルを選択してください。</string>
+    <string name="vault_folder_sharing_person">ユーザー</string>
+    <string name="vault_folder_sharing_group">グループ</string>
+    <string name="vault_folder_sharing_remove">アクセスを削除</string>
+    <string name="vault_folder_sharing_remove_confirm">この共同編集者の暗号化フォルダーへのアクセスを削除しますか？</string>
+</resources>

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="activities_title">アクティビティ</string>
+    <string name="activities_empty">アクティビティはありません</string>
+    <string name="activities_loading">アクティビティを読み込み中</string>
+    <string name="activities_unavailable">このサーバーまたは項目ではアクティビティを利用できません。</string>
+    <string name="activities_error">アクティビティを読み込めませんでした。接続とアクセス権を確認し、再試行してください。</string>
+    <string name="activities_limit">最近のアクティビティを最大200件表示しています。</string>
+    <string name="activities_retry">再試行</string>
+    <string name="activities_refresh">更新</string>
+    <string name="activities_back">詳細に戻る</string>
+</resources>

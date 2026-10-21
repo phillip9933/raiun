@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="search_offline_queued">Synchronisation hors connexion en attente.</string>
+    <string name="search_open_in_files">Ouvrez cet élément dans Fichiers pour modifier son emplacement ou son nom.</string>
+    <string name="search_action_failed">L’action a échoué.</string>
+    <string name="search_placeholder">Rechercher des fichiers et dossiers</string>
+    <string name="search_clear">Effacer la recherche</string>
+    <string name="search_back">Retour</string>
+    <string name="search_action_title">Action de recherche</string>
+    <string name="search_ok">OK</string>
+    <string name="search_empty_title">Rechercher dans OpenCloud</string>
+    <string name="search_empty_message">Les résultats de cet appareil apparaissent pendant la saisie.</string>
+    <string name="search_unavailable_title">Recherche sur le serveur indisponible</string>
+    <string name="search_unavailable_message">Aucun résultat trouvé sur cet appareil.</string>
+    <string name="search_no_results_title">Aucun résultat</string>
+    <string name="search_no_results_message">Essayez un autre nom de fichier ou de dossier.</string>
+    <string name="search_status_loading">Recherche sur le serveur…</string>
+    <string name="search_status_server_error">Résultats sur cet appareil • serveur indisponible</string>
+    <string name="search_status_capped">Résultats sur cet appareil et le serveur • affinez la recherche pour en voir plus</string>
+    <string name="search_status_combined">Résultats sur cet appareil et le serveur</string>
+    <string name="search_status_device">Résultats sur cet appareil</string>
+</resources>

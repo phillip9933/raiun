@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="editor_saved">Rascunho guardado neste dispositivo</string>
+    <string name="editor_saving">A guardar o rascunho…</string>
+    <string name="editor_upload_queued">Envio em fila</string>
+    <string name="editor_changed_title">Ficheiro alterado</string>
+    <string name="editor_changed_message">O ficheiro do servidor mudou. Continue a trabalhar no rascunho ou veja o ficheiro atual.</string>
+    <string name="editor_older_draft">A editar um rascunho mais antigo. Guardar pode exigir a resolução de um conflito.</string>
+</resources>

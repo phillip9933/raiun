@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_offline_unavailable_title">オフラインでは利用できません</string>
+    <string name="vault_offline_unavailable_space">Space</string>
+    <string name="vault_offline_unavailable_folder">フォルダー</string>
+    <string name="vault_offline_unavailable_message">暗号化された%1$s「%2$s」はこの端末に保存されていないため、オフラインではロックを解除できません。</string>
+</resources>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_manage_location">Gérer l’emplacement chiffré</string>
+    <string name="vault_manage_collaborators">Gérer les collaborateurs</string>
+    <string name="vault_manage_space">Gérer le Space</string>
+</resources>

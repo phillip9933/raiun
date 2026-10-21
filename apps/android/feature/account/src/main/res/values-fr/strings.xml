@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="account_title_accounts">Comptes</string>
+    <string name="account_back">Retour</string>
+    <string name="account_empty">Aucun compte</string>
+    <string name="account_add">Ajouter un compte</string>
+    <string name="account_sign_in_another_server">Se connecter à un autre serveur OpenCloud</string>
+    <string name="account_remove_accessibility">Supprimer %1$s</string>
+    <string name="account_remove_title">Se déconnecter et supprimer le compte ?</string>
+    <string name="account_remove_confirmation">Les fichiers locaux, identifiants, transferts, sauvegardes et l’accès au sélecteur de fichiers système pour %1$s seront supprimés.</string>
+    <string name="account_remove">Supprimer</string>
+    <string name="account_cancel">Annuler</string>
+    <string name="account_ok">OK</string>
+    <string name="account_information">Informations du compte</string>
+    <string name="account_refresh_accessibility">Actualiser le compte</string>
+    <string name="account_profile_picture">Photo de profil</string>
+    <string name="account_profile_picture_formats">JPG ou PNG, jusqu’à 10 Mo</string>
+    <string name="account_invalid_picture">Choisissez une image JPG ou PNG valide de 10 Mo maximum.</string>
+    <string name="account_upload_picture">Envoyer la photo</string>
+    <string name="account_remove_picture_title">Supprimer la photo de profil ?</string>
+    <string name="account_remove_picture_confirmation">Votre photo de profil sera supprimée du serveur et de toutes les applications OpenCloud.</string>
+    <string name="account_username">Nom d’utilisateur</string>
+    <string name="account_first_last_name">Prénom et nom</string>
+    <string name="account_email">Adresse e-mail</string>
+    <string name="account_not_loaded">Non chargé</string>
+    <string name="account_no_email">Aucune adresse e-mail définie</string>
+    <string name="account_storage_not_available">Indisponible</string>
+    <string name="account_storage_used">%1$s utilisés</string>
+    <string name="account_storage_used_of_total">%1$s utilisés sur %2$s</string>
+    <string name="account_personal_storage">Stockage personnel</string>
+    <string name="account_group_memberships">Appartenance aux groupes</string>
+    <string name="account_no_group_memberships">Aucune appartenance à un groupe</string>
+    <string name="account_server">Serveur</string>
+</resources>

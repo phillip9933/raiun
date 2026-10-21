@@ -1,0 +1,28 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="settings_data">Datos</string>
+    <string name="settings_temporary_files">Archivos locales temporales</string>
+    <string name="settings_app_lock">Bloqueo de la aplicación</string>
+    <string name="settings_app_lock_summary">Exige el bloqueo de pantalla del dispositivo para abrir Raiun.</string>
+    <string name="settings_app_lock_setup_device">Primero configura un bloqueo de pantalla en los ajustes de Android.</string>
+    <string name="settings_encrypted_preferences">Preferencias de cifrado</string>
+    <string name="settings_encrypted_preferences_summary">Opciones biométricas para carpetas y Spaces cifrados</string>
+    <string name="settings_permissions">Permisos</string>
+    <string name="settings_permissions_summary">Acceso a metadatos de fotos y vídeos</string>
+    <string name="settings_encrypted_preferences_explanation">Estas opciones se guardan en este dispositivo. Restablecer una elimina su clave biométrica guardada, si existe. Cuando desbloquees esa ubicación cifrada con su contraseña, Raiun podrá preguntarte de nuevo.</string>
+    <string name="settings_encrypted_preferences_empty">No hay opciones biométricas para ubicaciones cifradas en esta cuenta.</string>
+    <string name="settings_encrypted_preferences_failed">No se pudieron leer las preferencias de cifrado.</string>
+    <string name="settings_encrypted_folder">Carpeta</string>
+    <string name="settings_encrypted_space">Space</string>
+    <string name="settings_encrypted_unknown_location">Ubicación cifrada</string>
+    <string name="settings_encrypted_declined">Oferta de biometría rechazada</string>
+    <string name="settings_encrypted_enrolled">Clave biométrica guardada</string>
+    <string name="settings_encrypted_key_unavailable">Clave biométrica no disponible</string>
+    <string name="settings_encrypted_entry_description">%1$s · %2$s</string>
+    <string name="settings_encrypted_reset_title">¿Restablecer el acceso biométrico?</string>
+    <string name="settings_encrypted_reset_explanation">La clave biométrica guardada para %1$s se eliminará de este dispositivo. Usa su contraseña la próxima vez; Raiun preguntará si quieres volver a recordar una clave biométrica.</string>
+    <string name="settings_encrypted_reset_files_unchanged">Los archivos y carpetas cifrados no cambiarán.</string>
+    <string name="settings_encrypted_use_password">Usar contraseña la próxima vez</string>
+    <string name="settings_encrypted_ask_again">Preguntarme de nuevo</string>
+    <string name="settings_encrypted_reset_failed">No se pudo restablecer esta opción biométrica. Inténtalo de nuevo.</string>
+</resources>

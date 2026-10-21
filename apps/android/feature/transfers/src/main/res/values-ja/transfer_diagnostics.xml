@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="transfers_diagnostic_code">コード: %1$s • 試行%2$d回目</string>
+    <string name="transfers_retry_after">自動再試行は%1$s以降</string>
+    <string name="transfers_verification_pending">アップロードを送信しました。確認はまだ完了していません。</string>
+    <string name="transfers_encrypted_destination">暗号化された転送先</string>
+    <string name="transfers_details">詳細</string>
+    <string name="transfers_hide_details">詳細を非表示</string>
+    <string name="transfers_awaiting_unlock">ダウンロードしたファイルを検証するには、暗号化フォルダーのロックを解除してください。</string>
+</resources>

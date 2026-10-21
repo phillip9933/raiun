@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="folder_shortcut_appearance">ショートカットのアイコン</string>
+    <string name="folder_shortcut_preview">ショートカットのアイコンプレビュー</string>
+    <string name="folder_shortcut_badge">ランチャーがRaiunのバッジを追加します。既存のショートカットを更新するには、このフォルダーを追加し直してください。</string>
+    <string name="folder_shortcut_image">画像を選択</string>
+    <string name="folder_shortcut_image_error">画像を読み取れませんでした。16 MB未満の画像を選択してください。</string>
+    <string name="folder_shortcut_default">標準</string>
+    <string name="folder_shortcut_blue">青</string>
+    <string name="folder_shortcut_green">緑</string>
+    <string name="folder_shortcut_yellow">黄</string>
+    <string name="folder_shortcut_red">赤</string>
+    <string name="folder_shortcut_add">ホーム画面に追加</string>
+    <string name="folder_shortcut_error">このフォルダーを追加できませんでした。引き続き利用できることと、ランチャーがショートカットに対応していることを確認してください。</string>
+    <string name="folder_shortcut_requested">ショートカットの追加をリクエストしました。ランチャーから確認を求められた場合は確認してください。</string>
+    <string name="folder_shortcut_unavailable">このフォルダーのショートカットは利用できません。Raiunを開き、アカウントとフォルダーが存在することを確認してください。</string>
+    <string name="folder_shortcut_close">閉じる</string>
+    <string name="folder_shortcut_cancel">キャンセル</string>
+    <string name="folder_shortcut_purple">紫</string>
+    <string name="folder_shortcut_orange">オレンジ</string>
+    <string name="folder_shortcut_pink">ピンク</string>
+    <string name="folder_shortcut_teal">青緑</string>
+    <string name="folder_shortcut_grey">灰色</string>
+    <string name="folder_crop_title">ショートカット画像を切り抜く</string>
+    <string name="folder_crop_hint">ピンチ操作で拡大し、ドラッグして円の中に画像を配置してください。</string>
+    <string name="folder_crop_zoom">拡大率</string>
+    <string name="folder_crop_horizontal">水平位置</string>
+    <string name="folder_crop_vertical">垂直位置</string>
+    <string name="folder_crop_use">画像を使用</string>
+    <string name="folder_download">フォルダーをダウンロード</string>
+    <string name="folder_download_explanation">このフォルダーとサブフォルダーのファイルを「転送」に追加し、端末にコピーを保持します。共有ファイルには引き続きサーバーによるアクセス確認が必要です。キャンセルするとファイルの追加を停止します。すでに待機リストに追加されたダウンロードは「転送」に残ります。</string>
+    <string name="folder_download_count">%1$d件のファイルを「転送」に追加しました</string>
+    <string name="folder_download_failed">一部のファイルを待機リストに追加できませんでした。接続とアクセス権を確認し、もう一度お試しください。追加済みのファイルは「転送」に残ります。</string>
+    <string name="folder_crop_zoom_in">拡大</string>
+    <string name="folder_crop_zoom_out">縮小</string>
+    <string name="folder_crop_reset">切り抜きをリセット</string>
+</resources>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_folder_sharing_title">Partilhar a pasta encriptada</string>
+    <string name="vault_folder_sharing_warning">Aqui só podem ser adicionadas pessoas ou grupos identificados. Continuam a precisar da palavra-passe de encriptação para abrir o conteúdo. Remover o acesso não apaga chaves nem cópias que já possuam.</string>
+    <string name="vault_folder_sharing_uncertain">O servidor pode ter aplicado a alteração. Atualize a lista de colaboradores antes de tentar outra alteração.</string>
+    <string name="vault_folder_sharing_people">Colaboradores</string>
+    <string name="vault_folder_sharing_empty">Não há colaboradores identificados.</string>
+    <string name="vault_folder_sharing_add">Adicionar colaborador</string>
+    <string name="vault_folder_sharing_search">Procurar pessoas ou grupos</string>
+    <string name="vault_folder_sharing_permissions">Acesso</string>
+    <string name="vault_folder_sharing_viewer">Ver e transferir</string>
+    <string name="vault_folder_sharing_editor">Editar o conteúdo</string>
+    <string name="vault_folder_sharing_editor_reshare">Editar e voltar a partilhar</string>
+    <string name="vault_folder_sharing_custom_permissions">Esta partilha tem permissões personalizadas. Escolha um nível de acesso para a alterar.</string>
+    <string name="vault_folder_sharing_person">Pessoa</string>
+    <string name="vault_folder_sharing_group">Grupo</string>
+    <string name="vault_folder_sharing_remove">Remover o acesso</string>
+    <string name="vault_folder_sharing_remove_confirm">Remover o acesso deste colaborador à pasta encriptada?</string>
+</resources>

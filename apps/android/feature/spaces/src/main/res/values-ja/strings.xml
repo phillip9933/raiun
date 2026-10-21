@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="spaces_load_failed">Spacesを読み込めませんでした。</string>
+    <string name="spaces_none_available">このアカウントで利用できるSpacesはありません。</string>
+    <string name="spaces_open_space">Space %1$sを開く</string>
+    <string name="spaces_unlock_encrypted">暗号化Space %1$sのロックを解除</string>
+    <string name="spaces_encrypted_summary">暗号化Space · 閲覧するにはロック解除</string>
+    <string name="spaces_encrypted_load_failed">暗号化Spacesを読み込めませんでした。下に引いて更新し、再試行してください。</string>
+    <string name="spaces_owner">所有者: %1$s</string>
+    <string name="spaces_quota_summary">%1$s使用中 • %2$s利用可能</string>
+</resources>

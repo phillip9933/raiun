@@ -1,0 +1,18 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="settings_navigation">ナビゲーション</string>
+    <string name="settings_navigation_pinned">下部のナビゲーション</string>
+    <string name="settings_navigation_hint">3～5個の項目を選択してください。ほかの項目はメニューに表示されます。5個固定されている場合は、先に1個を解除してください。</string>
+    <string name="settings_navigation_recents">最近使用した項目</string>
+    <string name="settings_navigation_favorites">お気に入り</string>
+    <string name="settings_navigation_personal">個人</string>
+    <string name="settings_navigation_shares">共有</string>
+    <string name="settings_navigation_spaces">スペース</string>
+    <string name="settings_navigation_offline">オフライン</string>
+    <string name="settings_navigation_transfers">転送</string>
+    <string name="settings_navigation_save">保存</string>
+    <string name="settings_navigation_edit">編集</string>
+    <string name="settings_navigation_move_up">%1$sを上に移動</string>
+    <string name="settings_navigation_move_down">%1$sを下に移動</string>
+    <string name="settings_navigation_drag">ドラッグして%1$sを並べ替え</string>
+</resources>

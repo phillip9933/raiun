@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_offline_unavailable_title">Indisponible hors connexion</string>
+    <string name="vault_offline_unavailable_space">Space</string>
+    <string name="vault_offline_unavailable_folder">dossier</string>
+    <string name="vault_offline_unavailable_message">Le %1$s chiffré « %2$s » n’est pas enregistré sur cet appareil et ne peut pas être déverrouillé hors connexion.</string>
+</resources>

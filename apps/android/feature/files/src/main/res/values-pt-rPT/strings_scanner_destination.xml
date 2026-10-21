@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="scanner_destination_title">Escolher o destino da digitalização</string>
+    <string name="scanner_destination_cancel">Cancelar</string>
+    <string name="scanner_destination_spaces">Spaces</string>
+    <string name="scanner_destination_select_space">Escolher um Space pessoal ou de projeto</string>
+    <string name="scanner_destination_choose">Guardar nesta pasta</string>
+    <string name="scanner_destination_retry">Tentar novamente</string>
+    <string name="scanner_destination_all_spaces">Todos os Spaces</string>
+    <string name="scanner_destination_up">Pasta superior</string>
+    <string name="scanner_destination_root">Raiz</string>
+    <string name="scanner_destination_locations">Pessoal e Spaces</string>
+    <string name="scanner_destination_change">Alterar</string>
+    <string name="scanner_destination_root_folder">Pasta de nível superior</string>
+    <string name="scanner_destination_personal">Os seus ficheiros pessoais</string>
+    <string name="scanner_destination_project">Space de projeto</string>
+    <string name="scanner_destination_empty">Sem subpastas. Pode guardar a digitalização aqui.</string>
+</resources>

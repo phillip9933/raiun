@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_scan_document">Numériser un document</string>
+    <string name="vault_scanner_failed">La numérisation n’a pas pu se terminer. Certains fichiers ont peut-être déjà été envoyés. Fermez cet écran et actualisez avant de numériser à nouveau.</string>
+    <string name="vault_scanner_uploading">Chiffrement et envoi du document numérisé…</string>
+    <string name="vault_scanner_fixed_destination">Ce document numérisé sera enregistré uniquement dans</string>
+    <string name="vault_scanner_discard">Supprimer la numérisation</string>
+    <string name="vault_scanner_discard_title">Supprimer cette numérisation chiffrée ?</string>
+    <string name="vault_scanner_discard_body">Les fichiers temporaires de la numérisation seront supprimés de cet appareil.</string>
+    <string name="vault_scanner_keep">Conserver la numérisation</string>
+    <string name="vault_scanner_close">Fermer</string>
+</resources>

@@ -1,0 +1,11 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="vault_offline_copies">Copias cifradas sin conexión</string>
+    <string name="vault_offline_copy">Copia cifrada sin conexión · solo lectura</string>
+    <string name="vault_offline_explanation">Las copias guardadas pueden ser anteriores a las del servidor. Desbloquéalas para leerlas en este teléfono.</string>
+    <string name="vault_keep_offline">Conservar copia cifrada sin conexión</string>
+    <string name="vault_keep_offline_warning">Guarda este elemento y su contenido de forma segura en este teléfono. La copia permanece cifrada y requiere tu contraseña de cifrado o biometría. Es una copia puntual; vuelve a guardarla para actualizarla.</string>
+    <string name="vault_remove_offline">Eliminar copia sin conexión</string>
+    <string name="vault_remove_offline_warning">Elimina esta copia cifrada sin conexión de este teléfono. Los archivos del servidor no cambian.</string>
+    <string name="vault_offline_cleanup_failed">El cambio en el servidor se realizó, pero no se pudieron eliminar algunos datos cifrados locales.</string>
+</resources>

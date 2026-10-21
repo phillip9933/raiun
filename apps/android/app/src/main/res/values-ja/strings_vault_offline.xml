@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_offline_copies">暗号化されたオフラインコピー</string>
+    <string name="vault_offline_copy">暗号化されたオフラインコピー · 読み取り専用</string>
+    <string name="vault_offline_explanation">保存したコピーはサーバーより古い場合があります。このスマートフォンで読むには、ロックを解除してください。</string>
+    <string name="vault_keep_offline">暗号化コピーをオフラインで保持</string>
+    <string name="vault_keep_offline_warning">この項目とその内容を、このスマートフォンに安全に保存します。コピーは暗号化されたままで、暗号化パスワードまたは生体認証が必要です。保存時点のコピーなので、更新するには再度保存してください。</string>
+    <string name="vault_remove_offline">オフラインコピーを削除</string>
+    <string name="vault_remove_offline_warning">このスマートフォンから暗号化されたオフラインコピーを削除します。サーバー上のファイルは変更されません。</string>
+    <string name="vault_offline_cleanup_failed">サーバーの変更は成功しましたが、端末内の暗号化データの一部を削除できませんでした。</string>
+</resources>

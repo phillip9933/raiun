@@ -1,0 +1,18 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="folder_shortcut_appearance">Icono del acceso directo</string>
+    <string name="folder_shortcut_preview">Vista previa del icono del acceso directo</string>
+    <string name="folder_shortcut_badge">Tu lanzador añade el distintivo de Raiun. Añade esta carpeta de nuevo para actualizar un acceso directo existente.</string>
+    <string name="folder_shortcut_image">Elegir imagen</string>
+    <string name="folder_shortcut_image_error">No se pudo leer esa imagen. Elige una imagen de menos de 16 MB.</string>
+    <string name="folder_shortcut_default">Predeterminado</string>
+    <string name="folder_shortcut_blue">Azul</string>
+    <string name="folder_shortcut_green">Verde</string>
+    <string name="folder_shortcut_yellow">Amarillo</string>
+    <string name="folder_shortcut_red">Rojo</string>
+    <string name="folder_shortcut_add">Añadir a la pantalla de inicio</string>
+    <string name="folder_shortcut_error">No se pudo añadir esta carpeta. Comprueba que sigue disponible y que tu lanzador admite accesos directos.</string>
+    <string name="folder_shortcut_requested">Acceso directo solicitado. Confírmalo en tu lanzador si te lo pide.</string>
+    <string name="folder_shortcut_unavailable">Este acceso directo a carpeta no está disponible. Abre Raiun y comprueba que la cuenta y la carpeta siguen existiendo.</string>
+    <string name="folder_shortcut_close">Cerrar</string>
+</resources>

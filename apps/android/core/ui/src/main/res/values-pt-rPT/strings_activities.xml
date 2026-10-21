@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="activities_title">Atividades</string>
+    <string name="activities_empty">Sem atividades</string>
+    <string name="activities_loading">A carregar atividades</string>
+    <string name="activities_unavailable">As atividades não estão disponíveis neste servidor ou para este item.</string>
+    <string name="activities_error">Não foi possível carregar as atividades. Verifique a ligação e o acesso e tente novamente.</string>
+    <string name="activities_limit">A mostrar até 200 atividades recentes.</string>
+    <string name="activities_retry">Tentar novamente</string>
+    <string name="activities_refresh">Atualizar</string>
+    <string name="activities_back">Voltar aos detalhes</string>
+</resources>

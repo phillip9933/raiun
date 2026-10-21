@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="space_created_refresh_pending">Le Space a été créé sur le serveur, mais ses détails ne sont pas encore disponibles. Actualisez les Spaces pour vérifier à nouveau. Soumettre à nouveau le même nom vérifie ce Space au lieu d’en créer un autre.</string>
+    <string name="browser_backup_configured">Sauvegarde du dossier configurée.</string>
+    <string name="browser_preview_navigation_unavailable">Cette action de navigation globale n’est pas encore disponible dans l’aperçu du navigateur de fichiers.</string>
+    <string name="space_created_recovery_not_saved">Le Space a été créé sur le serveur, mais les informations de récupération n’ont pas pu être enregistrées sur cet appareil. Actualisez les Spaces avant d’en créer un autre.</string>
+</resources>

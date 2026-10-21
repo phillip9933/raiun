@@ -1,0 +1,33 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="vault_manage_space_title">Gestionar Space cifrado</string>
+    <string name="vault_manage_disable_space">Desactivar Space cifrado</string>
+    <string name="vault_manage_disable_confirm">Este Space quedará inaccesible hasta que un gestor lo restaure. Su contenido cifrado permanecerá almacenado.</string>
+    <string name="vault_manage_disable_confirm_action">Desactivar Space</string>
+    <string name="vault_disabled_management_title">Space cifrado desactivado</string>
+    <string name="vault_disabled_management_description">Este Space está desactivado. La gestión usa solo metadatos del servidor; sus archivos cifrados y claves permanecen cerrados.</string>
+    <string name="vault_disabled_restore">Restaurar Space</string>
+    <string name="vault_disabled_permanently_delete">Eliminar permanentemente</string>
+    <string name="vault_disabled_purge">Eliminar permanentemente</string>
+    <string name="vault_disabled_purge_confirm">¿Eliminar permanentemente «%1$s» y todo su contenido? Esta acción no se puede deshacer.</string>
+    <string name="vault_manage_space_uncertain">No se pudo confirmar el guardado. Puede que el servidor haya aplicado algunos cambios. Actualiza para comprobar los valores actuales antes de reintentar.</string>
+    <string name="vault_manage_name">Nombre</string>
+    <string name="vault_manage_description">Descripción</string>
+    <string name="vault_manage_description_value">Descripción: %1$s</string>
+    <string name="vault_manage_quota_mib">Cuota (MiB; actualización opcional)</string>
+    <string name="vault_manage_quota_help">Déjalo vacío para conservar la cuota actual. Reducir la cuota no elimina los archivos existentes.</string>
+    <string name="vault_manage_quota_value">Cuota: %1$d MiB</string>
+    <string name="vault_manage_used_value">Usado: %1$d MiB</string>
+    <string name="vault_manage_remaining_value">Disponible: %1$d MiB</string>
+    <string name="vault_manage_owner">Propietario: %1$s</string>
+    <string name="vault_manage_unknown">Desconocido</string>
+    <string name="vault_manage_edit_details">Editar detalles del Space</string>
+    <string name="vault_manage_members">Miembros</string>
+    <string name="vault_manage_member_search">Buscar personas o grupos</string>
+    <string name="vault_manage_member_role">Rol en el Space</string>
+    <string name="vault_manage_member_add">Añadir miembro</string>
+    <string name="vault_manage_member_remove">Eliminar miembro</string>
+    <string name="vault_manage_member_remove_confirm">¿Eliminar a %1$s de este Space?</string>
+    <string name="vault_manage_membership_warning">Ser miembro no proporciona la contraseña de cifrado. Eliminar a alguien no permite revocar las claves que ya conoce.</string>
+    <string name="vault_manage_save">Guardar</string>
+</resources>

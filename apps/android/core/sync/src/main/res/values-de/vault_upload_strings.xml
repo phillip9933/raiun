@@ -1,0 +1,4 @@
+<resources>
+    <string name="encrypted_upload">Verschlüsselter Upload</string>
+    <string name="encrypted_offline_download">Verschlüsselter Offline-Download</string>
+</resources>

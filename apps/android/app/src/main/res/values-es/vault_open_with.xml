@@ -1,0 +1,6 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="vault_open_with">Abrir con</string>
+    <string name="vault_open_with_warning">Abrir este archivo cifrado en otra aplicación crea una copia descifrada temporal en este teléfono. La otra aplicación puede leerla, guardarla o compartirla, y Raiun no puede eliminar las copias que conserve esa aplicación. Raiun intenta eliminar su copia temporal cuando vuelves. Los nuevos accesos caducan a los 10 minutos; Android puede retrasar la eliminación en segundo plano. Un archivo ya abierto por la otra aplicación puede seguir siendo legible. Usa solo una aplicación de confianza.</string>
+    <string name="vault_open_with_continue">Abrir copia descifrada</string>
+</resources>

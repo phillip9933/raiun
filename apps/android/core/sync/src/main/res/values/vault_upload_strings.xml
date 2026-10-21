@@ -1,0 +1,4 @@
+<resources>
+    <string name="encrypted_upload">Encrypted upload</string>
+    <string name="encrypted_offline_download">Encrypted offline download</string>
+</resources>

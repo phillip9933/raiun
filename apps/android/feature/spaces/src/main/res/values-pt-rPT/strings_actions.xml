@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="spaces_actions">Ações para %1$s</string>
+    <string name="spaces_open">Abrir</string>
+    <string name="spaces_trash">Abrir a reciclagem</string>
+    <string name="spaces_details">Detalhes</string>
+    <string name="spaces_rename">Mudar o nome</string>
+    <string name="spaces_subtitle">Editar o subtítulo</string>
+    <string name="spaces_quota">Editar a quota</string>
+    <string name="spaces_disable">Desativar o Space</string>
+    <string name="spaces_enable">Ativar o Space</string>
+    <string name="spaces_delete">Eliminar o Space permanentemente</string>
+    <string name="spaces_web">Gerir na aplicação web</string>
+    <string name="spaces_web_summary">Membros, imagem do Space, descrição, duplicação e transferência</string>
+    <string name="spaces_name">Nome do Space</string>
+    <string name="spaces_subtitle_label">Subtítulo</string>
+    <string name="spaces_quota_label">Limite de armazenamento (GiB)</string>
+    <string name="spaces_quota_hint">1 GiB = 1 073 741 824 bytes. Introduza um número positivo.</string>
+    <string name="spaces_save">Guardar</string>
+    <string name="spaces_cancel">Cancelar</string>
+    <string name="spaces_close">Fechar</string>
+    <string name="spaces_disabled">Desativado</string>
+    <string name="spaces_enabled">Ativado</string>
+    <string name="spaces_disable_message">Desativar %1$s? Os ficheiros permanecerão no servidor, mas os membros perderão o acesso até o Space ser novamente ativado.</string>
+    <string name="spaces_enable_message">Ativar %1$s e restaurar o acesso dos membros?</string>
+    <string name="spaces_delete_message">Eliminar permanentemente %1$s e todos os seus ficheiros? Esta ação é irreversível. Escreva o nome do Space para confirmar.</string>
+    <string name="spaces_operation_failed">Não foi possível atualizar o Space.</string>
+    <string name="spaces_last_activity">Última atividade: %1$s</string>
+    <string name="spaces_working">A atualizar o Space…</string>
+    <string name="spaces_web_unavailable">O servidor não forneceu um endereço web de confiança para este Space.</string>
+</resources>

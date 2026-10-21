@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="document_server_changed">編集の開始後にこのファイルが変更されました。下書きは別に保持されています。保存時に競合の解決が必要になる場合があります。</string>
+    <string name="document_view_current">現在のファイルを表示</string>
+    <string name="document_resume_draft">下書きの編集を再開</string>
+</resources>

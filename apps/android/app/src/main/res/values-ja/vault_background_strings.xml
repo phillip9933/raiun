@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_background_upload_preparing">ファイルを暗号化中です。準備が完了するまで、この場所のロックを解除したままにしてください。</string>
+    <string name="vault_background_upload_queued">暗号化アップロードを待機リストに追加しました。この場所をロックした後も続行できます。「転送」で進行状況を確認してください。</string>
+</resources>

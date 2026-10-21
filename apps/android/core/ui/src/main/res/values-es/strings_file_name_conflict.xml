@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="file_name_conflict_title">Ya existe un elemento con este nombre</string>
+    <string name="file_name_conflict_message">%1$s ya existe en esta carpeta. Conserva ambos usando el nombre %2$s o cancela.</string>
+    <string name="file_name_conflict_keep_both">Conservar ambos</string>
+    <string name="file_name_conflict_cancel">Cancelar</string>
+</resources>

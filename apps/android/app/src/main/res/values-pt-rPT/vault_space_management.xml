@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_manage_space_title">Gerir o Space encriptado</string>
+    <string name="vault_manage_disable_space">Desativar o Space encriptado</string>
+    <string name="vault_manage_disable_confirm">Este Space ficará inacessível até um gestor o restaurar. O conteúdo encriptado permanece guardado.</string>
+    <string name="vault_manage_disable_confirm_action">Desativar o Space</string>
+    <string name="vault_disabled_management_title">Space encriptado desativado</string>
+    <string name="vault_disabled_management_description">Este Space está desativado. A gestão usa apenas os metadados do servidor; os ficheiros encriptados e as chaves permanecem fechados.</string>
+    <string name="vault_disabled_restore">Restaurar o Space</string>
+    <string name="vault_disabled_permanently_delete">Eliminar permanentemente</string>
+    <string name="vault_disabled_purge">Eliminar permanentemente</string>
+    <string name="vault_disabled_purge_confirm">Eliminar permanentemente “%1$s” e todo o conteúdo nele guardado? Esta ação é irreversível.</string>
+    <string name="vault_manage_space_uncertain">Não foi possível confirmar a gravação. O servidor pode ter aplicado algumas alterações. Atualize para verificar os valores atuais antes de tentar novamente.</string>
+    <string name="vault_manage_name">Nome</string>
+    <string name="vault_manage_description">Descrição</string>
+    <string name="vault_manage_description_value">Descrição: %1$s</string>
+    <string name="vault_manage_quota_mib">Quota (MiB; atualização opcional)</string>
+    <string name="vault_manage_quota_help">Deixe em branco para manter a quota atual. Os ficheiros existentes não são removidos se a quota for reduzida.</string>
+    <string name="vault_manage_quota_value">Quota: %1$d MiB</string>
+    <string name="vault_manage_used_value">Usado: %1$d MiB</string>
+    <string name="vault_manage_remaining_value">Restante: %1$d MiB</string>
+    <string name="vault_manage_owner">Proprietário: %1$s</string>
+    <string name="vault_manage_unknown">Desconhecido</string>
+    <string name="vault_manage_edit_details">Editar os detalhes do Space</string>
+    <string name="vault_manage_members">Membros</string>
+    <string name="vault_manage_member_search">Procurar pessoas ou grupos</string>
+    <string name="vault_manage_member_role">Função no Space</string>
+    <string name="vault_manage_member_add">Adicionar membro</string>
+    <string name="vault_manage_member_remove">Remover membro</string>
+    <string name="vault_manage_member_remove_confirm">Remover %1$s deste Space?</string>
+    <string name="vault_manage_membership_warning">Ser membro não fornece a palavra-passe de encriptação. Remover alguém não pode revogar as chaves que já conhece.</string>
+    <string name="vault_manage_save">Guardar</string>
+</resources>

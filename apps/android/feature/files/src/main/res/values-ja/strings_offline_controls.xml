@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="offline_local_space_used">端末内の使用容量: %1$s</string>
+    <string name="offline_filter_all">すべて</string>
+    <string name="offline_filter_temporary">一時コピー</string>
+    <string name="offline_filter_pinned">オフラインで保持</string>
+    <string name="browser_folder_summary">%1$s · %2$s</string>
+    <plurals name="browser_folder_count">
+        <item quantity="other">%1$d個のフォルダー</item>
+    </plurals>
+    <plurals name="browser_file_count">
+        <item quantity="other">%1$d件のファイル</item>
+    </plurals>
+</resources>

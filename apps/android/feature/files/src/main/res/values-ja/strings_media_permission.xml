@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="media_metadata_title">写真の位置情報を保持しますか？</string>
+    <string name="media_metadata_explanation">写真の位置情報へのアクセスがオフです。Androidによってアップロードする写真からGPS位置情報が削除される場合があります。保持するために権限を許可してください。そのままアップロードすると、Androidが提供するファイルを使用します。位置情報やその他のメタデータが含まれる場合と含まれない場合があります。Raiunはメタデータを削除しません。</string>
+    <string name="media_metadata_allow">権限を許可</string>
+    <string name="media_metadata_continue">そのままアップロード（毎回確認）</string>
+    <string name="media_metadata_settings">アプリの権限を開く</string>
+    <string name="media_metadata_never_ask">そのままアップロード（今後確認しない）</string>
+    <string name="media_metadata_settings_note">後から設定の「セキュリティ」で変更できます。</string>
+</resources>

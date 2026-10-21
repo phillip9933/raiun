@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="auth_connect_title">OpenCloudに接続</string>
+    <string name="auth_server_discovery_description">OpenCloudサーバーのアドレスを入力して、ログイン方法を確認してください。</string>
+    <string name="auth_server_address">サーバーアドレス</string>
+    <string name="auth_use_browser_sign_in">ブラウザーでログイン</string>
+    <string name="auth_use_app_password">アプリパスワードまたはトークンを使用</string>
+    <string name="auth_client_id">管理者から提供されたクライアントID（任意）</string>
+    <string name="auth_continue">続行</string>
+    <string name="auth_dev_login">開発用ログイン</string>
+    <string name="auth_dev_login_configuration">local.propertiesでdev.server.url、dev.server.username、dev.server.passwordを設定してください。</string>
+    <string name="auth_server_label">サーバー: %1$s</string>
+    <string name="auth_username">ユーザー名</string>
+    <string name="auth_password">パスワード</string>
+    <string name="auth_sign_in">ログイン</string>
+    <string name="auth_sign_in_browser">ブラウザーでログイン</string>
+    <string name="auth_app_token_description">サーバーが発行したアプリパスワードまたはトークンを使用してください。ブラウザーでのログインも利用できます。</string>
+    <string name="auth_app_password_or_token">アプリパスワードまたはトークン</string>
+    <string name="auth_signed_in_as">%1$sとしてログイン中</string>
+    <string name="auth_server_version">サーバーバージョン: %1$s</string>
+    <string name="auth_unknown">不明</string>
+    <string name="auth_sharing_available">共有: 利用可能</string>
+    <string name="auth_sharing_unavailable">共有: 利用不可</string>
+    <string name="auth_required_fields">サーバーアドレス、ユーザー名、アプリパスワードまたはトークンを入力してください。</string>
+    <string name="auth_oidc_session_expired">ログインセッションの期限が切れたか、検証できませんでした。再度ログインしてください。</string>
+    <string name="auth_sign_in_cancelled">ログインがキャンセルまたは拒否されました。</string>
+    <string name="auth_certificate_untrusted">サーバーの証明書を信頼できませんでした。明示的な証明書の固定を承認する前に、証明書のフィンガープリントを確認してください。</string>
+</resources>

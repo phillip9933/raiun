@@ -1,0 +1,13 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="browser_encrypt_folder">Cifrar carpeta</string>
+    <string name="browser_encrypt_space">Cifrar Space</string>
+    <string name="browser_encrypt_new_summary">Seguridad adicional: ilegible sin esta contraseña. Perderla supone perder el acceso a los archivos. Las funciones de colaboración son limitadas.</string>
+    <string name="browser_encrypt_keep_password">Guarda esta contraseña de forma segura. Raiun no puede recuperarla y perderla supone perder el acceso a los archivos cifrados.</string>
+    <string name="browser_encrypt_password">Contraseña de la bóveda</string>
+    <string name="browser_encrypt_confirm_password">Confirmar contraseña de la bóveda</string>
+    <string name="browser_encrypt_password_mismatch">Las contraseñas no coinciden.</string>
+    <string name="browser_encrypt_show_password">Mostrar contraseña</string>
+    <string name="browser_encrypt_hide_password">Ocultar contraseña</string>
+    <string name="browser_encrypt_create_uncertain">Raiun no pudo confirmar si se creó la ubicación cifrada. Comprueba la carpeta o la lista de Spaces antes de reintentar para evitar duplicados.</string>
+</resources>

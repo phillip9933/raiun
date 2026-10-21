@@ -2,6 +2,8 @@
 
 Describe the problem and the resulting behavior.
 
+Identify the affected app/platform and any shared branding or repository changes.
+
 ## Validation
 
 List commands and environments actually checked, results, failures and checks not run. Distinguish historical evidence from new results.

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_refresh">Atualizar</string>
+    <string name="vault_new_folder">Nova pasta</string>
+    <string name="vault_upload_file">Enviar ficheiro</string>
+    <string name="vault_new_actions">Novas ações</string>
+    <string name="vault_close_actions">Fechar as novas ações</string>
+    <string name="vault_edit_location">Editar a localização encriptada</string>
+    <string name="vault_copy_to_folder">Copiar para uma pasta</string>
+    <string name="vault_move_to_folder">Mover para uma pasta</string>
+    <string name="vault_destination_root">Localização encriptada</string>
+    <string name="vault_destination_up">Subir um nível</string>
+    <string name="vault_destination_open">Abrir</string>
+    <string name="vault_details_path">Caminho: %1$s</string>
+    <string name="vault_details_type">Tipo: %1$s</string>
+    <string name="vault_details_size">Tamanho: %1$s</string>
+    <string name="vault_entry_size">%1$s · %2$s</string>
+    <string name="vault_preview_memory_only_note">O conteúdo da pré-visualização é desencriptado na memória. O Raiun não guarda uma cópia de pré-visualização em texto simples.</string>
+    <string name="vault_destination_choose">Escolha um destino para %1$s</string>
+    <string name="vault_copy_here">Copiar para aqui</string>
+    <string name="vault_move_here">Mover para aqui</string>
+    <string name="vault_destination_empty">Não há pastas nesta localização.</string>
+    <string name="vault_encrypted_space_header">Space encriptado</string>
+    <string name="vault_encrypted_folder_header">Pasta encriptada</string>
+    <string name="vault_entry_actions">Ações para %1$s</string>
+    <string name="vault_rename">Mudar o nome</string>
+    <string name="vault_delete">Eliminar</string>
+    <string name="vault_copy">Copiar</string>
+    <string name="vault_move">Mover</string>
+    <string name="vault_save_copy">Guardar uma cópia desencriptada</string>
+    <string name="vault_details">Detalhes</string>
+    <string name="vault_delete_confirm">Eliminar este item da localização encriptada?</string>
+    <string name="vault_details_content">Nome: %1$s\nCaminho: %2$s\nTamanho: %3$d bytes</string>
+    <string name="vault_cancel">Cancelar</string>
+    <string name="vault_confirm">Confirmar</string>
+    <string name="vault_operation_failed">A operação não foi concluída. Atualize antes de tentar novamente; o servidor pode já ter recebido uma alteração.</string>
+    <string name="vault_unlock_to_finish">Desbloqueie novamente para concluir a operação no ficheiro.</string>
+    <string name="vault_export_failed">A cópia não foi concluída. O destino pode conter um ficheiro incompleto.</string>
+    <string name="vault_save_copy_warning">A cópia guardada deixará de estar encriptada por esta pasta ou Space. Guarde-a apenas numa localização em que confie.</string>
+    <string name="vault_root_delete_warning">Eliminar “%1$s”? Aqui só pode eliminar uma pasta encriptada vazia. Remova ou mova primeiro o seu conteúdo.</string>
+    <string name="vault_space_management_web">Gira o nome, os membros e a eliminação do Space na aplicação web. As ações de ficheiros e pastas estão disponíveis dentro deste Space.</string>
+    <string name="vault_name">Nome</string>
+    <string name="vault_entry_folder_type">Pasta</string>
+    <string name="vault_entry_unknown_type">Tipo desconhecido</string>
+    <string name="vault_entry_offline_status">Disponível numa cópia encriptada offline</string>
+    <string name="vault_entry_online_unknown_status">Item encriptado; disponibilidade offline desconhecida</string>
+</resources>

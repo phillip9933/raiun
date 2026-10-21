@@ -1,6 +1,7 @@
-name: Quality and visual regression
+name: Android quality and visual regression
 
 on:
+  workflow_dispatch:
   pull_request:
   push:
     branches:
@@ -8,6 +9,10 @@ on:
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    working-directory: apps/android
 
 jobs:
   verify:
@@ -39,9 +44,12 @@ jobs:
       - name: Test optional translation validation
         run: python scripts/test_locale_validator.py
 
-      - name: Validate existing translations and format tokens (English fallback allowed)
-        shell: pwsh
-        run: ./scripts/validate-locale-resources.ps1 -Locale de
+      - name: Validate translations and format tokens (English fallback allowed)
+        run: |
+          for locale in de fr es pt-rPT ja; do
+            pwsh -NoProfile -File scripts/validate-locale-resources.ps1 -Locale "$locale"
+          done
+
       - name: Verify formatting
         run: ./gradlew ktlintCheck --no-daemon
 
@@ -73,10 +81,10 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: quality-reports-and-visual-diffs
+          name: android-quality-reports-and-visual-diffs
           if-no-files-found: ignore
           path: |
-            **/build/reports/**
-            **/build/outputs/roborazzi/**
-            app/build/outputs/apk/debug/app-debug.apk
-            app/build/outputs/apk/release/app-release-unsigned.apk
+            apps/android/**/build/reports/**
+            apps/android/**/build/outputs/roborazzi/**
+            apps/android/app/build/outputs/apk/debug/app-debug.apk
+            apps/android/app/build/outputs/apk/release/app-release-unsigned.apk

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="file_details_kept_offline">オフラインで保持中</string>
+    <string name="file_details_selected_offline">オフライン用に選択済み</string>
+    <string name="file_details_temporary_copy">端末内の一時コピー</string>
+    <string name="file_details_temporary_copy_short">一時コピー</string>
+    <string name="file_details_cloud_only">クラウドのみ</string>
+    <string name="file_details_folder">フォルダー</string>
+    <string name="file_details_checking_copy">端末内のコピーを確認中…</string>
+    <string name="file_details_kept_pending">オフラインで保持: ダウンロード待機中</string>
+    <string name="file_details_kept_retained">オフラインで保持: 削除するまで保持</string>
+    <string name="file_details_temporary_never">端末内の一時コピー: 自動削除は「しない」に設定されています</string>
+    <string name="file_details_now">今すぐ</string>
+    <string name="file_details_after_date">%1$s以降</string>
+    <string name="file_details_temporary_cleanup">端末内の一時コピー: %1$sに削除対象となります。開くとタイマーがリセットされます。Androidによって削除が遅れる場合があります。</string>
+    <string name="file_details_photo_metadata">写真のメタデータ（EXIF）</string>
+    <string name="file_details_no_photo_metadata">この画像には読み取れるEXIFメタデータがありません。</string>
+    <string name="file_details_download_error">写真のメタデータをダウンロードできませんでした。転送を確認し、もう一度お試しください。</string>
+    <string name="file_details_downloading_photo">写真をダウンロード中…</string>
+    <string name="file_details_download_photo">メタデータを表示するため写真をダウンロード</string>
+    <string name="file_details_close">閉じる</string>
+    <string name="file_details_location">場所: %1$s</string>
+    <string name="file_details_type">種類: %1$s</string>
+    <string name="file_details_size">サイズ: %1$s</string>
+    <string name="file_details_unknown">不明</string>
+    <string name="file_details_modified">更新日時: %1$s</string>
+    <string name="file_details_exif_taken">撮影日時</string>
+    <string name="file_details_exif_make">カメラメーカー</string>
+    <string name="file_details_exif_model">カメラ機種</string>
+    <string name="file_details_exif_width">幅</string>
+    <string name="file_details_exif_height">高さ</string>
+    <string name="file_details_exif_exposure">露光時間（秒）</string>
+    <string name="file_details_exif_aperture">絞り値</string>
+    <string name="file_details_exif_iso">ISO</string>
+    <string name="file_details_exif_focal_length">焦点距離</string>
+    <string name="file_details_exif_value">%1$s: %2$s</string>
+    <string name="file_details_exif_gps">GPS: %1$s, %2$s</string>
+</resources>

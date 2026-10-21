@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_biometric_offer_title">Desbloquear com biometria?</string>
+    <string name="vault_biometric_offer_message">Use a impressão digital ou o reconhecimento facial compatível para reabrir esta pasta ou Space encriptado. Isto funciona apenas neste telemóvel. Mantenha uma cópia de segurança da palavra-passe de encriptação num local seguro: continuará a precisar dela noutros dispositivos, se a biometria for reposta ou se perder este telemóvel.</string>
+    <string name="vault_biometric_offer_accept">Configurar a biometria</string>
+    <string name="vault_biometric_offer_decline">Agora não</string>
+    <string name="vault_biometric_setup_error">A confirmação biométrica terminou, mas o Raiun não conseguiu guardar ou usar a chave de encriptação. Desbloqueie com a palavra-passe de encriptação e configure novamente a biometria.</string>
+    <string name="vault_biometric_diagnostic">Código de diagnóstico: %1$s</string>
+</resources>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="preview_back">Retour</string>
+    <string name="preview_open_with">Ouvrir avec</string>
+    <string name="preview_edit">Modifier</string>
+    <string name="preview_failed">Impossible d’afficher l’aperçu de ce fichier. Réessayez ou utilisez Ouvrir avec. Les aperçus de texte prennent en charge les fichiers UTF-8 jusqu’à 1 Mo ; les autres aperçus prennent en charge les fichiers jusqu’à 100 Mo.</string>
+    <string name="preview_retry">Réessayer</string>
+    <string name="preview_previous">Précédent</string>
+    <string name="preview_next">Suivant</string>
+    <string name="preview_page">%1$d / %2$d</string>
+</resources>

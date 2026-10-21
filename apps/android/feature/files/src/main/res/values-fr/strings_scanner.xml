@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_scan">Numériser</string>
+    <string name="scanner_preparing">Préparation de la numérisation…</string>
+    <string name="scanner_uploading">Préparation des fichiers numérisés pour l’envoi…</string>
+    <string name="scanner_retry">Réessayer</string>
+    <string name="scanner_discard">Supprimer la numérisation</string>
+    <string name="scanner_discard_title">Supprimer ces fichiers numérisés ?</string>
+    <string name="scanner_discard_body">Les numérisations qui n’ont pas été mises en attente d’envoi seront supprimées de cet appareil.</string>
+    <string name="scanner_keep">Conserver la numérisation</string>
+    <string name="scanner_failed">La numérisation n’a pas pu se terminer. Vous pouvez réessayer ou la supprimer.</string>
+    <string name="scanner_location_title">Emplacement dans OpenCloud</string>
+    <string name="scanner_location_failed">Impossible de changer l’emplacement de numérisation. Votre destination précédente a été conservée.</string>
+    <string name="scanner_location_ok">OK</string>
+</resources>

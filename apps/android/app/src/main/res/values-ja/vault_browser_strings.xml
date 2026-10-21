@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_refresh">更新</string>
+    <string name="vault_new_folder">新しいフォルダー</string>
+    <string name="vault_upload_file">ファイルをアップロード</string>
+    <string name="vault_new_actions">新規操作</string>
+    <string name="vault_close_actions">新規操作を閉じる</string>
+    <string name="vault_edit_location">暗号化された場所を編集</string>
+    <string name="vault_copy_to_folder">フォルダーにコピー</string>
+    <string name="vault_move_to_folder">フォルダーに移動</string>
+    <string name="vault_destination_root">暗号化された場所</string>
+    <string name="vault_destination_up">上の階層へ</string>
+    <string name="vault_destination_open">開く</string>
+    <string name="vault_details_path">パス: %1$s</string>
+    <string name="vault_details_type">種類: %1$s</string>
+    <string name="vault_details_size">サイズ: %1$s</string>
+    <string name="vault_entry_size">%1$s · %2$s</string>
+    <string name="vault_preview_memory_only_note">プレビューの内容はメモリ内で復号されます。Raiunは平文のプレビューコピーを保存しません。</string>
+    <string name="vault_destination_choose">%1$sの転送先を選択</string>
+    <string name="vault_copy_here">ここにコピー</string>
+    <string name="vault_move_here">ここに移動</string>
+    <string name="vault_destination_empty">この場所にはフォルダーがありません。</string>
+    <string name="vault_encrypted_space_header">暗号化Space</string>
+    <string name="vault_encrypted_folder_header">暗号化フォルダー</string>
+    <string name="vault_entry_actions">%1$sの操作</string>
+    <string name="vault_rename">名前を変更</string>
+    <string name="vault_delete">削除</string>
+    <string name="vault_copy">コピー</string>
+    <string name="vault_move">移動</string>
+    <string name="vault_save_copy">復号したコピーを保存</string>
+    <string name="vault_details">詳細</string>
+    <string name="vault_delete_confirm">暗号化された場所からこの項目を削除しますか？</string>
+    <string name="vault_details_content">名前: %1$s\nパス: %2$s\nサイズ: %3$dバイト</string>
+    <string name="vault_cancel">キャンセル</string>
+    <string name="vault_confirm">確認</string>
+    <string name="vault_operation_failed">操作が完了しませんでした。サーバーがすでに変更を受け取っている可能性があるため、再試行する前に更新してください。</string>
+    <string name="vault_unlock_to_finish">ファイル操作を完了するには、再度ロックを解除してください。</string>
+    <string name="vault_export_failed">コピーが完了しませんでした。保存先に不完全なファイルが残っている可能性があります。</string>
+    <string name="vault_save_copy_warning">保存したコピーは、このフォルダーまたはSpaceによって暗号化されなくなります。信頼できる場所にのみ保存してください。</string>
+    <string name="vault_root_delete_warning">「%1$s」を削除しますか？ここでは空の暗号化フォルダーのみ削除できます。先に内容を削除または移動してください。</string>
+    <string name="vault_space_management_web">Spaceの名前、メンバー、削除はWebアプリで管理してください。このSpace内ではファイルとフォルダーを操作できます。</string>
+    <string name="vault_name">名前</string>
+    <string name="vault_entry_folder_type">フォルダー</string>
+    <string name="vault_entry_unknown_type">不明な種類</string>
+    <string name="vault_entry_offline_status">暗号化されたオフラインコピーで利用可能</string>
+    <string name="vault_entry_online_unknown_status">暗号化された項目 · オフラインでの利用可否は不明</string>
+</resources>

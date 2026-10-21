@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_offline_unavailable_title">Indisponível offline</string>
+    <string name="vault_offline_unavailable_space">Space</string>
+    <string name="vault_offline_unavailable_folder">pasta</string>
+    <string name="vault_offline_unavailable_message">Este item encriptado (%1$s) “%2$s” não está guardado neste dispositivo e não pode ser desbloqueado offline.</string>
+</resources>

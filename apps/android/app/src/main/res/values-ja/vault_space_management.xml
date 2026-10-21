@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_manage_space_title">暗号化Spaceを管理</string>
+    <string name="vault_manage_disable_space">暗号化Spaceを無効化</string>
+    <string name="vault_manage_disable_confirm">管理者が復元するまで、このSpaceにアクセスできなくなります。暗号化された内容は保存されたままです。</string>
+    <string name="vault_manage_disable_confirm_action">Spaceを無効化</string>
+    <string name="vault_disabled_management_title">無効な暗号化Space</string>
+    <string name="vault_disabled_management_description">このSpaceは無効です。管理にはサーバーのメタデータのみを使い、暗号化ファイルとキーは開きません。</string>
+    <string name="vault_disabled_restore">Spaceを復元</string>
+    <string name="vault_disabled_permanently_delete">完全に削除</string>
+    <string name="vault_disabled_purge">完全に削除</string>
+    <string name="vault_disabled_purge_confirm">「%1$s」とその中のすべての内容を完全に削除しますか？この操作は取り消せません。</string>
+    <string name="vault_manage_space_uncertain">保存を確認できませんでした。サーバーで一部の変更が適用された可能性があります。再試行する前に更新して現在の値を確認してください。</string>
+    <string name="vault_manage_name">名前</string>
+    <string name="vault_manage_description">説明</string>
+    <string name="vault_manage_description_value">説明: %1$s</string>
+    <string name="vault_manage_quota_mib">容量上限（MiB · 更新は任意）</string>
+    <string name="vault_manage_quota_help">空欄にすると現在の容量上限を維持します。容量上限を減らしても既存のファイルは削除されません。</string>
+    <string name="vault_manage_quota_value">容量上限: %1$d MiB</string>
+    <string name="vault_manage_used_value">使用量: %1$d MiB</string>
+    <string name="vault_manage_remaining_value">空き容量: %1$d MiB</string>
+    <string name="vault_manage_owner">所有者: %1$s</string>
+    <string name="vault_manage_unknown">不明</string>
+    <string name="vault_manage_edit_details">Spaceの詳細を編集</string>
+    <string name="vault_manage_members">メンバー</string>
+    <string name="vault_manage_member_search">ユーザーまたはグループを検索</string>
+    <string name="vault_manage_member_role">Spaceの役割</string>
+    <string name="vault_manage_member_add">メンバーを追加</string>
+    <string name="vault_manage_member_remove">メンバーを削除</string>
+    <string name="vault_manage_member_remove_confirm">このSpaceから%1$sを削除しますか？</string>
+    <string name="vault_manage_membership_warning">メンバーになっても暗号化パスワードは提供されません。メンバーを削除しても、その人がすでに知っているキーを無効にすることはできません。</string>
+    <string name="vault_manage_save">保存</string>
+</resources>

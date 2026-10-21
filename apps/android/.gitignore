@@ -1,0 +1,46 @@
+.gradle/
+.kotlin/
+.idea/
+build/
+**/build/
+local.properties
+*.iml
+captures/
+build-validation.*
+build-projects.log
+projects-validation.*
+*-validation.log
+*-validation.pid
+*-validation.exit
+*-validation-error.log
+/*.log
+/*.pid
+/*.exit
+/*-compile.log
+/*-validation.log
+**/build/outputs/roborazzi/
+**/build/reports/roborazzi/
+# Never publish signing material or local acceptance records.
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.clixml
+signing.properties
+# Historical device/server testing records stay local.
+docs/BACKLOG.md
+docs/DEVICE-FEEDBACK.md
+docs/TESTING-CHECKLIST.md
+docs/UPSTREAM-IMPLEMENTATION-2026-09-29.md
+docs/phase7-9-progress.md
+docs/RELEASE-HARDENING-2026-10-02.md
+# Unused translation scratch directories (real resources are under feature/).
+/account/
+/auth/
+/search/
+/settings/
+/spaces/
+
+# Original issue bodies/comments retained locally, not republished.
+docs/upstream-review/
+docs/UPSTREAM-ISSUE-AUDIT-2026-09-29.md

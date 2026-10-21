@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="boundary_destination_title">Choose destination</string>
+    <string name="boundary_other_location">Other location</string>
+    <string name="boundary_locations">Locations</string>
+    <string name="boundary_encrypted">Encrypted</string>
+    <string name="boundary_ordinary">Unencrypted</string>
+    <string name="boundary_unlock">Unlock destination</string>
+    <string name="boundary_password">Password</string>
+    <string name="boundary_unlock_action">Unlock</string>
+    <string name="boundary_plaintext_title">Create an unencrypted copy?</string>
+    <string name="boundary_plaintext_move_title">Move to unencrypted storage?</string>
+    <string name="boundary_plaintext_move_body">Files moved here will no longer be protected by your encryption password. Source items are removed only after the destination is verified. Continue only if you trust this destination.</string>
+    <string name="boundary_plaintext_body">Files copied here will no longer be protected by your encryption password. Continue only if you trust this destination.</string>
+    <string name="boundary_continue">Continue</string>
+    <string name="boundary_copy_here">Copy here</string>
+    <string name="boundary_move_here">Move here</string>
+    <string name="boundary_cancel">Cancel</string>
+    <string name="boundary_close">Close</string>
+    <string name="boundary_retry">Try again</string>
+    <string name="boundary_complete">Transfer completed and verified.</string>
+    <string name="boundary_partial_copy">The destination may contain incomplete copies. Your source items have been kept unless an earlier item was already safely moved. Check the destination before starting a new transfer.</string>
+    <string name="boundary_partial_move">The copy was verified, but source cleanup could not finish. The destination and remaining source items have been kept. Check both locations before starting a new move.</string>
+    <string name="boundary_cancel_title">Cancel this transfer?</string>
+    <string name="boundary_cancel_body">Some destination files may already have been created. Source items that have not already been safely moved will remain.</string>
+    <string name="boundary_working">Transferring and verifying…</string>
+    <plurals name="boundary_selection_count"><item quantity="one">%d selected item</item><item quantity="other">%d selected items</item></plurals>
+    <string name="boundary_empty">No folders here. You can choose this location.</string>
+</resources>

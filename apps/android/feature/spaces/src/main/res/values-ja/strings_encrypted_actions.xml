@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="spaces_encrypted_actions">%1$sの操作</string>
+    <string name="spaces_disabled_encrypted">無効な暗号化Space</string>
+    <string name="spaces_manage_disabled_encrypted">無効な暗号化Space %1$sを管理</string>
+</resources>

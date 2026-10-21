@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="document_edit_text">テキストを編集</string>
+    <string name="document_back">戻る</string>
+    <string name="document_save_server">サーバーに保存</string>
+    <string name="document_save_queued">保存を待機リストに追加しました。「転送」で進行状況や競合を確認してください。下書きはこの端末に残ります。</string>
+    <string name="document_check_save">保存状況を確認</string>
+    <string name="document_saving_draft">下書きを保存中…</string>
+    <string name="document_draft_saved">下書きを端末に保存しました。アップロードするには「サーバーに保存」を使ってください。</string>
+    <string name="document_utf8_text">テキスト（UTF-8）</string>
+    <string name="document_discard_draft">下書きを破棄</string>
+    <string name="document_discard_title">この下書きを破棄しますか？</string>
+    <string name="document_discard_description">端末内のテキストの変更を削除します。サーバー上のファイルを再び編集する前に、フォルダーを更新してください。</string>
+    <string name="document_discard">破棄</string>
+    <string name="document_cancel">キャンセル</string>
+    <string name="document_web_open">Webアプリで開く</string>
+    <string name="document_browser_required">このWebアプリを開くにはブラウザーをインストールしてください。</string>
+    <string name="document_view_with">%1$sで表示</string>
+    <string name="document_edit_with">%1$sで編集</string>
+    <string name="document_close">閉じる</string>
+    <string name="document_in_browser">ブラウザー内</string>
+    <string name="document_in_app">アプリ内</string>
+    <string name="document_session_warning">アプリを離れる前に保存を完了してください。離れると、このセッションは終了します。</string>
+    <string name="document_no_web_apps">このサーバーには対応するWebアプリがありません。</string>
+    <string name="document_upload_title">Raiunでアップロード</string>
+    <string name="document_preparing_uploads">アップロードを準備中…</string>
+    <string name="document_saving_shared">共有ファイルを保存中…</string>
+    <string name="document_shared_copy_on_upload">保存先を選び「アップロード」をタップすると、共有ファイルがコピーされます。</string>
+    <string name="document_sign_in_to_share">Raiunを開いてログインしてから、これらのファイルを再度共有してください。</string>
+    <string name="document_retry_uploads">アップロードを再試行</string>
+    <string name="document_upload_here">ここにアップロード</string>
+    <string name="document_account">アカウント</string>
+    <string name="document_selected">選択中</string>
+    <string name="document_destination">保存先</string>
+    <string name="document_up_folder">親フォルダーへ</string>
+    <plurals name="document_incoming_files">
+        <item quantity="other">%1$d件のファイル</item>
+    </plurals>
+</resources>

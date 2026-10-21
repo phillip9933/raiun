@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="transfer_notification_channel">ファイル転送</string>
+    <string name="transfer_notification_progress">処理中</string>
+</resources>

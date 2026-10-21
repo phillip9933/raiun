@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="transfers_diagnostic_code">Código: %1$s • Intento %2$d</string>
+    <string name="transfers_retry_after">Reintento automático a partir de %1$s</string>
+    <string name="transfers_verification_pending">Subida enviada; la confirmación aún está pendiente.</string>
+    <string name="transfers_encrypted_destination">Destino cifrado</string>
+    <string name="transfers_details">Detalles</string>
+    <string name="transfers_hide_details">Ocultar detalles</string>
+    <string name="transfers_awaiting_unlock">Desbloquea la carpeta cifrada para verificar el archivo descargado.</string>
+</resources>

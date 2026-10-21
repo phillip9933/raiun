@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="vault_offline_unavailable_title">No disponible sin conexión</string>
+    <string name="vault_offline_unavailable_space">Space</string>
+    <string name="vault_offline_unavailable_folder">carpeta</string>
+    <string name="vault_offline_unavailable_message">La ubicación cifrada de tipo %1$s «%2$s» no está guardada en este dispositivo y no se puede desbloquear sin conexión.</string>
+</resources>

@@ -1,0 +1,8 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="browser_storage_used">%1$s usado</string>
+    <string name="browser_storage_used_total">%1$s usado de %2$s</string>
+    <string name="browser_direction_upload">Subida</string>
+    <string name="browser_direction_download">Descarga</string>
+    <string name="browser_direction_transfer">Transferencia</string>
+</resources>

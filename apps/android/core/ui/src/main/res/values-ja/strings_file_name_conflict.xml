@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="file_name_conflict_title">同じ名前の項目がすでに存在します</string>
+    <string name="file_name_conflict_message">このフォルダーには%1$sがすでに存在します。新しく保存する項目を%2$sという名前にして両方を保持するか、キャンセルしてください。</string>
+    <string name="file_name_conflict_keep_both">両方を保持</string>
+    <string name="file_name_conflict_cancel">キャンセル</string>
+</resources>

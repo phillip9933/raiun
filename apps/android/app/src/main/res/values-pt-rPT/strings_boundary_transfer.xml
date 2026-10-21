@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="boundary_destination_title">Escolher o destino</string>
+    <string name="boundary_other_location">Outra localização</string>
+    <string name="boundary_locations">Localizações</string>
+    <string name="boundary_encrypted">Encriptado</string>
+    <string name="boundary_ordinary">Não encriptado</string>
+    <string name="boundary_unlock">Desbloquear o destino</string>
+    <string name="boundary_password">Palavra-passe</string>
+    <string name="boundary_unlock_action">Desbloquear</string>
+    <string name="boundary_plaintext_title">Criar uma cópia não encriptada?</string>
+    <string name="boundary_plaintext_move_title">Mover para armazenamento não encriptado?</string>
+    <string name="boundary_plaintext_move_body">Os ficheiros movidos para aqui deixarão de estar protegidos pela palavra-passe de encriptação. Os itens de origem só são removidos após a verificação do destino. Continue apenas se confiar neste destino.</string>
+    <string name="boundary_plaintext_body">Os ficheiros copiados para aqui deixarão de estar protegidos pela palavra-passe de encriptação. Continue apenas se confiar neste destino.</string>
+    <string name="boundary_continue">Continuar</string>
+    <string name="boundary_copy_here">Copiar para aqui</string>
+    <string name="boundary_move_here">Mover para aqui</string>
+    <string name="boundary_cancel">Cancelar</string>
+    <string name="boundary_close">Fechar</string>
+    <string name="boundary_retry">Tentar novamente</string>
+    <string name="boundary_complete">Transferência concluída e verificada.</string>
+    <string name="boundary_partial_copy">O destino pode conter cópias incompletas. Os itens de origem foram mantidos, exceto se um item anterior já tiver sido movido em segurança. Verifique o destino antes de iniciar uma nova transferência.</string>
+    <string name="boundary_partial_move">A cópia foi verificada, mas a limpeza da origem não pôde ser concluída. O destino e os itens de origem restantes foram mantidos. Verifique ambas as localizações antes de iniciar uma nova movimentação.</string>
+    <string name="boundary_cancel_title">Cancelar esta transferência?</string>
+    <string name="boundary_cancel_body">Alguns ficheiros de destino podem já ter sido criados. Os itens de origem que ainda não tenham sido movidos em segurança serão mantidos.</string>
+    <string name="boundary_working">A transferir e verificar…</string>
+    <plurals name="boundary_selection_count">
+        <item quantity="one">%d item selecionado</item>
+        <item quantity="many">%d itens selecionados</item>
+        <item quantity="other">%d itens selecionados</item>
+    </plurals>
+    <string name="boundary_empty">Não há pastas aqui. Pode escolher esta localização.</string>
+</resources>

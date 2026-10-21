@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_background_upload_preparing">Datei wird verschlüsselt. Lass diesen Speicherort entsperrt, bis die Vorbereitung abgeschlossen ist.</string>
+    <string name="vault_background_upload_queued">Verschlüsselter Upload eingereiht. Er kann nach dem Sperren dieses Speicherorts fortgesetzt werden. Den Fortschritt findest du unter Übertragungen.</string>
+</resources>

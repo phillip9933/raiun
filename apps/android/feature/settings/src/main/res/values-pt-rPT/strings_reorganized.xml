@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_data">Dados</string>
+    <string name="settings_temporary_files">Ficheiros locais temporários</string>
+    <string name="settings_app_lock">Bloqueio da aplicação</string>
+    <string name="settings_app_lock_summary">Exige o bloqueio de ecrã do dispositivo para abrir o Raiun.</string>
+    <string name="settings_app_lock_setup_device">Configure primeiro um bloqueio de ecrã nas definições do Android.</string>
+    <string name="settings_encrypted_preferences">Preferências de encriptação</string>
+    <string name="settings_encrypted_preferences_summary">Opções biométricas para pastas e Spaces encriptados</string>
+    <string name="settings_permissions">Permissões</string>
+    <string name="settings_permissions_summary">Acesso aos metadados de fotografias e vídeos</string>
+    <string name="settings_encrypted_preferences_explanation">Estas opções são guardadas neste dispositivo. Repor uma opção remove a respetiva chave biométrica guardada, se existir. Depois de desbloquear essa localização encriptada com a palavra-passe, o Raiun pode perguntar novamente.</string>
+    <string name="settings_encrypted_preferences_empty">Não há opções biométricas para localizações encriptadas nesta conta.</string>
+    <string name="settings_encrypted_preferences_failed">Não foi possível ler as preferências de encriptação.</string>
+    <string name="settings_encrypted_folder">Pasta</string>
+    <string name="settings_encrypted_space">Space</string>
+    <string name="settings_encrypted_unknown_location">Localização encriptada</string>
+    <string name="settings_encrypted_declined">Oferta de biometria recusada</string>
+    <string name="settings_encrypted_enrolled">Chave biométrica guardada</string>
+    <string name="settings_encrypted_key_unavailable">Chave biométrica indisponível</string>
+    <string name="settings_encrypted_entry_description">%1$s · %2$s</string>
+    <string name="settings_encrypted_reset_title">Repor o acesso biométrico?</string>
+    <string name="settings_encrypted_reset_explanation">A chave biométrica guardada de %1$s será removida deste dispositivo. Use a palavra-passe da próxima vez; o Raiun perguntará novamente se pretende memorizar uma chave biométrica.</string>
+    <string name="settings_encrypted_reset_files_unchanged">Os ficheiros e pastas encriptados não serão alterados.</string>
+    <string name="settings_encrypted_use_password">Usar a palavra-passe da próxima vez</string>
+    <string name="settings_encrypted_ask_again">Perguntar novamente</string>
+    <string name="settings_encrypted_reset_failed">Não foi possível repor esta opção biométrica. Tente novamente.</string>
+</resources>

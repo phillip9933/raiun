@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_parent">Subir um nível</string>
+    <string name="browser_compact">Mudar para a vista de lista compacta</string>
+    <string name="browser_tiles">Mudar para a vista de grelha</string>
+    <string name="browser_regular">Mudar para a vista de lista normal</string>
+</resources>

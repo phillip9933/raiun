@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="space_created_refresh_pending">サーバー上にSpaceを作成しましたが、詳細はまだ利用できません。Spacesを更新して再確認してください。同じ名前で再送信すると、新規作成せずにこのSpaceを確認します。</string>
+    <string name="browser_backup_configured">フォルダーバックアップを設定しました。</string>
+    <string name="browser_preview_navigation_unavailable">ファイルブラウザーのプレビューでは、この全体ナビゲーション操作はまだ利用できません。</string>
+    <string name="space_created_recovery_not_saved">サーバー上にSpaceを作成しましたが、この端末に復旧情報を保存できませんでした。別のSpaceを作成する前にSpacesを更新してください。</string>
+</resources>

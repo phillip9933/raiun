@@ -1,0 +1,5 @@
+<resources>
+    <string name="backup_scan_failed_at">Letzter Scan fehlgeschlagen: %1$s</string>
+    <string name="backup_scan_source_unavailable">Der Quellordner ist nicht mehr verfügbar. Wähle den Ordner unter Verwalten erneut aus.</string>
+    <string name="backup_scan_source_permission">Der Zugriff auf den Quellordner ging verloren. Wähle den Ordner unter Verwalten erneut aus und erteile den Zugriff.</string>
+</resources>

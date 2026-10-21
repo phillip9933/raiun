@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_transfer_conflict_title">Un élément porte déjà ce nom</string>
+    <string name="vault_transfer_conflict_body">%1$s existe déjà dans ce dossier. Conservez les deux sous le nom %2$s, ou annulez.</string>
+    <string name="vault_transfer_keep_both">Conserver les deux</string>
+    <string name="vault_entry_cloud_only_status">Sur le cloud uniquement</string>
+    <string name="vault_entry_unknown_size">Taille inconnue</string>
+</resources>

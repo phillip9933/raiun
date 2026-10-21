@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="backup_scan_failed_at">Última análise falhou %1$s</string>
+    <string name="backup_scan_source_unavailable">A pasta de origem já não está disponível. Use Gerir para escolher a pasta novamente.</string>
+    <string name="backup_scan_source_permission">O acesso à pasta de origem foi perdido. Use Gerir para selecionar a pasta e conceder novamente o acesso.</string>
+</resources>

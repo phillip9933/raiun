@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="file_versions_title">Historique des versions</string>
+    <string name="file_versions_loading">Chargement des versions…</string>
+    <string name="file_versions_empty">Aucune version antérieure n’est disponible pour ce fichier.</string>
+    <string name="file_versions_unavailable">L’historique des versions est indisponible pour ce fichier ou ce serveur.</string>
+    <string name="file_versions_error">Impossible de charger les versions. Vérifiez votre connexion et votre accès, puis réessayez.</string>
+    <string name="file_versions_restore">Restaurer</string>
+    <string name="file_versions_restoring">Restauration…</string>
+    <string name="file_versions_confirm">Remplacer le contenu actuel de « %1$s » par cette version ? Les paramètres de conservation du serveur déterminent les versions qui restent disponibles.</string>
+    <string name="file_versions_restore_error">La restauration n’a pas pu être confirmée. Actualisez le fichier avant de réessayer. Vérifiez les modifications ou envois en attente et confirmez que vous disposez toujours d’un accès en écriture.</string>
+    <string name="file_versions_restored">Version restaurée. La liste des fichiers sera actualisée.</string>
+    <string name="file_versions_retry">Réessayer</string>
+    <string name="file_versions_close">Fermer</string>
+    <string name="file_versions_cancel">Annuler</string>
+    <string name="file_versions_unknown_date">Date indisponible</string>
+    <string name="file_versions_unknown_size">Taille indisponible</string>
+</resources>

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="deleted_files_title">Ficheiros eliminados</string>
+    <string name="deleted_personal_space">Pessoal</string>
+    <plurals name="deleted_bin_item_count">
+        <item quantity="one">%1$d item eliminado</item>
+        <item quantity="many">%1$d itens eliminados</item>
+        <item quantity="other">%1$d itens eliminados</item>
+    </plurals>
+    <string name="deleted_back">Voltar</string>
+    <string name="deleted_recycle_bin_title">Reciclagem</string>
+    <string name="deleted_recycle_bin_explanation">Elimina permanentemente itens do servidor.</string>
+    <string name="deleted_empty_recycle_bin">Esvaziar a reciclagem</string>
+    <string name="deleted_delete_permanently">Eliminar permanentemente</string>
+    <string name="deleted_cancel">Cancelar</string>
+    <string name="deleted_ok">OK</string>
+    <string name="deleted_loading">A carregar ficheiros eliminados…</string>
+    <string name="deleted_empty">A reciclagem está vazia.</string>
+    <string name="deleted_unsupported">Este servidor não suporta ficheiros eliminados.</string>
+    <string name="deleted_clear_selection">Limpar seleção</string>
+    <string name="deleted_select_all">Selecionar tudo</string>
+    <string name="deleted_restore_selected">Restaurar os selecionados</string>
+    <string name="deleted_permanently_delete_selected">Eliminar permanentemente os selecionados</string>
+    <string name="deleted_restore_item">Restaurar %1$s</string>
+    <string name="deleted_permanently_delete_item">Eliminar permanentemente %1$s</string>
+    <plurals name="deleted_selection_count">
+        <item quantity="one">%1$d selecionados</item>
+        <item quantity="many">%1$d selecionados</item>
+        <item quantity="other">%1$d selecionados</item>
+    </plurals>
+    <plurals name="deleted_confirm_title">
+        <item quantity="one">Eliminar permanentemente %1$d item?</item>
+        <item quantity="many">Eliminar permanentemente %1$d itens?</item>
+        <item quantity="other">Eliminar permanentemente %1$d itens?</item>
+    </plurals>
+    <plurals name="deleted_confirm_message">
+        <item quantity="one">Este item será removido da reciclagem do servidor e não poderá ser restaurado.</item>
+        <item quantity="many">Estes itens serão removidos da reciclagem do servidor e não poderão ser restaurados.</item>
+        <item quantity="other">Estes itens serão removidos da reciclagem do servidor e não poderão ser restaurados.</item>
+    </plurals>
+    <plurals name="deleted_batch_failure">
+        <item quantity="one">Não foi possível processar %1$d item. %2$s</item>
+        <item quantity="many">Não foi possível processar %1$d itens. %2$s</item>
+        <item quantity="other">Não foi possível processar %1$d itens. %2$s</item>
+    </plurals>
+    <string name="file_operation_choose_destination_one">Escolha um destino para %1$s</string>
+    <plurals name="file_operation_choose_destination_many">
+        <item quantity="one">Escolha um destino para %1$d item</item>
+        <item quantity="many">Escolha um destino para %1$d itens</item>
+        <item quantity="other">Escolha um destino para %1$d itens</item>
+    </plurals>
+    <string name="file_operation_move_here">Mover para aqui</string>
+    <string name="file_operation_copy_here">Copiar para aqui</string>
+    <string name="file_operation_cancel">Cancelar</string>
+    <string name="file_operation_verifying">A verificar %1$s…</string>
+    <string name="file_operation_check_again">Verificar novamente</string>
+    <string name="file_operation_dismiss">Dispensar</string>
+</resources>

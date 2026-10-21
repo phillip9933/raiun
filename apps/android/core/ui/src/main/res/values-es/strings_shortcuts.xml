@@ -1,0 +1,37 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="folder_shortcut_appearance">Icono del acceso directo</string>
+    <string name="folder_shortcut_preview">Vista previa del icono del acceso directo</string>
+    <string name="folder_shortcut_badge">Tu lanzador añade el distintivo de Raiun. Añade esta carpeta de nuevo para actualizar un acceso directo existente.</string>
+    <string name="folder_shortcut_image">Elegir imagen</string>
+    <string name="folder_shortcut_image_error">No se pudo leer esa imagen. Elige una imagen de menos de 16 MB.</string>
+    <string name="folder_shortcut_default">Predeterminado</string>
+    <string name="folder_shortcut_blue">Azul</string>
+    <string name="folder_shortcut_green">Verde</string>
+    <string name="folder_shortcut_yellow">Amarillo</string>
+    <string name="folder_shortcut_red">Rojo</string>
+    <string name="folder_shortcut_add">Añadir a la pantalla de inicio</string>
+    <string name="folder_shortcut_error">No se pudo añadir esta carpeta. Comprueba que sigue disponible y que tu lanzador admite accesos directos.</string>
+    <string name="folder_shortcut_requested">Acceso directo solicitado. Confírmalo en tu lanzador si te lo pide.</string>
+    <string name="folder_shortcut_unavailable">Este acceso directo a carpeta no está disponible. Abre Raiun y comprueba que la cuenta y la carpeta siguen existiendo.</string>
+    <string name="folder_shortcut_close">Cerrar</string>
+    <string name="folder_shortcut_cancel">Cancelar</string>
+    <string name="folder_shortcut_purple">Morado</string>
+    <string name="folder_shortcut_orange">Naranja</string>
+    <string name="folder_shortcut_pink">Rosa</string>
+    <string name="folder_shortcut_teal">Verde azulado</string>
+    <string name="folder_shortcut_grey">Gris</string>
+    <string name="folder_crop_title">Recortar imagen del acceso directo</string>
+    <string name="folder_crop_hint">Pellizca para ampliar. Arrastra para colocar la imagen dentro del círculo.</string>
+    <string name="folder_crop_zoom">Zoom</string>
+    <string name="folder_crop_horizontal">Posición horizontal</string>
+    <string name="folder_crop_vertical">Posición vertical</string>
+    <string name="folder_crop_use">Usar imagen</string>
+    <string name="folder_download">Descargar carpeta</string>
+    <string name="folder_download_explanation">Añade los archivos de esta carpeta y sus subcarpetas a Transferencias y conserva copias locales. Los archivos compartidos siguen requiriendo comprobar el acceso con el servidor. Cancelar deja de añadir archivos; las descargas ya en cola permanecen en Transferencias.</string>
+    <string name="folder_download_count">%1$d archivos añadidos a Transferencias</string>
+    <string name="folder_download_failed">No se pudieron poner algunos archivos en cola. Comprueba tu conexión y acceso e inténtalo de nuevo. Los archivos ya en cola permanecen en Transferencias.</string>
+    <string name="folder_crop_zoom_in">Ampliar</string>
+    <string name="folder_crop_zoom_out">Reducir</string>
+    <string name="folder_crop_reset">Restablecer recorte</string>
+</resources>

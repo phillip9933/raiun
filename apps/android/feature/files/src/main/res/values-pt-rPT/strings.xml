@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_vaults">Cofres encriptados</string>
+    <string name="favorites_sync_running">A verificar os favoritos. A aguardar uma ligação, se necessário.</string>
+    <string name="favorites_sync_more">Pode haver mais favoritos por verificar.</string>
+    <string name="favorites_sync_failed">Não foi possível atualizar completamente os favoritos. Tente novamente.</string>
+    <string name="favorites_sync_unavailable">A pesquisa de favoritos não está disponível para esta conta. São apresentados os favoritos em cache.</string>
+    <string name="favorites_sync_continue">Continuar a verificar</string>
+    <string name="favorites_sync_refresh">Atualizar favoritos</string>
+</resources>

@@ -1,0 +1,26 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="incoming_open_folder">Abrir carpeta</string>
+    <string name="incoming_copy_link">Copiar enlace permanente</string>
+    <string name="incoming_link_copied">Enlace copiado. Se requiere tener acceso para abrirlo.</string>
+    <string name="incoming_hide_share">Ocultar recurso compartido</string>
+    <string name="incoming_unhide_share">Mostrar recurso compartido</string>
+    <string name="incoming_hide_explanation">Esto cambia la visibilidad en tu lista Compartido conmigo, también en la web. No elimina la carpeta ni cambia el acceso de nadie. Usa Mostrar compartidos ocultos para encontrar carpetas ocultas.</string>
+    <string name="incoming_show_hidden">Mostrar compartidos ocultos</string>
+    <string name="incoming_hide_hidden">Ocultar compartidos ocultos</string>
+    <string name="incoming_hidden">Recurso compartido oculto</string>
+    <string name="incoming_folder_location">Ubicación</string>
+    <string name="incoming_folder_owner">Propietario</string>
+    <string name="incoming_folder_shared_by">Compartido por</string>
+    <string name="incoming_folder_shared_at">Compartido el</string>
+    <string name="incoming_folder_expires">Caduca</string>
+    <string name="incoming_folder_modified">Modificado</string>
+    <string name="incoming_folder_size">Tamaño</string>
+    <string name="incoming_folder_visible_items">Elementos visibles en esta carpeta</string>
+    <string name="incoming_folder_access">Tu acceso a la raíz compartida</string>
+    <string name="incoming_access_browse">Explorar carpetas</string>
+    <string name="incoming_access_download">Descargar archivos</string>
+    <string name="incoming_access_upload">Subir archivos</string>
+    <string name="incoming_access_create">Crear carpetas</string>
+    <string name="incoming_access_scope">El servidor comprueba el acceso a cada elemento.</string>
+</resources>

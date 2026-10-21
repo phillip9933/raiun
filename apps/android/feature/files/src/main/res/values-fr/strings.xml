@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_vaults">Coffres chiffrés</string>
+    <string name="favorites_sync_running">Vérification des favoris. Attente d’une connexion si nécessaire.</string>
+    <string name="favorites_sync_more">D’autres favoris restent peut-être à vérifier.</string>
+    <string name="favorites_sync_failed">Les favoris n’ont pas pu être entièrement actualisés. Réessayez.</string>
+    <string name="favorites_sync_unavailable">La recherche de favoris est indisponible pour ce compte. Les favoris en cache sont affichés.</string>
+    <string name="favorites_sync_continue">Continuer la vérification</string>
+    <string name="favorites_sync_refresh">Actualiser les favoris</string>
+</resources>

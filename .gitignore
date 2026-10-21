@@ -1,46 +1,20 @@
-.gradle/
-.kotlin/
-.idea/
-build/
-**/build/
-local.properties
-*.iml
-captures/
-build-validation.*
-build-projects.log
-projects-validation.*
-*-validation.log
-*-validation.pid
-*-validation.exit
-*-validation-error.log
-/*.log
-/*.pid
-/*.exit
-/*-compile.log
-/*-validation.log
-**/build/outputs/roborazzi/
-**/build/reports/roborazzi/
-# Never publish signing material or local acceptance records.
+# Local credentials and signing material never belong in this repository.
 *.jks
 *.keystore
 *.p12
 *.pfx
 *.clixml
 signing.properties
-# Historical device/server testing records stay local.
-docs/BACKLOG.md
-docs/DEVICE-FEEDBACK.md
-docs/TESTING-CHECKLIST.md
-docs/UPSTREAM-IMPLEMENTATION-2026-09-29.md
-docs/phase7-9-progress.md
-docs/RELEASE-HARDENING-2026-10-02.md
-# Unused translation scratch directories (real resources are under feature/).
-/account/
-/auth/
-/search/
-/settings/
-/spaces/
+local.properties
+.env
+.env.*
+!*.example
 
-# Original issue bodies/comments retained locally, not republished.
-docs/upstream-review/
-docs/UPSTREAM-ISSUE-AUDIT-2026-09-29.md
+# Tool caches and build products; platform rules also live beside their app.
+.idea/
+.gradle/
+.kotlin/
+**/build/
+__pycache__/
+*.pyc
+/outputs/

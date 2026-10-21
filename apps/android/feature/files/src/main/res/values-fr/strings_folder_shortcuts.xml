@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="folder_shortcut_appearance">Icône du raccourci</string>
+    <string name="folder_shortcut_preview">Aperçu de l’icône du raccourci</string>
+    <string name="folder_shortcut_badge">Votre lanceur ajoute le badge Raiun. Ajoutez à nouveau ce dossier pour mettre à jour un raccourci existant.</string>
+    <string name="folder_shortcut_image">Choisir une image</string>
+    <string name="folder_shortcut_image_error">Impossible de lire cette image. Choisissez une image de moins de 16 Mo.</string>
+    <string name="folder_shortcut_default">Par défaut</string>
+    <string name="folder_shortcut_blue">Bleu</string>
+    <string name="folder_shortcut_green">Vert</string>
+    <string name="folder_shortcut_yellow">Jaune</string>
+    <string name="folder_shortcut_red">Rouge</string>
+    <string name="folder_shortcut_add">Ajouter à l’écran d’accueil</string>
+    <string name="folder_shortcut_error">Impossible d’ajouter ce dossier. Vérifiez qu’il est toujours disponible et que votre lanceur prend en charge les raccourcis.</string>
+    <string name="folder_shortcut_requested">Raccourci demandé. Confirmez-le dans votre lanceur si nécessaire.</string>
+    <string name="folder_shortcut_unavailable">Ce raccourci de dossier est indisponible. Ouvrez Raiun et vérifiez que le compte et le dossier existent toujours.</string>
+    <string name="folder_shortcut_close">Fermer</string>
+</resources>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="editor_saved">下書きをこの端末に保存しました</string>
+    <string name="editor_saving">下書きを保存中…</string>
+    <string name="editor_upload_queued">アップロード待機中</string>
+    <string name="editor_changed_title">ファイルが変更されました</string>
+    <string name="editor_changed_message">サーバー上のファイルが変更されました。下書きの編集を続けるか、現在のファイルを表示してください。</string>
+    <string name="editor_older_draft">古い下書きを編集中です。保存時に競合の解決が必要になる場合があります。</string>
+</resources>

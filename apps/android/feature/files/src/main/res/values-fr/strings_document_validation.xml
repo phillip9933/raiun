@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="document_not_utf8">Ce fichier n’est pas du texte UTF-8. Utilisez Ouvrir avec pour choisir un autre éditeur.</string>
+    <string name="document_text_too_large">L’éditeur prend en charge le texte UTF-8 jusqu’à 256 Ko.</string>
+</resources>

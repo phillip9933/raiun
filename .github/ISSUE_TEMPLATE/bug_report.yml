@@ -1,9 +1,18 @@
 name: Bug report
-description: Report a reproducible problem in the Android client.
+description: Report a reproducible problem in a Raiun app.
 body:
   - type: markdown
     attributes:
       value: "Do not include passwords, tokens or private files. Use private vulnerability reporting for security issues."
+  - type: dropdown
+    id: platform
+    attributes:
+      label: App platform
+      options:
+        - Android
+        - Desktop
+    validations:
+      required: true
   - type: input
     id: app-version
     attributes:
@@ -13,7 +22,7 @@ body:
   - type: input
     id: environment
     attributes:
-      label: Android/device and OpenCloud server versions
+      label: Operating system, device and OpenCloud server versions
   - type: textarea
     id: reproduction
     attributes:

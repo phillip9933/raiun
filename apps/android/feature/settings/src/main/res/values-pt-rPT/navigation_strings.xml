@@ -1,0 +1,18 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="settings_navigation">Navegação</string>
+    <string name="settings_navigation_pinned">Navegação inferior</string>
+    <string name="settings_navigation_hint">Escolha entre 3 e 5 itens. Os restantes ficam no menu. Se tiver cinco fixos, desative um antes de adicionar outro.</string>
+    <string name="settings_navigation_recents">Recentes</string>
+    <string name="settings_navigation_favorites">Favoritos</string>
+    <string name="settings_navigation_personal">Pessoal</string>
+    <string name="settings_navigation_shares">Partilhas</string>
+    <string name="settings_navigation_spaces">Espaços</string>
+    <string name="settings_navigation_offline">Offline</string>
+    <string name="settings_navigation_transfers">Transferências</string>
+    <string name="settings_navigation_save">Guardar</string>
+    <string name="settings_navigation_edit">Editar</string>
+    <string name="settings_navigation_move_up">Mover %1$s para cima</string>
+    <string name="settings_navigation_move_down">Mover %1$s para baixo</string>
+    <string name="settings_navigation_drag">Arrastar para reordenar %1$s</string>
+</resources>

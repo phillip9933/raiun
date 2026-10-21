@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="account_title_accounts">アカウント</string>
+    <string name="account_back">戻る</string>
+    <string name="account_empty">アカウントはありません</string>
+    <string name="account_add">アカウントを追加</string>
+    <string name="account_sign_in_another_server">別のOpenCloudサーバーにログイン</string>
+    <string name="account_remove_accessibility">%1$sを削除</string>
+    <string name="account_remove_title">ログアウトしてアカウントを削除しますか？</string>
+    <string name="account_remove_confirmation">%1$sの端末内のファイル、認証情報、転送、バックアップ、システムのファイル選択からのアクセスが削除されます。</string>
+    <string name="account_remove">削除</string>
+    <string name="account_cancel">キャンセル</string>
+    <string name="account_ok">OK</string>
+    <string name="account_information">アカウント情報</string>
+    <string name="account_refresh_accessibility">アカウントを更新</string>
+    <string name="account_profile_picture">プロフィール画像</string>
+    <string name="account_profile_picture_formats">JPGまたはPNG · 10 MBまで</string>
+    <string name="account_invalid_picture">10 MBまでの有効なJPGまたはPNG画像を選択してください。</string>
+    <string name="account_upload_picture">画像をアップロード</string>
+    <string name="account_remove_picture_title">プロフィール画像を削除しますか？</string>
+    <string name="account_remove_picture_confirmation">サーバーとすべてのOpenCloudアプリからプロフィール画像を削除します。</string>
+    <string name="account_username">ユーザー名</string>
+    <string name="account_first_last_name">氏名</string>
+    <string name="account_email">メールアドレス</string>
+    <string name="account_not_loaded">未読み込み</string>
+    <string name="account_no_email">メールアドレス未設定</string>
+    <string name="account_storage_not_available">利用不可</string>
+    <string name="account_storage_used">%1$s使用中</string>
+    <string name="account_storage_used_of_total">%2$s中%1$s使用中</string>
+    <string name="account_personal_storage">個人用ストレージ</string>
+    <string name="account_group_memberships">所属グループ</string>
+    <string name="account_no_group_memberships">所属グループはありません</string>
+    <string name="account_server">サーバー</string>
+</resources>

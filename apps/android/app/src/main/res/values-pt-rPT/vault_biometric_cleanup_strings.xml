@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_biometric_cleanup_error">O cofre foi eliminado, mas este dispositivo não conseguiu remover a chave biométrica guardada. Tente novamente a limpeza local nas Definições; a eliminação remota não será repetida.</string>
+</resources>

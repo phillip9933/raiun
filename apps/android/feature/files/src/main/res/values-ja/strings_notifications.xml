@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="notifications_title">通知</string>
+    <string name="notifications_refresh">通知を更新</string>
+    <string name="notifications_empty">新しい通知はありません</string>
+    <string name="notifications_read_all">すべて既読にする</string>
+    <string name="notifications_read">既読にする</string>
+    <string name="notifications_open_shares">自分と共有</string>
+</resources>

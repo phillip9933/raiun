@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="browser_vaults">Bóvedas cifradas</string>
+    <string name="favorites_sync_running">Comprobando favoritos. Esperando conexión si es necesario.</string>
+    <string name="favorites_sync_more">Puede que queden más favoritos por comprobar.</string>
+    <string name="favorites_sync_failed">No se pudieron actualizar todos los favoritos. Inténtalo de nuevo.</string>
+    <string name="favorites_sync_unavailable">La búsqueda de favoritos no está disponible para esta cuenta. Se muestran los favoritos en caché.</string>
+    <string name="favorites_sync_continue">Continuar comprobando</string>
+    <string name="favorites_sync_refresh">Actualizar favoritos</string>
+</resources>

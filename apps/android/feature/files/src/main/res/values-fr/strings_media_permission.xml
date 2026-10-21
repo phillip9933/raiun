@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="media_metadata_title">Conserver les métadonnées de localisation des photos ?</string>
+    <string name="media_metadata_explanation">L’accès à la localisation des photos est désactivé. Android peut retirer la position GPS des photos envoyées. Accordez l’autorisation pour aider à la conserver. Envoyer quand même utilise le fichier fourni par Android ; la localisation et les autres métadonnées peuvent être incluses ou omises. Raiun ne retire pas les métadonnées.</string>
+    <string name="media_metadata_allow">Accorder l’autorisation</string>
+    <string name="media_metadata_continue">Envoyer quand même (demander à chaque fois)</string>
+    <string name="media_metadata_settings">Ouvrir les autorisations de l’application</string>
+    <string name="media_metadata_never_ask">Envoyer quand même (ne plus demander)</string>
+    <string name="media_metadata_settings_note">Vous pourrez modifier ce choix dans les paramètres, sous Sécurité.</string>
+</resources>

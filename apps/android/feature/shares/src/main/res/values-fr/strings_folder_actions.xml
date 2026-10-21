@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="incoming_open_folder">Ouvrir le dossier</string>
+    <string name="incoming_copy_link">Copier le lien permanent</string>
+    <string name="incoming_link_copied">Lien copié. Un accès existant est requis pour l’ouvrir.</string>
+    <string name="incoming_hide_share">Masquer le partage</string>
+    <string name="incoming_unhide_share">Afficher le partage</string>
+    <string name="incoming_hide_explanation">Cela modifie la visibilité dans votre liste Partagés avec moi, y compris sur le web. Le dossier n’est pas supprimé et l’accès de chacun reste inchangé. Utilisez Afficher les partages masqués pour retrouver les dossiers masqués.</string>
+    <string name="incoming_show_hidden">Afficher les partages masqués</string>
+    <string name="incoming_hide_hidden">Masquer les partages masqués</string>
+    <string name="incoming_hidden">Partage masqué</string>
+    <string name="incoming_folder_location">Emplacement</string>
+    <string name="incoming_folder_owner">Propriétaire</string>
+    <string name="incoming_folder_shared_by">Partagé par</string>
+    <string name="incoming_folder_shared_at">Date du partage</string>
+    <string name="incoming_folder_expires">Expiration</string>
+    <string name="incoming_folder_modified">Modifié</string>
+    <string name="incoming_folder_size">Taille</string>
+    <string name="incoming_folder_visible_items">Éléments visibles dans ce dossier</string>
+    <string name="incoming_folder_access">Votre accès à la racine partagée</string>
+    <string name="incoming_access_browse">Parcourir les dossiers</string>
+    <string name="incoming_access_download">Télécharger des fichiers</string>
+    <string name="incoming_access_upload">Envoyer des fichiers</string>
+    <string name="incoming_access_create">Créer des dossiers</string>
+    <string name="incoming_access_scope">Le serveur vérifie l’accès à chaque élément.</string>
+</resources>

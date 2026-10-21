@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="deleted_files_title">Fichiers supprimés</string>
+    <string name="deleted_personal_space">Personnel</string>
+    <plurals name="deleted_bin_item_count">
+        <item quantity="one">%1$d élément supprimé</item>
+        <item quantity="many">%1$d éléments supprimés</item>
+        <item quantity="other">%1$d éléments supprimés</item>
+    </plurals>
+    <string name="deleted_back">Retour</string>
+    <string name="deleted_recycle_bin_title">Corbeille</string>
+    <string name="deleted_recycle_bin_explanation">Supprime définitivement les éléments du serveur.</string>
+    <string name="deleted_empty_recycle_bin">Vider la corbeille</string>
+    <string name="deleted_delete_permanently">Supprimer définitivement</string>
+    <string name="deleted_cancel">Annuler</string>
+    <string name="deleted_ok">OK</string>
+    <string name="deleted_loading">Chargement des fichiers supprimés…</string>
+    <string name="deleted_empty">La corbeille est vide.</string>
+    <string name="deleted_unsupported">Ce serveur ne prend pas en charge les fichiers supprimés.</string>
+    <string name="deleted_clear_selection">Effacer la sélection</string>
+    <string name="deleted_select_all">Tout sélectionner</string>
+    <string name="deleted_restore_selected">Restaurer la sélection</string>
+    <string name="deleted_permanently_delete_selected">Supprimer définitivement la sélection</string>
+    <string name="deleted_restore_item">Restaurer %1$s</string>
+    <string name="deleted_permanently_delete_item">Supprimer définitivement %1$s</string>
+    <plurals name="deleted_selection_count">
+        <item quantity="one">%1$d sélectionnés</item>
+        <item quantity="many">%1$d sélectionnés</item>
+        <item quantity="other">%1$d sélectionnés</item>
+    </plurals>
+    <plurals name="deleted_confirm_title">
+        <item quantity="one">Supprimer définitivement %1$d élément ?</item>
+        <item quantity="many">Supprimer définitivement %1$d éléments ?</item>
+        <item quantity="other">Supprimer définitivement %1$d éléments ?</item>
+    </plurals>
+    <plurals name="deleted_confirm_message">
+        <item quantity="one">Cet élément sera supprimé de la corbeille du serveur et ne pourra pas être restauré.</item>
+        <item quantity="many">Ces éléments seront supprimés de la corbeille du serveur et ne pourront pas être restaurés.</item>
+        <item quantity="other">Ces éléments seront supprimés de la corbeille du serveur et ne pourront pas être restaurés.</item>
+    </plurals>
+    <plurals name="deleted_batch_failure">
+        <item quantity="one">%1$d élément n’a pas pu être traité. %2$s</item>
+        <item quantity="many">%1$d éléments n’ont pas pu être traités. %2$s</item>
+        <item quantity="other">%1$d éléments n’ont pas pu être traités. %2$s</item>
+    </plurals>
+    <string name="file_operation_choose_destination_one">Choisissez une destination pour %1$s</string>
+    <plurals name="file_operation_choose_destination_many">
+        <item quantity="one">Choisissez une destination pour %1$d élément</item>
+        <item quantity="many">Choisissez une destination pour %1$d éléments</item>
+        <item quantity="other">Choisissez une destination pour %1$d éléments</item>
+    </plurals>
+    <string name="file_operation_move_here">Déplacer ici</string>
+    <string name="file_operation_copy_here">Copier ici</string>
+    <string name="file_operation_cancel">Annuler</string>
+    <string name="file_operation_verifying">Vérification de %1$s…</string>
+    <string name="file_operation_check_again">Vérifier à nouveau</string>
+    <string name="file_operation_dismiss">Ignorer</string>
+</resources>

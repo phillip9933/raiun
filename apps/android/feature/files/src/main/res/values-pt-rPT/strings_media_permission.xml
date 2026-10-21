@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="media_metadata_title">Manter os metadados de localização das fotografias?</string>
+    <string name="media_metadata_explanation">O acesso à localização das fotografias está desativado. O Android pode remover a localização GPS das fotografias enviadas. Conceda a permissão para ajudar a preservá-la. Enviar mesmo assim usa o ficheiro fornecido pelo Android; a localização e outros metadados podem ser incluídos ou omitidos. O Raiun não remove metadados.</string>
+    <string name="media_metadata_allow">Conceder permissão</string>
+    <string name="media_metadata_continue">Enviar mesmo assim (perguntar sempre)</string>
+    <string name="media_metadata_settings">Abrir as permissões da aplicação</string>
+    <string name="media_metadata_never_ask">Enviar mesmo assim (não voltar a perguntar)</string>
+    <string name="media_metadata_settings_note">Pode alterar isto mais tarde nas Definições, em Segurança.</string>
+</resources>

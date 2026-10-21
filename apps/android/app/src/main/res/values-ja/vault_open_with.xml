@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_open_with">他のアプリで開く</string>
+    <string name="vault_open_with_warning">この暗号化ファイルを他のアプリで開くと、このスマートフォンに一時的な復号コピーが作成されます。他のアプリはコピーの読み取り、保存、共有が可能で、そのアプリが保持するコピーをRaiunは削除できません。Raiunは戻った際に一時コピーの削除を試みます。新たなアクセスは10分後に失効しますが、Androidによってバックグラウンドでの削除が遅れる場合があります。他のアプリがすでに開いたファイルは、引き続き読み取れる可能性があります。信頼できるアプリのみ使用してください。</string>
+    <string name="vault_open_with_continue">復号したコピーを開く</string>
+</resources>

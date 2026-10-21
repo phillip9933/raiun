@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="backup_scan_failed_at">Dernière analyse échouée %1$s</string>
+    <string name="backup_scan_source_unavailable">Le dossier source n’est plus disponible. Utilisez Gérer pour le choisir à nouveau.</string>
+    <string name="backup_scan_source_permission">L’accès au dossier source a été perdu. Utilisez Gérer pour sélectionner le dossier et accorder à nouveau l’accès.</string>
+</resources>

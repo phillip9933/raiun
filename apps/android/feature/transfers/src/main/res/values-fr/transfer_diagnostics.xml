@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="transfers_diagnostic_code">Code : %1$s • Tentative %2$d</string>
+    <string name="transfers_retry_after">Nouvelle tentative automatique au plus tôt %1$s</string>
+    <string name="transfers_verification_pending">Envoi effectué ; confirmation toujours en attente.</string>
+    <string name="transfers_encrypted_destination">Destination chiffrée</string>
+    <string name="transfers_details">Détails</string>
+    <string name="transfers_hide_details">Masquer les détails</string>
+    <string name="transfers_awaiting_unlock">Déverrouillez le dossier chiffré pour vérifier le fichier téléchargé.</string>
+</resources>

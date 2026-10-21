@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="boundary_destination_title">Choisir la destination</string>
+    <string name="boundary_other_location">Autre emplacement</string>
+    <string name="boundary_locations">Emplacements</string>
+    <string name="boundary_encrypted">Chiffré</string>
+    <string name="boundary_ordinary">Non chiffré</string>
+    <string name="boundary_unlock">Déverrouiller la destination</string>
+    <string name="boundary_password">Mot de passe</string>
+    <string name="boundary_unlock_action">Déverrouiller</string>
+    <string name="boundary_plaintext_title">Créer une copie non chiffrée ?</string>
+    <string name="boundary_plaintext_move_title">Déplacer vers un stockage non chiffré ?</string>
+    <string name="boundary_plaintext_move_body">Les fichiers déplacés ici ne seront plus protégés par votre mot de passe de chiffrement. Les éléments sources ne sont supprimés qu’après vérification de la destination. Continuez uniquement si vous faites confiance à cette destination.</string>
+    <string name="boundary_plaintext_body">Les fichiers copiés ici ne seront plus protégés par votre mot de passe de chiffrement. Continuez uniquement si vous faites confiance à cette destination.</string>
+    <string name="boundary_continue">Continuer</string>
+    <string name="boundary_copy_here">Copier ici</string>
+    <string name="boundary_move_here">Déplacer ici</string>
+    <string name="boundary_cancel">Annuler</string>
+    <string name="boundary_close">Fermer</string>
+    <string name="boundary_retry">Réessayer</string>
+    <string name="boundary_complete">Transfert terminé et vérifié.</string>
+    <string name="boundary_partial_copy">La destination peut contenir des copies incomplètes. Vos éléments sources ont été conservés, sauf si un élément précédent a déjà été déplacé en toute sécurité. Vérifiez la destination avant de lancer un nouveau transfert.</string>
+    <string name="boundary_partial_move">La copie a été vérifiée, mais le nettoyage des sources n’a pas pu se terminer. La destination et les éléments sources restants ont été conservés. Vérifiez les deux emplacements avant de lancer un nouveau déplacement.</string>
+    <string name="boundary_cancel_title">Annuler ce transfert ?</string>
+    <string name="boundary_cancel_body">Certains fichiers de destination ont peut-être déjà été créés. Les éléments sources qui n’ont pas déjà été déplacés en toute sécurité seront conservés.</string>
+    <string name="boundary_working">Transfert et vérification…</string>
+    <plurals name="boundary_selection_count">
+        <item quantity="one">%d élément sélectionné</item>
+        <item quantity="many">%d éléments sélectionnés</item>
+        <item quantity="other">%d éléments sélectionnés</item>
+    </plurals>
+    <string name="boundary_empty">Aucun dossier ici. Vous pouvez choisir cet emplacement.</string>
+</resources>

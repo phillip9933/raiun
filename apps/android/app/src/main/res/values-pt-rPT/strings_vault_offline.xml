@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_offline_copies">Cópias encriptadas offline</string>
+    <string name="vault_offline_copy">Cópia encriptada offline · só de leitura</string>
+    <string name="vault_offline_explanation">As cópias guardadas podem ser mais antigas do que as do servidor. Desbloqueie para as ler neste telemóvel.</string>
+    <string name="vault_keep_offline">Manter uma cópia encriptada offline</string>
+    <string name="vault_keep_offline_warning">Guarde este item e o seu conteúdo em segurança neste telemóvel. A cópia continua encriptada e requer a palavra-passe de encriptação ou biometria. É uma cópia de um momento específico; guarde-a novamente para a atualizar.</string>
+    <string name="vault_remove_offline">Remover a cópia offline</string>
+    <string name="vault_remove_offline_warning">Remova esta cópia encriptada offline deste telemóvel. Os ficheiros no servidor não são alterados.</string>
+    <string name="vault_offline_cleanup_failed">A alteração no servidor foi bem-sucedida, mas alguns dados encriptados locais não puderam ser removidos.</string>
+</resources>

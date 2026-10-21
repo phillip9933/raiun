@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="document_edit_text">Editar texto</string>
+    <string name="document_back">Voltar</string>
+    <string name="document_save_server">Guardar no servidor</string>
+    <string name="document_save_queued">Gravação em fila. Consulte Transferências para acompanhar o progresso ou os conflitos. O rascunho fica neste dispositivo.</string>
+    <string name="document_check_save">Verificar o estado da gravação</string>
+    <string name="document_saving_draft">A guardar o rascunho…</string>
+    <string name="document_draft_saved">Rascunho guardado localmente. Use Guardar no servidor para o enviar.</string>
+    <string name="document_utf8_text">Texto (UTF-8)</string>
+    <string name="document_discard_draft">Descartar rascunho</string>
+    <string name="document_discard_title">Descartar este rascunho?</string>
+    <string name="document_discard_description">As alterações locais ao texto serão removidas. Atualize a pasta antes de editar novamente o ficheiro do servidor.</string>
+    <string name="document_discard">Descartar</string>
+    <string name="document_cancel">Cancelar</string>
+    <string name="document_web_open">Abrir na aplicação web</string>
+    <string name="document_browser_required">Instale um navegador para abrir esta aplicação web.</string>
+    <string name="document_view_with">Ver com %1$s</string>
+    <string name="document_edit_with">Editar com %1$s</string>
+    <string name="document_close">Fechar</string>
+    <string name="document_in_browser">No navegador</string>
+    <string name="document_in_app">Na aplicação</string>
+    <string name="document_session_warning">Termine a gravação antes de sair da aplicação. Sair fecha esta sessão.</string>
+    <string name="document_no_web_apps">Não há aplicações web compatíveis disponíveis neste servidor.</string>
+    <string name="document_upload_title">Enviar com o Raiun</string>
+    <string name="document_preparing_uploads">A preparar os envios…</string>
+    <string name="document_saving_shared">A guardar os ficheiros partilhados…</string>
+    <string name="document_shared_copy_on_upload">Os ficheiros partilhados serão copiados após escolher um destino e tocar em Enviar.</string>
+    <string name="document_sign_in_to_share">Abra o Raiun e inicie sessão, depois partilhe novamente estes ficheiros.</string>
+    <string name="document_retry_uploads">Tentar os envios novamente</string>
+    <string name="document_upload_here">Enviar para aqui</string>
+    <string name="document_account">Conta</string>
+    <string name="document_selected">Selecionado</string>
+    <string name="document_destination">Destino</string>
+    <string name="document_up_folder">Pasta superior</string>
+    <plurals name="document_incoming_files">
+        <item quantity="one">%1$d ficheiro</item>
+        <item quantity="many">%1$d ficheiros</item>
+        <item quantity="other">%1$d ficheiros</item>
+    </plurals>
+</resources>

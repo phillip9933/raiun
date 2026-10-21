@@ -1,0 +1,5 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="vault_background_upload_preparing">Cifrando archivo. Mantén esta ubicación desbloqueada hasta que termine la preparación.</string>
+    <string name="vault_background_upload_queued">Subida cifrada en cola. Puede continuar después de bloquear esta ubicación. Consulta el progreso en Transferencias.</string>
+</resources>

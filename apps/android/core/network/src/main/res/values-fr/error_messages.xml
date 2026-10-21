@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="error_connectivity">Impossible de joindre le serveur.</string>
+    <string name="error_timeout">La connexion a expiré.</string>
+    <string name="error_authentication_required">Reconnectez-vous pour continuer.</string>
+    <string name="error_client_registration_required">Une inscription valide du client de connexion est requise. Demandez à votre administrateur un identifiant de client mobile.</string>
+    <string name="error_access_denied">Accès refusé.</string>
+    <string name="error_public_link_password_required">Ce serveur exige un mot de passe pour les liens publics.</string>
+    <string name="error_share_permissions">Le serveur a refusé les autorisations de partage demandées.</string>
+    <string name="error_share_resource_reference">Le serveur n’a pas pu résoudre la référence de partage du fichier.</string>
+    <string name="error_share_space_root">Le serveur n’autorise pas le partage de la racine de ce Space personnel.</string>
+    <string name="error_share_expiration">Le serveur a refusé la date d’expiration du lien.</string>
+    <string name="error_share_request_format">Le serveur n’a pas pu lire la demande de partage.</string>
+    <string name="error_share_unknown">Le serveur a refusé la demande de partage (HTTP 400 ; motif inconnu).</string>
+    <string name="error_not_found">L’élément distant est introuvable.</string>
+    <string name="error_conflict">Un élément porte déjà ce nom.</string>
+    <string name="error_precondition_failed">L’élément distant a changé. Actualisez avant de réessayer.</string>
+    <string name="error_download_integrity">Le fichier téléchargé n’a pas pu être vérifié. Téléchargez-le à nouveau.</string>
+    <string name="error_invalid_response">Le serveur a renvoyé des métadonnées incomplètes ou inattendues.</string>
+    <string name="error_quota_exceeded">L’espace de stockage du serveur est insuffisant.</string>
+    <string name="error_local_storage">L’espace de stockage de l’appareil est insuffisant.</string>
+    <string name="error_source_unavailable">Le fichier sélectionné n’est plus disponible.</string>
+    <string name="error_source_permission_denied">L’autorisation de lire le fichier sélectionné a été perdue.</string>
+    <string name="error_unsupported">Le serveur ne prend pas en charge cette opération.</string>
+    <string name="error_trust">La connexion sécurisée n’a pas pu être vérifiée.</string>
+    <string name="error_unknown">L’opération n’a pas pu être effectuée.</string>
+    <string name="error_not_ready">Le serveur prépare encore ce fichier. Nouvelle tentative sous peu.</string>
+    <string name="error_rate_limited">Le serveur est occupé. Réessayez plus tard.</string>
+    <string name="error_http_status">Le serveur a renvoyé HTTP %1$d.</string>
+    <string name="error_password_policy">Le mot de passe du lien ne respecte pas les règles du serveur.</string>
+    <string name="error_password_policy_with_requirements">Le mot de passe du lien nécessite : %1$s.</string>
+    <string name="error_password_policy_separator">"; "</string>
+    <string name="error_password_requirement">au moins %1$d %2$s</string>
+    <string name="error_password_characters">caractères</string>
+    <string name="error_password_lowercase">lettres minuscules</string>
+    <string name="error_password_uppercase">lettres majuscules</string>
+    <string name="error_password_numbers">chiffres</string>
+    <string name="error_password_special">caractères spéciaux</string>
+    <string name="error_directory_listing_too_large">Le serveur a renvoyé une liste de dossier trop volumineuse pour être traitée en toute sécurité par Raiun. Essayez d’ouvrir un sous-dossier plus petit.</string>
+    <string name="error_local_storage_write_failed">Impossible d’enregistrer le fichier sur cet appareil. Vérifiez l’espace de stockage et réessayez.</string>
+    <string name="error_source_changed">Le fichier sélectionné a changé pendant la préparation de l’envoi. Sélectionnez-le à nouveau avant de l’envoyer.</string>
+</resources>

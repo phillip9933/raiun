@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="document_edits_title">編集内容を復旧</string>
+    <string name="document_edits_warning">未完了の編集内容は不完全な場合があります。アップロードする前にコピーをエクスポートして確認してください。</string>
+    <string name="document_edits_empty">復旧できる保存済みの編集内容はありません。</string>
+    <string name="document_edits_refresh">更新</string>
+    <string name="document_edits_close">閉じる</string>
+    <string name="document_edits_discard_title">端末内の編集内容を破棄しますか？</string>
+    <string name="document_edits_discard_confirmation">%1$sの未保存の変更を削除します。クラウドのファイルは変更されません。</string>
+    <string name="document_edits_discard_action">編集内容を破棄</string>
+    <string name="document_edits_cancel">キャンセル</string>
+    <string name="document_edits_open_in_editor">エディターで開く</string>
+    <string name="document_edits_needs_review">確認が必要</string>
+    <string name="document_edits_save_pending">保存待機中 · 更新して再試行</string>
+    <string name="document_edits_save_queued">保存待機リストに追加済み · 「アップロード」で進行状況を確認</string>
+    <string name="document_edits_export_copy">コピーをエクスポート</string>
+    <string name="document_edits_discard">破棄</string>
+    <string name="document_edits_recovery_copy_exported">復旧用コピーをエクスポートしました。クラウドのファイルは変更されません。</string>
+    <string name="document_edits_action_failed">操作を完了できませんでした。アプリのロックを解除し、再試行してください。</string>
+    <plurals name="document_edits_unreadable_records">
+        <item quantity="other">%1$d件の下書き記録を読み取れませんでした。ファイルは保持されています。</item>
+    </plurals>
+    <string name="transfers_title">アップロード</string>
+    <string name="transfers_back">戻る</string>
+    <string name="transfers_recover_edits">編集内容を復旧</string>
+    <string name="transfers_upload_files">ファイルをアップロード</string>
+    <string name="transfers_actions_description">転送操作</string>
+    <string name="transfers_retry_all_failed">再試行可能なアップロードを再試行</string>
+    <string name="transfers_bulk_retry_title">アップロードの再試行結果</string>
+    <string name="transfers_bulk_retry_result">%1$d件のアップロードを再試行の待機リストに追加しました。%2$d件は引き続き確認が必要です。競合や権限を個別に解決してください。</string>
+    <string name="transfers_clear_all">すべて削除</string>
+    <string name="transfers_active_queued">実行中と待機中</string>
+    <string name="transfers_needs_attention">確認が必要</string>
+    <string name="transfers_history">履歴</string>
+    <string name="transfers_action_title">転送操作</string>
+    <string name="transfers_action_failed">転送操作に失敗しました。</string>
+    <string name="transfers_ok">OK</string>
+    <string name="transfers_clear_all_title">すべての転送を削除しますか？</string>
+    <string name="transfers_clear_all_confirmation">実行中の処理をキャンセルし、転送一覧をすべて削除します。</string>
+    <string name="transfers_cancel">キャンセル</string>
+    <string name="transfers_empty_title">転送はありません</string>
+    <string name="transfers_empty_description">アップロードとダウンロードがここに表示されます。</string>
+    <string name="transfers_replace">クラウドのコピーを上書き</string>
+    <string name="transfers_keep_both">新しいコピーの名前を変更</string>
+    <string name="transfers_retry">再試行</string>
+    <string name="transfers_cancel_transfer">転送をキャンセル</string>
+    <string name="transfers_destination_upload">転送先: %1$s</string>
+    <string name="transfers_destination_download">転送元: %1$s</string>
+    <string name="transfers_started">開始: %1$s</string>
+    <string name="transfers_completed">完了: %1$s</string>
+    <string name="transfers_updated">更新: %1$s</string>
+    <string name="transfers_preparing">転送を準備中</string>
+    <string name="transfers_verifying">転送を検証中</string>
+    <string name="transfers_transferring">転送中</string>
+    <string name="transfers_status_queued">待機中</string>
+    <string name="transfers_status_retry">再試行</string>
+    <string name="transfers_status_conflict">競合</string>
+    <string name="transfers_status_succeeded">成功</string>
+    <string name="transfers_status_failed">失敗</string>
+    <string name="transfers_status_cancelled">キャンセル済み</string>
+    <string name="transfers_status_progress">%1$s • %2$s / %3$s</string>
+    <plurals name="transfers_retry_failures">
+        <item quantity="other">失敗した%2$d件の転送のうち、%1$d件を再試行できませんでした。</item>
+    </plurals>
+</resources>

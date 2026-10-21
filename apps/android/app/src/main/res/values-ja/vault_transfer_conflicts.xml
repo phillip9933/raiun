@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_transfer_conflict_title">同じ名前の項目がすでに存在します</string>
+    <string name="vault_transfer_conflict_body">このフォルダーには%1$sがすでに存在します。新しく保存する項目を%2$sという名前にして両方を保持するか、キャンセルしてください。</string>
+    <string name="vault_transfer_keep_both">両方を保持</string>
+    <string name="vault_entry_cloud_only_status">クラウドのみ</string>
+    <string name="vault_entry_unknown_size">不明なサイズ</string>
+</resources>

@@ -1,0 +1,19 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="vault_folder_sharing_title">Compartir carpeta cifrada</string>
+    <string name="vault_folder_sharing_warning">Aquí solo puedes añadir personas o grupos identificados. Seguirán necesitando la contraseña de cifrado para abrir el contenido. Quitarles el acceso no borra las claves ni las copias que ya tengan.</string>
+    <string name="vault_folder_sharing_uncertain">Puede que el servidor haya aplicado el cambio. Actualiza la lista de colaboradores antes de realizar otro cambio.</string>
+    <string name="vault_folder_sharing_people">Colaboradores</string>
+    <string name="vault_folder_sharing_empty">No hay colaboradores identificados.</string>
+    <string name="vault_folder_sharing_add">Añadir colaborador</string>
+    <string name="vault_folder_sharing_search">Buscar personas o grupos</string>
+    <string name="vault_folder_sharing_permissions">Acceso</string>
+    <string name="vault_folder_sharing_viewer">Ver y descargar</string>
+    <string name="vault_folder_sharing_editor">Editar contenido</string>
+    <string name="vault_folder_sharing_editor_reshare">Editar y volver a compartir</string>
+    <string name="vault_folder_sharing_custom_permissions">Este recurso compartido tiene permisos personalizados. Elige un nivel de acceso para cambiarlos.</string>
+    <string name="vault_folder_sharing_person">Persona</string>
+    <string name="vault_folder_sharing_group">Grupo</string>
+    <string name="vault_folder_sharing_remove">Eliminar acceso</string>
+    <string name="vault_folder_sharing_remove_confirm">¿Eliminar el acceso de este colaborador a la carpeta cifrada?</string>
+</resources>

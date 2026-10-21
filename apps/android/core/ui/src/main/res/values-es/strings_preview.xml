@@ -1,0 +1,11 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="preview_back">Atrás</string>
+    <string name="preview_open_with">Abrir con</string>
+    <string name="preview_edit">Editar</string>
+    <string name="preview_failed">No se puede mostrar este archivo. Inténtalo de nuevo o usa Abrir con. Las vistas previas de texto admiten archivos UTF-8 de hasta 1 MB; las demás admiten archivos de hasta 100 MB.</string>
+    <string name="preview_retry">Reintentar</string>
+    <string name="preview_previous">Anterior</string>
+    <string name="preview_next">Siguiente</string>
+    <string name="preview_page">%1$d / %2$d</string>
+</resources>

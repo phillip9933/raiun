@@ -1,0 +1,42 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="error_connectivity">No se pudo conectar con el servidor.</string>
+    <string name="error_timeout">Se agotó el tiempo de conexión.</string>
+    <string name="error_authentication_required">Inicia sesión de nuevo para continuar.</string>
+    <string name="error_client_registration_required">Se requiere un registro válido de cliente de inicio de sesión. Pide a tu administrador un ID de cliente móvil.</string>
+    <string name="error_access_denied">Se denegó el acceso.</string>
+    <string name="error_public_link_password_required">Este servidor requiere una contraseña para los enlaces públicos.</string>
+    <string name="error_share_permissions">El servidor rechazó los permisos de uso compartido solicitados.</string>
+    <string name="error_share_resource_reference">El servidor no pudo resolver la referencia de uso compartido del archivo.</string>
+    <string name="error_share_space_root">El servidor no permite compartir la raíz de este espacio personal.</string>
+    <string name="error_share_expiration">El servidor rechazó la fecha de caducidad del enlace.</string>
+    <string name="error_share_request_format">El servidor no pudo leer la solicitud de uso compartido.</string>
+    <string name="error_share_unknown">El servidor rechazó la solicitud de uso compartido (HTTP 400; motivo desconocido).</string>
+    <string name="error_not_found">No se encontró el elemento remoto.</string>
+    <string name="error_conflict">Ya existe un elemento con este nombre.</string>
+    <string name="error_precondition_failed">El elemento remoto ha cambiado. Actualiza antes de reintentar.</string>
+    <string name="error_download_integrity">No se pudo verificar el archivo descargado. Intenta descargarlo de nuevo.</string>
+    <string name="error_invalid_response">El servidor devolvió metadatos incompletos o inesperados.</string>
+    <string name="error_quota_exceeded">El servidor no tiene suficiente espacio de almacenamiento.</string>
+    <string name="error_local_storage">El dispositivo no tiene suficiente espacio de almacenamiento.</string>
+    <string name="error_source_unavailable">El archivo seleccionado ya no está disponible.</string>
+    <string name="error_source_permission_denied">Se perdió el permiso para leer el archivo seleccionado.</string>
+    <string name="error_unsupported">El servidor no admite esta operación.</string>
+    <string name="error_trust">No se pudo verificar la conexión segura.</string>
+    <string name="error_unknown">No se pudo completar la operación.</string>
+    <string name="error_not_ready">El servidor aún está preparando este archivo. Se reintentará en breve.</string>
+    <string name="error_rate_limited">El servidor está ocupado. Inténtalo más tarde.</string>
+    <string name="error_http_status">El servidor devolvió HTTP %1$d.</string>
+    <string name="error_password_policy">La contraseña del enlace no cumple las reglas de contraseñas del servidor.</string>
+    <string name="error_password_policy_with_requirements">La contraseña del enlace necesita: %1$s.</string>
+    <string name="error_password_policy_separator">"; "</string>
+    <string name="error_password_requirement">al menos %1$d %2$s</string>
+    <string name="error_password_characters">caracteres</string>
+    <string name="error_password_lowercase">letras minúsculas</string>
+    <string name="error_password_uppercase">letras mayúsculas</string>
+    <string name="error_password_numbers">números</string>
+    <string name="error_password_special">caracteres especiales</string>
+    <string name="error_directory_listing_too_large">El servidor devolvió una lista de carpeta mayor de lo que Raiun puede procesar de forma segura. Intenta abrir una subcarpeta más pequeña.</string>
+    <string name="error_local_storage_write_failed">No se pudo guardar el archivo en este dispositivo. Comprueba el almacenamiento e inténtalo de nuevo.</string>
+    <string name="error_source_changed">El archivo seleccionado cambió al preparar la subida. Selecciónalo de nuevo antes de subirlo.</string>
+</resources>

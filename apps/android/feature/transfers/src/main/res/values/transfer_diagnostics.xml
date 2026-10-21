@@ -1,0 +1,9 @@
+<resources>
+    <string name="transfers_diagnostic_code">Code: %1$s • Attempt %2$d</string>
+    <string name="transfers_retry_after">Automatic retry no earlier than %1$s</string>
+    <string name="transfers_verification_pending">Upload sent; confirmation is still pending.</string>
+    <string name="transfers_encrypted_destination">Encrypted destination</string>
+    <string name="transfers_details">Details</string>
+    <string name="transfers_hide_details">Hide details</string>
+    <string name="transfers_awaiting_unlock">Unlock the encrypted folder to verify the downloaded file.</string>
+</resources>

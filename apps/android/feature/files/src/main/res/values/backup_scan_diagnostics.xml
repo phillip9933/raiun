@@ -1,0 +1,5 @@
+<resources>
+    <string name="backup_scan_failed_at">Last scan failed %1$s</string>
+    <string name="backup_scan_source_unavailable">The source folder is no longer available. Use Manage to choose the folder again.</string>
+    <string name="backup_scan_source_permission">Access to the source folder was lost. Use Manage to select the folder and grant access again.</string>
+</resources>

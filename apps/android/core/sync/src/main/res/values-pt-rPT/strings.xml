@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="transfer_notification_channel">Transferências de ficheiros</string>
+    <string name="transfer_notification_progress">Em curso</string>
+</resources>

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="offline_local_space_used">Espace local utilisé : %1$s</string>
+    <string name="offline_filter_all">Tous</string>
+    <string name="offline_filter_temporary">Temporaires</string>
+    <string name="offline_filter_pinned">Conservé hors connexion</string>
+    <string name="browser_folder_summary">%1$s · %2$s</string>
+    <plurals name="browser_folder_count">
+        <item quantity="one">%1$d dossier</item>
+        <item quantity="many">%1$d dossiers</item>
+        <item quantity="other">%1$d dossiers</item>
+    </plurals>
+    <plurals name="browser_file_count">
+        <item quantity="one">%1$d fichier</item>
+        <item quantity="many">%1$d fichiers</item>
+        <item quantity="other">%1$d fichiers</item>
+    </plurals>
+</resources>

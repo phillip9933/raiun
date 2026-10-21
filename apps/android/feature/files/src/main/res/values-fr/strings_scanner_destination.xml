@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="scanner_destination_title">Choisir la destination de numérisation</string>
+    <string name="scanner_destination_cancel">Annuler</string>
+    <string name="scanner_destination_spaces">Spaces</string>
+    <string name="scanner_destination_select_space">Choisir un Space personnel ou de projet</string>
+    <string name="scanner_destination_choose">Enregistrer dans ce dossier</string>
+    <string name="scanner_destination_retry">Réessayer</string>
+    <string name="scanner_destination_all_spaces">Tous les Spaces</string>
+    <string name="scanner_destination_up">Dossier parent</string>
+    <string name="scanner_destination_root">Racine</string>
+    <string name="scanner_destination_locations">Personnel et Spaces</string>
+    <string name="scanner_destination_change">Modifier</string>
+    <string name="scanner_destination_root_folder">Dossier de premier niveau</string>
+    <string name="scanner_destination_personal">Vos fichiers personnels</string>
+    <string name="scanner_destination_project">Space de projet</string>
+    <string name="scanner_destination_empty">Aucun sous-dossier. Vous pouvez enregistrer votre numérisation ici.</string>
+</resources>

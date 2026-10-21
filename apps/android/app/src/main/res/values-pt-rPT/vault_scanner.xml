@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_scan_document">Digitalizar documento</string>
+    <string name="vault_scanner_failed">Não foi possível concluir a digitalização. Alguns ficheiros podem já ter sido enviados. Feche este ecrã e atualize antes de digitalizar novamente.</string>
+    <string name="vault_scanner_uploading">A encriptar e enviar a digitalização…</string>
+    <string name="vault_scanner_fixed_destination">Esta digitalização será guardada apenas em</string>
+    <string name="vault_scanner_discard">Descartar digitalização</string>
+    <string name="vault_scanner_discard_title">Descartar esta digitalização encriptada?</string>
+    <string name="vault_scanner_discard_body">Os ficheiros temporários da digitalização serão removidos deste dispositivo.</string>
+    <string name="vault_scanner_keep">Manter digitalização</string>
+    <string name="vault_scanner_close">Fechar</string>
+</resources>

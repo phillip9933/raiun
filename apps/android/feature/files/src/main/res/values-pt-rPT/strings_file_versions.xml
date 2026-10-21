@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="file_versions_title">Histórico de versões</string>
+    <string name="file_versions_loading">A carregar versões…</string>
+    <string name="file_versions_empty">Não há versões anteriores disponíveis para este ficheiro.</string>
+    <string name="file_versions_unavailable">O histórico de versões não está disponível para este ficheiro ou servidor.</string>
+    <string name="file_versions_error">Não foi possível carregar as versões. Verifique a ligação e o acesso e tente novamente.</string>
+    <string name="file_versions_restore">Restaurar</string>
+    <string name="file_versions_restoring">A restaurar…</string>
+    <string name="file_versions_confirm">Substituir o conteúdo atual de “%1$s” por esta versão? As definições de retenção do servidor determinam quais as versões que permanecem disponíveis.</string>
+    <string name="file_versions_restore_error">Não foi possível confirmar o restauro. Atualize o ficheiro antes de tentar novamente. Verifique se há edições ou envios pendentes e confirme que ainda tem acesso de escrita.</string>
+    <string name="file_versions_restored">Versão restaurada. A lista de ficheiros será atualizada.</string>
+    <string name="file_versions_retry">Tentar novamente</string>
+    <string name="file_versions_close">Fechar</string>
+    <string name="file_versions_cancel">Cancelar</string>
+    <string name="file_versions_unknown_date">Data indisponível</string>
+    <string name="file_versions_unknown_size">Tamanho indisponível</string>
+</resources>

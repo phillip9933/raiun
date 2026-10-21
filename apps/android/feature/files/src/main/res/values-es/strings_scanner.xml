@@ -1,0 +1,15 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="browser_scan">Escanear</string>
+    <string name="scanner_preparing">Preparando escaneo…</string>
+    <string name="scanner_uploading">Preparando archivos escaneados para subir…</string>
+    <string name="scanner_retry">Reintentar</string>
+    <string name="scanner_discard">Descartar escaneo</string>
+    <string name="scanner_discard_title">¿Descartar estos archivos escaneados?</string>
+    <string name="scanner_discard_body">Los escaneos que aún no estén en cola para subir se eliminarán de este dispositivo.</string>
+    <string name="scanner_keep">Conservar escaneo</string>
+    <string name="scanner_failed">No se pudo completar el escaneo. Puedes reintentarlo o descartarlo.</string>
+    <string name="scanner_location_title">Ubicación en OpenCloud</string>
+    <string name="scanner_location_failed">No se pudo cambiar la ubicación del escaneo. Se ha conservado tu destino anterior.</string>
+    <string name="scanner_location_ok">Aceptar</string>
+</resources>

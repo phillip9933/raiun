@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="folder_shortcut_appearance">ショートカットのアイコン</string>
+    <string name="folder_shortcut_preview">ショートカットのアイコンプレビュー</string>
+    <string name="folder_shortcut_badge">ランチャーがRaiunのバッジを追加します。既存のショートカットを更新するには、このフォルダーを追加し直してください。</string>
+    <string name="folder_shortcut_image">画像を選択</string>
+    <string name="folder_shortcut_image_error">画像を読み取れませんでした。16 MB未満の画像を選択してください。</string>
+    <string name="folder_shortcut_default">標準</string>
+    <string name="folder_shortcut_blue">青</string>
+    <string name="folder_shortcut_green">緑</string>
+    <string name="folder_shortcut_yellow">黄</string>
+    <string name="folder_shortcut_red">赤</string>
+    <string name="folder_shortcut_add">ホーム画面に追加</string>
+    <string name="folder_shortcut_error">このフォルダーを追加できませんでした。引き続き利用できることと、ランチャーがショートカットに対応していることを確認してください。</string>
+    <string name="folder_shortcut_requested">ショートカットの追加をリクエストしました。ランチャーから確認を求められた場合は確認してください。</string>
+    <string name="folder_shortcut_unavailable">このフォルダーのショートカットは利用できません。Raiunを開き、アカウントとフォルダーが存在することを確認してください。</string>
+    <string name="folder_shortcut_close">閉じる</string>
+</resources>

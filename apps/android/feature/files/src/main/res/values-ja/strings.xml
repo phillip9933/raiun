@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_vaults">暗号化保管庫</string>
+    <string name="favorites_sync_running">お気に入りを確認中です。必要に応じて接続を待ちます。</string>
+    <string name="favorites_sync_more">未確認のお気に入りが残っている可能性があります。</string>
+    <string name="favorites_sync_failed">お気に入りを完全に更新できませんでした。もう一度お試しください。</string>
+    <string name="favorites_sync_unavailable">このアカウントではお気に入りの検索を利用できません。キャッシュされたお気に入りを表示しています。</string>
+    <string name="favorites_sync_continue">確認を続行</string>
+    <string name="favorites_sync_refresh">お気に入りを更新</string>
+</resources>

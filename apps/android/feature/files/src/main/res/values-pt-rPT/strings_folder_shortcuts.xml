@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="folder_shortcut_appearance">Ícone do atalho</string>
+    <string name="folder_shortcut_preview">Pré-visualização do ícone do atalho</string>
+    <string name="folder_shortcut_badge">O iniciador adiciona o distintivo do Raiun. Adicione esta pasta novamente para atualizar um atalho existente.</string>
+    <string name="folder_shortcut_image">Escolher imagem</string>
+    <string name="folder_shortcut_image_error">Não foi possível ler essa imagem. Escolha uma imagem com menos de 16 MB.</string>
+    <string name="folder_shortcut_default">Predefinido</string>
+    <string name="folder_shortcut_blue">Azul</string>
+    <string name="folder_shortcut_green">Verde</string>
+    <string name="folder_shortcut_yellow">Amarelo</string>
+    <string name="folder_shortcut_red">Vermelho</string>
+    <string name="folder_shortcut_add">Adicionar ao ecrã inicial</string>
+    <string name="folder_shortcut_error">Não foi possível adicionar esta pasta. Verifique se ainda está disponível e se o iniciador suporta atalhos.</string>
+    <string name="folder_shortcut_requested">Atalho pedido. Confirme-o no iniciador se solicitado.</string>
+    <string name="folder_shortcut_unavailable">Este atalho de pasta não está disponível. Abra o Raiun e verifique se a conta e a pasta ainda existem.</string>
+    <string name="folder_shortcut_close">Fechar</string>
+</resources>

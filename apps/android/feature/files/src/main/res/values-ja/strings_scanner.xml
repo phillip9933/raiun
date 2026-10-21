@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_scan">スキャン</string>
+    <string name="scanner_preparing">スキャンを準備中…</string>
+    <string name="scanner_uploading">スキャンしたファイルのアップロードを準備中…</string>
+    <string name="scanner_retry">再試行</string>
+    <string name="scanner_discard">スキャンを破棄</string>
+    <string name="scanner_discard_title">これらのスキャンファイルを破棄しますか？</string>
+    <string name="scanner_discard_body">アップロード待機リストに未追加のスキャンを、この端末から削除します。</string>
+    <string name="scanner_keep">スキャンを保持</string>
+    <string name="scanner_failed">スキャンを完了できませんでした。再試行するか、破棄できます。</string>
+    <string name="scanner_location_title">OpenCloud内の場所</string>
+    <string name="scanner_location_failed">スキャンの保存先を変更できませんでした。前の保存先を保持しています。</string>
+    <string name="scanner_location_ok">OK</string>
+</resources>

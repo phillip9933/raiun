@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_encrypt_folder">Encriptar pasta</string>
+    <string name="browser_encrypt_space">Encriptar Space</string>
+    <string name="browser_encrypt_new_summary">Segurança reforçada: ilegível sem esta palavra-passe. Perdê-la significa perder o acesso aos ficheiros. As funcionalidades de colaboração são limitadas.</string>
+    <string name="browser_encrypt_keep_password">Guarde esta palavra-passe em segurança. O Raiun não a consegue recuperar e perdê-la significa perder o acesso aos ficheiros encriptados.</string>
+    <string name="browser_encrypt_password">Palavra-passe do cofre</string>
+    <string name="browser_encrypt_confirm_password">Confirmar a palavra-passe do cofre</string>
+    <string name="browser_encrypt_password_mismatch">As palavras-passe não coincidem.</string>
+    <string name="browser_encrypt_show_password">Mostrar a palavra-passe</string>
+    <string name="browser_encrypt_hide_password">Ocultar a palavra-passe</string>
+    <string name="browser_encrypt_create_uncertain">O Raiun não conseguiu confirmar se a localização encriptada foi criada. Verifique a pasta ou a lista de Spaces antes de tentar novamente para evitar um duplicado.</string>
+</resources>

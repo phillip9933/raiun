@@ -1,0 +1,10 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="media_metadata_title">¿Conservar los metadatos de ubicación de las fotos?</string>
+    <string name="media_metadata_explanation">El acceso a la ubicación de fotos está desactivado. Android puede eliminar la ubicación GPS de las fotos subidas. Concede permiso para ayudar a conservarla. Subir de todos modos usa el archivo que proporciona Android; la ubicación y otros metadatos pueden incluirse u omitirse. Raiun no elimina metadatos.</string>
+    <string name="media_metadata_allow">Conceder permiso</string>
+    <string name="media_metadata_continue">Subir de todos modos (preguntar siempre)</string>
+    <string name="media_metadata_settings">Abrir permisos de la aplicación</string>
+    <string name="media_metadata_never_ask">Subir de todos modos (no volver a preguntar)</string>
+    <string name="media_metadata_settings_note">Puedes cambiar esto más tarde en Ajustes, en Seguridad.</string>
+</resources>

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="error_connectivity">Não foi possível contactar o servidor.</string>
+    <string name="error_timeout">A ligação excedeu o tempo limite.</string>
+    <string name="error_authentication_required">Inicie sessão novamente para continuar.</string>
+    <string name="error_client_registration_required">É necessário um registo válido do cliente de início de sessão. Peça ao administrador um ID de cliente móvel.</string>
+    <string name="error_access_denied">O acesso foi recusado.</string>
+    <string name="error_public_link_password_required">Este servidor exige uma palavra-passe para ligações públicas.</string>
+    <string name="error_share_permissions">O servidor rejeitou as permissões de partilha pedidas.</string>
+    <string name="error_share_resource_reference">O servidor não conseguiu resolver a referência de partilha do ficheiro.</string>
+    <string name="error_share_space_root">O servidor não permite partilhar a raiz deste Space pessoal.</string>
+    <string name="error_share_expiration">O servidor rejeitou a data de expiração da ligação.</string>
+    <string name="error_share_request_format">O servidor não conseguiu ler o pedido de partilha.</string>
+    <string name="error_share_unknown">O servidor rejeitou o pedido de partilha (HTTP 400; motivo desconhecido).</string>
+    <string name="error_not_found">O item remoto não foi encontrado.</string>
+    <string name="error_conflict">Já existe um item com este nome.</string>
+    <string name="error_precondition_failed">O item remoto foi alterado. Atualize antes de tentar novamente.</string>
+    <string name="error_download_integrity">Não foi possível verificar o ficheiro transferido. Tente transferi-lo novamente.</string>
+    <string name="error_invalid_response">O servidor devolveu metadados incompletos ou inesperados.</string>
+    <string name="error_quota_exceeded">O servidor não tem espaço de armazenamento suficiente.</string>
+    <string name="error_local_storage">O dispositivo não tem espaço de armazenamento suficiente.</string>
+    <string name="error_source_unavailable">O ficheiro selecionado já não está disponível.</string>
+    <string name="error_source_permission_denied">A permissão para ler o ficheiro selecionado foi perdida.</string>
+    <string name="error_unsupported">O servidor não suporta esta operação.</string>
+    <string name="error_trust">Não foi possível verificar a ligação segura.</string>
+    <string name="error_unknown">Não foi possível concluir a operação.</string>
+    <string name="error_not_ready">O servidor ainda está a preparar este ficheiro. Nova tentativa dentro de momentos.</string>
+    <string name="error_rate_limited">O servidor está ocupado. Tente novamente mais tarde.</string>
+    <string name="error_http_status">O servidor devolveu HTTP %1$d.</string>
+    <string name="error_password_policy">A palavra-passe da ligação não cumpre as regras de palavras-passe do servidor.</string>
+    <string name="error_password_policy_with_requirements">A palavra-passe da ligação precisa de: %1$s.</string>
+    <string name="error_password_policy_separator">"; "</string>
+    <string name="error_password_requirement">pelo menos %1$d %2$s</string>
+    <string name="error_password_characters">caracteres</string>
+    <string name="error_password_lowercase">letras minúsculas</string>
+    <string name="error_password_uppercase">letras maiúsculas</string>
+    <string name="error_password_numbers">números</string>
+    <string name="error_password_special">caracteres especiais</string>
+    <string name="error_directory_listing_too_large">O servidor devolveu uma lista de pasta maior do que o Raiun consegue processar em segurança. Tente abrir uma subpasta mais pequena.</string>
+    <string name="error_local_storage_write_failed">Não foi possível guardar o ficheiro neste dispositivo. Verifique o armazenamento do dispositivo e tente novamente.</string>
+    <string name="error_source_changed">O ficheiro selecionado mudou durante a preparação do envio. Selecione-o novamente antes de o enviar.</string>
+</resources>

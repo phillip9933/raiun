@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="document_server_changed">Ce fichier a changé depuis le début de vos modifications. Votre brouillon a été conservé séparément. Son enregistrement peut nécessiter la résolution d’un conflit.</string>
+    <string name="document_view_current">Afficher le fichier actuel</string>
+    <string name="document_resume_draft">Reprendre le brouillon</string>
+</resources>

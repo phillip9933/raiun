@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="spaces_heading">Spaces</string>
+    <string name="spaces_members">Membros</string>
+    <string name="spaces_download">Transferir Space</string>
+    <string name="spaces_refresh">Atualizar</string>
+    <string name="spaces_member_add">Adicionar membro</string>
+    <string name="spaces_member_remove">Remover membro</string>
+    <string name="spaces_member_remove_confirmation">Remover %1$s deste Space?</string>
+    <string name="spaces_member_search">Procurar pessoas ou grupos</string>
+    <string name="spaces_members_scope">Adesões visíveis para a sua conta. O servidor verifica se pode adicionar, alterar ou remover membros.</string>
+    <string name="spaces_custom_role">Função personalizada</string>
+</resources>

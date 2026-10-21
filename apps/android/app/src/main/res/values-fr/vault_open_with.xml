@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_open_with">Ouvrir avec</string>
+    <string name="vault_open_with_warning">L’ouverture de ce fichier chiffré dans une autre application crée une copie déchiffrée temporaire sur ce téléphone. Cette application peut la lire, l’enregistrer ou la partager, et Raiun ne peut pas supprimer les copies qu’elle conserve. Raiun tente de supprimer sa copie temporaire à votre retour. Tout nouvel accès expire après 10 minutes ; Android peut retarder la suppression en arrière-plan. Un fichier déjà ouvert par l’autre application peut rester lisible. Utilisez uniquement une application de confiance.</string>
+    <string name="vault_open_with_continue">Ouvrir une copie déchiffrée</string>
+</resources>

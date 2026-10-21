@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="incoming_preparing">A preparar o ficheiro…</string>
+    <string name="incoming_cancel">Cancelar</string>
+    <string name="incoming_close">Fechar</string>
+    <string name="incoming_open_with">Abrir com</string>
+    <string name="incoming_send">Enviar ficheiro</string>
+    <string name="incoming_details">Detalhes</string>
+    <string name="incoming_layout">Alterar a disposição</string>
+    <string name="incoming_layout_list">Lista</string>
+    <string name="incoming_layout_compact">Lista compacta</string>
+    <string name="incoming_layout_tiles">Mosaicos</string>
+</resources>

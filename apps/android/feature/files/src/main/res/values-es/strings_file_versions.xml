@@ -1,0 +1,18 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="file_versions_title">Historial de versiones</string>
+    <string name="file_versions_loading">Cargando versiones…</string>
+    <string name="file_versions_empty">No hay versiones anteriores disponibles para este archivo.</string>
+    <string name="file_versions_unavailable">El historial de versiones no está disponible para este archivo o servidor.</string>
+    <string name="file_versions_error">No se pudieron cargar las versiones. Comprueba tu conexión y acceso e inténtalo de nuevo.</string>
+    <string name="file_versions_restore">Restaurar</string>
+    <string name="file_versions_restoring">Restaurando…</string>
+    <string name="file_versions_confirm">¿Reemplazar el contenido actual de «%1$s» por esta versión? Los ajustes de retención del servidor determinan qué versiones siguen disponibles.</string>
+    <string name="file_versions_restore_error">No se pudo confirmar la restauración. Actualiza el archivo antes de reintentar. Comprueba si hay ediciones o subidas pendientes y confirma que sigues teniendo acceso de escritura.</string>
+    <string name="file_versions_restored">Versión restaurada. Se actualizará la lista de archivos.</string>
+    <string name="file_versions_retry">Reintentar</string>
+    <string name="file_versions_close">Cerrar</string>
+    <string name="file_versions_cancel">Cancelar</string>
+    <string name="file_versions_unknown_date">Fecha no disponible</string>
+    <string name="file_versions_unknown_size">Tamaño no disponible</string>
+</resources>

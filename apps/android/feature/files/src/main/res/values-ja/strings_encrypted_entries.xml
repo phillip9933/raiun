@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_encrypted_locked">暗号化フォルダー · ロック中</string>
+    <string name="browser_encrypted_load_failed">暗号化フォルダーを確認できませんでした。下に引いて再試行してください。</string>
+    <string name="browser_encrypted_actions">%1$sの操作</string>
+</resources>

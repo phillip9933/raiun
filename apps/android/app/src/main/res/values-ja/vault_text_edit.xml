@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_text_edit_label">UTF-8テキスト</string>
+    <string name="vault_text_save">サーバーに保存</string>
+    <string name="vault_text_edit_secure_note">未保存の変更はメモリ内に保持され、この場所をロックすると消去されます。保存すると暗号化ファイルに直接書き込みます。</string>
+    <string name="vault_text_edit_too_large">エディターは256 KBまでのUTF-8テキストに対応しています。</string>
+    <string name="vault_text_discard_title">未保存の変更を破棄しますか？</string>
+    <string name="vault_text_discard_message">未保存のテキストはメモリ内にのみ保持され、消去されます。</string>
+    <string name="vault_text_discard">変更を破棄</string>
+</resources>

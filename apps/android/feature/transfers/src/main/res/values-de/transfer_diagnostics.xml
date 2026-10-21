@@ -1,0 +1,9 @@
+<resources>
+    <string name="transfers_diagnostic_code">Code: %1$s • Versuch %2$d</string>
+    <string name="transfers_retry_after">Automatischer Wiederholungsversuch frühestens am %1$s</string>
+    <string name="transfers_verification_pending">Upload gesendet; die Bestätigung steht noch aus.</string>
+    <string name="transfers_encrypted_destination">Verschlüsseltes Ziel</string>
+    <string name="transfers_details">Details</string>
+    <string name="transfers_hide_details">Details ausblenden</string>
+    <string name="transfers_awaiting_unlock">Entsperre den verschlüsselten Ordner, um die heruntergeladene Datei zu prüfen.</string>
+</resources>

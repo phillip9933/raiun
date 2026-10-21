@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_data">データ</string>
+    <string name="settings_temporary_files">端末内の一時ファイル</string>
+    <string name="settings_app_lock">アプリロック</string>
+    <string name="settings_app_lock_summary">Raiunを開くには端末の画面ロックを要求します。</string>
+    <string name="settings_app_lock_setup_device">先にAndroidの設定で画面ロックを設定してください。</string>
+    <string name="settings_encrypted_preferences">暗号化の設定</string>
+    <string name="settings_encrypted_preferences_summary">暗号化フォルダーとSpacesの生体認証設定</string>
+    <string name="settings_permissions">権限</string>
+    <string name="settings_permissions_summary">写真と動画のメタデータへのアクセス</string>
+    <string name="settings_encrypted_preferences_explanation">これらの設定はこの端末に保存されます。リセットすると、保存されている生体認証キーがあれば削除します。パスワードでその暗号化された場所のロックを解除すると、Raiunが再び確認できます。</string>
+    <string name="settings_encrypted_preferences_empty">このアカウントの暗号化された場所には、生体認証の設定がありません。</string>
+    <string name="settings_encrypted_preferences_failed">暗号化の設定を読み取れませんでした。</string>
+    <string name="settings_encrypted_folder">フォルダー</string>
+    <string name="settings_encrypted_space">Space</string>
+    <string name="settings_encrypted_unknown_location">暗号化された場所</string>
+    <string name="settings_encrypted_declined">生体認証の提案を辞退済み</string>
+    <string name="settings_encrypted_enrolled">生体認証キーを保存済み</string>
+    <string name="settings_encrypted_key_unavailable">生体認証キーは利用不可</string>
+    <string name="settings_encrypted_entry_description">%1$s · %2$s</string>
+    <string name="settings_encrypted_reset_title">生体認証によるアクセスをリセットしますか？</string>
+    <string name="settings_encrypted_reset_explanation">%1$sの保存済み生体認証キーをこの端末から削除します。次回はパスワードを使用してください。Raiunが生体認証キーを記憶するか再度確認します。</string>
+    <string name="settings_encrypted_reset_files_unchanged">暗号化されたファイルとフォルダーは変更されません。</string>
+    <string name="settings_encrypted_use_password">次回はパスワードを使用</string>
+    <string name="settings_encrypted_ask_again">再度確認する</string>
+    <string name="settings_encrypted_reset_failed">この生体認証の設定をリセットできませんでした。もう一度お試しください。</string>
+</resources>

@@ -1,0 +1,9 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="vault_biometric_offer_title">¿Desbloquear con biometría?</string>
+    <string name="vault_biometric_offer_message">Usa tu huella o el reconocimiento facial compatible para volver a abrir esta carpeta o Space cifrado. Solo funciona en este teléfono. Guarda una copia segura de tu contraseña de cifrado: la seguirás necesitando en otros dispositivos, si se restablece la biometría o si pierdes este teléfono.</string>
+    <string name="vault_biometric_offer_accept">Configurar biometría</string>
+    <string name="vault_biometric_offer_decline">Ahora no</string>
+    <string name="vault_biometric_setup_error">La confirmación biométrica terminó, pero Raiun no pudo guardar o usar la clave de cifrado. Desbloquea con tu contraseña de cifrado y configura de nuevo la biometría.</string>
+    <string name="vault_biometric_diagnostic">Código de diagnóstico: %1$s</string>
+</resources>

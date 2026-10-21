@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_biometric_cleanup_error">保管庫は削除されましたが、この端末に保存した生体認証キーを削除できませんでした。設定で端末内のデータ削除を再試行してください。サーバー上の削除は繰り返しません。</string>
+</resources>

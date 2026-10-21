@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_biometric_cleanup_error">Le coffre a été supprimé, mais cet appareil n’a pas pu supprimer sa clé biométrique enregistrée. Réessayez le nettoyage local dans les paramètres ; la suppression à distance ne sera pas répétée.</string>
+</resources>

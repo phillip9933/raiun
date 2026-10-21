@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="search_offline_queued">オフライン同期を待機リストに追加しました。</string>
+    <string name="search_open_in_files">場所や名前を変更するには、「ファイル」でこの項目を開いてください。</string>
+    <string name="search_action_failed">操作に失敗しました。</string>
+    <string name="search_placeholder">ファイルとフォルダーを検索</string>
+    <string name="search_clear">検索をクリア</string>
+    <string name="search_back">戻る</string>
+    <string name="search_action_title">検索操作</string>
+    <string name="search_ok">OK</string>
+    <string name="search_empty_title">OpenCloudを検索</string>
+    <string name="search_empty_message">入力すると、この端末の検索結果が表示されます。</string>
+    <string name="search_unavailable_title">サーバー検索を利用できません</string>
+    <string name="search_unavailable_message">端末内の検索結果が見つかりません。</string>
+    <string name="search_no_results_title">結果なし</string>
+    <string name="search_no_results_message">別のファイル名またはフォルダー名を試してください。</string>
+    <string name="search_status_loading">サーバーを検索中…</string>
+    <string name="search_status_server_error">端末内の結果 • サーバーは利用不可</string>
+    <string name="search_status_capped">端末内とサーバーの結果 • 検索条件を絞るとさらに表示できます</string>
+    <string name="search_status_combined">端末内とサーバーの結果</string>
+    <string name="search_status_device">端末内の結果</string>
+</resources>

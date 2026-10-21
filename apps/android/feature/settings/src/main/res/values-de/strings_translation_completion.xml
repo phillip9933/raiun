@@ -1,0 +1,12 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="settings_appearance_defaults">Personalisierung</string>
+    <string name="settings_opening_summary">Vorschauen und Standard-Apps</string>
+    <string name="settings_opening_files">Dateien öffnen</string>
+    <string name="settings_opening_description">Wähle, was beim Antippen einer Datei passiert. Android verwaltet deine externen Standard-Apps. Mit „Öffnen mit“ kannst du immer eine App auswählen.</string>
+    <string name="settings_opening_text">Textdateien</string>
+    <string name="settings_opening_pdf">PDF-Dokumente</string>
+    <string name="settings_opening_images">Bilder</string>
+    <string name="settings_opening_raiun">Raiun-Vorschau</string>
+    <string name="settings_opening_external">Externe App</string>
+</resources>

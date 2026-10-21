@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="boundary_destination_title">保存先を選択</string>
+    <string name="boundary_other_location">別の場所</string>
+    <string name="boundary_locations">場所</string>
+    <string name="boundary_encrypted">暗号化あり</string>
+    <string name="boundary_ordinary">暗号化なし</string>
+    <string name="boundary_unlock">保存先のロックを解除</string>
+    <string name="boundary_password">パスワード</string>
+    <string name="boundary_unlock_action">ロック解除</string>
+    <string name="boundary_plaintext_title">暗号化されていないコピーを作成しますか？</string>
+    <string name="boundary_plaintext_move_title">暗号化されていない場所に移動しますか？</string>
+    <string name="boundary_plaintext_move_body">ここに移動したファイルは、暗号化パスワードで保護されなくなります。移動先の検証が完了した後にのみ、元の項目を削除します。信頼できる移動先の場合にのみ続行してください。</string>
+    <string name="boundary_plaintext_body">ここにコピーしたファイルは、暗号化パスワードで保護されなくなります。信頼できるコピー先の場合にのみ続行してください。</string>
+    <string name="boundary_continue">続行</string>
+    <string name="boundary_copy_here">ここにコピー</string>
+    <string name="boundary_move_here">ここに移動</string>
+    <string name="boundary_cancel">キャンセル</string>
+    <string name="boundary_close">閉じる</string>
+    <string name="boundary_retry">再試行</string>
+    <string name="boundary_complete">転送と検証が完了しました。</string>
+    <string name="boundary_partial_copy">転送先に不完全なコピーが残っている可能性があります。すでに安全に移動された項目を除き、元の項目は保持されています。新しい転送を開始する前に転送先を確認してください。</string>
+    <string name="boundary_partial_move">コピーは検証されましたが、元の項目の削除を完了できませんでした。転送先と残りの元の項目は保持されています。新しい移動を開始する前に両方の場所を確認してください。</string>
+    <string name="boundary_cancel_title">この転送をキャンセルしますか？</string>
+    <string name="boundary_cancel_body">転送先にすでにファイルが作成されている可能性があります。まだ安全に移動されていない元の項目は残ります。</string>
+    <string name="boundary_working">転送と検証を実行中…</string>
+    <plurals name="boundary_selection_count">
+        <item quantity="other">%d件の項目を選択中</item>
+    </plurals>
+    <string name="boundary_empty">ここにはフォルダーがありません。この場所を選択できます。</string>
+</resources>

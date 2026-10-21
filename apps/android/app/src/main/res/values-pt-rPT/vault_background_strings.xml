@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_background_upload_preparing">A encriptar o ficheiro. Mantenha esta localização desbloqueada até a preparação terminar.</string>
+    <string name="vault_background_upload_queued">Envio encriptado em fila. Pode continuar após bloquear esta localização. Consulte Transferências para acompanhar o progresso.</string>
+</resources>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="backup_scan_failed_at">前回のスキャン失敗: %1$s</string>
+    <string name="backup_scan_source_unavailable">元のフォルダーが利用できなくなりました。「管理」からフォルダーを選択し直してください。</string>
+    <string name="backup_scan_source_permission">元のフォルダーへのアクセスが失われました。「管理」からフォルダーを選択し、再度アクセスを許可してください。</string>
+</resources>

@@ -1,0 +1,6 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="backup_scan_failed_at">El último análisis falló el %1$s</string>
+    <string name="backup_scan_source_unavailable">La carpeta de origen ya no está disponible. Usa Gestionar para elegirla de nuevo.</string>
+    <string name="backup_scan_source_permission">Se perdió el acceso a la carpeta de origen. Usa Gestionar para seleccionar la carpeta y conceder acceso de nuevo.</string>
+</resources>

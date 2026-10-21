@@ -1,0 +1,13 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="incoming_preparing">Preparando archivo…</string>
+    <string name="incoming_cancel">Cancelar</string>
+    <string name="incoming_close">Cerrar</string>
+    <string name="incoming_open_with">Abrir con</string>
+    <string name="incoming_send">Enviar archivo</string>
+    <string name="incoming_details">Detalles</string>
+    <string name="incoming_layout">Cambiar diseño</string>
+    <string name="incoming_layout_list">Lista</string>
+    <string name="incoming_layout_compact">Lista compacta</string>
+    <string name="incoming_layout_tiles">Cuadrícula</string>
+</resources>

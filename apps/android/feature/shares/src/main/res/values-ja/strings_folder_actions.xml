@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="incoming_open_folder">フォルダーを開く</string>
+    <string name="incoming_copy_link">固定リンクをコピー</string>
+    <string name="incoming_link_copied">リンクをコピーしました。開くには既存のアクセス権が必要です。</string>
+    <string name="incoming_hide_share">共有を非表示</string>
+    <string name="incoming_unhide_share">共有を再表示</string>
+    <string name="incoming_hide_explanation">Webを含む「自分と共有」の一覧での表示を変更します。フォルダーの削除やアクセス権の変更は行いません。非表示のフォルダーを探すには「非表示の共有を表示」を使ってください。</string>
+    <string name="incoming_show_hidden">非表示の共有を表示</string>
+    <string name="incoming_hide_hidden">非表示の共有を隠す</string>
+    <string name="incoming_hidden">非表示の共有</string>
+    <string name="incoming_folder_location">場所</string>
+    <string name="incoming_folder_owner">所有者</string>
+    <string name="incoming_folder_shared_by">共有したユーザー</string>
+    <string name="incoming_folder_shared_at">共有日</string>
+    <string name="incoming_folder_expires">有効期限</string>
+    <string name="incoming_folder_modified">更新日時</string>
+    <string name="incoming_folder_size">サイズ</string>
+    <string name="incoming_folder_visible_items">このフォルダー内の表示可能な項目</string>
+    <string name="incoming_folder_access">共有ルートへのアクセス権</string>
+    <string name="incoming_access_browse">フォルダーの閲覧</string>
+    <string name="incoming_access_download">ファイルのダウンロード</string>
+    <string name="incoming_access_upload">ファイルのアップロード</string>
+    <string name="incoming_access_create">フォルダーの作成</string>
+    <string name="incoming_access_scope">各項目へのアクセス権はサーバーが確認します。</string>
+</resources>

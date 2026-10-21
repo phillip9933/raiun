@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_data">Données</string>
+    <string name="settings_temporary_files">Fichiers locaux temporaires</string>
+    <string name="settings_app_lock">Verrouillage de l’application</string>
+    <string name="settings_app_lock_summary">Exige le verrouillage de l’écran de votre appareil pour ouvrir Raiun.</string>
+    <string name="settings_app_lock_setup_device">Configurez d’abord un verrouillage de l’écran dans les paramètres Android.</string>
+    <string name="settings_encrypted_preferences">Préférences de chiffrement</string>
+    <string name="settings_encrypted_preferences_summary">Choix biométriques pour les dossiers et Spaces chiffrés</string>
+    <string name="settings_permissions">Autorisations</string>
+    <string name="settings_permissions_summary">Accès aux métadonnées des photos et vidéos</string>
+    <string name="settings_encrypted_preferences_explanation">Ces choix sont enregistrés sur cet appareil. La réinitialisation d’un choix supprime sa clé biométrique enregistrée, si elle existe. Après déverrouillage de cet emplacement chiffré avec son mot de passe, Raiun pourra vous le demander à nouveau.</string>
+    <string name="settings_encrypted_preferences_empty">Aucun choix biométrique pour les emplacements chiffrés de ce compte.</string>
+    <string name="settings_encrypted_preferences_failed">Impossible de lire les préférences de chiffrement.</string>
+    <string name="settings_encrypted_folder">Dossier</string>
+    <string name="settings_encrypted_space">Space</string>
+    <string name="settings_encrypted_unknown_location">Emplacement chiffré</string>
+    <string name="settings_encrypted_declined">Proposition biométrique refusée</string>
+    <string name="settings_encrypted_enrolled">Clé biométrique enregistrée</string>
+    <string name="settings_encrypted_key_unavailable">Clé biométrique indisponible</string>
+    <string name="settings_encrypted_entry_description">%1$s · %2$s</string>
+    <string name="settings_encrypted_reset_title">Réinitialiser l’accès biométrique ?</string>
+    <string name="settings_encrypted_reset_explanation">La clé biométrique enregistrée pour %1$s sera supprimée de cet appareil. Utilisez son mot de passe la prochaine fois ; Raiun vous proposera à nouveau de mémoriser une clé biométrique.</string>
+    <string name="settings_encrypted_reset_files_unchanged">Les fichiers et dossiers chiffrés resteront inchangés.</string>
+    <string name="settings_encrypted_use_password">Utiliser le mot de passe la prochaine fois</string>
+    <string name="settings_encrypted_ask_again">Me demander à nouveau</string>
+    <string name="settings_encrypted_reset_failed">Impossible de réinitialiser ce choix biométrique. Réessayez.</string>
+</resources>

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_manage_location">暗号化された場所を管理</string>
+    <string name="vault_manage_collaborators">共同編集者を管理</string>
+    <string name="vault_manage_space">Spaceを管理</string>
+</resources>

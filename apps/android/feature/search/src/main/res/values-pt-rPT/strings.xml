@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="search_offline_queued">Sincronização offline em fila.</string>
+    <string name="search_open_in_files">Abra este item em Ficheiros para mudar a localização ou o nome.</string>
+    <string name="search_action_failed">A ação falhou.</string>
+    <string name="search_placeholder">Pesquisar ficheiros e pastas</string>
+    <string name="search_clear">Limpar a pesquisa</string>
+    <string name="search_back">Voltar</string>
+    <string name="search_action_title">Ação de pesquisa</string>
+    <string name="search_ok">OK</string>
+    <string name="search_empty_title">Pesquisar no OpenCloud</string>
+    <string name="search_empty_message">Os resultados deste dispositivo aparecem à medida que escreve.</string>
+    <string name="search_unavailable_title">Pesquisa no servidor indisponível</string>
+    <string name="search_unavailable_message">Não foram encontrados resultados no dispositivo.</string>
+    <string name="search_no_results_title">Sem resultados</string>
+    <string name="search_no_results_message">Tente outro nome de ficheiro ou pasta.</string>
+    <string name="search_status_loading">A pesquisar no servidor…</string>
+    <string name="search_status_server_error">Resultados no dispositivo • servidor indisponível</string>
+    <string name="search_status_capped">Resultados no dispositivo e no servidor • refine a pesquisa para ver mais</string>
+    <string name="search_status_combined">Resultados no dispositivo e no servidor</string>
+    <string name="search_status_device">Resultados no dispositivo</string>
+</resources>

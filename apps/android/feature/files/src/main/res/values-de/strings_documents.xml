@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="document_edit_text">Text bearbeiten</string>
+    <string name="document_back">Zurück</string>
+    <string name="document_save_server">Auf Server speichern</string>
+    <string name="document_save_queued">Speichern vorgemerkt. Prüfe den Fortschritt oder Konflikte unter „Übertragungen“. dein Entwurf bleibt auf diesem Gerät.</string>
+    <string name="document_check_save">Speicherstatus prüfen</string>
+    <string name="document_saving_draft">Entwurf wird gespeichert.</string>
+    <string name="document_draft_saved">Entwurf lokal gespeichert. Verwende „Auf Server speichern“, um ihn hochzuladen.</string>
+    <string name="document_utf8_text">Text (UTF-8)</string>
+    <string name="document_discard_draft">Entwurf verwerfen</string>
+    <string name="document_discard_title">Diesen Entwurf verwerfen?</string>
+    <string name="document_discard_description">Lokale Textänderungen werden entfernt. Aktualisiere den Ordner, bevor du die Serverdatei erneut bearbeitest.</string>
+    <string name="document_discard">Verwerfen</string>
+    <string name="document_cancel">Abbrechen</string>
+    <string name="document_web_open">In Web-App öffnen</string>
+    <string name="document_browser_required">Installiere einen Browser, um diese Web-App zu öffnen.</string>
+    <string name="document_view_with">Mit %1$s anzeigen</string>
+    <string name="document_edit_with">Mit %1$s bearbeiten</string>
+    <string name="document_close">Schließen</string>
+    <string name="document_in_browser">Im Browser</string>
+    <string name="document_in_app">In der App</string>
+    <string name="document_session_warning">Speichere deine Änderungen, bevor du die App verlässt. Beim Verlassen wird diese Sitzung geschlossen.</string>
+    <string name="document_no_web_apps">Auf diesem Server sind keine kompatiblen Web-Apps verfügbar.</string>
+    <string name="document_upload_title">Mit Raiun hochladen</string>
+    <string name="document_preparing_uploads">Uploads werden vorbereitet.</string>
+    <string name="document_saving_shared">Freigegebene Dateien werden gespeichert.</string>
+    <string name="document_shared_copy_on_upload">Freigegebene Dateien werden erst kopiert, wenn du ein Ziel auswählst und auf Hochladen tippst.</string>
+    <string name="document_sign_in_to_share">Öffne Raiun und melde dich an. Teile diese Dateien anschließend erneut.</string>
+    <string name="document_retry_uploads">Uploads erneut versuchen</string>
+    <string name="document_upload_here">Hier hochladen</string>
+    <string name="document_account">Konto</string>
+    <string name="document_selected">Ausgewählt</string>
+    <string name="document_destination">Ziel</string>
+    <string name="document_up_folder">Einen Ordner nach oben</string>
+    <plurals name="document_incoming_files">
+        <item quantity="one">%1$d Datei</item>
+        <item quantity="other">%1$d Dateien</item>
+    </plurals>
+</resources>

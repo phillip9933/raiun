@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="scanner_destination_title">スキャンの保存先を選択</string>
+    <string name="scanner_destination_cancel">キャンセル</string>
+    <string name="scanner_destination_spaces">Spaces</string>
+    <string name="scanner_destination_select_space">個人用またはプロジェクトのSpaceを選択</string>
+    <string name="scanner_destination_choose">このフォルダーに保存</string>
+    <string name="scanner_destination_retry">再試行</string>
+    <string name="scanner_destination_all_spaces">すべてのSpaces</string>
+    <string name="scanner_destination_up">親フォルダーへ</string>
+    <string name="scanner_destination_root">ルート</string>
+    <string name="scanner_destination_locations">個人用とSpaces</string>
+    <string name="scanner_destination_change">変更</string>
+    <string name="scanner_destination_root_folder">最上位フォルダー</string>
+    <string name="scanner_destination_personal">個人用ファイル</string>
+    <string name="scanner_destination_project">プロジェクトのSpace</string>
+    <string name="scanner_destination_empty">サブフォルダーはありません。ここにスキャンを保存できます。</string>
+</resources>

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="transfers_screen_title">転送</string>
+    <string name="transfers_filter_all">すべての転送</string>
+    <string name="transfers_filter_uploads">アップロード</string>
+    <string name="transfers_filter_downloads">ダウンロード</string>
+    <string name="transfers_filter_all_statuses">すべての状態</string>
+    <string name="transfers_filter_any_date">すべての日付</string>
+    <string name="transfers_filter_today">今日</string>
+    <string name="transfers_filter_week">過去7日間</string>
+    <string name="transfers_filter_month">過去30日間</string>
+    <string name="transfers_filter_custom">期間を指定…</string>
+    <string name="transfers_filter_reset">フィルターをリセット</string>
+    <string name="transfers_filter_started_hint">開始日で絞り込む</string>
+    <string name="transfers_filter_date_range">%1$s ～ %2$s</string>
+    <string name="transfers_filter_empty">一致する転送はありません</string>
+    <string name="transfers_filter_empty_hint">フィルターを変更またはリセットすると、ほかの転送を表示できます。</string>
+    <string name="transfers_filter_all_types">すべてのファイル形式</string>
+    <string name="transfers_filter_images">画像</string>
+    <string name="transfers_filter_videos">動画</string>
+    <string name="transfers_filter_documents">文書</string>
+    <string name="transfers_filter_audio">音声</string>
+    <string name="transfers_filter_other">その他</string>
+    <string name="document_edits_transfer_queued">保存待ち — 転送画面で進行状況を確認してください</string>
+</resources>

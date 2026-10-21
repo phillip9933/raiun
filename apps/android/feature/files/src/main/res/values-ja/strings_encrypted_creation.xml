@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_encrypt_folder">フォルダーを暗号化</string>
+    <string name="browser_encrypt_space">Spaceを暗号化</string>
+    <string name="browser_encrypt_new_summary">さらに安全に: このパスワードなしでは読み取れません。紛失するとファイルにアクセスできなくなります。共同作業の機能には制限があります。</string>
+    <string name="browser_encrypt_keep_password">このパスワードを安全に保管してください。Raiunでは復旧できず、紛失すると暗号化ファイルにアクセスできなくなります。</string>
+    <string name="browser_encrypt_password">保管庫のパスワード</string>
+    <string name="browser_encrypt_confirm_password">保管庫のパスワードを確認</string>
+    <string name="browser_encrypt_password_mismatch">パスワードが一致しません。</string>
+    <string name="browser_encrypt_show_password">パスワードを表示</string>
+    <string name="browser_encrypt_hide_password">パスワードを非表示</string>
+    <string name="browser_encrypt_create_uncertain">暗号化された場所が作成されたか確認できませんでした。重複を避けるため、再試行する前にフォルダーまたはSpacesの一覧を確認してください。</string>
+</resources>

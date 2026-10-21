@@ -1,0 +1,9 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="notifications_title">Notificaciones</string>
+    <string name="notifications_refresh">Actualizar notificaciones</string>
+    <string name="notifications_empty">No hay notificaciones nuevas</string>
+    <string name="notifications_read_all">Marcar todo como leído</string>
+    <string name="notifications_read">Marcar como leído</string>
+    <string name="notifications_open_shares">Compartido conmigo</string>
+</resources>

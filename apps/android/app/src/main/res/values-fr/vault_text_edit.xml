@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_text_edit_label">Texte UTF-8</string>
+    <string name="vault_text_save">Enregistrer sur le serveur</string>
+    <string name="vault_text_edit_secure_note">Les modifications non enregistrées restent en mémoire et sont effacées au verrouillage de cet emplacement. L’enregistrement écrit directement dans le fichier chiffré.</string>
+    <string name="vault_text_edit_too_large">L’éditeur prend en charge le texte UTF-8 jusqu’à 256 Ko.</string>
+    <string name="vault_text_discard_title">Abandonner les modifications non enregistrées ?</string>
+    <string name="vault_text_discard_message">Votre texte non enregistré est conservé uniquement en mémoire et sera effacé.</string>
+    <string name="vault_text_discard">Abandonner les modifications</string>
+</resources>

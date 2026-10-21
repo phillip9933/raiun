@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="transfers_diagnostic_code">Código: %1$s • Tentativa %2$d</string>
+    <string name="transfers_retry_after">Nova tentativa automática não antes de %1$s</string>
+    <string name="transfers_verification_pending">Envio efetuado; a confirmação ainda está pendente.</string>
+    <string name="transfers_encrypted_destination">Destino encriptado</string>
+    <string name="transfers_details">Detalhes</string>
+    <string name="transfers_hide_details">Ocultar detalhes</string>
+    <string name="transfers_awaiting_unlock">Desbloqueie a pasta encriptada para verificar o ficheiro transferido.</string>
+</resources>

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_folder_sharing_title">Partager le dossier chiffré</string>
+    <string name="vault_folder_sharing_warning">Seules des personnes ou des groupes nommés peuvent être ajoutés ici. Ils auront toujours besoin du mot de passe de chiffrement pour ouvrir le contenu. La suppression de l’accès n’efface pas les clés ou copies qu’ils possèdent déjà.</string>
+    <string name="vault_folder_sharing_uncertain">Le serveur a peut-être appliqué la modification. Actualisez la liste des collaborateurs avant toute autre modification.</string>
+    <string name="vault_folder_sharing_people">Collaborateurs</string>
+    <string name="vault_folder_sharing_empty">Aucun collaborateur nommé.</string>
+    <string name="vault_folder_sharing_add">Ajouter un collaborateur</string>
+    <string name="vault_folder_sharing_search">Rechercher des personnes ou des groupes</string>
+    <string name="vault_folder_sharing_permissions">Accès</string>
+    <string name="vault_folder_sharing_viewer">Afficher et télécharger</string>
+    <string name="vault_folder_sharing_editor">Modifier le contenu</string>
+    <string name="vault_folder_sharing_editor_reshare">Modifier et repartager</string>
+    <string name="vault_folder_sharing_custom_permissions">Ce partage utilise des autorisations personnalisées. Choisissez un niveau d’accès pour le modifier.</string>
+    <string name="vault_folder_sharing_person">Personne</string>
+    <string name="vault_folder_sharing_group">Groupe</string>
+    <string name="vault_folder_sharing_remove">Supprimer l’accès</string>
+    <string name="vault_folder_sharing_remove_confirm">Supprimer l’accès de ce collaborateur au dossier chiffré ?</string>
+</resources>

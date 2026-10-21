@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_text_edit_label">Texto UTF-8</string>
+    <string name="vault_text_save">Guardar no servidor</string>
+    <string name="vault_text_edit_secure_note">As alterações não guardadas ficam na memória e são apagadas quando esta localização é bloqueada. Guardar escreve diretamente no ficheiro encriptado.</string>
+    <string name="vault_text_edit_too_large">O editor suporta texto UTF-8 até 256 KB.</string>
+    <string name="vault_text_discard_title">Descartar as alterações não guardadas?</string>
+    <string name="vault_text_discard_message">O texto não guardado é mantido apenas na memória e será apagado.</string>
+    <string name="vault_text_discard">Descartar alterações</string>
+</resources>

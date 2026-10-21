@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="spaces_load_failed">Impossible de charger les Spaces.</string>
+    <string name="spaces_none_available">Aucun Space n’est disponible pour ce compte.</string>
+    <string name="spaces_open_space">Ouvrir le Space %1$s</string>
+    <string name="spaces_unlock_encrypted">Déverrouiller le Space chiffré %1$s</string>
+    <string name="spaces_encrypted_summary">Space chiffré · Déverrouillez pour parcourir</string>
+    <string name="spaces_encrypted_load_failed">Impossible de charger les Spaces chiffrés. Faites glisser pour actualiser et réessayer.</string>
+    <string name="spaces_owner">Propriétaire : %1$s</string>
+    <string name="spaces_quota_summary">%1$s utilisés • %2$s disponibles</string>
+</resources>

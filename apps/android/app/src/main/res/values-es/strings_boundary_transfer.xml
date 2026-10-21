@@ -1,0 +1,33 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="boundary_destination_title">Elegir destino</string>
+    <string name="boundary_other_location">Otra ubicación</string>
+    <string name="boundary_locations">Ubicaciones</string>
+    <string name="boundary_encrypted">Cifrado</string>
+    <string name="boundary_ordinary">Sin cifrar</string>
+    <string name="boundary_unlock">Desbloquear destino</string>
+    <string name="boundary_password">Contraseña</string>
+    <string name="boundary_unlock_action">Desbloquear</string>
+    <string name="boundary_plaintext_title">¿Crear una copia sin cifrar?</string>
+    <string name="boundary_plaintext_move_title">¿Mover a un almacenamiento sin cifrar?</string>
+    <string name="boundary_plaintext_move_body">Los archivos movidos aquí dejarán de estar protegidos por tu contraseña de cifrado. Los elementos de origen solo se eliminan tras verificar el destino. Continúa solo si confías en este destino.</string>
+    <string name="boundary_plaintext_body">Los archivos copiados aquí dejarán de estar protegidos por tu contraseña de cifrado. Continúa solo si confías en este destino.</string>
+    <string name="boundary_continue">Continuar</string>
+    <string name="boundary_copy_here">Copiar aquí</string>
+    <string name="boundary_move_here">Mover aquí</string>
+    <string name="boundary_cancel">Cancelar</string>
+    <string name="boundary_close">Cerrar</string>
+    <string name="boundary_retry">Intentar de nuevo</string>
+    <string name="boundary_complete">Transferencia completada y verificada.</string>
+    <string name="boundary_partial_copy">El destino puede contener copias incompletas. Se han conservado tus elementos de origen, salvo los que ya se hayan movido de forma segura. Comprueba el destino antes de iniciar otra transferencia.</string>
+    <string name="boundary_partial_move">Se verificó la copia, pero no se pudo terminar de limpiar el origen. Se han conservado el destino y los elementos de origen restantes. Comprueba ambas ubicaciones antes de iniciar otro traslado.</string>
+    <string name="boundary_cancel_title">¿Cancelar esta transferencia?</string>
+    <string name="boundary_cancel_body">Puede que ya se hayan creado algunos archivos de destino. Los elementos de origen que aún no se hayan movido de forma segura se conservarán.</string>
+    <string name="boundary_working">Transfiriendo y verificando…</string>
+    <plurals name="boundary_selection_count">
+        <item quantity="one">%d elemento seleccionado</item>
+        <item quantity="many">%d elementos seleccionados</item>
+        <item quantity="other">%d elementos seleccionados</item>
+    </plurals>
+    <string name="boundary_empty">No hay carpetas aquí. Puedes elegir esta ubicación.</string>
+</resources>

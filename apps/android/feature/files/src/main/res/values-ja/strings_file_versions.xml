@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="file_versions_title">バージョン履歴</string>
+    <string name="file_versions_loading">バージョンを読み込み中…</string>
+    <string name="file_versions_empty">このファイルには過去のバージョンがありません。</string>
+    <string name="file_versions_unavailable">このファイルまたはサーバーではバージョン履歴を利用できません。</string>
+    <string name="file_versions_error">バージョンを読み込めませんでした。接続とアクセス権を確認し、再試行してください。</string>
+    <string name="file_versions_restore">復元</string>
+    <string name="file_versions_restoring">復元中…</string>
+    <string name="file_versions_confirm">「%1$s」の現在の内容をこのバージョンに置き換えますか？利用可能なバージョンはサーバーの保持設定によって決まります。</string>
+    <string name="file_versions_restore_error">復元を確認できませんでした。再試行する前にファイルを更新してください。未完了の編集やアップロードを確認し、書き込み権限があることを確認してください。</string>
+    <string name="file_versions_restored">バージョンを復元しました。ファイル一覧を更新します。</string>
+    <string name="file_versions_retry">再試行</string>
+    <string name="file_versions_close">閉じる</string>
+    <string name="file_versions_cancel">キャンセル</string>
+    <string name="file_versions_unknown_date">日付不明</string>
+    <string name="file_versions_unknown_size">サイズ不明</string>
+</resources>

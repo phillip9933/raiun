@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="boundary_destination_title">Ziel auswählen</string>
+    <string name="boundary_other_location">Anderer Speicherort</string>
+    <string name="boundary_locations">Speicherorte</string>
+    <string name="boundary_encrypted">Verschlüsselt</string>
+    <string name="boundary_ordinary">Unverschlüsselt</string>
+    <string name="boundary_unlock">Ziel entsperren</string>
+    <string name="boundary_password">Passwort</string>
+    <string name="boundary_unlock_action">Entsperren</string>
+    <string name="boundary_plaintext_title">Unverschlüsselte Kopie erstellen?</string>
+    <string name="boundary_plaintext_move_title">An einen unverschlüsselten Speicherort verschieben?</string>
+    <string name="boundary_plaintext_move_body">Hierher verschobene Dateien werden nicht mehr durch dein Verschlüsselungspasswort geschützt. Die ursprünglichen Elemente werden erst nach der Überprüfung des Ziels entfernt. Fahre nur fort, wenn du diesem Ziel vertraust.</string>
+    <string name="boundary_plaintext_body">Hierher kopierte Dateien werden nicht mehr durch dein Verschlüsselungspasswort geschützt. Fahre nur fort, wenn du diesem Ziel vertraust.</string>
+    <string name="boundary_continue">Fortfahren</string>
+    <string name="boundary_copy_here">Hierher kopieren</string>
+    <string name="boundary_move_here">Hierher verschieben</string>
+    <string name="boundary_cancel">Abbrechen</string>
+    <string name="boundary_close">Schließen</string>
+    <string name="boundary_retry">Erneut versuchen</string>
+    <string name="boundary_complete">Übertragung abgeschlossen und überprüft.</string>
+    <string name="boundary_partial_copy">Das Ziel enthält möglicherweise unvollständige Kopien. Die ursprünglichen Elemente wurden beibehalten, sofern sie nicht bereits sicher verschoben wurden. Prüfe das Ziel, bevor du eine neue Übertragung startest.</string>
+    <string name="boundary_partial_move">Die Kopie wurde überprüft, aber die ursprünglichen Elemente konnten nicht vollständig entfernt werden. Das Ziel und die verbliebenen ursprünglichen Elemente wurden beibehalten. Prüfe beide Speicherorte, bevor du erneut Elemente verschiebst.</string>
+    <string name="boundary_cancel_title">Diese Übertragung abbrechen?</string>
+    <string name="boundary_cancel_body">Einige Dateien wurden möglicherweise bereits am Ziel erstellt. Ursprüngliche Elemente, die noch nicht sicher verschoben wurden, bleiben erhalten.</string>
+    <string name="boundary_working">Übertragung und Überprüfung laufen…</string>
+    <plurals name="boundary_selection_count">
+        <item quantity="one">%d ausgewähltes Element</item>
+        <item quantity="other">%d ausgewählte Elemente</item>
+    </plurals>
+    <string name="boundary_empty">Hier sind keine Ordner vorhanden. Du kannst diesen Speicherort auswählen.</string>
+</resources>

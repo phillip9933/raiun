@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_open_with">Abrir com</string>
+    <string name="vault_open_with_warning">Abrir este ficheiro encriptado noutra aplicação cria uma cópia desencriptada temporária neste telemóvel. A outra aplicação pode lê-la, guardá-la ou partilhá-la, e o Raiun não pode remover as cópias que essa aplicação conservar. O Raiun tenta eliminar a sua cópia temporária quando regressar. Novos acessos expiram após 10 minutos; o Android pode adiar a eliminação em segundo plano. Um ficheiro já aberto pela outra aplicação pode continuar legível. Use apenas uma aplicação em que confie.</string>
+    <string name="vault_open_with_continue">Abrir cópia desencriptada</string>
+</resources>

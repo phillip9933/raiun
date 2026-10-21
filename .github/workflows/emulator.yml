@@ -1,6 +1,7 @@
 name: Android emulator tests
 
 on:
+  workflow_dispatch:
   pull_request:
   push:
     branches:
@@ -8,6 +9,10 @@ on:
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    working-directory: apps/android
 
 jobs:
   instrumentation:
@@ -54,7 +59,7 @@ jobs:
           arch: x86_64
           disable-animations: true
           script: >-
-            ./gradlew
+            cd apps/android && ./gradlew
             :app:connectedDebugAndroidTest
             :core:crypto:connectedDebugAndroidTest
             :core:security:connectedDebugAndroidTest
@@ -72,5 +77,5 @@ jobs:
           name: emulator-instrumentation-reports-api-${{ matrix.api }}
           if-no-files-found: ignore
           path: |
-            **/build/reports/androidTests/**
-            **/build/outputs/androidTest-results/**
+            apps/android/**/build/reports/androidTests/**
+            apps/android/**/build/outputs/androidTest-results/**

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_scan">Digitalizar</string>
+    <string name="scanner_preparing">A preparar a digitalização…</string>
+    <string name="scanner_uploading">A preparar os ficheiros digitalizados para envio…</string>
+    <string name="scanner_retry">Tentar novamente</string>
+    <string name="scanner_discard">Descartar digitalização</string>
+    <string name="scanner_discard_title">Descartar estes ficheiros digitalizados?</string>
+    <string name="scanner_discard_body">As digitalizações que não tenham sido colocadas em fila para envio serão removidas deste dispositivo.</string>
+    <string name="scanner_keep">Manter digitalização</string>
+    <string name="scanner_failed">Não foi possível concluir a digitalização. Pode tentar novamente ou descartá-la.</string>
+    <string name="scanner_location_title">Localização no OpenCloud</string>
+    <string name="scanner_location_failed">Não foi possível mudar a localização da digitalização. O destino anterior foi mantido.</string>
+    <string name="scanner_location_ok">OK</string>
+</resources>

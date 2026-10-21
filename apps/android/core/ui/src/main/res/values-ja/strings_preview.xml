@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="preview_back">戻る</string>
+    <string name="preview_open_with">他のアプリで開く</string>
+    <string name="preview_edit">編集</string>
+    <string name="preview_failed">このファイルをプレビューできません。再試行するか、他のアプリで開いてください。テキストのプレビューは1 MBまでのUTF-8ファイル、その他のプレビューは100 MBまでのファイルに対応しています。</string>
+    <string name="preview_retry">再試行</string>
+    <string name="preview_previous">前へ</string>
+    <string name="preview_next">次へ</string>
+    <string name="preview_page">%1$d / %2$d</string>
+</resources>

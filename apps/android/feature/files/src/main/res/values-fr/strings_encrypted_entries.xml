@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_encrypted_locked">Dossier chiffré, verrouillé</string>
+    <string name="browser_encrypted_load_failed">Impossible de vérifier les dossiers chiffrés. Faites glisser vers le bas pour réessayer.</string>
+    <string name="browser_encrypted_actions">Actions pour %1$s</string>
+</resources>

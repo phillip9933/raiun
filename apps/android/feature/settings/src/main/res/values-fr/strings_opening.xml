@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_opening_summary">Aperçus et applications par défaut</string>
+    <string name="settings_opening_files">Ouverture des fichiers</string>
+    <string name="settings_opening_description">Choisissez ce qui se passe lorsque vous touchez un fichier. Android gère vos applications externes par défaut. Ouvrir avec permet toujours de choisir une application.</string>
+    <string name="settings_opening_text">Fichiers texte</string>
+    <string name="settings_opening_pdf">Documents PDF</string>
+    <string name="settings_opening_images">Images</string>
+    <string name="settings_opening_raiun">Aperçu Raiun</string>
+    <string name="settings_opening_external">Application externe</string>
+</resources>

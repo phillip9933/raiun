@@ -1,0 +1,18 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="scanner_destination_title">Elegir destino del escaneo</string>
+    <string name="scanner_destination_cancel">Cancelar</string>
+    <string name="scanner_destination_spaces">Spaces</string>
+    <string name="scanner_destination_select_space">Elige un Space personal o de proyecto</string>
+    <string name="scanner_destination_choose">Guardar en esta carpeta</string>
+    <string name="scanner_destination_retry">Reintentar</string>
+    <string name="scanner_destination_all_spaces">Todos los Spaces</string>
+    <string name="scanner_destination_up">Subir una carpeta</string>
+    <string name="scanner_destination_root">Raíz</string>
+    <string name="scanner_destination_locations">Personal y Spaces</string>
+    <string name="scanner_destination_change">Cambiar</string>
+    <string name="scanner_destination_root_folder">Carpeta de nivel superior</string>
+    <string name="scanner_destination_personal">Tus archivos personales</string>
+    <string name="scanner_destination_project">Space de proyecto</string>
+    <string name="scanner_destination_empty">No hay subcarpetas. Puedes guardar tu escaneo aquí.</string>
+</resources>

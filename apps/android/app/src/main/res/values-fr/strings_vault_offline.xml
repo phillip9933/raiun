@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_offline_copies">Copies hors connexion chiffrées</string>
+    <string name="vault_offline_copy">Copie hors connexion chiffrée · lecture seule</string>
+    <string name="vault_offline_explanation">Les copies enregistrées peuvent être plus anciennes que celles du serveur. Déverrouillez-les pour les lire sur ce téléphone.</string>
+    <string name="vault_keep_offline">Conserver une copie chiffrée hors connexion</string>
+    <string name="vault_keep_offline_warning">Enregistrez cet élément et son contenu en toute sécurité sur ce téléphone. La copie reste chiffrée et nécessite votre mot de passe de chiffrement ou la biométrie. Il s’agit d’un instantané ; enregistrez-le à nouveau pour le mettre à jour.</string>
+    <string name="vault_remove_offline">Supprimer la copie hors connexion</string>
+    <string name="vault_remove_offline_warning">Supprimez cette copie hors connexion chiffrée de ce téléphone. Les fichiers sur le serveur restent inchangés.</string>
+    <string name="vault_offline_cleanup_failed">La modification sur le serveur a réussi, mais certaines données chiffrées locales n’ont pas pu être supprimées.</string>
+</resources>

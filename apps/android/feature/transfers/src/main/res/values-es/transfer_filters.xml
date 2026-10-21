@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="transfers_screen_title">Transferencias</string>
+    <string name="transfers_filter_all">Todas las transferencias</string>
+    <string name="transfers_filter_uploads">Subidas</string>
+    <string name="transfers_filter_downloads">Descargas</string>
+    <string name="transfers_filter_all_statuses">Todos los estados</string>
+    <string name="transfers_filter_any_date">Cualquier fecha</string>
+    <string name="transfers_filter_today">Hoy</string>
+    <string name="transfers_filter_week">Últimos 7 días</string>
+    <string name="transfers_filter_month">Últimos 30 días</string>
+    <string name="transfers_filter_custom">Intervalo personalizado…</string>
+    <string name="transfers_filter_reset">Restablecer filtros</string>
+    <string name="transfers_filter_started_hint">Filtrar por fecha de inicio</string>
+    <string name="transfers_filter_date_range">%1$s – %2$s</string>
+    <string name="transfers_filter_empty">No hay transferencias coincidentes</string>
+    <string name="transfers_filter_empty_hint">Cambia o restablece los filtros para ver más transferencias.</string>
+    <string name="transfers_filter_all_types">Todos los tipos de archivo</string>
+    <string name="transfers_filter_images">Imágenes</string>
+    <string name="transfers_filter_videos">Vídeos</string>
+    <string name="transfers_filter_documents">Documentos</string>
+    <string name="transfers_filter_audio">Audio</string>
+    <string name="transfers_filter_other">Otros</string>
+    <string name="document_edits_transfer_queued">Guardado en cola — consulta el progreso en Transferencias</string>
+</resources>

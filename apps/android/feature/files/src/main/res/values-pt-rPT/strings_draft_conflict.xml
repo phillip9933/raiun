@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="document_server_changed">Este ficheiro mudou desde que começou a editá-lo. O rascunho foi mantido separadamente. Guardá-lo pode exigir a resolução de um conflito.</string>
+    <string name="document_view_current">Ver o ficheiro atual</string>
+    <string name="document_resume_draft">Retomar o rascunho</string>
+</resources>

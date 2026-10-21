@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="deleted_files_title">削除済みファイル</string>
+    <string name="deleted_personal_space">個人用</string>
+    <plurals name="deleted_bin_item_count">
+        <item quantity="other">%1$d件の削除済み項目</item>
+    </plurals>
+    <string name="deleted_back">戻る</string>
+    <string name="deleted_recycle_bin_title">ゴミ箱</string>
+    <string name="deleted_recycle_bin_explanation">サーバーから項目を完全に削除します。</string>
+    <string name="deleted_empty_recycle_bin">ゴミ箱を空にする</string>
+    <string name="deleted_delete_permanently">完全に削除</string>
+    <string name="deleted_cancel">キャンセル</string>
+    <string name="deleted_ok">OK</string>
+    <string name="deleted_loading">削除済みファイルを読み込み中…</string>
+    <string name="deleted_empty">ゴミ箱は空です。</string>
+    <string name="deleted_unsupported">このサーバーは削除済みファイルに対応していません。</string>
+    <string name="deleted_clear_selection">選択を解除</string>
+    <string name="deleted_select_all">すべて選択</string>
+    <string name="deleted_restore_selected">選択した項目を復元</string>
+    <string name="deleted_permanently_delete_selected">選択した項目を完全に削除</string>
+    <string name="deleted_restore_item">%1$sを復元</string>
+    <string name="deleted_permanently_delete_item">%1$sを完全に削除</string>
+    <plurals name="deleted_selection_count">
+        <item quantity="other">%1$d件を選択中</item>
+    </plurals>
+    <plurals name="deleted_confirm_title">
+        <item quantity="other">%1$d件の項目を完全に削除しますか？</item>
+    </plurals>
+    <plurals name="deleted_confirm_message">
+        <item quantity="other">これらの項目はサーバーのゴミ箱から削除され、復元できなくなります。</item>
+    </plurals>
+    <plurals name="deleted_batch_failure">
+        <item quantity="other">%1$d件の項目を処理できませんでした。%2$s</item>
+    </plurals>
+    <string name="file_operation_choose_destination_one">%1$sの転送先を選択</string>
+    <plurals name="file_operation_choose_destination_many">
+        <item quantity="other">%1$d件の項目の転送先を選択</item>
+    </plurals>
+    <string name="file_operation_move_here">ここに移動</string>
+    <string name="file_operation_copy_here">ここにコピー</string>
+    <string name="file_operation_cancel">キャンセル</string>
+    <string name="file_operation_verifying">%1$sを検証中…</string>
+    <string name="file_operation_check_again">再確認</string>
+    <string name="file_operation_dismiss">閉じる</string>
+</resources>

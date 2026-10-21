@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_encrypt_folder">Chiffrer le dossier</string>
+    <string name="browser_encrypt_space">Chiffrer le Space</string>
+    <string name="browser_encrypt_new_summary">Sécurité renforcée : illisible sans ce mot de passe. Le perdre entraîne la perte d’accès aux fichiers. Les fonctions de collaboration sont limitées.</string>
+    <string name="browser_encrypt_keep_password">Conservez ce mot de passe en lieu sûr. Raiun ne peut pas le récupérer et sa perte entraîne la perte d’accès aux fichiers chiffrés.</string>
+    <string name="browser_encrypt_password">Mot de passe du coffre</string>
+    <string name="browser_encrypt_confirm_password">Confirmer le mot de passe du coffre</string>
+    <string name="browser_encrypt_password_mismatch">Les mots de passe ne correspondent pas.</string>
+    <string name="browser_encrypt_show_password">Afficher le mot de passe</string>
+    <string name="browser_encrypt_hide_password">Masquer le mot de passe</string>
+    <string name="browser_encrypt_create_uncertain">Raiun n’a pas pu confirmer la création de l’emplacement chiffré. Vérifiez le dossier ou la liste des Spaces avant de réessayer pour éviter un doublon.</string>
+</resources>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="spaces_load_failed">Não foi possível carregar os Spaces.</string>
+    <string name="spaces_none_available">Não há Spaces disponíveis para esta conta.</string>
+    <string name="spaces_open_space">Abrir o Space %1$s</string>
+    <string name="spaces_unlock_encrypted">Desbloquear o Space encriptado %1$s</string>
+    <string name="spaces_encrypted_summary">Space encriptado · Desbloqueie para explorar</string>
+    <string name="spaces_encrypted_load_failed">Não foi possível carregar os Spaces encriptados. Puxe para atualizar e tentar novamente.</string>
+    <string name="spaces_owner">Proprietário: %1$s</string>
+    <string name="spaces_quota_summary">%1$s usados • %2$s disponíveis</string>
+</resources>

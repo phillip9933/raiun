@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_storage_used">%1$s使用中</string>
+    <string name="browser_storage_used_total">%2$s中%1$s使用中</string>
+    <string name="browser_direction_upload">アップロード</string>
+    <string name="browser_direction_download">ダウンロード</string>
+    <string name="browser_direction_transfer">転送</string>
+</resources>

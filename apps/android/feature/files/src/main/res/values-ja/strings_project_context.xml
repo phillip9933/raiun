@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_project_space">Space: %1$s</string>
+    <string name="browser_all_spaces">すべてのSpaces</string>
+    <string name="browser_recents">最近使った項目</string>
+    <string name="browser_offline">オフライン</string>
+    <string name="browser_add_destination">追加先: %1$s</string>
+</resources>

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="folder_shortcut_appearance">Icône du raccourci</string>
+    <string name="folder_shortcut_preview">Aperçu de l’icône du raccourci</string>
+    <string name="folder_shortcut_badge">Votre lanceur ajoute le badge Raiun. Ajoutez à nouveau ce dossier pour mettre à jour un raccourci existant.</string>
+    <string name="folder_shortcut_image">Choisir une image</string>
+    <string name="folder_shortcut_image_error">Impossible de lire cette image. Choisissez une image de moins de 16 Mo.</string>
+    <string name="folder_shortcut_default">Par défaut</string>
+    <string name="folder_shortcut_blue">Bleu</string>
+    <string name="folder_shortcut_green">Vert</string>
+    <string name="folder_shortcut_yellow">Jaune</string>
+    <string name="folder_shortcut_red">Rouge</string>
+    <string name="folder_shortcut_add">Ajouter à l’écran d’accueil</string>
+    <string name="folder_shortcut_error">Impossible d’ajouter ce dossier. Vérifiez qu’il est toujours disponible et que votre lanceur prend en charge les raccourcis.</string>
+    <string name="folder_shortcut_requested">Raccourci demandé. Confirmez-le dans votre lanceur si nécessaire.</string>
+    <string name="folder_shortcut_unavailable">Ce raccourci de dossier est indisponible. Ouvrez Raiun et vérifiez que le compte et le dossier existent toujours.</string>
+    <string name="folder_shortcut_close">Fermer</string>
+    <string name="folder_shortcut_cancel">Annuler</string>
+    <string name="folder_shortcut_purple">Violet</string>
+    <string name="folder_shortcut_orange">Orange</string>
+    <string name="folder_shortcut_pink">Rose</string>
+    <string name="folder_shortcut_teal">Turquoise</string>
+    <string name="folder_shortcut_grey">Gris</string>
+    <string name="folder_crop_title">Recadrer l’image du raccourci</string>
+    <string name="folder_crop_hint">Pincez pour zoomer. Faites glisser pour placer votre image dans le cercle.</string>
+    <string name="folder_crop_zoom">Zoom</string>
+    <string name="folder_crop_horizontal">Position horizontale</string>
+    <string name="folder_crop_vertical">Position verticale</string>
+    <string name="folder_crop_use">Utiliser l’image</string>
+    <string name="folder_download">Télécharger le dossier</string>
+    <string name="folder_download_explanation">Ajoutez les fichiers de ce dossier et de ses sous-dossiers aux Transferts et conservez des copies locales. Les fichiers partagés nécessitent toujours une vérification d’accès par le serveur. Annuler arrête l’ajout de fichiers ; les téléchargements déjà en attente restent dans Transferts.</string>
+    <string name="folder_download_count">%1$d fichiers ajoutés aux Transferts</string>
+    <string name="folder_download_failed">Certains fichiers n’ont pas pu être mis en attente. Vérifiez votre connexion et votre accès, puis réessayez. Les fichiers déjà en attente restent dans Transferts.</string>
+    <string name="folder_crop_zoom_in">Agrandir</string>
+    <string name="folder_crop_zoom_out">Réduire</string>
+    <string name="folder_crop_reset">Réinitialiser le recadrage</string>
+</resources>

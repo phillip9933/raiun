@@ -9,4 +9,4 @@ gradlew text eol=lf
 *.jar binary
 
 # Preserve upstream notice bytes and their recorded evidence hashes.
-app/src/main/assets/third-party/** -text
+apps/android/app/src/main/assets/third-party/** -text

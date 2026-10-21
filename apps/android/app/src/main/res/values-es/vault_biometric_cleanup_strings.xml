@@ -1,0 +1,4 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="vault_biometric_cleanup_error">La bóveda se eliminó, pero este dispositivo no pudo eliminar su clave biométrica guardada. Reintenta la limpieza local en Ajustes; no se repetirá la eliminación remota.</string>
+</resources>

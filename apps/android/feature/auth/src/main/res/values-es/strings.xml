@@ -1,0 +1,28 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="auth_connect_title">Conectar con OpenCloud</string>
+    <string name="auth_server_discovery_description">Introduce la dirección de tu servidor OpenCloud para descubrir su método de inicio de sesión.</string>
+    <string name="auth_server_address">Dirección del servidor</string>
+    <string name="auth_use_browser_sign_in">Iniciar sesión en el navegador</string>
+    <string name="auth_use_app_password">Usar contraseña de aplicación o token</string>
+    <string name="auth_client_id">ID de cliente proporcionado por el administrador (opcional)</string>
+    <string name="auth_continue">Continuar</string>
+    <string name="auth_dev_login">Inicio de sesión de desarrollo</string>
+    <string name="auth_dev_login_configuration">Configura dev.server.url, dev.server.username y dev.server.password en local.properties.</string>
+    <string name="auth_server_label">Servidor: %1$s</string>
+    <string name="auth_username">Nombre de usuario</string>
+    <string name="auth_password">Contraseña</string>
+    <string name="auth_sign_in">Iniciar sesión</string>
+    <string name="auth_sign_in_browser">Iniciar sesión en el navegador</string>
+    <string name="auth_app_token_description">Usa una contraseña de aplicación o un token emitido por tu servidor. También puedes iniciar sesión en el navegador.</string>
+    <string name="auth_app_password_or_token">Contraseña de aplicación o token</string>
+    <string name="auth_signed_in_as">Sesión iniciada como %1$s</string>
+    <string name="auth_server_version">Versión del servidor: %1$s</string>
+    <string name="auth_unknown">Desconocido</string>
+    <string name="auth_sharing_available">Uso compartido: disponible</string>
+    <string name="auth_sharing_unavailable">Uso compartido: no disponible</string>
+    <string name="auth_required_fields">Introduce la dirección del servidor, el nombre de usuario y la contraseña de aplicación o el token.</string>
+    <string name="auth_oidc_session_expired">La sesión de inicio de sesión caducó o no se pudo verificar. Inicia sesión de nuevo.</string>
+    <string name="auth_sign_in_cancelled">El inicio de sesión se canceló o rechazó.</string>
+    <string name="auth_certificate_untrusted">No se pudo confiar en el certificado del servidor. Revisa su huella antes de aprobar su fijación explícita.</string>
+</resources>

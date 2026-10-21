@@ -1,0 +1,47 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="vault_refresh">Actualizar</string>
+    <string name="vault_new_folder">Nueva carpeta</string>
+    <string name="vault_upload_file">Subir archivo</string>
+    <string name="vault_new_actions">Nuevas acciones</string>
+    <string name="vault_close_actions">Cerrar nuevas acciones</string>
+    <string name="vault_edit_location">Editar ubicación cifrada</string>
+    <string name="vault_copy_to_folder">Copiar a carpeta</string>
+    <string name="vault_move_to_folder">Mover a carpeta</string>
+    <string name="vault_destination_root">Ubicación cifrada</string>
+    <string name="vault_destination_up">Subir un nivel</string>
+    <string name="vault_destination_open">Abrir</string>
+    <string name="vault_details_path">Ruta: %1$s</string>
+    <string name="vault_details_type">Tipo: %1$s</string>
+    <string name="vault_details_size">Tamaño: %1$s</string>
+    <string name="vault_entry_size">%1$s · %2$s</string>
+    <string name="vault_preview_memory_only_note">El contenido de la vista previa se descifra en memoria. Raiun no guarda una copia de la vista previa en texto claro.</string>
+    <string name="vault_destination_choose">Elige un destino para %1$s</string>
+    <string name="vault_copy_here">Copiar aquí</string>
+    <string name="vault_move_here">Mover aquí</string>
+    <string name="vault_destination_empty">No hay carpetas en esta ubicación.</string>
+    <string name="vault_encrypted_space_header">Space cifrado</string>
+    <string name="vault_encrypted_folder_header">Carpeta cifrada</string>
+    <string name="vault_entry_actions">Acciones para %1$s</string>
+    <string name="vault_rename">Cambiar nombre</string>
+    <string name="vault_delete">Eliminar</string>
+    <string name="vault_copy">Copiar</string>
+    <string name="vault_move">Mover</string>
+    <string name="vault_save_copy">Guardar una copia descifrada</string>
+    <string name="vault_details">Detalles</string>
+    <string name="vault_delete_confirm">¿Eliminar este elemento de la ubicación cifrada?</string>
+    <string name="vault_details_content">Nombre: %1$s\nRuta: %2$s\nTamaño: %3$d bytes</string>
+    <string name="vault_cancel">Cancelar</string>
+    <string name="vault_confirm">Confirmar</string>
+    <string name="vault_operation_failed">La operación no se completó. Actualiza antes de reintentar; puede que el servidor ya haya recibido un cambio.</string>
+    <string name="vault_unlock_to_finish">Desbloquea de nuevo para terminar la operación de archivos.</string>
+    <string name="vault_export_failed">La copia no terminó. El destino puede contener un archivo incompleto.</string>
+    <string name="vault_save_copy_warning">La copia guardada dejará de estar cifrada por esta carpeta o Space. Guárdala solo en una ubicación de confianza.</string>
+    <string name="vault_root_delete_warning">¿Eliminar «%1$s»? Aquí solo se puede eliminar una carpeta cifrada vacía. Primero elimina o mueve su contenido.</string>
+    <string name="vault_space_management_web">Gestiona el nombre, los miembros y la eliminación del Space en la aplicación web. Las acciones de archivos y carpetas están disponibles dentro de este Space.</string>
+    <string name="vault_name">Nombre</string>
+    <string name="vault_entry_folder_type">Carpeta</string>
+    <string name="vault_entry_unknown_type">Tipo desconocido</string>
+    <string name="vault_entry_offline_status">Disponible en copia cifrada sin conexión</string>
+    <string name="vault_entry_online_unknown_status">Elemento cifrado; disponibilidad sin conexión desconocida</string>
+</resources>

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="document_edit_text">Modifier le texte</string>
+    <string name="document_back">Retour</string>
+    <string name="document_save_server">Enregistrer sur le serveur</string>
+    <string name="document_save_queued">Enregistrement en attente. Consultez Transferts pour suivre la progression ou les conflits. Votre brouillon reste sur cet appareil.</string>
+    <string name="document_check_save">Vérifier l’état de l’enregistrement</string>
+    <string name="document_saving_draft">Enregistrement du brouillon…</string>
+    <string name="document_draft_saved">Brouillon enregistré localement. Utilisez Enregistrer sur le serveur pour l’envoyer.</string>
+    <string name="document_utf8_text">Texte (UTF-8)</string>
+    <string name="document_discard_draft">Abandonner le brouillon</string>
+    <string name="document_discard_title">Abandonner ce brouillon ?</string>
+    <string name="document_discard_description">Les modifications locales du texte seront supprimées. Actualisez le dossier avant de modifier à nouveau le fichier du serveur.</string>
+    <string name="document_discard">Abandonner</string>
+    <string name="document_cancel">Annuler</string>
+    <string name="document_web_open">Ouvrir dans l’application web</string>
+    <string name="document_browser_required">Installez un navigateur pour ouvrir cette application web.</string>
+    <string name="document_view_with">Afficher avec %1$s</string>
+    <string name="document_edit_with">Modifier avec %1$s</string>
+    <string name="document_close">Fermer</string>
+    <string name="document_in_browser">Dans le navigateur</string>
+    <string name="document_in_app">Dans l’application</string>
+    <string name="document_session_warning">Terminez l’enregistrement avant de quitter l’application. La quitter ferme cette session.</string>
+    <string name="document_no_web_apps">Aucune application web compatible n’est disponible sur ce serveur.</string>
+    <string name="document_upload_title">Envoyer avec Raiun</string>
+    <string name="document_preparing_uploads">Préparation des envois…</string>
+    <string name="document_saving_shared">Enregistrement des fichiers partagés…</string>
+    <string name="document_shared_copy_on_upload">Les fichiers partagés seront copiés après le choix d’une destination et un appui sur Envoyer.</string>
+    <string name="document_sign_in_to_share">Ouvrez Raiun et connectez-vous, puis partagez à nouveau ces fichiers.</string>
+    <string name="document_retry_uploads">Réessayer les envois</string>
+    <string name="document_upload_here">Envoyer ici</string>
+    <string name="document_account">Compte</string>
+    <string name="document_selected">Sélectionné</string>
+    <string name="document_destination">Destination</string>
+    <string name="document_up_folder">Dossier parent</string>
+    <plurals name="document_incoming_files">
+        <item quantity="one">%1$d fichier</item>
+        <item quantity="many">%1$d fichiers</item>
+        <item quantity="other">%1$d fichiers</item>
+    </plurals>
+</resources>

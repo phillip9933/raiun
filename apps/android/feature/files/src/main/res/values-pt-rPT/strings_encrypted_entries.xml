@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="browser_encrypted_locked">Pasta encriptada, bloqueada</string>
+    <string name="browser_encrypted_load_failed">Não foi possível verificar as pastas encriptadas. Puxe para baixo para tentar novamente.</string>
+    <string name="browser_encrypted_actions">Ações para %1$s</string>
+</resources>

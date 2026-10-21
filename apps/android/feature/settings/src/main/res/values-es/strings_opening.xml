@@ -1,0 +1,11 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="settings_opening_summary">Vistas previas y aplicaciones predeterminadas</string>
+    <string name="settings_opening_files">Abrir archivos</string>
+    <string name="settings_opening_description">Elige qué ocurre al pulsar un archivo. Android gestiona tus aplicaciones externas predeterminadas. Abrir con siempre permite elegir una aplicación.</string>
+    <string name="settings_opening_text">Archivos de texto</string>
+    <string name="settings_opening_pdf">Documentos PDF</string>
+    <string name="settings_opening_images">Imágenes</string>
+    <string name="settings_opening_raiun">Vista previa de Raiun</string>
+    <string name="settings_opening_external">Aplicación externa</string>
+</resources>

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="transfers_screen_title">Transfers</string>
+    <string name="transfers_filter_all">All transfers</string>
+    <string name="transfers_filter_uploads">Uploads</string>
+    <string name="transfers_filter_downloads">Downloads</string>
+    <string name="transfers_filter_all_statuses">All statuses</string>
+    <string name="transfers_filter_any_date">Any date</string>
+    <string name="transfers_filter_today">Today</string>
+    <string name="transfers_filter_week">Last 7 days</string>
+    <string name="transfers_filter_month">Last 30 days</string>
+    <string name="transfers_filter_custom">Custom date range…</string>
+    <string name="transfers_filter_reset">Reset filters</string>
+    <string name="transfers_filter_started_hint">Filter by date started</string>
+    <string name="transfers_filter_date_range">%1$s – %2$s</string>
+    <string name="transfers_filter_empty">No matching transfers</string>
+    <string name="transfers_filter_empty_hint">Change or reset the filters to see more transfers.</string>
+    <string name="transfers_filter_all_types">All file types</string>
+    <string name="transfers_filter_images">Images</string>
+    <string name="transfers_filter_videos">Videos</string>
+    <string name="transfers_filter_documents">Documents</string>
+    <string name="transfers_filter_audio">Audio</string>
+    <string name="transfers_filter_other">Other</string>
+    <string name="document_edits_transfer_queued">Save queued — check Transfers for progress</string>
+</resources>

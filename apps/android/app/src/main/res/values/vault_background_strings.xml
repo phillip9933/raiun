@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="vault_background_upload_preparing">Encrypting file. Keep this location unlocked until preparation finishes.</string>
+    <string name="vault_background_upload_queued">Encrypted upload queued. It can continue after you lock this location. Check Transfers for progress.</string>
+</resources>

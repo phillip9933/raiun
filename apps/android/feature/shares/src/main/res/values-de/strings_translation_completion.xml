@@ -1,0 +1,36 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="incoming_preparing">Datei wird vorbereitet…</string>
+    <string name="incoming_cancel">Abbrechen</string>
+    <string name="incoming_close">Schließen</string>
+    <string name="incoming_open_with">Öffnen mit</string>
+    <string name="incoming_send">Datei senden</string>
+    <string name="incoming_details">Details</string>
+    <string name="incoming_layout">Ansicht ändern</string>
+    <string name="incoming_layout_list">Liste</string>
+    <string name="incoming_layout_compact">Kompakte Liste</string>
+    <string name="incoming_layout_tiles">Kacheln</string>
+    <string name="incoming_open_folder">Ordner öffnen</string>
+    <string name="incoming_copy_link">Dauerhaften Link kopieren</string>
+    <string name="incoming_link_copied">Link kopiert. Zum Öffnen sind bestehende Zugriffsrechte erforderlich.</string>
+    <string name="incoming_hide_share">Freigabe ausblenden</string>
+    <string name="incoming_unhide_share">Freigabe einblenden</string>
+    <string name="incoming_hide_explanation">Dies ändert die Sichtbarkeit in deiner Liste „Mit mir geteilt“, auch im Web. Der Ordner wird nicht gelöscht und die Zugriffsrechte bleiben unverändert. Mit „Ausgeblendete Freigaben anzeigen“ findest du ausgeblendete Ordner.</string>
+    <string name="incoming_show_hidden">Ausgeblendete Freigaben anzeigen</string>
+    <string name="incoming_hide_hidden">Ausgeblendete Freigaben ausblenden</string>
+    <string name="incoming_hidden">Ausgeblendete Freigabe</string>
+    <string name="incoming_folder_location">Speicherort</string>
+    <string name="incoming_folder_owner">Eigentümer</string>
+    <string name="incoming_folder_shared_by">Geteilt von</string>
+    <string name="incoming_folder_shared_at">Geteilt am</string>
+    <string name="incoming_folder_expires">Läuft ab</string>
+    <string name="incoming_folder_modified">Geändert</string>
+    <string name="incoming_folder_size">Größe</string>
+    <string name="incoming_folder_visible_items">Sichtbare Elemente in diesem Ordner</string>
+    <string name="incoming_folder_access">Dein Zugriff auf den freigegebenen Stammordner</string>
+    <string name="incoming_access_browse">Ordner durchsuchen</string>
+    <string name="incoming_access_download">Dateien herunterladen</string>
+    <string name="incoming_access_upload">Dateien hochladen</string>
+    <string name="incoming_access_create">Ordner erstellen</string>
+    <string name="incoming_access_scope">Der Zugriff auf einzelne Elemente wird vom Server geprüft.</string>
+</resources>
