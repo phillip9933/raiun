@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Ubuntu 24.04 x86_64 companion build; does not replace the tarball installer.
 set -euo pipefail
+trap 'echo "AppImage packaging failed at line $LINENO: $BASH_COMMAND" >&2' ERR
 cd "$(dirname "$0")/.."
 [[ $# == 0 && $(uname -m) == x86_64 ]]
 . /etc/os-release
@@ -26,7 +27,7 @@ appdir=$(find desktop-shell/src-tauri/target/release/bundle/appimage -maxdepth 1
 [[ -n "$appdir" && "$appdir" != *$'\n'* ]]
 appdir=$(realpath "$appdir")
 # Explicitly deploy both helper dependency closures (Zenity uses GTK4).
-linuxdeploy=$(find "${XDG_CACHE_HOME:-$HOME/.cache}/tauri" -type f -name 'linuxdeploy-x86_64.AppImage' -print -quit)
+linuxdeploy=$(find "${XDG_CACHE_HOME:-$HOME/.cache}/tauri" -type f -name 'linuxdeploy-07333c6-x86_64.AppImage' -print -quit)
 [[ -n "$linuxdeploy" ]]
 APPIMAGE_EXTRACT_AND_RUN=1 "$linuxdeploy" --appimage-extract-and-run --appdir "$appdir" --executable "$appdir/usr/bin/zenity" --executable "$appdir/usr/bin/secret-tool"
 mv "$appdir/AppRun" "$appdir/AppRun.tauri"
