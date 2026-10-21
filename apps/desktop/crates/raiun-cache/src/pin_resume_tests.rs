@@ -625,17 +625,21 @@ fn concurrent_handles_admit_only_one_initial_pin_for_the_same_target() {
     let scope = scope();
     let item = entry("file-a", "/file-a.bin", "etag-a", b"listed");
     publish_listing(&cache, &scope, &item, 1);
-    let state_path = state.path().to_owned();
+    // This checks concurrent pin admission through independent handles, not
+    // concurrent database initialization. Prepare both fallible opens before
+    // the barrier so a startup error cannot strand the remaining participants.
+    let handles = (0..2)
+        .map(|_| Cache::open(state.path(), 16 * 1024 * 1024).unwrap())
+        .collect::<Vec<_>>();
     let start = Arc::new(Barrier::new(3));
 
-    let workers = (0..2)
-        .map(|_| {
-            let path = state_path.clone();
+    let workers = handles
+        .into_iter()
+        .map(|cache| {
             let barrier = Arc::clone(&start);
             let scope = scope.clone();
             let item = item.clone();
             std::thread::spawn(move || {
-                let cache = Cache::open(&path, 16 * 1024 * 1024).unwrap();
                 barrier.wait();
                 cache.begin_initial_pin_manifest_at_cancellable(
                     &scope,

@@ -41,7 +41,11 @@ jobs:
         run: cargo test --workspace --exclude raiun-fuse --locked --no-run
       - name: Check Windows workspace
         run: cargo clippy --workspace --exclude raiun-fuse --all-targets --locked -- -D warnings
+      - name: Verify concurrent pin admission before the full batch
+        timeout-minutes: 3
+        run: cargo test --locked -p raiun-cache --lib pin_resume_tests::concurrent_handles_admit_only_one_initial_pin_for_the_same_target -- --exact --nocapture
       - name: Run workspace tests
+        timeout-minutes: 20
         run: cargo test --workspace --exclude raiun-fuse --locked
       - name: Build unsigned candidate installer
         run: |
