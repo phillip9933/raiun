@@ -1,8 +1,8 @@
 # Desktop photo and video import design
 
-Updated 9 October 2026. This is a bounded design proposal for a future desktop
-media-import feature. It does not claim that media import exists in Raiun
-Desktop, and it does not change the Android implementation.
+Updated 13 October 2026. This document describes the bounded desktop media
+import design and the current implementation boundary. It does not change the
+Android implementation.
 
 ## What exists today
 
@@ -10,9 +10,15 @@ Raiun Desktop currently models configured local-to-cloud folder pairs with
 `two_way`, `upload_only`, and `download_only` modes. The Linux agent and engine
 already own scheduling, transfer records, persistent inventory, conditional
 provider writes, and explicit conflict review. The shell exposes transfers and
-requires a deliberate Keep local or Keep cloud choice for a conflict. There is
-no media-specific source model, file-type filter, date-based destination
-organization, or metadata-based rename feature in the desktop UI or engine.
+requires a deliberate Keep local or Keep cloud choice for a conflict. The read-only preview now has a bounded local scanner and destination planner.
+The current branch persists account-bound, revisioned upload-only media jobs
+and has an engine API for durable import passes, including stability
+observations, private staged copies, conditional writes, and verified receipts.
+The agent exposes destination validation, create/update, explicit run, pause,
+remove, and status actions; a bounded scheduler handles explicit runs and
+enabled recurring jobs. The shell includes recurring-backup controls. Source
+files are never renamed or deleted. This source remains a candidate until the
+integrated source and native acceptance gates pass.
 
 The Android app has a separate folder-backup flow in `feature/files`. It selects
 a source folder, lets a user choose Photos, Videos, or All files, chooses a
@@ -36,6 +42,38 @@ be separated from transport. It leaves date-source precedence, timezone,
 collision behavior, repeat-run identity, sidecars, and rename scope open. This
 proposal stays within those boundaries.
 
+## Read-only source scan implemented
+
+`raiun media-scan --source /absolute/source --destination-root /Photos --filter photos`
+scans one explicitly selected local directory and writes a JSON report to stdout.
+It never uploads, renames, or modifies source files. The report contains
+`manifest`, `scan`, and `preview`; extract `manifest` to use the existing
+`media-preview --input` command. Incomplete scans still print their report but
+exit unsuccessfully, so scripts cannot mistake a partial inventory for a
+complete one. No remote inventory is loaded, so existing cloud collisions are
+not checked.
+
+The scanner uses directory-relative capabilities and no-follow opens, with
+10,000 discovered entries globally, depth 64, 8 MiB of cumulative path data,
+and a 64 KiB signature prefix per file. Unix nonblocking opens prevent a file
+swapped to a FIFO from hanging before its handle is checked. Signature detection
+classifies supported photo/video types; unknown files remain Other with a
+warning. Symlinks, special files, invalid paths, and unreadable or unstable
+entries are reported. Unknown media formats are not inferred from extensions.
+Warnings are bounded and report how many details were omitted.
+
+The default preserves relative paths without inferring dates. Add
+`--organization utc-year-month --filesystem-mtime-utc` to explicitly use the
+filesystem modification month in UTC. This is not EXIF capture time. Files
+whose metadata changes during the bounded read are excluded, but no ten-second
+stable-file delay or future immutability is claimed.
+
+A desktop preview command uses the same scanner/planner, permits only one scan
+at a time, and returns the first 100 rows and 20 warnings with complete totals
+and truncation indicators. The UI also has recurring-backup controls. The
+engine and agent integration is under verification; installation and
+end-to-end acceptance are not implied by these source changes.
+
 ## Bounded implementation proposal
 
 Treat media import as a separately configured, upload-only job, not as a new
@@ -46,12 +84,16 @@ their names. Reuse the agent scheduler, transfer history, provider upload
 pipeline, durable recovery behavior, and conflict APIs. Do not add a second
 transfer queue or allow media import to delete cloud or local files.
 
-The initial scanner should have an explicit bounded contract: enumerate the
-selected source, filter by MIME type, wait for a file to be stable before
-queueing it, and record an accepted receipt only according to the existing
-transfer-success semantics. A queued or failed upload must not be mistaken for
-a completed import. Use content hashes where size/mtime cannot establish a
-reliable signature, and persist scan progress so restarts can resume safely.
+The engine has an explicit bounded contract: enumerate the
+selected source, filter by detected media type, require two matching full
+content signatures at least ten seconds apart, and persist an immutable private
+staging copy before upload. A receipt is committed only after conditional
+upload and full remote content readback. Failed or ambiguous outcomes remain
+attention states with their staged copy retained; they are not automatically
+replayed. The job configuration is opt-in and bounded, and receipts bind the
+exact account, origin, Space, selected destination root identity, source path,
+destination path, and content signature. Agent scheduling/IPC and UI controls
+are implemented in the current candidate, pending integrated verification.
 The Linux engine has a conservative local hash cache covered by tests. It uses
 device/inode/size/mtime/ctime fingerprints on ext4, Btrfs, XFS, and tmpfs, and
 does not reuse a hash when ctime nanoseconds are zero. The tmpfs content test
@@ -61,9 +103,10 @@ SQLite work: a one-million-empty-file warm run took 19,722 ms with cache
 versus 14,004 ms before cache, with no new RSS sample. Installed end-to-end
 acceptance is pending; this media proposal does not depend on that optimization.
 
-The current reviewable slice is an offline CLI preview, not an importer. Pass
-an already classified source manifest and existing destination file paths to
-`raiun media-preview --input ./media-preview.json`:
+The CLI planner remains available for an offline preview independent of the
+recurring-backup screen. Pass an already classified source manifest and
+existing destination file paths to `raiun media-preview --input
+./media-preview.json`:
 
 ```json
 {
@@ -143,9 +186,8 @@ rename identity. It does not settle the owner decisions above.
 
 ## Delivery and acceptance boundary
 
-Before adding UI, define a media-job configuration and receipt schema in the
-core/agent contract, with migration and validation tests. Then implement a
-synthetic-filesystem scanner and queue integration. Acceptance should cover
+Before exposing the importer, finish agent scheduling/IPC and connect the
+durable engine runner to the transfer-status model. Acceptance should cover
 stable-file delay, unsupported MIME types, edits after an earlier upload,
 restart/retry behavior, repeated identical scans, renamed and moved source
 files, destination collisions, unavailable permissions/volumes, and recovery

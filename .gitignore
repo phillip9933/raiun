@@ -12,3 +12,6 @@ Thumbs.db
 /desktop-shell/dist/
 /desktop-shell/src-tauri/target/
 /desktop-shell/src-tauri/gen/
+
+# Temporary standalone crate builds during interoperability review.
+/crates/*/target/

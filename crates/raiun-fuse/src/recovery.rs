@@ -58,6 +58,7 @@ pub enum RecoveryWarning {
     ManifestNameMismatch,
     InvalidManifestFields,
     LocalPathUnavailable,
+    LegacyUnscopedManifest,
 }
 
 /// One bounded page from a read-only spool scan.
@@ -155,7 +156,11 @@ pub fn list_recoveries(
             unrecognized_entries = unrecognized_entries.saturating_add(1);
             continue;
         };
-        if name.starts_with(".provider-manifest-") && name.ends_with(".tmp") {
+        // This separately indexed, encrypted spool is not ordinary recovery.
+        // Only the known real directory is exempt, never a symlink or file.
+        if name == crate::vault_write::ROOT_DIR_NAME
+            && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        {
             continue;
         }
         let (stem, is_manifest) = if let Some(stem) = name.strip_suffix(".meta") {
@@ -284,11 +289,32 @@ fn read_spool_item(key: &str, files: &SpoolFiles) -> RecoveryItem {
         return item;
     };
     match read_bounded_manifest(manifest) {
-        Ok(fields) => {
-            let [space, remote, condition, etag] = fields;
+        Ok(manifest) => {
+            let (space, remote, condition, etag, legacy) = match manifest {
+                ProviderManifest::Legacy(fields) => (
+                    fields[0].clone(),
+                    fields[1].clone(),
+                    fields[2].clone(),
+                    fields[3].clone(),
+                    true,
+                ),
+                ProviderManifest::Scoped(fields) => (
+                    fields.space_id,
+                    fields.path,
+                    fields.condition,
+                    fields.etag,
+                    false,
+                ),
+            };
             if !valid_manifest_fields(&space, &remote, &condition, &etag) {
                 item.warnings.push(RecoveryWarning::InvalidManifestFields);
                 return item;
+            }
+            if legacy {
+                // Old records lack account, origin, root, and resource
+                // identity. Keep them visible for manual recovery, but the
+                // FUSE write path will never auto-adopt them.
+                item.warnings.push(RecoveryWarning::LegacyUnscopedManifest);
             }
             if stable_hash(&format!("{space}\0{remote}"))
                 != u64::from_str_radix(key, 16).unwrap_or(0)
@@ -317,13 +343,40 @@ fn read_spool_item(key: &str, files: &SpoolFiles) -> RecoveryItem {
     item
 }
 
-enum ManifestReadError {
+#[derive(Debug)]
+pub(super) enum ManifestReadError {
     TooLarge,
     Unsafe,
     Malformed,
 }
 
-fn read_bounded_manifest(path: &Path) -> Result<[String; 4], ManifestReadError> {
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScopedManifest {
+    version: u8,
+    origin: String,
+    account_id: String,
+    space_id: String,
+    root_resource_id: String,
+    resource_id: Option<String>,
+    path: String,
+    condition: String,
+    etag: String,
+}
+
+enum ProviderManifest {
+    Legacy([String; 4]),
+    Scoped(ScopedManifest),
+}
+
+pub(super) fn read_manifest_bytes(path: &Path) -> Result<Vec<u8>, ManifestReadError> {
+    read_manifest_bytes_after_open(path, || {})
+}
+
+fn read_manifest_bytes_after_open(
+    path: &Path,
+    after_open: impl FnOnce(),
+) -> Result<Vec<u8>, ManifestReadError> {
     let before = fs::symlink_metadata(path).map_err(|_| ManifestReadError::Unsafe)?;
     if before.file_type().is_symlink() || !before.is_file() {
         return Err(ManifestReadError::Unsafe);
@@ -339,6 +392,7 @@ fn read_bounded_manifest(path: &Path) -> Result<[String; 4], ManifestReadError> 
     if opened.len() > MAX_RECOVERY_MANIFEST_BYTES {
         return Err(ManifestReadError::TooLarge);
     }
+    after_open();
     let mut body = Vec::with_capacity(opened.len() as usize);
     bounded_take(&mut file)
         .read_to_end(&mut body)
@@ -350,7 +404,32 @@ fn read_bounded_manifest(path: &Path) -> Result<[String; 4], ManifestReadError> 
     if after.file_type().is_symlink() || !same_identity(&opened, &after) {
         return Err(ManifestReadError::Unsafe);
     }
-    serde_json::from_slice::<[String; 4]>(&body).map_err(|_| ManifestReadError::Malformed)
+    Ok(body)
+}
+
+fn read_bounded_manifest(path: &Path) -> Result<ProviderManifest, ManifestReadError> {
+    let body = read_manifest_bytes(path)?;
+    if let Ok(manifest) = serde_json::from_slice::<ScopedManifest>(&body) {
+        if manifest.version != 2
+            || manifest.origin.len() > 4_096
+            || manifest.account_id.is_empty()
+            || manifest.account_id.len() > 1_024
+            || manifest.space_id.is_empty()
+            || manifest.space_id.len() > MAX_SPACE_ID_BYTES
+            || manifest.root_resource_id.is_empty()
+            || manifest.root_resource_id.len() > 1_024
+            || manifest
+                .resource_id
+                .as_ref()
+                .is_some_and(|value| value.len() > 1_024)
+        {
+            return Err(ManifestReadError::Malformed);
+        }
+        return Ok(ProviderManifest::Scoped(manifest));
+    }
+    serde_json::from_slice::<[String; 4]>(&body)
+        .map(ProviderManifest::Legacy)
+        .map_err(|_| ManifestReadError::Malformed)
 }
 
 fn bounded_take(file: &mut File) -> Take<&mut File> {
@@ -362,7 +441,7 @@ fn open_manifest_nofollow(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path)
 }
 
@@ -451,6 +530,55 @@ mod tests {
         stem
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn only_real_vault_spool_directory_is_exempt_from_unknown_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let known = temp.path().join(crate::vault_write::ROOT_DIR_NAME);
+        fs::create_dir(&known).unwrap();
+        assert_eq!(
+            list_recoveries(temp.path(), None, 100)
+                .unwrap()
+                .unrecognized_entries,
+            0
+        );
+        fs::remove_dir(&known).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(other.path(), &known).unwrap();
+        assert_eq!(
+            list_recoveries(temp.path(), None, 100)
+                .unwrap()
+                .unrecognized_entries,
+            1
+        );
+        assert!(known.is_symlink());
+    }
+
+    #[test]
+    fn manifest_reader_bounds_growth_and_rejects_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("manifest");
+        fs::write(&path, b"initial").unwrap();
+        let result = read_manifest_bytes_after_open(&path, || {
+            fs::write(&path, vec![b'x'; MAX_RECOVERY_MANIFEST_BYTES as usize + 1]).unwrap();
+        });
+        assert!(matches!(result, Err(ManifestReadError::TooLarge)));
+        assert_eq!(
+            fs::metadata(&path).unwrap().len(),
+            MAX_RECOVERY_MANIFEST_BYTES + 1
+        );
+
+        fs::write(&path, b"original").unwrap();
+        let saved = temp.path().join("saved");
+        let result = read_manifest_bytes_after_open(&path, || {
+            fs::rename(&path, &saved).unwrap();
+            fs::write(&path, b"replacement").unwrap();
+        });
+        assert!(matches!(result, Err(ManifestReadError::Unsafe)));
+        assert_eq!(fs::read(&saved).unwrap(), b"original");
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+    }
+
     #[test]
     fn indexes_saved_upload_copy_without_reading_or_mutating_data() {
         let spool = tempfile::tempdir().unwrap();
@@ -474,7 +602,7 @@ mod tests {
         assert_eq!(item.bytes, Some(before.len() as u64));
         assert_eq!(item.local_data_path.as_deref(), data.to_str());
         assert_eq!(item.condition, Some(RecoveryConditionKind::Match));
-        assert!(item.warnings.is_empty());
+        assert_eq!(item.warnings, vec![RecoveryWarning::LegacyUnscopedManifest]);
         assert_eq!(fs::read(data).unwrap(), before);
     }
 

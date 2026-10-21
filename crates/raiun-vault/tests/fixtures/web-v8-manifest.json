@@ -1,0 +1,20 @@
+{
+  "source": "@fyears/rclone-crypt 0.0.7, fe7ce657bcf92566986ed1572f90e1cbb4683464",
+  "password": "potato (synthetic)",
+  "nonce": "0102030405060708090a0b0c0d0e0f101112131415161718",
+  "names": {
+    "1": "9cmn80lns8obm4t3koceogil20",
+    "123456789012345": "39pfuflp0u10iqi88m20aq3i28",
+    "1234567890123456": "9qg6n1iouahpupqlekm1k6sa5psf32kr83f3vv36c5kqrhij022g",
+    "12345678901234567": "q954vaqdql2tkn1g9g546an1oo9npnm6m8vk4ausf4cq5i364jig",
+    "写真🗃️": "m9t62nq5a92ncslf90dorqurss",
+    "folder/école.txt": "um9jr7t436jbmsgpub5sfni4qk/ap8un5letkkhetgjpn9528qi4c"
+  },
+  "sha256": {
+    "0": "c77033388300949b8ef061845548d9c318ea0897176091ecbde4863478a4b2bc",
+    "1": "bd80a5709d01fb2ae255679d2d186887e6043575017a74bf9e81082b04ba9a87",
+    "65535": "61a35da900c7cd936d702ff28ebbc3d9d44770559a46e0219df063093c9f53af",
+    "65536": "7560361bdc7f12d2522d8e39e80405f59e33512eefb662440a43e9342e0d15b1",
+    "65537": "420857bf896969fd5dc4a27c4492561bf06a391deecf1e065c772d9d29d46a09"
+  }
+}

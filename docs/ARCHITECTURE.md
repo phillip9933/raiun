@@ -1,7 +1,7 @@
 # Raiun Desktop architecture
 
 Status: accepted direction and target architecture; implementation status is
-tracked separately. Updated 9 October 2026.
+tracked separately. Updated 10 October 2026.
 
 Raiun Desktop is a lightweight OpenCloud companion that keeps existing local folders synchronized and exposes cloud content through the operating system's file manager. Linux is the first release target, Windows follows, and the architecture preserves a native macOS path. One desktop repository produces the platform packages. The Android application remains a separate project.
 
@@ -24,22 +24,35 @@ administration.
 
 Users select existing folders wherever they live on supported local volumes. Files need not move beneath the cloud root. Each pair maps one local directory to a directory within a personal or project Space. Two-way synchronization is the main mode; upload-only and download-only modes have explicit deletion policies rather than ambiguous mirror semantics.
 
-There is exactly one OS cloud entry for the MVP account:
+Each configured account has its own OS cloud entry and independent cloud root:
 
 ```text
-OpenCloud
+OpenCloud — account A
 ├── Personal
 │   └── the user's personal files and folders
 └── Spaces
     ├── Design
     └── Family
+
+OpenCloud — account B
+├── Personal
+└── Spaces
+    └── Research
 ```
 
 Personal and Spaces are synthetic namespace nodes. They are not folders created on the server. Project Spaces appear underneath Spaces; the personal drive appears once, under Personal. Selecting a Space changes neither its permissions nor membership. Users can make ordinary bookmarks or shortcuts into this hierarchy. Separate per-Space OS registrations are out of scope.
 
 Other applications must be able to enumerate, open, create, save, rename, and delete supported files through ordinary filesystem APIs and file dialogs. An Explorer sidebar link that only opens a web page does not satisfy the requirement. Uncached content downloads on demand. Being visible does not mean a file is available offline. The provider reports read-only permissions and unavailable content accurately.
 
-The MVP supports one configured account; internal resource keys already include account identity. Multiple accounts require a later explicit namespace design, not an implicit mixing of similarly named Spaces. Encrypted folders and Spaces, richer photo/video organization, metadata-based renaming, and additional automation are future increments. Detect encrypted areas early and block unsupported plaintext treatment.
+Remote-folder browsing may warn when existing names are not portable to
+Windows, including reserved device names, unsupported characters, trailing
+dots or spaces, and sibling names that compare equal after lowercase
+conversion. These notices are advisory: names stay unchanged and valid Linux
+names are not rejected. Lowercase comparison is an approximation, not a full
+implementation of Windows case folding, Unicode normalization, or
+filesystem-specific rules.
+
+Each account has a distinct profile, state directory, credential scope, scheduler, and cloud root; resource identity remains account-scoped. The selected account controls the settings and transfer view, but does not merge roots or change another account's sync state. Reject overlapping account roots and folder-pair roots, including canonical and ancestor/descendant aliases. Encrypted folders and Spaces, richer photo/video organization, metadata-based renaming, and additional automation are future increments. Detect encrypted areas early and block unsupported plaintext treatment.
 
 ## Language and toolkit decisions
 
@@ -122,7 +135,7 @@ Linux uses FUSE for real filesystem access. Sidebar visibility is a separate fil
 
 Windows uses a registered Cloud Files root. Native placeholders expose files before hydration; pinning and residency are distinct from sync completion. Cloud Files currently depends on NTFS. Arbitrary folder pairs are independent normal local folders and are not automatically converted to placeholder roots. The provider must implement conflicts, recovery, and changes itself; Microsoft's example is not a production sync engine. See [Cloud Files architecture](https://learn.microsoft.com/en-us/windows/win32/cfapi/build-a-cloud-file-sync-engine).
 
-macOS uses one File Provider domain for the MVP account with Personal/Spaces represented inside it. OS-managed provider paths must be respected; do not promise an arbitrary user-selected mount location on macOS. Swift handles extension lifecycle and native item representations. A bridge may call Rust library code, but there must be an explicit owner for mutable state. Prototype extension-to-agent communication and sandbox access before committing to that topology. If direct IPC is unsuitable, use an app-group durable request mailbox with defined ownership rather than two independent reconciliation engines. See [Apple replicated File Provider](https://developer.apple.com/documentation/fileprovider/replicated-file-provider-extension).
+macOS uses one File Provider domain per account with Personal/Spaces represented inside each domain. OS-managed provider paths must be respected; do not promise an arbitrary user-selected mount location on macOS. Swift handles extension lifecycle and native item representations. A bridge may call Rust library code, but there must be an explicit owner for mutable state. Prototype extension-to-agent communication and sandbox access before committing to that topology. If direct IPC is unsuitable, use an app-group durable request mailbox with defined ownership rather than two independent reconciliation engines. See [Apple replicated File Provider](https://developer.apple.com/documentation/fileprovider/replicated-file-provider-extension).
 
 The full MVP requires writable cloud-file access, pin/unpin, error reporting, and recovery on its release platform. A read-only mount is a useful internal milestone but is not the promised MVP. Cross-Space moves are copy-and-verify followed by a separately authorized delete, not assumed atomic server moves. Do not claim POSIX locking, hard links, device files, or transactional multi-file database behavior. Reject unsupported special files clearly. Application save-through-temporary-file and rename patterns are mandatory compatibility tests.
 

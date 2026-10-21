@@ -7,6 +7,13 @@ publish.workspace = true
 
 [dependencies]
 serde.workspace = true
+cap-std = "4.0.3"
+cap-fs-ext = "4.0.3"
+infer = "0.19"
+time = { version = "=0.3.45", default-features = false, features = ["std"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 serde_json.workspace = true

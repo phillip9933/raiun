@@ -10,14 +10,28 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub mod backend;
+pub mod media_jobs;
 pub mod media_plan;
+pub mod media_scan;
+pub mod windows_compatibility;
+pub use media_jobs::{
+    DEFAULT_MEDIA_SCAN_INTERVAL_SECONDS, MAX_MEDIA_IMPORT_JOBS, MAX_MEDIA_SCAN_INTERVAL_SECONDS,
+    MAX_MEDIA_SOURCE_PATH_BYTES, MIN_MEDIA_SCAN_INTERVAL_SECONDS, MediaImportJob,
+    default_media_scan_interval_seconds, validate_media_import_jobs,
+};
 pub use media_plan::{
     MediaFilter, MediaKind, MediaOrganization, MediaPlanError, MediaPlanItem, MediaPlanOptions,
     MediaPlanOutcome, MediaPlanRejection, MediaSource, MediaUtcMonth, plan_media_import,
 };
+pub use windows_compatibility::{WindowsNameWarning, windows_name_warnings};
 
 /// Current on-disk configuration schema version.
 pub const CONFIG_SCHEMA_VERSION: u32 = 1;
+/// Maximum number of exact relative paths excluded from one folder pair.
+pub const MAX_EXCLUDED_PATHS: usize = 256;
+/// Maximum aggregate UTF-8 bytes in one folder pair's exclusion list.
+pub const MAX_EXCLUDED_PATH_BYTES: usize = 32 * 1024;
+const MAX_EXCLUDED_PATH_LENGTH: usize = 4096;
 
 /// Application configuration for a single OS-provided cloud root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,8 +49,52 @@ pub struct FolderPair {
     pub id: String,
     pub local_path: PathBuf,
     pub space_id: String,
+    /// Explicit identity for a folder vault. `remote_path` is then interpreted
+    /// as a virtual path beneath this root, never as a DAV path.
+    #[serde(default)]
+    pub vault: Option<VaultBinding>,
     pub remote_path: String,
     pub mode: SyncMode,
+    /// Exact pair-relative paths whose local/cloud copies remain untouched.
+    /// Directories also exclude descendants at slash-separated boundaries.
+    #[serde(default)]
+    pub excluded_paths: Vec<String>,
+}
+
+impl FolderPair {
+    /// Whether an exact pair-relative path is excluded from reconciliation.
+    /// Callers should pass normalized `/`-separated paths without a leading
+    /// slash; configuration validation enforces this representation.
+    pub fn excludes_relative_path(&self, path: &str) -> bool {
+        self.excluded_paths.iter().any(|excluded| {
+            path == excluded
+                || path
+                    .strip_prefix(excluded)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        })
+    }
+
+    /// Validate the bounded canonical representation used by sync engines.
+    pub fn validate_exclusions(&self) -> Result<(), String> {
+        let errors = validate_excluded_paths(&self.excluded_paths);
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+}
+
+/// Stable location and resource identity for one folder-vault root.
+///
+/// Passwords and unlocked session material are never stored in configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VaultBinding {
+    /// Absolute logical DAV path within `FolderPair::space_id`.
+    pub root_path: String,
+    /// Server resource identity, scoped by account, origin, and Space.
+    pub root_resource_id: String,
 }
 
 /// Direction in which a future sync engine may reconcile a folder pair.
@@ -185,22 +243,142 @@ pub fn validate_pair(pair: &FolderPair, existing: &[FolderPair], cloud_root: &Pa
         ));
     }
 
+    errors.extend(
+        validate_excluded_paths(&pair.excluded_paths)
+            .into_iter()
+            .map(|problem| format!("pair '{}' exclusions are invalid: {problem}", pair.id)),
+    );
+
+    if let Some(binding) = &pair.vault {
+        if binding.root_path.len() > 32_768 {
+            errors.push(format!(
+                "pair '{}' vault root_path exceeds 32768 bytes",
+                pair.id
+            ));
+        }
+        if let Err(problem) = validate_remote_path(&binding.root_path) {
+            errors.push(format!(
+                "pair '{}' vault root_path '{}' is invalid: {}",
+                pair.id, binding.root_path, problem
+            ));
+        }
+        if binding.root_resource_id.trim().is_empty()
+            || binding.root_resource_id.trim() != binding.root_resource_id
+            || binding.root_resource_id.len() > 512
+            || binding.root_resource_id.chars().any(char::is_control)
+        {
+            errors.push(format!(
+                "pair '{}' vault root_resource_id must be nonempty, at most 512 bytes, and contain no control characters",
+                pair.id
+            ));
+        }
+    }
+
     for other in existing.iter().filter(|other| !std::ptr::eq(*other, pair)) {
         if other.id == pair.id {
             errors.push(format!("pair id '{}' is duplicated", pair.id));
         }
-        if other.space_id == pair.space_id
-            && validate_remote_path(&pair.remote_path).is_ok()
-            && validate_remote_path(&other.remote_path).is_ok()
-            && remote_paths_overlap(&pair.remote_path, &other.remote_path)
-        {
-            errors.push(format!(
-                "pair '{}' remote_path '{}' overlaps pair '{}' remote_path '{}' in space '{}'",
-                pair.id, pair.remote_path, other.id, other.remote_path, pair.space_id
-            ));
+        if other.space_id == pair.space_id {
+            if let (Some(left), Some(right)) = (&pair.vault, &other.vault) {
+                if left.root_path == right.root_path
+                    && left.root_resource_id != right.root_resource_id
+                {
+                    errors.push(format!(
+                        "pairs '{}' and '{}' bind different vault resources at the same root path '{}'",
+                        pair.id, other.id, left.root_path
+                    ));
+                }
+                if left.root_resource_id == right.root_resource_id
+                    && left.root_path != right.root_path
+                {
+                    errors.push(format!(
+                        "pairs '{}' and '{}' bind the same vault resource at different root paths",
+                        pair.id, other.id
+                    ));
+                }
+            }
+            if validate_remote_path(&pair.remote_path).is_ok()
+                && validate_remote_path(&other.remote_path).is_ok()
+                && pair
+                    .vault
+                    .as_ref()
+                    .is_none_or(|binding| validate_remote_path(&binding.root_path).is_ok())
+                && other
+                    .vault
+                    .as_ref()
+                    .is_none_or(|binding| validate_remote_path(&binding.root_path).is_ok())
+            {
+                let same_vault = match (&pair.vault, &other.vault) {
+                    (Some(left), Some(right)) => {
+                        left.root_path == right.root_path
+                            && left.root_resource_id == right.root_resource_id
+                    }
+                    _ => false,
+                };
+                let left_path = effective_remote_path(&pair.remote_path, pair.vault.as_ref());
+                let right_path = effective_remote_path(&other.remote_path, other.vault.as_ref());
+                let overlaps = if same_vault {
+                    remote_paths_overlap(&pair.remote_path, &other.remote_path)
+                } else {
+                    remote_paths_overlap(&left_path, &right_path)
+                };
+                if overlaps {
+                    errors.push(format!(
+                        "pair '{}' remote_path '{}' overlaps pair '{}' remote_path '{}' in space '{}'",
+                        pair.id, pair.remote_path, other.id, other.remote_path, pair.space_id
+                    ));
+                }
+            }
         }
     }
     errors
+}
+
+fn validate_excluded_paths(paths: &[String]) -> Vec<String> {
+    let mut errors = Vec::new();
+    if paths.len() > MAX_EXCLUDED_PATHS {
+        errors.push(format!(
+            "at most {MAX_EXCLUDED_PATHS} exact paths are allowed"
+        ));
+    }
+    let total_bytes = paths
+        .iter()
+        .try_fold(0_usize, |sum, path| sum.checked_add(path.len()));
+    if total_bytes.is_none_or(|bytes| bytes > MAX_EXCLUDED_PATH_BYTES) {
+        errors.push(format!(
+            "the exclusion list exceeds {MAX_EXCLUDED_PATH_BYTES} bytes"
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for path in paths {
+        let invalid = path.is_empty()
+            || path.len() > MAX_EXCLUDED_PATH_LENGTH
+            || path.starts_with('/')
+            || path.ends_with('/')
+            || path.contains('\\')
+            || path.chars().any(char::is_control)
+            || path
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..");
+        if invalid {
+            errors.push(format!(
+                "'{path}' must be a bounded, normalized relative path using '/' separators"
+            ));
+        } else if !seen.insert(path) {
+            errors.push(format!("'{path}' is listed more than once"));
+        }
+    }
+    errors
+}
+
+fn effective_remote_path(remote_path: &str, vault: Option<&VaultBinding>) -> String {
+    // Virtual plaintext components are not DAV components. For mixed bindings
+    // conservatively protect the whole vault root; same-vault pairs are
+    // compared using their virtual paths by the caller above.
+    vault.map_or_else(
+        || remote_path.to_owned(),
+        |binding| binding.root_path.clone(),
+    )
 }
 
 /// A cloud space with a stable identity and user-facing display name.
@@ -287,7 +465,7 @@ pub fn space_entries(spaces: &[Space]) -> Result<Vec<NamespaceEntry>, String> {
     Ok(entries)
 }
 
-fn validate_remote_path(path: &str) -> Result<(), &'static str> {
+pub fn validate_remote_path(path: &str) -> Result<(), &'static str> {
     if path.is_empty() {
         return Err("use '/' for the space root or an absolute slash-separated path");
     }
@@ -518,8 +696,10 @@ mod tests {
             id: id.to_string(),
             local_path,
             space_id: space_id.to_string(),
+            vault: None,
             remote_path: remote_path.to_string(),
             mode: SyncMode::TwoWay,
+            excluded_paths: Vec::new(),
         }
     }
 
@@ -529,6 +709,172 @@ mod tests {
         assert_eq!(encoded, "\"upload_only\"");
         let invalid = r#"{"schema_version":1,"cloud_root":"/cloud","pairs":[],"extra":true}"#;
         assert!(serde_json::from_str::<Config>(invalid).is_err());
+    }
+
+    #[test]
+    fn folder_pair_configuration_remains_backward_compatible_without_vault_binding() {
+        let legacy = r#"{"id":"p","local_path":"/local","space_id":"s","remote_path":"/docs","mode":"two_way"}"#;
+        let pair: FolderPair = serde_json::from_str(legacy).expect("legacy pair");
+        assert!(pair.vault.is_none());
+        assert!(pair.excluded_paths.is_empty());
+        assert_eq!(
+            serde_json::from_str::<FolderPair>(&serde_json::to_string(&pair).unwrap()).unwrap(),
+            pair
+        );
+    }
+
+    #[test]
+    fn selective_paths_use_exact_component_boundaries() {
+        let mut pair = pair("p", PathBuf::from("/local"), "s", "/docs");
+        pair.excluded_paths = vec!["cache".into(), "one/two.txt".into()];
+        assert!(pair.excludes_relative_path("cache"));
+        assert!(pair.excludes_relative_path("cache/item.bin"));
+        assert!(!pair.excludes_relative_path("cache-old/item.bin"));
+        assert!(pair.excludes_relative_path("one/two.txt"));
+        assert!(!pair.excludes_relative_path("one/two.txt.bak"));
+        assert!(!pair.excludes_relative_path("one/three.txt"));
+    }
+
+    #[test]
+    fn selective_path_validation_rejects_ambiguous_or_unbounded_values() {
+        let local = tempfile::tempdir().expect("local root");
+        let cloud = tempfile::tempdir().expect("cloud root");
+        let mut candidate = pair("p", local.path().into(), "s", "/docs");
+        for invalid in [
+            "",
+            "/absolute",
+            "trailing/",
+            "a//b",
+            "./a",
+            "a/../b",
+            "a\\b",
+            "bad\nname",
+        ] {
+            candidate.excluded_paths = vec![invalid.into()];
+            assert!(
+                validate_pair(&candidate, &[], cloud.path())
+                    .iter()
+                    .any(|error| error.contains("exclusions are invalid")),
+                "accepted {invalid:?}"
+            );
+        }
+        candidate.excluded_paths = vec!["same/path".into(), "same/path".into()];
+        assert!(
+            validate_pair(&candidate, &[], cloud.path())
+                .iter()
+                .any(|error| error.contains("listed more than once"))
+        );
+
+        candidate.excluded_paths = vec!["x".repeat(MAX_EXCLUDED_PATH_LENGTH + 1)];
+        assert!(
+            validate_pair(&candidate, &[], cloud.path())
+                .iter()
+                .any(|error| error.contains("normalized relative path"))
+        );
+
+        candidate.excluded_paths = vec!["x".into(); MAX_EXCLUDED_PATHS + 1];
+        assert!(
+            validate_pair(&candidate, &[], cloud.path())
+                .iter()
+                .any(|error| error.contains("at most 256"))
+        );
+
+        candidate.excluded_paths = vec!["x".repeat(MAX_EXCLUDED_PATH_BYTES + 1)];
+        assert!(
+            validate_pair(&candidate, &[], cloud.path())
+                .iter()
+                .any(|error| error.contains("exclusion list exceeds"))
+        );
+    }
+
+    #[test]
+    fn validates_explicit_vault_binding_path_and_resource_identity() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let local = temp.path().join("local");
+        fs::create_dir(&local).expect("create local");
+        let cloud = temp.path().join("cloud");
+        let mut candidate = pair("vault", local, "s", "/");
+        candidate.vault = Some(VaultBinding {
+            root_path: "/team.vault".into(),
+            root_resource_id: "resource-1".into(),
+        });
+        assert!(validate_pair(&candidate, &[], &cloud).is_empty());
+
+        for root_path in ["", "relative", "/a/../b", "/a//b", "/a/"] {
+            let mut invalid = candidate.clone();
+            invalid.vault.as_mut().unwrap().root_path = root_path.into();
+            assert!(
+                validate_pair(&invalid, &[], &cloud)
+                    .iter()
+                    .any(|error| error.contains("vault root_path")),
+                "accepted {root_path:?}"
+            );
+        }
+        let oversized_id = "x".repeat(513);
+        for resource_id in [
+            "",
+            " \t",
+            " leading",
+            "trailing ",
+            oversized_id.as_str(),
+            "bad\nid",
+        ] {
+            let mut invalid = candidate.clone();
+            invalid.vault.as_mut().unwrap().root_resource_id = resource_id.into();
+            assert!(
+                validate_pair(&invalid, &[], &cloud)
+                    .iter()
+                    .any(|error| error.contains("root_resource_id")),
+                "accepted invalid resource id"
+            );
+        }
+        let mut space_root = candidate;
+        space_root.vault.as_mut().unwrap().root_path = "/".into();
+        assert!(validate_pair(&space_root, &[], &cloud).is_empty());
+    }
+
+    #[test]
+    fn vault_remote_overlap_uses_virtual_paths_for_same_root_and_physical_paths_otherwise() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let first_local = temp.path().join("first");
+        let second_local = temp.path().join("second");
+        let third_local = temp.path().join("third");
+        fs::create_dir_all(&first_local).expect("first local");
+        fs::create_dir_all(&second_local).expect("second local");
+        fs::create_dir_all(&third_local).expect("third local");
+        let cloud = temp.path().join("cloud");
+
+        let mut ordinary_parent = pair("plain", first_local.clone(), "s", "/vaults");
+        let mut nested_vault = pair("vault", second_local.clone(), "s", "/");
+        nested_vault.vault = Some(VaultBinding {
+            root_path: "/vaults/team.vault".into(),
+            root_resource_id: "team-id".into(),
+        });
+        assert!(
+            validate_pair(&nested_vault, &[ordinary_parent.clone()], &cloud)
+                .iter()
+                .any(|error| error.contains("remote_path") && error.contains("overlaps"))
+        );
+
+        ordinary_parent.remote_path = "/elsewhere".into();
+        let mut sibling_vault = pair("sibling", third_local.clone(), "s", "/");
+        sibling_vault.vault = Some(VaultBinding {
+            root_path: "/vaults/other.vault".into(),
+            root_resource_id: "other-id".into(),
+        });
+        assert!(
+            !validate_pair(&sibling_vault, &[nested_vault.clone()], &cloud)
+                .iter()
+                .any(|error| error.contains("remote_path") && error.contains("overlaps"))
+        );
+
+        let mut same_root_child = pair("child", third_local, "s", "/photos");
+        same_root_child.vault = nested_vault.vault.clone();
+        assert!(
+            validate_pair(&same_root_child, &[nested_vault], &cloud)
+                .iter()
+                .any(|error| error.contains("remote_path") && error.contains("overlaps"))
+        );
     }
 
     #[test]
@@ -598,7 +944,7 @@ mod tests {
             );
         }
 
-        let root = Path::new(std::path::MAIN_SEPARATOR_STR);
+        let root = temp.path().ancestors().last().expect("filesystem root");
         let errors = validate_pair(&candidate, &[], root);
         assert!(
             errors
@@ -675,10 +1021,27 @@ mod tests {
 
     #[test]
     fn rejects_filesystem_root_as_local_path() {
-        let root = Path::new(std::path::MAIN_SEPARATOR_STR);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().ancestors().last().expect("filesystem root");
         let candidate = pair("root", root.to_path_buf(), "space", "/");
-        let errors = validate_pair(&candidate, &[], Path::new("/cloud"));
+        let cloud_root = temp.path().join("cloud");
+        let errors = validate_pair(&candidate, &[], &cloud_root);
         assert!(errors.iter().any(|error| error.contains("filesystem root")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recognizes_windows_volume_and_unc_roots() {
+        for root in [
+            Path::new(r"C:\"),
+            Path::new(r"\\server\share\"),
+            Path::new(r"\\?\C:\"),
+            Path::new(r"\\?\UNC\server\share\"),
+        ] {
+            assert!(is_filesystem_root(root), "expected root: {root:?}");
+        }
+        assert!(!is_filesystem_root(Path::new(r"C:\Users")));
+        assert!(!is_filesystem_root(Path::new(r"\\server\share\folder")));
     }
 
     #[test]

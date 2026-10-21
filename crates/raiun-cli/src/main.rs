@@ -5,11 +5,14 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use raiun_core::media_plan::{MediaPlanOptions, MediaSource, plan_media_import};
+use raiun_core::media_plan::{
+    MediaFilter, MediaOrganization, MediaPlanItem, MediaPlanOptions, MediaSource, plan_media_import,
+};
+use raiun_core::media_scan::{MediaScanOptions, MediaScanReport, scan_media_folder};
 use raiun_core::{
     CONFIG_SCHEMA_VERSION, Config, FolderPair, SyncMode, validate_config, validate_pair,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -41,20 +44,108 @@ enum Command {
     },
     /// Report configuration and engine availability.
     Status,
+    /// Print a redacted, local-only diagnostic summary.
+    Diagnostics {
+        /// Write the redacted JSON report to a new file instead of stdout.
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
     /// Preview deterministic media destinations from an already-classified JSON manifest.
     MediaPreview {
         /// JSON request file. This command does not scan files or contact a server.
         #[arg(long, value_name = "JSON")]
         input: PathBuf,
     },
+    /// Read-only scan of one selected folder; prints a planner manifest and preview.
+    /// Extract the `manifest` object to use it with `media-preview --input`.
+    MediaScan {
+        /// Absolute source folder to inspect. The scanner never writes to it.
+        #[arg(long, value_name = "PATH")]
+        source: PathBuf,
+        /// Remote destination root, such as /Personal/Photos.
+        #[arg(long, value_name = "REMOTE_PATH")]
+        destination_root: String,
+        /// Which classified source types to include in the preview.
+        #[arg(long, value_enum)]
+        filter: ScanFilterArg,
+        /// Destination layout. Defaults to preserving relative source folders.
+        #[arg(long, value_enum, default_value_t = ScanOrganizationArg::PreserveRelativePath)]
+        organization: ScanOrganizationArg,
+        /// Include filesystem modification time interpreted as a UTC month.
+        #[arg(long)]
+        filesystem_mtime_utc: bool,
+    },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 struct MediaPreviewRequest {
     options: MediaPlanOptions,
     sources: Vec<MediaSource>,
     existing_destinations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ScanFilterArg {
+    Photos,
+    Videos,
+    All,
+}
+
+impl From<ScanFilterArg> for MediaFilter {
+    fn from(value: ScanFilterArg) -> Self {
+        match value {
+            ScanFilterArg::Photos => Self::Photos,
+            ScanFilterArg::Videos => Self::Videos,
+            ScanFilterArg::All => Self::All,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ScanOrganizationArg {
+    PreserveRelativePath,
+    UtcYearMonth,
+}
+
+impl From<ScanOrganizationArg> for MediaOrganization {
+    fn from(value: ScanOrganizationArg) -> Self {
+        match value {
+            ScanOrganizationArg::PreserveRelativePath => Self::PreserveRelativePath,
+            ScanOrganizationArg::UtcYearMonth => Self::UtcYearMonth,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct DiagnosticsReport {
+    schema_version: u32,
+    app_version: &'static str,
+    target_os: &'static str,
+    target_arch: &'static str,
+    config: ConfigDiagnostics,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigDiagnostics {
+    parse_valid: bool,
+    folder_pair_count: Option<usize>,
+    mode_counts: Option<SyncModeCounts>,
+    vault_pair_count: Option<usize>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct SyncModeCounts {
+    two_way: usize,
+    upload_only: usize,
+    download_only: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct MediaScanOutput {
+    manifest: MediaPreviewRequest,
+    scan: MediaScanReport,
+    preview: Vec<MediaPlanItem>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -132,6 +223,21 @@ fn run(cli: Cli) -> Result<(), String> {
     let Cli { config, command } = cli;
     let command = match command {
         Command::MediaPreview { input } => return media_preview(&input),
+        Command::MediaScan {
+            source,
+            destination_root,
+            filter,
+            organization,
+            filesystem_mtime_utc,
+        } => {
+            return media_scan(
+                &source,
+                destination_root,
+                filter,
+                organization,
+                filesystem_mtime_utc,
+            );
+        }
         command => command,
     };
 
@@ -171,12 +277,15 @@ fn run(cli: Cli) -> Result<(), String> {
                     id: args.id,
                     local_path: args.local,
                     space_id: args.space_id,
+                    vault: None,
                     remote_path: args.remote,
                     mode: args.mode.into(),
+                    excluded_paths: Vec::new(),
                 },
             ),
             PairCommand::Remove(args) => remove_pair(&config_path, args.id),
         },
+        Command::Diagnostics { output } => diagnostics(&config_path, output.as_deref()),
         Command::Status => {
             let config = read_config(&config_path)?;
             let issues = validate_config(&config);
@@ -200,7 +309,9 @@ fn run(cli: Cli) -> Result<(), String> {
             }
             Ok(())
         }
-        Command::MediaPreview { .. } => unreachable!("handled before configuration lookup"),
+        Command::MediaPreview { .. } | Command::MediaScan { .. } => {
+            unreachable!("handled before configuration lookup")
+        }
     }
 }
 
@@ -235,6 +346,115 @@ fn media_preview(path: &Path) -> Result<(), String> {
         "{}",
         serde_json::to_string_pretty(&preview).map_err(display)?
     );
+    Ok(())
+}
+
+fn diagnostics(config_path: &Path, destination: Option<&Path>) -> Result<(), String> {
+    let config = match read_config(config_path) {
+        Ok(config) => {
+            let mut mode_counts = SyncModeCounts::default();
+            for pair in &config.pairs {
+                match pair.mode {
+                    SyncMode::TwoWay => mode_counts.two_way += 1,
+                    SyncMode::UploadOnly => mode_counts.upload_only += 1,
+                    SyncMode::DownloadOnly => mode_counts.download_only += 1,
+                }
+            }
+            ConfigDiagnostics {
+                parse_valid: true,
+                folder_pair_count: Some(config.pairs.len()),
+                mode_counts: Some(mode_counts),
+                vault_pair_count: Some(
+                    config
+                        .pairs
+                        .iter()
+                        .filter(|pair| pair.vault.is_some())
+                        .count(),
+                ),
+            }
+        }
+        Err(_) => ConfigDiagnostics {
+            parse_valid: false,
+            folder_pair_count: None,
+            mode_counts: None,
+            vault_pair_count: None,
+        },
+    };
+    let report = DiagnosticsReport {
+        schema_version: 1,
+        app_version: env!("CARGO_PKG_VERSION"),
+        target_os: env::consts::OS,
+        target_arch: env::consts::ARCH,
+        config,
+    };
+    let output = serde_json::to_string_pretty(&report)
+        .map_err(|_| "could not encode redacted diagnostics".to_string())?;
+    if let Some(destination) = destination {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(destination).map_err(|_| {
+            "could not create diagnostics file (choose a new local file path)".to_string()
+        })?;
+        file.write_all(output.as_bytes())
+            .and_then(|()| file.write_all(b"\n"))
+            .and_then(|()| file.sync_all())
+            .map_err(|_| "could not write diagnostics file".to_string())?;
+        println!("Diagnostics saved to the selected file.");
+    } else {
+        println!("{output}");
+    }
+    Ok(())
+}
+
+fn media_scan(
+    source_root: &Path,
+    destination_root: String,
+    filter: ScanFilterArg,
+    organization: ScanOrganizationArg,
+    filesystem_mtime_utc: bool,
+) -> Result<(), String> {
+    let scan = scan_media_folder(
+        source_root,
+        MediaScanOptions {
+            filesystem_mtime_utc,
+        },
+    )
+    .map_err(display)?;
+    let manifest = MediaPreviewRequest {
+        options: MediaPlanOptions {
+            destination_root,
+            filter: filter.into(),
+            organization: organization.into(),
+        },
+        sources: scan.sources.clone(),
+        existing_destinations: Vec::new(),
+    };
+    let preview = plan_media_import(
+        &manifest.sources,
+        &manifest.options,
+        &manifest.existing_destinations,
+    )
+    .map_err(display)?;
+    let incomplete = !scan.complete || scan.truncated;
+    let output = MediaScanOutput {
+        manifest,
+        scan,
+        preview,
+    };
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&output).map_err(display)?
+    );
+    if incomplete {
+        return Err(
+            "media scan is incomplete; review the scan warnings before using its manifest".into(),
+        );
+    }
     Ok(())
 }
 

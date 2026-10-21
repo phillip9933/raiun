@@ -4,34 +4,193 @@
 //! listings are staged incrementally; a failed scan never advances a baseline.
 //! The first implementation serializes mutations through one engine mutex.
 
+use raiun_cache::{
+    AvailabilityPolicy, Cache, CacheScope, CacheUsage, CachedEntry, ConditionalWriteRequest,
+    ContentProtection, ContentVersion, PinInfo, PinManifestEntry, PinState, QueuedWrite, Retention,
+    ScopeProtection, TargetState, WriteState,
+};
 use raiun_core::backend::{
     CloudBackend, CloudError, CloudSpace, ErrorKind, RemoteEntry, WriteCondition,
 };
-use raiun_core::{FolderPair, SyncMode};
+use raiun_core::{FolderPair, SyncMode, VaultBinding, validate_remote_path};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, Mutex, MutexGuard,
-    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, MutexGuard, RwLock,
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::{Builder as TempBuilder, NamedTempFile};
 
+#[cfg(unix)]
+mod folder_cloud_only;
+pub mod media_import;
+pub use media_import::{
+    MAX_MEDIA_RECEIPTS_PER_ACCOUNT, MAX_MEDIA_RECOVERY_PAGE, MEDIA_STABLE_FILE_SECONDS,
+    MediaImportReceipt, MediaImportRecoveryCursor, MediaImportRecoveryItem,
+    MediaImportRecoveryPage, MediaImportRunReport, MediaImportRunStatus,
+};
+
 #[derive(Clone)]
 pub struct Engine {
     inner: Arc<Inner>,
+    backend: Arc<dyn CloudBackend>,
+    vault_binding: Option<(String, VaultBinding)>,
+    offline_cache: Option<Arc<OfflineCache>>,
+    account_scope: Option<AccountScope>,
+    offline_namespace: Arc<OfflineNamespace>,
+}
+
+/// Holds the engine dispatch fence while a caller durably persists an updated
+/// profile policy. The caller publishes this in-memory policy only after the
+/// settings write succeeds; dropping the guard rolls back by doing nothing.
+pub struct PairPolicyPublication<'a> {
+    inner: &'a Inner,
+    pair_id: String,
+    exclusions: Option<Vec<String>>,
+    _execution: MutexGuard<'a, ()>,
+}
+
+impl PairPolicyPublication<'_> {
+    /// Make the prepared policy visible to subsequent sync dispatches. This is
+    /// infallible after validation; a poisoned map mutex is recovered while
+    /// still holding the execution gate.
+    pub fn publish(self) {
+        let mut policies = self
+            .inner
+            .pair_policies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        policies.insert(self.pair_id.clone(), self.exclusions.clone());
+    }
+}
+
+/// Retire several connections under one dispatch fence after durable settings
+/// publication. Dropping this guard leaves every existing connection unchanged.
+pub struct PairRetirementPublication<'a> {
+    inner: &'a Inner,
+    pair_ids: Vec<String>,
+    _execution: MutexGuard<'a, ()>,
+}
+
+impl PairRetirementPublication<'_> {
+    pub fn publish(self) {
+        let mut policies = self
+            .inner
+            .pair_policies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for id in self.pair_ids {
+            policies.insert(id, None);
+        }
+    }
+}
+
+#[derive(Clone)]
+struct AccountScope {
+    account_id: String,
+    origin: String,
+}
+
+/// An immutable authority boundary shared only by clones of one account-bound
+/// Engine. Rebinding an Engine creates a fresh namespace handle, even when the
+/// visible account and origin strings happen to be identical.
+struct OfflineNamespace {
+    binding: Option<OfflineNamespaceBinding>,
+    binding_token: Arc<()>,
+    probe_gate: Mutex<()>,
+    next_probe: AtomicU64,
+    transport_unavailable: AtomicBool,
+    spaces: RwLock<Option<Arc<Vec<CloudSpace>>>>,
+    published_live_spaces: RwLock<Option<Vec<CloudSpace>>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct OfflineNamespaceBinding {
+    account_id: String,
+    origin: String,
+    backend_identity: usize,
+}
+
+impl OfflineNamespace {
+    fn unbound() -> Arc<Self> {
+        Arc::new(Self {
+            binding: None,
+            binding_token: Arc::new(()),
+            probe_gate: Mutex::new(()),
+            next_probe: AtomicU64::new(0),
+            transport_unavailable: AtomicBool::new(false),
+            spaces: RwLock::new(None),
+            published_live_spaces: RwLock::new(None),
+        })
+    }
+
+    fn for_account(scope: &AccountScope, backend: &Arc<dyn CloudBackend>) -> Arc<Self> {
+        Arc::new(Self {
+            binding: Some(OfflineNamespaceBinding {
+                account_id: scope.account_id.clone(),
+                origin: scope.origin.clone(),
+                backend_identity: Arc::as_ptr(backend) as *const () as usize,
+            }),
+            binding_token: Arc::new(()),
+            probe_gate: Mutex::new(()),
+            next_probe: AtomicU64::new(0),
+            transport_unavailable: AtomicBool::new(false),
+            spaces: RwLock::new(None),
+            published_live_spaces: RwLock::new(None),
+        })
+    }
+}
+
+/// A live namespace response tied to one immutable Engine account/backend
+/// binding. Callers may inspect it for application-specific account checks,
+/// but cannot construct or alter the proof before publishing it.
+#[derive(Debug)]
+pub struct LiveNamespaceSnapshot {
+    binding: OfflineNamespaceBinding,
+    binding_token: Arc<()>,
+    probe_generation: u64,
+    spaces: Vec<CloudSpace>,
+}
+
+impl LiveNamespaceSnapshot {
+    pub fn spaces(&self) -> &[CloudSpace] {
+        &self.spaces
+    }
+}
+
+struct OfflineCache {
+    cache: Cache,
+    account_id: String,
+    origin: String,
+}
+
+struct CacheMutation {
+    scope: CacheScope,
+    parent_paths: Vec<String>,
+}
+
+#[derive(Default)]
+struct RefreshTree {
+    by_id: BTreeMap<String, (String, RemoteEntry)>,
+    directories: usize,
 }
 
 struct Inner {
     state_dir: PathBuf,
     cache_dir: PathBuf,
-    backend: Arc<dyn CloudBackend>,
     db: Mutex<Connection>,
     execution: Mutex<()>,
+    /// Last published exclusion policy for each pair. `None` is a retired
+    /// pair ID and prevents a stale scheduler snapshot from reactivating it.
+    /// Access is serialized by `execution` with every sync dispatch.
+    pair_policies: Mutex<BTreeMap<String, Option<Vec<String>>>>,
+    metadata_gate: Mutex<()>,
     sync_paused: AtomicBool,
 }
 
@@ -88,16 +247,58 @@ pub struct TransferRecord {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OfflineRefreshReport {
+    pub files_checked: usize,
+    pub files_downloaded: usize,
+    pub folders_refreshed: usize,
+    pub unavailable: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileWriteOutcome {
+    Uploaded(RemoteEntry),
+    Queued(RemoteEntry),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriteReconcileReport {
+    pub uploaded: u64,
+    pub conflicts: u64,
+    pub remaining: u64,
+}
+
 /// A verified download whose temporary file is removed when the snapshot is
 /// dropped. Use this for short-lived provider reads that should not accumulate
 /// in the persistent engine cache.
 pub struct FetchSnapshot {
-    // The backend may atomically replace this pathname after receiving it as
-    // the download destination. Keep the NamedTempFile only as the path owner;
-    // `file` is reopened after the backend returns so reads use the published
-    // contents rather than the now-unlinked original inode.
-    _temp: NamedTempFile,
-    file: File,
+    // The download helper rebuilds this owner from the published file handle,
+    // so the path and `file` refer to the same downloaded contents.
+    _temp: Option<NamedTempFile>,
+    file: SnapshotReader,
+}
+
+enum SnapshotReader {
+    Download(File),
+    Cached(raiun_cache::CacheContentReader),
+}
+
+impl Read for SnapshotReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Download(file) => file.read(buffer),
+            Self::Cached(file) => file.read(buffer),
+        }
+    }
+}
+
+impl Seek for SnapshotReader {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        match self {
+            Self::Download(file) => file.seek(position),
+            Self::Cached(file) => file.seek(position),
+        }
+    }
 }
 
 impl Read for FetchSnapshot {
@@ -140,6 +341,8 @@ struct LocalScanMetrics {
 }
 
 const MAX_LIST_ENTRIES: usize = 100_000;
+const MAX_REFRESH_DEPTH: usize = 64;
+const MAX_REFRESH_PATH_BYTES: usize = 32 * 1024 * 1024;
 // The bound is cumulative over all entries found locally and remotely for one
 // pair scan; it prevents a many-directory tree from bypassing per-list limits.
 const MAX_TOTAL_SCAN_ENTRIES: usize = 10_000_000;
@@ -209,23 +412,580 @@ impl Engine {
                pair_id TEXT NOT NULL, side TEXT NOT NULL, remote_path TEXT NOT NULL,
                PRIMARY KEY(pair_id, side, remote_path)
              );
-             PRAGMA user_version=1;",
+             CREATE TABLE IF NOT EXISTS media_job_runs (
+               job_id TEXT PRIMARY KEY, generation INTEGER NOT NULL, state TEXT NOT NULL,
+               scanned INTEGER NOT NULL DEFAULT 0, waiting INTEGER NOT NULL DEFAULT 0,
+               uploaded INTEGER NOT NULL DEFAULT 0, unchanged INTEGER NOT NULL DEFAULT 0,
+               conflicts INTEGER NOT NULL DEFAULT 0, attention INTEGER NOT NULL DEFAULT 0,
+               last_error TEXT, updated_unix INTEGER NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS media_candidates (
+               job_id TEXT NOT NULL, account_id TEXT NOT NULL, origin TEXT NOT NULL,
+               space_id TEXT NOT NULL, source_root TEXT NOT NULL, relative_path TEXT NOT NULL,
+               destination_path TEXT NOT NULL, source_size INTEGER NOT NULL,
+               mtime_seconds INTEGER NOT NULL, mtime_nanoseconds INTEGER NOT NULL,
+               source_sha256 TEXT NOT NULL, first_seen_unix INTEGER NOT NULL,
+               last_seen_unix INTEGER NOT NULL, state TEXT NOT NULL, message TEXT,
+               PRIMARY KEY(job_id,account_id,origin,space_id,source_root,relative_path,destination_path)
+             );
+             CREATE TABLE IF NOT EXISTS media_upload_attempts (
+               job_id TEXT NOT NULL, account_id TEXT NOT NULL, origin TEXT NOT NULL,
+               space_id TEXT NOT NULL, source_root TEXT NOT NULL, relative_path TEXT NOT NULL,
+               destination_path TEXT NOT NULL, generation INTEGER NOT NULL,
+               job_revision INTEGER NOT NULL DEFAULT 0, run_generation INTEGER NOT NULL,
+               state TEXT NOT NULL, source_size INTEGER NOT NULL,
+               mtime_seconds INTEGER NOT NULL, mtime_nanoseconds INTEGER NOT NULL,
+               source_sha256 TEXT NOT NULL, base_remote_id TEXT, base_etag TEXT,
+               message TEXT, updated_unix INTEGER NOT NULL,
+               PRIMARY KEY(job_id,account_id,origin,space_id,source_root,relative_path,destination_path)
+             );
+             CREATE TABLE IF NOT EXISTS media_upload_stages (
+               job_id TEXT NOT NULL, account_id TEXT NOT NULL, origin TEXT NOT NULL,
+               space_id TEXT NOT NULL, source_root TEXT NOT NULL, relative_path TEXT NOT NULL,
+               destination_path TEXT NOT NULL, attempt_generation INTEGER NOT NULL,
+               staged_path TEXT NOT NULL, staged_size INTEGER NOT NULL,
+               PRIMARY KEY(job_id,account_id,origin,space_id,source_root,relative_path,destination_path)
+             );
+             CREATE TABLE IF NOT EXISTS media_import_receipts (
+               job_id TEXT NOT NULL, account_id TEXT NOT NULL, origin TEXT NOT NULL,
+               space_id TEXT NOT NULL, source_root TEXT NOT NULL, relative_path TEXT NOT NULL,
+               destination_path TEXT NOT NULL, destination_root_id TEXT NOT NULL,
+               source_size INTEGER NOT NULL,
+               mtime_seconds INTEGER NOT NULL, source_sha256 TEXT NOT NULL,
+               remote_resource_id TEXT NOT NULL, remote_etag TEXT NOT NULL,
+               uploaded_unix INTEGER NOT NULL,
+               PRIMARY KEY(job_id,account_id,origin,space_id,source_root,relative_path,destination_path)
+             );
+             PRAGMA user_version=2;",
         )
         .map_err(db_error)?;
+        ensure_media_job_revision_column(&db)?;
         // An operation that was still running at process death has an unknown
         // remote outcome. Keep it visible as failed; a later reconciliation
         // must inspect the destination before attempting another mutation.
         db.execute("UPDATE transfers SET status='failed',message='engine stopped while operation was running',finished_unix=?1 WHERE status='running'", [now_unix()]).map_err(db_error)?;
+        db.execute("UPDATE media_upload_attempts SET state='uncertain',message='engine stopped while media upload was in flight',updated_unix=?1 WHERE state='running'", [now_unix()]).map_err(db_error)?;
+        db.execute("UPDATE media_candidates SET state='attention',message='engine stopped while media upload was in flight',last_seen_unix=?1 WHERE state='uploading'", [now_unix()]).map_err(db_error)?;
+        db.execute("UPDATE media_job_runs SET state='interrupted',last_error='engine stopped while media job was running',updated_unix=?1 WHERE state='running'", [now_unix()]).map_err(db_error)?;
         Ok(Self {
+            backend,
+            vault_binding: None,
+            offline_cache: None,
+            account_scope: None,
+            offline_namespace: OfflineNamespace::unbound(),
             inner: Arc::new(Inner {
                 state_dir,
                 cache_dir,
-                backend,
                 db: Mutex::new(db),
                 execution: Mutex::new(()),
+                pair_policies: Mutex::new(BTreeMap::new()),
+                metadata_gate: Mutex::new(()),
                 sync_paused: AtomicBool::new(false),
             }),
         })
+    }
+
+    /// Bind a backend to one encrypted collection while retaining this account's
+    /// database, execution gate and pause flag. The caller supplies a verified
+    /// vault adapter; ordinary engines reject vault-bound pairs before scanning.
+    pub fn with_vault_backend(
+        &self,
+        space_id: String,
+        binding: VaultBinding,
+        backend: Arc<dyn CloudBackend>,
+    ) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            backend,
+            vault_binding: Some((space_id, binding)),
+            // Vault engines never inherit the ordinary plaintext cache.
+            offline_cache: None,
+            account_scope: None,
+            offline_namespace: OfflineNamespace::unbound(),
+        }
+    }
+
+    /// Bind the authenticated account identity even when the optional cache
+    /// could not be opened. This keeps provider recovery manifests scoped
+    /// without making an otherwise online-capable Engine depend on the cache.
+    pub fn with_account_scope(
+        &self,
+        account_id: String,
+        origin: String,
+    ) -> Result<Self, CloudError> {
+        let scope = CacheScope::new(
+            &origin,
+            &account_id,
+            "scope-check-space",
+            "scope-check-root",
+            ScopeProtection::PlaintextAllowed,
+        )
+        .map_err(cache_cloud_error)?;
+        if self.backend.server_origin().as_deref() != Some(scope.origin()) {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "account scope origin does not match the configured cloud server",
+            ));
+        }
+        let account_scope = AccountScope {
+            account_id,
+            origin: scope.origin().to_owned(),
+        };
+        let offline_namespace = if self.vault_binding.is_none() {
+            OfflineNamespace::for_account(&account_scope, &self.backend)
+        } else {
+            OfflineNamespace::unbound()
+        };
+        // Account rebinding creates a new authority boundary. Retain cached
+        // data only for the same already-bound account and canonical origin;
+        // the old account's cache remains owned by its original Engine.
+        let offline_cache = self
+            .offline_cache
+            .as_ref()
+            .filter(|cache| {
+                cache.account_id == account_scope.account_id
+                    && self.account_scope.as_ref().is_some_and(|previous| {
+                        previous.account_id == account_scope.account_id
+                            && previous.origin == account_scope.origin
+                    })
+            })
+            .cloned();
+        Ok(Self {
+            inner: self.inner.clone(),
+            backend: self.backend.clone(),
+            vault_binding: self.vault_binding.clone(),
+            offline_cache,
+            account_scope: Some(account_scope),
+            // Rebinding creates a fresh authority handle, even if account
+            // labels match an earlier Engine.
+            offline_namespace,
+        })
+    }
+
+    /// Enable the ordinary, account-scoped persistent cache. The caller must
+    /// supply the selected profile/account identity and the configured server
+    /// origin; each Space root is then verified online before its cache scope
+    /// is used. Vault-bound engines deliberately discard this configuration.
+    pub fn with_offline_cache(
+        &self,
+        cache: Cache,
+        account_id: String,
+        origin: String,
+    ) -> Result<Self, CloudError> {
+        let validated_scope = CacheScope::new(
+            &origin,
+            &account_id,
+            "cache-origin-check",
+            "cache-root-check",
+            ScopeProtection::PlaintextAllowed,
+        )
+        .map_err(cache_cloud_error)?;
+        if self.backend.server_origin().as_deref() != Some(validated_scope.origin()) {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "offline cache origin does not match the configured cloud server",
+            ));
+        }
+        let account_scope = AccountScope {
+            account_id: account_id.clone(),
+            origin: validated_scope.origin().to_owned(),
+        };
+        let offline_namespace = if self.vault_binding.is_none() {
+            OfflineNamespace::for_account(&account_scope, &self.backend)
+        } else {
+            OfflineNamespace::unbound()
+        };
+        Ok(Self {
+            inner: self.inner.clone(),
+            backend: self.backend.clone(),
+            vault_binding: self.vault_binding.clone(),
+            account_scope: Some(account_scope),
+            offline_namespace,
+            offline_cache: if self.vault_binding.is_none() {
+                Some(Arc::new(OfflineCache {
+                    cache,
+                    account_id,
+                    origin,
+                }))
+            } else {
+                None
+            },
+        })
+    }
+
+    /// Attach a bounded, private last-known namespace snapshot for this
+    /// account and server. `spaces()` uses it only when the live backend
+    /// reports a transport outage. Cached entries are exposed as read-only
+    /// while disconnected; authorization and server errors are never hidden.
+    ///
+    /// Call this only after the owning profile layer has loaded a snapshot
+    /// whose persisted account and origin match the selected identity.
+    pub fn with_offline_spaces(&self, spaces: Vec<CloudSpace>) -> Result<Self, CloudError> {
+        let spaces = self.validate_offline_spaces(spaces)?;
+        self.publish_offline_spaces(spaces)?;
+        Ok(self.clone())
+    }
+
+    /// Mark this account-bound Engine as transport-offline when the profile
+    /// layer restored a previously verified namespace after a failed network
+    /// probe. This hint is shared by Engine clones, so mounted filesystem
+    /// listings can use cached metadata immediately instead of repeating a
+    /// long transport timeout. It never grants write authority.
+    pub fn mark_namespace_transport_unavailable(&self) -> Result<(), CloudError> {
+        self.validate_offline_namespace_binding()?;
+        let has_snapshot = self
+            .offline_namespace
+            .spaces
+            .read()
+            .map_err(|_| CloudError::new(ErrorKind::Io, "offline namespace state is unavailable"))?
+            .is_some();
+        if !has_snapshot {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "cannot mark a namespace offline without a verified snapshot",
+            ));
+        }
+        self.offline_namespace
+            .transport_unavailable
+            .store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Whether the bound profile has already established that its namespace
+    /// transport is unavailable. This is a read-only fast-path hint, not a
+    /// replacement for fresh authorization checks when the server is online.
+    pub fn namespace_transport_unavailable(&self) -> bool {
+        self.offline_namespace
+            .transport_unavailable
+            .load(Ordering::Acquire)
+    }
+
+    /// Probe the live namespace without publishing it. The returned opaque
+    /// proof can be inspected for additional identity checks, then published
+    /// only into clones sharing this exact account/backend binding.
+    pub fn probe_live_namespace(&self) -> Result<LiveNamespaceSnapshot, CloudError> {
+        self.validate_offline_namespace_binding()?;
+        let _probe_guard = self.offline_namespace.probe_gate.lock().map_err(|_| {
+            CloudError::new(ErrorKind::Io, "offline namespace state is unavailable")
+        })?;
+        let mut previous_generation = self.offline_namespace.next_probe.load(Ordering::Acquire);
+        let probe_generation = loop {
+            let next_generation = previous_generation.checked_add(1).ok_or_else(|| {
+                CloudError::new(
+                    ErrorKind::Conflict,
+                    "offline namespace probe generation is exhausted",
+                )
+            })?;
+            match self.offline_namespace.next_probe.compare_exchange_weak(
+                previous_generation,
+                next_generation,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break next_generation,
+                Err(current_generation) => previous_generation = current_generation,
+            }
+        };
+        drop(_probe_guard);
+        let spaces = match self.live_spaces() {
+            Ok(spaces) => spaces,
+            Err(error) if error.kind == ErrorKind::Offline => {
+                if self
+                    .offline_namespace
+                    .spaces
+                    .read()
+                    .map_err(|_| {
+                        CloudError::new(ErrorKind::Io, "offline namespace state is unavailable")
+                    })?
+                    .is_some()
+                {
+                    self.offline_namespace
+                        .transport_unavailable
+                        .store(true, Ordering::Release);
+                }
+                return Err(error);
+            }
+            Err(error) => {
+                self.revoke_mount_permissions(probe_generation)?;
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.validate_offline_spaces(spaces.clone()) {
+            self.revoke_mount_permissions(probe_generation)?;
+            return Err(error);
+        }
+        let binding = self.offline_namespace.binding.as_ref().ok_or_else(|| {
+            CloudError::new(
+                ErrorKind::Conflict,
+                "offline namespace handle is not account-bound",
+            )
+        })?;
+        Ok(LiveNamespaceSnapshot {
+            binding: OfflineNamespaceBinding {
+                account_id: binding.account_id.clone(),
+                origin: binding.origin.clone(),
+                backend_identity: binding.backend_identity,
+            },
+            binding_token: self.offline_namespace.binding_token.clone(),
+            probe_generation,
+            spaces,
+        })
+    }
+
+    /// Publish a previously probed live namespace after the owning profile
+    /// layer has completed its authenticated account-identity checks. The
+    /// proof cannot be used on a rebound or different Engine.
+    pub fn publish_live_namespace(
+        &self,
+        snapshot: LiveNamespaceSnapshot,
+    ) -> Result<Vec<CloudSpace>, CloudError> {
+        self.validate_offline_namespace_binding()?;
+        let binding = self.offline_namespace.binding.as_ref().ok_or_else(|| {
+            CloudError::new(
+                ErrorKind::Conflict,
+                "offline namespace handle is not account-bound",
+            )
+        })?;
+        if binding != &snapshot.binding {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "live namespace proof belongs to a different Engine binding",
+            ));
+        }
+        if !Arc::ptr_eq(
+            &self.offline_namespace.binding_token,
+            &snapshot.binding_token,
+        ) {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "live namespace proof belongs to a different Engine handle",
+            ));
+        }
+        let _probe_guard = self.offline_namespace.probe_gate.lock().map_err(|_| {
+            CloudError::new(ErrorKind::Io, "offline namespace state is unavailable")
+        })?;
+        if self.offline_namespace.next_probe.load(Ordering::Acquire) != snapshot.probe_generation {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "a newer live namespace probe superseded this proof",
+            ));
+        }
+        let sanitized = self.validate_offline_spaces(snapshot.spaces.clone())?;
+        // Block permission readers until both namespace views are published.
+        let mut live_permissions = self
+            .offline_namespace
+            .published_live_spaces
+            .write()
+            .map_err(|_| {
+                CloudError::new(ErrorKind::Io, "live namespace permissions are unavailable")
+            })?;
+        if let Err(error) = self.store_offline_spaces(sanitized) {
+            *live_permissions = Some(Vec::new());
+            return Err(error);
+        }
+        *live_permissions = Some(snapshot.spaces.clone());
+        self.offline_namespace
+            .transport_unavailable
+            .store(false, Ordering::Release);
+        Ok(snapshot.spaces)
+    }
+
+    /// Reject an otherwise well-formed proof after application account checks.
+    /// A proof from another handle cannot revoke this mount's permissions.
+    pub fn reject_live_namespace(&self, snapshot: LiveNamespaceSnapshot) -> Result<(), CloudError> {
+        if self.offline_namespace.binding.as_ref() != Some(&snapshot.binding)
+            || !Arc::ptr_eq(
+                &self.offline_namespace.binding_token,
+                &snapshot.binding_token,
+            )
+        {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "namespace rejection belongs to a different Engine handle",
+            ));
+        }
+        self.revoke_mount_permissions(snapshot.probe_generation)
+    }
+
+    fn revoke_mount_permissions(&self, probe_generation: u64) -> Result<(), CloudError> {
+        let _probe_guard =
+            self.offline_namespace.probe_gate.lock().map_err(|_| {
+                CloudError::new(ErrorKind::Io, "namespace probe gate is unavailable")
+            })?;
+        if self.offline_namespace.next_probe.load(Ordering::Acquire) == probe_generation {
+            *self
+                .offline_namespace
+                .published_live_spaces
+                .write()
+                .map_err(|_| {
+                    CloudError::new(ErrorKind::Io, "live namespace permissions are unavailable")
+                })? = Some(Vec::new());
+            self.offline_namespace
+                .transport_unavailable
+                .store(false, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    /// Last application-validated live permission for an existing mount mapping.
+    /// None means no live proof has been published into this exact Engine handle;
+    /// callers may retain their startup permissions. Removed or rebound roots and
+    /// poisoned state fail closed. This is not a substitute for write-time server
+    /// preconditions, and does not make the saved offline namespace writable.
+    pub fn published_mount_permission(&self, mounted: &CloudSpace) -> Option<bool> {
+        let published = match self.offline_namespace.published_live_spaces.read() {
+            Ok(published) => published,
+            Err(_) => return Some(false),
+        };
+        published.as_ref().map(|spaces| {
+            spaces.iter().any(|space| {
+                space.id == mounted.id
+                    && space.dav_url == mounted.dav_url
+                    && space.encrypted == mounted.encrypted
+                    && space.personal == mounted.personal
+                    && space.writable
+            })
+        })
+    }
+
+    fn validate_offline_namespace_binding(&self) -> Result<(), CloudError> {
+        let account_scope = self.account_scope.as_ref().ok_or_else(|| {
+            CloudError::new(
+                ErrorKind::Conflict,
+                "offline namespace requires an account-scoped engine",
+            )
+        })?;
+        let backend_origin = self.backend.server_origin().ok_or_else(|| {
+            CloudError::new(
+                ErrorKind::Conflict,
+                "offline namespace requires a server-bound backend",
+            )
+        })?;
+        if self.vault_binding.is_some() || backend_origin != account_scope.origin {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "offline namespace binding does not match this ordinary account engine",
+            ));
+        }
+        let expected = OfflineNamespaceBinding {
+            account_id: account_scope.account_id.clone(),
+            origin: account_scope.origin.clone(),
+            backend_identity: Arc::as_ptr(&self.backend) as *const () as usize,
+        };
+        if self.offline_namespace.binding.as_ref() != Some(&expected) {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "offline namespace handle does not match this account and backend",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_offline_spaces(
+        &self,
+        mut spaces: Vec<CloudSpace>,
+    ) -> Result<Vec<CloudSpace>, CloudError> {
+        const MAX_SNAPSHOT_SPACES: usize = 2048;
+        const MAX_SPACE_FIELD_BYTES: usize = 16 * 1024;
+
+        self.validate_offline_namespace_binding()?;
+        if spaces.is_empty() || spaces.len() > MAX_SNAPSHOT_SPACES {
+            return Err(CloudError::new(
+                ErrorKind::InvalidResponse,
+                "offline namespace is empty or exceeds its limit",
+            ));
+        }
+
+        let mut space_ids = std::collections::BTreeSet::new();
+        for space in &spaces {
+            if space.id.is_empty()
+                || space.id.len() > MAX_SPACE_FIELD_BYTES
+                || space.id.chars().any(char::is_control)
+                || !space_ids.insert(space.id.as_str())
+                || space.name.is_empty()
+                || space.name.len() > MAX_SPACE_FIELD_BYTES
+                || space.name.chars().any(char::is_control)
+                || space.dav_url.is_empty()
+                || space.dav_url.len() > MAX_SPACE_FIELD_BYTES
+            {
+                return Err(CloudError::new(
+                    ErrorKind::InvalidResponse,
+                    "offline namespace contains invalid or duplicate Space metadata",
+                ));
+            }
+            let dav_url = url::Url::parse(&space.dav_url).map_err(|_| {
+                CloudError::new(
+                    ErrorKind::InvalidResponse,
+                    "offline namespace contains an invalid DAV URL",
+                )
+            })?;
+            if !matches!(dav_url.scheme(), "http" | "https")
+                || !dav_url.username().is_empty()
+                || dav_url.password().is_some()
+                || dav_url.query().is_some()
+                || dav_url.fragment().is_some()
+                || dav_url.origin().ascii_serialization()
+                    != self.account_scope.as_ref().expect("validated scope").origin
+            {
+                return Err(CloudError::new(
+                    ErrorKind::InvalidResponse,
+                    "offline namespace DAV URL is outside the selected server",
+                ));
+            }
+        }
+
+        for space in &mut spaces {
+            // The snapshot discovers names and roots only. It does not grant
+            // current write permission while the server is unreachable.
+            space.writable = false;
+        }
+        Ok(spaces)
+    }
+
+    fn publish_offline_spaces(&self, spaces: Vec<CloudSpace>) -> Result<(), CloudError> {
+        self.validate_offline_namespace_binding()?;
+        let _probe_guard = self.offline_namespace.probe_gate.lock().map_err(|_| {
+            CloudError::new(ErrorKind::Io, "offline namespace state is unavailable")
+        })?;
+        let next_generation = self
+            .offline_namespace
+            .next_probe
+            .load(Ordering::Acquire)
+            .checked_add(1)
+            .ok_or_else(|| {
+                CloudError::new(
+                    ErrorKind::Conflict,
+                    "offline namespace probe generation is exhausted",
+                )
+            })?;
+        self.offline_namespace
+            .next_probe
+            .store(next_generation, Ordering::Release);
+        self.store_offline_spaces(spaces)
+    }
+
+    fn store_offline_spaces(&self, spaces: Vec<CloudSpace>) -> Result<(), CloudError> {
+        *self.offline_namespace.spaces.write().map_err(|_| {
+            CloudError::new(ErrorKind::Io, "offline namespace state is unavailable")
+        })? = Some(Arc::new(spaces));
+        Ok(())
+    }
+
+    fn validate_backend_binding(&self, pair: &FolderPair) -> Result<(), CloudError> {
+        let matches = match (&self.vault_binding, &pair.vault) {
+            (None, None) => true,
+            (Some((space, binding)), Some(pair_binding)) => {
+                space == &pair.space_id && binding == pair_binding
+            }
+            _ => false,
+        };
+        if !matches {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "folder pair requires its explicitly bound unlocked vault backend",
+            ));
+        }
+        Ok(())
     }
 
     /// Pause or resume folder-pair reconciliation. An in-flight sync stops at
@@ -234,27 +994,1950 @@ impl Engine {
         self.inner.sync_paused.store(paused, Ordering::Release);
     }
 
+    /// Return the namespace reported by the live backend without consulting
+    /// the persisted offline snapshot. Reconnect/authentication flows should
+    /// use this to prove the server is reachable before refreshing cached
+    /// namespace metadata.
+    pub fn live_spaces(&self) -> Result<Vec<CloudSpace>, CloudError> {
+        self.backend.spaces()
+    }
+
+    /// Query one ordinary-cloud entry without consulting the offline cache or
+    /// pending-operation overlay. Use only for fresh identity validation.
+    pub fn live_stat(&self, space: &str, path: &str) -> Result<RemoteEntry, CloudError> {
+        if self.vault_binding.is_some() {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "live ordinary-cloud lookup is unavailable for a vault route",
+            ));
+        }
+        validate_remote_path(path).map_err(|error| {
+            CloudError::new(
+                ErrorKind::Unsupported,
+                format!("invalid remote path: {error}"),
+            )
+        })?;
+        self.backend.stat(space, path)
+    }
+
+    /// Return live namespace metadata, falling back to the validated,
+    /// read-only snapshot only for transport-offline failures.
     pub fn spaces(&self) -> Result<Vec<CloudSpace>, CloudError> {
-        self.inner.backend.spaces()
+        if self.namespace_transport_unavailable() {
+            return self.offline_namespace_spaces();
+        }
+        match self.live_spaces() {
+            Ok(spaces) => Ok(spaces),
+            Err(error) if error.kind == ErrorKind::Offline => {
+                if self
+                    .offline_namespace
+                    .spaces
+                    .read()
+                    .map_err(|_| {
+                        CloudError::new(ErrorKind::Io, "offline namespace state is unavailable")
+                    })?
+                    .is_some()
+                {
+                    self.offline_namespace
+                        .transport_unavailable
+                        .store(true, Ordering::Release);
+                }
+                self.offline_namespace_spaces().or(Err(error))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn offline_namespace_spaces(&self) -> Result<Vec<CloudSpace>, CloudError> {
+        self.offline_namespace
+            .spaces
+            .read()
+            .map_err(|_| CloudError::new(ErrorKind::Io, "offline namespace state is unavailable"))?
+            .as_ref()
+            .map(|spaces| spaces.as_ref().clone())
+            .ok_or_else(|| CloudError::new(ErrorKind::Offline, "saved namespace is unavailable"))
     }
 
     pub fn list(&self, space: &str, path: &str) -> Result<Vec<RemoteEntry>, CloudError> {
+        if self.namespace_transport_unavailable() {
+            return self.cached_list_without_probe(space, path);
+        }
+        if self.offline_cache.is_some() {
+            return self.cached_list(space, path);
+        }
         let mut entries = Vec::new();
-        self.inner.backend.list(space, path, &mut |entry| {
+        let mut metadata_bytes = 0usize;
+        let result = self.backend.list(space, path, &mut |entry| {
             if entries.len() >= MAX_LIST_ENTRIES {
                 return Err(CloudError::new(
                     ErrorKind::InvalidResponse,
                     "cloud listing exceeds the 100,000-entry limit",
                 ));
             }
+            metadata_bytes = metadata_bytes
+                .saturating_add(entry.id.len())
+                .saturating_add(entry.etag.len())
+                .saturating_add(entry.path.len());
+            if metadata_bytes > MAX_REFRESH_PATH_BYTES {
+                return Err(CloudError::new(
+                    ErrorKind::InvalidResponse,
+                    "cloud listing metadata exceeds the 32 MiB limit",
+                ));
+            }
+            entries.push(entry);
+            Ok(())
+        });
+        match result {
+            Ok(()) => Ok(entries),
+            Err(error) if error.kind == ErrorKind::Offline => {
+                if self
+                    .offline_namespace
+                    .spaces
+                    .read()
+                    .map_err(|_| {
+                        CloudError::new(ErrorKind::Io, "offline namespace state is unavailable")
+                    })?
+                    .is_some()
+                {
+                    self.offline_namespace
+                        .transport_unavailable
+                        .store(true, Ordering::Release);
+                }
+                Err(error)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn cached_list_without_probe(
+        &self,
+        space: &str,
+        path: &str,
+    ) -> Result<Vec<RemoteEntry>, CloudError> {
+        let Some(context) = &self.offline_cache else {
+            return Err(CloudError::new(
+                ErrorKind::Offline,
+                "cloud listing is unavailable while the saved namespace is offline",
+            ));
+        };
+        let offline = CloudError::new(
+            ErrorKind::Offline,
+            "cloud listing is unavailable while the saved namespace is offline",
+        );
+        let scope = self
+            .cached_scope(space, context)
+            .map_err(|error| offline_cache_error(error, offline.clone()))?;
+        self.cached_listing(context, &scope, path, offline)
+    }
+
+    pub fn stat(&self, space: &str, path: &str) -> Result<RemoteEntry, CloudError> {
+        let Some(context) = &self.offline_cache else {
+            return self.backend.stat(space, path);
+        };
+        match self.online_plaintext_scope(space) {
+            Ok((scope, root)) => {
+                if path == "/" {
+                    return Ok(root);
+                }
+                match self.backend.stat(space, path) {
+                    Ok(entry) if entry.encrypted => Err(unsupported_encrypted_cache()),
+                    Ok(entry) => self.overlay_pending_stat(&scope, path, entry),
+                    Err(error) if error.kind == ErrorKind::Offline => {
+                        if let Some(write) = context
+                            .cache
+                            .pending_write_for_path(&scope, path)
+                            .map_err(cache_cloud_error)?
+                        {
+                            return self.remote_entry_for_pending(space, &write);
+                        }
+                        self.cached_entry_or_error(context, &scope, path, error)
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Err(error) if error.kind == ErrorKind::Offline => {
+                let scope = self
+                    .cached_scope(space, context)
+                    .map_err(|cache_error| offline_cache_error(cache_error, error.clone()))?;
+                if let Some(write) = context
+                    .cache
+                    .pending_write_for_path(&scope, path)
+                    .map_err(cache_cloud_error)?
+                {
+                    return self.remote_entry_for_pending(space, &write);
+                }
+                self.cached_entry_or_error(context, &scope, path, error)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn cached_list(&self, space: &str, path: &str) -> Result<Vec<RemoteEntry>, CloudError> {
+        let _metadata = self.metadata_publication()?;
+        let context = self
+            .offline_cache
+            .as_ref()
+            .expect("cached list requires a cache context");
+        let (scope, root) = match self.online_plaintext_scope(space) {
+            Ok(scope_root) => scope_root,
+            Err(error) if error.kind == ErrorKind::Offline => {
+                let scope = self
+                    .cached_scope(space, context)
+                    .map_err(|cache_error| offline_cache_error(cache_error, error.clone()))?;
+                return self.cached_listing(context, &scope, path, error);
+            }
+            Err(error) => return Err(error),
+        };
+        let parent_id = if path == "/" {
+            root.id.clone()
+        } else {
+            match self.backend.stat(space, path) {
+                Ok(parent) if parent.encrypted => return Err(unsupported_encrypted_cache()),
+                Ok(parent) if !parent.directory => {
+                    return Err(CloudError::new(
+                        ErrorKind::Unsupported,
+                        "cloud item is not a directory",
+                    ));
+                }
+                Ok(parent) => parent.id,
+                Err(error) if error.kind == ErrorKind::Offline => {
+                    return self.cached_listing(context, &scope, path, error);
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let mut entries = Vec::new();
+        let mut metadata_bytes = 0usize;
+        let result = self.backend.list(space, path, &mut |entry| {
+            if entries.len() >= MAX_LIST_ENTRIES {
+                return Err(CloudError::new(
+                    ErrorKind::InvalidResponse,
+                    "cloud listing exceeds the 100,000-entry limit",
+                ));
+            }
+            metadata_bytes = metadata_bytes
+                .saturating_add(entry.id.len())
+                .saturating_add(entry.etag.len())
+                .saturating_add(entry.path.len());
+            if metadata_bytes > MAX_REFRESH_PATH_BYTES {
+                return Err(CloudError::new(
+                    ErrorKind::InvalidResponse,
+                    "cloud listing metadata exceeds the 32 MiB limit",
+                ));
+            }
+            entries.push(entry);
+            Ok(())
+        });
+        match result {
+            Ok(()) => {
+                let cache_entries = entries
+                    .iter()
+                    .filter(|entry| !entry.encrypted)
+                    .cloned()
+                    .map(|entry| CachedEntry {
+                        parent_resource_id: parent_id.clone(),
+                        entry,
+                    })
+                    .collect::<Vec<_>>();
+                // Cache failures must not turn a successful online listing into
+                // an error. A later offline read will fail closed if no full
+                // verified snapshot was committed.
+                if context
+                    .cache
+                    .publish_listing(&scope, &parent_id, &cache_entries, now_unix())
+                    .is_ok()
+                {
+                    let _ = context.cache.evict_recent(context.cache.quota_bytes());
+                }
+                self.overlay_pending_entries(&scope, &parent_id, &mut entries)?;
+                Ok(entries)
+            }
+            Err(error) if error.kind == ErrorKind::Offline => {
+                self.cached_listing(context, &scope, path, error)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn online_plaintext_scope(
+        &self,
+        space_id: &str,
+    ) -> Result<(CacheScope, RemoteEntry), CloudError> {
+        let context = self
+            .offline_cache
+            .as_ref()
+            .expect("online cache scope requires a cache context");
+        let space = self
+            .backend
+            .spaces()?
+            .into_iter()
+            .find(|space| space.id == space_id)
+            .ok_or_else(|| CloudError::new(ErrorKind::NotFound, "cloud Space was not found"))?;
+        if space.encrypted {
+            return Err(unsupported_encrypted_cache());
+        }
+        let root = self.backend.stat(space_id, "/")?;
+        if root.encrypted || !root.directory || root.path != "/" {
+            return Err(CloudError::new(
+                ErrorKind::InvalidResponse,
+                "cloud Space root identity is invalid for the ordinary cache",
+            ));
+        }
+        let scope = CacheScope::new(
+            &context.origin,
+            &context.account_id,
+            space_id,
+            &root.id,
+            ScopeProtection::PlaintextAllowed,
+        )
+        .map_err(cache_cloud_error)?;
+        Ok((scope, root))
+    }
+
+    fn cached_scope(
+        &self,
+        space_id: &str,
+        context: &OfflineCache,
+    ) -> Result<CacheScope, raiun_cache::CacheError> {
+        context
+            .cache
+            .find_plaintext_scope(&context.origin, &context.account_id, space_id)?
+            .ok_or(raiun_cache::CacheError::NotFound)
+    }
+
+    /// Invalidate affected snapshots before sending a remote mutation. If the
+    /// server operation then fails ambiguously, stale metadata is still not
+    /// available to an offline read. Immutable content and recovery records
+    /// are retained; only listing reachability and pin freshness change.
+    fn begin_cache_mutation(
+        &self,
+        space_id: &str,
+        paths: &[&str],
+    ) -> Result<Option<CacheMutation>, CloudError> {
+        let Some(context) = &self.offline_cache else {
+            return Ok(None);
+        };
+        let (scope, _) = self.online_plaintext_scope(space_id)?;
+        context
+            .cache
+            .invalidate_paths(&scope, paths)
+            .map_err(cache_cloud_error)?;
+        let mut parent_paths = paths
+            .iter()
+            .map(|path| {
+                if *path == "/" {
+                    Ok("/".to_owned())
+                } else {
+                    parent_path(path)
+                }
+            })
+            .collect::<Result<Vec<_>, CloudError>>()?;
+        parent_paths.sort();
+        parent_paths.dedup();
+        Ok(Some(CacheMutation {
+            scope,
+            parent_paths,
+        }))
+    }
+
+    /// Republish exact complete parent listings after a mutation attempt.
+    /// This reads the current server tree even when the mutation failed; it
+    /// never restores the invalidated snapshot or verifies an unacknowledged write.
+    /// A failed/uncertain refresh leaves the prior listing invalidated, so the
+    /// next offline request fails closed instead of resurrecting old entries.
+    fn finish_cache_mutation(&self, space_id: &str, mutation: Option<CacheMutation>) {
+        let (Some(context), Some(mutation)) = (&self.offline_cache, mutation) else {
+            return;
+        };
+        for parent_path in mutation.parent_paths {
+            let refreshed = (|| {
+                let (current_scope, root) = self.online_plaintext_scope(space_id)?;
+                if current_scope != mutation.scope {
+                    return Err(CloudError::new(
+                        ErrorKind::Conflict,
+                        "cloud Space root changed during a provider mutation",
+                    ));
+                }
+                let parent = if parent_path == "/" {
+                    root
+                } else {
+                    self.backend.stat(space_id, &parent_path)?
+                };
+                if !parent.directory || parent.encrypted {
+                    return Err(unsupported_encrypted_cache());
+                }
+                let mut entries = Vec::new();
+                self.backend.list(space_id, &parent_path, &mut |entry| {
+                    if entries.len() >= MAX_LIST_ENTRIES {
+                        return Err(CloudError::new(
+                            ErrorKind::InvalidResponse,
+                            "cloud listing exceeds the 100,000-entry limit",
+                        ));
+                    }
+                    entries.push(entry);
+                    Ok(())
+                })?;
+                let cached_entries = entries
+                    .iter()
+                    .filter(|entry| !entry.encrypted)
+                    .cloned()
+                    .map(|entry| CachedEntry {
+                        parent_resource_id: parent.id.clone(),
+                        entry,
+                    })
+                    .collect::<Vec<_>>();
+                context
+                    .cache
+                    .publish_listing(&mutation.scope, &parent.id, &cached_entries, now_unix())
+                    .map_err(cache_cloud_error)?;
+                Ok(())
+            })();
+            // Preserve the mutation's own result independently of metadata
+            // refresh. Invalidation remains in place if refresh fails, and
+            // offline browsing will fail
+            // closed until a later complete listing succeeds.
+            let _ = refreshed;
+        }
+    }
+
+    fn cached_listing(
+        &self,
+        context: &OfflineCache,
+        scope: &CacheScope,
+        path: &str,
+        offline: CloudError,
+    ) -> Result<Vec<RemoteEntry>, CloudError> {
+        let parent_id = context
+            .cache
+            .resource_id_for_path(scope, path)
+            .map_err(|error| offline_cache_error(error, offline.clone()))?
+            .ok_or_else(|| offline.clone())?;
+        let listing = context
+            .cache
+            .listing(scope, &parent_id)
+            .map_err(|error| offline_cache_error(error, offline))?;
+        if listing.entries.iter().any(|item| item.entry.encrypted) {
+            return Err(unsupported_encrypted_cache());
+        }
+        let mut entries = listing
+            .entries
+            .into_iter()
+            .map(|item| item.entry)
+            .collect::<Vec<_>>();
+        self.overlay_pending_entries(scope, &parent_id, &mut entries)?;
+        Ok(entries)
+    }
+
+    fn overlay_pending_stat(
+        &self,
+        scope: &CacheScope,
+        path: &str,
+        remote: RemoteEntry,
+    ) -> Result<RemoteEntry, CloudError> {
+        let Some(context) = &self.offline_cache else {
+            return Ok(remote);
+        };
+        let Some(write) = context
+            .cache
+            .pending_write_for_path(scope, path)
+            .map_err(cache_cloud_error)?
+        else {
+            return Ok(remote);
+        };
+        if remote.encrypted {
+            context
+                .cache
+                .mark_write_conflict(scope, write.id)
+                .map_err(cache_cloud_error)?;
+            return Err(unsupported_encrypted_cache());
+        }
+        if remote.id != write.resource_id.as_deref().unwrap_or_default()
+            || !matches!(&write.base, WriteCondition::Match(etag) if etag == &remote.etag)
+            || !remote.writable
+        {
+            context
+                .cache
+                .mark_write_conflict(scope, write.id)
+                .map_err(cache_cloud_error)?;
+        }
+        self.remote_entry_for_pending_in_scope(scope, &write)
+    }
+
+    fn overlay_pending_entries(
+        &self,
+        scope: &CacheScope,
+        parent_id: &str,
+        entries: &mut Vec<RemoteEntry>,
+    ) -> Result<(), CloudError> {
+        let Some(context) = &self.offline_cache else {
+            return Ok(());
+        };
+        let writes = context
+            .cache
+            .pending_writes_for_parent(scope, parent_id)
+            .map_err(cache_cloud_error)?;
+        for write in writes {
+            if write.state == WriteState::Verified {
+                continue;
+            }
+            let existing = entries
+                .iter()
+                .position(|entry| entry.path == write.logical_path);
+            if let Some(index) = existing {
+                let remote = &entries[index];
+                if remote.encrypted {
+                    context
+                        .cache
+                        .mark_write_conflict(scope, write.id)
+                        .map_err(cache_cloud_error)?;
+                    continue;
+                }
+                if remote.id != write.resource_id.as_deref().unwrap_or_default()
+                    || !matches!(&write.base, WriteCondition::Match(etag) if etag == &remote.etag)
+                    || !remote.writable
+                {
+                    context
+                        .cache
+                        .mark_write_conflict(scope, write.id)
+                        .map_err(cache_cloud_error)?;
+                }
+            } else {
+                // The last complete online listing proves this target is no
+                // longer present. Keep the user copy visible as a conflict;
+                // never translate that absence into a delete operation.
+                context
+                    .cache
+                    .mark_write_conflict(scope, write.id)
+                    .map_err(cache_cloud_error)?;
+            }
+            let mut local = self.remote_entry_for_pending_in_scope(scope, &write)?;
+            if let Some(index) = existing {
+                entries[index] = local;
+            } else {
+                local.encrypted = false;
+                entries.push(local);
+            }
+        }
+        Ok(())
+    }
+
+    fn cached_entry_or_error(
+        &self,
+        context: &OfflineCache,
+        scope: &CacheScope,
+        path: &str,
+        offline: CloudError,
+    ) -> Result<RemoteEntry, CloudError> {
+        let entry = context
+            .cache
+            .entry_for_path(scope, path)
+            .map_err(|error| offline_cache_error(error, offline.clone()))?
+            .ok_or_else(|| offline.clone())?;
+        if entry.encrypted {
+            return Err(unsupported_encrypted_cache());
+        }
+        if context
+            .cache
+            .policy_target_state(scope, &entry.id)
+            .map_err(cache_cloud_error)?
+            .is_some_and(|state| state != TargetState::Ready)
+        {
+            return Err(offline);
+        }
+        Ok(entry)
+    }
+
+    /// Set path-level availability after fresh server metadata validation.
+    /// Unix folders use bounded atomic CloudOnly admission or clear only their
+    /// own folder intent. AlwaysOffline files first stage their exact ETag;
+    /// recursive folder retention continues through the folder pin workflow.
+    pub fn set_availability_policy(
+        &self,
+        space: &str,
+        path: &str,
+        policy: AvailabilityPolicy,
+    ) -> Result<(), CloudError> {
+        let context = self.offline_cache.as_ref().ok_or_else(|| {
+            CloudError::new(ErrorKind::Unsupported, "offline cache is unavailable")
+        })?;
+        let (scope, _) = self.online_plaintext_scope(space)?;
+        let entry = self.backend.stat(space, path)?;
+        if entry.encrypted {
+            return Err(unsupported_encrypted_cache());
+        }
+        if entry.directory {
+            #[cfg(unix)]
+            match policy {
+                AvailabilityPolicy::CloudOnly => {
+                    return self.set_folder_cloud_only_live(space, &scope, &entry);
+                }
+                AvailabilityPolicy::Recent => {
+                    let _metadata = self.metadata_publication()?;
+                    let (current_scope, _) = self.online_plaintext_scope(space)?;
+                    if current_scope != scope || self.backend.stat(space, path)? != entry {
+                        return Err(CloudError::new(
+                            ErrorKind::Conflict,
+                            "folder identity changed while clearing availability",
+                        ));
+                    }
+                    return context
+                        .cache
+                        .clear_folder_cloud_only(&scope, &entry.id)
+                        .map(|_| ())
+                        .map_err(cache_cloud_error);
+                }
+                AvailabilityPolicy::AlwaysOffline => {}
+            }
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "availability policy applies to files; pin a folder recursively",
+            ));
+        }
+        let parent = parent_path(path)?;
+        let listing = self.list(space, &parent)?;
+        if !listing.iter().any(|listed| {
+            listed.id == entry.id
+                && listed.path == entry.path
+                && listed.etag == entry.etag
+                && listed.size == entry.size
+                && !listed.encrypted
+        }) {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "file changed while its availability policy was being updated",
+            ));
+        }
+        if policy == AvailabilityPolicy::AlwaysOffline {
+            let _snapshot = self.fetch_snapshot(space, path)?;
+            let version = ContentVersion {
+                resource_id: entry.id.clone(),
+                etag: entry.etag.clone(),
+                protection: ContentProtection::Plaintext,
+            };
+            context
+                .cache
+                .content_record(&scope, &version)
+                .map_err(cache_cloud_error)?;
+        }
+        context
+            .cache
+            .set_policy_at(&scope, &entry.id, &entry.path, &entry.etag, policy)
+            .map_err(cache_cloud_error)
+    }
+
+    /// Read the policy for a freshly verified ordinary file path.
+    pub fn availability_policy(
+        &self,
+        space: &str,
+        path: &str,
+    ) -> Result<AvailabilityPolicy, CloudError> {
+        self.availability_status(space, path)
+            .map(|(policy, _)| policy)
+    }
+
+    /// Read policy and refresh state from one identity-checked metadata pass.
+    pub fn availability_status(
+        &self,
+        space: &str,
+        path: &str,
+    ) -> Result<(AvailabilityPolicy, Option<TargetState>), CloudError> {
+        let context = self.offline_cache.as_ref().ok_or_else(|| {
+            CloudError::new(ErrorKind::Unsupported, "offline cache is unavailable")
+        })?;
+        let (scope, _) = self.online_plaintext_scope(space)?;
+        let entry = self.backend.stat(space, path)?;
+        if entry.encrypted || (entry.directory && !cfg!(unix)) {
+            return Err(unsupported_encrypted_cache());
+        }
+        let policy = context
+            .cache
+            .policy(&scope, &entry.id)
+            .map_err(cache_cloud_error)?;
+        if entry.directory {
+            return Ok((policy, None));
+        }
+        let state = context
+            .cache
+            .policy_target_state(&scope, &entry.id)
+            .map_err(cache_cloud_error)?;
+        Ok((policy, state))
+    }
+
+    /// Return the state of the exact stable resource's AlwaysOffline target.
+    /// A missing policy has no refresh state; callers must not infer that a
+    /// cache entry is protected merely because some Recent bytes exist.
+    pub fn availability_state(
+        &self,
+        space: &str,
+        path: &str,
+    ) -> Result<Option<TargetState>, CloudError> {
+        self.availability_status(space, path)
+            .map(|(_, state)| state)
+    }
+
+    /// Read cache accounting without triggering eviction.
+    pub fn offline_cache_usage(&self) -> Result<CacheUsage, CloudError> {
+        let context = self.offline_cache.as_ref().ok_or_else(|| {
+            CloudError::new(ErrorKind::Unsupported, "offline cache is unavailable")
+        })?;
+        context.cache.usage().map_err(cache_cloud_error)
+    }
+
+    /// Enumerate retained ordinary file edits for the active account entirely
+    /// from the local journal, so the transfer view remains available offline.
+    pub fn pending_file_writes(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<raiun_cache::PendingWritePage, CloudError> {
+        let context = self.offline_cache.as_ref().ok_or_else(|| {
+            CloudError::new(
+                ErrorKind::Unsupported,
+                "offline write journal is unavailable",
+            )
+        })?;
+        context
+            .cache
+            .pending_write_page(&context.origin, &context.account_id, after, limit)
+            .map_err(cache_cloud_error)
+    }
+
+    /// Return the current exact ordinary scope used for write-recovery
+    /// manifests. With a cache this permits the existing offline scope only
+    /// after a transport-offline error; without one, the Runtime-supplied
+    /// account identity still binds online writes.
+    pub fn ordinary_write_scope(&self, space_id: &str) -> Result<CacheScope, CloudError> {
+        if self.vault_binding.is_some() {
+            return Err(unsupported_encrypted_cache());
+        }
+        if let Some(context) = &self.offline_cache {
+            return match self.online_plaintext_scope(space_id) {
+                Ok((scope, _)) => Ok(scope),
+                Err(error) if error.kind == ErrorKind::Offline => self
+                    .cached_scope(space_id, context)
+                    .map_err(cache_cloud_error),
+                Err(error) => Err(error),
+            };
+        }
+        let identity = self.account_scope.as_ref().ok_or_else(|| {
+            CloudError::new(
+                ErrorKind::Unsupported,
+                "authenticated account scope is unavailable",
+            )
+        })?;
+        let space = self
+            .backend
+            .spaces()?
+            .into_iter()
+            .find(|space| space.id == space_id)
+            .ok_or_else(|| CloudError::new(ErrorKind::NotFound, "cloud Space was not found"))?;
+        if space.encrypted {
+            return Err(unsupported_encrypted_cache());
+        }
+        let root = self.backend.stat(space_id, "/")?;
+        if root.encrypted || !root.directory || root.path != "/" {
+            return Err(CloudError::new(
+                ErrorKind::InvalidResponse,
+                "cloud Space root identity is invalid for ordinary writes",
+            ));
+        }
+        CacheScope::new(
+            &identity.origin,
+            &identity.account_id,
+            space_id,
+            &root.id,
+            ScopeProtection::PlaintextAllowed,
+        )
+        .map_err(cache_cloud_error)
+    }
+
+    /// Save an edit to a previously cached regular file. The durable journal
+    /// keeps the original ETag as its conditional base and stores the new
+    /// bytes under a separate immutable version.
+    pub fn queue_offline_file_write(
+        &self,
+        space: &str,
+        path: &str,
+        source: &Path,
+        base: WriteCondition,
+    ) -> Result<QueuedWrite, CloudError> {
+        let _guard = self.execution()?;
+        let _metadata = self.metadata_publication()?;
+        let context = self.offline_cache.as_ref().ok_or_else(|| {
+            CloudError::new(
+                ErrorKind::Unsupported,
+                "offline write journal is unavailable",
+            )
+        })?;
+        let scope = match self.online_plaintext_scope(space) {
+            Ok((scope, _)) => scope,
+            Err(error) if error.kind == ErrorKind::Offline => self
+                .cached_scope(space, context)
+                .map_err(cache_cloud_error)?,
+            Err(error) => return Err(error),
+        };
+        let metadata = fs::metadata(source).map_err(io_error)?;
+        if !metadata.is_file() {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "offline edits require a regular local file",
+            ));
+        }
+        let expected_len = metadata.len();
+        let parent = parent_path(path)?;
+        let existing = context
+            .cache
+            .pending_write_for_path(&scope, path)
+            .map_err(cache_cloud_error)?;
+        let (parent_id, resource_id) = if let Some(write) = &existing {
+            if write.base != base {
+                return Err(CloudError::new(
+                    ErrorKind::Conflict,
+                    "open file does not match the pending write base",
+                ));
+            }
+            let resource_id = write.resource_id.clone().ok_or_else(|| {
+                CloudError::new(
+                    ErrorKind::Unsupported,
+                    "offline file creation is not enabled",
+                )
+            })?;
+            (write.parent_resource_id.clone(), resource_id)
+        } else {
+            let parent_id = context
+                .cache
+                .resource_id_for_path(&scope, &parent)
+                .map_err(cache_cloud_error)?
+                .ok_or_else(|| {
+                    CloudError::new(ErrorKind::Offline, "cached parent is unavailable")
+                })?;
+            let cached = context
+                .cache
+                .entry_for_path(&scope, path)
+                .map_err(cache_cloud_error)?
+                .ok_or_else(|| CloudError::new(ErrorKind::Offline, "cached file is unavailable"))?;
+            if cached.directory
+                || cached.encrypted
+                || !cached.writable
+                || cached.path != path
+                || !matches!(&base, WriteCondition::Match(etag) if etag == &cached.etag)
+            {
+                return Err(CloudError::new(
+                    ErrorKind::Conflict,
+                    "cached file identity, permission, or base version changed",
+                ));
+            }
+            (parent_id, cached.id)
+        };
+        let request = ConditionalWriteRequest {
+            parent_resource_id: parent_id,
+            name: path.rsplit('/').next().unwrap_or_default().to_owned(),
+            logical_path: path.to_owned(),
+            resource_id: Some(resource_id),
+            base,
+            expected_len,
+            protection: ContentProtection::Plaintext,
+        };
+        let mut input = File::open(source).map_err(io_error)?;
+        let queued = if existing.is_some() {
+            context
+                .cache
+                .replace_pending_conditional_write(&scope, request, &mut input)
+        } else {
+            context
+                .cache
+                .queue_conditional_write(&scope, request, &mut input)
+        }
+        .map_err(cache_cloud_error)?;
+        Ok(queued)
+    }
+
+    /// Commit an online edit immediately when possible, otherwise durably
+    /// queue it. If this path already has a journal record, updates remain
+    /// conditional on its original ETag and are never implicitly rebased.
+    pub fn commit_file_write(
+        &self,
+        space: &str,
+        path: &str,
+        source: &Path,
+        base: WriteCondition,
+    ) -> Result<FileWriteOutcome, CloudError> {
+        if self.offline_cache.is_none() {
+            return self
+                .put(space, path, source, base)
+                .map(FileWriteOutcome::Uploaded);
+        }
+        if let Some(write) = self.pending_write(space, path)? {
+            if base != write.base {
+                return Err(CloudError::new(
+                    ErrorKind::Conflict,
+                    "open file was based on a different pending-write version",
+                ));
+            }
+            let updated = self.queue_offline_file_write(space, path, source, write.base.clone())?;
+            if updated.state == WriteState::Conflict {
+                return Ok(FileWriteOutcome::Queued(
+                    self.remote_entry_for_pending(space, &updated)?,
+                ));
+            }
+            return match self.reconcile_one_pending_write(space, updated.id) {
+                Ok(entry) => Ok(FileWriteOutcome::Uploaded(entry)),
+                Err(error) if error.kind == ErrorKind::Offline => Ok(FileWriteOutcome::Queued(
+                    self.remote_entry_for_pending(space, &updated)?,
+                )),
+                Err(error) => Err(error),
+            };
+        }
+        if matches!(&base, WriteCondition::Absent) {
+            // The ordinary offline journal only supports edits to an existing
+            // resource. An online create must still reach conditional PUT;
+            // routing it through that journal rejects every uncached new file.
+            // On transport failure the caller's FUSE spool/manifest remains
+            // the recovery owner; never claim an offline create was queued.
+            return self
+                .put(space, path, source, base)
+                .map(FileWriteOutcome::Uploaded);
+        }
+        let queued = self.queue_offline_file_write(space, path, source, base)?;
+        match self.reconcile_one_pending_write(space, queued.id) {
+            Ok(entry) => Ok(FileWriteOutcome::Uploaded(entry)),
+            Err(error) if error.kind == ErrorKind::Offline => Ok(FileWriteOutcome::Queued(
+                self.remote_entry_for_pending(space, &queued)?,
+            )),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Commit a FUSE write only while the exact account/Space-root and remote
+    /// file identities captured at open remain current. Offline fallback is
+    /// allowed only when an ordinary cache scope proves the same root; the
+    /// cache journal then retains the original resource and ETag conditions.
+    pub fn commit_file_write_scoped(
+        &self,
+        space: &str,
+        path: &str,
+        source: &Path,
+        base: WriteCondition,
+        expected_scope: &CacheScope,
+        expected_resource_id: Option<&str>,
+    ) -> Result<FileWriteOutcome, CloudError> {
+        let current_scope = self.ordinary_write_scope(space)?;
+        if &current_scope != expected_scope {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "account or Space root changed since the file was opened; local bytes were preserved",
+            ));
+        }
+        match self.backend.stat(space, path) {
+            Ok(current) => {
+                if current.encrypted
+                    || current.directory
+                    || Some(current.id.as_str()) != expected_resource_id
+                    || matches!(&base, WriteCondition::Match(etag) if etag != &current.etag)
+                    || matches!(&base, WriteCondition::Absent)
+                {
+                    return Err(CloudError::new(
+                        ErrorKind::Conflict,
+                        "remote file identity or base version changed; local bytes were preserved",
+                    ));
+                }
+            }
+            Err(error)
+                if error.kind == ErrorKind::NotFound
+                    && expected_resource_id.is_none()
+                    && matches!(&base, WriteCondition::Absent) => {}
+            Err(error) if error.kind == ErrorKind::Offline && self.offline_cache.is_some() => {}
+            Err(error) => return Err(error),
+        }
+        if matches!(&base, WriteCondition::Absent)
+            && (self.offline_cache.is_none() || self.pending_write(space, path)?.is_none())
+        {
+            let _guard = self.execution()?;
+            return self
+                .upload_inner_with_root(
+                    None,
+                    space,
+                    path,
+                    source,
+                    base,
+                    Some(expected_scope.root_resource_id()),
+                )
+                .map(FileWriteOutcome::Uploaded);
+        }
+        self.commit_file_write(space, path, source, base)
+    }
+
+    /// Attempt conditional reconciliation for every pending ordinary file
+    /// write in one Space. Conflicts and bytes are retained; deletions are not
+    /// inferred from missing or evicted content.
+    pub fn reconcile_pending_file_writes(
+        &self,
+        space: &str,
+    ) -> Result<WriteReconcileReport, CloudError> {
+        self.reconcile_pending_file_writes_cancellable(space, usize::MAX, || false)
+    }
+
+    /// Reconcile at most `limit` pending writes, stopping between remote
+    /// operations when the caller's profile generation, cancellation, or
+    /// pause state changes. Unattempted and conflicted rows remain in the
+    /// local journal and are counted in `remaining`.
+    pub fn reconcile_pending_file_writes_cancellable(
+        &self,
+        space: &str,
+        limit: usize,
+        mut should_stop: impl FnMut() -> bool,
+    ) -> Result<WriteReconcileReport, CloudError> {
+        if limit == 0 {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "write reconciliation limit must be positive",
+            ));
+        }
+        let context = self.offline_cache.as_ref().ok_or_else(|| {
+            CloudError::new(
+                ErrorKind::Unsupported,
+                "offline write journal is unavailable",
+            )
+        })?;
+        let scope = match self.online_plaintext_scope(space) {
+            Ok((scope, _)) => scope,
+            Err(error) => return Err(error),
+        };
+        let writes = context
+            .cache
+            .pending_writes(&scope)
+            .map_err(cache_cloud_error)?;
+        let mut report = WriteReconcileReport::default();
+        let mut attempted = 0usize;
+        for write in writes {
+            if write.state == WriteState::Verified {
+                continue;
+            }
+            if attempted >= limit || should_stop() {
+                break;
+            }
+            // Already-conflicted writes require explicit user resolution and
+            // must never be retried by automatic reconciliation.
+            if write.state == WriteState::Conflict {
+                report.conflicts = report.conflicts.saturating_add(1);
+                continue;
+            }
+            attempted += 1;
+            match self.reconcile_one_pending_write(space, write.id) {
+                Ok(_) => report.uploaded = report.uploaded.saturating_add(1),
+                Err(error) if error.kind == ErrorKind::Conflict => {
+                    report.conflicts = report.conflicts.saturating_add(1)
+                }
+                Err(error) if error.kind == ErrorKind::Offline => {
+                    break;
+                }
+                Err(error)
+                    if error.kind == ErrorKind::Unsupported
+                        && error.message.contains("Folder sync paused") =>
+                {
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        report.remaining = context
+            .cache
+            .pending_writes(&scope)
+            .map_err(cache_cloud_error)?
+            .into_iter()
+            // Conflicts are reported separately and need explicit user
+            // attention; `remaining` is the count of uploads still eligible
+            // for a conditional retry.
+            .filter(|write| write.state == WriteState::Pending)
+            .count() as u64;
+        Ok(report)
+    }
+
+    fn pending_write(&self, space: &str, path: &str) -> Result<Option<QueuedWrite>, CloudError> {
+        let Some(context) = &self.offline_cache else {
+            return Ok(None);
+        };
+        let scope = match self.online_plaintext_scope(space) {
+            Ok((scope, _)) => scope,
+            Err(error) if error.kind == ErrorKind::Offline => self
+                .cached_scope(space, context)
+                .map_err(cache_cloud_error)?,
+            Err(error) => return Err(error),
+        };
+        context
+            .cache
+            .pending_write_for_path(&scope, path)
+            .map_err(cache_cloud_error)
+    }
+
+    fn remote_entry_for_pending(
+        &self,
+        space: &str,
+        write: &QueuedWrite,
+    ) -> Result<RemoteEntry, CloudError> {
+        let context = self.offline_cache.as_ref().ok_or_else(|| {
+            CloudError::new(ErrorKind::Unsupported, "offline cache is unavailable")
+        })?;
+        let scope = match self.online_plaintext_scope(space) {
+            Ok((scope, _)) => scope,
+            Err(error) if error.kind == ErrorKind::Offline => self
+                .cached_scope(space, context)
+                .map_err(cache_cloud_error)?,
+            Err(error) => return Err(error),
+        };
+        self.remote_entry_for_pending_in_scope(&scope, write)
+    }
+
+    fn remote_entry_for_pending_in_scope(
+        &self,
+        scope: &CacheScope,
+        write: &QueuedWrite,
+    ) -> Result<RemoteEntry, CloudError> {
+        let context = self.offline_cache.as_ref().ok_or_else(|| {
+            CloudError::new(ErrorKind::Unsupported, "offline cache is unavailable")
+        })?;
+        if write.content.protection != ContentProtection::Plaintext {
+            return Err(unsupported_encrypted_cache());
+        }
+        let content = context
+            .cache
+            .content_record(scope, &write.content)
+            .map_err(cache_cloud_error)?;
+        Ok(RemoteEntry {
+            id: write
+                .resource_id
+                .clone()
+                .unwrap_or_else(|| write.content.resource_id.clone()),
+            path: write.logical_path.clone(),
+            directory: false,
+            size: content.byte_len,
+            etag: match &write.base {
+                WriteCondition::Match(etag) => etag.clone(),
+                WriteCondition::Absent => write.content.etag.clone(),
+            },
+            modified_unix: write.created_at_unix,
+            writable: true,
+            encrypted: false,
+        })
+    }
+
+    fn reconcile_one_pending_write(
+        &self,
+        space: &str,
+        write_id: i64,
+    ) -> Result<RemoteEntry, CloudError> {
+        let _guard = self.execution()?;
+        self.check_sync_paused()?;
+        let context = self.offline_cache.as_ref().ok_or_else(|| {
+            CloudError::new(
+                ErrorKind::Unsupported,
+                "offline write journal is unavailable",
+            )
+        })?;
+        let (scope, _) = self.online_plaintext_scope(space)?;
+        let write = context
+            .cache
+            .pending_writes(&scope)
+            .map_err(cache_cloud_error)?
+            .into_iter()
+            .find(|write| write.id == write_id)
+            .ok_or_else(|| CloudError::new(ErrorKind::NotFound, "pending write was not found"))?;
+        if write.state == WriteState::Verified {
+            return Err(CloudError::new(
+                ErrorKind::NotFound,
+                "pending write has already been verified",
+            ));
+        }
+        if write.state == WriteState::Conflict {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "pending write is marked conflicted; user action is required",
+            ));
+        }
+        if write.content.protection != ContentProtection::Plaintext {
+            return Err(unsupported_encrypted_cache());
+        }
+        let current_scope = self.online_plaintext_scope(space)?.0;
+        if current_scope != scope {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "cloud account or Space root changed; pending bytes were preserved",
+            ));
+        }
+        let current = match self.backend.stat(space, &write.logical_path) {
+            Ok(entry) => entry,
+            Err(error) if error.kind == ErrorKind::NotFound => {
+                context
+                    .cache
+                    .mark_write_conflict(&scope, write.id)
+                    .map_err(cache_cloud_error)?;
+                return Err(CloudError::new(
+                    ErrorKind::Conflict,
+                    "remote file was removed; pending bytes were preserved",
+                ));
+            }
+            Err(error) => return Err(error),
+        };
+        let expected_etag = match &write.base {
+            WriteCondition::Match(etag) => etag.as_str(),
+            WriteCondition::Absent => {
+                context
+                    .cache
+                    .mark_write_conflict(&scope, write.id)
+                    .map_err(cache_cloud_error)?;
+                return Err(CloudError::new(
+                    ErrorKind::Conflict,
+                    "offline creation is not enabled for this write journal",
+                ));
+            }
+        };
+        if current.id != write.resource_id.as_deref().unwrap_or_default()
+            || current.encrypted
+            || current.directory
+            || !current.writable
+            || current.etag != expected_etag
+        {
+            context
+                .cache
+                .mark_write_conflict(&scope, write.id)
+                .map_err(cache_cloud_error)?;
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "remote identity, permissions, or base version changed; pending bytes were preserved",
+            ));
+        }
+        let content = context
+            .cache
+            .open_content(&scope, &write.content)
+            .map_err(cache_cloud_error)?;
+        let staged = NamedTempFile::new_in(self.cache_dir()).map_err(io_error)?;
+        let mut staged = staged;
+        let mut input = content;
+        std::io::copy(&mut input, staged.as_file_mut()).map_err(io_error)?;
+        staged.as_file().sync_all().map_err(io_error)?;
+        let uploaded = match self.upload_inner(
+            None,
+            space,
+            &write.logical_path,
+            staged.path(),
+            write.base.clone(),
+        ) {
+            Ok(entry) => entry,
+            Err(error) if error.kind == ErrorKind::Conflict => {
+                context
+                    .cache
+                    .mark_write_conflict(&scope, write.id)
+                    .map_err(cache_cloud_error)?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+        let version = ContentVersion {
+            resource_id: uploaded.id.clone(),
+            etag: uploaded.etag.clone(),
+            protection: ContentProtection::Plaintext,
+        };
+        let mut verified_bytes = File::open(staged.path()).map_err(io_error)?;
+        context
+            .cache
+            .publish_content(
+                &scope,
+                &version,
+                &mut verified_bytes,
+                uploaded.size,
+                Retention::Recent,
+            )
+            .map_err(cache_cloud_error)?;
+        context
+            .cache
+            .mark_write_verified(&scope, write.id)
+            .map_err(cache_cloud_error)?;
+        Ok(uploaded)
+    }
+
+    /// Build a durable recursive pin from fresh online listings. The callback
+    /// receives persisted counts after the manifest is committed and after
+    /// each exact file version is verified. Failures leave a Building pin and
+    /// already downloaded recent content intact for inspection or cancellation.
+    pub fn pin_offline_tree<F>(
+        &self,
+        space: &str,
+        path: &str,
+        progress: F,
+    ) -> Result<PinInfo, CloudError>
+    where
+        F: FnMut(PinInfo),
+    {
+        self.pin_offline_tree_cancellable(space, path, || false, progress)
+    }
+
+    /// As `pin_offline_tree`, with cooperative cancellation points between
+    /// directory listings and verified file downloads. An in-flight blocking
+    /// network request is allowed to finish before cancellation takes effect.
+    pub fn pin_offline_tree_cancellable<F, C>(
+        &self,
+        space: &str,
+        path: &str,
+        mut cancelled: C,
+        mut progress: F,
+    ) -> Result<PinInfo, CloudError>
+    where
+        F: FnMut(PinInfo),
+        C: FnMut() -> bool,
+    {
+        if cancelled() {
+            return Err(CloudError::new(ErrorKind::Offline, "offline pin cancelled"));
+        }
+        let context = self.offline_cache.as_ref().ok_or_else(|| {
+            CloudError::new(ErrorKind::Unsupported, "offline cache is unavailable")
+        })?;
+        let (scope, space_root) = self.online_plaintext_scope(space)?;
+        if cancelled() {
+            return Err(CloudError::new(ErrorKind::Offline, "offline pin cancelled"));
+        }
+        let selected = if path == "/" {
+            space_root.clone()
+        } else {
+            self.backend.stat(space, path)?
+        };
+        if !selected.directory || selected.encrypted {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "offline folder availability requires an unencrypted directory",
+            ));
+        }
+        let root_resource_id = selected.id.clone();
+        if path != "/" {
+            let parent = parent_path(path)?;
+            let parent_entry = if parent == "/" {
+                space_root.clone()
+            } else {
+                self.backend.stat(space, &parent)?
+            };
+            if !parent_entry.directory || parent_entry.encrypted {
+                return Err(unsupported_encrypted_cache());
+            }
+            let _metadata = self.metadata_publication()?;
+            let siblings = self.list_live(space, &parent)?;
+            if !siblings.iter().any(|entry| {
+                entry.id == selected.id
+                    && entry.path == selected.path
+                    && entry.etag == selected.etag
+                    && entry.directory
+                    && !entry.encrypted
+            }) {
+                return Err(CloudError::new(
+                    ErrorKind::Conflict,
+                    "folder changed while preparing offline availability",
+                ));
+            }
+            context
+                .cache
+                .publish_listing(
+                    &scope,
+                    &parent_entry.id,
+                    &siblings
+                        .iter()
+                        .filter(|entry| !entry.encrypted)
+                        .cloned()
+                        .map(|entry| CachedEntry {
+                            parent_resource_id: parent_entry.id.clone(),
+                            entry,
+                        })
+                        .collect::<Vec<_>>(),
+                    now_unix(),
+                )
+                .map_err(cache_cloud_error)?;
+        }
+        let mut pending = vec![(path.to_owned(), root_resource_id.clone())];
+        let mut manifest = Vec::new();
+        let mut files = Vec::new();
+        while let Some((directory_path, parent_id)) = pending.pop() {
+            if cancelled() {
+                return Err(CloudError::new(ErrorKind::Offline, "offline pin cancelled"));
+            }
+            let _metadata = self.metadata_publication()?;
+            let entries = self.list_live(space, &directory_path)?;
+            if entries.len() > MAX_LIST_ENTRIES
+                || manifest.len().saturating_add(entries.len()) > MAX_LIST_ENTRIES
+            {
+                return Err(CloudError::new(
+                    ErrorKind::Unsupported,
+                    "offline folder manifest exceeds the 100,000-entry limit",
+                ));
+            }
+            for entry in entries {
+                if cancelled() {
+                    return Err(CloudError::new(ErrorKind::Offline, "offline pin cancelled"));
+                }
+                if entry.encrypted || !is_direct_child_path(&directory_path, &entry.path) {
+                    return Err(unsupported_encrypted_cache());
+                }
+                manifest.push(PinManifestEntry {
+                    parent_resource_id: parent_id.clone(),
+                    entry: entry.clone(),
+                });
+                if entry.directory {
+                    pending.push((entry.path.clone(), entry.id.clone()));
+                } else {
+                    files.push(entry);
+                }
+            }
+            context
+                .cache
+                .publish_listing(
+                    &scope,
+                    &parent_id,
+                    &manifest
+                        .iter()
+                        .filter(|item| item.parent_resource_id == parent_id)
+                        .cloned()
+                        .map(|item| CachedEntry {
+                            parent_resource_id: item.parent_resource_id,
+                            entry: item.entry,
+                        })
+                        .collect::<Vec<_>>(),
+                    now_unix(),
+                )
+                .map_err(cache_cloud_error)?;
+        }
+        if cancelled() {
+            return Err(CloudError::new(ErrorKind::Offline, "offline pin cancelled"));
+        }
+        let pin = context
+            .cache
+            .begin_pin_at(&scope, &root_resource_id, path, &manifest)
+            .map_err(cache_cloud_error)?;
+        progress(pin.clone());
+        for file_entry in files {
+            if cancelled() {
+                return Err(CloudError::new(ErrorKind::Offline, "offline pin cancelled"));
+            }
+            let (current_scope, _) = self.online_plaintext_scope(space)?;
+            if current_scope != scope {
+                return Err(CloudError::new(
+                    ErrorKind::Conflict,
+                    "cloud Space root changed while preparing offline availability",
+                ));
+            }
+            let version = ContentVersion {
+                resource_id: file_entry.id.clone(),
+                etag: file_entry.etag.clone(),
+                protection: ContentProtection::Plaintext,
+            };
+            let already_cached = context.cache.open_content(&scope, &version).is_ok();
+            if !already_cached {
+                let snapshot = self.fetch_snapshot(space, &file_entry.path)?;
+                drop(snapshot);
+                context
+                    .cache
+                    .open_content(&scope, &version)
+                    .map_err(cache_cloud_error)?;
+            }
+            let current = context
+                .cache
+                .refresh_pin(&pin.id)
+                .map_err(cache_cloud_error)?;
+            progress(current);
+        }
+        let completed = context
+            .cache
+            .refresh_pin(&pin.id)
+            .map_err(cache_cloud_error)?;
+        let _ = context.cache.evict_recent(context.cache.quota_bytes());
+        Ok(completed)
+    }
+
+    /// Refresh every persisted AlwaysOffline file and folder snapshot for one
+    /// verified ordinary Space. Targets are resolved by stable resource ID,
+    /// never by reusing whatever happens to occupy their previous path. A
+    /// complete bounded traversal is required before a missing target becomes
+    /// unavailable. Folder pins are rebuilt under a temporary ID and swapped
+    /// only after the new full snapshot is ready.
+    pub fn refresh_offline_availability_cancellable<C>(
+        &self,
+        space: &str,
+        mut cancelled: C,
+    ) -> Result<OfflineRefreshReport, CloudError>
+    where
+        C: FnMut() -> bool,
+    {
+        if cancelled() {
+            return Err(CloudError::new(
+                ErrorKind::Offline,
+                "offline refresh cancelled",
+            ));
+        }
+        let context = self.offline_cache.as_ref().ok_or_else(|| {
+            CloudError::new(ErrorKind::Unsupported, "offline cache is unavailable")
+        })?;
+        let (scope, root) = self.online_plaintext_scope(space)?;
+        let (policies, pins) = context
+            .cache
+            .refresh_targets(&scope)
+            .map_err(cache_cloud_error)?;
+        if policies.is_empty() && pins.is_empty() {
+            return Ok(OfflineRefreshReport::default());
+        }
+        let tree = self.refresh_live_tree(space, &scope, &root, &mut cancelled)?;
+        // Do not apply any target status if the account/root binding changed
+        // while the bounded traversal was in progress.
+        let (current_scope, _) = self.online_plaintext_scope(space)?;
+        if current_scope != scope {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "cloud Space root changed during offline refresh",
+            ));
+        }
+        let mut report = OfflineRefreshReport {
+            folders_refreshed: tree.directories,
+            ..OfflineRefreshReport::default()
+        };
+        for target in policies {
+            if cancelled() {
+                return Err(CloudError::new(
+                    ErrorKind::Offline,
+                    "offline refresh cancelled",
+                ));
+            }
+            report.files_checked += 1;
+            let Some((path, entry)) = tree.by_id.get(&target.resource_id) else {
+                context
+                    .cache
+                    .mark_policy_unavailable(&scope, &target.resource_id)
+                    .map_err(cache_cloud_error)?;
+                report.unavailable += 1;
+                continue;
+            };
+            if entry.directory || entry.encrypted {
+                context
+                    .cache
+                    .set_policy_refresh_state(
+                        &scope,
+                        &target.resource_id,
+                        &target.path,
+                        &target.etag,
+                        TargetState::Unavailable,
+                    )
+                    .map_err(cache_cloud_error)?;
+                report.unavailable += 1;
+                continue;
+            }
+            // Mark a new revision stale before fetching it so no offline read
+            // can expose the old protected bytes if the transfer fails.
+            if target.etag != entry.etag
+                || target.path != *path
+                || target.state != TargetState::Ready
+            {
+                context
+                    .cache
+                    .set_policy_refresh_state(
+                        &scope,
+                        &target.resource_id,
+                        path,
+                        &target.etag,
+                        TargetState::Stale,
+                    )
+                    .map_err(cache_cloud_error)?;
+            }
+            let version = ContentVersion {
+                resource_id: entry.id.clone(),
+                etag: entry.etag.clone(),
+                protection: ContentProtection::Plaintext,
+            };
+            let cached = context.cache.open_content(&scope, &version).is_ok();
+            if !cached {
+                // `fetch_snapshot` validates the live ID/ETag/size and
+                // publishes this exact immutable version as Recent. The
+                // policy row is promoted only after the cache verifies it.
+                let _snapshot = self.fetch_snapshot(space, path)?;
+                report.files_downloaded += 1;
+                context
+                    .cache
+                    .open_content(&scope, &version)
+                    .map_err(cache_cloud_error)?;
+            }
+            context
+                .cache
+                .set_policy_refresh_state(
+                    &scope,
+                    &target.resource_id,
+                    path,
+                    &entry.etag,
+                    TargetState::Ready,
+                )
+                .map_err(cache_cloud_error)?;
+        }
+        for target in pins {
+            if cancelled() {
+                return Err(CloudError::new(
+                    ErrorKind::Offline,
+                    "offline refresh cancelled",
+                ));
+            }
+            let Some((path, entry)) = tree.by_id.get(&target.root_resource_id) else {
+                context
+                    .cache
+                    .set_pin_refresh_target(
+                        &scope,
+                        &target.pin_id,
+                        &target.root_resource_id,
+                        &target.path,
+                        PinState::Unavailable,
+                    )
+                    .map_err(cache_cloud_error)?;
+                report.unavailable += 1;
+                continue;
+            };
+            if !entry.directory || entry.encrypted {
+                context
+                    .cache
+                    .set_pin_refresh_target(
+                        &scope,
+                        &target.pin_id,
+                        &target.root_resource_id,
+                        path,
+                        PinState::Unavailable,
+                    )
+                    .map_err(cache_cloud_error)?;
+                report.unavailable += 1;
+                continue;
+            }
+            context
+                .cache
+                .set_pin_refresh_target(
+                    &scope,
+                    &target.pin_id,
+                    &target.root_resource_id,
+                    path,
+                    PinState::Stale,
+                )
+                .map_err(cache_cloud_error)?;
+            let mut staging_id = None;
+            let staged = self.pin_offline_tree_cancellable(space, path, &mut cancelled, |info| {
+                staging_id = Some(info.id.clone())
+            });
+            match staged {
+                Ok(info) => {
+                    if cancelled() {
+                        let _ = context.cache.cancel_pin_for_scope(&scope, &info.id);
+                        return Err(CloudError::new(
+                            ErrorKind::Offline,
+                            "offline refresh cancelled",
+                        ));
+                    }
+                    let (live_scope, live_root) = self.online_plaintext_scope(space)?;
+                    if live_scope != scope || live_root.id != scope.root_resource_id() {
+                        let _ = context.cache.cancel_pin_for_scope(&scope, &info.id);
+                        return Err(CloudError::new(
+                            ErrorKind::Conflict,
+                            "cloud Space root changed during pin refresh",
+                        ));
+                    }
+                    context
+                        .cache
+                        .replace_pin_snapshot(&scope, &target.pin_id, &info.id)
+                        .map_err(cache_cloud_error)?;
+                }
+                Err(error) => {
+                    if let Some(id) = staging_id {
+                        let _ = context.cache.cancel_pin_for_scope(&scope, &id);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        let _ = context.cache.evict_recent(context.cache.quota_bytes());
+        Ok(report)
+    }
+
+    fn refresh_live_tree<C>(
+        &self,
+        space: &str,
+        scope: &CacheScope,
+        root: &RemoteEntry,
+        cancelled: &mut C,
+    ) -> Result<RefreshTree, CloudError>
+    where
+        C: FnMut() -> bool,
+    {
+        if root.id != scope.root_resource_id()
+            || root.path != "/"
+            || !root.directory
+            || root.encrypted
+        {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "cloud Space root identity changed",
+            ));
+        }
+        let context = self.offline_cache.as_ref().expect("refresh requires cache");
+        let mut tree = RefreshTree::default();
+        tree.by_id
+            .insert(root.id.clone(), ("/".into(), root.clone()));
+        let mut pending = vec![("/".to_owned(), root.id.clone(), 0usize)];
+        let mut total_entries = 0usize;
+        let mut path_bytes = 1usize;
+        while let Some((parent_path, parent_id, depth)) = pending.pop() {
+            if cancelled() {
+                return Err(CloudError::new(
+                    ErrorKind::Offline,
+                    "offline refresh cancelled",
+                ));
+            }
+            if depth > MAX_REFRESH_DEPTH {
+                return Err(CloudError::new(
+                    ErrorKind::Unsupported,
+                    "offline refresh exceeds the directory-depth limit",
+                ));
+            }
+            let _metadata = self.metadata_publication()?;
+            let entries = self.list_live(space, &parent_path)?;
+            total_entries = total_entries.saturating_add(entries.len());
+            if total_entries > MAX_LIST_ENTRIES {
+                return Err(CloudError::new(
+                    ErrorKind::Unsupported,
+                    "offline refresh exceeds the 100,000-entry limit",
+                ));
+            }
+            let mut cache_entries = Vec::with_capacity(entries.len());
+            for entry in entries {
+                if cancelled() {
+                    return Err(CloudError::new(
+                        ErrorKind::Offline,
+                        "offline refresh cancelled",
+                    ));
+                }
+                // The ordinary cache intentionally omits encrypted entries.
+                // They are outside this refresh's plaintext authority and
+                // must never block or be copied into an ordinary snapshot.
+                if entry.encrypted {
+                    continue;
+                }
+                if !is_direct_child_path(&parent_path, &entry.path) {
+                    return Err(unsupported_encrypted_cache());
+                }
+                path_bytes = path_bytes
+                    .saturating_add(entry.id.len())
+                    .saturating_add(entry.etag.len())
+                    .saturating_add(entry.path.len());
+                if path_bytes > MAX_REFRESH_PATH_BYTES {
+                    return Err(CloudError::new(
+                        ErrorKind::Unsupported,
+                        "offline refresh exceeds the metadata-size limit",
+                    ));
+                }
+                if tree
+                    .by_id
+                    .insert(entry.id.clone(), (entry.path.clone(), entry.clone()))
+                    .is_some()
+                {
+                    return Err(CloudError::new(
+                        ErrorKind::InvalidResponse,
+                        "cloud returned a duplicate resource identity",
+                    ));
+                }
+                if entry.directory {
+                    pending.push((entry.path.clone(), entry.id.clone(), depth + 1));
+                }
+                cache_entries.push(CachedEntry {
+                    parent_resource_id: parent_id.clone(),
+                    entry,
+                });
+            }
+            context
+                .cache
+                .publish_listing(scope, &parent_id, &cache_entries, now_unix())
+                .map_err(cache_cloud_error)?;
+            tree.directories += 1;
+        }
+        Ok(tree)
+    }
+
+    /// Read persisted pin progress scoped to this profile and Space. This does
+    /// not touch the network and verifies the pin manifest before reporting.
+    pub fn offline_pin_status(&self, space: &str, pin_id: &str) -> Result<PinInfo, CloudError> {
+        let context = self.offline_cache.as_ref().ok_or_else(|| {
+            CloudError::new(ErrorKind::Unsupported, "offline cache is unavailable")
+        })?;
+        let scope = self
+            .cached_scope(space, context)
+            .map_err(cache_cloud_error)?;
+        context
+            .cache
+            .pin_info_for_scope(&scope, pin_id)
+            .map_err(cache_cloud_error)
+    }
+
+    /// Read historical pin metadata for an explicit recovery view. This never
+    /// becomes a complete/current listing and grants no write or delete authority.
+    pub fn offline_pin_recovery_manifest(
+        &self,
+        space: &str,
+        pin_id: &str,
+    ) -> Result<raiun_cache::RetainedPinManifest, CloudError> {
+        let (context, scope) = self.offline_recovery_context(space)?;
+        context
+            .cache
+            .retained_pin_manifest(&scope, pin_id)
+            .map_err(cache_cloud_error)
+    }
+
+    /// Bounded historical snapshot roots; this is not a current cloud listing.
+    pub fn offline_pin_recovery_catalog(
+        &self,
+        space: &str,
+    ) -> Result<Vec<raiun_cache::RetainedPinSummary>, CloudError> {
+        let (context, scope) = self.offline_recovery_context(space)?;
+        context
+            .cache
+            .retained_pin_catalog(&scope)
+            .map_err(cache_cloud_error)
+    }
+
+    fn offline_recovery_context(
+        &self,
+        space: &str,
+    ) -> Result<(&OfflineCache, CacheScope), CloudError> {
+        self.validate_offline_namespace_binding()?;
+        let context = self.offline_cache.as_ref().ok_or_else(|| {
+            CloudError::new(ErrorKind::Unsupported, "offline cache is unavailable")
+        })?;
+        let account = self
+            .account_scope
+            .as_ref()
+            .expect("validated account scope");
+        if context.account_id != account.account_id {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "recovery cache belongs to another account",
+            ));
+        }
+        let scope = self
+            .cached_scope(space, context)
+            .map_err(cache_cloud_error)?;
+        if scope.origin() != account.origin {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "recovery cache belongs to another server",
+            ));
+        }
+        Ok((context, scope))
+    }
+
+    /// Open one exact retained pin member for read-only recovery. The caller
+    /// must retain its account/root revocation lease for the reader lifetime.
+    /// This never resolves the historical path through live stat or fetch.
+    pub fn open_offline_pin_recovery_content(
+        &self,
+        space: &str,
+        pin_id: &str,
+        expected: &PinManifestEntry,
+    ) -> Result<raiun_cache::CacheContentReader, CloudError> {
+        let manifest = self.offline_pin_recovery_manifest(space, pin_id)?;
+        if expected.entry.directory
+            || expected.entry.encrypted
+            || expected.entry.writable
+            || !manifest.entries.iter().any(|entry| entry == expected)
+        {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "retained pin member changed",
+            ));
+        }
+        let context = self
+            .offline_cache
+            .as_ref()
+            .expect("validated recovery cache");
+        let scope = self
+            .cached_scope(space, context)
+            .map_err(cache_cloud_error)?;
+        let reader = context
+            .cache
+            .open_content(
+                &scope,
+                &ContentVersion {
+                    resource_id: expected.entry.id.clone(),
+                    etag: expected.entry.etag.clone(),
+                    protection: ContentProtection::Plaintext,
+                },
+            )
+            .map_err(cache_cloud_error)?;
+        if reader
+            .metadata()
+            .map_err(|_| {
+                CloudError::new(ErrorKind::Io, "retained content metadata is unavailable")
+            })?
+            .len()
+            != expected.entry.size
+        {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "retained content length changed",
+            ));
+        }
+        // Content verification may take time. Recheck exact membership/state
+        // afterward so a replaced or removed pin cannot retarget this open.
+        if self.offline_pin_recovery_manifest(space, pin_id)? != manifest {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "retained pin changed during open",
+            ));
+        }
+        Ok(reader)
+    }
+
+    /// List persisted pin manifests for a Space without network access.
+    pub fn offline_pins(&self, space: &str) -> Result<Vec<PinInfo>, CloudError> {
+        let context = self.offline_cache.as_ref().ok_or_else(|| {
+            CloudError::new(ErrorKind::Unsupported, "offline cache is unavailable")
+        })?;
+        let scope = self
+            .cached_scope(space, context)
+            .map_err(cache_cloud_error)?;
+        context.cache.pins(&scope).map_err(cache_cloud_error)
+    }
+
+    /// Cancel a pin for this profile/Space only. Cached Recent content remains
+    /// eligible for ordinary quota eviction; pinned or dirty data is not
+    /// deleted as a side effect of cancellation.
+    pub fn cancel_offline_pin(&self, space: &str, pin_id: &str) -> Result<(), CloudError> {
+        let context = self.offline_cache.as_ref().ok_or_else(|| {
+            CloudError::new(ErrorKind::Unsupported, "offline cache is unavailable")
+        })?;
+        let scope = self
+            .cached_scope(space, context)
+            .map_err(cache_cloud_error)?;
+        context
+            .cache
+            .cancel_pin_for_scope(&scope, pin_id)
+            .map_err(cache_cloud_error)
+    }
+
+    fn list_live(&self, space: &str, path: &str) -> Result<Vec<RemoteEntry>, CloudError> {
+        let mut entries = Vec::new();
+        let mut metadata_bytes = 0usize;
+        self.backend.list(space, path, &mut |entry| {
+            if entries.len() >= MAX_LIST_ENTRIES {
+                return Err(CloudError::new(
+                    ErrorKind::InvalidResponse,
+                    "cloud listing exceeds the 100,000-entry limit",
+                ));
+            }
+            metadata_bytes = metadata_bytes
+                .saturating_add(entry.id.len())
+                .saturating_add(entry.etag.len())
+                .saturating_add(entry.path.len());
+            if metadata_bytes > MAX_REFRESH_PATH_BYTES {
+                return Err(CloudError::new(
+                    ErrorKind::InvalidResponse,
+                    "cloud listing metadata exceeds the 32 MiB limit",
+                ));
+            }
             entries.push(entry);
             Ok(())
         })?;
         Ok(entries)
-    }
-
-    pub fn stat(&self, space: &str, path: &str) -> Result<RemoteEntry, CloudError> {
-        self.inner.backend.stat(space, path)
     }
 
     /// Download one file into the engine cache, checking both its advertised
@@ -281,41 +2964,44 @@ impl Engine {
     pub fn fetch_snapshot(&self, space: &str, path: &str) -> Result<FetchSnapshot, CloudError> {
         let _guard = self.execution()?;
         let record = self.begin_transfer(None, space, path, "download")?;
-        let result = (|| {
-            let before = self.inner.backend.stat(space, path)?;
-            if before.directory {
-                return Err(CloudError::new(
-                    ErrorKind::Unsupported,
-                    "cannot fetch a directory as a file",
-                ));
-            }
-            let snapshot = NamedTempFile::new_in(self.cache_dir()).map_err(io_error)?;
-            let entry =
-                self.inner
-                    .backend
-                    .download(space, path, Some(&before.etag), snapshot.path())?;
-            // CloudBackend implementations may publish downloads with an
-            // atomic rename over the destination. Reopen the path after the
-            // call: the original NamedTempFile handle can now point at an
-            // unlinked, empty inode even though the destination has content.
-            let mut file = File::open(snapshot.path()).map_err(io_error)?;
-            let size = file.metadata().map_err(io_error)?.len();
-            if entry.etag != before.etag || size != entry.size || size != before.size {
-                return Err(CloudError::new(
-                    ErrorKind::InvalidResponse,
-                    "download revision or size failed verification",
-                ));
-            }
-            file.sync_all().map_err(io_error)?;
-            file.seek(SeekFrom::Start(0)).map_err(io_error)?;
-            Ok((
-                FetchSnapshot {
-                    _temp: snapshot,
-                    file,
-                },
-                size,
-            ))
-        })();
+        let result = if self.offline_cache.is_some() {
+            self.fetch_snapshot_cached(space, path)
+        } else {
+            (|| {
+                let before = self.backend.stat(space, path)?;
+                if before.directory {
+                    return Err(CloudError::new(
+                        ErrorKind::Unsupported,
+                        "cannot fetch a directory as a file",
+                    ));
+                }
+                let snapshot = NamedTempFile::new_in(self.cache_dir()).map_err(io_error)?;
+                let (snapshot, entry) = download_to_named_temp(
+                    self.backend.as_ref(),
+                    space,
+                    path,
+                    Some(&before.etag),
+                    snapshot,
+                )?;
+                let size = snapshot.as_file().metadata().map_err(io_error)?.len();
+                if entry.etag != before.etag || size != entry.size || size != before.size {
+                    return Err(CloudError::new(
+                        ErrorKind::InvalidResponse,
+                        "download revision or size failed verification",
+                    ));
+                }
+                snapshot.as_file().sync_all().map_err(io_error)?;
+                let mut file = snapshot.reopen().map_err(io_error)?;
+                file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+                Ok((
+                    FetchSnapshot {
+                        _temp: Some(snapshot),
+                        file: SnapshotReader::Download(file),
+                    },
+                    size,
+                ))
+            })()
+        };
         match result {
             Ok((snapshot, bytes)) => {
                 self.finish_transfer(record, "completed", bytes, None)?;
@@ -326,6 +3012,182 @@ impl Engine {
                 Err(error)
             }
         }
+    }
+
+    fn fetch_snapshot_cached(
+        &self,
+        space: &str,
+        path: &str,
+    ) -> Result<(FetchSnapshot, u64), CloudError> {
+        let context = self
+            .offline_cache
+            .as_ref()
+            .expect("cached snapshot requires a cache context");
+        let (scope, online_root) = match self.online_plaintext_scope(space) {
+            Ok(result) => result,
+            Err(error) if error.kind == ErrorKind::Offline => {
+                let scope = self
+                    .cached_scope(space, context)
+                    .map_err(|cache_error| offline_cache_error(cache_error, error.clone()))?;
+                if let Some(write) = context
+                    .cache
+                    .pending_write_for_path(&scope, path)
+                    .map_err(cache_cloud_error)?
+                {
+                    let mut file = context
+                        .cache
+                        .open_content(&scope, &write.content)
+                        .map_err(cache_cloud_error)?;
+                    let bytes = file.metadata().map_err(io_error)?.len();
+                    file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+                    return Ok((
+                        FetchSnapshot {
+                            _temp: None,
+                            file: SnapshotReader::Cached(file),
+                        },
+                        bytes,
+                    ));
+                }
+                let entry = self.cached_entry_or_error(context, &scope, path, error.clone())?;
+                let size = entry.size;
+                return self
+                    .open_cached_snapshot(context, &scope, &entry, error)
+                    .map(|snapshot| (snapshot, size));
+            }
+            Err(error) => return Err(error),
+        };
+        if path != "/" {
+            if let Some(write) = context
+                .cache
+                .pending_write_for_path(&scope, path)
+                .map_err(cache_cloud_error)?
+            {
+                let mut file = context
+                    .cache
+                    .open_content(&scope, &write.content)
+                    .map_err(cache_cloud_error)?;
+                let bytes = file.metadata().map_err(io_error)?.len();
+                file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+                return Ok((
+                    FetchSnapshot {
+                        _temp: None,
+                        file: SnapshotReader::Cached(file),
+                    },
+                    bytes,
+                ));
+            }
+        }
+        let before = if path == "/" {
+            online_root
+        } else {
+            match self.backend.stat(space, path) {
+                Ok(entry) => entry,
+                Err(error) if error.kind == ErrorKind::Offline => {
+                    let entry = self.cached_entry_or_error(context, &scope, path, error.clone())?;
+                    let size = entry.size;
+                    return self
+                        .open_cached_snapshot(context, &scope, &entry, error)
+                        .map(|snapshot| (snapshot, size));
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        if before.directory {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "cannot fetch a directory as a file",
+            ));
+        }
+        if before.encrypted {
+            return Err(unsupported_encrypted_cache());
+        }
+        let downloaded = (|| {
+            let snapshot = NamedTempFile::new_in(self.cache_dir()).map_err(io_error)?;
+            let (snapshot, entry) = download_to_named_temp(
+                self.backend.as_ref(),
+                space,
+                path,
+                Some(&before.etag),
+                snapshot,
+            )?;
+            let size = snapshot.as_file().metadata().map_err(io_error)?.len();
+            if entry.directory
+                || entry.encrypted
+                || entry.id != before.id
+                || entry.etag != before.etag
+                || size != entry.size
+                || size != before.size
+            {
+                return Err(CloudError::new(
+                    ErrorKind::Conflict,
+                    "download revision, identity, or size failed verification",
+                ));
+            }
+            snapshot.as_file().sync_all().map_err(io_error)?;
+            if let Ok(mut source) = snapshot.reopen() {
+                let version = ContentVersion {
+                    resource_id: before.id.clone(),
+                    etag: before.etag.clone(),
+                    protection: ContentProtection::Plaintext,
+                };
+                if context
+                    .cache
+                    .publish_content(&scope, &version, &mut source, size, Retention::Recent)
+                    .is_ok()
+                {
+                    let _ = context.cache.evict_recent(context.cache.quota_bytes());
+                }
+            }
+            let mut file = snapshot.reopen().map_err(io_error)?;
+            file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+            Ok((
+                FetchSnapshot {
+                    _temp: Some(snapshot),
+                    file: SnapshotReader::Download(file),
+                },
+                size,
+            ))
+        })();
+        match downloaded {
+            Err(error) if error.kind == ErrorKind::Offline => {
+                let size = before.size;
+                self.open_cached_snapshot(context, &scope, &before, error)
+                    .map(|snapshot| (snapshot, size))
+            }
+            result => result,
+        }
+    }
+
+    fn open_cached_snapshot(
+        &self,
+        context: &OfflineCache,
+        scope: &CacheScope,
+        entry: &RemoteEntry,
+        offline: CloudError,
+    ) -> Result<FetchSnapshot, CloudError> {
+        if entry.directory || entry.encrypted {
+            return Err(unsupported_encrypted_cache());
+        }
+        let version = ContentVersion {
+            resource_id: entry.id.clone(),
+            etag: entry.etag.clone(),
+            protection: ContentProtection::Plaintext,
+        };
+        let mut file = context
+            .cache
+            .open_content(scope, &version)
+            .map_err(|error| offline_cache_error(error, offline))?;
+        if file.metadata().map_err(io_error)?.len() != entry.size {
+            return Err(CloudError::new(
+                ErrorKind::InvalidResponse,
+                "cached file version does not match its metadata size",
+            ));
+        }
+        file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+        Ok(FetchSnapshot {
+            _temp: None,
+            file: SnapshotReader::Cached(file),
+        })
     }
 
     pub fn put(
@@ -341,10 +3203,13 @@ impl Engine {
 
     pub fn mkdir(&self, space: &str, path: &str) -> Result<RemoteEntry, CloudError> {
         let _guard = self.execution()?;
+        let _metadata = self.metadata_publication()?;
+        let cache_mutation = self.begin_cache_mutation(space, &[path])?;
         let id = self.begin_transfer(None, space, path, "mkdir")?;
-        match self.inner.backend.mkdir(space, path) {
-            Ok(entry) => match self.inner.backend.stat(space, path) {
+        match self.backend.mkdir(space, path) {
+            Ok(entry) => match self.backend.stat(space, path) {
                 Ok(verified) if verified.directory && verified.etag == entry.etag => {
+                    self.finish_cache_mutation(space, cache_mutation);
                     self.finish_transfer(id, "completed", 0, None)?;
                     Ok(verified)
                 }
@@ -369,11 +3234,22 @@ impl Engine {
     }
 
     pub fn delete(&self, space: &str, path: &str, expected_etag: &str) -> Result<(), CloudError> {
+        // Slash-only aliases resolve to the same DAV root. Reject them before
+        // cache invalidation or any backend operation, even for direct callers.
+        if path.is_empty() || path.bytes().all(|byte| byte == b'/') {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "cannot delete a cloud Space root",
+            ));
+        }
         let _guard = self.execution()?;
+        let _metadata = self.metadata_publication()?;
+        let cache_mutation = self.begin_cache_mutation(space, &[path])?;
         let id = self.begin_transfer(None, space, path, "delete")?;
-        match self.inner.backend.delete(space, path, expected_etag) {
-            Ok(()) => match self.inner.backend.stat(space, path) {
+        match self.backend.delete(space, path, expected_etag) {
+            Ok(()) => match self.backend.stat(space, path) {
                 Err(error) if error.kind == ErrorKind::NotFound => {
+                    self.finish_cache_mutation(space, cache_mutation);
                     self.finish_transfer(id, "completed", 0, None)?;
                     Ok(())
                 }
@@ -405,10 +3281,42 @@ impl Engine {
         expected_etag: &str,
     ) -> Result<RemoteEntry, CloudError> {
         let _guard = self.execution()?;
+        let _metadata = self.metadata_publication()?;
+        // FUSE may retire its spool after transferring ownership to the
+        // durable write journal. A move must protect those edits as well.
+        if let Some(context) = &self.offline_cache {
+            let (scope, _) = self.online_plaintext_scope(space)?;
+            let writes = context
+                .cache
+                .pending_writes(&scope)
+                .map_err(cache_cloud_error)?;
+            if writes.iter().any(|write| {
+                write.state != WriteState::Verified
+                    && [from, to].iter().any(|target| {
+                        let path = write.logical_path.as_str();
+                        path == *target
+                            || *target == "/"
+                            || path == "/"
+                            || path
+                                .strip_prefix(target)
+                                .is_some_and(|suffix| suffix.starts_with('/'))
+                            || target
+                                .strip_prefix(path)
+                                .is_some_and(|suffix| suffix.starts_with('/'))
+                    })
+            }) {
+                return Err(CloudError::new(
+                    ErrorKind::Conflict,
+                    "rename subtree has pending local journal edits; local bytes were preserved",
+                ));
+            }
+        }
+        let cache_mutation = self.begin_cache_mutation(space, &[from, to])?;
         let id = self.begin_transfer(None, space, from, "rename")?;
-        match self.inner.backend.rename(space, from, to, expected_etag) {
-            Ok(entry) => match self.inner.backend.stat(space, to) {
+        match self.backend.rename(space, from, to, expected_etag) {
+            Ok(entry) => match self.backend.stat(space, to) {
                 Ok(verified) if verified.etag == entry.etag => {
+                    self.finish_cache_mutation(space, cache_mutation);
                     self.finish_transfer(id, "completed", 0, None)?;
                     Ok(verified)
                 }
@@ -478,12 +3386,14 @@ impl Engine {
         limit: usize,
     ) -> Result<ConflictPage, CloudError> {
         let _guard = self.execution()?;
+        self.validate_backend_binding(pair)?;
         validate_pair_runtime(pair)?;
-        self.validate_pair_root(pair)?;
+        self.check_pair_policy(pair)?;
+        let pair = self.normalize_pair_root(pair)?;
         self.clear_stage(&pair.id)?;
         let mut scanned_entries = 0;
-        self.scan_local(pair, &mut scanned_entries, true, None)?;
-        self.scan_remote_for_conflicts(pair, &mut scanned_entries)?;
+        self.scan_local(&pair, &mut scanned_entries, true, None)?;
+        self.scan_remote_for_conflicts(&pair, &mut scanned_entries)?;
 
         let limit = limit.clamp(1, 1000);
         let mut page = ConflictPage::default();
@@ -505,14 +3415,18 @@ impl Engine {
                     if remote.encrypted {
                         continue;
                     }
-                    let remote_hash =
-                        if self.conflict_needs_content_compare(pair, &rel, &local.hash, &remote)? {
-                            Some(hash_for_remote(self, &pair.space_id, &remote.path)?)
-                        } else {
-                            None
-                        };
+                    let remote_hash = if self.conflict_needs_content_compare(
+                        &pair,
+                        &rel,
+                        &local.hash,
+                        &remote,
+                    )? {
+                        Some(hash_for_remote(self, &pair.space_id, &remote.path)?)
+                    } else {
+                        None
+                    };
                     if self.is_conflict_state(
-                        pair,
+                        &pair,
                         &rel,
                         &local.hash,
                         &remote,
@@ -547,9 +3461,17 @@ impl Engine {
         expected_remote_etag: &str,
     ) -> Result<ConflictResolution, CloudError> {
         let _guard = self.execution()?;
+        self.validate_backend_binding(pair)?;
         validate_pair_runtime(pair)?;
-        self.validate_pair_root(pair)?;
+        self.check_pair_policy(pair)?;
+        let pair = self.normalize_pair_root(pair)?;
         validate_conflict_path(rel)?;
+        if pair.excludes_relative_path(rel) {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "excluded paths cannot be resolved through the folder conflict action",
+            ));
+        }
         match (choice, pair.mode) {
             (ConflictChoice::KeepLocal, SyncMode::DownloadOnly)
             | (ConflictChoice::KeepRemote, SyncMode::UploadOnly) => {
@@ -571,7 +3493,7 @@ impl Engine {
             ));
         }
         let remote_path = join_remote(&pair.remote_path, rel);
-        let remote = self.inner.backend.stat(&pair.space_id, &remote_path)?;
+        let remote = self.backend.stat(&pair.space_id, &remote_path)?;
         if remote.directory || remote.etag != expected_remote_etag {
             return Err(CloudError::new(
                 ErrorKind::Conflict,
@@ -591,7 +3513,7 @@ impl Engine {
             ));
         }
         let remote_hash = hash_for_remote(self, &pair.space_id, &remote.path)?;
-        if !self.is_conflict_state(pair, rel, &local_hash, &remote, Some(&remote_hash))? {
+        if !self.is_conflict_state(&pair, rel, &local_hash, &remote, Some(&remote_hash))? {
             return Err(CloudError::new(
                 ErrorKind::Conflict,
                 "file is no longer in conflict; sync or refresh conflicts before resolving",
@@ -651,7 +3573,7 @@ impl Engine {
                 let transfer =
                     self.begin_transfer(Some(&pair.id), &pair.space_id, &remote.path, "download")?;
                 let staged = match download_to_temp(
-                    &self.inner.backend,
+                    &self.backend,
                     &pair.space_id,
                     &remote.path,
                     &remote,
@@ -707,12 +3629,14 @@ impl Engine {
     pub fn sync_pair(&self, pair: &FolderPair) -> Result<SyncReport, CloudError> {
         let _guard = self.execution()?;
         self.check_sync_paused()?;
+        self.validate_backend_binding(pair)?;
         validate_pair_runtime(pair)?;
-        self.validate_pair_root(pair)?;
+        self.check_pair_policy(pair)?;
+        let pair = self.normalize_pair_root(pair)?;
         self.clear_stage(&pair.id)?;
         let mut scanned_entries = 0;
-        self.scan_local(pair, &mut scanned_entries, false, None)?;
-        self.scan_remote(pair, &mut scanned_entries)?;
+        self.scan_local(&pair, &mut scanned_entries, false, None)?;
+        self.scan_remote(&pair, &mut scanned_entries)?;
         let mut report = SyncReport {
             pair_id: pair.id.clone(),
             ..SyncReport::default()
@@ -734,34 +3658,34 @@ impl Engine {
                         report.unchanged += 1;
                     }
                     (Some(l), Some(r)) if !l.directory && !r.directory => {
-                        self.reconcile_file(pair, &rel, l, r, baseline, &mut report)?;
+                        self.reconcile_file(&pair, &rel, l, r, baseline, &mut report)?;
                     }
                     (Some(l), None) if l.directory => {
                         if baseline.is_some() {
                             report.needs_attention += 1;
                         } else if pair.mode != SyncMode::DownloadOnly {
-                            self.upload_directory(pair, &rel, &mut report)?;
+                            self.upload_directory(&pair, &rel, &mut report)?;
                         }
                     }
                     (Some(l), None) if !l.directory => {
                         if baseline.is_some() {
                             report.needs_attention += 1;
                         } else if pair.mode != SyncMode::DownloadOnly {
-                            self.upload_file(pair, &rel, &l.path, None, &mut report)?;
+                            self.upload_file(&pair, &rel, &l.path, None, &mut report)?;
                         }
                     }
                     (None, Some(r)) if r.directory => {
                         if baseline.is_some() {
                             report.needs_attention += 1;
                         } else if pair.mode != SyncMode::UploadOnly {
-                            self.create_local_dir(pair, &rel)?;
+                            self.create_local_dir(&pair, &rel)?;
                         }
                     }
                     (None, Some(r)) if !r.directory => {
                         if baseline.is_some() {
                             report.needs_attention += 1;
                         } else if pair.mode != SyncMode::UploadOnly {
-                            self.download_file(pair, &rel, &r, &mut report)?;
+                            self.download_file(&pair, &rel, &r, &mut report)?;
                         }
                     }
                     (None, None) => {}
@@ -772,6 +3696,130 @@ impl Engine {
             }
         }
         Ok(report)
+    }
+
+    /// Publish a pair's exclusion policy before persisting a profile update.
+    /// The shared execution gate waits for an active reconciliation to finish,
+    /// then makes any stale queued scheduler snapshot fail before dispatch.
+    pub fn publish_pair_policy(&self, pair: &FolderPair) -> Result<(), CloudError> {
+        self.prepare_pair_policy(pair)?.publish();
+        Ok(())
+    }
+
+    /// Prepare a publication while retaining the dispatch fence. The caller
+    /// should persist the matching profile settings, then call `publish`; if
+    /// persistence fails, simply drop the guard and the old policy remains.
+    pub fn prepare_pair_policy(
+        &self,
+        pair: &FolderPair,
+    ) -> Result<PairPolicyPublication<'_>, CloudError> {
+        let guard = self.execution()?;
+        validate_pair_runtime(pair)?;
+        let policies = self
+            .inner
+            .pair_policies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(policies.get(&pair.id), Some(None)) {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "folder pair ID has been retired and cannot be reused",
+            ));
+        }
+        drop(policies);
+        Ok(PairPolicyPublication {
+            inner: &self.inner,
+            pair_id: pair.id.clone(),
+            exclusions: Some(pair.excluded_paths.clone()),
+            _execution: guard,
+        })
+    }
+
+    /// Prepare pair retirement while retaining the same dispatch fence used
+    /// for policy changes and sync admission.
+    pub fn prepare_pair_retirement(
+        &self,
+        pair_id: &str,
+    ) -> Result<PairPolicyPublication<'_>, CloudError> {
+        if pair_id.is_empty() || pair_id.len() > 128 {
+            return Err(CloudError::new(
+                ErrorKind::InvalidResponse,
+                "invalid folder pair ID",
+            ));
+        }
+        let guard = self.execution()?;
+        Ok(PairPolicyPublication {
+            inner: &self.inner,
+            pair_id: pair_id.to_owned(),
+            exclusions: None,
+            _execution: guard,
+        })
+    }
+
+    /// Prepare atomic policy retirement for a bounded set of connections.
+    /// The caller must durably remove these exact IDs before publishing; never
+    /// acquire individual retirement guards recursively for a group.
+    pub fn prepare_pair_retirements(
+        &self,
+        pair_ids: &[String],
+    ) -> Result<PairRetirementPublication<'_>, CloudError> {
+        if pair_ids.len() > 100_000 || pair_ids.iter().any(|id| id.is_empty() || id.len() > 128) {
+            return Err(CloudError::new(
+                ErrorKind::InvalidResponse,
+                "invalid folder pair retirement set",
+            ));
+        }
+        let unique = pair_ids.iter().collect::<std::collections::BTreeSet<_>>();
+        if unique.len() != pair_ids.len() {
+            return Err(CloudError::new(
+                ErrorKind::InvalidResponse,
+                "duplicate folder pair retirement ID",
+            ));
+        }
+        Ok(PairRetirementPublication {
+            inner: &self.inner,
+            pair_ids: pair_ids.to_vec(),
+            _execution: self.execution()?,
+        })
+    }
+
+    /// Permanently retire a pair ID before profile settings remove it. IDs are
+    /// not reusable, so a delayed scheduler snapshot must remain rejected.
+    pub fn retire_pair_policy(&self, pair_id: &str) -> Result<(), CloudError> {
+        if pair_id.is_empty() || pair_id.len() > 128 {
+            return Err(CloudError::new(
+                ErrorKind::InvalidResponse,
+                "invalid folder pair ID",
+            ));
+        }
+        self.prepare_pair_retirement(pair_id)?.publish();
+        Ok(())
+    }
+
+    fn check_pair_policy(&self, pair: &FolderPair) -> Result<(), CloudError> {
+        let mut policies = self
+            .inner
+            .pair_policies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match policies.get(&pair.id) {
+            Some(Some(exclusions)) if exclusions == &pair.excluded_paths => Ok(()),
+            Some(Some(_)) => Err(CloudError::new(
+                ErrorKind::Conflict,
+                "folder pair policy changed; refresh the profile snapshot before syncing",
+            )),
+            Some(None) => Err(CloudError::new(
+                ErrorKind::Conflict,
+                "folder pair has been removed",
+            )),
+            None => {
+                // Legacy callers and first startup establish the initial
+                // policy on first dispatch. Subsequent changes require the
+                // explicit publication API above.
+                policies.insert(pair.id.clone(), Some(pair.excluded_paths.clone()));
+                Ok(())
+            }
+        }
     }
 
     fn reconcile_file(
@@ -895,13 +3943,6 @@ impl Engine {
                 {
                     continue;
                 }
-                let meta = fs::symlink_metadata(&path).map_err(io_error)?;
-                if meta.file_type().is_symlink() {
-                    return Err(CloudError::new(
-                        ErrorKind::Unsupported,
-                        format!("symlink is unsupported in folder pair: {}", path.display()),
-                    ));
-                }
                 let rel_path = path.strip_prefix(&root).map_err(io_error)?;
                 let rel = rel_path
                     .to_str()
@@ -912,6 +3953,16 @@ impl Engine {
                         )
                     })?
                     .replace(std::path::MAIN_SEPARATOR, "/");
+                if pair.excludes_relative_path(&rel) {
+                    continue;
+                }
+                let meta = fs::symlink_metadata(&path).map_err(io_error)?;
+                if meta.file_type().is_symlink() {
+                    return Err(CloudError::new(
+                        ErrorKind::Unsupported,
+                        format!("symlink is unsupported in folder pair: {}", path.display()),
+                    ));
+                }
                 let local_path = path.to_str().ok_or_else(|| {
                     CloudError::new(
                         ErrorKind::Unsupported,
@@ -1145,44 +4196,50 @@ impl Engine {
             let mut failure = None;
             let mut emitted = 0_usize;
             let mut batch = Vec::with_capacity(STAGE_BATCH_SIZE);
-            self.inner
-                .backend
-                .list(&pair.space_id, &dir, &mut |entry| {
-                    self.check_sync_paused()?;
-                    emitted += 1;
-                    if emitted > MAX_LIST_ENTRIES {
-                        let error = CloudError::new(
-                            ErrorKind::InvalidResponse,
-                            "remote folder exceeds the 100,000-entry limit",
-                        );
+            self.backend.list(&pair.space_id, &dir, &mut |entry| {
+                self.check_sync_paused()?;
+                emitted += 1;
+                if emitted > MAX_LIST_ENTRIES {
+                    let error = CloudError::new(
+                        ErrorKind::InvalidResponse,
+                        "remote folder exceeds the 100,000-entry limit",
+                    );
+                    failure = Some(error.clone());
+                    return Err(error);
+                }
+                if let Err(error) = charge_scan_budget(scanned_entries, 1, MAX_TOTAL_SCAN_ENTRIES) {
+                    failure = Some(error.clone());
+                    return Err(error);
+                }
+                if skip_encrypted && entry.encrypted {
+                    return Ok(());
+                }
+                let relative = match remote_relative(&pair.remote_path, &entry.path) {
+                    Ok(relative) => relative,
+                    Err(error) => {
                         failure = Some(error.clone());
                         return Err(error);
                     }
-                    if let Err(error) =
-                        charge_scan_budget(scanned_entries, 1, MAX_TOTAL_SCAN_ENTRIES)
-                    {
+                };
+                if pair.excludes_relative_path(&relative) {
+                    return Ok(());
+                }
+                match self.prepare_remote_entry(pair, &dir, entry) {
+                    Ok(entry) => batch.push(entry),
+                    Err(error) => {
                         failure = Some(error.clone());
                         return Err(error);
                     }
-                    if skip_encrypted && entry.encrypted {
-                        return Ok(());
+                }
+                if batch.len() == STAGE_BATCH_SIZE {
+                    if let Err(error) = self.insert_remote_batch(pair, &batch) {
+                        failure = Some(error.clone());
+                        return Err(error);
                     }
-                    match self.prepare_remote_entry(pair, &dir, entry) {
-                        Ok(entry) => batch.push(entry),
-                        Err(error) => {
-                            failure = Some(error.clone());
-                            return Err(error);
-                        }
-                    }
-                    if batch.len() == STAGE_BATCH_SIZE {
-                        if let Err(error) = self.insert_remote_batch(pair, &batch) {
-                            failure = Some(error.clone());
-                            return Err(error);
-                        }
-                        batch.clear();
-                    }
-                    Ok(())
-                })?;
+                    batch.clear();
+                }
+                Ok(())
+            })?;
             if let Some(error) = failure {
                 return Err(error);
             }
@@ -1269,7 +4326,7 @@ impl Engine {
     ) -> Result<(), CloudError> {
         let remote = join_remote(&pair.remote_path, rel);
         let id = self.begin_transfer(Some(&pair.id), &pair.space_id, &remote, "mkdir")?;
-        match self.inner.backend.mkdir(&pair.space_id, &remote) {
+        match self.backend.mkdir(&pair.space_id, &remote) {
             Ok(_) => {
                 self.finish_transfer(id, "completed", 0, None)?;
                 report.uploaded += 1;
@@ -1345,34 +4402,32 @@ impl Engine {
         ensure_safe_pair_path(&pair.local_path, &destination, true)?;
         let staged = NamedTempFile::new_in(parent).map_err(io_error)?;
         let id = self.begin_transfer(Some(&pair.id), &pair.space_id, &remote.path, "download")?;
-        let result = self
-            .inner
-            .backend
-            .download(
-                &pair.space_id,
-                &remote.path,
-                Some(&remote.etag),
-                staged.path(),
-            )
-            .and_then(|entry| {
-                if entry.etag != remote.etag {
-                    return Err(CloudError::new(
-                        ErrorKind::Conflict,
-                        "remote revision changed during download",
-                    ));
-                }
-                staged.as_file().sync_all().map_err(io_error)?;
-                let size = fs::metadata(staged.path()).map_err(io_error)?.len();
-                if size != entry.size {
-                    return Err(CloudError::new(
-                        ErrorKind::InvalidResponse,
-                        "download size does not match the server response",
-                    ));
-                }
-                Ok((entry, size, hash_file(staged.path())?))
-            });
+        let result = download_to_named_temp(
+            self.backend.as_ref(),
+            &pair.space_id,
+            &remote.path,
+            Some(&remote.etag),
+            staged,
+        )
+        .and_then(|(staged, entry)| {
+            if entry.etag != remote.etag {
+                return Err(CloudError::new(
+                    ErrorKind::Conflict,
+                    "remote revision changed during download",
+                ));
+            }
+            staged.as_file().sync_all().map_err(io_error)?;
+            let size = staged.as_file().metadata().map_err(io_error)?.len();
+            if size != entry.size {
+                return Err(CloudError::new(
+                    ErrorKind::InvalidResponse,
+                    "download size does not match the server response",
+                ));
+            }
+            Ok((entry, size, hash_file(staged.path())?, staged))
+        });
         match result {
-            Ok((entry, size, hash)) => {
+            Ok((entry, size, hash, staged)) => {
                 // Only replace if the destination still has the scanned version (or is absent).
                 let expected = self.local_stage(&pair.id, rel)?;
                 if let Some(old) = &expected {
@@ -1459,49 +4514,84 @@ impl Engine {
         source: &Path,
         condition: WriteCondition,
     ) -> Result<RemoteEntry, CloudError> {
+        self.upload_inner_with_root(pair_id, space, path, source, condition, None)
+    }
+
+    fn upload_inner_with_root(
+        &self,
+        pair_id: Option<&str>,
+        space: &str,
+        path: &str,
+        source: &Path,
+        condition: WriteCondition,
+        expected_root: Option<&str>,
+    ) -> Result<RemoteEntry, CloudError> {
         let before_hash = hash_file(source)?;
         let bytes = fs::metadata(source).map_err(io_error)?.len();
+        let _metadata = self.metadata_publication()?;
+        let cache_mutation = self.begin_cache_mutation(space, &[path])?;
         let id = self.begin_transfer(pair_id, space, path, "upload")?;
-        let result = self
-            .inner
-            .backend
-            .upload(space, path, source, condition)
-            .and_then(|uploaded| {
-                let remote_temp = self.unique_temp("verify")?;
-                let checked = self
-                    .inner
+        let upload = match expected_root {
+            Some(root) => self
+                .backend
+                .upload_in_root(space, path, source, condition, root),
+            None => self.backend.upload(space, path, source, condition),
+        };
+        let result = upload.and_then(|uploaded| {
+            let remote_temp = self.unique_temp("verify")?;
+            let download = match expected_root {
+                Some(root) => self.backend.download_in_root(
+                    space,
+                    path,
+                    Some(&uploaded.etag),
+                    &remote_temp,
+                    root,
+                ),
+                None => self
                     .backend
-                    .download(space, path, Some(&uploaded.etag), &remote_temp)
-                    .and_then(|verified| {
-                        let actual_hash = hash_file(&remote_temp)?;
-                        let actual_size = fs::metadata(&remote_temp).map_err(io_error)?.len();
-                        if verified.etag != uploaded.etag
-                            || actual_hash != before_hash
-                            || actual_size != bytes
-                        {
-                            return Err(CloudError::new(
-                                ErrorKind::InvalidResponse,
-                                "uploaded content could not be verified",
-                            ));
-                        }
-                        Ok(verified)
-                    });
-                let _ = fs::remove_file(remote_temp);
-                let after_hash = hash_file(source)?;
-                if after_hash != before_hash {
+                    .download(space, path, Some(&uploaded.etag), &remote_temp),
+            };
+            let checked = download.and_then(|verified| {
+                let actual_hash = hash_file(&remote_temp)?;
+                let actual_size = fs::metadata(&remote_temp).map_err(io_error)?.len();
+                if (expected_root.is_some()
+                    && (verified.id != uploaded.id
+                        || verified.path != uploaded.path
+                        || verified.directory
+                        || verified.encrypted))
+                    || verified.etag != uploaded.etag
+                    || actual_hash != before_hash
+                    || actual_size != bytes
+                {
                     return Err(CloudError::new(
-                        ErrorKind::Conflict,
-                        "local source changed while upload was running",
+                        ErrorKind::InvalidResponse,
+                        "uploaded content could not be verified",
                     ));
                 }
-                checked
+                Ok(verified)
             });
+            let _ = fs::remove_file(remote_temp);
+            let after_hash = hash_file(source)?;
+            if after_hash != before_hash {
+                return Err(CloudError::new(
+                    ErrorKind::Conflict,
+                    "local source changed while upload was running",
+                ));
+            }
+            checked
+        });
         match result {
             Ok(entry) => {
+                self.finish_cache_mutation(space, cache_mutation);
                 self.finish_transfer(id, "completed", bytes, None)?;
                 Ok(entry)
             }
             Err(error) => {
+                // A rejected or unacknowledged PUT must not permanently hide
+                // unrelated cached files when fresh metadata is still reachable.
+                // Only a complete listing under the same verified root can
+                // restore reachability; the write and its recovery stay failed.
+                self.finish_cache_mutation(space, cache_mutation);
                 self.finish_transfer(id, "failed", 0, Some(&error.message))?;
                 Err(error)
             }
@@ -1509,20 +4599,23 @@ impl Engine {
     }
 
     fn fetch_inner(&self, space: &str, path: &str) -> Result<(PathBuf, u64), CloudError> {
-        let before = self.inner.backend.stat(space, path)?;
+        let before = self.backend.stat(space, path)?;
         if before.directory {
             return Err(CloudError::new(
                 ErrorKind::Unsupported,
                 "cannot fetch a directory as a file",
             ));
         }
-        let dest = self.cache_dir().join(cache_key(space, path));
+        let cache_scope = match &self.vault_binding {
+            Some((_, binding)) => format!(
+                "{space}\0{}\0{}",
+                binding.root_path, binding.root_resource_id
+            ),
+            None => space.to_owned(),
+        };
+        let dest = self.cache_dir().join(cache_key(&cache_scope, path));
         let tmp = self.unique_temp("fetch")?;
-        let entry = match self
-            .inner
-            .backend
-            .download(space, path, Some(&before.etag), &tmp)
-        {
+        let entry = match self.backend.download(space, path, Some(&before.etag), &tmp) {
             Ok(entry) => entry,
             Err(error) => {
                 let _ = fs::remove_file(&tmp);
@@ -1593,7 +4686,13 @@ impl Engine {
         Ok(local_changed && remote_changed)
     }
 
-    fn validate_pair_root(&self, pair: &FolderPair) -> Result<(), CloudError> {
+    fn normalize_pair_root(&self, pair: &FolderPair) -> Result<FolderPair, CloudError> {
+        let mut normalized = pair.clone();
+        normalized.local_path = self.validate_pair_root(pair)?;
+        Ok(normalized)
+    }
+
+    fn validate_pair_root(&self, pair: &FolderPair) -> Result<PathBuf, CloudError> {
         let local_root = ensure_pair_root_is_real_directory(&pair.local_path)?;
         if local_root.starts_with(&self.inner.state_dir)
             || self.inner.state_dir.starts_with(&local_root)
@@ -1603,7 +4702,7 @@ impl Engine {
                 "folder pair overlaps engine state or cache storage",
             ));
         }
-        Ok(())
+        Ok(local_root)
     }
 
     fn local_stage(&self, pair: &str, rel: &str) -> Result<Option<LocalEntry>, CloudError> {
@@ -1718,6 +4817,14 @@ impl Engine {
             .lock()
             .map_err(|_| CloudError::new(ErrorKind::Io, "engine execution lock was poisoned"))
     }
+    fn metadata_publication(&self) -> Result<MutexGuard<'_, ()>, CloudError> {
+        self.inner.metadata_gate.lock().map_err(|_| {
+            CloudError::new(
+                ErrorKind::Io,
+                "engine metadata publication lock was poisoned",
+            )
+        })
+    }
 
     fn check_sync_paused(&self) -> Result<(), CloudError> {
         if self.inner.sync_paused.load(Ordering::Acquire) {
@@ -1779,6 +4886,55 @@ fn charge_scan_budget(total: &mut usize, amount: usize, maximum: usize) -> Resul
     }
     *total = next;
     Ok(())
+}
+
+fn open_owned_file_for_sync(path: &Path) -> std::io::Result<File> {
+    #[cfg(windows)]
+    {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+    }
+    #[cfg(not(windows))]
+    {
+        File::open(path)
+    }
+}
+
+/// Download to a temporary path without keeping its file handle open.
+///
+/// Some backends publish downloads by atomically renaming a completed file
+/// over the destination. Windows denies that replacement while the
+/// `NamedTempFile` handle remains open. `TempPath` retains cleanup ownership
+/// while closing the handle; reopening the published path restores the
+/// existing `NamedTempFile` ownership and caller flow.
+fn download_to_named_temp(
+    backend: &dyn CloudBackend,
+    space: &str,
+    path: &str,
+    expected_etag: Option<&str>,
+    staged: NamedTempFile,
+) -> Result<(NamedTempFile, RemoteEntry), CloudError> {
+    let staged_path = staged.into_temp_path();
+    let entry = backend.download(space, path, expected_etag, &staged_path)?;
+    if !fs::symlink_metadata(&staged_path)
+        .map_err(io_error)?
+        .is_file()
+    {
+        return Err(CloudError::new(
+            ErrorKind::InvalidResponse,
+            "download did not publish a regular local file",
+        ));
+    }
+    let file = open_owned_file_for_sync(&staged_path).map_err(io_error)?;
+    Ok((NamedTempFile::from_parts(file, staged_path), entry))
+}
+
+fn sync_owned_file(path: &Path) -> Result<(), CloudError> {
+    open_owned_file_for_sync(path)
+        .and_then(|file| file.sync_all())
+        .map_err(io_error)
 }
 
 #[cfg(unix)]
@@ -1859,9 +5015,7 @@ fn preserve_local_version(
         ));
     }
     fs::copy(source, &recovery_file).map_err(io_error)?;
-    File::open(&recovery_file)
-        .and_then(|file| file.sync_all())
-        .map_err(io_error)?;
+    sync_owned_file(&recovery_file)?;
     if hash_file(source)? != expected_hash || hash_file(&recovery_file)? != expected_hash {
         return Err(CloudError::new(
             ErrorKind::Conflict,
@@ -1902,19 +5056,21 @@ fn preserve_remote_version(
         .map_err(io_error)?;
     let staged = NamedTempFile::new_in(recovery_dir.path()).map_err(io_error)?;
     let transfer = engine.begin_transfer(Some(pair_id), space, remote_path, "conflict_backup")?;
-    let downloaded =
-        engine
-            .inner
-            .backend
-            .download(space, remote_path, Some(&expected.etag), staged.path());
-    let result = downloaded.and_then(|entry| {
+    let downloaded = download_to_named_temp(
+        engine.backend.as_ref(),
+        space,
+        remote_path,
+        Some(&expected.etag),
+        staged,
+    );
+    let result = downloaded.and_then(|(staged, entry)| {
         if entry.etag != expected.etag || entry.size != expected.size {
             return Err(CloudError::new(
                 ErrorKind::Conflict,
                 "remote file changed while its recovery copy was created",
             ));
         }
-        let file = File::open(staged.path()).map_err(io_error)?;
+        let file = open_owned_file_for_sync(staged.path()).map_err(io_error)?;
         let size = file.metadata().map_err(io_error)?.len();
         file.sync_all().map_err(io_error)?;
         if size != entry.size || hash_file(staged.path())? != expected_hash {
@@ -1923,9 +5079,9 @@ fn preserve_remote_version(
                 "remote recovery copy failed content or size verification",
             ));
         }
-        Ok((size, entry))
+        Ok((size, entry, staged))
     });
-    let (size, _entry) = match result {
+    let (size, _entry, staged) = match result {
         Ok(result) => result,
         Err(error) => {
             engine.finish_transfer(transfer, "failed", 0, Some(&error.message))?;
@@ -1949,9 +5105,7 @@ fn preserve_remote_version(
         engine.finish_transfer(transfer, "failed", 0, Some(&error.message))?;
         return Err(error);
     }
-    if let Err(error) = File::open(&recovery_file)
-        .and_then(|file| file.sync_all())
-        .map_err(io_error)
+    if let Err(error) = sync_owned_file(&recovery_file)
         .and_then(|()| sync_directory(recovery_dir.path()))
         .and_then(|()| sync_directory(parent))
     {
@@ -1980,7 +5134,8 @@ fn download_to_temp(
     parent: &Path,
 ) -> Result<NamedTempFile, CloudError> {
     let staged = NamedTempFile::new_in(parent).map_err(io_error)?;
-    let entry = backend.download(space, path, Some(&expected.etag), staged.path())?;
+    let (staged, entry) =
+        download_to_named_temp(backend.as_ref(), space, path, Some(&expected.etag), staged)?;
     if entry.etag != expected.etag || entry.size != expected.size {
         return Err(CloudError::new(
             ErrorKind::Conflict,
@@ -1996,7 +5151,7 @@ fn download_to_temp(
             "download did not publish a regular local file",
         ));
     }
-    let file = File::open(staged.path()).map_err(io_error)?;
+    let file = open_owned_file_for_sync(staged.path()).map_err(io_error)?;
     let size = file.metadata().map_err(io_error)?.len();
     file.sync_all().map_err(io_error)?;
     if size != entry.size {
@@ -2056,9 +5211,7 @@ fn replace_existing_download(
     let backup = backup_dir.path().join("previous-version");
 
     preserve_unix_permissions(&staged, destination)?;
-    File::open(staged.path())
-        .and_then(|file| file.sync_all())
-        .map_err(io_error)?;
+    sync_owned_file(staged.path())?;
 
     // Moving the old path into a private same-volume directory closes the
     // check/replace window. The staged download is installed with no-clobber;
@@ -2156,9 +5309,8 @@ fn replace_existing_download(
 
 fn hash_for_remote(engine: &Engine, space: &str, path: &str) -> Result<String, CloudError> {
     let tmp = engine.unique_temp("hash")?;
-    let entry = engine.inner.backend.stat(space, path)?;
+    let entry = engine.backend.stat(space, path)?;
     let downloaded = engine
-        .inner
         .backend
         .download(space, path, Some(&entry.etag), &tmp);
     let result = downloaded.and_then(|actual| {
@@ -2186,6 +5338,12 @@ fn validate_pair_runtime(pair: &FolderPair) -> Result<(), CloudError> {
             "folder pair identity or remote path is invalid",
         ));
     }
+    pair.validate_exclusions().map_err(|_| {
+        CloudError::new(
+            ErrorKind::Unsupported,
+            "folder pair exclusion paths are invalid",
+        )
+    })?;
     if !pair.local_path.is_absolute() {
         return Err(CloudError::new(
             ErrorKind::Unsupported,
@@ -2220,6 +5378,42 @@ fn join_remote(root: &str, rel: &str) -> String {
     } else {
         format!("{root}/{rel}")
     }
+}
+fn parent_path(path: &str) -> Result<String, CloudError> {
+    if !path.starts_with('/') || path == "/" || path.ends_with('/') || path.contains('\0') {
+        return Err(CloudError::new(
+            ErrorKind::Unsupported,
+            "cloud item path is not a canonical non-root path",
+        ));
+    }
+    let (parent, leaf) = path
+        .rsplit_once('/')
+        .ok_or_else(|| CloudError::new(ErrorKind::Unsupported, "cloud item path is invalid"))?;
+    if leaf.is_empty() || leaf == "." || leaf == ".." {
+        return Err(CloudError::new(
+            ErrorKind::Unsupported,
+            "cloud item path is not a safe path",
+        ));
+    }
+    Ok(if parent.is_empty() {
+        "/".into()
+    } else {
+        parent.into()
+    })
+}
+fn is_direct_child_path(parent: &str, child: &str) -> bool {
+    if !child.starts_with('/') || child.ends_with('/') || child.contains('\0') {
+        return false;
+    }
+    let prefix = if parent == "/" {
+        "/".to_owned()
+    } else {
+        format!("{}/", parent.trim_end_matches('/'))
+    };
+    let Some(leaf) = child.strip_prefix(&prefix) else {
+        return false;
+    };
+    !leaf.is_empty() && !leaf.contains('/') && leaf != "." && leaf != ".." && !leaf.contains('\\')
 }
 fn cache_key(space: &str, path: &str) -> String {
     hex(&Sha256::digest(format!("{space}\0{path}").as_bytes()))
@@ -2427,23 +5621,128 @@ fn now_unix_nanos() -> u128 {
 fn io_error(error: impl std::fmt::Display) -> CloudError {
     CloudError::new(ErrorKind::Io, error.to_string())
 }
+
+fn unsupported_encrypted_cache() -> CloudError {
+    CloudError::new(
+        ErrorKind::Unsupported,
+        "encrypted cloud locations are unavailable to the ordinary cache",
+    )
+}
+
+fn cache_cloud_error(error: raiun_cache::CacheError) -> CloudError {
+    use raiun_cache::CacheError;
+    let kind = match error {
+        CacheError::Cancelled => ErrorKind::Io,
+        CacheError::Conflict | CacheError::PolicyConflict => ErrorKind::Conflict,
+        CacheError::NotFound | CacheError::IncompleteListing | CacheError::PinNotFound => {
+            ErrorKind::NotFound
+        }
+        CacheError::InvalidScope
+        | CacheError::InvalidEntry
+        | CacheError::InvalidContentVersion
+        | CacheError::ProtectionMismatch
+        | CacheError::LimitExceeded
+        | CacheError::Corrupt
+        | CacheError::UnsafeDirectory
+        | CacheError::InsufficientSpace
+        | CacheError::Io(_)
+        | CacheError::Database(_)
+        | CacheError::IncompleteManifest => ErrorKind::Io,
+    };
+    CloudError::new(kind, error.to_string())
+}
+
+fn offline_cache_error(error: raiun_cache::CacheError, offline: CloudError) -> CloudError {
+    match error {
+        raiun_cache::CacheError::NotFound | raiun_cache::CacheError::IncompleteListing => offline,
+        other => cache_cloud_error(other),
+    }
+}
 fn db_error(error: rusqlite::Error) -> CloudError {
     CloudError::new(ErrorKind::Io, format!("engine database error: {error}"))
 }
 
+fn ensure_media_job_revision_column(db: &Connection) -> Result<(), CloudError> {
+    let mut statement = db
+        .prepare("PRAGMA table_info(media_upload_attempts)")
+        .map_err(db_error)?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(db_error)?;
+    let mut has_revision = false;
+    for column in columns {
+        if column.map_err(db_error)? == "job_revision" {
+            has_revision = true;
+            break;
+        }
+    }
+    drop(statement);
+    if !has_revision {
+        db.execute_batch(
+            "ALTER TABLE media_upload_attempts ADD COLUMN job_revision INTEGER NOT NULL DEFAULT 0",
+        )
+        .map_err(db_error)?;
+    }
+    db.execute_batch("PRAGMA user_version=3").map_err(db_error)
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    mod folder_cloud_only_tests {
+        include!("folder_cloud_only_tests.rs");
+    }
     use super::*;
     use std::collections::BTreeMap;
     use std::sync::mpsc::{self, Receiver, SyncSender};
 
+    #[test]
+    fn media_attempt_revision_migration_is_idempotent_and_legacy_rows_are_unbound() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE media_upload_attempts (job_id TEXT NOT NULL, state TEXT NOT NULL)",
+        )
+        .unwrap();
+        ensure_media_job_revision_column(&db).unwrap();
+        ensure_media_job_revision_column(&db).unwrap();
+        db.execute(
+            "INSERT INTO media_upload_attempts(job_id,state) VALUES('legacy','uncertain')",
+            [],
+        )
+        .unwrap();
+        let default_revision: i64 = db
+            .query_row(
+                "SELECT job_revision FROM media_upload_attempts LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+            .unwrap_or(0);
+        assert_eq!(default_revision, 0);
+        let user_version: i64 = db
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(user_version, 3);
+    }
+
     #[derive(Default)]
     struct FakeCloud {
         entries: Mutex<BTreeMap<String, (RemoteEntry, Vec<u8>)>>,
+        spaces_calls: Mutex<usize>,
+        list_calls: Mutex<usize>,
         next_etag: Mutex<u64>,
+        delete_calls: Mutex<usize>,
         downloads: Mutex<usize>,
+        fail_download_after_write: Mutex<bool>,
         fail_listing: Mutex<bool>,
         fail_upload: Mutex<bool>,
+        fail_upload_after_commit: Mutex<bool>,
+        replace_root_before_scoped_upload: Mutex<bool>,
+        fail_all: Mutex<Option<ErrorKind>>,
+        space_encrypted: Mutex<bool>,
+        spaces_override: Mutex<Option<Vec<CloudSpace>>>,
+        spaces_gate: Mutex<Option<(SyncSender<()>, Receiver<()>)>>,
         list_repeat: Mutex<usize>,
         list_gate: Mutex<Option<(SyncSender<()>, Receiver<()>)>>,
     }
@@ -2451,6 +5750,7 @@ mod tests {
     impl FakeCloud {
         fn new() -> Self {
             let cloud = Self::default();
+            cloud.insert_dir("/");
             cloud.insert_dir("/sync");
             cloud
         }
@@ -2461,6 +5761,38 @@ mod tests {
 
         fn insert_file(&self, path: &str, data: &[u8]) {
             self.insert(path, false, data.to_vec());
+        }
+
+        fn replace_file(&self, path: &str, data: &[u8]) {
+            let mut counter = self.next_etag.lock().expect("etag mutex");
+            *counter += 1;
+            let mut entries = self.entries.lock().expect("entries mutex");
+            let (entry, _) = entries.get(path).expect("fixture file exists");
+            assert!(!entry.directory);
+            let mut updated = entry.clone();
+            updated.etag = counter.to_string();
+            updated.size = data.len() as u64;
+            updated.modified_unix = now_unix();
+            entries.insert(path.to_owned(), (updated, data.to_vec()));
+        }
+
+        fn move_prefix(&self, old: &str, new: &str) {
+            let mut entries = self.entries.lock().expect("entries mutex");
+            let matching = entries
+                .iter()
+                .filter(|(path, _)| *path == old || path.starts_with(&format!("{old}/")))
+                .map(|(path, value)| (path.clone(), value.clone()))
+                .collect::<Vec<_>>();
+            assert!(!matching.is_empty());
+            for (path, _) in &matching {
+                entries.remove(path);
+            }
+            for (path, (mut entry, bytes)) in matching {
+                let suffix = &path[old.len()..];
+                let new_path = format!("{new}{suffix}");
+                entry.path = new_path.clone();
+                entries.insert(new_path, (entry, bytes));
+            }
         }
 
         fn insert(&self, path: &str, directory: bool, bytes: Vec<u8>) {
@@ -2501,14 +5833,53 @@ mod tests {
     }
 
     impl CloudBackend for FakeCloud {
+        fn server_origin(&self) -> Option<String> {
+            Some("https://example.invalid".into())
+        }
+
         fn spaces(&self) -> Result<Vec<CloudSpace>, CloudError> {
+            *self
+                .spaces_calls
+                .lock()
+                .map_err(|_| CloudError::new(ErrorKind::Io, "poisoned"))? += 1;
+            if let Some(kind) = *self
+                .fail_all
+                .lock()
+                .map_err(|_| CloudError::new(ErrorKind::Io, "poisoned"))?
+            {
+                return Err(CloudError::new(kind, "fixture transport unavailable"));
+            }
+            let spaces_gate = self
+                .spaces_gate
+                .lock()
+                .map_err(|_| CloudError::new(ErrorKind::Io, "poisoned"))?
+                .take();
+            if let Some((started, release)) = spaces_gate {
+                started
+                    .send(())
+                    .map_err(|_| CloudError::new(ErrorKind::Io, "namespace test ended"))?;
+                release
+                    .recv()
+                    .map_err(|_| CloudError::new(ErrorKind::Io, "namespace test ended"))?;
+            }
+            if let Some(spaces) = self
+                .spaces_override
+                .lock()
+                .map_err(|_| CloudError::new(ErrorKind::Io, "poisoned"))?
+                .clone()
+            {
+                return Ok(spaces);
+            }
             Ok(vec![CloudSpace {
                 id: "space".into(),
                 name: "Fixture".into(),
                 dav_url: "https://example.invalid/dav".into(),
                 personal: false,
                 writable: true,
-                encrypted: false,
+                encrypted: *self
+                    .space_encrypted
+                    .lock()
+                    .map_err(|_| CloudError::new(ErrorKind::Io, "poisoned"))?,
             }])
         }
 
@@ -2518,6 +5889,17 @@ mod tests {
             path: &str,
             visit: &mut dyn FnMut(RemoteEntry) -> Result<(), CloudError>,
         ) -> Result<(), CloudError> {
+            *self
+                .list_calls
+                .lock()
+                .map_err(|_| CloudError::new(ErrorKind::Io, "poisoned"))? += 1;
+            if let Some(kind) = *self
+                .fail_all
+                .lock()
+                .map_err(|_| CloudError::new(ErrorKind::Io, "poisoned"))?
+            {
+                return Err(CloudError::new(kind, "fixture transport unavailable"));
+            }
             if *self
                 .fail_listing
                 .lock()
@@ -2575,6 +5957,13 @@ mod tests {
         }
 
         fn stat(&self, _space: &str, path: &str) -> Result<RemoteEntry, CloudError> {
+            if let Some(kind) = *self
+                .fail_all
+                .lock()
+                .map_err(|_| CloudError::new(ErrorKind::Io, "poisoned"))?
+            {
+                return Err(CloudError::new(kind, "fixture transport unavailable"));
+            }
             self.remote_entry(path)
         }
 
@@ -2585,6 +5974,13 @@ mod tests {
             expected_etag: Option<&str>,
             destination: &Path,
         ) -> Result<RemoteEntry, CloudError> {
+            if let Some(kind) = *self
+                .fail_all
+                .lock()
+                .map_err(|_| CloudError::new(ErrorKind::Io, "poisoned"))?
+            {
+                return Err(CloudError::new(kind, "fixture transport unavailable"));
+            }
             *self
                 .downloads
                 .lock()
@@ -2600,6 +5996,16 @@ mod tests {
                 return Err(CloudError::new(ErrorKind::Conflict, "revision changed"));
             }
             fs::write(destination, bytes).map_err(io_error)?;
+            if *self
+                .fail_download_after_write
+                .lock()
+                .map_err(|_| CloudError::new(ErrorKind::Io, "poisoned"))?
+            {
+                return Err(CloudError::new(
+                    ErrorKind::Offline,
+                    "fixture download failed after writing staged bytes",
+                ));
+            }
             Ok(entry)
         }
 
@@ -2631,9 +6037,44 @@ mod tests {
             }
             let bytes = fs::read(source).map_err(io_error)?;
             self.insert_file(path, &bytes);
+            if *self.fail_upload_after_commit.lock().unwrap() {
+                return Err(CloudError::new(
+                    ErrorKind::Offline,
+                    "fixture lost upload acknowledgement",
+                ));
+            }
             self.remote_entry(path)
         }
 
+        fn upload_in_root(
+            &self,
+            space: &str,
+            path: &str,
+            source: &Path,
+            condition: WriteCondition,
+            expected_root: &str,
+        ) -> Result<RemoteEntry, CloudError> {
+            if *self.replace_root_before_scoped_upload.lock().unwrap() {
+                self.entries.lock().unwrap().get_mut("/").unwrap().0.id = "replacement-root".into();
+            }
+            if self.remote_entry("/")?.id != expected_root {
+                return Err(CloudError::new(ErrorKind::Conflict, "fixture root changed"));
+            }
+            self.upload(space, path, source, condition)
+        }
+        fn download_in_root(
+            &self,
+            space: &str,
+            path: &str,
+            etag: Option<&str>,
+            destination: &Path,
+            expected_root: &str,
+        ) -> Result<RemoteEntry, CloudError> {
+            if self.remote_entry("/")?.id != expected_root {
+                return Err(CloudError::new(ErrorKind::Conflict, "fixture root changed"));
+            }
+            self.download(space, path, etag, destination)
+        }
         fn mkdir(&self, _space: &str, path: &str) -> Result<RemoteEntry, CloudError> {
             self.insert_dir(path);
             self.remote_entry(path)
@@ -2644,6 +6085,10 @@ mod tests {
             if entry.etag != expected_etag {
                 return Err(CloudError::new(ErrorKind::Conflict, "revision changed"));
             }
+            *self
+                .delete_calls
+                .lock()
+                .map_err(|_| CloudError::new(ErrorKind::Io, "poisoned"))? += 1;
             self.entries
                 .lock()
                 .map_err(|_| CloudError::new(ErrorKind::Io, "poisoned"))?
@@ -2686,6 +6131,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn failed_download_cleans_up_owned_temporary_path() {
+        let cloud = FakeCloud::new();
+        cloud.insert_file("/sync/file.txt", b"staged bytes");
+        *cloud
+            .fail_download_after_write
+            .lock()
+            .expect("download failure mutex") = true;
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let staged = NamedTempFile::new_in(directory.path()).expect("staged temp file");
+        let path = staged.path().to_path_buf();
+
+        let result = download_to_named_temp(&cloud, "space", "/sync/file.txt", None, staged);
+
+        assert!(result.is_err(), "the fixture download should fail");
+        assert!(
+            !path.exists(),
+            "failed download should clean up its staged path"
+        );
+    }
+
     fn setup() -> (
         tempfile::TempDir,
         tempfile::TempDir,
@@ -2703,10 +6169,448 @@ mod tests {
             id: "pair".into(),
             local_path: local,
             space_id: "space".into(),
+            vault: None,
             remote_path: "/sync".into(),
             mode: SyncMode::TwoWay,
+            excluded_paths: Vec::new(),
         };
         (state, local_parent, cloud, engine, pair)
+    }
+
+    #[test]
+    fn published_pair_policy_fences_stale_sync_and_retired_ids() {
+        let (_state, _local, _cloud, engine, pair) = setup();
+        engine
+            .publish_pair_policy(&pair)
+            .expect("publish initial policy");
+
+        let mut updated = pair.clone();
+        updated.excluded_paths = vec!["private/cache".into()];
+
+        // Dropping a prepared policy models settings persistence failure: no
+        // new exclusion is published and the prior snapshot stays runnable.
+        drop(
+            engine
+                .prepare_pair_policy(&updated)
+                .expect("prepare policy"),
+        );
+        engine
+            .sync_pair(&pair)
+            .expect("old policy remains after failed persistence");
+
+        engine
+            .prepare_pair_policy(&updated)
+            .expect("prepare policy")
+            .publish();
+        assert_eq!(
+            engine.sync_pair(&pair).unwrap_err().kind,
+            ErrorKind::Conflict,
+            "an old queued pair snapshot must not dispatch after publication"
+        );
+        engine
+            .sync_pair(&updated)
+            .expect("the durably published policy is dispatchable");
+
+        engine
+            .prepare_pair_retirement(&pair.id)
+            .expect("prepare retirement")
+            .publish();
+        assert_eq!(
+            engine.sync_pair(&updated).unwrap_err().kind,
+            ErrorKind::Conflict,
+            "a delayed snapshot cannot reactivate a removed pair"
+        );
+        assert!(
+            engine.publish_pair_policy(&updated).is_err(),
+            "retired pair IDs cannot be explicitly published again"
+        );
+    }
+
+    #[test]
+    fn encrypted_pairs_require_exact_backend_binding_and_share_pause_state() {
+        let (_state, _local, cloud, engine, mut pair) = setup();
+        let binding = VaultBinding {
+            root_path: "/Synthetic.vault".into(),
+            root_resource_id: "vault-id".into(),
+        };
+        pair.vault = Some(binding.clone());
+        assert!(engine.sync_pair(&pair).is_err());
+        assert!(engine.conflicts(&pair, None, 10).is_err());
+        let encrypted = engine.with_vault_backend(pair.space_id.clone(), binding, cloud);
+        assert!(encrypted.sync_pair(&pair).is_ok());
+        engine.set_sync_paused(true);
+        assert!(encrypted.sync_pair(&pair).is_err());
+        engine.set_sync_paused(false);
+        assert!(encrypted.sync_pair(&pair).is_ok());
+        pair.vault.as_mut().unwrap().root_resource_id = "replacement-vault".into();
+        assert!(encrypted.sync_pair(&pair).is_err());
+        pair.vault = None;
+        assert!(encrypted.sync_pair(&pair).is_err());
+    }
+
+    #[test]
+    fn excluded_changes_preserve_both_copies_and_baseline_until_reincluded() {
+        let (_state, _parent, cloud, engine, mut pair) = setup();
+        let nested = pair.local_path.join("nested");
+        fs::create_dir(&nested).expect("nested directory");
+        let local_file = nested.join("shared.txt");
+        fs::write(&local_file, b"baseline").expect("initial local file");
+        let initial = engine.sync_pair(&pair).expect("initial sync");
+        assert!(initial.uploaded >= 2);
+        assert_eq!(cloud.bytes("/sync/nested/shared.txt").unwrap(), b"baseline");
+        let baseline = engine
+            .baseline(&pair.id, "nested/shared.txt")
+            .expect("read baseline")
+            .expect("initial baseline");
+
+        fs::write(&local_file, b"local edit").expect("edit local file");
+        cloud.replace_file("/sync/nested/shared.txt", b"remote edit");
+        pair.excluded_paths = vec!["nested".into()];
+        engine
+            .publish_pair_policy(&pair)
+            .expect("publish exclusion policy before sync");
+        let excluded = engine.sync_pair(&pair).expect("excluded sync");
+        assert_eq!(excluded.uploaded, 0);
+        assert_eq!(excluded.downloaded, 0);
+        assert_eq!(excluded.conflicts, 0);
+        assert_eq!(fs::read(&local_file).unwrap(), b"local edit");
+        assert_eq!(
+            cloud.bytes("/sync/nested/shared.txt").unwrap(),
+            b"remote edit"
+        );
+        assert_eq!(*cloud.delete_calls.lock().unwrap(), 0);
+        let excluded_baseline = engine
+            .baseline(&pair.id, "nested/shared.txt")
+            .unwrap()
+            .expect("excluded baseline remains available");
+        assert_eq!(excluded_baseline.local_hash, baseline.local_hash);
+        assert_eq!(excluded_baseline.remote_etag, baseline.remote_etag);
+
+        pair.excluded_paths.clear();
+        engine
+            .publish_pair_policy(&pair)
+            .expect("publish re-inclusion before sync");
+        let included = engine.sync_pair(&pair).expect("reconcile after inclusion");
+        assert_eq!(included.conflicts, 1);
+        assert_eq!(fs::read(&local_file).unwrap(), b"local edit");
+        assert_eq!(
+            cloud.bytes("/sync/nested/shared.txt").unwrap(),
+            b"remote edit"
+        );
+        assert_eq!(*cloud.delete_calls.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn cached_namespace_is_used_only_for_transport_offline_and_read_only() {
+        let (_state, _local, cloud, engine, _pair) = setup();
+        let engine = engine
+            .with_account_scope("profile-a".into(), "https://example.invalid".into())
+            .expect("bind account scope");
+        let snapshot = CloudSpace {
+            id: "cached-space".into(),
+            name: "Last known Space".into(),
+            dav_url: "https://example.invalid/remote.php/dav/spaces/cached-space/".into(),
+            personal: true,
+            writable: true,
+            encrypted: false,
+        };
+        let engine = engine
+            .with_offline_spaces(vec![snapshot.clone()])
+            .expect("attach matching snapshot");
+
+        // A live response always wins over the snapshot.
+        assert_eq!(engine.spaces().unwrap()[0].id, "space");
+        *cloud.fail_all.lock().expect("failure mutex") = Some(ErrorKind::Offline);
+        let spaces = engine.spaces().expect("offline snapshot");
+        assert_eq!(
+            spaces,
+            vec![CloudSpace {
+                writable: false,
+                ..snapshot
+            }]
+        );
+        assert_eq!(
+            engine.live_spaces().unwrap_err().kind,
+            ErrorKind::Offline,
+            "live-only probes must never use the offline snapshot"
+        );
+
+        // Authentication and authorization failures are not transport
+        // outages, so stale namespace metadata must not conceal them.
+        for kind in [ErrorKind::Forbidden, ErrorKind::InvalidResponse] {
+            *cloud.fail_all.lock().expect("failure mutex") = Some(kind);
+            assert_eq!(
+                engine.probe_live_namespace().unwrap_err().kind,
+                kind,
+                "a bounded recovery probe must distinguish non-transport failures"
+            );
+            assert_eq!(engine.spaces().unwrap_err().kind, kind);
+        }
+
+        *cloud.fail_all.lock().expect("failure mutex") = Some(ErrorKind::Offline);
+        let rebound = engine
+            .with_account_scope("profile-b".into(), "https://example.invalid".into())
+            .expect("bind another profile");
+        assert_eq!(
+            rebound.spaces().unwrap_err().kind,
+            ErrorKind::Offline,
+            "a namespace snapshot must not cross profile identities"
+        );
+    }
+
+    #[test]
+    fn published_mount_permissions_follow_validated_identity_and_revocation() {
+        let (_state, _local, cloud, engine, _pair) = setup();
+        let engine = engine
+            .with_account_scope("profile-a".into(), "https://example.invalid".into())
+            .unwrap();
+        let mounted = engine.spaces().unwrap()[0].clone();
+        let clone = engine.clone();
+        assert_eq!(clone.published_mount_permission(&mounted), None);
+        let publish = |spaces| {
+            *cloud.spaces_override.lock().unwrap() = Some(spaces);
+            engine
+                .publish_live_namespace(engine.probe_live_namespace().unwrap())
+                .unwrap();
+        };
+        publish(vec![mounted.clone()]);
+        assert_eq!(clone.published_mount_permission(&mounted), Some(true));
+        *cloud.fail_all.lock().unwrap() = Some(ErrorKind::Offline);
+        assert!(engine.probe_live_namespace().is_err());
+        assert_eq!(clone.published_mount_permission(&mounted), Some(true));
+        *cloud.fail_all.lock().unwrap() = Some(ErrorKind::Forbidden);
+        assert!(engine.probe_live_namespace().is_err());
+        assert_eq!(clone.published_mount_permission(&mounted), Some(false));
+        *cloud.fail_all.lock().unwrap() = None;
+        publish(vec![mounted.clone()]);
+        *cloud.spaces_override.lock().unwrap() = Some(Vec::new());
+        assert_eq!(
+            engine.probe_live_namespace().unwrap_err().kind,
+            ErrorKind::InvalidResponse
+        );
+        assert_eq!(clone.published_mount_permission(&mounted), Some(false));
+        publish(vec![mounted.clone()]);
+        engine
+            .reject_live_namespace(engine.probe_live_namespace().unwrap())
+            .unwrap();
+        assert_eq!(clone.published_mount_permission(&mounted), Some(false));
+        publish(vec![mounted.clone()]);
+        let mut revoked = mounted.clone();
+        revoked.writable = false;
+        publish(vec![revoked]);
+        assert_eq!(clone.published_mount_permission(&mounted), Some(false));
+        for change in 0..3 {
+            let mut replaced = mounted.clone();
+            match change {
+                0 => replaced.dav_url.push_str("different/"),
+                1 => replaced.encrypted = !replaced.encrypted,
+                _ => replaced.personal = !replaced.personal,
+            }
+            publish(vec![replaced]);
+            assert_eq!(clone.published_mount_permission(&mounted), Some(false));
+        }
+        let mut other = mounted.clone();
+        other.id = "different-space".into();
+        publish(vec![other]);
+        assert_eq!(clone.published_mount_permission(&mounted), Some(false));
+        publish(vec![mounted.clone()]);
+        let rebound = engine
+            .clone()
+            .with_account_scope("profile-a".into(), "https://example.invalid".into())
+            .unwrap();
+        assert_eq!(rebound.published_mount_permission(&mounted), None);
+        let foreign = engine.probe_live_namespace().unwrap();
+        assert!(rebound.publish_live_namespace(foreign).is_err());
+        assert_eq!(rebound.published_mount_permission(&mounted), None);
+    }
+
+    #[test]
+    fn refreshed_namespace_updates_only_clones_of_the_same_account_engine() {
+        let (_state, _local, cloud, engine, _pair) = setup();
+        let engine = engine
+            .with_account_scope("profile-a".into(), "https://example.invalid".into())
+            .expect("bind account scope");
+        let initial = engine.spaces().expect("initial live namespace");
+        let engine = engine
+            .with_offline_spaces(initial)
+            .expect("attach initial fallback");
+        let mounted_clone = engine.clone();
+
+        let replacement = CloudSpace {
+            id: "refreshed-space".into(),
+            name: "Refreshed Space".into(),
+            dav_url: "https://example.invalid/remote.php/dav/refreshed/".into(),
+            personal: false,
+            writable: true,
+            encrypted: false,
+        };
+        *cloud
+            .spaces_override
+            .lock()
+            .expect("namespace override lock") = Some(vec![replacement.clone()]);
+        let proof = engine.probe_live_namespace().expect("probe live namespace");
+        assert_eq!(proof.spaces(), std::slice::from_ref(&replacement));
+        assert_eq!(
+            mounted_clone
+                .publish_live_namespace(proof)
+                .expect("publish to the same account handle"),
+            vec![replacement.clone()]
+        );
+
+        // A refresh failure does not replace the last verified live snapshot.
+        *cloud.fail_all.lock().expect("failure mutex") = Some(ErrorKind::Forbidden);
+        assert_eq!(
+            engine.probe_live_namespace().unwrap_err().kind,
+            ErrorKind::Forbidden
+        );
+
+        // A probe already in flight supersedes an earlier proof before that
+        // proof can publish, even while the newer network request is blocked.
+        *cloud.fail_all.lock().expect("failure mutex") = None;
+        let older_proof = engine.probe_live_namespace().expect("older probe");
+        let (started_tx, started_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        *cloud.spaces_gate.lock().expect("space gate lock") = Some((started_tx, release_rx));
+        let probing_engine = engine.clone();
+        let newer_probe = std::thread::spawn(move || probing_engine.probe_live_namespace());
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("newer probe reached live backend");
+        assert_eq!(
+            engine.publish_live_namespace(older_proof).unwrap_err().kind,
+            ErrorKind::Conflict
+        );
+        release_tx.send(()).expect("release newer probe");
+        let newer_proof = newer_probe
+            .join()
+            .expect("newer probe thread")
+            .expect("newer live namespace proof");
+        engine
+            .publish_live_namespace(newer_proof)
+            .expect("publish newest probe");
+        let foreign_proof = engine.probe_live_namespace().expect("foreign proof");
+
+        *cloud.fail_all.lock().expect("failure mutex") = Some(ErrorKind::Offline);
+        let mounted_spaces = mounted_clone
+            .spaces()
+            .expect("mounted Engine clone sees refreshed fallback");
+        assert_eq!(mounted_spaces[0].id, "refreshed-space");
+        assert!(!mounted_spaces[0].writable);
+
+        // Rebinding creates a fresh authority handle, even with identical
+        // visible labels and backend. The old fallback cannot cross it.
+        let rebound = engine
+            .with_account_scope("profile-a".into(), "https://example.invalid".into())
+            .expect("same-label account rebind");
+        assert_eq!(rebound.spaces().unwrap_err().kind, ErrorKind::Offline);
+        assert_eq!(
+            rebound
+                .publish_live_namespace(foreign_proof)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Conflict,
+            "a proof from the previous handle cannot publish after rebind"
+        );
+
+        let cache_dir = tempfile::tempdir().expect("create private cache directory");
+        #[cfg(unix)]
+        fs::set_permissions(
+            cache_dir.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("make cache directory private");
+        let cache = Cache::open(cache_dir.path(), 1024 * 1024).expect("open fresh cache");
+        let cache_rebound = engine
+            .with_offline_cache(cache, "profile-a".into(), "https://example.invalid".into())
+            .expect("rebind cache identity");
+        assert_eq!(cache_rebound.spaces().unwrap_err().kind, ErrorKind::Offline);
+
+        let vault_rebound = engine.with_vault_backend(
+            "space".into(),
+            VaultBinding {
+                root_path: "/Encrypted.vault".into(),
+                root_resource_id: "vault-root".into(),
+            },
+            cloud,
+        );
+        assert_eq!(vault_rebound.spaces().unwrap_err().kind, ErrorKind::Offline);
+    }
+
+    #[test]
+    fn cached_namespace_requires_the_bound_account_and_server_origin() {
+        let (_state, _local, _cloud, engine, _pair) = setup();
+        let snapshot = CloudSpace {
+            id: "cached-space".into(),
+            name: "Last known Space".into(),
+            dav_url: "https://example.invalid/dav/".into(),
+            personal: false,
+            writable: false,
+            encrypted: false,
+        };
+        assert!(
+            engine
+                .clone()
+                .with_offline_spaces(vec![snapshot.clone()])
+                .is_err()
+        );
+
+        let account_engine = engine
+            .with_account_scope("profile-a".into(), "https://example.invalid".into())
+            .expect("bind matching account");
+        let foreign = CloudSpace {
+            dav_url: "https://elsewhere.invalid/dav/".into(),
+            ..snapshot.clone()
+        };
+        assert!(account_engine.with_offline_spaces(vec![foreign]).is_err());
+        assert!(
+            account_engine
+                .with_offline_spaces(vec![snapshot.clone(), snapshot])
+                .is_err()
+        );
+        assert!(
+            engine
+                .with_account_scope("profile-a".into(), "https://elsewhere.invalid".into())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn engine_accepts_the_persisted_namespace_size_limits() {
+        let (_state, _local, cloud, engine, _pair) = setup();
+        let engine = engine
+            .with_account_scope("profile-a".into(), "https://example.invalid".into())
+            .expect("bind account scope");
+        let spaces = (0..257)
+            .map(|index| CloudSpace {
+                id: if index == 0 {
+                    "i".repeat(600)
+                } else {
+                    format!("space-{index}")
+                },
+                name: if index == 1 {
+                    "n".repeat(1500)
+                } else {
+                    format!("Space {index}")
+                },
+                dav_url: if index == 2 {
+                    format!("https://example.invalid/{}", "d".repeat(5000))
+                } else {
+                    format!("https://example.invalid/dav/{index}")
+                },
+                personal: false,
+                writable: true,
+                encrypted: false,
+            })
+            .collect::<Vec<_>>();
+        engine
+            .with_offline_spaces(spaces)
+            .expect("Engine limits match persisted namespace bounds");
+        *cloud.fail_all.lock().expect("failure mutex") = Some(ErrorKind::Offline);
+        assert_eq!(
+            engine.spaces().expect("offline namespace").len(),
+            257,
+            "snapshots above the old in-memory cap remain usable after restart"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -2938,8 +6842,10 @@ mod tests {
             id: "pause-test".into(),
             local_path: local,
             space_id: "space".into(),
+            vault: None,
             remote_path: "/sync".into(),
             mode: SyncMode::TwoWay,
+            excluded_paths: Vec::new(),
         };
         let sync_engine = engine.clone();
         let sync_pair = pair.clone();
@@ -2967,6 +6873,28 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn sync_owned_read_only_file_does_not_require_write_access() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("read-only");
+        fs::write(&path, b"durable recovery contents").expect("write fixture");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).expect("make read-only");
+
+        sync_owned_file(&path).expect("sync read-only owned file");
+
+        assert_eq!(
+            fs::read(&path).expect("read fixture"),
+            b"durable recovery contents"
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o444
+        );
+    }
+
     #[test]
     fn verified_snapshots_are_readable_and_removed_after_each_open() {
         let (_state, _parent, cloud, engine, _pair) = setup();
@@ -2982,6 +6910,1415 @@ mod tests {
             drop(snapshot);
             assert_eq!(fs::read_dir(engine.cache_dir()).unwrap().count(), 0);
         }
+    }
+
+    #[test]
+    fn ordinary_listing_and_verified_content_survive_restart_for_transport_offline_reads() {
+        let state = tempfile::tempdir().expect("state dir");
+        #[cfg(unix)]
+        fs::set_permissions(
+            state.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("private state directory");
+        let cloud = Arc::new(FakeCloud::new());
+        cloud.insert_file("/offline.txt", b"verified cached bytes");
+        cloud.insert_file("/sync/nested.txt", b"nested cached bytes");
+        let cache = Cache::open(state.path(), 64 * 1024 * 1024).expect("open cache");
+        let engine = Engine::open(state.path(), cloud.clone())
+            .expect("open engine")
+            .with_offline_cache(
+                cache,
+                "profile-account-1".into(),
+                "https://example.invalid/".into(),
+            )
+            .expect("bind cache identity");
+        let namespace_snapshot = engine.spaces().expect("capture online namespace");
+        let engine = engine
+            .with_offline_spaces(namespace_snapshot.clone())
+            .expect("attach account-bound namespace snapshot");
+
+        let online = engine.list("space", "/").expect("online listing");
+        let nested_online = engine.list("space", "/sync").expect("nested listing");
+        assert!(
+            nested_online
+                .iter()
+                .any(|entry| entry.path == "/sync/nested.txt")
+        );
+        let item = online
+            .iter()
+            .find(|entry| entry.path == "/offline.txt")
+            .expect("fixture file listed");
+        let mut snapshot = engine
+            .fetch_snapshot("space", &item.path)
+            .expect("online version download");
+        let mut online_bytes = Vec::new();
+        snapshot
+            .read_to_end(&mut online_bytes)
+            .expect("read online snapshot");
+        assert_eq!(online_bytes, b"verified cached bytes");
+        drop(snapshot);
+        drop(engine);
+
+        *cloud.fail_all.lock().expect("offline mode lock") = Some(ErrorKind::Offline);
+        let cache = Cache::open(state.path(), 64 * 1024 * 1024).expect("reopen cache");
+        let engine = Engine::open(state.path(), cloud.clone())
+            .expect("reopen engine")
+            .with_offline_cache(
+                cache,
+                "profile-account-1".into(),
+                "https://example.invalid/".into(),
+            )
+            .expect("rebind cache identity")
+            .with_offline_spaces(namespace_snapshot.clone())
+            .expect("rebind saved namespace");
+        engine
+            .mark_namespace_transport_unavailable()
+            .expect("restore known offline state");
+        let spaces_calls_before = *cloud.spaces_calls.lock().expect("spaces call count");
+        let list_calls_before = *cloud.list_calls.lock().expect("list call count");
+        let offline_spaces = engine.spaces().expect("cached namespace after restart");
+        assert_eq!(offline_spaces.len(), namespace_snapshot.len());
+        assert_eq!(offline_spaces[0].id, namespace_snapshot[0].id);
+        assert!(!offline_spaces[0].writable);
+        let offline = engine.list("space", "/").expect("cached offline listing");
+        assert!(offline.iter().any(|entry| entry == item));
+        let nested_offline = engine
+            .list("space", "/sync")
+            .expect("cached nested listing");
+        assert!(
+            nested_offline
+                .iter()
+                .any(|entry| entry.path == "/sync/nested.txt")
+        );
+        assert_eq!(
+            *cloud.spaces_calls.lock().expect("spaces call count"),
+            spaces_calls_before,
+            "known-offline namespace reads must not probe the network"
+        );
+        assert_eq!(
+            *cloud.list_calls.lock().expect("list call count"),
+            list_calls_before,
+            "a cached offline parent listing must not wait for the transport deadline"
+        );
+        let mut snapshot = engine
+            .fetch_snapshot("space", "/offline.txt")
+            .expect("cached offline content");
+        let mut offline_bytes = Vec::new();
+        snapshot
+            .read_to_end(&mut offline_bytes)
+            .expect("read cached snapshot");
+        assert_eq!(offline_bytes, b"verified cached bytes");
+
+        *cloud.fail_all.lock().expect("offline mode lock") = Some(ErrorKind::Unauthorized);
+        assert_eq!(
+            engine.probe_live_namespace().unwrap_err().kind,
+            ErrorKind::Unauthorized,
+            "bounded recovery probes must surface auth errors and clear the offline fast path"
+        );
+        assert!(!engine.namespace_transport_unavailable());
+        let error = engine
+            .list("space", "/")
+            .expect_err("authorization failure must not fall back");
+        assert_eq!(error.kind, ErrorKind::Unauthorized);
+
+        *cloud.fail_all.lock().expect("offline mode lock") = None;
+        *cloud.space_encrypted.lock().expect("space metadata lock") = true;
+        let error = engine
+            .list("space", "/")
+            .expect_err("encrypted Space must not use ordinary cache");
+        assert_eq!(error.kind, ErrorKind::Unsupported);
+
+        *cloud.space_encrypted.lock().expect("space metadata lock") = false;
+        if let Some((root, _)) = cloud
+            .entries
+            .lock()
+            .expect("remote entries lock")
+            .get_mut("/")
+        {
+            root.id = "replacement-root-id".into();
+        }
+        *cloud.fail_listing.lock().expect("listing flag") = true;
+        let error = engine
+            .list("space", "/")
+            .expect_err("a replacement root cannot reuse the previous root cache");
+        assert_eq!(error.kind, ErrorKind::Offline);
+    }
+
+    #[test]
+    fn cached_online_create_uploads_conditionally_and_failed_create_keeps_local_bytes() {
+        let state = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(
+            state.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        let cloud = Arc::new(FakeCloud::new());
+        let cache = Cache::open(state.path(), 64 * 1024 * 1024).unwrap();
+        let engine = Engine::open(state.path(), cloud.clone())
+            .unwrap()
+            .with_offline_cache(
+                cache,
+                "profile-account-1".into(),
+                "https://example.invalid/".into(),
+            )
+            .unwrap();
+        engine.list("space", "/").unwrap();
+        let scope = engine.ordinary_write_scope("space").unwrap();
+        let source = state.path().join("new-file-spool.bin");
+        fs::write(&source, b"new ordinary file").unwrap();
+        let result = engine
+            .commit_file_write_scoped(
+                "space",
+                "/new.txt",
+                &source,
+                WriteCondition::Absent,
+                &scope,
+                None,
+            )
+            .expect("online create must not require a cached existing file");
+        assert!(matches!(result, FileWriteOutcome::Uploaded(_)));
+        assert_eq!(
+            cloud.bytes("/new.txt").as_deref(),
+            Some(b"new ordinary file".as_slice())
+        );
+        assert_eq!(
+            engine.pending_file_writes(None, 10).unwrap().pending_count,
+            0
+        );
+
+        fs::write(&source, b"must not replace remote").unwrap();
+        let error = engine
+            .commit_file_write_scoped(
+                "space",
+                "/new.txt",
+                &source,
+                WriteCondition::Absent,
+                &scope,
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Conflict);
+        assert_eq!(
+            cloud.bytes("/new.txt").as_deref(),
+            Some(b"new ordinary file".as_slice())
+        );
+
+        *cloud.fail_upload.lock().unwrap() = true;
+        let error = engine
+            .commit_file_write_scoped(
+                "space",
+                "/offline-new.txt",
+                &source,
+                WriteCondition::Absent,
+                &scope,
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Offline);
+        assert!(cloud.bytes("/offline-new.txt").is_none());
+        assert_eq!(fs::read(&source).unwrap(), b"must not replace remote");
+        assert_eq!(
+            engine.pending_file_writes(None, 10).unwrap().pending_count,
+            0
+        );
+        *cloud.fail_upload.lock().unwrap() = false;
+        *cloud.fail_upload_after_commit.lock().unwrap() = true;
+        let error = engine
+            .commit_file_write_scoped(
+                "space",
+                "/ambiguous.txt",
+                &source,
+                WriteCondition::Absent,
+                &scope,
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Offline);
+        assert_eq!(
+            cloud.bytes("/ambiguous.txt").as_deref(),
+            Some(b"must not replace remote".as_slice())
+        );
+        assert_eq!(fs::read(&source).unwrap(), b"must not replace remote");
+        *cloud.fail_upload_after_commit.lock().unwrap() = false;
+        fs::write(&source, b"newer retained local revision").unwrap();
+        let error = engine
+            .commit_file_write_scoped(
+                "space",
+                "/ambiguous.txt",
+                &source,
+                WriteCondition::Absent,
+                &scope,
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            ErrorKind::Conflict,
+            "lost acknowledgement cannot authorize replay"
+        );
+        assert_eq!(
+            cloud.bytes("/ambiguous.txt").as_deref(),
+            Some(b"must not replace remote".as_slice())
+        );
+        assert_eq!(fs::read(&source).unwrap(), b"newer retained local revision");
+        assert_eq!(
+            engine.pending_file_writes(None, 10).unwrap().pending_count,
+            0
+        );
+        *cloud.replace_root_before_scoped_upload.lock().unwrap() = true;
+        let error = engine
+            .commit_file_write_scoped(
+                "space",
+                "/root-race.txt",
+                &source,
+                WriteCondition::Absent,
+                &scope,
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Conflict);
+        assert!(cloud.bytes("/root-race.txt").is_none());
+        assert_eq!(fs::read(&source).unwrap(), b"newer retained local revision");
+    }
+
+    #[test]
+    fn offline_cached_edit_reads_locally_after_restart_and_reconciles_conditionally() {
+        let state = tempfile::tempdir().expect("state dir");
+        #[cfg(unix)]
+        fs::set_permissions(
+            state.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("private state directory");
+        let cloud = Arc::new(FakeCloud::new());
+        cloud.insert_file("/offline.txt", b"base bytes");
+        let cache = Cache::open(state.path(), 64 * 1024 * 1024).expect("open cache");
+        let engine = Engine::open(state.path(), cloud.clone())
+            .expect("open engine")
+            .with_offline_cache(
+                cache,
+                "profile-account-1".into(),
+                "https://example.invalid/".into(),
+            )
+            .expect("bind cache identity");
+        let listed = engine.list("space", "/").expect("cache listing");
+        let base = listed
+            .iter()
+            .find(|entry| entry.path == "/offline.txt")
+            .expect("listed file")
+            .etag
+            .clone();
+        let mut original = engine
+            .fetch_snapshot("space", "/offline.txt")
+            .expect("cache base bytes");
+        let mut original_bytes = Vec::new();
+        original.read_to_end(&mut original_bytes).unwrap();
+        assert_eq!(original_bytes, b"base bytes");
+
+        let edit = state.path().join("working-copy.bin");
+        fs::write(&edit, b"local edit").unwrap();
+        *cloud.fail_all.lock().expect("offline mode lock") = Some(ErrorKind::Offline);
+        let queued = engine
+            .commit_file_write(
+                "space",
+                "/offline.txt",
+                &edit,
+                WriteCondition::Match(base.clone()),
+            )
+            .expect("offline edit should be durably queued");
+        assert!(matches!(queued, FileWriteOutcome::Queued(_)));
+        let offline_entries = engine
+            .list("space", "/")
+            .expect("offline listing with pending overlay");
+        let pending = offline_entries
+            .iter()
+            .find(|entry| entry.path == "/offline.txt")
+            .expect("pending file stays visible");
+        assert_eq!(pending.size, b"local edit".len() as u64);
+        assert_eq!(pending.etag, base);
+        let queued_page = engine
+            .pending_file_writes(None, 10)
+            .expect("local journal page");
+        assert_eq!(queued_page.pending_count, 1);
+        assert_eq!(queued_page.items[0].path, "/offline.txt");
+        assert_eq!(queued_page.items[0].bytes, b"local edit".len() as u64);
+        let mut local = engine
+            .fetch_snapshot("space", "/offline.txt")
+            .expect("read your offline write");
+        let mut local_bytes = Vec::new();
+        local.read_to_end(&mut local_bytes).unwrap();
+        assert_eq!(local_bytes, b"local edit");
+
+        drop(engine);
+        let reopened_cache = Cache::open(state.path(), 64 * 1024 * 1024).expect("reopen cache");
+        let reopened = Engine::open(state.path(), cloud.clone())
+            .expect("reopen engine")
+            .with_offline_cache(
+                reopened_cache,
+                "profile-account-1".into(),
+                "https://example.invalid/".into(),
+            )
+            .expect("rebind cache identity");
+        let mut after_restart = reopened
+            .fetch_snapshot("space", "/offline.txt")
+            .expect("read pending write after restart");
+        let mut bytes = Vec::new();
+        after_restart.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"local edit");
+
+        *cloud.fail_all.lock().expect("online mode lock") = None;
+        let cancelled = reopened
+            .reconcile_pending_file_writes_cancellable("space", 8, || true)
+            .expect("cancel should stop before first upload");
+        assert_eq!(cancelled.uploaded, 0);
+        assert_eq!(cancelled.remaining, 1);
+        assert_eq!(
+            cloud.bytes("/offline.txt").as_deref(),
+            Some(&b"base bytes"[..])
+        );
+        reopened.set_sync_paused(true);
+        let paused = reopened
+            .reconcile_pending_file_writes_cancellable("space", 8, || false)
+            .expect("pause should preserve journal without failing it");
+        assert_eq!(paused.uploaded, 0);
+        assert_eq!(paused.remaining, 1);
+        assert_eq!(
+            cloud.bytes("/offline.txt").as_deref(),
+            Some(&b"base bytes"[..])
+        );
+        reopened.set_sync_paused(false);
+        let report = reopened
+            .reconcile_pending_file_writes("space")
+            .expect("reconcile pending edit");
+        assert_eq!(report.uploaded, 1);
+        assert_eq!(
+            cloud.bytes("/offline.txt").as_deref(),
+            Some(&b"local edit"[..])
+        );
+        let refreshed = reopened.stat("space", "/offline.txt").unwrap();
+        assert_ne!(refreshed.etag, base);
+        let mut verified = reopened
+            .fetch_snapshot("space", "/offline.txt")
+            .expect("read verified remote version");
+        bytes.clear();
+        verified.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"local edit");
+    }
+
+    #[test]
+    fn offline_edit_conflict_preserves_remote_and_local_bytes_after_restart() {
+        let state = tempfile::tempdir().expect("state dir");
+        #[cfg(unix)]
+        fs::set_permissions(
+            state.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("private state directory");
+        let cloud = Arc::new(FakeCloud::new());
+        cloud.insert_file("/offline.txt", b"base bytes");
+        let cache = Cache::open(state.path(), 64 * 1024 * 1024).expect("open cache");
+        let engine = Engine::open(state.path(), cloud.clone())
+            .expect("open engine")
+            .with_offline_cache(
+                cache,
+                "profile-account-1".into(),
+                "https://example.invalid/".into(),
+            )
+            .expect("bind cache identity");
+        let base = engine.list("space", "/").unwrap()[0].etag.clone();
+        let mut cached = engine.fetch_snapshot("space", "/offline.txt").unwrap();
+        let mut discarded = Vec::new();
+        cached.read_to_end(&mut discarded).unwrap();
+        let edit = state.path().join("working-copy.bin");
+        fs::write(&edit, b"local version").unwrap();
+        *cloud.fail_all.lock().expect("offline mode lock") = Some(ErrorKind::Offline);
+        engine
+            .commit_file_write("space", "/offline.txt", &edit, WriteCondition::Match(base))
+            .expect("queue offline edit");
+        cloud.replace_file("/offline.txt", b"remote version");
+        *cloud.fail_all.lock().expect("online mode lock") = None;
+        let report = engine
+            .reconcile_pending_file_writes("space")
+            .expect("conflict report");
+        assert_eq!(report.conflicts, 1);
+        assert_eq!(report.remaining, 0);
+        assert_eq!(
+            cloud.bytes("/offline.txt").as_deref(),
+            Some(&b"remote version"[..])
+        );
+        let displayed = engine.stat("space", "/offline.txt").unwrap();
+        assert_eq!(displayed.size, b"local version".len() as u64);
+        drop(engine);
+
+        *cloud.fail_all.lock().expect("offline mode lock") = Some(ErrorKind::Offline);
+        let cache = Cache::open(state.path(), 64 * 1024 * 1024).unwrap();
+        let reopened = Engine::open(state.path(), cloud)
+            .unwrap()
+            .with_offline_cache(
+                cache,
+                "profile-account-1".into(),
+                "https://example.invalid/".into(),
+            )
+            .unwrap();
+        let mut local = reopened
+            .fetch_snapshot("space", "/offline.txt")
+            .expect("conflicted bytes remain readable after restart");
+        let mut bytes = Vec::new();
+        local.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"local version");
+    }
+
+    #[test]
+    fn reconciliation_reports_pending_uploads_separately_from_conflicts() {
+        let state = tempfile::tempdir().expect("state dir");
+        #[cfg(unix)]
+        fs::set_permissions(
+            state.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("private state directory");
+        let cloud = Arc::new(FakeCloud::new());
+        cloud.insert_file("/a-conflict.txt", b"base a");
+        cloud.insert_file("/b-pending.txt", b"base b");
+        let cache = Cache::open(state.path(), 64 * 1024 * 1024).expect("open cache");
+        let engine = Engine::open(state.path(), cloud.clone())
+            .expect("open engine")
+            .with_offline_cache(
+                cache,
+                "profile-account-1".into(),
+                "https://example.invalid/".into(),
+            )
+            .expect("bind cache identity");
+        let listed = engine.list("space", "/").expect("prime listing");
+        let base_a = listed
+            .iter()
+            .find(|entry| entry.path == "/a-conflict.txt")
+            .unwrap()
+            .etag
+            .clone();
+        let base_b = listed
+            .iter()
+            .find(|entry| entry.path == "/b-pending.txt")
+            .unwrap()
+            .etag
+            .clone();
+        for path in ["/a-conflict.txt", "/b-pending.txt"] {
+            let mut cached = engine.fetch_snapshot("space", path).unwrap();
+            std::io::copy(&mut cached, &mut std::io::sink()).unwrap();
+        }
+        *cloud.fail_all.lock().unwrap() = Some(ErrorKind::Offline);
+        for (path, base, name, bytes) in [
+            ("/a-conflict.txt", base_a, "a-edit", b"local a".as_slice()),
+            ("/b-pending.txt", base_b, "b-edit", b"local b".as_slice()),
+        ] {
+            let edit = state.path().join(name);
+            fs::write(&edit, bytes).unwrap();
+            engine
+                .commit_file_write("space", path, &edit, WriteCondition::Match(base))
+                .expect("queue offline edit");
+        }
+        // The first queued item now conflicts. The bounded pass leaves the
+        // later pending item untouched, and reports the two counts separately.
+        cloud.replace_file("/a-conflict.txt", b"remote a");
+        *cloud.fail_all.lock().unwrap() = None;
+        let first = engine
+            .reconcile_pending_file_writes_cancellable("space", 1, || false)
+            .expect("one-item reconciliation");
+        assert_eq!(first.uploaded, 0);
+        assert_eq!(first.conflicts, 1);
+        assert_eq!(first.remaining, 1);
+
+        let second = engine
+            .reconcile_pending_file_writes_cancellable("space", 1, || false)
+            .expect("retry remaining pending item");
+        assert_eq!(second.uploaded, 1);
+        assert_eq!(second.conflicts, 1);
+        assert_eq!(second.remaining, 0);
+        assert_eq!(
+            cloud.bytes("/a-conflict.txt").as_deref(),
+            Some(&b"remote a"[..])
+        );
+        assert_eq!(
+            cloud.bytes("/b-pending.txt").as_deref(),
+            Some(&b"local b"[..])
+        );
+        let journal = engine.pending_file_writes(None, 10).unwrap();
+        assert_eq!(journal.conflict_count, 1);
+        assert_eq!(journal.pending_count, 0);
+        assert_eq!(journal.items[0].state, WriteState::Conflict);
+    }
+
+    #[test]
+    fn delete_rejects_space_root_aliases_before_backend_operations() {
+        let state = tempfile::tempdir().unwrap();
+        let cloud = Arc::new(FakeCloud::new());
+        cloud.insert_file("/item.txt", b"keep");
+        let engine = Engine::open(state.path(), cloud.clone()).unwrap();
+        let root = cloud.remote_entry("/").unwrap();
+        for path in ["", "/", "//", "///"] {
+            let error = engine.delete("space", path, &root.etag).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Unsupported);
+            assert!(error.message.contains("Space root"));
+        }
+        assert_eq!(*cloud.delete_calls.lock().unwrap(), 0);
+        assert_eq!(*cloud.spaces_calls.lock().unwrap(), 0);
+        assert_eq!(*cloud.list_calls.lock().unwrap(), 0);
+        assert_eq!(cloud.remote_entry("/").unwrap().etag, root.etag);
+        assert_eq!(cloud.bytes("/item.txt").unwrap(), b"keep");
+        // Ordinary conditional deletion must remain available.
+        let item = cloud.remote_entry("/item.txt").unwrap();
+        engine.delete("space", "/item.txt", &item.etag).unwrap();
+        assert_eq!(*cloud.delete_calls.lock().unwrap(), 1);
+        assert!(cloud.bytes("/item.txt").is_none());
+    }
+
+    #[test]
+    fn ordinary_delete_retains_journal_without_cloud_resurrection() {
+        for conflicted in [false, true] {
+            let state = tempfile::tempdir().unwrap();
+            #[cfg(unix)]
+            fs::set_permissions(
+                state.path(),
+                std::os::unix::fs::PermissionsExt::from_mode(0o700),
+            )
+            .unwrap();
+            let cloud = Arc::new(FakeCloud::new());
+            cloud.insert_file("/item.txt", b"original");
+            let cache = Cache::open(state.path(), 64 * 1024 * 1024).unwrap();
+            let engine = Engine::open(state.path(), cloud.clone())
+                .unwrap()
+                .with_offline_cache(
+                    cache.clone(),
+                    "profile-account-1".into(),
+                    "https://example.invalid/".into(),
+                )
+                .unwrap();
+            engine.list("space", "/").unwrap();
+            let original = cloud.remote_entry("/item.txt").unwrap();
+            let source = state.path().join("local-edit");
+            fs::write(&source, b"retained journal edit").unwrap();
+            *cloud.fail_upload.lock().unwrap() = true;
+            assert!(matches!(
+                engine
+                    .commit_file_write(
+                        "space",
+                        "/item.txt",
+                        &source,
+                        WriteCondition::Match(original.etag.clone())
+                    )
+                    .unwrap(),
+                FileWriteOutcome::Queued(_)
+            ));
+            *cloud.fail_upload.lock().unwrap() = false;
+            let scope = engine.online_plaintext_scope("space").unwrap().0;
+            let queued = cache.pending_writes(&scope).unwrap().remove(0);
+            if conflicted {
+                cache.mark_write_conflict(&scope, queued.id).unwrap();
+            }
+            engine.delete("space", "/item.txt", &original.etag).unwrap();
+            assert!(cloud.bytes("/item.txt").is_none());
+            assert_eq!(*cloud.delete_calls.lock().unwrap(), 1);
+            let report = engine.reconcile_pending_file_writes("space").unwrap();
+            assert_eq!(report.uploaded, 0);
+            assert_eq!(report.conflicts, 1);
+            assert_eq!(report.remaining, 0);
+            let entries = engine.list("space", "/").unwrap();
+            assert!(entries.iter().any(|entry| entry.path == "/item.txt"));
+            let reopened = Cache::open(state.path(), 64 * 1024 * 1024).unwrap();
+            let retained = reopened.pending_writes(&scope).unwrap();
+            assert_eq!(retained.len(), 1);
+            assert_eq!(retained[0].id, queued.id);
+            assert_eq!(retained[0].state, WriteState::Conflict);
+            let mut stored = reopened.open_content(&scope, &retained[0].content).unwrap();
+            let mut bytes = Vec::new();
+            stored.read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, b"retained journal edit");
+            let retry = engine.reconcile_pending_file_writes("space").unwrap();
+            assert_eq!(retry.uploaded, 0);
+            assert_eq!(retry.conflicts, 1);
+            assert!(cloud.bytes("/item.txt").is_none());
+        }
+    }
+
+    #[test]
+    fn rename_rejects_subtrees_with_journal_edits_before_remote_mutation() {
+        for conflicted in [false, true] {
+            let state = tempfile::tempdir().unwrap();
+            #[cfg(unix)]
+            fs::set_permissions(
+                state.path(),
+                std::os::unix::fs::PermissionsExt::from_mode(0o700),
+            )
+            .unwrap();
+            let cloud = Arc::new(FakeCloud::new());
+            cloud.insert_file("/sync/item.txt", b"original");
+            cloud.insert_file("/sync2.txt", b"independent");
+            let cache = Cache::open(state.path(), 64 * 1024 * 1024).unwrap();
+            let engine = Engine::open(state.path(), cloud.clone())
+                .unwrap()
+                .with_offline_cache(
+                    cache.clone(),
+                    "profile-account-1".into(),
+                    "https://example.invalid/".into(),
+                )
+                .unwrap();
+            engine.list("space", "/").unwrap();
+            engine.list("space", "/sync").unwrap();
+            let original = cloud.remote_entry("/sync/item.txt").unwrap();
+            let source = state.path().join("local-edit");
+            fs::write(&source, b"retained journal edit").unwrap();
+            *cloud.fail_upload.lock().unwrap() = true;
+            assert!(matches!(
+                engine
+                    .commit_file_write(
+                        "space",
+                        "/sync/item.txt",
+                        &source,
+                        WriteCondition::Match(original.etag.clone())
+                    )
+                    .unwrap(),
+                FileWriteOutcome::Queued(_)
+            ));
+            *cloud.fail_upload.lock().unwrap() = false;
+            let scope = engine.online_plaintext_scope("space").unwrap().0;
+            let queued = cache.pending_writes(&scope).unwrap().remove(0);
+            if conflicted {
+                cache.mark_write_conflict(&scope, queued.id).unwrap();
+            }
+
+            for (from, to) in [
+                ("/sync", "/moved"),
+                ("/other", "/sync"),
+                ("/sync/item.txt", "/other.txt"),
+            ] {
+                let error = engine.rename("space", from, to, "unused").unwrap_err();
+                assert_eq!(error.kind, ErrorKind::Conflict);
+                assert!(error.message.contains("pending local journal edits"));
+            }
+            assert_eq!(cloud.bytes("/sync/item.txt").unwrap(), b"original");
+            assert_eq!(
+                engine.pending_file_writes(None, 10).unwrap().pending_count,
+                if conflicted { 0 } else { 1 }
+            );
+            let reopened = Cache::open(state.path(), 64 * 1024 * 1024).unwrap();
+            let retained = reopened.pending_writes(&scope).unwrap();
+            assert_eq!(retained.len(), 1);
+            assert_eq!(retained[0].logical_path, "/sync/item.txt");
+            assert_eq!(
+                retained[0].state,
+                if conflicted {
+                    WriteState::Conflict
+                } else {
+                    WriteState::Pending
+                }
+            );
+            let mut stored = reopened.open_content(&scope, &retained[0].content).unwrap();
+            let mut stored_bytes = Vec::new();
+            stored.read_to_end(&mut stored_bytes).unwrap();
+            assert_eq!(stored_bytes, b"retained journal edit");
+            let mut snapshot = engine.fetch_snapshot("space", "/sync/item.txt").unwrap();
+            let mut bytes = Vec::new();
+            snapshot.read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, b"retained journal edit");
+            let sibling = cloud.remote_entry("/sync2.txt").unwrap();
+            engine
+                .rename("space", "/sync2.txt", "/sibling-moved.txt", &sibling.etag)
+                .unwrap();
+            if !conflicted {
+                engine.reconcile_pending_file_writes("space").unwrap();
+                let verified = cloud.remote_entry("/sync/item.txt").unwrap();
+                engine
+                    .rename("space", "/sync/item.txt", "/uploaded.txt", &verified.etag)
+                    .unwrap();
+                assert_eq!(
+                    cloud.bytes("/uploaded.txt").unwrap(),
+                    b"retained journal edit"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn failed_upload_refreshes_only_fresh_metadata_and_retains_dirty_bytes_after_restart() {
+        for committed in [false, true] {
+            for listing_available in [false, true] {
+                let state = tempfile::tempdir().unwrap();
+                #[cfg(unix)]
+                fs::set_permissions(
+                    state.path(),
+                    std::os::unix::fs::PermissionsExt::from_mode(0o700),
+                )
+                .unwrap();
+                let cloud = Arc::new(FakeCloud::new());
+                cloud.insert_file("/edited.txt", b"original");
+                cloud.insert_file("/unrelated.txt", b"retained");
+                let cache = Cache::open(state.path(), 64 * 1024 * 1024).unwrap();
+                let engine = Engine::open(state.path(), cloud.clone())
+                    .unwrap()
+                    .with_offline_cache(
+                        cache.clone(),
+                        "profile-account-1".into(),
+                        "https://example.invalid/".into(),
+                    )
+                    .unwrap();
+                engine.list("space", "/").unwrap();
+                let original = cloud.remote_entry("/edited.txt").unwrap();
+                for path in ["/edited.txt", "/unrelated.txt"] {
+                    let mut snapshot = engine.fetch_snapshot("space", path).unwrap();
+                    std::io::copy(&mut snapshot, &mut std::io::sink()).unwrap();
+                }
+                engine
+                    .set_availability_policy(
+                        "space",
+                        "/unrelated.txt",
+                        AvailabilityPolicy::AlwaysOffline,
+                    )
+                    .unwrap();
+                let scope = engine.online_plaintext_scope("space").unwrap().0;
+                let edit = state.path().join("edit");
+                fs::write(&edit, b"local dirty bytes").unwrap();
+                *cloud.fail_upload.lock().unwrap() = !committed;
+                *cloud.fail_upload_after_commit.lock().unwrap() = committed;
+                *cloud.fail_listing.lock().unwrap() = !listing_available;
+                assert!(matches!(
+                    engine
+                        .commit_file_write(
+                            "space",
+                            "/edited.txt",
+                            &edit,
+                            WriteCondition::Match(original.etag)
+                        )
+                        .unwrap(),
+                    FileWriteOutcome::Queued(_)
+                ));
+                let before = cache.pending_writes(&scope).unwrap();
+                assert_eq!(before.len(), 1);
+                assert_eq!(before[0].state, WriteState::Pending);
+                drop(engine);
+                drop(cache);
+                *cloud.fail_all.lock().unwrap() = Some(ErrorKind::Offline);
+                let reopened_cache = Cache::open(state.path(), 64 * 1024 * 1024).unwrap();
+                let reopened = Engine::open(state.path(), cloud.clone())
+                    .unwrap()
+                    .with_offline_cache(
+                        reopened_cache.clone(),
+                        "profile-account-1".into(),
+                        "https://example.invalid/".into(),
+                    )
+                    .unwrap();
+                let listed = reopened.list("space", "/");
+                if listing_available {
+                    let entries = listed.unwrap();
+                    assert!(entries.iter().any(|entry| entry.path == "/unrelated.txt"));
+                    let mut snapshot = reopened.fetch_snapshot("space", "/unrelated.txt").unwrap();
+                    let mut bytes = Vec::new();
+                    snapshot.read_to_end(&mut bytes).unwrap();
+                    assert_eq!(bytes, b"retained");
+                } else {
+                    assert_eq!(listed.unwrap_err().kind, ErrorKind::Offline);
+                }
+                let after = reopened_cache.pending_writes(&scope).unwrap();
+                assert_eq!(after.len(), 1);
+                assert_eq!(after[0].id, before[0].id);
+                // A fresh listing of an acknowledged-differently server
+                // version must surface the retained edit as a conflict.
+                let expected_state = if committed && listing_available {
+                    WriteState::Conflict
+                } else {
+                    WriteState::Pending
+                };
+                assert_eq!(after[0].state, expected_state);
+                let mut bytes = Vec::new();
+                reopened_cache
+                    .open_content(&scope, &after[0].content)
+                    .unwrap()
+                    .read_to_end(&mut bytes)
+                    .unwrap();
+                assert_eq!(bytes, b"local dirty bytes");
+                assert_eq!(fs::read(&edit).unwrap(), b"local dirty bytes");
+            }
+        }
+    }
+
+    #[test]
+    fn failed_upload_refresh_cannot_rebind_invalidated_listing_to_replaced_root() {
+        let state = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(
+            state.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        let cloud = Arc::new(FakeCloud::new());
+        cloud.insert_file("/item.txt", b"original");
+        let cache = Cache::open(state.path(), 64 * 1024 * 1024).unwrap();
+        let engine = Engine::open(state.path(), cloud.clone())
+            .unwrap()
+            .with_offline_cache(
+                cache.clone(),
+                "profile-account-1".into(),
+                "https://example.invalid/".into(),
+            )
+            .unwrap();
+        engine.list("space", "/").unwrap();
+        let scope = engine.online_plaintext_scope("space").unwrap().0;
+        let source = state.path().join("source");
+        fs::write(&source, b"replacement").unwrap();
+        *cloud.replace_root_before_scoped_upload.lock().unwrap() = true;
+        let error = engine
+            .upload_inner_with_root(
+                None,
+                "space",
+                "/item.txt",
+                &source,
+                WriteCondition::Match(cloud.remote_entry("/item.txt").unwrap().etag),
+                Some(scope.root_resource_id()),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Conflict);
+        assert_eq!(error.message, "fixture root changed");
+        assert_eq!(
+            cache.listing(&scope, scope.root_resource_id()).unwrap_err(),
+            raiun_cache::CacheError::IncompleteListing
+        );
+        assert_eq!(cloud.bytes("/item.txt").unwrap(), b"original");
+        assert_eq!(fs::read(&source).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn verified_mutations_refresh_offline_tree_and_uncertain_mutation_stays_invalidated() {
+        let state = tempfile::tempdir().expect("state dir");
+        #[cfg(unix)]
+        fs::set_permissions(
+            state.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("private state directory");
+        let cloud = Arc::new(FakeCloud::new());
+        cloud.insert_file("/sync/item.txt", b"old revision");
+        let cache = Cache::open(state.path(), 64 * 1024 * 1024).expect("open cache");
+        let engine = Engine::open(state.path(), cloud.clone())
+            .expect("open engine")
+            .with_offline_cache(
+                cache.clone(),
+                "profile-account-1".into(),
+                "https://example.invalid/".into(),
+            )
+            .expect("bind cache identity");
+
+        engine.list("space", "/").expect("cache root listing");
+        engine.list("space", "/sync").expect("cache sync listing");
+        let old_entry = cloud.remote_entry("/sync/item.txt").unwrap();
+        let mut old_snapshot = engine
+            .fetch_snapshot("space", "/sync/item.txt")
+            .expect("cache old content");
+        let mut old_bytes = Vec::new();
+        old_snapshot.read_to_end(&mut old_bytes).unwrap();
+        assert_eq!(old_bytes, b"old revision");
+        drop(old_snapshot);
+        let pin = engine
+            .pin_offline_tree("space", "/sync", |_| {})
+            .expect("pin the old snapshot");
+        assert_eq!(pin.state, raiun_cache::PinState::Ready);
+
+        // A successful overwrite refreshes the tree but never labels the old
+        // pin as current. The previous immutable blob remains retained.
+        let replacement = tempfile::NamedTempFile::new_in(state.path()).unwrap();
+        fs::write(replacement.path(), b"replacement revision").unwrap();
+        engine
+            .put(
+                "space",
+                "/sync/item.txt",
+                replacement.path(),
+                WriteCondition::Match(old_entry.etag.clone()),
+            )
+            .expect("verified overwrite");
+        assert_eq!(
+            cache.refresh_pin(&pin.id).unwrap().state,
+            raiun_cache::PinState::Stale
+        );
+
+        // Rename, directory creation, and delete all update the complete
+        // parent snapshot before it can be used as an offline listing.
+        engine
+            .rename(
+                "space",
+                "/sync/item.txt",
+                "/sync/renamed.txt",
+                &cloud.remote_entry("/sync/item.txt").unwrap().etag,
+            )
+            .expect("verified rename");
+        engine
+            .mkdir("space", "/sync/new-folder")
+            .expect("verified mkdir");
+        engine
+            .delete(
+                "space",
+                "/sync/renamed.txt",
+                &cloud.remote_entry("/sync/renamed.txt").unwrap().etag,
+            )
+            .expect("verified delete");
+
+        *cloud.fail_all.lock().expect("offline mode lock") = Some(ErrorKind::Offline);
+        let offline = engine
+            .list("space", "/sync")
+            .expect("fresh verified parent snapshot is available offline");
+        assert_eq!(offline.len(), 1);
+        assert_eq!(offline[0].path, "/sync/new-folder");
+        let old_version = ContentVersion {
+            resource_id: old_entry.id,
+            etag: old_entry.etag,
+            protection: ContentProtection::Plaintext,
+        };
+        let mut retained = cache
+            .open_content(
+                &cache
+                    .find_plaintext_scope("https://example.invalid/", "profile-account-1", "space")
+                    .unwrap()
+                    .unwrap(),
+                &old_version,
+            )
+            .expect("old immutable content is retained");
+        let mut retained_bytes = Vec::new();
+        retained.read_to_end(&mut retained_bytes).unwrap();
+        assert_eq!(retained_bytes, b"old revision");
+        assert_eq!(
+            engine
+                .fetch_snapshot("space", "/sync/renamed.txt")
+                .err()
+                .expect("deleted path must not resolve from stale metadata")
+                .kind,
+            ErrorKind::Offline
+        );
+
+        // If both a mutation and its fresh listing fail, the old listing
+        // remains invalidated instead of being restored from cache.
+        *cloud.fail_all.lock().expect("offline mode lock") = None;
+        *cloud.fail_upload.lock().expect("upload flag") = true;
+        *cloud.fail_listing.lock().unwrap() = true;
+        let another = tempfile::NamedTempFile::new_in(state.path()).unwrap();
+        fs::write(another.path(), b"uncertain").unwrap();
+        assert!(
+            engine
+                .put(
+                    "space",
+                    "/sync/uncertain.txt",
+                    another.path(),
+                    WriteCondition::Absent
+                )
+                .is_err()
+        );
+        *cloud.fail_all.lock().expect("offline mode lock") = Some(ErrorKind::Offline);
+        assert_eq!(
+            engine.list("space", "/sync").unwrap_err().kind,
+            ErrorKind::Offline
+        );
+        assert_eq!(
+            cache.refresh_pin(&pin.id).unwrap().state,
+            raiun_cache::PinState::Stale
+        );
+    }
+
+    #[test]
+    fn automatic_refresh_moves_stable_pin_and_updates_only_changed_versions() {
+        let state = tempfile::tempdir().expect("state dir");
+        #[cfg(unix)]
+        fs::set_permissions(
+            state.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("private state directory");
+        let cloud = Arc::new(FakeCloud::new());
+        cloud.insert_dir("/sync/nested");
+        cloud.insert_file("/sync/nested/unchanged.txt", b"unchanged");
+        cloud.insert_file("/sync/revised.txt", b"old");
+        cloud.insert_file("/always.txt", b"policy-old");
+        let cache = Cache::open(state.path(), 64 * 1024 * 1024).expect("open cache");
+        let engine = Engine::open(state.path(), cloud.clone())
+            .expect("open engine")
+            .with_offline_cache(
+                cache.clone(),
+                "profile-account-1".into(),
+                "https://example.invalid/".into(),
+            )
+            .expect("bind cache identity");
+        let pin = engine
+            .pin_offline_tree("space", "/sync", |_| {})
+            .expect("initial folder snapshot");
+        engine
+            .set_availability_policy("space", "/always.txt", AvailabilityPolicy::AlwaysOffline)
+            .expect("initial file policy");
+        let scope = cache
+            .find_plaintext_scope("https://example.invalid/", "profile-account-1", "space")
+            .unwrap()
+            .unwrap();
+        let pin_root_id = pin.root_resource_id.clone();
+        let downloads_before = *cloud.downloads.lock().unwrap();
+
+        // Rename the pinned folder without changing resource identities,
+        // revise one pinned file and the standalone policy file, and add a
+        // child. The refresh finds the old folder by ID and stages a new
+        // complete snapshot before replacing the stable pin record.
+        cloud.move_prefix("/sync", "/renamed");
+        cloud.insert_file("/renamed/new.txt", b"new child");
+        cloud.replace_file("/renamed/revised.txt", b"new revision");
+        cloud.replace_file("/always.txt", b"policy-new");
+
+        let report = engine
+            .refresh_offline_availability_cancellable("space", || false)
+            .expect("refresh complete snapshot");
+        assert_eq!(report.files_downloaded, 1);
+        assert_eq!(*cloud.downloads.lock().unwrap() - downloads_before, 3);
+        let refreshed_pin = cache.refresh_pin(&pin.id).unwrap();
+        assert_eq!(refreshed_pin.state, PinState::Ready);
+        assert_eq!(refreshed_pin.root_resource_id, pin_root_id);
+        assert_eq!(refreshed_pin.root_path, "/renamed");
+        assert_eq!(refreshed_pin.required_content_count, 3);
+        assert_eq!(cache.pins(&scope).unwrap().len(), 1);
+        let policy_entry = engine.stat("space", "/always.txt").unwrap();
+        assert_eq!(
+            cache.policy_target_state(&scope, &policy_entry.id).unwrap(),
+            Some(TargetState::Ready)
+        );
+        let mut policy_bytes = Vec::new();
+        cache
+            .open_content(
+                &scope,
+                &ContentVersion {
+                    resource_id: policy_entry.id,
+                    etag: policy_entry.etag,
+                    protection: ContentProtection::Plaintext,
+                },
+            )
+            .unwrap()
+            .read_to_end(&mut policy_bytes)
+            .unwrap();
+        assert_eq!(policy_bytes, b"policy-new");
+
+        *cloud.fail_all.lock().unwrap() = Some(ErrorKind::Offline);
+        assert_eq!(
+            engine
+                .refresh_offline_availability_cancellable("space", || false)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Offline
+        );
+        assert_eq!(cache.refresh_pin(&pin.id).unwrap().state, PinState::Ready);
+        *cloud.fail_all.lock().unwrap() = None;
+
+        // A second pass with identical versions verifies/reuses all immutable
+        // content instead of redownloading it.
+        let before_second = *cloud.downloads.lock().unwrap();
+        engine
+            .refresh_offline_availability_cancellable("space", || false)
+            .expect("unchanged refresh");
+        assert_eq!(*cloud.downloads.lock().unwrap(), before_second);
+
+        let current_policy_entry = engine.stat("space", "/always.txt").unwrap();
+        let protected_old = ContentVersion {
+            resource_id: current_policy_entry.id.clone(),
+            etag: current_policy_entry.etag.clone(),
+            protection: ContentProtection::Plaintext,
+        };
+        cloud.replace_file("/always.txt", b"policy-third");
+        *cloud.fail_download_after_write.lock().unwrap() = true;
+        assert!(
+            engine
+                .refresh_offline_availability_cancellable("space", || false)
+                .is_err()
+        );
+        *cloud.fail_download_after_write.lock().unwrap() = false;
+        let (policies, _) = cache.refresh_targets(&scope).unwrap();
+        let policy = policies
+            .iter()
+            .find(|target| target.resource_id == current_policy_entry.id)
+            .unwrap();
+        assert_eq!(policy.etag, protected_old.etag);
+        assert_eq!(policy.state, TargetState::Stale);
+        cache
+            .open_content(&scope, &protected_old)
+            .expect("prior verified policy bytes remain protected after failed refresh");
+    }
+
+    #[test]
+    fn automatic_refresh_never_adopts_replacement_at_old_path() {
+        let state = tempfile::tempdir().expect("state dir");
+        #[cfg(unix)]
+        fs::set_permissions(
+            state.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("private state directory");
+        let cloud = Arc::new(FakeCloud::new());
+        cloud.insert_dir("/folder");
+        cloud.insert_file("/folder/old.txt", b"retained bytes");
+        let cache = Cache::open(state.path(), 64 * 1024 * 1024).expect("open cache");
+        let engine = Engine::open(state.path(), cloud.clone())
+            .expect("open engine")
+            .with_offline_cache(
+                cache.clone(),
+                "profile-account-1".into(),
+                "https://example.invalid/".into(),
+            )
+            .expect("bind cache identity");
+        let pin = engine.pin_offline_tree("space", "/folder", |_| {}).unwrap();
+        engine
+            .set_availability_policy(
+                "space",
+                "/folder/old.txt",
+                AvailabilityPolicy::AlwaysOffline,
+            )
+            .unwrap();
+        let old_id = pin.root_resource_id.clone();
+        let old_file_id = cloud.remote_entry("/folder/old.txt").unwrap().id;
+        // Remove the original stable identity and place a different object at
+        // the same path. A complete traversal proves the old target absent;
+        // retained data stays on disk but is never relabeled as current.
+        cloud.move_prefix("/folder", "/gone");
+        {
+            let mut entries = cloud.entries.lock().unwrap();
+            entries.remove("/gone");
+            entries.remove("/gone/old.txt");
+        }
+        cloud.insert_dir("/folder");
+        cloud.insert_file("/folder/replacement.txt", b"different identity");
+        cloud
+            .entries
+            .lock()
+            .unwrap()
+            .get_mut("/folder")
+            .unwrap()
+            .0
+            .id = "replacement-folder-id".into();
+        let refreshed = engine
+            .refresh_offline_availability_cancellable("space", || false)
+            .expect("refresh deleted target");
+        assert_eq!(refreshed.unavailable, 2);
+        let pin = cache.refresh_pin(&pin.id).unwrap();
+        assert_eq!(pin.root_resource_id, old_id);
+        assert_eq!(pin.state, PinState::Unavailable);
+        assert_eq!(pin.root_path, "/folder");
+        assert_eq!(
+            cache
+                .policy_target_state(
+                    &cache
+                        .find_plaintext_scope(
+                            "https://example.invalid/",
+                            "profile-account-1",
+                            "space",
+                        )
+                        .unwrap()
+                        .unwrap(),
+                    &old_file_id,
+                )
+                .unwrap(),
+            Some(TargetState::Unavailable)
+        );
+        assert!(engine.fetch_snapshot("space", "/folder/old.txt").is_err());
+    }
+
+    #[test]
+    fn historical_pin_recovery_does_not_restore_an_invalidated_current_listing() {
+        let state = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(
+            state.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        let cloud = Arc::new(FakeCloud::new());
+        cloud.insert_file("/sync/pinned.txt", b"retained version");
+        let cache = Cache::open(state.path(), 64 * 1024 * 1024).unwrap();
+        let engine = Engine::open(state.path(), cloud.clone())
+            .unwrap()
+            .with_offline_cache(
+                cache.clone(),
+                "recovery-account".into(),
+                "https://example.invalid/".into(),
+            )
+            .unwrap();
+        let pin = engine.pin_offline_tree("space", "/sync", |_| {}).unwrap();
+        let scope = cache
+            .find_plaintext_scope("https://example.invalid", "recovery-account", "space")
+            .unwrap()
+            .unwrap();
+        cache
+            .invalidate_paths(&scope, &["/sync/pinned.txt"])
+            .unwrap();
+        *cloud.fail_all.lock().unwrap() = Some(ErrorKind::Offline);
+        assert!(engine.list("space", "/sync").is_err());
+        let recovery = engine
+            .offline_pin_recovery_manifest("space", &pin.id)
+            .unwrap();
+        assert_eq!(recovery.state, PinState::Stale);
+        assert_eq!(recovery.entries.len(), 1);
+        assert_eq!(recovery.entries[0].entry.path, "/sync/pinned.txt");
+        assert!(!recovery.entries[0].entry.writable);
+        let expected = &recovery.entries[0];
+        let mut reader = engine
+            .open_offline_pin_recovery_content("space", &pin.id, expected)
+            .unwrap();
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"retained version");
+        let mut forged = expected.clone();
+        forged.entry.path = "/sync/replacement.txt".into();
+        assert!(
+            engine
+                .open_offline_pin_recovery_content("space", &pin.id, &forged)
+                .is_err()
+        );
+        assert!(
+            engine.list("space", "/sync").is_err(),
+            "reading recovery metadata must not publish a current listing"
+        );
+    }
+
+    #[test]
+    fn account_rebind_cannot_reuse_another_accounts_offline_cache() {
+        let state = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(
+            state.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        let cloud = Arc::new(FakeCloud::new());
+        cloud.insert_file("/sync/pinned.txt", b"account one retained bytes");
+        let cache = Cache::open(state.path(), 64 * 1024 * 1024).unwrap();
+        let first = Engine::open(state.path(), cloud)
+            .unwrap()
+            .with_offline_cache(
+                cache,
+                "first-account".into(),
+                "https://example.invalid/".into(),
+            )
+            .unwrap();
+        let pin = first.pin_offline_tree("space", "/sync", |_| {}).unwrap();
+        assert_eq!(first.offline_pins("space").unwrap().len(), 1);
+        assert!(
+            first
+                .offline_pin_recovery_manifest("space", &pin.id)
+                .is_ok()
+        );
+        assert_eq!(
+            first
+                .with_account_scope("first-account".into(), "https://elsewhere.invalid".into())
+                .err()
+                .unwrap()
+                .kind,
+            ErrorKind::Conflict
+        );
+        let same = first
+            .with_account_scope("first-account".into(), "https://example.invalid".into())
+            .unwrap();
+        assert_eq!(
+            same.offline_pins("space").unwrap().len(),
+            1,
+            "canonical equivalent origins preserve the same account cache"
+        );
+        let rebound = first
+            .with_account_scope("second-account".into(), "https://example.invalid/".into())
+            .unwrap();
+        assert!(
+            rebound.offline_pins("space").is_err(),
+            "another account must not inherit old cache metadata"
+        );
+        assert!(
+            rebound
+                .offline_pin_recovery_manifest("space", &pin.id)
+                .is_err()
+        );
+        // Rebinding does not erase the original account's retained pin.
+        assert_eq!(
+            first.offline_pin_status("space", &pin.id).unwrap().state,
+            PinState::Ready
+        );
+    }
+
+    #[test]
+    fn recursive_pin_and_file_policy_preserve_exact_offline_versions_across_restart() {
+        let state = tempfile::tempdir().expect("state dir");
+        #[cfg(unix)]
+        fs::set_permissions(
+            state.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("private state directory");
+        let cloud = Arc::new(FakeCloud::new());
+        cloud.insert_file("/sync/pinned.txt", b"pinned version");
+        cloud.insert_file("/policy.txt", b"always available");
+        cloud.insert_file("/cloud-only.txt", b"never use offline bytes");
+        let cache = Cache::open(state.path(), 64 * 1024 * 1024).expect("open cache");
+        let status_cache = cache.clone();
+        let engine = Engine::open(state.path(), cloud.clone())
+            .expect("open engine")
+            .with_offline_cache(
+                cache,
+                "profile-account-1".into(),
+                "https://example.invalid/".into(),
+            )
+            .expect("bind cache identity");
+
+        let mut progress = Vec::new();
+        let pin = engine
+            .pin_offline_tree("space", "/sync", |status| progress.push(status))
+            .expect("pin folder recursively");
+        assert_eq!(pin.state, raiun_cache::PinState::Ready);
+        assert_eq!(pin.item_count, 1);
+        assert_eq!(pin.required_content_count, 1);
+        assert!(progress.len() >= 2);
+
+        engine
+            .set_availability_policy("space", "/policy.txt", AvailabilityPolicy::AlwaysOffline)
+            .expect("cache exact file version before policy");
+        engine
+            .set_availability_policy("space", "/cloud-only.txt", AvailabilityPolicy::CloudOnly)
+            .expect("set cloud-only policy");
+        drop(engine);
+
+        let cache = Cache::open(state.path(), 64 * 1024 * 1024).expect("reopen cache");
+        let scope = cache
+            .find_plaintext_scope("https://example.invalid/", "profile-account-1", "space")
+            .expect("read scope")
+            .expect("persisted scope");
+        let persisted_pins = cache.pins(&scope).expect("persistent pin progress");
+        assert_eq!(persisted_pins.len(), 1);
+        assert_eq!(persisted_pins[0].state, raiun_cache::PinState::Ready);
+        assert_eq!(status_cache.evict_recent(0).unwrap().protected_bytes, 30);
+
+        *cloud.fail_all.lock().expect("offline mode lock") = Some(ErrorKind::Offline);
+        let engine = Engine::open(state.path(), cloud.clone())
+            .expect("reopen engine")
+            .with_offline_cache(
+                cache,
+                "profile-account-1".into(),
+                "https://example.invalid/".into(),
+            )
+            .expect("rebind cache identity");
+        let files = engine
+            .list("space", "/sync")
+            .expect("offline pinned listing");
+        assert!(files.iter().any(|entry| entry.path == "/sync/pinned.txt"));
+        let mut pinned = engine
+            .fetch_snapshot("space", "/sync/pinned.txt")
+            .expect("offline pinned read");
+        let mut pinned_bytes = Vec::new();
+        pinned.read_to_end(&mut pinned_bytes).unwrap();
+        assert_eq!(pinned_bytes, b"pinned version");
+        let mut always = engine
+            .fetch_snapshot("space", "/policy.txt")
+            .expect("offline AlwaysOffline read");
+        let mut always_bytes = Vec::new();
+        always.read_to_end(&mut always_bytes).unwrap();
+        assert_eq!(always_bytes, b"always available");
+        let error = engine
+            .fetch_snapshot("space", "/cloud-only.txt")
+            .err()
+            .expect("CloudOnly item has no offline content");
+        assert_eq!(error.kind, ErrorKind::Offline);
     }
 
     #[test]
@@ -3016,8 +8353,10 @@ mod tests {
             id: "non-utf8".into(),
             local_path: local,
             space_id: "space".into(),
+            vault: None,
             remote_path: "/sync".into(),
             mode: SyncMode::TwoWay,
+            excluded_paths: Vec::new(),
         };
         assert_eq!(
             engine.sync_pair(&pair).unwrap_err().kind,
@@ -3048,8 +8387,10 @@ mod tests {
             id: "pair".into(),
             local_path: local.clone(),
             space_id: "space".into(),
+            vault: None,
             remote_path: "/sync".into(),
             mode: SyncMode::DownloadOnly,
+            excluded_paths: Vec::new(),
         };
 
         let report = engine.sync_pair(&pair).expect("cross-filesystem sync");
@@ -3500,8 +8841,10 @@ mod tests {
             id: "overlap".into(),
             local_path: local,
             space_id: "space".into(),
+            vault: None,
             remote_path: "/sync".into(),
             mode: SyncMode::TwoWay,
+            excluded_paths: Vec::new(),
         };
         assert_eq!(
             engine.sync_pair(&pair).unwrap_err().kind,

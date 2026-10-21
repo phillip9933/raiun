@@ -7,12 +7,16 @@ publish.workspace = true
 
 [dependencies]
 raiun-core = { path = "../raiun-core" }
+raiun-cache = { path = "../raiun-cache" }
+cap-std = "4.0.3"
+cap-fs-ext = "4.0.3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde.workspace = true
 sha2 = "0.10"
 tempfile.workspace = true
+url = "2"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1.5", features = ["fs"] }
 
 [dev-dependencies]

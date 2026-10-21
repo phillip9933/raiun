@@ -1,6 +1,43 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+pub(crate) const TRAY_SYNC_IDLE_LABEL: &str = "Force Sync Now";
+
+#[cfg(any(target_os = "linux", test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentStartAction {
+    UseExistingEndpoint,
+    WaitForOwnedProcess,
+    SpawnAgent,
+}
+
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn agent_start_action(
+    endpoint_available: bool,
+    owned_process_running: bool,
+) -> AgentStartAction {
+    if endpoint_available {
+        AgentStartAction::UseExistingEndpoint
+    } else if owned_process_running {
+        AgentStartAction::WaitForOwnedProcess
+    } else {
+        AgentStartAction::SpawnAgent
+    }
+}
+
+pub(crate) fn agent_action_waits_for_completion(action: &str) -> bool {
+    matches!(
+        action,
+        "shutdown"
+            | "space_pause"
+            | "space_disconnect"
+            | "vault_lock"
+            | "vault_create"
+            | "cache_saved_write_export"
+            | "cache_conflict_export"
+    )
+}
+
 pub(crate) fn agent_response_timeout(action: &str) -> Duration {
     if action == "auth_begin" {
         Duration::from_secs(65)
@@ -17,7 +54,11 @@ pub(crate) fn sibling_agent_path(shell_executable: &Path) -> Result<PathBuf, Str
     let parent = shell_executable
         .parent()
         .ok_or_else(|| "Raiun Desktop executable has no parent directory".to_string())?;
-    Ok(parent.join("raiun-agent"))
+    #[cfg(windows)]
+    let path = parent.join("raiun-agent.exe");
+    #[cfg(not(windows))]
+    let path = parent.join("raiun-agent");
+    Ok(path)
 }
 
 pub(crate) fn should_prevent_exit(code: Option<i32>, tray_available: bool) -> bool {
@@ -47,19 +88,51 @@ pub(crate) fn tray_status_label(
     }
 }
 
+pub(crate) fn tray_pause_menu_label(paused: bool) -> &'static str {
+    if paused { "Resume sync" } else { "Pause sync" }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        agent_response_timeout, has_background_argument, should_prevent_exit,
-        should_show_initial_window, sibling_agent_path, tray_status_label,
+        AgentStartAction, TRAY_SYNC_IDLE_LABEL, agent_action_waits_for_completion,
+        agent_response_timeout, agent_start_action, has_background_argument, should_prevent_exit,
+        should_show_initial_window, sibling_agent_path, tray_pause_menu_label, tray_status_label,
     };
     use std::path::Path;
 
     #[test]
     fn agent_resolution_uses_only_the_shell_sibling() {
+        #[cfg(windows)]
+        let (shell, expected) = (
+            Path::new(r"C:\opt\raiun\raiun-desktop.exe"),
+            Path::new(r"C:\opt\raiun\raiun-agent.exe"),
+        );
+        #[cfg(not(windows))]
+        let (shell, expected) = (
+            Path::new("/opt/raiun/raiun-desktop"),
+            Path::new("/opt/raiun/raiun-agent"),
+        );
+        assert_eq!(sibling_agent_path(shell).expect("agent path"), expected);
+    }
+
+    #[test]
+    fn agent_retry_never_spawns_when_endpoint_or_owned_process_is_live() {
         assert_eq!(
-            sibling_agent_path(Path::new("/opt/raiun/raiun-desktop")).expect("agent path"),
-            Path::new("/opt/raiun/raiun-agent")
+            agent_start_action(true, false),
+            AgentStartAction::UseExistingEndpoint
+        );
+        assert_eq!(
+            agent_start_action(true, true),
+            AgentStartAction::UseExistingEndpoint
+        );
+        assert_eq!(
+            agent_start_action(false, true),
+            AgentStartAction::WaitForOwnedProcess
+        );
+        assert_eq!(
+            agent_start_action(false, false),
+            AgentStartAction::SpawnAgent
         );
     }
 
@@ -87,6 +160,22 @@ mod tests {
         assert!(should_show_initial_window(false, false));
         assert!(!should_show_initial_window(true, true));
         assert!(should_show_initial_window(true, false));
+    }
+
+    #[test]
+    fn long_lived_mutations_wait_for_completion_without_an_ipc_timeout() {
+        assert!(agent_action_waits_for_completion("shutdown"));
+        assert!(agent_action_waits_for_completion("space_pause"));
+        assert!(agent_action_waits_for_completion("space_disconnect"));
+        assert!(agent_action_waits_for_completion("vault_lock"));
+        assert!(agent_action_waits_for_completion("vault_create"));
+        assert!(agent_action_waits_for_completion(
+            "cache_saved_write_export"
+        ));
+        assert!(agent_action_waits_for_completion("cache_conflict_export"));
+        assert!(!agent_action_waits_for_completion("vault_list"));
+        assert!(!agent_action_waits_for_completion("status"));
+        assert!(!agent_action_waits_for_completion("auth_begin"));
     }
 
     #[test]
@@ -118,5 +207,12 @@ mod tests {
             tray_status_label(false, false, false, false),
             "Status · Agent unavailable"
         );
+    }
+
+    #[test]
+    fn pause_menu_label_reflects_the_reported_agent_state() {
+        assert_eq!(tray_pause_menu_label(false), "Pause sync");
+        assert_eq!(tray_pause_menu_label(true), "Resume sync");
+        assert_eq!(TRAY_SYNC_IDLE_LABEL, "Force Sync Now");
     }
 }

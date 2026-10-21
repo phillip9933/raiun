@@ -317,8 +317,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         id: "inventory-scale".into(),
         local_path: local_root,
         space_id: SPACE.into(),
+        vault: None,
         remote_path: REMOTE_ROOT.into(),
         mode: SyncMode::TwoWay,
+        excluded_paths: Vec::new(),
     };
     let start = Instant::now();
     let report = engine.sync_pair(&pair)?;

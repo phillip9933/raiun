@@ -4,7 +4,9 @@
 //! command line. The Secret Service helper receives them only over stdin and
 //! returns them only over stdout.
 
+#[cfg(any(unix, test))]
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use raiun_opencloud::ProxyConfig;
 use reqwest::blocking::{Client, Response};
 use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
@@ -12,6 +14,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+#[cfg(unix)]
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -20,10 +23,13 @@ use url::Url;
 const MAX_BODY: u64 = 1_048_576;
 const MAX_WEBFINGER_BODY: u64 = 65_536;
 const MAX_SECRET: usize = 65_536;
+#[cfg(unix)]
 const SECRET_SERVICE: &str = "app.raiun.desktop";
 const AUTH_CODE_GRANT: &str = "authorization_code";
 const CALLBACK_LIMIT: usize = 8192;
+#[cfg(any(unix, test))]
 const MAX_JWT_PAYLOAD: usize = 8192;
+#[cfg(any(unix, test))]
 const ISSUER_MISMATCH_HINT: &str = "Token issuer differs from OpenCloud discovery; configure the desktop provider to use the same issuer and signing key as the existing OpenCloud provider.";
 const WEBFINGER_ISSUER_REL: &str = "http://openid.net/specs/connect/1.0/issuer";
 const LEGACY_WEBFINGER_ISSUER_REL: &str = "http://opencloud.eu/ns/oidc/issuer";
@@ -31,6 +37,9 @@ const WEBFINGER_CLIENT_ID: &str = "http://opencloud.eu/ns/oidc/client_id";
 const WEBFINGER_SCOPES: &str = "http://opencloud.eu/ns/oidc/scopes";
 const DEFAULT_CLIENT_ID: &str = "OpenCloudDesktop";
 const DEFAULT_SCOPES: &[&str] = &["openid", "offline_access", "profile", "email"];
+
+#[cfg(all(feature = "synthetic-test-ca", not(debug_assertions)))]
+compile_error!("synthetic-test-ca is restricted to debug test builds");
 
 #[derive(Debug)]
 struct WebFingerConfig {
@@ -54,6 +63,7 @@ pub struct AuthFlow {
     expires_in: u64,
     listener: TcpListener,
     client: Client,
+    proxy: ProxyConfig,
 }
 
 /// An OAuth session. This type intentionally does not implement `Debug`.
@@ -71,11 +81,47 @@ pub struct Session {
     /// Timestamp of the last successful refresh, safe for local status output.
     #[serde(default)]
     pub last_refresh_at: Option<u64>,
+    /// Snapshot of the account's transport route used by discovery, token,
+    /// Graph, and DAV clients. Settings changes apply only after reconnect.
+    #[serde(default)]
+    pub proxy: ProxyConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshError {
+    Transport,
+    Rejected(String),
+    Other(String),
+}
+
+impl std::fmt::Display for RefreshError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transport => write!(
+                formatter,
+                "Could not contact the token endpoint to refresh the session"
+            ),
+            Self::Rejected(message) | Self::Other(message) => formatter.write_str(message),
+        }
+    }
 }
 
 impl AuthFlow {
     /// Discover OpenID configuration and prepare a loopback PKCE sign-in.
+    #[cfg_attr(unix, allow(dead_code))]
     pub fn begin(server: &str, client_id: &str) -> Result<Self, String> {
+        Self::begin_with_proxy(server, client_id, ProxyConfig::System)
+    }
+
+    /// Discover OpenID configuration using the selected immutable proxy route.
+    pub fn begin_with_proxy(
+        server: &str,
+        client_id: &str,
+        proxy: ProxyConfig,
+    ) -> Result<Self, String> {
+        proxy
+            .validate()
+            .map_err(|_| "Proxy configuration is invalid")?;
         let server_url = validate_url(server, true, "server")?;
         if server_url.query().is_some() {
             return Err("Server URL must not contain a query string".into());
@@ -87,10 +133,11 @@ impl AuthFlow {
             validate_client_id(client_id)?;
         }
         let server = normalize_server(&server_url);
-        let client = safe_client()?;
+        let client = safe_client_for(Some(&server), &proxy)?;
         let webfinger = get_webfinger(&client, &server, &server_url)?;
         let discovered_issuer = webfinger.as_ref().and_then(|info| info.issuer.as_deref());
         let issuer_url = discovered_issuer.unwrap_or(&server);
+        ensure_synthetic_test_ca_endpoint(issuer_url)?;
         let metadata_url = format!(
             "{}/.well-known/openid-configuration",
             issuer_url.trim_end_matches('/')
@@ -98,6 +145,7 @@ impl AuthFlow {
         let metadata = get_json(&client, &metadata_url, "OpenID discovery")?;
         let issuer = required_string(&metadata, "issuer")?;
         validate_url(issuer, allow_loopback_http, "OpenID issuer")?;
+        ensure_synthetic_test_ca_endpoint(issuer)?;
         if discovered_issuer.is_some_and(|discovered| discovered != issuer) {
             return Err("OpenID discovery issuer does not match the WebFinger issuer".into());
         }
@@ -109,7 +157,9 @@ impl AuthFlow {
             allow_loopback_http,
             "authorization endpoint",
         )?;
+        ensure_synthetic_test_ca_endpoint(authorization_endpoint)?;
         validate_url(token_endpoint, allow_loopback_http, "token endpoint")?;
+        ensure_synthetic_test_ca_endpoint(token_endpoint)?;
         let advertised_client_id = webfinger
             .as_ref()
             .filter(|info| info.issuer.is_some())
@@ -177,6 +227,7 @@ impl AuthFlow {
             expires_in,
             listener,
             client,
+            proxy,
         })
     }
 
@@ -189,20 +240,50 @@ impl AuthFlow {
         })
     }
 
+    /// Return the non-secret identity used for scoping local configuration.
+    /// This is an issuer/client tuple, not a verified user subject.
+    #[cfg(windows)]
+    pub fn configured_identity(&self) -> (&str, &str) {
+        (&self.server, &self.client_id)
+    }
+
     /// The effective client ID selected from an explicit override, WebFinger,
     /// or the backward-compatible OpenCloud default.
+    #[cfg(any(unix, test))]
     pub fn client_id(&self) -> &str {
         &self.client_id
     }
 
     /// Accept the bounded loopback callback until authorization expires.
+    #[cfg(any(unix, test))]
     pub fn wait(self) -> Result<Session, String> {
+        self.wait_with_cancel(|| false)
+    }
+
+    /// Accept the bounded loopback callback until authorization expires or a
+    /// caller cancels the in-progress sign-in. The callback is checked on each
+    /// nonblocking listener poll so platform control loops can stop promptly.
+    pub fn wait_with_cancel(
+        self,
+        mut is_cancelled: impl FnMut() -> bool,
+    ) -> Result<Session, String> {
         loop {
+            if is_cancelled() {
+                return Err("Sign-in was cancelled".into());
+            }
             if Instant::now() >= self.expires_at {
                 return Err("Sign-in expired. Start sign-in again.".into());
             }
             match self.listener.accept() {
                 Ok((mut stream, _)) => {
+                    // Windows may propagate the listener's nonblocking mode
+                    // to accepted sockets. Callback parsing uses bounded
+                    // read timeouts, so normalize the accepted stream before
+                    // reading rather than treating WSAEWOULDBLOCK as a bad
+                    // callback.
+                    stream
+                        .set_nonblocking(false)
+                        .map_err(|_| "Could not configure OAuth callback mode")?;
                     stream
                         .set_read_timeout(Some(Duration::from_secs(3)))
                         .map_err(|_| "Could not configure OAuth callback timeout")?;
@@ -239,6 +320,7 @@ impl AuthFlow {
                 &self.client_id,
                 &self.token_endpoint,
                 self.expected_issuer.as_deref(),
+                self.proxy.clone(),
             );
         }
         let error = oauth_error(&body).unwrap_or("invalid_response");
@@ -252,13 +334,22 @@ impl AuthFlow {
 
 impl Session {
     /// Refresh the access token without exposing token data in diagnostics.
+    #[cfg(unix)]
     pub fn refresh(&mut self) -> Result<(), String> {
-        validate_session(self)?;
-        let refresh_token = self
-            .refresh_token
-            .as_deref()
-            .ok_or_else(|| "This session has no refresh token; sign in again".to_string())?;
-        let client = safe_client()?;
+        self.refresh_classified().map_err(|error| error.to_string())
+    }
+
+    /// Refresh while preserving whether failure occurred before an HTTP
+    /// response (transport) or came from validation/server response. Offline
+    /// startup may use cached state only for the former.
+    pub fn refresh_classified(&mut self) -> Result<(), RefreshError> {
+        validate_session(self).map_err(RefreshError::Other)?;
+        let refresh_token = self.refresh_token.as_deref().ok_or_else(|| {
+            RefreshError::Other("This session has no refresh token; sign in again".into())
+        })?;
+        let client =
+            safe_client_for(Some(&self.server), &self.proxy).map_err(RefreshError::Other)?;
+        ensure_synthetic_test_ca_endpoint(&self.token_endpoint).map_err(RefreshError::Other)?;
         let response = client
             .post(&self.token_endpoint)
             .form(&[
@@ -267,16 +358,17 @@ impl Session {
                 ("client_id", self.client_id.as_str()),
             ])
             .send()
-            .map_err(|_| {
-                "Could not contact the token endpoint to refresh the session".to_string()
-            })?;
+            .map_err(|_| RefreshError::Transport)?;
         let status = response.status();
-        let body = read_bounded(response, "Token refresh response")?;
+        let body = read_bounded(response, "Token refresh response").map_err(RefreshError::Other)?;
         if !status.is_success() {
             let code = oauth_error(&body).unwrap_or("invalid_response");
-            return Err(format!(
-                "Session refresh failed ({code}); sign in again if needed"
-            ));
+            let message = format!("Session refresh failed ({code}); sign in again if needed");
+            return Err(if status.as_u16() == 401 || code == "invalid_grant" {
+                RefreshError::Rejected(message)
+            } else {
+                RefreshError::Other(message)
+            });
         }
         let refreshed = parse_session(
             &body,
@@ -284,7 +376,9 @@ impl Session {
             &self.client_id,
             &self.token_endpoint,
             self.expected_issuer.as_deref(),
-        )?;
+            self.proxy.clone(),
+        )
+        .map_err(RefreshError::Other)?;
         self.access_token = refreshed.access_token;
         self.expires_at = refreshed.expires_at;
         if refreshed.refresh_token.is_some() {
@@ -297,8 +391,15 @@ impl Session {
 
 /// Save a session to the user's Secret Service via `secret-tool`.
 /// The serialized session is sent through stdin, never an argument or log.
+#[cfg(unix)]
 pub fn save_session(session: &Session) -> Result<(), String> {
+    save_session_scoped(session, None)
+}
+
+#[cfg(unix)]
+pub fn save_session_scoped(session: &Session, scope: Option<&str>) -> Result<(), String> {
     validate_session(session)?;
+    let service = secret_service_name(scope)?;
     let secret = serde_json::to_vec(session)
         .map_err(|_| "Could not encode the session for secure storage".to_string())?;
     if secret.len() > MAX_SECRET {
@@ -309,7 +410,7 @@ pub fn save_session(session: &Session) -> Result<(), String> {
             "store",
             "--label=Raiun Desktop session",
             "service",
-            SECRET_SERVICE,
+            &service,
             "server",
             &session.server,
             "client_id",
@@ -346,7 +447,18 @@ pub fn save_session(session: &Session) -> Result<(), String> {
 }
 
 /// Load the session associated with the exact server and OAuth client.
+#[cfg(unix)]
 pub fn load_session(server: &str, client_id: &str) -> Result<Option<Session>, String> {
+    load_session_scoped(server, client_id, None)
+}
+
+#[cfg(unix)]
+pub fn load_session_scoped(
+    server: &str,
+    client_id: &str,
+    scope: Option<&str>,
+) -> Result<Option<Session>, String> {
+    let service = secret_service_name(scope)?;
     let server_url = validate_url(server, true, "server")?;
     if server_url.query().is_some() {
         return Err("Server URL must not contain a query string".into());
@@ -359,7 +471,7 @@ pub fn load_session(server: &str, client_id: &str) -> Result<Option<Session>, St
         .args([
             "lookup",
             "service",
-            SECRET_SERVICE,
+            &service,
             "server",
             &server,
             "client_id",
@@ -392,10 +504,76 @@ pub fn load_session(server: &str, client_id: &str) -> Result<Option<Session>, St
     Ok(Some(session))
 }
 
+#[cfg(unix)]
+pub fn remove_session(server: &str, client_id: &str) -> Result<(), String> {
+    remove_session_scoped(server, client_id, None)
+}
+
+#[cfg(unix)]
+pub fn remove_session_scoped(
+    server: &str,
+    client_id: &str,
+    scope: Option<&str>,
+) -> Result<(), String> {
+    let service = secret_service_name(scope)?;
+    let server_url = validate_url(server, true, "server")?;
+    if server_url.query().is_some() {
+        return Err("Server URL must not contain a query string".into());
+    }
+    if client_id.trim().is_empty() || client_id.len() > 512 {
+        return Err("OAuth client ID is empty or too long".into());
+    }
+    let server = normalize_server(&server_url);
+    let child = Command::new("secret-tool")
+        .args([
+            "clear",
+            "service",
+            &service,
+            "server",
+            &server,
+            "client_id",
+            client_id,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| {
+            "Secret Service is unavailable; install or unlock a compatible keyring".to_string()
+        })?;
+    let (status, _, _) = wait_bounded(child, Duration::from_secs(10))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(
+            "Secret Service could not remove the saved session; unlock the keyring and retry"
+                .into(),
+        )
+    }
+}
+
+#[cfg(unix)]
+fn secret_service_name(scope: Option<&str>) -> Result<String, String> {
+    match scope {
+        None => Ok(SECRET_SERVICE.to_owned()),
+        Some(scope)
+            if !scope.is_empty()
+                && scope.len() <= 64
+                && scope.bytes().all(|byte| {
+                    byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                }) =>
+        {
+            Ok(format!("{SECRET_SERVICE}.profile.{scope}"))
+        }
+        Some(_) => Err("Secret Service profile scope is invalid".into()),
+    }
+}
+
 /// Run a Secret Service helper without allowing an unlocked/absent keyring to
 /// hang startup forever. Both pipes are drained on helper threads so a full
 /// pipe cannot prevent the timeout check. Diagnostic output is intentionally
 /// discarded and never returned to callers.
+#[cfg(unix)]
 fn wait_bounded(
     mut child: Child,
     timeout: Duration,
@@ -449,13 +627,108 @@ fn wait_bounded(
     Ok((status, output, stderr))
 }
 
+#[cfg(test)]
 fn safe_client() -> Result<Client, String> {
-    Client::builder()
+    safe_client_for(None, &ProxyConfig::System)
+}
+
+fn safe_client_for(server: Option<&str>, proxy: &ProxyConfig) -> Result<Client, String> {
+    let builder = proxy
+        .apply_to_client_builder(Client::builder())
+        .map_err(|_| "Proxy configuration is invalid")?
         .redirect(Policy::none())
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(20));
+    #[cfg(feature = "synthetic-test-ca")]
+    let builder = if let Some((origin, pem_path)) = synthetic_test_ca_config()? {
+        let server = server.ok_or_else(|| {
+            "Synthetic test CA requires an explicitly scoped loopback server".to_string()
+        })?;
+        let server_origin = url_origin(server)?;
+        if server_origin != origin {
+            return Err("Synthetic test CA is scoped to a different server origin".into());
+        }
+        let pem = std::fs::read(pem_path)
+            .map_err(|_| "Could not read the explicit synthetic test CA certificate".to_string())?;
+        if pem.is_empty() || pem.len() > 65_536 {
+            return Err("Synthetic test CA certificate exceeds the size limit".into());
+        }
+        let certificate = reqwest::Certificate::from_pem(&pem)
+            .map_err(|_| "Synthetic test CA certificate is invalid".to_string())?;
+        builder.add_root_certificate(certificate)
+    } else {
+        builder
+    };
+    #[cfg(not(feature = "synthetic-test-ca"))]
+    let _ = server;
+    builder
         .build()
         .map_err(|_| "Could not create a secure OAuth HTTP client".into())
+}
+
+#[cfg(feature = "synthetic-test-ca")]
+fn synthetic_test_ca_config() -> Result<Option<(String, std::ffi::OsString)>, String> {
+    let origin = std::env::var("RAIUN_SYNTHETIC_TEST_CA_ORIGIN").ok();
+    let pem_path = std::env::var_os("RAIUN_SYNTHETIC_TEST_CA_PEM");
+    match (origin, pem_path) {
+        (None, None) => Ok(None),
+        (Some(origin), Some(pem_path)) => Ok(Some((
+            normalize_synthetic_test_ca_origin(&origin)?,
+            pem_path,
+        ))),
+        _ => Err("Synthetic test CA requires both origin and PEM path".into()),
+    }
+}
+
+#[cfg(feature = "synthetic-test-ca")]
+fn normalize_synthetic_test_ca_origin(origin: &str) -> Result<String, String> {
+    let parsed =
+        Url::parse(origin).map_err(|_| "Synthetic test CA origin is invalid".to_string())?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none_or(|host| !is_loopback(host))
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !matches!(parsed.path(), "" | "/")
+    {
+        return Err("Synthetic test CA origin must be an HTTPS loopback origin".into());
+    }
+    let normalized = parsed.origin().ascii_serialization();
+    if origin.trim_end_matches('/') != normalized {
+        return Err("Synthetic test CA origin must not include a path".into());
+    }
+    Ok(normalized)
+}
+
+#[cfg(feature = "synthetic-test-ca")]
+fn url_origin(value: &str) -> Result<String, String> {
+    let parsed = Url::parse(value).map_err(|_| "Server URL is invalid".to_string())?;
+    if parsed.scheme() != "https"
+        || parsed.host_str().is_none_or(|host| !is_loopback(host))
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err("Synthetic test CA is limited to HTTPS loopback URLs".into());
+    }
+    Ok(parsed.origin().ascii_serialization())
+}
+
+#[cfg(feature = "synthetic-test-ca")]
+fn ensure_synthetic_test_ca_endpoint(value: &str) -> Result<(), String> {
+    if let Some((origin, _)) = synthetic_test_ca_config()? {
+        if url_origin(value)? != origin {
+            return Err(
+                "Synthetic test CA discovery endpoints must use the configured origin".into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "synthetic-test-ca"))]
+fn ensure_synthetic_test_ca_endpoint(_value: &str) -> Result<(), String> {
+    Ok(())
 }
 
 fn get_json(client: &Client, url: &str, context: &str) -> Result<Value, String> {
@@ -660,6 +933,7 @@ fn parse_session(
     client_id: &str,
     token_endpoint: &str,
     expected_issuer: Option<&str>,
+    proxy: ProxyConfig,
 ) -> Result<Session, String> {
     let value: Value = serde_json::from_slice(body)
         .map_err(|_| "Token endpoint returned invalid JSON".to_string())?;
@@ -691,10 +965,15 @@ fn parse_session(
         token_endpoint: token_endpoint.to_string(),
         expected_issuer: expected_issuer.map(str::to_owned),
         last_refresh_at: None,
+        proxy,
     })
 }
 
-fn validate_session(session: &Session) -> Result<(), String> {
+pub(crate) fn validate_session(session: &Session) -> Result<(), String> {
+    session
+        .proxy
+        .validate()
+        .map_err(|_| "Stored proxy configuration is invalid".to_string())?;
     let server = validate_url(&session.server, true, "stored server")?;
     let allow_loopback_http =
         server.scheme() == "http" && server.host_str().is_some_and(is_loopback);
@@ -727,6 +1006,7 @@ fn validate_session(session: &Session) -> Result<(), String> {
 /// Add a narrowly scoped setup hint to Graph discovery failures when an
 /// unverified JWT payload appears to name a different issuer than discovery.
 /// The claim is diagnostic only; no token is rejected or treated as proof.
+#[cfg(any(unix, test))]
 pub fn graph_error_with_issuer_hint(error: &str, session: &Session) -> String {
     let mismatch = session.expected_issuer.as_deref().is_some_and(|expected| {
         unverified_token_issuer(session.access_token.as_str())
@@ -739,6 +1019,7 @@ pub fn graph_error_with_issuer_hint(error: &str, session: &Session) -> String {
     }
 }
 
+#[cfg(any(unix, test))]
 fn unverified_token_issuer(token: &str) -> Option<String> {
     if token.len() > MAX_SECRET {
         return None;
@@ -1003,7 +1284,24 @@ mod tests {
     use std::io::{BufRead, BufReader};
     use std::net::TcpListener;
 
+    #[cfg(feature = "synthetic-test-ca")]
+    #[test]
+    fn synthetic_ca_origin_is_https_loopback_only() {
+        assert_eq!(
+            normalize_synthetic_test_ca_origin("https://127.0.0.1:18443").unwrap(),
+            "https://127.0.0.1:18443"
+        );
+        assert!(normalize_synthetic_test_ca_origin("http://127.0.0.1:18443").is_err());
+        assert!(normalize_synthetic_test_ca_origin("https://example.com").is_err());
+        assert!(normalize_synthetic_test_ca_origin("https://127.0.0.1:18443/path").is_err());
+    }
+
     fn read_http_request(stream: &TcpStream) -> (String, Vec<u8>, String) {
+        // A server listener switched to nonblocking mode for bounded accept
+        // polling can yield accepted sockets that retain that mode on Windows.
+        // Test handlers intentionally consume complete request bodies, so use
+        // blocking reads (the clients already have bounded request timeouts).
+        stream.set_nonblocking(false).unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
@@ -1038,6 +1336,218 @@ mod tests {
         write!(stream, "HTTP/1.1 {status} {text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
     }
 
+    fn refresh_session(endpoint: &str) -> Session {
+        let server = endpoint.trim_end_matches("/token").to_owned();
+        Session {
+            server: server.clone(),
+            client_id: "synthetic-client".into(),
+            access_token: "old-access-token".into(),
+            refresh_token: Some("old-refresh-token".into()),
+            expires_at: now_unix().saturating_sub(1),
+            token_endpoint: endpoint.to_owned(),
+            expected_issuer: Some(server),
+            last_refresh_at: None,
+            proxy: ProxyConfig::System,
+        }
+    }
+
+    fn refresh_server(
+        status: u16,
+        body: &'static str,
+    ) -> (String, std::thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}/token", listener.local_addr().unwrap());
+        let task = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (request, request_body, _) = read_http_request(&stream);
+            assert!(request.starts_with("POST /token"));
+            let form: std::collections::HashMap<String, String> =
+                url::form_urlencoded::parse(&request_body)
+                    .into_owned()
+                    .collect();
+            assert_eq!(
+                form.get("grant_type").map(String::as_str),
+                Some("refresh_token")
+            );
+            assert_eq!(
+                form.get("refresh_token").map(String::as_str),
+                Some("old-refresh-token")
+            );
+            assert_eq!(
+                form.get("client_id").map(String::as_str),
+                Some("synthetic-client")
+            );
+            response(&mut stream, status, body);
+            String::from_utf8(request_body).unwrap()
+        });
+        (endpoint, task)
+    }
+
+    #[cfg(not(feature = "synthetic-test-ca"))]
+    #[test]
+    fn auth_discovery_and_refresh_share_explicit_proxy_without_echoing_credentials() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_address = listener.local_addr().unwrap();
+        let proxy_server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let (first, _body, headers) = read_http_request(&stream);
+                requests.push(format!("{first}\n{headers}"));
+                if index == 0 {
+                    let body = "{}";
+                    write!(stream, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                }
+                // Closing the second connection without an HTTP response makes
+                // the refresh failure a transport error independent of proxy
+                // status-code classification.
+            }
+            requests
+        });
+        let proxy = ProxyConfig::Explicit {
+            url: format!("http://{proxy_address}"),
+        };
+        let begin_result =
+            AuthFlow::begin_with_proxy("http://127.0.0.1:9", "synthetic-client", proxy.clone());
+        let begin_error = match begin_result {
+            Ok(_) => panic!("the rejecting proxy must stop discovery"),
+            Err(error) => error,
+        };
+        assert!(!begin_error.contains(&proxy_address.to_string()));
+
+        let mut session = refresh_session("http://127.0.0.1:9/token");
+        session.proxy = proxy;
+        assert_eq!(session.refresh_classified(), Err(RefreshError::Transport));
+
+        let requests = proxy_server.join().unwrap();
+        assert!(requests[0].starts_with("GET http://127.0.0.1:9/.well-known/webfinger?"));
+        assert!(requests[1].starts_with("POST http://127.0.0.1:9/token "));
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.contains("refresh_token"))
+        );
+    }
+
+    #[cfg(not(feature = "synthetic-test-ca"))]
+    #[test]
+    fn explicit_proxy_carries_webfinger_oidc_code_exchange_and_refresh() {
+        let target = "http://127.0.0.1:9";
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_address = listener.local_addr().unwrap();
+        let proxy_url = format!("http://{proxy_address}");
+        let target_for_thread = target.to_owned();
+        let proxy_server = thread::spawn(move || {
+            let mut captured = Vec::new();
+            for index in 0..4 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let (first, body, headers) = read_http_request(&stream);
+                captured.push((first.clone(), body.clone(), headers.clone()));
+                match index {
+                    0 => {
+                        assert!(first.starts_with(&format!(
+                            "GET {target_for_thread}/.well-known/webfinger?"
+                        )));
+                        let body = json!({
+                            "links": [{"rel": WEBFINGER_ISSUER_REL, "href": target_for_thread}],
+                            "properties": {
+                                WEBFINGER_CLIENT_ID: "advertised-client",
+                                WEBFINGER_SCOPES: ["openid", "profile"]
+                            }
+                        })
+                        .to_string();
+                        response(&mut stream, 200, &body);
+                    }
+                    1 => {
+                        assert!(first.starts_with(&format!(
+                            "GET {target_for_thread}/.well-known/openid-configuration "
+                        )));
+                        assert!(!headers.lines().any(|line| {
+                            line.to_ascii_lowercase().starts_with("authorization:")
+                        }));
+                        let body = metadata_for_issuer(&target_for_thread, &target_for_thread);
+                        response(&mut stream, 200, &body);
+                    }
+                    2 | 3 => {
+                        assert!(first.starts_with(&format!("POST {target_for_thread}/token ")));
+                        let form: std::collections::HashMap<String, String> =
+                            url::form_urlencoded::parse(&body).into_owned().collect();
+                        if index == 2 {
+                            assert_eq!(
+                                form.get("grant_type").map(String::as_str),
+                                Some("authorization_code")
+                            );
+                            assert_eq!(
+                                form.get("code").map(String::as_str),
+                                Some("synthetic-code")
+                            );
+                            assert_eq!(
+                                form.get("client_id").map(String::as_str),
+                                Some("synthetic-client")
+                            );
+                            assert!(
+                                form.get("code_verifier")
+                                    .is_some_and(|value| !value.is_empty())
+                            );
+                        } else {
+                            assert_eq!(
+                                form.get("grant_type").map(String::as_str),
+                                Some("refresh_token")
+                            );
+                            assert_eq!(
+                                form.get("refresh_token").map(String::as_str),
+                                Some("synthetic-refresh")
+                            );
+                        }
+                        response(
+                            &mut stream,
+                            200,
+                            if index == 2 {
+                                r#"{"access_token":"synthetic-access","refresh_token":"synthetic-refresh","expires_in":3600}"#
+                            } else {
+                                r#"{"access_token":"synthetic-access-2","refresh_token":"synthetic-refresh-2","expires_in":3600}"#
+                            },
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            captured
+        });
+
+        let flow = AuthFlow::begin_with_proxy(
+            target,
+            "synthetic-client",
+            ProxyConfig::Explicit { url: proxy_url },
+        )
+        .unwrap();
+        let info = flow.public_info();
+        let authorization = Url::parse(info["url"].as_str().unwrap()).unwrap();
+        let params: std::collections::HashMap<_, _> =
+            authorization.query_pairs().into_owned().collect();
+        let redirect = Url::parse(params.get("redirect_uri").unwrap()).unwrap();
+        let state = params.get("state").unwrap().clone();
+
+        let waiter = thread::spawn(move || flow.wait());
+        let mut callback = TcpStream::connect(("127.0.0.1", redirect.port().unwrap())).unwrap();
+        write!(
+            callback,
+            "GET /?code=synthetic-code&state={state} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+        )
+        .unwrap();
+        let mut session = waiter.join().unwrap().unwrap();
+        session.expires_at = now_unix().saturating_sub(1);
+        session.refresh_classified().unwrap();
+
+        let captured = proxy_server.join().unwrap();
+        assert_eq!(captured.len(), 4);
+        assert!(captured.iter().all(|(request, _, _)| {
+            request.starts_with(&format!("GET {target}/.well-known/"))
+                || request.starts_with(&format!("POST {target}/token "))
+        }));
+        assert_eq!(session.access_token, "synthetic-access-2");
+    }
+
     fn metadata_for_issuer(base: &str, issuer: &str) -> String {
         json!({
             "issuer": issuer,
@@ -1049,6 +1559,69 @@ mod tests {
 
     fn start_server() -> (String, std::thread::JoinHandle<Vec<u8>>) {
         start_server_with_webfinger(404, "", None)
+    }
+
+    #[test]
+    fn refresh_persists_rotation_fields_only_from_a_successful_response() {
+        let (endpoint, server) = refresh_server(
+            200,
+            r#"{"access_token":"rotated-access-token","refresh_token":"rotated-refresh-token","expires_in":3600}"#,
+        );
+        let mut session = refresh_session(&endpoint);
+        session.refresh_classified().unwrap();
+        server.join().unwrap();
+        assert_eq!(session.access_token, "rotated-access-token");
+        assert_eq!(
+            session.refresh_token.as_deref(),
+            Some("rotated-refresh-token")
+        );
+        assert!(session.expires_at > now_unix() + 3500);
+        assert!(session.last_refresh_at.is_some());
+    }
+
+    #[test]
+    fn saved_session_keeps_its_proxy_snapshot() {
+        let mut session = refresh_session("https://cloud.example/token");
+        session.proxy = ProxyConfig::Explicit {
+            url: "http://proxy.example:3128".into(),
+        };
+        let encoded = serde_json::to_vec(&session).unwrap();
+        let restored: Session = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(restored.proxy, session.proxy);
+
+        let legacy = json!({
+            "server": session.server,
+            "client_id": session.client_id,
+            "access_token": session.access_token,
+            "refresh_token": session.refresh_token,
+            "expires_at": session.expires_at,
+            "token_endpoint": session.token_endpoint,
+            "expected_issuer": session.expected_issuer,
+            "last_refresh_at": session.last_refresh_at,
+        });
+        let restored_legacy: Session = serde_json::from_value(legacy).unwrap();
+        assert_eq!(restored_legacy.proxy, ProxyConfig::System);
+    }
+
+    #[test]
+    fn refresh_rejection_is_distinct_from_transport_failure() {
+        let (endpoint, server) = refresh_server(401, r#"{"error":"invalid_grant"}"#);
+        let mut session = refresh_session(&endpoint);
+        assert!(matches!(
+            session.refresh_classified(),
+            Err(RefreshError::Rejected(_))
+        ));
+        server.join().unwrap();
+        assert_eq!(session.access_token, "old-access-token");
+        assert_eq!(session.refresh_token.as_deref(), Some("old-refresh-token"));
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let unavailable = format!("http://{}/token", listener.local_addr().unwrap());
+        drop(listener);
+        let mut session = refresh_session(&unavailable);
+        assert_eq!(session.refresh_classified(), Err(RefreshError::Transport));
+        assert_eq!(session.access_token, "old-access-token");
+        assert_eq!(session.refresh_token.as_deref(), Some("old-refresh-token"));
     }
 
     fn start_server_with_webfinger(
@@ -1601,6 +2174,7 @@ mod tests {
             token_endpoint: "https://issuer.example/token".into(),
             expected_issuer: Some("https://issuer.example".into()),
             last_refresh_at: None,
+            proxy: ProxyConfig::System,
         };
 
         let mismatch_token = jwt("https://legacy.example");

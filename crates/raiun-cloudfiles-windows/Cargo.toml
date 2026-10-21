@@ -1,0 +1,36 @@
+[package]
+name = "raiun-cloudfiles-windows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Available only to the agent's Windows synthetic integration tests. Production
+# builds cannot start a configured Cloud Files root through this surface.
+synthetic-agent-integration = ["raiun-control-windows/synthetic-agent-integration"]
+
+[dependencies]
+raiun-core = { path = "../raiun-core" }
+raiun-cache = { path = "../raiun-cache" }
+raiun-opencloud = { path = "../raiun-opencloud" }
+getrandom = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+zeroize = "1"
+fs2 = "0.4"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+raiun-control-windows = { path = "../raiun-control-windows" }
+
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = "warn"

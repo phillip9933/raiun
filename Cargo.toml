@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/raiun-core", "crates/raiun-cli", "crates/raiun-opencloud", "crates/raiun-engine", "crates/raiun-agent", "crates/raiun-fuse"]
+members = ["crates/raiun-core", "crates/raiun-cli", "crates/raiun-opencloud", "crates/raiun-engine", "crates/raiun-agent", "crates/raiun-fuse", "crates/raiun-vault", "crates/raiun-cache", "crates/raiun-control", "crates/raiun-control-windows", "crates/raiun-cloudfiles-windows", "crates/raiun-sqlite-windows"]
 exclude = ["desktop-shell/src-tauri"]
 resolver = "2"
 

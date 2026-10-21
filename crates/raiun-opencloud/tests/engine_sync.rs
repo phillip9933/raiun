@@ -1,18 +1,26 @@
-use raiun_core::{FolderPair, SyncMode, backend::ErrorKind};
+use raiun_core::{
+    FolderPair, SyncMode,
+    backend::{CloudBackend, ErrorKind, WriteCondition},
+};
 use raiun_engine::Engine;
-use raiun_opencloud::OpenCloudClient;
+use raiun_opencloud::{
+    OpenCloudClient, ProxyConfig,
+    transfer_budget::{TransferBudget, TransferLimits},
+};
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
+    num::NonZeroU64,
     path::PathBuf,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
+use tempfile::NamedTempFile;
 use url::Url;
 
 struct RemoteFile {
@@ -120,6 +128,9 @@ impl Drop for HttpFixture {
 }
 
 fn serve_request(mut stream: TcpStream, authority: &str, state: &Arc<Mutex<FixtureState>>) {
+    stream
+        .set_nonblocking(false)
+        .expect("set accepted stream to blocking mode");
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("set request timeout");
@@ -233,9 +244,36 @@ fn serve_request(mut stream: TcpStream, authority: &str, state: &Arc<Mutex<Fixtu
                 .unwrap()
                 .files
                 .get(&logical)
-                .map(|file| file.bytes.clone());
-            if let Some(bytes) = file {
-                respond_bytes(&mut stream, 200, "application/octet-stream", &bytes);
+                .map(|file| (file.bytes.clone(), file.etag()));
+            if let Some((bytes, etag)) = file {
+                if let Some(range) = headers.get("range") {
+                    let Some((start, end)) = parse_byte_range(range, bytes.len()) else {
+                        respond(&mut stream, 416, "text/plain", "range not satisfiable");
+                        return;
+                    };
+                    if headers
+                        .get("if-match")
+                        .is_some_and(|expected| expected != &etag)
+                    {
+                        respond(&mut stream, 412, "text/plain", "revision changed");
+                        return;
+                    }
+                    let body = &bytes[start..=end];
+                    write!(
+                        stream,
+                        "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nContent-Range: bytes {}-{}/{}\r\nETag: {}\r\nConnection: close\r\n\r\n",
+                        body.len(),
+                        start,
+                        end,
+                        bytes.len(),
+                        etag
+                    )
+                    .unwrap();
+                    stream.write_all(body).unwrap();
+                    stream.flush().unwrap();
+                } else {
+                    respond_bytes(&mut stream, 200, "application/octet-stream", &bytes);
+                }
             } else {
                 respond(&mut stream, 404, "text/plain", "not found");
             }
@@ -270,6 +308,14 @@ fn serve_request(mut stream: TcpStream, authority: &str, state: &Arc<Mutex<Fixtu
         }
         _ => respond(&mut stream, 405, "text/plain", "method not allowed"),
     }
+}
+
+fn parse_byte_range(value: &str, size: usize) -> Option<(usize, usize)> {
+    let range = value.strip_prefix("bytes=")?;
+    let (start, end) = range.split_once('-')?;
+    let start = start.parse::<usize>().ok()?;
+    let end = end.parse::<usize>().ok()?.min(size.checked_sub(1)?);
+    (start <= end && end < size).then_some((start, end))
 }
 
 fn logical_path(url: &Url) -> Option<String> {
@@ -321,6 +367,7 @@ fn respond_bytes(stream: &mut TcpStream, status: u16, content_type: &str, body: 
         401 => "Unauthorized",
         405 => "Method Not Allowed",
         412 => "Precondition Failed",
+        416 => "Range Not Satisfiable",
         _ => "Error",
     };
     write!(stream, "HTTP/1.1 {status} {phrase}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
@@ -333,9 +380,35 @@ fn pair(local_path: PathBuf) -> FolderPair {
         id: "integration-pair".into(),
         local_path,
         space_id: "personal-drive".into(),
+        vault: None,
         remote_path: "/".into(),
         mode: SyncMode::TwoWay,
+        excluded_paths: Vec::new(),
     }
+}
+
+#[test]
+fn atomic_publish_replaces_a_closed_temp_path_and_drop_cleans_published_file() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let destination = NamedTempFile::new_in(directory.path()).expect("destination temp file");
+    let destination_path = destination.into_temp_path();
+    let path = destination_path.to_path_buf();
+    let mut staged = NamedTempFile::new_in(directory.path()).expect("staged temp file");
+    staged
+        .write_all(b"published bytes")
+        .expect("write staged contents");
+    staged.as_file().sync_all().expect("sync staged contents");
+
+    staged
+        .persist(&path)
+        .expect("replace closed temporary destination");
+
+    assert_eq!(
+        std::fs::read(&path).expect("read published destination"),
+        b"published bytes"
+    );
+    drop(destination_path);
+    assert!(!path.exists(), "TempPath drop should clean published file");
 }
 
 #[test]
@@ -359,6 +432,141 @@ fn engine_fetch_snapshot_reads_atomically_published_unicode_file() {
             .count(),
         0
     );
+}
+
+#[test]
+fn ordinary_content_streams_share_directional_account_budgets() {
+    let fixture = HttpFixture::start();
+    let work = tempfile::tempdir().unwrap();
+    let budget = TransferBudget::new();
+    let rate = NonZeroU64::new(16 * 1024).unwrap();
+    budget.set_limits(TransferLimits {
+        upload_bytes_per_second: Some(rate),
+        download_bytes_per_second: Some(rate),
+    });
+    let client = OpenCloudClient::new_with_proxy_and_transfer_budget(
+        &fixture.url(),
+        "synthetic-token".into(),
+        &ProxyConfig::System,
+        budget.clone(),
+    )
+    .unwrap();
+    let concurrent = client.clone();
+    let body = vec![0x6d; 16 * 1024];
+    let first = work.path().join("first-upload.bin");
+    let second = work.path().join("second-upload.bin");
+    std::fs::write(&first, &body).unwrap();
+    std::fs::write(&second, &body).unwrap();
+
+    // The initial one-second burst can fund one upload. A concurrent clone
+    // must wait for the same account bucket to refill before its body flows.
+    budget.set_limits(TransferLimits {
+        upload_bytes_per_second: Some(rate),
+        download_bytes_per_second: Some(rate),
+    });
+    let started = Instant::now();
+    let upload = thread::spawn(move || {
+        CloudBackend::upload(
+            &concurrent,
+            "personal-drive",
+            "/second-upload.bin",
+            &second,
+            WriteCondition::Absent,
+        )
+    });
+    CloudBackend::upload(
+        &client,
+        "personal-drive",
+        "/first-upload.bin",
+        &first,
+        WriteCondition::Absent,
+    )
+    .unwrap();
+    upload.join().unwrap().unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(700));
+    assert_eq!(fixture.remote_bytes("/first-upload.bin"), body);
+    assert_eq!(fixture.remote_bytes("/second-upload.bin"), body);
+
+    let download_body = vec![0x2a; 32 * 1024];
+    fixture.put_remote("/download.bin", &download_body);
+    let destination = work.path().join("download.bin");
+    let started = Instant::now();
+    CloudBackend::download(
+        &client,
+        "personal-drive",
+        "/download.bin",
+        None,
+        &destination,
+    )
+    .unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(700));
+    assert_eq!(std::fs::read(&destination).unwrap(), download_body);
+
+    // Content ceilings do not throttle metadata-only operations.
+    let started = Instant::now();
+    CloudBackend::stat(&client, "personal-drive", "/download.bin").unwrap();
+    assert!(started.elapsed() < Duration::from_millis(700));
+    assert_eq!(
+        budget.limits().upload_bytes_per_second,
+        Some(NonZeroU64::new(16 * 1024).unwrap())
+    );
+    assert_eq!(
+        budget.limits().download_bytes_per_second,
+        Some(NonZeroU64::new(16 * 1024).unwrap())
+    );
+}
+
+#[test]
+fn callback_range_reads_obey_download_budget_without_throttling_metadata() {
+    let fixture = HttpFixture::start();
+    let budget = TransferBudget::new();
+    let rate = NonZeroU64::new(2048).unwrap();
+    budget.set_limits(TransferLimits {
+        upload_bytes_per_second: None,
+        download_bytes_per_second: Some(rate),
+    });
+    let client = OpenCloudClient::new_with_proxy_and_transfer_budget(
+        &fixture.url(),
+        "synthetic-token".into(),
+        &ProxyConfig::System,
+        budget,
+    )
+    .unwrap();
+    let bytes = vec![0x4c; 4096];
+    fixture.put_remote("/range-budget.bin", &bytes);
+    let entry = CloudBackend::stat(&client, "personal-drive", "/range-budget.bin").unwrap();
+    let context = raiun_opencloud::RangeReadContext {
+        deadline: Instant::now() + Duration::from_secs(10),
+        token_generation: client.token_generation(),
+    };
+    let space = client
+        .spaces_with_context(context)
+        .unwrap()
+        .into_iter()
+        .find(|space| space.id == "personal-drive")
+        .unwrap();
+    let root = client
+        .stat_discovered_space_root_with_context(&space, context)
+        .unwrap();
+    let started = Instant::now();
+    let actual = client
+        .read_callback_range_to_vec_cancellable_with_context(
+            raiun_opencloud::RemoteRangeRequest {
+                space: &space.id,
+                expected_root_id: &root.id,
+                path: "/range-budget.bin",
+                expected_id: &entry.id,
+                expected_etag: &entry.etag,
+                expected_size: entry.size,
+                offset: 0,
+            },
+            bytes.len(),
+            context,
+            || false,
+        )
+        .unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(850));
+    assert_eq!(actual, bytes);
 }
 
 #[test]

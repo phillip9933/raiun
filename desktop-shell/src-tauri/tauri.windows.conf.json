@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "resources": {
+      "../../target/windows-package-resources/raiun-agent.exe": "raiun-agent.exe",
+      "../../target/windows-package-resources/raiun.exe": "raiun.exe"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "startMenuFolder": "Raiun"
+      }
+    }
+  }
+}
