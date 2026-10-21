@@ -56,7 +56,7 @@ def descriptor(p,logical,origin,url,licenses):
  b=p.read_bytes()
  return {'path':logical,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest(),'origin':origin,'source_url':url,'license_files':[{'path':str(dest/n),'bytes':(dest/n).stat().st_size,'sha256':hashlib.sha256((dest/n).read_bytes()).hexdigest()} for n in licenses]}
 alllicenses=[p.name for p in src.iterdir() if p.name!='sources.json']
-meta={'files':[descriptor(app/'AppRun.tauri','AppRun.tauri','Tauri upstream AppRun (AppImageKit)','https://github.com/tauri-apps/binary-releases/releases/tag/apprun-old',['AppImageKit-LICENSE'])],
+meta={'files':[descriptor(app/'AppRun.tauri','AppRun.tauri','linuxdeploy 07333c6 generated hook wrapper','https://github.com/linuxdeploy/linuxdeploy/tree/07333c6',['linuxdeploy-LICENSE']),descriptor(app/'AppRun.wrapped','AppRun.wrapped','Tauri upstream AppRun (AppImageKit)','https://github.com/tauri-apps/binary-releases/releases/tag/apprun-old',['AppImageKit-LICENSE'])],
 'artifacts':[descriptor(work/'runtime-x86_64',str(work/'runtime-x86_64'),'AppImage type2-runtime 20251108','https://github.com/AppImage/type2-runtime/releases/tag/20251108',alllicenses),descriptor(work/'appimagetool',str(work/'appimagetool'),'appimagetool 1.9.1 build tool','https://github.com/AppImage/appimagetool/releases/tag/1.9.1',['appimagetool-LICENSE'])]}
 (work/'runtime-metadata.json').write_text(json.dumps(meta,indent=2)+'\n')
 PYMETA

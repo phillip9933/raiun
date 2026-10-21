@@ -48,6 +48,12 @@
       "sha256": "845efc77857d485d91fb3e0b884aaa929368c717ae8186b66fe1ed2495753243",
       "bytes": 1002,
       "source_url": "https://raw.githubusercontent.com/madler/zlib/v1.3.1/LICENSE"
+    },
+    {
+      "path": "linuxdeploy-LICENSE",
+      "source_url": "https://raw.githubusercontent.com/linuxdeploy/linuxdeploy/07333c6/LICENSE.txt",
+      "bytes": 1051,
+      "sha256": "1edb41ae7601854ae15d113c3700beebd0ea3ed05b85e3786a94a72bb9916091"
     }
   ]
 }
