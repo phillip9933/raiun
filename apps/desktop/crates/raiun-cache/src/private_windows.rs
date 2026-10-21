@@ -446,6 +446,9 @@ if ($owner.Value -ne $identity.User.Value) {
     let output = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .env("RAIUN_TEST_FIXTURE_PATH", path)
+        // The CI parent uses PowerShell 7; Windows PowerShell must discover
+        // its own built-in Security module rather than inherit that module path.
+        .env_remove("PSModulePath")
         .output()
         .expect("set up synthetic Windows fixture owner");
     assert!(
