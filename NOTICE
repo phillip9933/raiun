@@ -19,4 +19,6 @@ https://github.com/phillip9933/raiun
 Android source, build scripts and dependency notices are in apps/android/.
 See apps/android/scripts/offline-scanner-sdk.lock.json and
 apps/android/THIRD-PARTY-NOTICES.md for the pinned scanner source and notices.
-Desktop source and notices will be included with its later platform import.
+Desktop source, build scripts, privacy information and dependency notices are in
+apps/desktop/. The first-party desktop code shares this repository's
+AGPL-3.0-only license; retained third-party code keeps its original notices.

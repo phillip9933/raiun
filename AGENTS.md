@@ -6,7 +6,7 @@ Read applicable project/shared guidance when available. This is a linked develop
 
 Android's complete Gradle project is `apps/android/`; read its `AGENTS.md` and run Android commands there. Repository policies, shared branding in `design/`, product docs in `docs/` and executable GitHub workflows stay at the root. Keep native code, locks, tests, scripts, notices and implementation docs with their app.
 
-Desktop is developed separately and is not imported yet. Do not modify or copy its live checkout during Android migration. Follow `docs/MONOREPO.md` for a coordinated history-preserving import into `apps/desktop`. Do not add empty platform scaffolding or claim absent source is built.
+Desktop is imported with its original Git ancestry under `apps/desktop/`. Read its guidance before changing that app. Preserve independent app versions, locks, platform identities and data/credential locations. Root GitHub workflows build each app from its own directory. The older standalone desktop repository is preserved; do not overwrite this frozen import from a live working directory.
 
 Task deliverables belong in the Raiun project's `outputs/` outside Git. Preserve ignored translations, unpublished docs, source, recovery data and backups. Inspect status before edits, avoid incidental staging, run relevant checks and distinguish historical evidence from current results. Preserve Android identities, user data and update compatibility.
 

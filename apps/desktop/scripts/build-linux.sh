@@ -14,6 +14,11 @@ install -m755 desktop-shell/src-tauri/target/release/raiun-desktop-shell "$bundl
 install -m644 desktop-shell/src-tauri/icons/icon.png "$bundle/raiun-desktop.png"
 install -m755 packaging/linux/install.sh "$bundle/install.sh"
 cp README.md "$bundle/README.md"
+for document in LICENSE NOTICE THIRD-PARTY-NOTICES.md PRIVACY.md CHANGELOG.md; do
+  install -m644 "$document" "$bundle/$document"
+done
+test -f legal/dependency-inventory.json || { echo 'Generate the reviewed runtime dependency notices before packaging.' >&2; exit 1; }
+cp -R legal "$bundle/legal"
 mkdir -p "$bundle/docs"
 for document in OFFLINE-CACHE.md ENCRYPTED-SYNC.md ENCRYPTION-INTEROP.md VAULT-SESSIONS.md VAULT-DIRECTORIES.md VAULT-WRITE-CONTRACT.md; do
   install -m644 "docs/$document" "$bundle/docs/$document"

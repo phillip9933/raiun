@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 — 2026-10-21
 
 - Move the Android project into `apps/android` while preserving app identity and existing data compatibility.
 
@@ -16,7 +16,7 @@
 - Add background encrypted file uploads and offline downloads, with verification before files become available offline.
 - Add copying and moving between ordinary and encrypted locations, with destination browsing, conflict choices and an explicit warning when files will become unencrypted.
 
-These changes are in development. Release and device acceptance checks remain required before publication.
+The application ID and original signing identity are preserved for in-place updates. See the release notes and testing guide for validation and remaining device/server limits.
 
 ## 0.9.3 beta
 

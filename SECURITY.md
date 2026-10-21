@@ -8,4 +8,4 @@ The Android encrypted-vault implementation uses the Web-compatible rclone-crypt 
 
 Security reports should identify the affected platform, release, OS version and device class when safe to do so. Use synthetic accounts and files; redact credentials, tokens, private URLs, filenames and personal content from diagnostics. Do not test against a server or account without authorization.
 
-Desktop security boundaries must be documented and reviewed with its later source import. Android review evidence does not establish desktop security.
+Desktop encryption, local recovery and account boundaries are described in [desktop privacy](apps/desktop/PRIVACY.md), [encrypted sync](apps/desktop/docs/ENCRYPTED-SYNC.md) and [the format limits](apps/desktop/docs/ENCRYPTION-INTEROP.md). Linux Desktop 0.7 is a beta with documented unverified workflows. Android review evidence does not establish desktop security.

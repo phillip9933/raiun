@@ -1,6 +1,6 @@
 # Raiun coordinated releases
 
-Each app has an independent version, build and acceptance gate. The planned joint launch is Android 1.0 and desktop 0.7 beta after desktop import and both apps' acceptance. Restructuring alone does not bump versions, create tags, sign artifacts or authorize publication.
+Each app has an independent version, build and acceptance gate. The coordinated launch is Android 1.0.0 and Linux Desktop 0.7.0-beta.1. Desktop has been imported with its Git history under `apps/desktop`. Signing and publication remain explicit maintainer actions.
 
 ## Versions and tags
 
@@ -21,7 +21,7 @@ Tags may point to the same validated commit for a coordinated launch. Separate r
 
 1. Freeze a revision after desktop import. Review each changelog, limitations, privacy notice and notices. Write short, plain-language release notes and describe supported platforms honestly.
 2. Run Android's [quality and API 26/API 35 emulator gates](../apps/android/docs/TESTING.md) and [packaging/signing checks](../apps/android/docs/RELEASING.md) on that exact source. Owner device/server acceptance remains required. Historical checks on the old layout are not migration results.
-3. Run desktop's imported platform build/test matrix, packaging and isolated acceptance checks on the same candidate. Until those instructions and workflows are imported, desktop readiness is unverified here.
+3. Run the relevant desktop source gates, Linux packaging and focused exact-package isolated checks on the candidate. Reuse unchanged validated safety evidence and disclose the beta's unverified workflows; whole-category certification is not required for this beta. Desktop CI is `.github/workflows/desktop-ci.yml`; only Linux x86_64 is shipped in this beta.
 4. Build and verify exact distributables. CI produces Android debug and unsigned release APKs; production signing remains local with the original identity. Keep credentials outside source and CI logs. Source relocation never authorizes a new identity.
 5. Verify Android name/code, application ID, certificate, empty development credentials, APK/native alignment and upgrade over the previous release. Verify desktop identities and upgrade/data compatibility separately.
 6. Use distinct assets such as `raiun-android-1.0.0.apk` and `raiun-desktop-0.7.0-beta.1-<os>-<arch>.<package>`, with checksums per release. Audit desktop updater handling of these tags before enabling it: a generic latest-release lookup may choose the other platform. GitHub supplies source archives automatically.

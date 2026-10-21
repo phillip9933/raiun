@@ -1,0 +1,25 @@
+Raiun Desktop
+Copyright (C) 2026 Phillip Rogers and contributors
+
+SPDX-License-Identifier: AGPL-3.0-only
+
+Raiun Desktop's first-party source is distributed under the GNU Affero General
+Public License version 3 only. See LICENSE. It is provided without warranty.
+
+Corresponding Raiun source and build scripts:
+https://github.com/phillip9933/raiun
+Desktop source, locks, packaging and notices are under apps/desktop/.
+Use the source revision identified by the release and packaged build manifest.
+
+Third-party components retain their own copyrights and licenses. See
+THIRD-PARTY-NOTICES.md and legal/dependency-inventory.json for the locked Linux
+release graph and retained upstream texts. License alternatives and combined
+license requirements are recorded as declared upstream; the first-party license
+does not replace them. The resolution of cached notice gaps is recorded there with upstream provenance.
+
+The EME implementation retains its original MIT attribution to
+Jakob Unterwurzacher (2015); see crates/raiun-vault/EME-MIT-LICENSE and the
+identical retained legal/EME-MIT-LICENSE. Do not remove that notice.
+
+OpenCloud names and marks belong to their respective owners. Raiun is an
+independent client and is not an official OpenCloud release.

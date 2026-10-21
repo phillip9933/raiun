@@ -1,0 +1,150 @@
+[
+  {
+    "bytes": 1483,
+    "commit": "ae42d22078b98549e987d2f03d12df7b984fde47",
+    "group": "alloc",
+    "path": "legal/upstream-retrieval/alloc-ae42d22078b98549e987d2f03d12df7b984fde47/LICENSE",
+    "repository": "dropbox/rust-alloc-no-stdlib",
+    "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae",
+    "status": "retained",
+    "upstream_path": "LICENSE",
+    "url": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/ae42d22078b98549e987d2f03d12df7b984fde47/LICENSE"
+  },
+  {
+    "bytes": 1184,
+    "commit": "cc80e4a0a90d499b677fdf7743699b4b3a43a989",
+    "group": "dlopen",
+    "path": "legal/upstream-retrieval/dlopen-cc80e4a0a90d499b677fdf7743699b4b3a43a989/LICENSE",
+    "repository": "OpenByteDev/dlopen2",
+    "sha256": "39fa265207450e77c62e90c5594a06c085b655d8374c7ced4bf7894b6bd95dd2",
+    "status": "retained",
+    "upstream_path": "LICENSE",
+    "url": "https://raw.githubusercontent.com/OpenByteDev/dlopen2/cc80e4a0a90d499b677fdf7743699b4b3a43a989/LICENSE"
+  },
+  {
+    "bytes": 1109,
+    "commit": "eafd1e3682a1247f595410266091e9684021cb6f",
+    "group": "indicator",
+    "path": "legal/upstream-retrieval/indicator-eafd1e3682a1247f595410266091e9684021cb6f/LICENSE-MIT",
+    "repository": "tauri-apps/libappindicator-rs",
+    "sha256": "eb227437252b2a7a9c1fc342c93ade1f3d7ce38cc6dd754f613db07d53ceff0b",
+    "status": "retained",
+    "upstream_path": "LICENSE-MIT",
+    "url": "https://raw.githubusercontent.com/tauri-apps/libappindicator-rs/eafd1e3682a1247f595410266091e9684021cb6f/LICENSE-MIT"
+  },
+  {
+    "bytes": 10847,
+    "commit": "eafd1e3682a1247f595410266091e9684021cb6f",
+    "group": "indicator",
+    "path": "legal/upstream-retrieval/indicator-eafd1e3682a1247f595410266091e9684021cb6f/LICENSE-APACHE",
+    "repository": "tauri-apps/libappindicator-rs",
+    "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+    "status": "retained",
+    "upstream_path": "LICENSE-APACHE",
+    "url": "https://raw.githubusercontent.com/tauri-apps/libappindicator-rs/eafd1e3682a1247f595410266091e9684021cb6f/LICENSE-APACHE"
+  },
+  {
+    "bytes": 356,
+    "commit": "eafd1e3682a1247f595410266091e9684021cb6f",
+    "group": "indicator",
+    "path": "legal/upstream-retrieval/indicator-eafd1e3682a1247f595410266091e9684021cb6f/sys/Cargo.toml",
+    "repository": "tauri-apps/libappindicator-rs",
+    "sha256": "ffa544131659aeeff24cdf56faf7f89e0dcd4e1eb0f6e03b1616436eab4bc815",
+    "status": "retained",
+    "upstream_path": "sys/Cargo.toml",
+    "url": "https://raw.githubusercontent.com/tauri-apps/libappindicator-rs/eafd1e3682a1247f595410266091e9684021cb6f/sys/Cargo.toml"
+  },
+  {
+    "commit": "635e1a19d02960588a00e189bd4bd5bdb150ec3d",
+    "error": "HTTPError: HTTP Error 404: Not Found",
+    "group": "selectors",
+    "repository": "servo/stylo",
+    "status": "failed",
+    "upstream_path": "LICENSE",
+    "url": "https://raw.githubusercontent.com/servo/stylo/635e1a19d02960588a00e189bd4bd5bdb150ec3d/LICENSE"
+  },
+  {
+    "bytes": 1090,
+    "commit": "6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a",
+    "group": "tauriplugin",
+    "path": "legal/upstream-retrieval/tauriplugin-6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a/LICENSE_MIT",
+    "repository": "tauri-apps/tauri",
+    "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d",
+    "status": "retained",
+    "upstream_path": "LICENSE_MIT",
+    "url": "https://raw.githubusercontent.com/tauri-apps/tauri/6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a/LICENSE_MIT"
+  },
+  {
+    "bytes": 10174,
+    "commit": "6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a",
+    "group": "tauriplugin",
+    "path": "legal/upstream-retrieval/tauriplugin-6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a/LICENSE_APACHE-2.0",
+    "repository": "tauri-apps/tauri",
+    "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594",
+    "status": "retained",
+    "upstream_path": "LICENSE_APACHE-2.0",
+    "url": "https://raw.githubusercontent.com/tauri-apps/tauri/6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a/LICENSE_APACHE-2.0"
+  },
+  {
+    "commit": "5878605364af97a3358368a6eaef02104af2e016",
+    "error": "HTTPError: HTTP Error 404: Not Found",
+    "group": "unic",
+    "repository": "open-i18n/rust-unic",
+    "status": "failed",
+    "upstream_path": "COPYRIGHT",
+    "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT"
+  },
+  {
+    "bytes": 1023,
+    "commit": "5878605364af97a3358368a6eaef02104af2e016",
+    "group": "unic",
+    "path": "legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT",
+    "repository": "open-i18n/rust-unic",
+    "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+    "status": "retained",
+    "upstream_path": "LICENSE-MIT",
+    "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT"
+  },
+  {
+    "bytes": 10847,
+    "commit": "5878605364af97a3358368a6eaef02104af2e016",
+    "group": "unic",
+    "path": "legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE",
+    "repository": "open-i18n/rust-unic",
+    "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+    "status": "retained",
+    "upstream_path": "LICENSE-APACHE",
+    "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE"
+  },
+  {
+    "commit": "8a6ce83063d90b91ae2ce59eddb803edd393fca9",
+    "error": "HTTPError: HTTP Error 404: Not Found",
+    "group": "unicident",
+    "repository": "open-i18n/rust-unic",
+    "status": "failed",
+    "upstream_path": "COPYRIGHT",
+    "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/COPYRIGHT"
+  },
+  {
+    "bytes": 1023,
+    "commit": "8a6ce83063d90b91ae2ce59eddb803edd393fca9",
+    "group": "unicident",
+    "path": "legal/upstream-retrieval/unicident-8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-MIT",
+    "repository": "open-i18n/rust-unic",
+    "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+    "status": "retained",
+    "upstream_path": "LICENSE-MIT",
+    "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-MIT"
+  },
+  {
+    "bytes": 10847,
+    "commit": "8a6ce83063d90b91ae2ce59eddb803edd393fca9",
+    "group": "unicident",
+    "path": "legal/upstream-retrieval/unicident-8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-APACHE",
+    "repository": "open-i18n/rust-unic",
+    "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+    "status": "retained",
+    "upstream_path": "LICENSE-APACHE",
+    "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-APACHE"
+  }
+]

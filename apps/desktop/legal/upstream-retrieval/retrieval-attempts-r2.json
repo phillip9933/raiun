@@ -1,0 +1,23 @@
+[
+  {
+    "bytes": 608,
+    "path": "legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md",
+    "sha256": "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b",
+    "status": "retained",
+    "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md"
+  },
+  {
+    "bytes": 608,
+    "path": "legal/upstream-retrieval/unicident-8a6ce83063d90b91ae2ce59eddb803edd393fca9/COPYRIGHT.md",
+    "sha256": "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b",
+    "status": "retained",
+    "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/COPYRIGHT.md"
+  },
+  {
+    "bytes": 16726,
+    "path": "legal/upstream-retrieval/selectors-635e1a19d02960588a00e189bd4bd5bdb150ec3d/MPL-2.0.txt",
+    "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
+    "status": "retained",
+    "url": "https://www.mozilla.org/media/MPL/2.0/index.txt"
+  }
+]

@@ -8,10 +8,10 @@ I build projects to solve problems I run into in my own life. I share them becau
 
 | Platform | Source and setup | Release status |
 | --- | --- | --- |
-| Android | [apps/android](apps/android/README.md) | Published 0.9.3 beta; unreleased work is being prepared for 1.0 |
-| Desktop | Developed separately until import into `apps/desktop` | In development; not included or built by this checkout yet |
+| Android | [apps/android](apps/android/README.md) | 1.0.0 |
+| Linux Desktop | [apps/desktop](apps/desktop/README.md) | 0.7.0-beta.1; early beta |
 
-The planned joint launch is Android 1.0 with a separately versioned desktop 0.7 beta, subject to each app's own testing and release checks. Preparing this repository does not publish either app.
+Android and desktop have independent versions and release pages. This coordinated release pairs Android 1.0.0 with the first Linux Desktop 0.7 beta. Windows and macOS are not released.
 
 Android includes Personal files and Spaces, encrypted folders and Spaces, offline access, transfers, folder/camera backup and document scanning. See its [features and limitations](apps/android/README.md), [privacy notice](apps/android/PRIVACY.md) and [changelog](apps/android/CHANGELOG.md).
 
@@ -27,11 +27,21 @@ python3 scripts/install_offline_scanner_sdk.py
 
 Use JDK 21 and Android SDK 36. Open `apps/android` in Android Studio. GitHub Actions remain in the repository's `.github/workflows` directory and run Android from that same project directory. See [Contributing](CONTRIBUTING.md) and the [monorepo guide](docs/MONOREPO.md).
 
-Shared [branding and design references](design/) stay at the repository root. Each app owns its native resources and packaging.
+For Linux desktop, use Rust, Node.js/npm and the native dependencies listed in
+[its setup guide](apps/desktop/README.md), then run:
+
+```sh
+cd apps/desktop
+scripts/build-linux.sh
+```
+
+Desktop CI is independent of the Android SDK. Shared [branding and design
+references](design/) stay at the repository root. Each app owns its native
+resources and packaging.
 
 ## Releases and security
 
-Download published Android APKs from [GitHub Releases](https://github.com/phillip9933/raiun/releases). Install a release signed with the original identity over an existing Raiun installation to preserve app data. Read the app's limitations and keep independent backups.
+Download Android APKs and Linux desktop packages from [GitHub Releases](https://github.com/phillip9933/raiun/releases). Install a release signed with the original identity over an existing Raiun installation to preserve app data. Read the app's limitations and keep independent backups.
 
 New releases will use platform-specific tags and assets so Android and desktop can version independently. Existing tags remain unchanged. See [Releasing](docs/RELEASING.md), [version history](CHANGELOG.md), [security reporting](SECURITY.md), [privacy](PRIVACY.md) and [third-party notices](THIRD-PARTY-NOTICES.md).
 

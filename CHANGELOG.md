@@ -1,16 +1,20 @@
 # Raiun release history
 
-Android and desktop have independent versions. A coordinated announcement can include both apps without forcing version numbers to match.
+Android and desktop have independent versions and release pages.
 
-## Unreleased repository changes
+## Coordinated release — 2026-10-21
 
-- Move Android into `apps/android`, with its own build setup, tests, scripts, changelog and docs.
-- Keep shared branding and product guidance at the root, ready for a later desktop import into `apps/desktop`.
-- Run Android CI from its new directory. Preserve existing tags and use platform-specific tags for future releases.
-
-The intended joint launch is Android 1.0 and desktop 0.7 beta. Both remain subject to validation and owner acceptance; this layout change does not publish or bump either app.
+- Android **1.0.0**: Transfers filters, customizable drag-and-drop navigation,
+  encrypted/offline and backup improvements, and additional translations.
+- Linux Desktop **0.7.0-beta.1**: first public Linux beta with cloud-drive,
+  folder-sync, offline, encrypted-access and recovery controls; known validation
+  limits are documented in its release notes.
+- Complete Android project under `apps/android` and history-preserving desktop
+  import under `apps/desktop`; shared branding and product docs at the root.
+- Separate Android and desktop CI, dependency locks and platform-specific tags.
+  Existing Android tags and release assets remain unchanged.
 
 ## Platform history
 
-- [Android changes and complete existing history](apps/android/CHANGELOG.md), including the unpublished pre-1.0 work.
-- Desktop history will join its source at `apps/desktop/CHANGELOG.md` when the import is ready. No desktop release is claimed here.
+- [Android changes](apps/android/CHANGELOG.md)
+- [Desktop changes and beta limits](apps/desktop/CHANGELOG.md)

@@ -16,21 +16,21 @@ and recovery data were not changed. The original UI selector failures are
 preserved, and no numeric shell exit code is claimed because its original
 parent had exited; separate closure proof passed.
 
-Evidence: [parent acceptance](../../outputs/vm-lab/linux-saved-edit-export-20261017-r123/native-acceptance.json),
-[installed state](../../outputs/vm-lab/linux-saved-edit-export-20261017-r123/laptop-install-r123.json),
-and [native details](../../outputs/vm-lab/linux-saved-edit-export-20261017-r123b/R123b-acceptance-status.md).
+Evidence: parent acceptance (maintainer-local evidence: `../../outputs/vm-lab/linux-saved-edit-export-20261017-r123/native-acceptance.json`),
+installed state (maintainer-local evidence: `../../outputs/vm-lab/linux-saved-edit-export-20261017-r123/laptop-install-r123.json`),
+and native details (maintainer-local evidence: `../../outputs/vm-lab/linux-saved-edit-export-20261017-r123b/R123b-acceptance-status.md`).
 R126 now has 12 individually verified native Windows filter passes: four
 account/root-fenced cache-status tests and eight exact-binding cache tests.
 The first harness stopped after two passes; a fresh continuation ran only the
 remaining ten. Raw numeric exits, stdout and pre-resume identity/hash checks
 passed, and scoped processes were closed afterward. Final wrapper summary/exit
 records are unavailable and are not claimed as a clean aggregate wrapper run.
-[Parent native review](../../outputs/vm-lab/windows-cache-policy-binding-20261017-r126/parent-native-acceptance.json).
+Parent native review (maintainer-local evidence: `../../outputs/vm-lab/windows-cache-policy-binding-20261017-r126/parent-native-acceptance.json`).
 R127 cache-publication hardening passed 784 host tests (13 ignored), formatting
 and strict Clippy. Its exact R128 Windows cache artifact passed all 15 serial
 native policy/invalidation tests, including final metadata revalidation and
 preserved dirty bytes; native process and wrapper exits were both zero and
-postflight found no scoped process. [Parent native review](../../outputs/vm-lab/windows-cache-publication-fence-20261017-r128/parent-native-acceptance.json).
+postflight found no scoped process. Parent native review (maintainer-local evidence: `../../outputs/vm-lab/windows-cache-publication-fence-20261017-r128/parent-native-acceptance.json`).
 The combined R130 Linux package has passed its fresh-home VM installer check;
 its native runtime/export acceptance is pending, so R123 remains installed.
 R131 adds test-only positive connected-worker cache-status request coverage;
@@ -56,8 +56,8 @@ Package SHA-256: `b3932a858d09dbf7d797765614a6567a5e57650afeaa4318106e82b84d24cc
 Previous R116a binaries and launcher are preserved at
 `../outputs/install-backups/r119c-before-install-20261017T061603Z/`.
 Recovery and profile data were untouched; the app remains closed.
-See [parent acceptance](../../outputs/vm-lab/linux-offline-recovery-identity-20261017-r119c/native-acceptance.json)
-and [installed hashes](../../outputs/vm-lab/linux-offline-recovery-identity-20261017-r119c/laptop-install-r119c.json).
+See parent acceptance (maintainer-local evidence: `../../outputs/vm-lab/linux-offline-recovery-identity-20261017-r119c/native-acceptance.json`)
+and installed hashes (maintainer-local evidence: `../../outputs/vm-lab/linux-offline-recovery-identity-20261017-r119c/laptop-install-r119c.json`).
 
 
 ## Earlier installation: R116a, closed — 17 October 2026 JST
@@ -68,7 +68,7 @@ VM installer check. Dirty data and recovery stayed intact; no successful cloud
 PUT/DELETE/MOVE occurred. R112 is backed up. The first R116 install was safely
 refused for invalid timestamp metadata; R116a changes only that manifest field.
 See [current implementation](IMPLEMENTATION.md) and
-[installed state](../../outputs/vm-lab/linux-failed-upload-listing-refresh-20261017-r116a/laptop-install-r116a.json).
+installed state (maintainer-local evidence: `../../outputs/vm-lab/linux-failed-upload-listing-refresh-20261017-r116a/laptop-install-r116a.json`).
 Cold-login restoration, metadata-unavailable recovery enumeration, recursive
 folder native acceptance and Windows native/provider gates remain open.
 The R112/R108 checkpoints below are historical.
@@ -81,7 +81,7 @@ isolated Linux VM; the remote snapshot stayed unchanged. Normal tray Quit closed
 the app and agent; its helper's redundant shutdown RPC failed after the socket
 was already gone, so that harness failure and unavailable attached-shell exit
 code remain explicit. See [current implementation](IMPLEMENTATION.md) and
-[R112 evidence](../../outputs/vm-lab/linux-offline-policy-commit-20261017-r112/native-acceptance.json).
+R112 evidence (maintainer-local evidence: `../../outputs/vm-lab/linux-offline-policy-commit-20261017-r112/native-acceptance.json`).
 R113b also passed native copy into an existing nested encrypted destination on
 the exact installed R112 package, including plaintext verification, unchanged
 source, journal retirement and normal tray Quit. Folder creation/moves and live
@@ -310,7 +310,7 @@ R107 is backed up, and the app remains closed. Windows copy UI is hidden;
 nested-parent copy acceptance and durable moves remain open.
 
 R109 adds a Windows native lifecycle result from the pre-existing synthetic
-`raiunGuiR66a` console session (WTS session 1): the exact `native_normal_lifecycle_restores_and_reconnects_registered_namespace` test passed once (1 passed, 0 failed) and reported implicit OS-read hydration for Personal and Projects Space. The same suspended process was verified by PID, image hash, SID, session and command line, then resumed once and exited naturally with code 0. The initial wrapper attempt stopped because CIM returned a null executable path; that failure is preserved, so this is not a clean wrapper pass. Developer Mode was restored exactly. The synthetic root/profile remain; no registration enumeration or cleanup was performed, and a protected cache path was not inspectable from SYSTEM. This is native test evidence only, not Explorer acceptance, packaged GUI acceptance, RecoveryRoot hydration acceptance, or production provider enablement. Evidence: [`native-acceptance.json`](../../outputs/vm-lab/windows-wts-isolated-native-20261017-r109/evidence/native-acceptance.json) and [`status.md`](../../outputs/vm-lab/windows-wts-isolated-native-20261017-r109/evidence/status.md).
+`raiunGuiR66a` console session (WTS session 1): the exact `native_normal_lifecycle_restores_and_reconnects_registered_namespace` test passed once (1 passed, 0 failed) and reported implicit OS-read hydration for Personal and Projects Space. The same suspended process was verified by PID, image hash, SID, session and command line, then resumed once and exited naturally with code 0. The initial wrapper attempt stopped because CIM returned a null executable path; that failure is preserved, so this is not a clean wrapper pass. Developer Mode was restored exactly. The synthetic root/profile remain; no registration enumeration or cleanup was performed, and a protected cache path was not inspectable from SYSTEM. This is native test evidence only, not Explorer acceptance, packaged GUI acceptance, RecoveryRoot hydration acceptance, or production provider enablement. Evidence: `native-acceptance.json` (maintainer-local evidence: `../../outputs/vm-lab/windows-wts-isolated-native-20261017-r109/evidence/native-acceptance.json`) and `status.md` (maintainer-local evidence: `../../outputs/vm-lab/windows-wts-isolated-native-20261017-r109/evidence/status.md`).
 
 R110 verifies a Windows cache-policy source foundation in focused native tests.
 The cache setter transactionally fences the exact ordinary-file ID, path, ETag,
@@ -327,7 +327,7 @@ strict Clippy and workspace tests (760 passed, 13 ignored), plus Windows workspa
 check, strict Clippy and test-binary builds passed. This is a 109-file R103d-based
 source candidate with four overlays, not a full current product package; RPC/UI
 and installed-package acceptance remain open. R108 remains installed on Linux
-and closed. See the [R110 native acceptance record](../../outputs/vm-lab/windows-cache-policy-fence-20261017-r110/evidence/native-acceptance.json) and [gate status](../../outputs/vm-lab/windows-cache-policy-fence-20261017-r110/STATUS.txt).
+and closed. See the R110 native acceptance record (maintainer-local evidence: `../../outputs/vm-lab/windows-cache-policy-fence-20261017-r110/evidence/native-acceptance.json`) and gate status (maintainer-local evidence: `../../outputs/vm-lab/windows-cache-policy-fence-20261017-r110/STATUS.txt`).
 
 
 A source audit found unsupported cross-vault/root moves returning EXDEV, which
@@ -831,8 +831,8 @@ process remains, and Developer Mode was unchanged. R121 corrects the test
 fixture by explicitly making a second ordinary same-content write; it does not
 weaken the duplicate checks or establish production acceptance.
 
-See [preserved native result](../../outputs/vm-lab/windows-dirty-duplicate-restart-20261017-r118/windows/R118-native-result-summary.txt)
-and [source diagnosis](../../outputs/vm-lab/windows-dirty-duplicate-restart-20261017-r118/windows/R118-duplicate-failure-diagnosis.md).
+See preserved native result (maintainer-local evidence: `../../outputs/vm-lab/windows-dirty-duplicate-restart-20261017-r118/windows/R118-native-result-summary.txt`)
+and source diagnosis (maintainer-local evidence: `../../outputs/vm-lab/windows-dirty-duplicate-restart-20261017-r118/windows/R118-duplicate-failure-diagnosis.md`).
 
 ## Windows duplicate dirty-edit restart accepted — R121
 
@@ -850,7 +850,7 @@ proven by the test source, raw phase traces and acceptance marker. This closes
 the duplicate-restart gate, not Explorer, packaged GUI, policy UI or production
 provider activation. Earlier R118 failure evidence remains intact.
 
-See [parent native acceptance](../../outputs/vm-lab/windows-dirty-duplicate-restart-20261017-r121/parent-native-acceptance.json).
+See parent native acceptance (maintainer-local evidence: `../../outputs/vm-lab/windows-dirty-duplicate-restart-20261017-r121/parent-native-acceptance.json`).
 
 R122 source adds a worker-owned read-only cache-status RPC fenced by current
 account generation, exact registered-root identity, active binding and scope

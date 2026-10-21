@@ -68,7 +68,7 @@ hash audit runs every 120 completed pair scans, and failed local scans do not
 prune cache rows.
 
 A source-only harness at
-[`outputs/mvp-2026-10-09/hash-cache-benchmark/`](../../outputs/mvp-2026-10-09/hash-cache-benchmark/)
+`outputs/mvp-2026-10-09/hash-cache-benchmark/` (maintainer-local evidence: `../../outputs/mvp-2026-10-09/hash-cache-benchmark/`)
 exercised the public engine API on tmpfs with 32 synthetic 16 MiB files (512
 MiB total). The first sync took 1,748 ms and uploaded 512 MiB; the fake backend
 observed 1,024 MiB of verification downloads. One unchanged scan took 723 µs,

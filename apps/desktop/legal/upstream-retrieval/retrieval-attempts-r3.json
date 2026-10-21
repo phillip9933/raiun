@@ -1,0 +1,16 @@
+[
+  {
+    "bytes": 664,
+    "path": "legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/AUTHORS",
+    "sha256": "2748c1a1fba7616917c61d455e8d715ab952671ead63f2026ad0124410596b09",
+    "status": "retained",
+    "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/AUTHORS"
+  },
+  {
+    "bytes": 664,
+    "path": "legal/upstream-retrieval/unicident-8a6ce83063d90b91ae2ce59eddb803edd393fca9/AUTHORS",
+    "sha256": "2748c1a1fba7616917c61d455e8d715ab952671ead63f2026ad0124410596b09",
+    "status": "retained",
+    "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/AUTHORS"
+  }
+]

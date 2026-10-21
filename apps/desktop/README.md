@@ -10,19 +10,19 @@ OpenCloud/
     Team space/
 ```
 
-**Status: MVP integration in progress.** Earlier Linux builds passed live OAuth,
-Graph, token refresh, mount, folder-pair, and conflict-choice checks. The latest
-feedback update is installed on disk; no startup/restart was performed as part
-of the overnight update, and current runtime health is unverified. Earlier
-checks do not establish acceptance of the new build.
-Native window/tray interactions, KDE folder-chooser scaling, two real accounts,
-and desktop-login autostart still need acceptance testing. See the current
-[acceptance checklist](docs/MVP-ACCEPTANCE.md) for expected results and preserved
-recovery data. Do not use development builds as the only copy of important files.
+**Linux Desktop 0.7.0-beta.1.** Source and packages are now part of the Raiun
+monorepo at `apps/desktop`, alongside Android at `apps/android`. Each app has its
+own version and build. Only Linux x86_64 is offered in this desktop beta;
+Windows and macOS are not released.
 
-The desktop project has its own repository and local folder, separate from
-Raiun Android. One repository owns shared Rust components and platform adapters.
-Windows and macOS adapters are planned; Linux support does not imply they ship.
+The app provides an OpenCloud drive, folder sync, offline caching, encrypted
+file access, account controls, transfers and recovery UI. Focused tests cover
+account-scoped dirty-edit recovery/reconciliation, selected filesystem paths,
+startup settings and package installation. Native account-selector/file-manager
+workflows, disconnect confirmation, media upload/deduplication/restart and some
+advanced encrypted/offline controls remain unverified. Media preview and backup
+job creation were observed; a click alone is not proof of an upload. See the
+[beta changelog](CHANGELOG.md) and [acceptance records](docs/MVP-ACCEPTANCE.md).
 
 ## Components
 
@@ -35,7 +35,7 @@ Windows and macOS adapters are planned; Linux support does not imply they ship.
   preview from an explicit JSON manifest, plus a bounded local `media-scan`
   command. Neither imports, renames, or uploads files.
 - `desktop-shell`: Tauri 2 native tray with TypeScript account settings, folder-pair,
-  conflict-review, saved-copy recovery, transfers, and local Media preview UI.
+  conflict-review, saved-copy recovery, transfers, and media-backup UI.
 - `raiun-vault`: streaming vault encryption/decryption, scoped unlock lifecycle,
   and portable directory validation. Explicit encrypted folder pairs use a
   separate verified backend; ordinary sync and the on-demand mount retain
@@ -81,9 +81,9 @@ control diagnostic; never send credentials through it.
 
 Folder-pair deletion propagation is currently conservative: missing baseline
 items and conflicting edits require attention. The cloud mount is a separate
-projection; local folder pairs cannot overlap it. `media-preview` is a bounded
-offline planner rather than an importer; media workflow extensions remain future
-work.
+projection; local folder pairs cannot overlap it. `media-preview` is a bounded offline CLI planner. The UI also configures
+recurring upload-only media jobs; full native upload/deduplication/restart
+acceptance remains unverified for this beta.
 
 Read [architecture](docs/ARCHITECTURE.md),
 [language decision](docs/LANGUAGE-DECISION.md), and

@@ -1,43 +1,54 @@
 # Raiun repository layout
 
-Raiun uses one product repository with independent platform projects. Android is present now. Desktop continues separately until a coordinated import; its working files and Git state are not changed by this migration.
+Raiun uses one product repository with independent platform projects:
 
 ```text
 raiun/
-  .github/workflows/    # Platform CI; GitHub discovers workflows only here
+  .github/workflows/   # Android and desktop CI, all executable workflows here
   apps/
-    android/           # Complete Gradle project, modules, scripts and docs
-  design/              # Shared branding and product design references
-  docs/                # Layout and coordinated release guidance
+    android/          # Complete Gradle project, modules, resources and scripts
+    desktop/          # Rust engine, Tauri UI, native adapters and packaging
+  design/             # Shared branding and product design references
+  docs/               # Product layout and coordinated release guidance
 ```
-
-The later desktop import belongs in `apps/desktop/`. There is intentionally no placeholder desktop source or build job claiming to validate it today.
 
 ## Platform ownership
 
-Open `apps/android` in Android Studio. Run Android commands there; the Gradle root and module names (`:app`, `:core:*`, `:feature:*`) are unchanged. Wrapper, version catalog, scanner lock, analysis config, scripts, schemas, translations and screenshot baselines move together. APKs and test reports are under `apps/android/<module>/build/`.
+Open `apps/android` in Android Studio and run its Gradle wrapper there. Use JDK
+21 and Android SDK 36; the scanner SDK remains independently checksum-pinned.
+Run desktop Cargo/build commands from `apps/desktop`; its UI is under
+`desktop-shell`. Android does not require Rust/Node and desktop does not require
+the Android SDK. Each app owns its locks, native resources, tests, packaging,
+implementation docs, privacy notice and dependency notices.
 
-GitHub workflows stay in `.github/workflows`. Android shell steps use `apps/android` as the working directory. Action inputs, including emulator commands and upload paths, specify it explicitly because they do not inherit shell defaults. Existing workflow filenames and job names are retained for check continuity; branch-protection settings are not changed. Workflows still run for all pull requests and main-branch pushes, avoiding skipped required checks. Introduce platform-aware change selection alongside desktop workflows after reviewing required checks.
+GitHub executes workflows only at the repository root. Android retains
+`quality.yml` and `emulator.yml`; `desktop-ci.yml` uses explicit app working
+and artifact paths. Portable Rust checks on Windows/macOS are not releases of
+those desktop platforms. No shared runtime or top-level build system is added.
 
-Android dependencies resolve independently of Rust, Node or desktop tooling. The scanner remains a checksum-pinned, separately versioned SDK. Branding can share source assets and design references; each app owns native resources and packaging. Add a shared runtime or top-level build system only for a concrete need.
+## Preserved history and compatibility
 
-## Compatibility and private files
+Android history and existing tags retain their original revisions and paths.
+The unpublished Android candidate was frozen before integration. Desktop's
+original Git history and frozen 0.7 beta source were merged without squashing,
+with its tree under `apps/desktop`. The original development checkouts, ignored
+files, test binaries and recovery material remain separate and preserved.
 
-Source relocation does not change Android's `app.raiun.cloud` application ID, namespace, database schemas, document-provider authorities, credential aliases or signing identity. Build and test from the new path before publishing. Installed-app updates still require the original certificate and an increasing Android version code.
+Relocation does not change Android's `app.raiun.cloud` application ID, signing
+certificate, database/provider identities or credential aliases. Desktop's
+`org.raiun.desktop` identity, executable names, state and credential locations
+are also preserved. Installed Android updates need the original certificate
+and a strictly increasing version code.
 
-Keep private signing material outside the entire Git repository. Local properties belong in `apps/android/local.properties` and remain ignored. Project caches and outputs stay beside the Android build and never enter desktop source. Never copy credentials or personal test records to make builds portable.
+Keep signing keys, local properties, credentials, account state, test evidence,
+caches and generated build outputs outside Git. Never import a moving checkout
+or personal data to make a build portable. Shared branding does not merge
+private app state or grant cross-account access.
 
-Existing Android history and tags remain at their original revisions and paths. Git can follow renames across the later migration commit; do not rewrite historical tags. The primary checkout and other worktrees may use the previous layout until the migration is integrated.
+## Independent releases
 
-Maintainer tools outside this repository must point at `apps/android` and its new APK/report paths. Avoid packaging from a preserved older checkout by mistake; verify the selected source, version and artifact before any later signing step.
-
-## Import desktop later
-
-1. Coordinate with desktop work before selecting an exact source revision. Finish or explicitly preserve staged, unstaged and untracked work; never import a live directory or discard local changes.
-2. Use a dedicated integration branch/worktree and a reviewed, history-preserving import under `apps/desktop`. Keep the desktop repository and recovery material until acceptance. Copying a source snapshot alone does not merge its history.
-3. Retain Cargo/npm locks, per-OS packaging, application identities, credential/storage locations and license attribution. Include desktop privacy, security limits, notices, changelog and verified build instructions. Reconcile imported agent guidance with the new paths and current owner instructions.
-4. Move executable desktop workflows into root `.github/workflows` with distinct names. GitHub does not run nested `apps/desktop/.github/workflows`. Update working directories, cache dependency paths, artifacts and per-OS packaging commands. Importing source does not activate signing or publication.
-5. Validate actual supported desktop platforms with their existing checks and isolated acceptance procedures. Repeat Android checks for shared changes; an Android pass never establishes desktop compatibility.
-6. Review the complete import diff for private data and generated outputs before release acceptance. Source import, publication and package installation are separate actions.
-
-See [Releasing](RELEASING.md) for platform versions and the intended Android 1.0 / desktop 0.7 beta joint launch.
+The coordinated launch pairs Android **1.0.0** with Linux Desktop
+**0.7.0-beta.1**. Tags and assets are platform-specific, and each release has
+its own maturity and known limits. Historical tags are not renamed. See
+[Releasing](RELEASING.md), [Android changes](../apps/android/CHANGELOG.md) and
+[Desktop changes](../apps/desktop/CHANGELOG.md).
