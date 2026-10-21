@@ -83,6 +83,7 @@ verified vault. This does not authorize unsafe recursive encrypted deletion.
    boundaries merely to accommodate new ideas. Record owner-approved changes
    explicitly with their date and effect on completion reporting.
 
-The owner explicitly resumed development on 17 October 2026 and replaced the
-previous rolling-spend stop rule with a 500-credit minimum available balance.
-This changes the work budget, not the fixed feature scope above.
+Owner update, 21 October 2026: resume the next Linux and Windows release at a
+token-frugal pace. Stop work and delegated agents when less than 10% of the
+weekly allowance remains (weekly usedPercent > 90), until explicit owner resume.
+This supersedes the earlier spending thresholds without expanding feature scope.
