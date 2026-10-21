@@ -61,6 +61,8 @@ impl Drop for Fixture {
     }
 }
 fn serve(mut stream: TcpStream, origin: &str, state: &Mutex<State>) {
+    // Windows inherits the listener's nonblocking mode on accepted sockets.
+    stream.set_nonblocking(false).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();

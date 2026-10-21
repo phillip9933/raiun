@@ -90,6 +90,10 @@ impl Drop for HttpFixture {
 }
 
 fn serve_request(mut stream: TcpStream, authority: &str, state: &Arc<Mutex<FixtureState>>) {
+    // Windows inherits the listener's nonblocking mode on accepted sockets.
+    stream
+        .set_nonblocking(false)
+        .expect("set synthetic request stream blocking");
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("set synthetic request timeout");
