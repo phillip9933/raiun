@@ -118,6 +118,10 @@ class UbuntuBaseline:
     def origin(self, name, digest, identity):
         candidates = self.index.get(name, set())
         if len(candidates) > 512:
+            # Resource provenance is best-effort; ubiquitous copyright names
+            # must not bypass the strict origin requirement for native ELFs.
+            if identity is None:
+                return []
             raise ValueError('too many dpkg candidates for basename: ' + name)
         matches = []
         for text, package in sorted(candidates):

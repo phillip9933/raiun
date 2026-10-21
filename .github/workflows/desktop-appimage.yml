@@ -1,6 +1,11 @@
 name: Desktop AppImage
 on:
   workflow_dispatch:
+    inputs:
+      reuse_checked_rust:
+        description: Reuse passed Rust checks only if source and locks match the verified AppImage baseline
+        type: boolean
+        default: false
 permissions:
   contents: read
 defaults:
@@ -13,6 +18,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt, clippy
@@ -36,11 +43,24 @@ jobs:
           key: raiun-appimage-ubuntu24-v1-${{ hashFiles('apps/desktop/**/Cargo.lock') }}-${{ github.run_id }}
           restore-keys: |
             raiun-appimage-ubuntu24-v1-${{ hashFiles('apps/desktop/**/Cargo.lock') }}-
+      - name: Verify reuse of unchanged Rust checks
+        id: code-gates
+        env:
+          REUSE_CHECKED_RUST: ${{ inputs.reuse_checked_rust }}
+        run: |
+          if [ "$REUSE_CHECKED_RUST" = true ]; then
+            git diff --exit-code 2cbf50e041355a0e08fd464604842108264becdb HEAD --               crates Cargo.toml Cargo.lock .cargo 'rust-toolchain*'               ../../.cargo '../../rust-toolchain*'
+            echo 'reuse=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'reuse=false' >> "$GITHUB_OUTPUT"
+          fi
       - name: Check Rust formatting
         run: cargo fmt --all --check
       - name: Check Rust code
+        if: steps.code-gates.outputs.reuse != 'true'
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Run Rust tests
+        if: steps.code-gates.outputs.reuse != 'true'
         run: cargo test --workspace --locked
       - name: Build AppImage
         env:
