@@ -157,7 +157,7 @@ try {
     # instead of letting PowerShell's Stop preference abort after packaging.
     $commit = 'unknown'
     $dirty = $true
-    $gitCommand = Get-Command git -CommandType Application -ErrorAction SilentlyContinue
+    $gitCommand = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($gitCommand) {
         $commitOutput = & $gitCommand.Source -C $repoRoot rev-parse HEAD 2>$null
         $commitExitCode = $LASTEXITCODE
