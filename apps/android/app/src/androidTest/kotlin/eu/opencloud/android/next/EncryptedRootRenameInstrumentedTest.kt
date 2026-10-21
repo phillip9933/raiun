@@ -20,6 +20,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import eu.opencloud.android.next.feature.files.R as FilesR
 
 /** Exercises the secure root action dialog on Android without network or vault-key dependencies. */
 @RunWith(AndroidJUnit4::class)
@@ -70,13 +71,13 @@ class EncryptedRootRenameInstrumentedTest {
             }
         }
 
-        compose.onNodeWithContentDescription("New actions").performClick()
-        compose.onNodeWithContentDescription("New folder").performClick()
+        compose.onNodeWithContentDescription(compose.activity.getString(FilesR.string.browser_new)).performClick()
+        compose.onNodeWithContentDescription(compose.activity.getString(FilesR.string.browser_create_folder)).performClick()
         compose.onNodeWithText("Cancel").performClick()
         compose.runOnIdle { assertEquals(null, created) }
 
-        compose.onNodeWithContentDescription("New actions").performClick()
-        compose.onNodeWithContentDescription("New folder").performClick()
+        compose.onNodeWithContentDescription(compose.activity.getString(FilesR.string.browser_new)).performClick()
+        compose.onNodeWithContentDescription(compose.activity.getString(FilesR.string.browser_create_folder)).performClick()
         compose.onNode(hasSetTextAction()).performTextInput("Quarterly records")
         compose.onNodeWithText("Confirm").performClick()
         compose.runOnIdle { assertEquals("Quarterly records", created) }
