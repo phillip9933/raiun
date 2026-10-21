@@ -2,7 +2,7 @@
 
 Independent OpenCloud apps for Android and desktop, built around the same product and design. This is not an official OpenCloud GmbH product or supported client.
 
-I build projects to solve problems I run into in my own life. I share them because I believe in open source and hope others can learn from them, adapt them or find them useful. Making them public does not mean they are suitable for every setup, and I can't promise a support schedule. Bug reports and feature requests are welcome—please open an issue to share problems, ideas or suggestions and help make these projects better.
+I build projects to solve problems I run into in my own life. I share them because I believe in open source and hope others can learn from them, adapt them or find them useful. Making them public does not mean they are suitable for every setup, and I can't promise a support schedule. Bug reports and feature requests are welcome so please open an issue to share problems, ideas or suggestions and help make these projects better.
 
 ## Apps
 
