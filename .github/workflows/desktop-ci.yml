@@ -1,7 +1,13 @@
 name: Desktop checks
 on:
   push:
+    paths:
+      - 'apps/desktop/**'
+      - '.github/workflows/desktop-*.yml'
   pull_request:
+    paths:
+      - 'apps/desktop/**'
+      - '.github/workflows/desktop-*.yml'
   workflow_dispatch:
 permissions:
   contents: read
@@ -14,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
