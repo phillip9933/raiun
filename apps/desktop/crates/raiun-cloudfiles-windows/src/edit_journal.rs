@@ -1,12 +1,13 @@
 //! Portable, encrypted-at-rest recovery journal for Windows placeholder edits.
 //!
-//! This module does not upload, acknowledge, or retire edits. It stores one
-//! immutable, authenticated local snapshot per observed edit. A platform
+//! This module never uploads or removes edits. It stores one immutable,
+//! authenticated local snapshot per observed edit and can retain a protected
+//! terminal acknowledgement from the separately guarded native completion path. A platform
 //! protector must encrypt and authenticate the complete record before it is
 //! written; Windows production wiring is intentionally a separate step.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -597,6 +598,7 @@ impl EditJournal {
                     return Ok(snapshot
                         .records
                         .iter()
+                        .filter(|record| snapshot.is_unresolved(record))
                         .map(|r| r.metadata.clone())
                         .collect());
                 }
@@ -765,12 +767,14 @@ impl EditJournal {
             return Ok(RecoveryScan::Retry);
         }
         records.sort_by(|left, right| left.metadata.record_id.cmp(&right.metadata.record_id));
-        let recovery_states = validate_recovery_events(&records, recovery_events)?;
+        let (recovery_states, locally_acknowledged) =
+            validate_recovery_events(&records, recovery_events)?;
         self.directory_guard.verify_path()?;
         Ok(RecoveryScan::Complete(RecoverySnapshot {
             records,
             incomplete_staging_files,
             recovery_states,
+            locally_acknowledged,
         }))
     }
 
@@ -808,6 +812,9 @@ impl EditJournal {
                 .map_err(|_| JournalError::Io),
         )?;
         let snapshot = trace_journal_stage("begin_attempt_recover", self.recover_all())?;
+        if snapshot.locally_acknowledged.contains(record_id) {
+            return Err(JournalError::InvalidState);
+        }
         let record = snapshot
             .records
             .iter()
@@ -875,6 +882,9 @@ impl EditJournal {
                 .map_err(|_| JournalError::Io),
         )?;
         let snapshot = trace_journal_stage("record_outcome_recover", self.recover_all())?;
+        if snapshot.locally_acknowledged.contains(record_id) {
+            return Err(JournalError::InvalidState);
+        }
         let record = snapshot
             .records
             .iter()
@@ -911,6 +921,53 @@ impl EditJournal {
                 attempts,
             }),
         )
+    }
+
+    /// Trusted provider/native join only: call after exact guarded OS completion,
+    /// while its account/publication lease remains held. Never removes bodies.
+    pub(crate) fn acknowledge_local_completion(
+        &self,
+        lease: &RecoveryDispatchLease,
+        metadata: &LocalEditMetadata,
+    ) -> Result<(), JournalError> {
+        lease.check_record(&metadata.record_id)?;
+        let _guard = RECOVERY_EVENT_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| JournalError::Io)?;
+        if metadata.scope != self.scope {
+            return Err(JournalError::ScopeMismatch);
+        }
+        let snapshot = self.recover_all()?;
+        if snapshot.incomplete_staging_files != 0 {
+            return Err(JournalError::InvalidState);
+        }
+        if !snapshot
+            .records
+            .iter()
+            .any(|record| record.metadata == *metadata)
+        {
+            return Err(JournalError::ScopeMismatch);
+        }
+        if snapshot.locally_acknowledged.contains(&metadata.record_id) {
+            return Ok(());
+        }
+        let Some(RecoveryAttemptState::VerifiedApplied {
+            attempt_id,
+            attempts,
+        }) = snapshot.recovery_states.get(&metadata.record_id).copied()
+        else {
+            return Err(JournalError::InvalidState);
+        };
+        self.append_recovery_event(RecoveryEvent {
+            scope: self.scope.clone(),
+            record_id: metadata.record_id.clone(),
+            record_generation: metadata.generation,
+            sequence: self.next_recovery_sequence(&metadata.record_id)?,
+            attempt_id,
+            attempts,
+            state: RecoveryEventState::LocallyAcknowledged,
+        })
     }
 
     fn next_recovery_sequence(&self, record_id: &str) -> Result<u64, JournalError> {
@@ -1071,6 +1128,17 @@ pub struct RecoverySnapshot {
     pub incomplete_staging_files: usize,
     /// Latest protected reconciliation state by immutable record ID.
     pub recovery_states: HashMap<String, RecoveryAttemptState>,
+    /// Exact records whose native local completion was durably acknowledged.
+    /// Their protected bodies remain in records and still count toward quotas.
+    pub(crate) locally_acknowledged: HashSet<String>,
+}
+
+impl RecoverySnapshot {
+    pub(crate) fn is_unresolved(&self, record: &LocalEditRecord) -> bool {
+        !self
+            .locally_acknowledged
+            .contains(&record.metadata.record_id)
+    }
 }
 
 enum RecoveryScan {
@@ -1093,6 +1161,7 @@ struct RecoveryEvent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum RecoveryEventState {
+    LocallyAcknowledged,
     Attempting,
     VerifiedApplied,
     Conflict,
@@ -1103,7 +1172,7 @@ enum RecoveryEventState {
 fn validate_recovery_events(
     records: &[LocalEditRecord],
     mut events: Vec<RecoveryEvent>,
-) -> Result<HashMap<String, RecoveryAttemptState>, JournalError> {
+) -> Result<(HashMap<String, RecoveryAttemptState>, HashSet<String>), JournalError> {
     if events.len() > MAX_RECOVERY_EVENT_FILES {
         return Err(JournalError::ScanLimit);
     }
@@ -1113,6 +1182,7 @@ fn validate_recovery_events(
             .then_with(|| left.sequence.cmp(&right.sequence))
     });
     let mut states = HashMap::new();
+    let mut acknowledged = HashSet::new();
     let mut current_id: Option<String> = None;
     let mut history = Vec::new();
     for event in events {
@@ -1121,7 +1191,10 @@ fn validate_recovery_events(
             .is_some_and(|id| id != event.record_id)
         {
             let id = current_id.take().expect("checked above");
-            let state = validate_event_sequence(&id, &history, records)?;
+            let (state, complete) = validate_event_sequence(&id, &history, records)?;
+            if complete {
+                acknowledged.insert(id.clone());
+            }
             states.insert(id, state);
             history.clear();
         }
@@ -1129,17 +1202,20 @@ fn validate_recovery_events(
         history.push(event);
     }
     if let Some(id) = current_id {
-        let state = validate_event_sequence(&id, &history, records)?;
+        let (state, complete) = validate_event_sequence(&id, &history, records)?;
+        if complete {
+            acknowledged.insert(id.clone());
+        }
         states.insert(id, state);
     }
-    Ok(states)
+    Ok((states, acknowledged))
 }
 
 fn validate_event_sequence(
     record_id: &str,
     events: &[RecoveryEvent],
     records: &[LocalEditRecord],
-) -> Result<RecoveryAttemptState, JournalError> {
+) -> Result<(RecoveryAttemptState, bool), JournalError> {
     let record = records
         .iter()
         .find(|record| record.metadata.record_id == record_id)
@@ -1151,8 +1227,10 @@ fn validate_event_sequence(
     let mut active_attempt = false;
     let mut state = RecoveryAttemptState::NotAttempted;
     let mut expected_sequence = 1u64;
+    let mut acknowledged = false;
     for event in events {
-        if event.record_generation != record.metadata.generation
+        if acknowledged
+            || event.record_generation != record.metadata.generation
             || event.sequence != expected_sequence
             || event.attempt_id > MAX_RECOVERY_EVENTS_PER_RECORD
         {
@@ -1162,6 +1240,14 @@ fn validate_event_sequence(
             .checked_add(1)
             .ok_or(JournalError::ScanLimit)?;
         match event.state {
+            RecoveryEventState::LocallyAcknowledged => {
+                if !matches!(state, RecoveryAttemptState::VerifiedApplied { attempt_id, attempts }
+                    if event.attempt_id == attempt_id && event.attempts == attempts)
+                {
+                    return Err(JournalError::CorruptRecord);
+                }
+                acknowledged = true;
+            }
             RecoveryEventState::Attempting => {
                 if event.attempt_id != last_attempt + 1 || event.attempts != 0 {
                     return Err(JournalError::CorruptRecord);
@@ -1202,12 +1288,14 @@ fn validate_event_sequence(
                         attempt_id: last_attempt,
                         attempts: event.attempts,
                     },
-                    RecoveryEventState::Attempting => unreachable!(),
+                    RecoveryEventState::Attempting | RecoveryEventState::LocallyAcknowledged => {
+                        unreachable!()
+                    }
                 };
             }
         }
     }
-    Ok(state)
+    Ok((state, acknowledged))
 }
 
 fn attempt_id(state: RecoveryAttemptState) -> u64 {
@@ -1816,6 +1904,197 @@ mod tests {
             etag: "\"v1\"".into(),
             byte_len: 4,
         }
+    }
+
+    fn local_completion_record(journal: &EditJournal, body: &[u8]) -> super::LocalEditMetadata {
+        journal
+            .append_edit(
+                1,
+                LocalFileIdentity {
+                    volume_serial: 17,
+                    file_index: 99,
+                },
+                "Projects/notes.txt",
+                Some(baseline()),
+                body,
+            )
+            .unwrap()
+    }
+
+    fn verified_for_local_completion(
+        journal: &EditJournal,
+        metadata: &super::LocalEditMetadata,
+    ) -> super::RecoveryDispatchLease {
+        let lease = journal.acquire_dispatch_lease(&metadata.record_id).unwrap();
+        let attempt = journal
+            .begin_attempt(
+                &lease,
+                &metadata.record_id,
+                metadata.generation,
+                ExplicitRecoveryApproval::user_reviewed(),
+            )
+            .unwrap();
+        journal
+            .record_outcome(
+                &lease,
+                &metadata.record_id,
+                metadata.generation,
+                attempt,
+                1,
+                RecoveryAttemptOutcome::VerifiedApplied,
+            )
+            .unwrap();
+        lease
+    }
+
+    #[test]
+    fn local_completion_is_terminal_idempotent_and_preserves_body_across_reopen() {
+        let temp = private_tempdir();
+        let protector = TestProtector::new();
+        let journal = EditJournal::open(temp.path(), scope(), protector.clone()).unwrap();
+        let metadata = local_completion_record(&journal, b"local completion body");
+        let record_path = journal.directory.join(record_filename(&metadata.record_id));
+        let sealed = fs::read(&record_path).unwrap();
+        let lease = verified_for_local_completion(&journal, &metadata);
+        let snapshot = journal.recover_all().unwrap();
+        assert!(snapshot.is_unresolved(&snapshot.records[0]));
+        assert_eq!(
+            journal
+                .recover_metadata_bounded(&mut MetadataScanBudget::default())
+                .unwrap(),
+            vec![metadata.clone()]
+        );
+        journal
+            .acknowledge_local_completion(&lease, &metadata)
+            .unwrap();
+        let sequence = journal.next_recovery_sequence(&metadata.record_id).unwrap();
+        journal
+            .acknowledge_local_completion(&lease, &metadata)
+            .unwrap();
+        assert_eq!(
+            journal.next_recovery_sequence(&metadata.record_id).unwrap(),
+            sequence
+        );
+        assert_eq!(
+            journal.begin_attempt(
+                &lease,
+                &metadata.record_id,
+                metadata.generation,
+                ExplicitRecoveryApproval::user_reviewed()
+            ),
+            Err(JournalError::InvalidState)
+        );
+        assert_eq!(
+            journal.record_outcome(
+                &lease,
+                &metadata.record_id,
+                metadata.generation,
+                1,
+                1,
+                RecoveryAttemptOutcome::VerifiedApplied
+            ),
+            Err(JournalError::InvalidState)
+        );
+        drop(lease);
+        drop(journal);
+        let reopened = EditJournal::open(temp.path(), scope(), protector).unwrap();
+        let snapshot = reopened.recover_all().unwrap();
+        assert_eq!(snapshot.records.len(), 1);
+        assert_eq!(snapshot.records[0].content, b"local completion body");
+        assert!(!snapshot.is_unresolved(&snapshot.records[0]));
+        assert!(
+            reopened
+                .recover_metadata_bounded(&mut MetadataScanBudget::default())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(fs::read(record_path).unwrap(), sealed);
+    }
+
+    #[test]
+    fn local_completion_selects_only_one_same_file_same_generation_random_record() {
+        let temp = private_tempdir();
+        let journal = EditJournal::open(temp.path(), scope(), TestProtector::new()).unwrap();
+        let first = local_completion_record(&journal, b"first snapshot");
+        let second = local_completion_record(&journal, b"second snapshot");
+        assert_eq!(first.generation, second.generation);
+        assert_eq!(first.local_file, second.local_file);
+        assert_ne!(first.record_id, second.record_id);
+        let first_path = journal.directory.join(record_filename(&first.record_id));
+        let second_path = journal.directory.join(record_filename(&second.record_id));
+        let originals = [
+            fs::read(&first_path).unwrap(),
+            fs::read(&second_path).unwrap(),
+        ];
+        let lease = verified_for_local_completion(&journal, &first);
+        journal
+            .acknowledge_local_completion(&lease, &first)
+            .unwrap();
+        let snapshot = journal.recover_all().unwrap();
+        assert_eq!(snapshot.records.len(), 2);
+        assert_eq!(
+            snapshot
+                .records
+                .iter()
+                .filter(|r| snapshot.is_unresolved(r))
+                .map(|r| r.metadata.record_id.clone())
+                .collect::<Vec<_>>(),
+            vec![second.record_id.clone()]
+        );
+        assert_eq!(
+            journal
+                .recover_metadata_bounded(&mut MetadataScanBudget::default())
+                .unwrap(),
+            vec![second]
+        );
+        assert_eq!(fs::read(first_path).unwrap(), originals[0]);
+        assert_eq!(fs::read(second_path).unwrap(), originals[1]);
+    }
+
+    #[test]
+    fn local_completion_refuses_unverified_or_changed_metadata_and_truncated_terminal() {
+        let temp = private_tempdir();
+        let journal = EditJournal::open(temp.path(), scope(), TestProtector::new()).unwrap();
+        let metadata = local_completion_record(&journal, b"retained after corrupt terminal");
+        let lease = journal.acquire_dispatch_lease(&metadata.record_id).unwrap();
+        assert_eq!(
+            journal.acknowledge_local_completion(&lease, &metadata),
+            Err(JournalError::InvalidState)
+        );
+        drop(lease);
+        let lease = verified_for_local_completion(&journal, &metadata);
+        let mut changed = metadata.clone();
+        changed.relative_path = "different.txt".into();
+        assert_eq!(
+            journal.acknowledge_local_completion(&lease, &changed),
+            Err(JournalError::ScopeMismatch)
+        );
+        assert_eq!(
+            journal.next_recovery_sequence(&metadata.record_id).unwrap(),
+            3
+        );
+        journal
+            .acknowledge_local_completion(&lease, &metadata)
+            .unwrap();
+        let terminal = journal
+            .directory
+            .join(super::recovery_event_filename(&metadata.record_id, 3));
+        let mut sealed = fs::read(&terminal).unwrap();
+        sealed.truncate(sealed.len() / 2);
+        fs::write(&terminal, &sealed).unwrap();
+        assert!(journal.recover_all().is_err());
+        assert!(
+            journal
+                .recover_metadata_bounded(&mut MetadataScanBudget::default())
+                .is_err()
+        );
+        assert_eq!(fs::read(terminal).unwrap(), sealed);
+        assert!(
+            journal
+                .directory
+                .join(record_filename(&metadata.record_id))
+                .is_file()
+        );
     }
 
     #[test]

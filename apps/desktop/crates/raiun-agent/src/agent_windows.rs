@@ -2818,16 +2818,40 @@ fn dispatch_one_initial_edit(
     }
     let scope = pending.scope().clone();
     backend
-        .with_initial_edit_remote(&scope, |remote| {
+        .with_initial_edit_session(&scope, |session| {
             let remote = AgentGenerationRecoveryRemote {
-                inner: RecoveryRemoteHandle::Borrowed(remote),
+                inner: RecoveryRemoteHandle::Borrowed(session.remote()),
                 authorized_generation: Arc::clone(generation),
                 expected_generation: binding.generation,
             };
-            pending
-                .dispatch(&remote)
-                .map(Some)
-                .map_err(|_| "The initial save requires recovery review".to_owned())
+            let dispatched = pending
+                .dispatch_verified(&remote)
+                .map_err(|_| "The initial save requires recovery review".to_owned())?;
+            if let Some(proof) = dispatched.proof {
+                let location = dispatched
+                    .location
+                    .ok_or_else(|| "The saved edit needs local recovery review".to_owned())?;
+                if generation.load(Ordering::Acquire) != binding.generation
+                    || location.root_identity() != binding.identity
+                    || location.local_file_identity() != proof.metadata().local_file
+                {
+                    return Err("The local save binding changed".to_owned());
+                }
+                let publication = session
+                    .prepare_verified_edit(location.identity(), &proof)
+                    .map_err(|_| "The saved cloud version changed".to_owned())?;
+                let components: Vec<&str> =
+                    location.components().iter().map(String::as_str).collect();
+                connection
+                    .acknowledge_verified_edit(&components, &publication)
+                    .map_err(|_| "The saved edit needs local recovery review".to_owned())?;
+            } else if matches!(
+                dispatched.outcome,
+                raiun_cloudfiles_windows::ReconciliationOutcome::VerifiedApplied { .. }
+            ) {
+                return Err("The saved edit needs fresh verification".to_owned());
+            }
+            Ok(Some(dispatched.outcome))
         })
         .map_err(|_| "Could not verify the fresh edit's current Space root".to_owned())?
 }

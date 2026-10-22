@@ -514,6 +514,9 @@ fn dispatch_edit(
         "dispatch_initial_recover",
         journal.recover_all(),
     )?;
+    if snapshot.locally_acknowledged.contains(record_id) {
+        return Err(JournalError::InvalidState);
+    }
     let record = snapshot
         .records
         .into_iter()

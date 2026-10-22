@@ -135,6 +135,33 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
         Err(crate::JournalError::InvalidState)
     }
 
+    /// Dispatch the fresh receipt and, when supported, obtain a newly read
+    /// remote proof. A successful historical outcome alone cannot authorize
+    /// local in-sync marking; implementations without proof support return None.
+    fn dispatch_initial_receipt_verified(
+        &self,
+        receipt: crate::InitialEditReceipt,
+        remote: &dyn crate::RecoveryRemote,
+    ) -> Result<
+        (
+            crate::ReconciliationOutcome,
+            Option<crate::VerifiedEditReadback>,
+        ),
+        crate::JournalError,
+    > {
+        self.dispatch_initial_receipt(receipt, remote)
+            .map(|outcome| (outcome, None))
+    }
+
+    /// Record exact native completion while the caller still retains the
+    /// active publication/account permit. Unsupported implementations refuse.
+    fn record_local_completion(
+        &self,
+        _completion: crate::CompletedLocalEdit,
+    ) -> Result<(), crate::JournalError> {
+        Err(crate::JournalError::InvalidState)
+    }
+
     /// Whether durable unresolved records remain for this connection. Errors
     /// are treated as unresolved by the native teardown path.
     fn has_unresolved(&self) -> Result<bool, BackendError>;

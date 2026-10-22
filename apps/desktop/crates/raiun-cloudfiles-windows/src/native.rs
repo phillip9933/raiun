@@ -1708,14 +1708,20 @@ impl ConfiguredRootConnection {
             if result < 0 {
                 return Err(native_error("complete verified edit in-sync", result));
             }
-            Ok(())
-        })?;
-        if saved_usn == 0 || root_snapshot(file.as_raw_handle())?.identity != opened.identity {
-            return Err(Error::ConfiguredRootChanged);
-        }
-        root.verify_identity(true)?;
-        root.verify_registered()?;
-        Ok(())
+            if saved_usn == 0 || root_snapshot(file.as_raw_handle())?.identity != opened.identity {
+                return Err(Error::ConfiguredRootChanged);
+            }
+            root.verify_identity(true)?;
+            root.verify_registered()?;
+            // Still under the same publication/token permit and held local
+            // handle: record only this exact native-completed snapshot. If
+            // persistence fails, its encrypted body remains unresolved.
+            recovery
+                .record_local_completion(crate::CompletedLocalEdit::from_native_completion(
+                    metadata,
+                ))
+                .map_err(|_| Error::EditRecoveryUnavailable)
+        })
     }
     pub(super) fn take_initial_edit(&self) -> Result<Option<crate::PendingInitialEdit>, Error> {
         if !self.connected {
@@ -3844,7 +3850,44 @@ impl CallbackState {
         if let Some(receipt) = receipt {
             // Saturation/contention loses only automatic scheduling. The
             // immutable body was already durably retained for explicit review.
-            let _ = self.initial_edits.push(Arc::clone(recovery), receipt);
+            // Use the pinned local entry's actual position under the pinned
+            // root. The journal's relative_path is a cloud path and may omit
+            // the composite Personal/Spaces directories on disk.
+            let location = pinned_entry_final
+                .strip_prefix(&callback_guard.root_final_path)
+                .ok()
+                .and_then(|relative| {
+                    relative
+                        .components()
+                        .map(|component| match component {
+                            std::path::Component::Normal(value) => {
+                                value.to_str().map(str::to_owned)
+                            }
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>()
+                })
+                .and_then(|components| {
+                    crate::InitialEditLocation::new(
+                        components,
+                        identity.try_into().ok()?,
+                        crate::ConfiguredRootIdentity {
+                            volume_serial: root_identity.volume_serial,
+                            file_index: root_identity.file_index,
+                        },
+                        LocalFileIdentity {
+                            volume_serial: after_read.identity.volume_serial,
+                            file_index: after_read.identity.file_index,
+                        },
+                        &receipt,
+                    )
+                    .ok()
+                });
+            if let Some(location) = location {
+                let _ =
+                    self.initial_edits
+                        .push_with_location(Arc::clone(recovery), receipt, location);
+            }
         }
         Ok(true)
     }

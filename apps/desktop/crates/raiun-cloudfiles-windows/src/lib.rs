@@ -31,7 +31,9 @@ pub use edit_journal::{
     LocalEditMetadata, LocalEditRecord, LocalEditState, LocalFileIdentity, RecoveryAttemptOutcome,
     RecoveryAttemptState, RecoverySnapshot, RemoteEditBaseline,
 };
-pub use initial_edit_queue::{MAX_PENDING_INITIAL_EDITS, PendingInitialEdit};
+pub use initial_edit_queue::{
+    InitialEditDispatch, InitialEditLocation, MAX_PENDING_INITIAL_EDITS, PendingInitialEdit,
+};
 pub use opencloud::{
     FileCacheBindingExpectation, FileCacheStatus, InitialEditSession, ListedFilePage,
     ListedFileRow, OpaqueIdentity, OpenCloudPlaceholderBackend, ProviderIdentityBinding,
@@ -41,7 +43,7 @@ pub use opencloud::{
 pub use opencloud::{
     FolderCacheBindingExpectation, ListedFolderPage, ListedFolderRow, OfflineDownloadError,
 };
-pub use recovery_provider::{DurableEditRecoveryProvider, InitialEditReceipt};
+pub use recovery_provider::{CompletedLocalEdit, DurableEditRecoveryProvider, InitialEditReceipt};
 pub use recovery_reconcile::{
     MAX_RECOVERY_UPLOAD_ATTEMPTS, MAX_RECOVERY_UPLOAD_BYTES, OpenCloudRecoveryRemote,
     ReconciliationIssue, ReconciliationOutcome, RecoveryRemote, RecoveryRemoteBody,

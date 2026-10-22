@@ -20,9 +20,16 @@ existing-identity catalog refresh and guarded native completion operation build
 on that proof. The native operation pins the exact local file, checks its full
 hash and saved nonzero USN, then asks Windows to mark it in sync only if the USN
 still matches. Catalog publication and OS completion share the existing
-revocation/token fence. Fresh native handoff and durable journal resolution
-still need to be wired before production activation. Portable tests and Linux
-source gates pass; native Windows compile/runtime verification remains pending.
+revocation/token fence. The fresh callback now carries its actual pinned local
+path and opaque identity, separately from the remote path. The worker joins that
+handoff to a fresh readback proof, native completion, and a protected terminal
+local-acknowledgement event. That event resolves only the exact immutable record;
+it preserves all encrypted bodies, including other edits of the same file in the
+same account generation. Remote verification alone leaves recovery unresolved.
+Publication, OS completion, and the durable event share the same account fence;
+a partial failure keeps recovery available. Focused portable integration checks
+pass. The joined source still requires native compile and focused save/restart
+acceptance before production activation; both activation switches remain off.
 
 ## Next-release media recovery — 23 October 2026 JST
 

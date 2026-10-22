@@ -874,10 +874,40 @@ pub struct InitialEditReceipt {
 }
 
 impl InitialEditReceipt {
+    #[cfg(any(windows, test))]
+    pub(crate) fn record_key(&self) -> (&str, u64) {
+        (&self.metadata.record_id, self.metadata.generation)
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn local_file(&self) -> crate::LocalFileIdentity {
+        self.metadata.local_file
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn owner(&self) -> &Arc<()> {
+        &self.owner
+    }
+
     /// Trusted routing context for constructing the current generation-checked
     /// remote adapter. This is account metadata and must not be logged.
     pub fn scope(&self) -> &EditJournalScope {
         &self.metadata.scope
+    }
+}
+
+/// Opaque evidence minted only by the guarded native completion path after
+/// the OS accepts its nonzero-USN comparison. Not a remote-only receipt.
+pub struct CompletedLocalEdit {
+    metadata: LocalEditMetadata,
+}
+
+impl CompletedLocalEdit {
+    #[cfg(any(windows, test))]
+    pub(crate) fn from_native_completion(metadata: &LocalEditMetadata) -> Self {
+        Self {
+            metadata: metadata.clone(),
+        }
     }
 }
 
@@ -1001,6 +1031,63 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
             &metadata.scope,
             remote,
         )
+    }
+
+    fn dispatch_initial_receipt_verified(
+        &self,
+        receipt: InitialEditReceipt,
+        remote: &dyn RecoveryRemote,
+    ) -> Result<(ReconciliationOutcome, Option<crate::VerifiedEditReadback>), crate::JournalError>
+    {
+        // The ordinary dispatch consumes and validates this instance's fresh
+        // capability before any upload. Keep only its immutable metadata for
+        // joining a new readback to that same protected record afterward.
+        let metadata = receipt.metadata.clone();
+        let outcome = self.dispatch_initial_receipt(receipt, remote)?;
+        if !matches!(outcome, ReconciliationOutcome::VerifiedApplied { .. }) {
+            return Ok((outcome, None));
+        }
+        let journal = self.catalog.journal_for_record(
+            &self.scope,
+            self.root_identity,
+            &metadata.record_id,
+            metadata.generation,
+        )?;
+        if journal.scope() != &metadata.scope {
+            return Err(crate::JournalError::ScopeMismatch);
+        }
+        let record = journal
+            .recover_all()?
+            .records
+            .into_iter()
+            .find(|record| record.metadata == metadata)
+            .ok_or(crate::JournalError::ScopeMismatch)?;
+        match crate::verify_edit_readback(&record, &metadata.scope, remote) {
+            Ok(proof) => Ok((outcome, Some(proof))),
+            // No proof means no acknowledgement authority. Preserve the
+            // original encrypted body and report the fresh verification result.
+            Err(outcome) => Ok((outcome, None)),
+        }
+    }
+
+    fn record_local_completion(
+        &self,
+        completion: CompletedLocalEdit,
+    ) -> Result<(), crate::JournalError> {
+        let metadata = completion.metadata;
+        if metadata.generation != self.scope.token_generation()
+            || !scope_matches_provider(&metadata.scope, &self.scope, self.root_identity)
+        {
+            return Err(crate::JournalError::ScopeMismatch);
+        }
+        let journal = self.catalog.journal_for_record(
+            &self.scope,
+            self.root_identity,
+            &metadata.record_id,
+            metadata.generation,
+        )?;
+        let lease = journal.acquire_dispatch_lease(&metadata.record_id)?;
+        journal.acknowledge_local_completion(&lease, &metadata)
     }
 
     fn has_unresolved(&self) -> Result<bool, BackendError> {
@@ -1136,8 +1223,10 @@ impl ScopeCatalog {
         {
             let journal = self.open_existing_journal(&scope)?;
             let snapshot = journal.recover_all()?;
-            for record in snapshot.records {
-                metadata.push(record.metadata.clone());
+            for record in &snapshot.records {
+                if snapshot.is_unresolved(record) {
+                    metadata.push(record.metadata.clone());
+                }
             }
         }
         Ok(metadata)
@@ -1157,7 +1246,12 @@ impl ScopeCatalog {
         {
             let journal = self.open_existing_journal(&scope)?;
             let snapshot = journal.recover_all()?;
-            if snapshot.incomplete_staging_files != 0 || !snapshot.records.is_empty() {
+            if snapshot.incomplete_staging_files != 0
+                || snapshot
+                    .records
+                    .iter()
+                    .any(|record| snapshot.is_unresolved(record))
+            {
                 drop_records(snapshot.records);
                 return Ok(true);
             }

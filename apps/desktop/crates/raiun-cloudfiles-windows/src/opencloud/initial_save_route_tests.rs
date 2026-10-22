@@ -469,9 +469,9 @@ fn fresh_initial_receipt_uses_verified_route_for_conditional_upload_and_readback
         .unwrap()
         .unwrap();
     let scope = receipt.scope().clone();
-    let outcome = backend
+    let (outcome, proof) = backend
         .with_initial_edit_remote(&scope, |remote| {
-            prepared.dispatch_initial_receipt(receipt, remote)
+            prepared.dispatch_initial_receipt_verified(receipt, remote)
         })
         .unwrap()
         .unwrap();
@@ -497,7 +497,9 @@ fn fresh_initial_receipt_uses_verified_route_for_conditional_upload_and_readback
             .any(|line| line.eq_ignore_ascii_case("if-match: \"base-e1\""))
     );
     assert_eq!(puts[0].body, content);
-    assert_eq!(gets.len(), 1);
+    // Dispatch verifies its upload and the capability obtains a second,
+    // current readback; cached VerifiedApplied state cannot supply authority.
+    assert_eq!(gets.len(), 2);
     assert!(
         gets[0]
             .headers
@@ -523,7 +525,8 @@ fn fresh_initial_receipt_uses_verified_route_for_conditional_upload_and_readback
     };
     backend
         .with_initial_edit_session(&scope, |session| {
-            let proof = crate::verify_edit_readback(&record, &scope, session.remote()).unwrap();
+            let proof = proof.expect("fresh receipt dispatch must return current readback proof");
+            assert_eq!(proof.metadata(), &record.metadata);
             assert!(session.prepare_verified_edit(&[0; 16], &proof).is_err());
             let publication = session
                 .prepare_verified_edit(identity.as_bytes(), &proof)
@@ -536,6 +539,11 @@ fn fresh_initial_receipt_uses_verified_route_for_conditional_upload_and_readback
             publication
                 .publish_and_complete(|| {
                     assert!(backend.publish_gate.try_lock().is_err());
+                    // Portable stand-in for successful guarded OS completion;
+                    // this checks the durable join, not the real Cloud Files API.
+                    prepared.record_local_completion(
+                        crate::CompletedLocalEdit::from_native_completion(proof.metadata()),
+                    ).unwrap();
                     Ok(())
                 })
                 .unwrap();
@@ -550,5 +558,7 @@ fn fresh_initial_receipt_uses_verified_route_for_conditional_upload_and_readback
     assert_eq!(refreshed.binding().base_etag, "\"new-e2\"");
     assert_eq!(refreshed.binding().base_size, content.len() as u64);
     assert_eq!(refreshed.binding().remote_resource_id, "project-file");
-    assert_eq!(provider.unresolved_edits().unwrap(), retained);
+    assert!(provider.unresolved_edits().unwrap().is_empty());
+    assert!(!provider.has_unresolved_edits().unwrap());
+    assert!(provider.unresolved_metadata_bounded().unwrap().is_empty());
 }
