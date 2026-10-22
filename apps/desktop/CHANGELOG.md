@@ -1,5 +1,14 @@
 # Raiun Desktop changelog
 
+## Unreleased
+
+- Linux: add **Verify uploaded copy** for newly recorded uncertain media uploads.
+  It checks the saved cloud destination without changing source files, retrying
+  the upload, or clearing recovery. Older attempts remain inspection-only.
+- Windows development: verified test installers and guarded cloud-drive save
+  completion are in progress. Automatic drive activation remains disabled while
+  native acceptance is completed; Windows is not yet a public release.
+
 ## 0.7.0-beta.1 — 2026-10-21
 
 First public Linux x86_64 beta, released alongside Raiun Android 1.0.0.
@@ -28,5 +37,5 @@ performing destructive replay. Retained local working/recovery copies can be
 plaintext: cloud encryption is not local-disk encryption.
 
 The Linux tarball requires the documented system dependencies, including Zenity
-and an unlocked Secret Service for persistent credentials. It is not an AppImage.
-Windows and macOS are not offered in this release.
+and an unlocked Secret Service for persistent credentials. An AppImage is also
+available alongside the tarball. Windows and macOS are not offered in this release.

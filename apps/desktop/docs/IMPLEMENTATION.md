@@ -27,7 +27,8 @@ local-acknowledgement event. That event resolves only the exact immutable record
 it preserves all encrypted bodies, including other edits of the same file in the
 same account generation. Remote verification alone leaves recovery unresolved.
 Publication, OS completion, and the durable event share the same account fence;
-a partial failure keeps recovery available. Focused portable integration checks
+a partial failure keeps recovery available. Retained acknowledged snapshots still
+count toward the existing journal quota; this change does not delete them. Focused portable integration checks
 pass. The joined source still requires native compile and focused save/restart
 acceptance before production activation; both activation switches remain off.
 

@@ -27,7 +27,7 @@ function harness() {
   const map = () => new Map();
   const context = {
     state, confirmDialog: (message, options) => { prompts.push({ message, options }); return dialog.promise; },
-    render() {}, providerAvailable: x => x !== false, spaceName: () => 'R196 Synthetic Space A',
+    render() {}, providerAvailable: x => x !== false, featureAvailable: field => state.status.provider_supported !== false && state.status[field] !== false, spaceName: () => 'R196 Synthetic Space A',
     selectedAccountLabel: () => 'Synthetic profile', lastPath: path => path.split('/').at(-1),
     messageOf: error => String(error.message || error), isStaleAccountRequest: () => false,
     pairExclusionsUi: { open: new Set(), drafts: map(), errors: map(), busy: map() },

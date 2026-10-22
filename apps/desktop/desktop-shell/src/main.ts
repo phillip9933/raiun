@@ -11,7 +11,7 @@ import { completeVaultCreate, finishVaultCreateAttempt } from './vault-create';
 import { offlineCopyStoredSizeLabel } from './offline-snapshot';
 import { isVaultFailureClass, vaultEditRetryStatusMessage, vaultFailureMessage, type VaultFailureClass } from './vault-failure-copy';
 import { windowsPortabilityLabel } from './windows-compatibility';
-import { loadProviderSyncData, providerAvailable } from './provider-capabilities';
+import { loadProviderSyncData, providerAvailable, providerFeatureAvailable } from './provider-capabilities';
 import { eligibleWindowsRecoveryContext, WindowsRecoveryController, windowsRecoveryContextKey } from './windows-recovery-controller';
 import { WINDOWS_RECOVERY_PAGE_LIMIT } from './windows-recovery';
 import { WindowsOfflineFileController, windowsOfflineFileContextKey, windowsOfflineJobMessage, type WindowsOfflineFileContext, type WindowsOfflineFileRow } from './windows-offline-file';
@@ -26,7 +26,7 @@ import { isVaultPasswordValidationError, shouldAnnounceVaultCloseBlocked, vaultD
 import raiunLogo from '../src-tauri/icons/raiun.svg';
 
 type OfflineCacheSummary = { available: boolean; quota_bytes: number; used_bytes: number; pinned_bytes: number; protected_bytes: number; over_quota: boolean; unavailable_reason?: string | null };
-type Status = { connected: boolean; offline_namespace?: boolean; server?: string | null; client_id?: string | null; paused?: boolean; paused_space_ids?: string[]; mounted?: boolean; cloud_root?: string | null; error?: string | null; autostart?: boolean | null; recovery_folder?: string | null; encrypted_edit_recovery_available?: boolean; offline_cache?: OfflineCacheSummary | null; profile_id?: string | null; profile_label?: string | null; auth_generation?: number; root_configuration?: { valid: boolean; identity_bound: boolean; registration_state: string | null; recovery_scope_token?: unknown } | null; stopped?: boolean; authenticating?: boolean; provider_supported?: boolean; session_cleanup_uncertain?: boolean };
+type Status = { connected: boolean; offline_namespace?: boolean; server?: string | null; client_id?: string | null; paused?: boolean; paused_space_ids?: string[]; mounted?: boolean; cloud_root?: string | null; error?: string | null; autostart?: boolean | null; recovery_folder?: string | null; encrypted_edit_recovery_available?: boolean; offline_cache?: OfflineCacheSummary | null; profile_id?: string | null; profile_label?: string | null; auth_generation?: number; root_configuration?: { valid: boolean; identity_bound: boolean; registration_state: string | null; recovery_scope_token?: unknown } | null; stopped?: boolean; authenticating?: boolean; provider_supported?: boolean; folder_sync_supported?: boolean; media_jobs_supported?: boolean; vaults_supported?: boolean; account_switch_supported?: boolean; pause_supported?: boolean; session_cleanup_uncertain?: boolean };
 type Account = { id: string; label: string; status: Status };
 type AccountsResult = { selected: string | null; items: Account[] };
 type ShellUnlockIntent = { profile_id: string; space_id: string; root_resource_id: string };
@@ -141,7 +141,7 @@ const mediaJobs = new MediaJobsView({
   key: () => `${state.accountEpoch}:${state.selectedAccount}`,
   connected: () => state.status?.connected === true,
   reachable: () => state.agentReachable,
-  supported: () => state.status?.provider_supported !== false,
+  supported: () => featureAvailable('media_jobs_supported'),
   blocked: () => state.mutationBusy > 0 || state.nativeDialogBusy || state.accountSwitching,
   spaces: () => state.spaces,
   request,
@@ -173,7 +173,10 @@ let renderedVaultDialog: VaultDialogState | null = null;
 
 class StaleAccountRequest extends Error {}
 function isCurrentAccount(epoch: number, profileId = state.selectedAccount) { return epoch === state.accountEpoch && profileId === state.selectedAccount; }
-function windowsSignInPending() { return state.status?.provider_supported === false && state.status.authenticating === true; }
+function featureAvailable(feature: 'folder_sync_supported' | 'media_jobs_supported' | 'vaults_supported' | 'account_switch_supported' | 'pause_supported') {
+  return providerFeatureAvailable(state.status?.provider_supported, state.status?.[feature]);
+}
+function windowsSignInPending() { return isWindowsAgentStatus(state.status) && state.status?.authenticating === true; }
 
 async function request<T>(action: string, args: Record<string, unknown> = {}): Promise<T> {
   if (!isTauri()) throw new Error('Open Raiun Desktop to connect to the background agent. This browser view is a layout preview.');
@@ -186,6 +189,7 @@ async function request<T>(action: string, args: Record<string, unknown> = {}): P
   return result;
 }
 async function vaultSecretRequest<T>(message: Record<string, unknown>): Promise<T> {
+  if (!featureAvailable('vaults_supported')) throw new Error('Encrypted files are unavailable for this agent.');
   if (!isTauri()) throw new Error('Vault encryption is available in Raiun Desktop, not in the browser preview.');
   const epoch = state.accountEpoch;
   const profileId = state.selectedAccount;
@@ -195,7 +199,7 @@ async function vaultSecretRequest<T>(message: Record<string, unknown>): Promise<
 }
 function isWindowsAgentStatus(status: Status | null): boolean {
   const windowsWebview = isTauri() && typeof navigator !== 'undefined' && /\bWindows NT\b/i.test(navigator.userAgent);
-  return windowsWebview || (status?.profile_label === 'This PC' && status.provider_supported === false);
+  return windowsWebview || (status?.profile_label === 'This PC' && status.root_configuration !== undefined);
 }
 function windowsRecoveryBinding() {
   return eligibleWindowsRecoveryContext(
@@ -498,14 +502,14 @@ function render() {
             const selected = state.selectedAccount === account.id;
             const switching = state.accountSwitchTarget === account.id;
             const connectedAccount = account.status.connected === true;
-            return `<button class="account-option ${selected ? 'selected' : ''} ${switching ? 'switching' : ''}" data-account-id="${esc(account.id)}" aria-pressed="${selected}" aria-busy="${switching}" title="${selected ? 'Current account' : `Switch to ${esc(account.label)}`}" ${accountSwitchDisabled() ? 'disabled' : ''}><span class="account-option-mark">${svg('cloud')}</span><span class="account-option-copy"><b>${esc(account.label)}</b><small>${switching ? 'Switching…' : esc(accountStatusLabel(account.status))}</small></span><span class="account-option-state ${connectedAccount ? 'connected' : account.status.error ? 'attention' : ''}" aria-hidden="true">${selected ? svg('check') : ''}</span></button>`;
+            return `<button class="account-option ${selected ? 'selected' : ''} ${switching ? 'switching' : ''}" data-account-id="${esc(account.id)}" aria-pressed="${selected}" aria-busy="${switching}" title="${selected ? 'Current account' : `Switch to ${esc(account.label)}`}" ${accountSwitchDisabled() || !featureAvailable('account_switch_supported') ? 'disabled' : ''}><span class="account-option-mark">${svg('cloud')}</span><span class="account-option-copy"><b>${esc(account.label)}</b><small>${switching ? 'Switching…' : esc(accountStatusLabel(account.status))}</small></span><span class="account-option-state ${connectedAccount ? 'connected' : account.status.error ? 'attention' : ''}" aria-hidden="true">${selected ? svg('check') : ''}</span></button>`;
           }).join('') : `<div class="account-list-empty">${state.accountsLoading ? 'Loading accounts…' : 'No accounts found.'}</div>`}</div>
           ${state.accountSwitching && targetAccount ? `<div class="account-switch-feedback" role="status" aria-live="polite">Switching to ${esc(targetAccount.label)}…</div>` : ''}
-          <button class="button subtle account-add-button" data-action="open-add-account" ${accountSwitchDisabled() || !providerAvailable(state.status?.provider_supported) ? 'disabled' : ''}>${svg('plus')} Add account</button>
+          <button class="button subtle account-add-button" data-action="open-add-account" ${accountSwitchDisabled() || !featureAvailable('account_switch_supported') ? 'disabled' : ''}>${svg('plus')} Add account</button>
           ${state.accountsError ? `<div class="account-list-error" role="alert">${esc(state.accountsError)}</div>` : ''}
         </section>
         <nav aria-label="Main navigation">${nav.map(([key, label, glyph]) => { const encryptedEdits = state.encryptedEditRecoveryPage?.counts; const encryptedNeedsAttention = encryptedEdits ? encryptedEdits.pending + encryptedEdits.uncertain + encryptedEdits.corrupt : 0; const transferBadge = activeCount() + pendingWritesUi.pendingCount + pendingWritesUi.conflictCount + encryptedNeedsAttention; return `<button class="nav-item ${state.page === key ? 'selected' : ''}" data-page="${key}">${svg(glyph)}<span>${label}</span>${key === 'transfers' && transferBadge ? `<span class="nav-count" title="${activeCount()} active transfers, ${pendingWritesUi.pendingCount + pendingWritesUi.conflictCount} ordinary offline edits, and ${encryptedNeedsAttention} encrypted edits needing review">${transferBadge}</span>` : ''}</button>`; }).join('')}</nav>
-        <div class="sidebar-bottom"><button class="agent-status agent-status-toggle" data-action="toggle-pause" ${reachable && connected && providerAvailable(state.status?.provider_supported) ? '' : 'disabled'} aria-label="${state.status?.paused ? 'Resume sync' : 'Pause sync'}"><span class="status-mark ${connected && providerAvailable(state.status?.provider_supported) ? 'online' : 'offline'}">${svg(connected && providerAvailable(state.status?.provider_supported) ? (state.status?.paused ? 'play' : 'pause') : 'alert')}</span><span class="agent-status-copy"><b>${connection === 'unavailable' ? 'Agent unavailable' : connection === 'offline_reconnecting' ? 'Working offline' : connection === 'sign_in' ? 'Sign-in needed' : !providerAvailable(state.status?.provider_supported) ? 'Drive unavailable' : (state.status?.paused ? 'Sync paused' : 'Sync running')}</b><small>${!providerAvailable(state.status?.provider_supported) ? 'Windows drive support is not enabled' : connection === 'unavailable' ? 'Waiting for Raiun agent' : connection === 'offline_reconnecting' ? 'Reconnecting to server' : connection === 'sign_in' ? 'Connect your OpenCloud account' : (state.status?.paused ? 'Click to resume' : 'Click to pause')}</small></span></button><div class="version">RAIUN DESKTOP <span id="app-version">${esc(appVersionLabel)}</span></div></div>
+        <div class="sidebar-bottom"><button class="agent-status agent-status-toggle" data-action="toggle-pause" ${reachable && connected && featureAvailable('pause_supported') ? '' : 'disabled'} aria-label="${state.status?.paused ? 'Resume sync' : 'Pause sync'}"><span class="status-mark ${connected && providerAvailable(state.status?.provider_supported) ? 'online' : 'offline'}">${svg(connected && providerAvailable(state.status?.provider_supported) ? (state.status?.paused ? 'play' : 'pause') : 'alert')}</span><span class="agent-status-copy"><b>${connection === 'unavailable' ? 'Agent unavailable' : connection === 'offline_reconnecting' ? 'Working offline' : connection === 'sign_in' ? 'Sign-in needed' : !providerAvailable(state.status?.provider_supported) ? 'Drive unavailable' : !featureAvailable('pause_supported') ? 'Drive connected' : (state.status?.paused ? 'Sync paused' : 'Sync running')}</b><small>${!providerAvailable(state.status?.provider_supported) ? 'Windows drive support is not enabled' : connection === 'unavailable' ? 'Waiting for Raiun agent' : connection === 'offline_reconnecting' ? 'Reconnecting to server' : connection === 'sign_in' ? 'Connect your OpenCloud account' : !featureAvailable('pause_supported') ? 'Cloud drive available' : (state.status?.paused ? 'Click to resume' : 'Click to pause')}</small></span></button><div class="version">RAIUN DESKTOP <span id="app-version">${esc(appVersionLabel)}</span></div></div>
       </aside>
       <main class="main-area">
         <header class="topbar"><div class="crumb">${svg(state.page === 'media' ? 'media' : 'cloud')}<span>${state.page === 'media' ? 'This PC' : 'OpenCloud'}</span>${svg('chevron')}<strong>${nav.find(([key]) => key === state.page)?.[1]}</strong></div><div class="topbar-account" aria-live="polite"><span>ACTIVE ACCOUNT</span><b>${esc(selectedAccountLabel())}</b><small>${state.accountSwitching && targetAccount ? `Switching to ${esc(targetAccount.label)}…` : esc(activeServer)}</small></div><div class="top-actions"><button class="icon-button" id="refresh" aria-label="Refresh status" title="Refresh">${svg('refresh')}</button><div class="avatar">R</div></div></header>
@@ -630,7 +634,7 @@ function selectionDirection(element: HTMLInputElement | HTMLTextAreaElement): 'f
 }
 
 function pageMarkup(): string {
-  if (state.page === 'media') return `${mediaJobs.html()}${mediaPreviewPage()}`;
+  if (state.page === 'media') return `${featureAvailable('media_jobs_supported') ? mediaJobs.html() : '<p class="notice-card">Recurring media backups are unavailable for this agent.</p>'}${mediaPreviewPage()}`;
   if (!state.status) return `<div class="loading-panel"><div class="spinner"></div><p>Checking Raiun agent…</p></div>`;
   if (state.page === 'overview') return overviewPage();
   if (state.page === 'folders') return foldersPage();
@@ -684,7 +688,7 @@ function overviewPage() {
   const reachable = state.agentReachable;
   const errors = (state.status?.error ? 1 : 0) + attentionCount();
   const running = state.transfers.filter(item => ['queued', 'running', 'retry_wait', 'verifying'].includes((item.state || '').toLowerCase())).length;
-  return `<div class="welcome-row"><div><div class="eyebrow">YOUR FILES, IN RHYTHM</div><h1>Good to see you.</h1><p class="lede">Your cloud files and sync folders, together in one place.</p></div><button class="button primary" data-action="add-pair" ${connected && providerEnabled ? '' : 'disabled'}>${svg('plus')} Add sync folder</button></div>
+  return `<div class="welcome-row"><div><div class="eyebrow">YOUR FILES, IN RHYTHM</div><h1>Good to see you.</h1><p class="lede">Your cloud files and sync folders, together in one place.</p></div><button class="button primary" data-action="add-pair" ${connected && featureAvailable('folder_sync_supported') ? '' : 'disabled'}>${svg('plus')} Add sync folder</button></div>
     ${connection === 'unavailable' ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Raiun agent isn't available</b><p>${esc(state.status?.error || 'Start the Raiun background agent to connect this window to your account. Your settings will appear here once it is running.')}</p></div><button class="button subtle" data-action="refresh">Try again</button></div>` : connection === 'offline_reconnecting' ? `<div class="notice-card offline"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>Working offline — reconnecting to server</b><p>Your existing offline session is still available. Raiun will retry the connection; you do not need to sign in again.</p></div><button class="button subtle" data-action="refresh">Retry connection</button></div>` : connection === 'sign_in' ? `<div class="notice-card"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>Connect your OpenCloud account</b><p>Sign in using your organization’s OpenCloud server. Raiun will open the sign-in page in your browser.</p>${signInPending ? `<div class="signin-pending" role="status">Raiun is waiting for sign-in to finish in your browser.<button class="button subtle" data-action="cancel-sign-in" ${state.mutationBusy ? 'disabled' : ''}>Cancel sign-in</button></div>` : `<div class="signin-server"><input id="server-address" data-server value="${esc(state.server)}" placeholder="https://cloud.example.com" aria-label="OpenCloud server address"/><input id="client-id" data-client-id value="${esc(state.clientId)}" placeholder="Automatic client ID" aria-label="OAuth client ID override (optional)"/><button class="button primary" data-action="sign-in">Sign in ${svg('chevron')}</button></div>`}</div></div>` : ''}
     <div class="section-heading"><div><h2>At a glance</h2><p>A live view from your Raiun agent.</p></div>${connected ? `<span class="live-pill"><i></i> LIVE</span>` : ''}</div>
     <div class="stats-grid"><article class="stat-card"><div class="stat-label">SYNC FOLDERS</div><div class="stat-value">${reachable && connected && providerEnabled ? state.pairs.length : '—'}</div><div class="stat-foot">${!providerEnabled ? 'Windows drive support is not enabled' : !reachable ? 'Connect the agent to see folders' : connected ? 'Connected folder pairs' : connection === 'offline_reconnecting' ? 'Reconnecting to server' : 'Sign in to load your folders'}</div><span class="stat-icon teal">${svg('folders')}</span></article><article class="stat-card"><div class="stat-label">ACTIVE TRANSFERS</div><div class="stat-value">${reachable && connected && providerEnabled ? running : '—'}</div><div class="stat-foot">${!providerEnabled ? 'Transfer status is unavailable' : !reachable ? 'Connect the agent to see transfers' : connected ? (running ? 'Work in progress' : 'Nothing in progress') : connection === 'offline_reconnecting' ? 'Reconnecting to server' : 'Sign in to load transfers'}</div><span class="stat-icon blue">${svg('transfers')}</span></article><button class="stat-card stat-card-button" data-action="show-attention" ${reachable && (connected || !!state.status?.error) ? '' : 'disabled'} aria-label="Show ${errors} items needing attention"><div class="stat-label">NEEDS ATTENTION</div><div class="stat-value ${errors ? 'attention-value' : ''}">${reachable && (connected || state.status?.error) ? errors : '—'}</div><div class="stat-foot">${!reachable ? 'Connect the agent to see status' : state.status?.error ? 'Open settings to review this issue' : connected ? (errors ? 'Review items below' : 'No issues reported') : connection === 'offline_reconnecting' ? 'Working offline' : 'Sign in to load status'}</div><span class="stat-icon ${errors ? 'amber' : 'green'}">${svg(errors ? 'alert' : 'check')}</span></button></div>
@@ -699,12 +703,12 @@ function offlineAvailabilityCard() {
   return `<section class="offline-availability-card"><div class="offline-availability-icon">${svg('download')}</div><div class="offline-availability-copy"><b>Offline files</b><span>${!providerEnabled ? 'Offline file access is unavailable because the Windows drive is not enabled.' : cache.available ? 'Choose files or folders to keep available offline. Raiun stores copies on this computer and must stay running to serve them from the drive.' : 'Offline storage is not available for this account yet.'}</span>${cache.available ? `<small>${esc(formatBytes(cache.used_bytes))} used of ${esc(formatBytes(cache.quota_bytes))} · ${esc(formatBytes(cache.pinned_bytes))} pinned</small>` : ''}</div><button class="button ${cache.available ? 'primary' : 'subtle'}" data-action="open-offline-files" ${providerEnabled && cache.available && state.status?.connected && !accountSwitchDisabled() ? '' : 'disabled'}>Manage offline files</button></section>`;
 }
 function encryptedAccessCard() {
-  const providerEnabled = providerAvailable(state.status?.provider_supported);
-  return `<section class="encrypted-access-card"><div class="encrypted-access-icon">${svg('lock')}</div><div class="encrypted-access-copy"><b>Encrypted files</b><span>${providerEnabled ? 'Unlock an encrypted Space or folder to browse it. This does not add a sync folder.' : 'Encrypted browsing is unavailable because the Windows drive is not enabled.'}</span></div><button class="button primary" data-action="open-encrypted-access" ${providerEnabled && state.agentReachable && !accountSwitchDisabled() ? '' : 'disabled'}>Unlock encrypted files</button></section>`;
+  const providerEnabled = featureAvailable('vaults_supported');
+  return `<section class="encrypted-access-card"><div class="encrypted-access-icon">${svg('lock')}</div><div class="encrypted-access-copy"><b>Encrypted files</b><span>${providerEnabled ? 'Unlock an encrypted Space or folder to browse it. This does not add a sync folder.' : 'Encrypted browsing is unavailable for this agent.'}</span></div><button class="button primary" data-action="open-encrypted-access" ${providerEnabled && state.agentReachable && !accountSwitchDisabled() ? '' : 'disabled'}>Unlock encrypted files</button></section>`;
 }
 function foldersPage() {
   const connected = state.status?.connected === true;
-  const providerEnabled = providerAvailable(state.status?.provider_supported);
+  const providerEnabled = featureAvailable('folder_sync_supported');
   const connection = connectionMode(state.agentReachable, state.status);
   const groups = folderPairGroups();
   return `<div class="page-title-row"><div><div class="eyebrow">STAY IN SYNC</div><h1>Synced Folders</h1><p class="lede">Choose folders on this computer and where they belong in OpenCloud.</p></div><button class="button primary" data-action="add-pair" ${connected && providerEnabled ? '' : 'disabled'}>${svg('plus')} Add sync folder</button></div>
@@ -728,7 +732,7 @@ function spacePairGroup(spaceId: string, pairs: Pair[]) {
   const paused = state.status?.paused_space_ids?.includes(spaceId) === true;
   const globalPaused = state.status?.paused === true;
   const busy = state.spaceActionBusy[spaceId];
-  const controlsUnavailable = !state.agentReachable || !providerAvailable(state.status?.provider_supported) || state.status?.connected !== true || state.mutationBusy > 0 || Boolean(busy);
+  const controlsUnavailable = !state.agentReachable || !featureAvailable('folder_sync_supported') || state.status?.connected !== true || state.mutationBusy > 0 || Boolean(busy);
   const syncUnavailable = controlsUnavailable || globalPaused || paused;
   const title = spaceName(spaceId);
   const pauseLabel = busy === 'pause' ? 'Updating…' : paused ? 'Resume folder sync' : 'Pause folder sync';
@@ -741,7 +745,7 @@ function spacePairGroup(spaceId: string, pairs: Pair[]) {
       : paused
         ? 'Resume folder sync for this Space before queueing it.'
         : 'Queue an immediate sync for this Space.';
-  return `<section class="space-sync-group" aria-labelledby="space-sync-${esc(spaceId)}"><header class="space-sync-header"><div class="space-sync-title"><span class="space-sync-icon">${svg('cloud')}</span><div><div class="eyebrow">FOLDER SYNC</div><h2 id="space-sync-${esc(spaceId)}">${esc(title)}</h2><span class="space-sync-state ${paused || globalPaused ? 'paused' : ''}">${syncStateLabel}</span></div></div><div class="space-sync-controls"><button class="button subtle" data-action="space-toggle" data-space-id="${esc(spaceId)}" aria-label="${paused ? 'Resume' : 'Pause'} folder sync for ${esc(title)}" title="Pause or resume automatic folder sync for ${esc(title)}" ${controlsUnavailable ? 'disabled' : ''}>${pauseLabel}</button><button class="button primary" data-action="space-sync-now" data-space-id="${esc(spaceId)}" aria-label="Sync ${esc(title)} now" title="${esc(syncReason)}" ${syncUnavailable ? 'disabled' : ''}>${syncLabel}</button><button class="button subtle danger-hover" data-action="space-disconnect" data-space-id="${esc(spaceId)}" aria-label="Disconnect folder sync for ${esc(title)}" title="Remove this Space’s folder-sync connections. Local and cloud files stay in place." ${controlsUnavailable || !pairs.length ? 'disabled' : ''}>${busy === 'disconnect' ? 'Disconnecting…' : 'Disconnect folder sync'}</button></div></header><p class="space-sync-note">Pausing waits for an active folder sync to finish. Mounted drive browsing and writes are unaffected.</p><div class="pair-list page-pair-list">${pairs.map(folderPairCard).join('')}</div></section>`;
+  return `<section class="space-sync-group" aria-labelledby="space-sync-${esc(spaceId)}"><header class="space-sync-header"><div class="space-sync-title"><span class="space-sync-icon">${svg('cloud')}</span><div><div class="eyebrow">FOLDER SYNC</div><h2 id="space-sync-${esc(spaceId)}">${esc(title)}</h2><span class="space-sync-state ${paused || globalPaused ? 'paused' : ''}">${syncStateLabel}</span></div></div><div class="space-sync-controls"><button class="button subtle" data-action="space-toggle" data-space-id="${esc(spaceId)}" aria-label="${paused ? 'Resume' : 'Pause'} folder sync for ${esc(title)}" title="Pause or resume automatic folder sync for ${esc(title)}" ${controlsUnavailable || !featureAvailable('pause_supported') ? 'disabled' : ''}>${pauseLabel}</button><button class="button primary" data-action="space-sync-now" data-space-id="${esc(spaceId)}" aria-label="Sync ${esc(title)} now" title="${esc(syncReason)}" ${syncUnavailable ? 'disabled' : ''}>${syncLabel}</button><button class="button subtle danger-hover" data-action="space-disconnect" data-space-id="${esc(spaceId)}" aria-label="Disconnect folder sync for ${esc(title)}" title="Remove this Space’s folder-sync connections. Local and cloud files stay in place." ${controlsUnavailable || !pairs.length ? 'disabled' : ''}>${busy === 'disconnect' ? 'Disconnecting…' : 'Disconnect folder sync'}</button></div></header><p class="space-sync-note">Pausing waits for an active folder sync to finish. Mounted drive browsing and writes are unaffected.</p><div class="pair-list page-pair-list">${pairs.map(folderPairCard).join('')}</div></section>`;
 }
 function folderPairCard(pair: Pair) {
   const panel = state.conflicts[pair.id];
@@ -749,7 +753,7 @@ function folderPairCard(pair: Pair) {
 }
 function pairCard(pair: Pair, includeReview = false) {
   const title = spaceName(pair.space_id);
-  const providerEnabled = providerAvailable(state.status?.provider_supported);
+  const providerEnabled = featureAvailable('folder_sync_supported');
   const mode = pair.mode === 'two_way' ? 'Two-way' : pair.mode === 'upload_only' ? 'Upload only' : 'Download only';
   const review = includeReview ? `<button class="small-action quiet" data-review-pair="${esc(pair.id)}" ${providerEnabled && state.status?.connected === true ? '' : 'disabled'}>${state.conflicts[pair.id]?.opened ? 'Hide conflicts' : 'Review conflicts'}</button>` : '';
   const vaultAction = pair.vault ? `<button class="small-action quiet vault-manage" data-vault-pair="${esc(pair.id)}">${svg('lock')} Encryption</button>` : '';
@@ -779,7 +783,7 @@ function conflictCard(pair: Pair, item: Conflict) {
   return `<article class="conflict-card"><div class="conflict-file">${svg('alert')}<div><b>${esc(lastPath(item.path))}</b><small>${esc(item.path)}</small></div></div><p class="conflict-description">Local and cloud versions both changed. Pick one to keep.</p><div class="conflict-actions"><button class="button subtle" data-resolve-conflict="keep_local" data-pair-id="${esc(pair.id)}" data-path="${esc(item.path)}" data-local-hash="${esc(item.local_hash)}" data-remote-etag="${esc(item.remote_etag)}" ${localDisabled ? 'disabled' : ''}>Keep local</button><button class="button subtle" data-resolve-conflict="keep_remote" data-pair-id="${esc(pair.id)}" data-path="${esc(item.path)}" data-local-hash="${esc(item.local_hash)}" data-remote-etag="${esc(item.remote_etag)}" ${remoteDisabled ? 'disabled' : ''}>Keep cloud</button></div>${pair.mode === 'download_only' ? '<small class="conflict-mode-note">Keep local is unavailable for download-only pairs.</small>' : pair.mode === 'upload_only' ? '<small class="conflict-mode-note">Keep cloud is unavailable for upload-only pairs.</small>' : ''}</article>`;
 }
 function emptyFolders() {
-  if (!providerAvailable(state.status?.provider_supported)) return `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Windows folder sync is unavailable</b><p>The account is connected, but this Windows agent cannot load or run folder sync yet. No folder list or transfer state is available.</p></div></div>`;
+  if (!featureAvailable('folder_sync_supported')) return `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Windows folder sync is unavailable</b><p>The account is connected, but this Windows agent cannot load or run folder sync yet. No folder list or transfer state is available.</p></div></div>`;
   return `<div class="empty-card"><span class="empty-icon">${svg('folders')}</span><h3>No sync folders yet</h3><p>Add an existing folder and choose its place in OpenCloud. The folder stays on your computer.</p><button class="button primary" data-action="add-pair" ${state.status?.connected ? '' : 'disabled'}>${svg('plus')} Add your first folder</button></div>`;
 }
 function pendingOfflineWritesSection() {
@@ -821,7 +825,7 @@ function pendingOfflineWritesSection() {
   return `<section class="pending-writes-card"><div class="pending-writes-heading"><div><h2>Offline edits</h2>${summary}<p>These are retained local edit records. Their status does not confirm a cloud change. Retry uploads checks the cloud version first; changed versions stay for review. Save local copy exports a separate file and leaves the saved edit here.</p></div><button class="button subtle" data-action="refresh-pending-writes" ${pendingWritesUi.loading ? 'disabled' : ''}>${pendingWritesUi.loading ? 'Checking…' : loadedForAccount ? 'Refresh list' : 'Check saved edits'}</button></div>${pendingWritesUi.error ? `<div class="pending-writes-error" role="alert">${esc(pendingWritesUi.error)}</div>` : ''}${pendingWritesUi.loading && !pendingWritesUi.items.length ? `<div class="pending-writes-empty" role="status"><span class="spinner"></span> Checking saved edits…</div>` : !loadedForAccount ? `<div class="pending-writes-empty">Check for local edits waiting to upload.</div>` : total === 0 && !pendingWritesUi.truncated ? `<div class="pending-writes-empty" role="status">No saved edits are waiting to upload or review.</div>` : `${pendingWritesUi.truncated ? '<div class="pending-writes-warning" role="status">The list is limited; load more to see additional saved edits.</div>' : ''}${rows || '<div class="pending-writes-empty">No items on this page.</div>'}${pendingWritesUi.nextAfter ? `<div class="pending-writes-more"><button class="button subtle" data-action="more-pending-writes" ${pendingWritesUi.loading ? 'disabled' : ''}>${pendingWritesUi.loading ? 'Loading…' : 'Load more'}</button></div>` : ''}`}</section>`;
 }
 function transfersPage() {
-  const providerEnabled = providerAvailable(state.status?.provider_supported);
+  const providerEnabled = featureAvailable('folder_sync_supported');
   const connection = connectionMode(state.agentReachable, state.status);
   const filters = [['active', 'Active'], ['attention', 'Needs attention'], ['history', 'History']] as const;
   const matching = state.transfers.filter(item => {
@@ -834,11 +838,11 @@ function transfersPage() {
     <div class="filter-tabs" role="tablist">${filters.map(([key,label]) => `<button class="filter-tab ${state.transferFilter === key ? 'active' : ''}" data-filter="${key}">${label}${key === 'attention' && attentionCount() ? `<span class="tab-badge">${attentionCount()}</span>` : ''}</button>`).join('')}</div>
     ${windowsOfflineFilesCard()}
     ${windowsOfflineFoldersCard()}
-    ${state.agentReachable ? pendingOfflineWritesSection() : ''}
-    ${state.agentReachable ? encryptedOperationsTransferSection() : ''}
-    ${state.agentReachable ? encryptedRetryLatestSection() : ''}
-    ${state.agentReachable ? encryptedEditsTransferSection() : ''}
-    ${!providerEnabled ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Transfer status is unavailable</b><p>The Windows agent is reachable and your account status remains available, but drive sync and transfer reporting are not enabled.</p></div></div>` : state.agentReachable && state.status?.connected ? matching.length ? `<div class="transfer-list">${matching.map(transferCard).join('')}</div>` : `<div class="empty-card transfer-empty"><span class="empty-icon">${svg(state.transferFilter === 'attention' ? 'check' : 'transfers')}</span><h3>${state.transferFilter === 'attention' ? 'Nothing needs attention' : state.transferFilter === 'history' ? 'No transfer history yet' : 'No active transfers'}</h3><p>${state.transferFilter === 'active' ? 'New folder sync activity will appear here when the agent reports it.' : state.transferFilter === 'attention' ? 'Raiun has not reported any blocked transfers.' : 'Completed and cancelled transfers will be listed here.'}</p></div>` : connection === 'unavailable' ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Transfer status is unavailable</b><p>Start the Raiun agent to see transfer activity.</p></div><button class="button subtle" data-action="refresh">Refresh</button></div>` : connection === 'offline_reconnecting' ? `<div class="notice-card offline"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>Working offline — reconnecting to server</b><p>Transfer history will refresh when Raiun reconnects.</p></div><button class="button subtle" data-action="refresh">Retry connection</button></div>` : `<div class="notice-card"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>Sign in to see transfer activity</b><p>Connect your OpenCloud account to load transfer status.</p></div><button class="button primary" data-action="sign-in">Sign in</button></div>`}`;
+    ${!isWindowsAgentStatus(state.status) && state.agentReachable ? pendingOfflineWritesSection() : ''}
+    ${featureAvailable('vaults_supported') && state.agentReachable ? encryptedOperationsTransferSection() : ''}
+    ${featureAvailable('vaults_supported') && state.agentReachable ? encryptedRetryLatestSection() : ''}
+    ${featureAvailable('vaults_supported') && state.agentReachable ? encryptedEditsTransferSection() : ''}
+    ${!providerEnabled ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Transfer status is unavailable</b><p>Folder-sync transfer reporting is unavailable for this agent. Supported cloud-drive offline controls remain available above.</p></div></div>` : state.agentReachable && state.status?.connected ? matching.length ? `<div class="transfer-list">${matching.map(transferCard).join('')}</div>` : `<div class="empty-card transfer-empty"><span class="empty-icon">${svg(state.transferFilter === 'attention' ? 'check' : 'transfers')}</span><h3>${state.transferFilter === 'attention' ? 'Nothing needs attention' : state.transferFilter === 'history' ? 'No transfer history yet' : 'No active transfers'}</h3><p>${state.transferFilter === 'active' ? 'New folder sync activity will appear here when the agent reports it.' : state.transferFilter === 'attention' ? 'Raiun has not reported any blocked transfers.' : 'Completed and cancelled transfers will be listed here.'}</p></div>` : connection === 'unavailable' ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Transfer status is unavailable</b><p>Start the Raiun agent to see transfer activity.</p></div><button class="button subtle" data-action="refresh">Refresh</button></div>` : connection === 'offline_reconnecting' ? `<div class="notice-card offline"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>Working offline — reconnecting to server</b><p>Transfer history will refresh when Raiun reconnects.</p></div><button class="button subtle" data-action="refresh">Retry connection</button></div>` : `<div class="notice-card"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>Sign in to see transfer activity</b><p>Connect your OpenCloud account to load transfer status.</p></div><button class="button primary" data-action="sign-in">Sign in</button></div>`}`;
 }
 function validateVaultEditLatest(value: unknown, spaceId: string, rootResourceId: string): VaultEditLatestResult {
   if (!value || typeof value !== 'object') throw new Error('The agent returned an invalid encrypted retry status.');
@@ -1383,7 +1387,7 @@ function resetEncryptedRetryLatestUi() {
   encryptedRetryLatestUi.accountEpoch = state.accountEpoch;
 }
 async function refreshEncryptedRetryLatestStatuses(forceOperations = false) {
-  if (!providerAvailable(state.status?.provider_supported)) {
+  if (!featureAvailable('vaults_supported')) {
     encryptedRetryLatestUi.discoveryError = 'Encrypted retry status is unavailable for this Windows agent.';
     render();
     return;
@@ -1542,7 +1546,7 @@ function transferCard(item: Transfer) {
   return `<article class="transfer-card"><span class="transfer-direction ${isUpload ? 'up' : 'down'}">${svg(isUpload ? 'arrowUp' : 'arrowDown')}</span><div class="transfer-main"><div class="transfer-title"><b>${esc(lastPath(subject))}</b><span class="transfer-status ${issue ? 'issue' : ''}">${esc(statusLabel)}</span></div><div class="transfer-meta">${esc(origin)}${historyAccount} <span>·</span> ${esc(item.space_id ? spaceName(item.space_id) : 'OpenCloud')}${byteText ? `<span>·</span> ${esc(byteText)}` : ''}</div>${item.error ? `<p class="transfer-error">${esc(item.error)}</p>` : ''}</div><div class="transfer-actions">${issue && item.origin === 'folder_pair' ? `<button class="small-action" data-action="sync-now">Rescan folders</button>` : ''}</div></article>`;
 }
 async function loadPendingOfflineWrites(reset: boolean) {
-  if (!providerAvailable(state.status?.provider_supported)) {
+  if (isWindowsAgentStatus(state.status) || !providerAvailable(state.status?.provider_supported)) {
     pendingWritesUi.error = 'Saved-edit status is unavailable for this Windows agent. Existing local copies remain in place.';
     render();
     return;
@@ -1604,7 +1608,7 @@ async function loadPendingOfflineWrites(reset: boolean) {
   }
 }
 async function retryPendingOfflineWrites(spaceId: string) {
-  if (!providerAvailable(state.status?.provider_supported)) return;
+  if (isWindowsAgentStatus(state.status) || !providerAvailable(state.status?.provider_supported)) return;
   const epoch = state.accountEpoch;
   const profileId = state.selectedAccount;
   if (!state.status?.connected || !spaceId || pendingWritesUi.retryingSpaces.has(spaceId)) return;
@@ -1717,7 +1721,7 @@ async function pollPendingReconcile(expected: { job_id: string; space_id: string
 async function loadNetworkProxySettings(force = false) {
   if (!state.agentReachable || proxyUi.loading) return;
   const epoch = state.accountEpoch;
-  if (!providerAvailable(state.status?.provider_supported)) {
+  if (isWindowsAgentStatus(state.status) || !providerAvailable(state.status?.provider_supported)) {
     proxyUi.error = 'Proxy settings are unavailable for this Windows agent.';
     proxyUi.loadedEpoch = epoch;
     render();
@@ -1803,7 +1807,7 @@ async function saveNetworkProxySettings() {
 async function loadBandwidthSettings(force = false) {
   if (!state.agentReachable || bandwidthUi.loading) return;
   const epoch = state.accountEpoch;
-  if (!providerAvailable(state.status?.provider_supported)) {
+  if (isWindowsAgentStatus(state.status) || !providerAvailable(state.status?.provider_supported)) {
     bandwidthUi.error = 'Transfer limits are unavailable for this Windows agent.';
     bandwidthUi.loadedEpoch = epoch;
     render();
@@ -1884,7 +1888,7 @@ async function saveBandwidthLimits() {
 }
 
 function bandwidthSettingsCard() {
-  const providerEnabled = providerAvailable(state.status?.provider_supported);
+  const providerEnabled = !isWindowsAgentStatus(state.status) && providerAvailable(state.status?.provider_supported);
   const canEdit = providerEnabled && state.agentReachable && !state.accountSwitching && state.mutationBusy === 0 &&
     !state.status?.authenticating && bandwidthUi.loadedEpoch === state.accountEpoch && Boolean(bandwidthUi.accountId) && !bandwidthUi.loading && !bandwidthUi.saving;
   const status = bandwidthUi.loading
@@ -1902,7 +1906,7 @@ function bandwidthSettingsCard() {
 }
 
 function networkProxySettingsCard(connected: boolean, connection: ReturnType<typeof connectionMode>) {
-  const providerEnabled = providerAvailable(state.status?.provider_supported);
+  const providerEnabled = !isWindowsAgentStatus(state.status) && providerAvailable(state.status?.provider_supported);
   const active = proxyUi.config.mode === 'system'
     ? 'System proxy'
     : proxyUi.config.mode === 'direct'
@@ -1956,14 +1960,14 @@ function settingsPage() {
       ? `<div class="recovery-empty" role="status" aria-live="polite">${recoveryPage.warning_count || recoveryPage.unrecognized_entries ? 'No recognized saved copies were listed. Review the scan warnings above.' : 'No saved upload copies. Nothing to review.'}</div>`
       : '';
   return `<div class="page-title-row"><div><div class="eyebrow">PREFERENCES</div><h1>Settings</h1><p class="lede">Manage how Raiun works on this computer.</p></div></div>
-    <div class="settings-stack"><section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('cloud')}</span><div><h2>${esc(selectedAccountLabel())}</h2><p>Sign-in and sync folders for this account.${providerEnabled ? ' Other accounts keep syncing in the background.' : ''}</p></div></div><div class="settings-row account-settings-row"><div><b>${connection === 'unavailable' ? 'Agent status' : connection === 'offline_reconnecting' ? 'Working offline' : connected ? 'Connected server' : 'Sign in to OpenCloud'}</b><small>${connection === 'unavailable' ? 'The Raiun agent is not reachable' : connection === 'offline_reconnecting' ? 'Raiun is reconnecting to the server. Your offline session remains available.' : connected ? esc(state.status?.server || 'This account is connected') : `Sign in to connect ${selectedAccountLabel()}`}</small>${settingsSignIn}</div><div class="button-group"><button class="button subtle" data-action="refresh">${connection === 'offline_reconnecting' ? 'Retry connection' : 'Refresh'}</button>${connected ? `<button class="button subtle" data-action="logout" title="Sign out of ${esc(selectedAccountLabel())}">Sign out</button>` : ''}</div></div></section>
+    <div class="settings-stack"><section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('cloud')}</span><div><h2>${esc(selectedAccountLabel())}</h2><p>Sign-in and sync folders for this account.${featureAvailable('account_switch_supported') ? ' Other accounts keep syncing in the background.' : ''}</p></div></div><div class="settings-row account-settings-row"><div><b>${connection === 'unavailable' ? 'Agent status' : connection === 'offline_reconnecting' ? 'Working offline' : connected ? 'Connected server' : 'Sign in to OpenCloud'}</b><small>${connection === 'unavailable' ? 'The Raiun agent is not reachable' : connection === 'offline_reconnecting' ? 'Raiun is reconnecting to the server. Your offline session remains available.' : connected ? esc(state.status?.server || 'This account is connected') : `Sign in to connect ${selectedAccountLabel()}`}</small>${settingsSignIn}</div><div class="button-group"><button class="button subtle" data-action="refresh">${connection === 'offline_reconnecting' ? 'Retry connection' : 'Refresh'}</button>${connected ? `<button class="button subtle" data-action="logout" title="Sign out of ${esc(selectedAccountLabel())}">Sign out</button>` : ''}</div></div></section>
     <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('folder')}</span><div><h2>Cloud drive</h2><p>${providerEnabled ? 'This account’s OpenCloud location in the computer’s file manager. Save files inside Personal or a writable Space; the top-level folder is read-only.' : 'Windows cloud drive support is not enabled. Choosing a folder saves its setup, but does not mount or sync files.'}</p></div></div><div class="settings-row"><div><b>Mount status</b><small>${!providerEnabled ? state.status?.cloud_root ? `Configured but disconnected at ${esc(state.status.cloud_root)}` : 'Windows cloud drive is not mounted' : (connected || connection === 'offline_reconnecting') && state.status?.cloud_root ? `${state.status.mounted ? 'Mounted at' : 'Configured at'} ${esc(state.status.cloud_root)}` : 'No cloud drive location reported for this account'}</small></div><div class="button-group"><button class="button subtle" data-action="mount" ${providerEnabled && connected ? '' : 'disabled'}>Mount</button><button class="button subtle" data-action="unmount" ${providerEnabled && connected ? '' : 'disabled'}>Unmount</button></div></div><div class="settings-row"><div><b>Choose location</b><small>Pick this account’s directory for the OpenCloud drive.</small></div><button class="button subtle" data-action="configure-root" ${state.agentReachable && connected ? '' : 'disabled'}>Choose folder</button></div></section>
     ${networkProxySettingsCard(connected, connection)}
     ${bandwidthSettingsCard()}
-    <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('lock')}</span><div><h2>Encrypted files</h2><p>${providerEnabled ? 'Unlock an encrypted Space or folder to browse it. This does not add a sync folder; use Synced Folders to set up syncing.' : 'Encrypted file browsing is unavailable until Windows cloud drive support is enabled.'}</p></div></div><div class="settings-row"><div><b>Browse encrypted files</b><small>Choose a Space, then unlock an encrypted location. Offline edits, when available, apply only to supported operations in this unlocked location.</small></div><button class="button primary" data-action="open-encrypted-access" ${providerEnabled && state.agentReachable && !accountSwitchDisabled() ? '' : 'disabled'}>Unlock encrypted files</button></div></section>
+    <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('lock')}</span><div><h2>Encrypted files</h2><p>${featureAvailable('vaults_supported') ? 'Unlock an encrypted Space or folder to browse it. This does not add a sync folder; use Synced Folders to set up syncing.' : 'Encrypted file browsing is unavailable for this agent.'}</p></div></div><div class="settings-row"><div><b>Browse encrypted files</b><small>Choose a Space, then unlock an encrypted location. Offline edits, when available, apply only to supported operations in this unlocked location.</small></div><button class="button primary" data-action="open-encrypted-access" ${featureAvailable('vaults_supported') && state.agentReachable && !accountSwitchDisabled() ? '' : 'disabled'}>Unlock encrypted files</button></div></section>
     ${windowsAgent ? windowsRecoverySettingsCard() : `<section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('folder')}</span><div><h2>Saved upload copies</h2><p>Raiun keeps local copies while uploads are pending or in progress.</p></div></div><div class="settings-row"><div><b>Saved copies</b><small>Review the local and OpenCloud paths. Viewing does not restore, upload, or delete files.</small></div><div class="button-group"><button class="button subtle" data-action="open-recovery" ${canOpenRecoveryFolder ? '' : 'disabled'}>Open folder</button><button class="button primary" data-action="load-recoveries" ${canInspectRecoveries && !state.recoveryLoading ? '' : 'disabled'}>${state.recoveryLoading ? 'Checking…' : recoveryPage ? 'Refresh list' : 'View saved copies'}</button></div></div>${!state.agentReachable ? `<p class="recovery-hint">Raiun is not connected.</p>` : !state.status?.recovery_folder ? `<p class="recovery-hint">No upload-copy folder is linked to this account yet. You can still check for saved copies; sign in to associate future copies with this account.</p>` : ''}${state.recoveryError ? `<div class="recovery-warning" role="alert">${esc(state.recoveryError)}</div>` : ''}${state.recoveryLoading ? `<div class="recovery-loading" role="status" aria-live="polite"><span class="spinner"></span> Checking saved copies…</div>` : ''}${recoveryNotice}${recoveryRows}${recoveryPage?.next_after && !state.recoveryLoading ? `<div class="recovery-more"><button class="button subtle" data-action="more-recoveries">Load more</button></div>` : ''}</section>${encryptedEditRecoveryCard()}`}
-    <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('play')}</span><div><h2>Startup</h2><p>Start Raiun when you sign in to this computer.</p></div></div><div class="settings-row"><div><b>Launch at login</b><small>${!providerEnabled ? 'Startup setting is unavailable for this Windows agent' : state.autostart == null ? 'Current setting is not reported by the agent' : state.autostart ? 'Raiun will start at login' : 'Raiun will not start at login'}</small></div><button class="button ${state.autostart ? 'subtle' : 'primary'}" data-action="toggle-autostart" ${providerEnabled && connected ? '' : 'disabled'}>${state.autostart ? 'Disable' : 'Enable'}</button></div></section>
-    <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('pause')}</span><div><h2>Sync activity</h2><p>Pause background work across your folder pairs.</p></div></div><div class="settings-row"><div><b>${!providerEnabled ? 'Windows folder sync is unavailable' : connection === 'offline_reconnecting' ? 'Working offline' : !connected ? 'Sign in to enable sync' : state.status?.paused ? 'Sync is paused' : 'Sync is enabled'}</b><small>${!providerEnabled ? 'This agent cannot start or pause folder sync until drive support is enabled.' : connection === 'offline_reconnecting' ? 'Raiun will retry the server connection; no new sign-in is needed.' : 'The current file may finish first. Opening cloud files can still use the network.'}</small></div><button class="button subtle" data-action="toggle-pause" ${providerEnabled && connected ? '' : 'disabled'}>${state.status?.paused ? 'Resume sync' : 'Pause sync'}</button></div></section>
+    <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('play')}</span><div><h2>Startup</h2><p>Start Raiun when you sign in to this computer.</p></div></div><div class="settings-row"><div><b>Launch at login</b><small>${!providerEnabled ? 'Startup setting is unavailable for this Windows agent' : state.autostart == null ? 'Current setting is not reported by the agent' : state.autostart ? 'Raiun will start at login' : 'Raiun will not start at login'}</small></div><button class="button ${state.autostart ? 'subtle' : 'primary'}" data-action="toggle-autostart" ${providerEnabled && connected && typeof state.autostart === 'boolean' ? '' : 'disabled'}>${state.autostart ? 'Disable' : 'Enable'}</button></div></section>
+    <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('pause')}</span><div><h2>Sync activity</h2><p>Pause background work across your folder pairs.</p></div></div><div class="settings-row"><div><b>${!featureAvailable('pause_supported') ? 'Windows folder sync is unavailable' : connection === 'offline_reconnecting' ? 'Working offline' : !connected ? 'Sign in to enable sync' : state.status?.paused ? 'Sync is paused' : 'Sync is enabled'}</b><small>${!featureAvailable('pause_supported') ? 'This agent does not support pausing folder sync.' : connection === 'offline_reconnecting' ? 'Raiun will retry the server connection; no new sign-in is needed.' : 'The current file may finish first. Opening cloud files can still use the network.'}</small></div><button class="button subtle" data-action="toggle-pause" ${featureAvailable('pause_supported') && connected ? '' : 'disabled'}>${state.status?.paused ? 'Resume sync' : 'Pause sync'}</button></div></section>
     <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('alert')}</span><div><h2>Diagnostics</h2><p>Export a redacted summary for the selected account with app version, platform, configuration counts, and connection status. It omits account identifiers, folder paths, credentials, and logs.</p></div></div><div class="settings-row"><div><b>Local support report</b><small>Choose a new file location. Existing files are never replaced.</small></div><button class="button subtle" data-action="export-diagnostics" ${!isTauri() || state.nativeDialogBusy ? 'disabled' : ''}>${state.nativeDialogBusy ? 'Preparing…' : 'Export report'}</button></div></section></div>`;
 }
 function windowsRecoverySettingsCard() {
@@ -2357,7 +2361,7 @@ function vaultDialog() {
 
 function bind() {
   mediaJobs.bind(app);
-  app.querySelectorAll<HTMLElement>('[data-page]').forEach(el => el.addEventListener('click', () => { state.page = el.dataset.page as Page; if (state.page === 'media') void mediaJobs.refresh(); if (state.page === 'settings') { void loadNetworkProxySettings(); void loadBandwidthSettings(); } if (state.page === 'transfers') { render(); void loadPendingOfflineWrites(true); void loadEncryptedEditRecoveries(true); void refreshEncryptedRetryLatestStatuses(); } else { stopEncryptedRetryLatestPolling(); render(); } }));
+  app.querySelectorAll<HTMLElement>('[data-page]').forEach(el => el.addEventListener('click', () => { state.page = el.dataset.page as Page; if (state.page === 'media') void mediaJobs.refresh(); if (state.page === 'settings') { void loadNetworkProxySettings(); void loadBandwidthSettings(); } if (state.page === 'transfers') { render(); if (!isWindowsAgentStatus(state.status)) void loadPendingOfflineWrites(true); if (featureAvailable('vaults_supported')) { void loadEncryptedEditRecoveries(true); void refreshEncryptedRetryLatestStatuses(); } } else { stopEncryptedRetryLatestPolling(); render(); } }));
   app.querySelector('#refresh')?.addEventListener('click', () => void refresh(true, true));
   app.querySelectorAll<HTMLButtonElement>('[data-account-id]').forEach(el => el.addEventListener('click', () => { if (el.dataset.accountId) void switchAccount(el.dataset.accountId); }));
   app.querySelectorAll<HTMLElement>('[data-action]').forEach(el => el.addEventListener('click', () => void handleAction(el.dataset.action || '', el)));
@@ -2602,9 +2606,9 @@ async function handleAction(action: string, element?: HTMLElement) {
   switch (action) {
     case 'refresh': await refresh(true, true); break;
     case 'load-network-proxy': await loadNetworkProxySettings(true); break;
-    case 'save-network-proxy': if (providerAvailable(state.status?.provider_supported)) await saveNetworkProxySettings(); break;
+    case 'save-network-proxy': if (!isWindowsAgentStatus(state.status) && providerAvailable(state.status?.provider_supported)) await saveNetworkProxySettings(); break;
     case 'load-bandwidth-limits': await loadBandwidthSettings(true); break;
-    case 'save-bandwidth-limits': if (providerAvailable(state.status?.provider_supported)) await saveBandwidthLimits(); break;
+    case 'save-bandwidth-limits': if (!isWindowsAgentStatus(state.status) && providerAvailable(state.status?.provider_supported)) await saveBandwidthLimits(); break;
     case 'show-attention':
       if (state.status?.error) state.page = 'settings';
       else { state.page = 'transfers'; state.transferFilter = 'attention'; }
@@ -2626,8 +2630,8 @@ async function handleAction(action: string, element?: HTMLElement) {
     }
     case 'run-media-preview': await runMediaPreview(); break;
     case 'refresh-spaces': await loadSpaces(true); break;
-    case 'open-add-account': if (!providerAvailable(state.status?.provider_supported)) return; state.addAccountOpen = true; state.addAccountStep = 'details'; state.addAccountLabel = ''; state.addAccountRoot = ''; state.addAccountServer = ''; state.addAccountClientId = ''; state.addAccountAuthMessage = ''; state.addAccountAuthStarted = false; state.addAccountError = ''; state.addAccountCreatedId = ''; state.accountsError = ''; render(); break;
-    case 'open-encrypted-access': if (providerAvailable(state.status?.provider_supported)) await openEncryptedAccess(); break;
+    case 'open-add-account': if (!featureAvailable('account_switch_supported')) return; state.addAccountOpen = true; state.addAccountStep = 'details'; state.addAccountLabel = ''; state.addAccountRoot = ''; state.addAccountServer = ''; state.addAccountClientId = ''; state.addAccountAuthMessage = ''; state.addAccountAuthStarted = false; state.addAccountError = ''; state.addAccountCreatedId = ''; state.accountsError = ''; render(); break;
+    case 'open-encrypted-access': if (featureAvailable('vaults_supported')) await openEncryptedAccess(); break;
     case 'open-offline-files': if (providerAvailable(state.status?.provider_supported)) await openOfflineFiles(); break;
     case 'refresh-pending-writes': await loadPendingOfflineWrites(true); break;
     case 'refresh-windows-offline-folders': await windowsOfflineFoldersPanel.load(true); break;
@@ -2695,7 +2699,7 @@ async function handleAction(action: string, element?: HTMLElement) {
       break;
     }
     case 'save-account': await addAccount(); break;
-    case 'add-pair': if (!providerAvailable(state.status?.provider_supported) || !state.status?.connected) return; state.pickerGeneration++; state.pickerPurpose = 'pair'; state.vaultAccessOpen = false; state.addOpen = true; state.message = ''; state.localPath = ''; state.spaceId = state.spaces.find(space => space.personal && space.writable && !space.encrypted)?.id || ''; state.remotePath = ''; state.vaultBinding = null; state.vaultWritable = false; state.mode = 'two_way'; render(); void loadSpaces(); break;
+    case 'add-pair': if (!featureAvailable('folder_sync_supported') || !state.status?.connected) return; state.pickerGeneration++; state.pickerPurpose = 'pair'; state.vaultAccessOpen = false; state.addOpen = true; state.message = ''; state.localPath = ''; state.spaceId = state.spaces.find(space => space.personal && space.writable && !space.encrypted)?.id || ''; state.remotePath = ''; state.vaultBinding = null; state.vaultWritable = false; state.mode = 'two_way'; render(); void loadSpaces(); break;
     case 'close-add': closeAdd(); break;
     case 'choose-local': {
       const epoch = state.accountEpoch;
@@ -2729,11 +2733,11 @@ async function handleAction(action: string, element?: HTMLElement) {
       if (await confirmAccountAction(`Sign out of ${selectedAccountLabel()}? Its local files stay on this computer, while this account’s cloud drive stops mounting.`) && isCurrentAccount(epoch, profileId)) await run('logout', {});
       break;
     }
-    case 'toggle-pause': if (providerAvailable(state.status?.provider_supported) && state.status) await run('pause', { paused: !state.status.paused }); break;
+    case 'toggle-pause': if (featureAvailable('pause_supported') && state.status) await run('pause', { paused: !state.status.paused }); break;
     case 'space-toggle': if (element?.dataset.spaceId) await toggleSpacePause(element.dataset.spaceId); break;
     case 'space-sync-now': if (element?.dataset.spaceId) await queueSpaceSync(element.dataset.spaceId); break;
     case 'space-disconnect': if (element?.dataset.spaceId) await disconnectSpaceFolderSync(element.dataset.spaceId); break;
-    case 'sync-now': if (providerAvailable(state.status?.provider_supported)) await run('sync_now', {}); break;
+    case 'sync-now': if (featureAvailable('folder_sync_supported')) await run('sync_now', {}); break;
     case 'mount': if (providerAvailable(state.status?.provider_supported)) await run('mount', {}); break;
     case 'unmount': if (providerAvailable(state.status?.provider_supported)) await run('unmount', {}); break;
     case 'open-cloud': if (state.status?.cloud_root) await openAccountFolder('open_cloud_folder'); break;
@@ -2775,7 +2779,7 @@ async function handleAction(action: string, element?: HTMLElement) {
       break;
     }
     case 'toggle-autostart': {
-      if (!providerAvailable(state.status?.provider_supported)) return;
+      if (!providerAvailable(state.status?.provider_supported) || typeof state.autostart !== 'boolean') return;
       const epoch = state.accountEpoch;
       const enabled = state.autostart !== true;
       await run('set_autostart', { enabled });
@@ -2858,7 +2862,7 @@ async function openEncryptedEditRecoveryFolder() {
   }
 }
 async function loadEncryptedEditRecoveries(reset: boolean) {
-  if (!providerAvailable(state.status?.provider_supported)) {
+  if (!featureAvailable('vaults_supported')) {
     state.encryptedEditRecoveryError = 'Encrypted recovery listing is unavailable for this Windows agent. Existing recovery data remains in place.';
     render();
     return;
@@ -2916,7 +2920,7 @@ function validateEncryptedEditRecoveryPage(value: EncryptedEditRecoveryPage): En
   return value;
 }
 async function loadRecoveries(reset: boolean) {
-  if (!providerAvailable(state.status?.provider_supported)) {
+  if (isWindowsAgentStatus(state.status) || !providerAvailable(state.status?.provider_supported)) {
     state.recoveryError = 'Saved-copy listing is unavailable for this Windows agent. Existing recovery data remains in place.';
     render();
     return;
@@ -2997,7 +3001,7 @@ async function cancelSignIn() {
   }
 }
 async function loadSpaces(force = false) {
-  if (!providerAvailable(state.status?.provider_supported)) return;
+  if (!featureAvailable('folder_sync_supported') && !featureAvailable('media_jobs_supported') && !featureAvailable('vaults_supported')) return;
   if (!state.status?.connected || state.spacesLoading) return;
   const epoch = state.accountEpoch;
   const serverKey = state.status.server?.trim() || '__connected__';
@@ -3026,7 +3030,7 @@ async function loadSpaces(force = false) {
   }
 }
 async function openEncryptedAccess() {
-  if (!providerAvailable(state.status?.provider_supported) || !state.agentReachable || accountSwitchDisabled()) return;
+  if (!featureAvailable('vaults_supported') || !state.agentReachable || accountSwitchDisabled()) return;
   const epoch = state.accountEpoch;
   state.pickerGeneration++;
   state.pickerOpen = false;
@@ -3059,6 +3063,7 @@ function closeEncryptedAccess() {
 }
 function cachedVaultRootKey(root: CachedVaultRoot) { return JSON.stringify([root.space_id, root.root_resource_id]); }
 async function loadCachedVaultRoots(reset: boolean) {
+  if (!featureAvailable('vaults_supported')) return;
   if (!state.vaultAccessOpen || cachedVaultRootsUi.loading) return;
   if (cachedVaultRootsUi.accountEpoch !== state.accountEpoch) reset = true;
   const epoch = state.accountEpoch;
@@ -4487,6 +4492,7 @@ async function createRemoteFolder() {
   }
 }
 async function savePair() {
+  if (!featureAvailable('folder_sync_supported')) return;
   const epoch = state.accountEpoch;
   const mode = state.mode;
   const selectedSpace = state.spaces.find(space => space.id === state.spaceId);
@@ -4499,10 +4505,10 @@ async function savePair() {
   render();
 }
 async function removePair(id: string) {
-  if (!providerAvailable(state.status?.provider_supported)) return;
+  if (!featureAvailable('folder_sync_supported')) return;
   const epoch = state.accountEpoch;
   const profileId = state.selectedAccount;
-  if (!await confirmAccountAction('Remove this folder pair? The local and cloud files will stay in place.') || !isCurrentAccount(epoch, profileId) || !providerAvailable(state.status?.provider_supported) || !state.pairs.some(pair => pair.id === id)) return;
+  if (!await confirmAccountAction('Remove this folder pair? The local and cloud files will stay in place.') || !isCurrentAccount(epoch, profileId) || !featureAvailable('folder_sync_supported') || !state.pairs.some(pair => pair.id === id)) return;
   await run('pair_remove', { id });
   if (!isCurrentAccount(epoch)) return;
   if (!state.error) { pairExclusionsUi.open.delete(id); pairExclusionsUi.drafts.delete(id); pairExclusionsUi.errors.delete(id); state.message = 'Folder pair removed.'; await refresh(); }
@@ -4650,7 +4656,7 @@ function isStaleConflictError(message: string) {
   return /stale|changed since|no longer matches|conflict.*changed/i.test(message);
 }
 async function transferAction(action: 'retry'|'cancel', id: string) {
-  if (!providerAvailable(state.status?.provider_supported)) return;
+  if (!featureAvailable('folder_sync_supported')) return;
   const epoch = state.accountEpoch;
   await run(action, { id });
   if (!isCurrentAccount(epoch)) return;
@@ -4668,7 +4674,7 @@ async function run(action: string, args: Record<string, unknown>) {
 }
 function isStaleAccountRequest(error: unknown) { return error instanceof StaleAccountRequest; }
 async function toggleSpacePause(spaceId: string) {
-  if (!providerAvailable(state.status?.provider_supported) || !state.agentReachable || state.status?.connected !== true || state.mutationBusy > 0 || state.spaceActionBusy[spaceId]) return;
+  if (!featureAvailable('folder_sync_supported') || !featureAvailable('pause_supported') || !state.agentReachable || state.status?.connected !== true || state.mutationBusy > 0 || state.spaceActionBusy[spaceId]) return;
   const epoch = state.accountEpoch;
   const paused = state.status.paused_space_ids?.includes(spaceId) !== true;
   state.spaceActionBusy[spaceId] = 'pause';
@@ -4692,7 +4698,7 @@ async function toggleSpacePause(spaceId: string) {
 async function queueSpaceSync(spaceId: string) {
   const globallyPaused = state.status?.paused === true;
   const spacePaused = state.status?.paused_space_ids?.includes(spaceId) === true;
-  if (!providerAvailable(state.status?.provider_supported) || !state.agentReachable || state.status?.connected !== true || globallyPaused || spacePaused || state.mutationBusy > 0 || state.spaceActionBusy[spaceId]) return;
+  if (!featureAvailable('folder_sync_supported') || !state.agentReachable || state.status?.connected !== true || globallyPaused || spacePaused || state.mutationBusy > 0 || state.spaceActionBusy[spaceId]) return;
   const epoch = state.accountEpoch;
   state.spaceActionBusy[spaceId] = 'sync';
   state.mutationBusy++;
@@ -4713,7 +4719,7 @@ async function queueSpaceSync(spaceId: string) {
   }
 }
 async function disconnectSpaceFolderSync(spaceId: string) {
-  if (!providerAvailable(state.status?.provider_supported) || !state.agentReachable || state.status?.connected !== true || state.mutationBusy > 0 || state.spaceActionBusy[spaceId]) return;
+  if (!featureAvailable('folder_sync_supported') || !state.agentReachable || state.status?.connected !== true || state.mutationBusy > 0 || state.spaceActionBusy[spaceId]) return;
   const pairs = state.pairs.filter(pair => pair.space_id === spaceId);
   if (!pairs.length) return;
   const title = spaceName(spaceId);
@@ -4722,7 +4728,7 @@ async function disconnectSpaceFolderSync(spaceId: string) {
   const pairIds = pairs.map(pair => pair.id).sort();
   if (!await confirmAccountAction(`Disconnect folder sync for ${title}? This removes all folder-sync connections for this Space. Local files and cloud files stay in place. Account and cloud-drive browsing, and media backups, remain connected.`) || !isCurrentAccount(epoch, profileId)) return;
   const currentPairIds = state.pairs.filter(pair => pair.space_id === spaceId).map(pair => pair.id).sort();
-  if (!providerAvailable(state.status?.provider_supported) || !state.agentReachable || state.status?.connected !== true || state.mutationBusy > 0 || state.spaceActionBusy[spaceId] || currentPairIds.length !== pairIds.length || currentPairIds.some((id, index) => id !== pairIds[index])) return;
+  if (!featureAvailable('folder_sync_supported') || !state.agentReachable || state.status?.connected !== true || state.mutationBusy > 0 || state.spaceActionBusy[spaceId] || currentPairIds.length !== pairIds.length || currentPairIds.some((id, index) => id !== pairIds[index])) return;
   state.spaceActionBusy[spaceId] = 'disconnect';
   state.mutationBusy++;
   state.error = ''; state.message = '';
@@ -4928,7 +4934,7 @@ async function syncAccountsForSelection(profileId: string): Promise<void> {
   throw new Error('Raiun could not confirm the selected account. Refresh and try again.');
 }
 async function switchAccount(profileId: string) {
-  if (!profileId || profileId === state.selectedAccount || accountSwitchDisabled()) return;
+  if (!featureAvailable('account_switch_supported') || !profileId || profileId === state.selectedAccount || accountSwitchDisabled()) return;
   const targetLabel = state.accounts.find(account => account.id === profileId)?.label || 'account';
   state.accountSwitching = true;
   state.accountSwitchTarget = profileId;
@@ -4979,6 +4985,7 @@ function closeAccountSetup() {
   render();
 }
 async function beginNewAccountSignIn() {
+  if (!featureAvailable('account_switch_supported')) return;
   const normalized = normalizeServerAddress(state.addAccountServer);
   if (!normalized.ok) throw new Error(normalized.error);
   state.addAccountServer = normalized.server;
@@ -4992,7 +4999,7 @@ async function beginNewAccountSignIn() {
     : 'Sign-in page opened. Approve access in your browser, then return here.';
 }
 async function addAccount() {
-  if (!providerAvailable(state.status?.provider_supported)) return;
+  if (!featureAvailable('account_switch_supported')) return;
   if (state.addAccountBusy) return;
   const label = state.addAccountLabel.trim();
   const cloudRoot = state.addAccountRoot.trim();
@@ -5036,6 +5043,7 @@ async function addAccount() {
   }
 }
 async function retryAccountSignIn() {
+  if (!featureAvailable('account_switch_supported')) return;
   if (state.addAccountBusy || !state.addAccountCreatedId || state.addAccountStep !== 'waiting') return;
   state.addAccountBusy = true;
   state.mutationBusy++;
@@ -5054,6 +5062,7 @@ async function retryAccountSignIn() {
   }
 }
 async function retryAccountMount() {
+  if (!featureAvailable('account_switch_supported')) return;
   if (state.addAccountBusy || state.status?.connected !== true || state.status.mounted === true) return;
   const epoch = state.accountEpoch;
   state.addAccountBusy = true;
@@ -5202,7 +5211,7 @@ async function initialize() {
       if (destination === 'folders' || destination === 'transfers') {
         state.page = destination;
         render();
-        if (destination === 'transfers') { void loadPendingOfflineWrites(true); void loadEncryptedEditRecoveries(true); void refreshEncryptedRetryLatestStatuses(); }
+        if (destination === 'transfers') { if (!isWindowsAgentStatus(state.status)) void loadPendingOfflineWrites(true); if (featureAvailable('vaults_supported')) { void loadEncryptedEditRecoveries(true); void refreshEncryptedRetryLatestStatuses(); } }
       }
     } catch (error) {
       state.error = `Could not check for pending tray navigation: ${messageOf(error)}`;
@@ -5265,6 +5274,7 @@ async function refresh(showError = true, forceSpacesRefresh = false) {
       state.status.provider_supported,
       state.status.connected,
       action => request(action),
+      state.status.folder_sync_supported,
     );
     state.pairs = syncData.pairs;
     state.transfers = syncData.transfers;
@@ -5308,7 +5318,7 @@ function formatBytes(bytes: number) { if (bytes < 1024) return `${bytes} B`; con
 function activeCount() { return state.transfers.filter(t => ['queued','running','retry_wait','verifying'].includes((t.state || '').toLowerCase())).length; }
 function attentionCount() { return state.transfers.filter(t => ['failed','conflict','awaiting_authentication'].includes((t.state || '').toLowerCase())).length; }
 
-void listen<string>('navigate', event => { if (['folders','transfers'].includes(event.payload)) { state.page = event.payload as Page; render(); if (state.page === 'transfers') { void loadPendingOfflineWrites(true); void loadEncryptedEditRecoveries(true); void refreshEncryptedRetryLatestStatuses(); } else stopEncryptedRetryLatestPolling(); } });
+void listen<string>('navigate', event => { if (['folders','transfers'].includes(event.payload)) { state.page = event.payload as Page; render(); if (state.page === 'transfers') { if (!isWindowsAgentStatus(state.status)) void loadPendingOfflineWrites(true); if (featureAvailable('vaults_supported')) { void loadEncryptedEditRecoveries(true); void refreshEncryptedRetryLatestStatuses(); } } else stopEncryptedRetryLatestPolling(); } });
 void listen<{ source?: string; action?: string }>('raiun:status-changed', async event => {
   const passiveTrayPoll = event.payload?.source === 'tray' && !event.payload.action;
   if (passiveTrayPoll && passiveRefreshBlocked()) {

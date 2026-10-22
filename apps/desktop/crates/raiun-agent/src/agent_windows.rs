@@ -826,6 +826,13 @@ impl ProviderManager {
         self.connected.load(Ordering::Acquire)
     }
 
+    fn activation_enabled(&self) -> bool {
+        let enabled = WINDOWS_PROVIDER_ACTIVATION_ENABLED;
+        #[cfg(all(test, debug_assertions))]
+        let enabled = enabled || self.lifecycle_test_activation.load(Ordering::Acquire);
+        enabled
+    }
+
     fn authorize_generation(&self, generation: u64) {
         self.offline_jobs
             .cancel_and_authorize(&self.authorized_generation, generation);
@@ -1103,6 +1110,7 @@ impl WindowsAgent {
     fn status(&self) -> Result<Value, String> {
         self.maybe_start_refresh()?;
         let mounted = self.provider.is_connected();
+        let provider_supported = self.provider.activation_enabled();
         let state = self
             .state
             .lock()
@@ -1124,7 +1132,7 @@ impl WindowsAgent {
                 "registration_state": value.registration_ownership.as_ref().map(|owner| owner.state.as_str()),
                 "recovery_scope_token": self.provider.configuration_recovery_scope_token(value, state.active_generation).ok(),
             })),
-            "error": state.error.as_deref().or(Some(PROVIDER_UNAVAILABLE)),
+            "error": state.error.as_deref().or_else(|| (!provider_supported).then_some(PROVIDER_UNAVAILABLE)),
             "autostart": null,
             "recovery_folder": null,
             "encrypted_edit_recovery_available": false,
@@ -1132,7 +1140,12 @@ impl WindowsAgent {
             "profile_id": "default",
             "profile_label": "This PC",
             "auth_generation": state.active_generation,
-            "provider_supported": false,
+            "provider_supported": provider_supported,
+            "folder_sync_supported": false,
+            "media_jobs_supported": false,
+            "vaults_supported": false,
+            "account_switch_supported": false,
+            "pause_supported": false,
             "authenticating": state.authenticating,
             "refreshing": state.refreshing,
             "session_expires_at": session.map(|value| value.expires_at),
@@ -1667,13 +1680,37 @@ impl WindowsAgent {
         drop(state);
         drop(root_lease);
         Self::maybe_connect_provider(&self.session_store, &self.state, &self.provider)?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?;
+        let current = state
+            .root_configuration
+            .as_ref()
+            .filter(|current| {
+                current.server == configuration.server
+                    && current.client_id == configuration.client_id
+                    && current.path == configuration.path
+                    && current.volume_serial == configuration.volume_serial
+                    && current.file_index == configuration.file_index
+                    && current
+                        .registration_ownership
+                        .as_ref()
+                        .map(|owner| &owner.account_id)
+                        == configuration
+                            .registration_ownership
+                            .as_ref()
+                            .map(|owner| &owner.account_id)
+            })
+            .filter(|_| state.active_generation == generation)
+            .ok_or("The account or root changed while connecting the drive folder")?;
         Ok(json!({
             "configured": true,
-            "cloud_root": configuration.path,
-            "mounted": false,
-            "provider_supported": false,
-            "root_identity_bound": configuration.registration_ownership.is_some(),
-            "registration_state": "prepared_not_registered",
+            "cloud_root": current.path,
+            "mounted": self.provider.is_connected(),
+            "provider_supported": self.provider.activation_enabled(),
+            "root_identity_bound": current.registration_ownership.is_some(),
+            "registration_state": current.registration_ownership.as_ref().map(|owner| owner.state.as_str()),
         }))
     }
 
@@ -1686,11 +1723,7 @@ impl WindowsAgent {
         state: &Arc<Mutex<AccountState>>,
         provider: &Arc<ProviderManager>,
     ) -> Result<(), String> {
-        let activation_enabled = WINDOWS_PROVIDER_ACTIVATION_ENABLED;
-        #[cfg(all(test, debug_assertions))]
-        let activation_enabled =
-            activation_enabled || provider.lifecycle_test_activation.load(Ordering::Acquire);
-        if activation_enabled {
+        if provider.activation_enabled() {
             let has_ready_root = state.lock().is_ok_and(|state| {
                 state.online_authenticated
                     && !state.authenticating
@@ -10444,6 +10477,29 @@ mod tests {
         assert_eq!(status["mounted"], false);
         assert_eq!(status["provider_supported"], false);
         assert_eq!(status["error"], PROVIDER_UNAVAILABLE);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn windows_drive_capability_does_not_claim_unimplemented_controls() {
+        let agent = Arc::new(WindowsAgent::new(MemoryStore::default()));
+        agent
+            .provider
+            .lifecycle_test_activation
+            .store(true, Ordering::Release);
+        let status = agent.status().unwrap();
+        assert_eq!(status["provider_supported"], true);
+        assert_eq!(status["mounted"], false);
+        assert!(status["error"].is_null());
+        for capability in [
+            "folder_sync_supported",
+            "media_jobs_supported",
+            "vaults_supported",
+            "account_switch_supported",
+            "pause_supported",
+        ] {
+            assert_eq!(status[capability], false);
+        }
     }
 
     #[test]
