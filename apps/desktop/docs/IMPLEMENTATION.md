@@ -10,6 +10,17 @@ below are historical engineering evidence, not semantic release versions or
 claims that each workflow is verified on this beta. Local evidence/output paths
 refer to maintainer archives that are not part of this public source tree.
 
+## Next-release Windows save-back work — 23 October 2026 JST
+
+Windows save-back now has a fresh, read-only verification result that binds the
+protected edit metadata to an exact current remote resource, strong ETag, size
+and content hash, with authorization checked again after readback. An upload
+success or cached journal outcome cannot construct this result. This change
+does not acknowledge a local placeholder or retire a journal entry. The current
+backend lease, exact journal record, guarded local file and durable catalog/native
+update still need to be joined before production activation. Focused portable
+tests and Linux source gates pass; native Windows verification remains pending.
+
 ## Next-release media recovery preparation — 22 October 2026 JST
 
 New media upload attempts retain the destination root resource identity alongside

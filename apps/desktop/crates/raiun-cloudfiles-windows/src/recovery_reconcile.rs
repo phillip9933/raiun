@@ -307,6 +307,122 @@ pub enum ReconciliationIssue {
     ResponseInconsistent,
 }
 
+/// Fresh read-only proof that one exact protected edit matches its remote
+/// object/version. Fields are private so an upload outcome alone cannot mint
+/// acknowledgement authority. This value is not serializable or cloneable.
+/// It is not sufficient acknowledgement authority by itself: the current
+/// prepared backend/lease and exact journal record must also match. It does not
+/// acknowledge a local placeholder or retire a recovery record.
+pub struct VerifiedEditReadback {
+    metadata: crate::LocalEditMetadata,
+    version: RecoveryRemoteVersion,
+}
+
+impl VerifiedEditReadback {
+    pub fn metadata(&self) -> &crate::LocalEditMetadata {
+        &self.metadata
+    }
+
+    pub fn remote_version(&self) -> &RecoveryRemoteVersion {
+        &self.version
+    }
+}
+
+impl std::fmt::Debug for VerifiedEditReadback {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("VerifiedEditReadback([BOUND])")
+    }
+}
+
+/// Verify the current remote version without uploading or changing the journal.
+/// The caller must retain the active account/root lease through verification
+/// and subsequent local acknowledgement. Native acknowledgement must separately
+/// reopen the captured local file and prove its identity and content unchanged.
+pub fn verify_edit_readback(
+    record: &LocalEditRecord,
+    expected_scope: &EditJournalScope,
+    remote: &dyn RecoveryRemote,
+) -> Result<VerifiedEditReadback, ReconciliationOutcome> {
+    if !valid_record_for_scope(record, expected_scope)
+        || record.metadata.local_file.volume_serial != expected_scope.root_volume_serial
+        || record.metadata.local_file.file_index == 0
+    {
+        return Err(ReconciliationOutcome::Conflict(
+            ReconciliationIssue::InvalidRecord,
+        ));
+    }
+    if remote.server_origin() != Some(expected_scope.server_origin.as_str()) {
+        return Err(ReconciliationOutcome::Conflict(
+            ReconciliationIssue::ScopeMismatch,
+        ));
+    }
+    if remote.ensure_authorized(expected_scope).is_err() {
+        return Err(ReconciliationOutcome::Deferred);
+    }
+    let baseline = record
+        .metadata
+        .remote
+        .as_ref()
+        .filter(|baseline| !baseline.resource_id.is_empty() && valid_strong_etag(&baseline.etag))
+        .ok_or(ReconciliationOutcome::Conflict(
+            ReconciliationIssue::MissingStrongBaseline,
+        ))?;
+    let path = record.metadata.relative_path.as_str();
+    let before = remote.stat(expected_scope, path).map_err(|error| {
+        if error.kind == ErrorKind::NotFound {
+            ReconciliationOutcome::Conflict(ReconciliationIssue::RemoteObjectMissing)
+        } else {
+            ReconciliationOutcome::Deferred
+        }
+    })?;
+    match validate_version(&before, &baseline.resource_id) {
+        VersionCheck::WrongObject => {
+            return Err(ReconciliationOutcome::Conflict(
+                ReconciliationIssue::RemoteObjectChanged,
+            ));
+        }
+        VersionCheck::NotWritable => {
+            return Err(ReconciliationOutcome::Conflict(
+                ReconciliationIssue::RemoteNotWritable,
+            ));
+        }
+        VersionCheck::Valid => {}
+    }
+    if before.size != record.metadata.content_len {
+        return Err(ReconciliationOutcome::Conflict(
+            ReconciliationIssue::ContentMismatch,
+        ));
+    }
+    let body = remote
+        .readback(
+            expected_scope,
+            path,
+            &baseline.resource_id,
+            Some(&before.etag),
+            MAX_RECOVERY_UPLOAD_BYTES,
+        )
+        .map_err(|_| ReconciliationOutcome::Ambiguous)?;
+    if body.version != before || body.content().len() as u64 != before.size {
+        return Err(ReconciliationOutcome::Conflict(
+            ReconciliationIssue::ResponseInconsistent,
+        ));
+    }
+    if body.content().len() > MAX_RECOVERY_UPLOAD_BYTES
+        || digest_hex(body.content()) != record.metadata.content_sha256
+    {
+        return Err(ReconciliationOutcome::Conflict(
+            ReconciliationIssue::ContentMismatch,
+        ));
+    }
+    if remote.ensure_authorized(expected_scope).is_err() {
+        return Err(ReconciliationOutcome::Deferred);
+    }
+    Ok(VerifiedEditReadback {
+        metadata: record.metadata.clone(),
+        version: body.version.clone(),
+    })
+}
+
 /// Safe result of one bounded reconciliation invocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReconciliationOutcome {
@@ -483,14 +599,7 @@ fn reconcile_recovered_edit_with_hook(
     remote: &dyn RecoveryRemote,
     mut before_upload: impl FnMut() -> bool,
 ) -> ReconciliationOutcome {
-    if &record.metadata.scope != expected_scope
-        || !valid_scope(expected_scope)
-        || record.metadata.generation == 0
-        || !valid_relative_path(&record.metadata.relative_path)
-        || record.metadata.content_len != record.content.len() as u64
-        || record.content.len() > MAX_RECOVERY_UPLOAD_BYTES
-        || record.metadata.content_sha256 != digest_hex(&record.content)
-    {
+    if !valid_record_for_scope(record, expected_scope) {
         return ReconciliationOutcome::Conflict(ReconciliationIssue::InvalidRecord);
     }
     if remote.server_origin() != Some(expected_scope.server_origin.as_str()) {
@@ -684,6 +793,16 @@ fn is_transient_transport(kind: ErrorKind) -> bool {
     matches!(kind, ErrorKind::Offline | ErrorKind::Io)
 }
 
+fn valid_record_for_scope(record: &LocalEditRecord, expected_scope: &EditJournalScope) -> bool {
+    &record.metadata.scope == expected_scope
+        && valid_scope(expected_scope)
+        && record.metadata.generation != 0
+        && valid_relative_path(&record.metadata.relative_path)
+        && record.metadata.content_len == record.content.len() as u64
+        && record.content.len() <= MAX_RECOVERY_UPLOAD_BYTES
+        && record.metadata.content_sha256 == digest_hex(&record.content)
+}
+
 fn valid_scope(scope: &EditJournalScope) -> bool {
     [
         &scope.profile_id,
@@ -802,6 +921,9 @@ mod tests {
         behaviors: Mutex<Vec<UploadBehavior>>,
         calls: Mutex<Vec<&'static str>>,
         fail_readback: bool,
+        revoke_after_readback: bool,
+        authorization_revoked: std::sync::atomic::AtomicBool,
+        readback_etag_override: Option<String>,
     }
 
     impl FakeRemote {
@@ -820,6 +942,9 @@ mod tests {
                 behaviors: Mutex::new(behaviors),
                 calls: Mutex::new(Vec::new()),
                 fail_readback,
+                revoke_after_readback: false,
+                authorization_revoked: std::sync::atomic::AtomicBool::new(false),
+                readback_etag_override: None,
             }
         }
 
@@ -838,6 +963,20 @@ mod tests {
     impl RecoveryRemote for FakeRemote {
         fn server_origin(&self) -> Option<&str> {
             Some(&self.origin)
+        }
+
+        fn ensure_authorized(&self, _scope: &EditJournalScope) -> Result<(), CloudError> {
+            if self
+                .authorization_revoked
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                Err(CloudError::new(
+                    ErrorKind::Unauthorized,
+                    "synthetic revocation",
+                ))
+            } else {
+                Ok(())
+            }
         }
 
         fn stat(
@@ -927,6 +1066,14 @@ mod tests {
             if content.len() > max_bytes {
                 return Err(CloudError::new(ErrorKind::InvalidResponse, "too large"));
             }
+            if self.revoke_after_readback {
+                self.authorization_revoked
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            let mut version = version;
+            if let Some(etag) = &self.readback_etag_override {
+                version.etag = etag.clone();
+            }
             Ok(RecoveryRemoteBody::new(version, content))
         }
     }
@@ -966,6 +1113,72 @@ mod tests {
             },
             content,
         }
+    }
+
+    #[test]
+    fn readback_proof_binds_exact_record_and_current_remote_without_upload() {
+        let scope = test_scope();
+        let record = test_record(&scope);
+        let remote = FakeRemote::new(Vec::new(), false);
+        remote.apply(&record.content);
+        let proof = verify_edit_readback(&record, &scope, &remote).unwrap();
+        assert_eq!(proof.metadata(), &record.metadata);
+        assert_eq!(proof.remote_version().etag, ETAG_UPDATED);
+        assert_eq!(proof.remote_version().resource_id, "remote-42");
+        assert_eq!(remote.calls(), ["stat", "readback"]);
+        assert_eq!(format!("{proof:?}"), "VerifiedEditReadback([BOUND])");
+    }
+
+    #[test]
+    fn readback_proof_rejects_other_scope_or_changed_local_snapshot() {
+        let scope = test_scope();
+        let mut record = test_record(&scope);
+        let remote = FakeRemote::new(Vec::new(), false);
+        let mut other = scope.clone();
+        other.account_subject.push('x');
+        assert_eq!(
+            verify_edit_readback(&record, &other, &remote).unwrap_err(),
+            ReconciliationOutcome::Conflict(ReconciliationIssue::InvalidRecord)
+        );
+        record.content[0] ^= 1;
+        assert_eq!(
+            verify_edit_readback(&record, &scope, &remote).unwrap_err(),
+            ReconciliationOutcome::Conflict(ReconciliationIssue::InvalidRecord)
+        );
+        assert!(remote.calls().is_empty());
+    }
+
+    #[test]
+    fn readback_proof_rejects_equal_length_remote_content_change() {
+        let scope = test_scope();
+        let record = test_record(&scope);
+        let remote = FakeRemote::new(Vec::new(), false);
+        remote.apply(&vec![b'x'; record.content.len()]);
+        assert_eq!(
+            verify_edit_readback(&record, &scope, &remote).unwrap_err(),
+            ReconciliationOutcome::Conflict(ReconciliationIssue::ContentMismatch)
+        );
+        assert_eq!(remote.calls(), ["stat", "readback"]);
+    }
+
+    #[test]
+    fn readback_proof_rejects_revocation_and_inconsistent_version() {
+        let scope = test_scope();
+        let record = test_record(&scope);
+        let mut revoked = FakeRemote::new(Vec::new(), false);
+        revoked.apply(&record.content);
+        revoked.revoke_after_readback = true;
+        assert_eq!(
+            verify_edit_readback(&record, &scope, &revoked).unwrap_err(),
+            ReconciliationOutcome::Deferred
+        );
+        let mut inconsistent = FakeRemote::new(Vec::new(), false);
+        inconsistent.apply(&record.content);
+        inconsistent.readback_etag_override = Some("\"different-version\"".into());
+        assert_eq!(
+            verify_edit_readback(&record, &scope, &inconsistent).unwrap_err(),
+            ReconciliationOutcome::Conflict(ReconciliationIssue::ResponseInconsistent)
+        );
     }
 
     #[test]

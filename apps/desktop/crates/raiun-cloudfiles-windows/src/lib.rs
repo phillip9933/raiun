@@ -45,7 +45,7 @@ pub use recovery_provider::{DurableEditRecoveryProvider, InitialEditReceipt};
 pub use recovery_reconcile::{
     MAX_RECOVERY_UPLOAD_ATTEMPTS, MAX_RECOVERY_UPLOAD_BYTES, OpenCloudRecoveryRemote,
     ReconciliationIssue, ReconciliationOutcome, RecoveryRemote, RecoveryRemoteBody,
-    RecoveryRemoteVersion,
+    RecoveryRemoteVersion, VerifiedEditReadback, verify_edit_readback,
 };
 
 #[cfg(windows)]
