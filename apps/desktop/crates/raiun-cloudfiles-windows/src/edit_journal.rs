@@ -37,6 +37,12 @@ const MAX_RECOVERY_EVENT_BYTES: usize = 16 * 1024;
 const MAX_RECOVERY_SCAN_RETRIES: usize = 3;
 const RECOVERY_EVENT_AAD_PREFIX: &[u8] = b"raiun/windows-edit-recovery-event/v1\0";
 static RECOVERY_EVENT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+// Windows publication opens the staged entry with DELETE access. Discovery
+// pins read handles without sharing delete, so those phases cannot overlap in
+// this agent. Scans never take the append/event locks: writers take those first
+// and acquire this lock only for the final publish, avoiding lock inversion.
+#[cfg(windows)]
+static JOURNAL_SCAN_PUBLICATION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Aggregate work allowance for read-only discovery, shared across journals.
 /// Retries consume the same allowance; exhausted scans return no partial page.
@@ -612,6 +618,11 @@ impl EditJournal {
         after_entry_name: &mut impl FnMut(&str),
         mut metadata_budget: Option<&mut MetadataScanBudget>,
     ) -> Result<RecoveryScan, JournalError> {
+        #[cfg(windows)]
+        let _scan_publication = JOURNAL_SCAN_PUBLICATION_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| JournalError::Io)?;
         let mut records = Vec::new();
         let mut incomplete_staging_files = 0usize;
         let mut recovered_bytes = 0u64;
@@ -1706,6 +1717,11 @@ impl JournalDirectoryGuard {
         destination: &std::ffi::OsStr,
         expected: JournalFileIdentity,
     ) -> Result<(), JournalError> {
+        #[cfg(windows)]
+        let _scan_publication = JOURNAL_SCAN_PUBLICATION_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| JournalError::Io)?;
         self.verify_path()?;
         #[cfg(windows)]
         {

@@ -255,8 +255,18 @@ identities fail closed. The same held stream and saved nonzero USN are passed to
 the conditional in-sync call; there is no unconditional or zero-USN fallback.
 No dehydration, truncation, path-based deletion or journal retirement occurs.
 If post-completion validation fails, recovery remains even if the OS has already
-accepted the in-sync state. The initial native handoff and durable resolved-state
-integration remain separate requirements; production activation stays disabled.
+accepted the in-sync state. The fresh handoff carries the actual pinned local
+location independently of the remote path. Successful native postchecks append
+an exact-record protected local-acknowledgement event under the same publication
+permit; encrypted bodies remain retained. Production activation stays disabled.
+
+Windows journal scans and atomic staged-file publication share an in-process
+mutex. Scanners retain no-delete read handles, while publication needs DELETE
+access for its pinned rename; those phases must not overlap in the agent.
+Writers acquire append/event locks before this mutex, and scanners never acquire
+those writer locks. Staging writes remain outside it. This adds no delete sharing
+and makes no cross-process serialization claim; external contention still fails
+closed and preserves recovery.
 
 These contracts follow [CfSetInSyncState](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfsetinsyncstate)
 and [FSCTL_READ_FILE_USN_DATA](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_read_file_usn_data).
