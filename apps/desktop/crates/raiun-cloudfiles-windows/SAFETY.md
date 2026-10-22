@@ -235,3 +235,29 @@ The API behavior and layouts are based on Microsoft's documentation for
 [CfExecute](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfexecute),
 [CfGetPlatformInfo](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfgetplatforminfo), and the
 [sync policy documentation](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/ns-cfapi-cf_sync_policies).
+
+
+The verified-edit completion boundary uses the existing account publication gate
+and token-generation permit through both durable catalog refresh and
+`CfSetInSyncState`. Its prepared capability can refresh only an existing opaque
+identity's ETag/size, retaining the account/root/path/resource tuple. A busy
+binding-state mutex fails without waiting while that permit is held.
+
+Before completion, the native path pins the no-follow registered root, ancestors
+and exact file, compares its opaque Cloud Files identity, and opens the ordinary
+stream excluding write/delete sharing. It reads a nonzero file USN before a
+fresh full-content hash against the protected snapshot, then requires unchanged
+USN and metadata. This fresh local revalidation permits a reopened handle after
+upload; merely sampling a new USN without rehashing would be insufficient.
+`FSCTL_READ_FILE_USN_DATA` uses a bounded aligned output buffer and accepts only
+well-sized V2 records with the exact 64-bit file ID. Unsupported/zero USNs and V3
+identities fail closed. The same held stream and saved nonzero USN are passed to
+the conditional in-sync call; there is no unconditional or zero-USN fallback.
+No dehydration, truncation, path-based deletion or journal retirement occurs.
+If post-completion validation fails, recovery remains even if the OS has already
+accepted the in-sync state. The initial native handoff and durable resolved-state
+integration remain separate requirements; production activation stays disabled.
+
+These contracts follow [CfSetInSyncState](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfsetinsyncstate)
+and [FSCTL_READ_FILE_USN_DATA](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_read_file_usn_data).
+Source review and compilation do not establish runtime Cloud Files acceptance.

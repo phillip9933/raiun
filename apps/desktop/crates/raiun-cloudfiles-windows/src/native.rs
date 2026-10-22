@@ -632,6 +632,12 @@ unsafe extern "system" {
         hydrate_flags: u32,
         overlapped: *mut c_void,
     ) -> HResult;
+    fn CfSetInSyncState(
+        file_handle: Handle,
+        in_sync_state: u32,
+        in_sync_flags: u32,
+        in_sync_usn: *mut i64,
+    ) -> HResult;
     fn CfUpdatePlaceholder(
         file_handle: Handle,
         fs_metadata: *const CfFsMetadata,
@@ -680,6 +686,16 @@ unsafe extern "system" {
         token_information: *mut c_void,
         token_information_length: u32,
         return_length: *mut u32,
+    ) -> i32;
+    fn DeviceIoControl(
+        device: Handle,
+        control_code: u32,
+        input: *const c_void,
+        input_len: u32,
+        output: *mut c_void,
+        output_len: u32,
+        returned: *mut u32,
+        overlapped: *mut c_void,
     ) -> i32;
     fn GetLastError() -> u32;
     fn CloseHandle(handle: Handle) -> i32;
@@ -1592,6 +1608,115 @@ impl OwnedConfiguredRoot {
 
 #[allow(dead_code)]
 impl ConfiguredRootConnection {
+    pub(super) fn acknowledge_verified_edit(
+        &self,
+        local_components: &[&str],
+        publication: &crate::VerifiedEditPublication<'_, '_>,
+    ) -> Result<(), Error> {
+        if !self.connected
+            || local_components.is_empty()
+            || local_components
+                .iter()
+                .any(|component| !valid_component(component))
+        {
+            return Err(Error::ConnectionStateInvalid);
+        }
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        let recovery = self
+            .state
+            .recovery
+            .as_ref()
+            .ok_or(Error::EditRecoveryUnavailable)?;
+        let metadata = publication.proof().metadata();
+        if recovery.provider_scope() != publication.provider_scope()
+            || metadata.generation != publication.provider_scope().token_generation()
+            || metadata.scope.root_volume_serial != root.identity.volume_serial
+            || metadata.scope.root_file_index != root.identity.file_index
+            || metadata.local_file.volume_serial != root.identity.volume_serial
+            || metadata.content_len > MAX_REQUEST_BYTES
+        {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        let mut path = root.path.clone();
+        for component in local_components {
+            path.push(component);
+        }
+        let (root_final, _ancestors, entry_guard, before) = pin_callback_path_chain(
+            &path,
+            root.identity,
+            metadata.local_file.file_index,
+            metadata.content_len,
+        )
+        .map_err(|_| Error::ConfiguredRootChanged)?;
+        if before.placeholder_state & CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK != 0 {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        let path_wide = wide_path(&path)?;
+        // The no-follow chain pins every name; this ordinary stream handle
+        // excludes both writers and deletion for the entire hash/publication/CAS.
+        let raw = unsafe {
+            CreateFileW(
+                path_wide.as_ptr(),
+                GENERIC_READ | FILE_READ_ATTRIBUTES | FILE_WRITE_DATA,
+                FILE_SHARE_READ,
+                null(),
+                OPEN_EXISTING,
+                0,
+                null_mut(),
+            )
+        };
+        if raw.is_null() || raw == INVALID_HANDLE_VALUE {
+            return Err(win32_io_error("open verified edit completion handle"));
+        }
+        // SAFETY: raw is newly owned and transferred exactly once to File.
+        let mut file = unsafe { std::fs::File::from_raw_handle(raw) };
+        let opened = root_snapshot(file.as_raw_handle())?;
+        let entry_final =
+            final_path_for_handle(entry_guard.0).map_err(|_| Error::ConfiguredRootChanged)?;
+        let opened_final = final_path_for_handle(file.as_raw_handle())
+            .map_err(|_| Error::ConfiguredRootChanged)?;
+        if !same_edit_snapshot(before, opened)
+            || !windows_paths_equal(&entry_final, &opened_final)
+            || !windows_path_is_within(&opened_final, &root_final)
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        verify_completion_identity(file.as_raw_handle(), publication.identity())?;
+        // This is a fresh local revalidation snapshot, not a blind new USN
+        // sampled after upload. Its full bytes must match the immutable record.
+        let mut saved_usn = completion_usn(file.as_raw_handle(), metadata.local_file.file_index)?;
+        let len =
+            usize::try_from(metadata.content_len).map_err(|_| Error::EditRecoveryUnavailable)?;
+        let mut bytes = Zeroizing::new(vec![0_u8; len]);
+        file.read_exact(&mut bytes)
+            .map_err(|error| io_error("read verified edit completion", error))?;
+        if crate::recovery_reconcile::digest_hex(&bytes) != metadata.content_sha256
+            || !same_edit_snapshot(opened, root_snapshot(file.as_raw_handle())?)
+            || completion_usn(file.as_raw_handle(), metadata.local_file.file_index)? != saved_usn
+        {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        // SAFETY: this held, identity-validated writable file belongs to the
+        // registered root. Nonzero saved_usn makes the OS reject intervening
+        // changes. Never retry with zero or replace the saved snapshot here.
+        publication.publish_and_complete(|| {
+            let result = unsafe { CfSetInSyncState(file.as_raw_handle(), 1, 0, &mut saved_usn) };
+            if result < 0 {
+                return Err(native_error("complete verified edit in-sync", result));
+            }
+            Ok(())
+        })?;
+        if saved_usn == 0 || root_snapshot(file.as_raw_handle())?.identity != opened.identity {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        Ok(())
+    }
     pub(super) fn take_initial_edit(&self) -> Result<Option<crate::PendingInitialEdit>, Error> {
         if !self.connected {
             return Err(Error::ConnectionStateInvalid);
@@ -6051,6 +6176,107 @@ fn read_open_file(handle: RawOwnedHandle, len: usize) -> Result<(Vec<u8>, RootSn
     })?;
     let snapshot = root_snapshot(file.as_raw_handle())?;
     Ok((bytes, snapshot))
+}
+
+fn same_edit_snapshot(left: RootSnapshot, right: RootSnapshot) -> bool {
+    left.identity == right.identity
+        && left.file_attributes == right.file_attributes
+        && left.reparse_tag == right.reparse_tag
+        && left.placeholder_state == right.placeholder_state
+        && left.file_size == right.file_size
+        && left.last_write_time == right.last_write_time
+}
+
+fn verify_completion_identity(handle: Handle, expected: &[u8; 16]) -> Result<(), Error> {
+    const IDENTITY_OFFSET: usize = 28;
+    let mut storage = [0_u64; 8];
+    let mut returned = 0_u32;
+    // SAFETY: aligned, bounded output buffer; API retains no pointers.
+    let result = unsafe {
+        CfGetPlaceholderInfo(
+            handle,
+            CF_PLACEHOLDER_INFO_BASIC,
+            storage.as_mut_ptr().cast(),
+            size_of_val(&storage) as u32,
+            &mut returned,
+        )
+    };
+    if result < 0 {
+        return Err(native_error("read edit completion identity", result));
+    }
+    let returned = returned as usize;
+    if !(IDENTITY_OFFSET + 16..=size_of_val(&storage)).contains(&returned) {
+        return Err(Error::ConfiguredRootChanged);
+    }
+    // SAFETY: returned is bounded by the initialized storage above.
+    let bytes = unsafe { std::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), returned) };
+    let length = u32::from_le_bytes(
+        bytes[24..28]
+            .try_into()
+            .map_err(|_| Error::ConfiguredRootChanged)?,
+    );
+    if length != 16 || bytes[IDENTITY_OFFSET..IDENTITY_OFFSET + 16] != *expected {
+        return Err(Error::ConfiguredRootChanged);
+    }
+    Ok(())
+}
+
+fn completion_usn(handle: Handle, expected_file_id: u64) -> Result<i64, Error> {
+    // FSCTL_READ_FILE_USN_DATA, default USN_RECORD_V2. ReFS/V3 records are
+    // deliberately unsupported by this 64-bit-file-ID completion boundary.
+    const FSCTL_READ_FILE_USN_DATA: u32 = 0x0009_00eb;
+    let mut storage = vec![0_u64; 8192];
+    let mut returned = 0_u32;
+    // SAFETY: live held file handle, no input selects documented V2 output,
+    // writable aligned buffer and synchronous invocation; no pointers retained.
+    let result = unsafe {
+        DeviceIoControl(
+            handle,
+            FSCTL_READ_FILE_USN_DATA,
+            null(),
+            0,
+            storage.as_mut_ptr().cast(),
+            (storage.len() * size_of::<u64>()) as u32,
+            &mut returned,
+            null_mut(),
+        )
+    };
+    if result == 0 {
+        return Err(win32_io_error("read edit completion USN"));
+    }
+    let returned = returned as usize;
+    if returned < 60 || returned > storage.len() * size_of::<u64>() {
+        return Err(Error::EditRecoveryUnavailable);
+    }
+    // SAFETY: returned is bounded by the initialized storage above.
+    let bytes = unsafe { std::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), returned) };
+    let length = u32::from_le_bytes(
+        bytes[0..4]
+            .try_into()
+            .map_err(|_| Error::EditRecoveryUnavailable)?,
+    ) as usize;
+    let major = u16::from_le_bytes(
+        bytes[4..6]
+            .try_into()
+            .map_err(|_| Error::EditRecoveryUnavailable)?,
+    );
+    if length < 60 || length > returned || major != 2 {
+        return Err(Error::EditRecoveryUnavailable);
+    }
+    let file_id = u64::from_le_bytes(
+        bytes[8..16]
+            .try_into()
+            .map_err(|_| Error::EditRecoveryUnavailable)?,
+    );
+    let usn = i64::from_le_bytes(
+        bytes[24..32]
+            .try_into()
+            .map_err(|_| Error::EditRecoveryUnavailable)?,
+    );
+    if file_id != expected_file_id || usn <= 0 {
+        return Err(Error::EditRecoveryUnavailable);
+    }
+    Ok(usn)
 }
 
 type PlaceholderRecoveryRead = Result<(Zeroizing<Vec<u8>>, RootSnapshot), (usize, i32)>;

@@ -1,8 +1,7 @@
 use super::*;
 use crate::{
     ConfiguredRootIdentity, DurableEditRecoveryProvider, EditJournalScope, EditRecordProtector,
-    EditRecoveryProvider, LocalFileIdentity, PlaceholderEditBinding,
-    ReconciliationOutcome,
+    EditRecoveryProvider, LocalFileIdentity, PlaceholderEditBinding, ReconciliationOutcome,
 };
 use sha2::{Digest, Sha256};
 
@@ -432,6 +431,9 @@ fn fresh_initial_receipt_uses_verified_route_for_conditional_upload_and_readback
     backend
         .register_composite_root_for("personal-drive", "personal-root")
         .unwrap();
+    let identity = backend
+        .register_file("projects-drive", "projects-root", "/notes.txt")
+        .unwrap();
     let temp = private_initial_save_tempdir();
     let provider = DurableEditRecoveryProvider::new(
         temp.path().to_path_buf(),
@@ -514,4 +516,39 @@ fn fresh_initial_receipt_uses_verified_route_for_conditional_upload_and_readback
         .map(|byte| format!("{byte:02x}"))
         .collect();
     assert_eq!(retained[0].content_sha256, digest);
+
+    let record = crate::LocalEditRecord {
+        metadata: retained[0].clone(),
+        content: content.to_vec(),
+    };
+    backend
+        .with_initial_edit_session(&scope, |session| {
+            let proof = crate::verify_edit_readback(&record, &scope, session.remote()).unwrap();
+            assert!(session.prepare_verified_edit(&[0; 16], &proof).is_err());
+            let publication = session
+                .prepare_verified_edit(identity.as_bytes(), &proof)
+                .unwrap();
+            let stale = session
+                .prepare_verified_edit(identity.as_bytes(), &proof)
+                .unwrap();
+            assert_eq!(publication.identity(), identity.as_bytes());
+            assert_eq!(publication.proof().metadata(), &record.metadata);
+            publication
+                .publish_and_complete(|| {
+                    assert!(backend.publish_gate.try_lock().is_err());
+                    Ok(())
+                })
+                .unwrap();
+            assert!(
+                stale
+                    .publish_and_complete::<()>(|| panic!("stale completion must not run"))
+                    .is_err()
+            );
+        })
+        .unwrap();
+    let refreshed = backend.prepare_edit_binding(identity.as_bytes()).unwrap();
+    assert_eq!(refreshed.binding().base_etag, "\"new-e2\"");
+    assert_eq!(refreshed.binding().base_size, content.len() as u64);
+    assert_eq!(refreshed.binding().remote_resource_id, "project-file");
+    assert_eq!(provider.unresolved_edits().unwrap(), retained);
 }

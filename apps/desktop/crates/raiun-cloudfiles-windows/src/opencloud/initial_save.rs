@@ -17,6 +17,16 @@ impl OpenCloudPlaceholderBackend {
         scope: &EditJournalScope,
         run: impl FnOnce(&dyn RecoveryRemote) -> T,
     ) -> Result<T, BackendError> {
+        self.with_initial_edit_session(scope, |session| run(session.remote()))
+    }
+
+    /// Retain the same revocation lease through remote verification and local
+    /// completion. Publication capabilities cannot outlive this session.
+    pub fn with_initial_edit_session<T>(
+        &self,
+        scope: &EditJournalScope,
+        run: impl FnOnce(&InitialEditSession<'_>) -> T,
+    ) -> Result<T, BackendError> {
         let _lease = self
             .lease_gate
             .read()
@@ -75,17 +85,31 @@ impl OpenCloudPlaceholderBackend {
             backend: self,
             inner,
         };
-        Ok(run(&remote))
+        Ok(run(&InitialEditSession {
+            remote,
+            scope: scope.clone(),
+        }))
     }
 }
 
-struct LiveInitialRemote<'a> {
-    backend: &'a OpenCloudPlaceholderBackend,
+pub struct InitialEditSession<'backend> {
+    pub(super) remote: LiveInitialRemote<'backend>,
+    pub(super) scope: EditJournalScope,
+}
+
+impl InitialEditSession<'_> {
+    pub fn remote(&self) -> &dyn RecoveryRemote {
+        &self.remote
+    }
+}
+
+pub(super) struct LiveInitialRemote<'a> {
+    pub(super) backend: &'a OpenCloudPlaceholderBackend,
     inner: OpenCloudRecoveryRemote,
 }
 
 impl LiveInitialRemote<'_> {
-    fn authorize(&self, scope: &EditJournalScope) -> Result<(), CloudError> {
+    pub(super) fn authorize(&self, scope: &EditJournalScope) -> Result<(), CloudError> {
         self.backend.ensure_active().map_err(|_| {
             CloudError::new(ErrorKind::Unauthorized, "the connected backend changed")
         })?;

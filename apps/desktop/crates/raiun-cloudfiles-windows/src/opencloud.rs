@@ -7,6 +7,9 @@
 //! as paths or URLs.
 
 mod initial_save;
+mod verified_edit;
+pub use initial_save::InitialEditSession;
+pub use verified_edit::VerifiedEditPublication;
 
 use std::{
     collections::HashMap,

@@ -33,9 +33,9 @@ pub use edit_journal::{
 };
 pub use initial_edit_queue::{MAX_PENDING_INITIAL_EDITS, PendingInitialEdit};
 pub use opencloud::{
-    FileCacheBindingExpectation, FileCacheStatus, ListedFilePage, ListedFileRow, OpaqueIdentity,
-    OpenCloudPlaceholderBackend, ProviderIdentityBinding, ProviderIdentityCatalog,
-    ProviderIdentityCatalogScope, ProviderScope,
+    FileCacheBindingExpectation, FileCacheStatus, InitialEditSession, ListedFilePage,
+    ListedFileRow, OpaqueIdentity, OpenCloudPlaceholderBackend, ProviderIdentityBinding,
+    ProviderIdentityCatalog, ProviderIdentityCatalogScope, ProviderScope, VerifiedEditPublication,
 };
 #[cfg(windows)]
 pub use opencloud::{
@@ -303,6 +303,20 @@ pub struct ConfiguredRootConnection {
 #[cfg(windows)]
 #[allow(dead_code)]
 impl ConfiguredRootConnection {
+    /// Complete one freshly verified existing file under its exact live
+    /// backend session. Local components must come from the native handoff,
+    /// not a guessed remote path. This never retires the journal. Failure
+    /// retains recovery even if the OS accepted completion before a later
+    /// validation failed.
+    pub fn acknowledge_verified_edit(
+        &self,
+        local_components: &[&str],
+        publication: &VerifiedEditPublication<'_, '_>,
+    ) -> Result<(), Error> {
+        self.inner
+            .acknowledge_verified_edit(local_components, publication)
+    }
+
     /// Take one newly captured close receipt from this exact live connection.
     /// This never scans recovered edits or authorizes a remote mutation.
     pub fn take_initial_edit(&self) -> Result<Option<PendingInitialEdit>, Error> {
