@@ -6850,6 +6850,18 @@ mod tests {
     #[test]
     #[ignore = "requires disposable Windows VM, Cloud Files, and current-user DPAPI"]
     fn agent_preflights_exact_scope_and_dpapi_before_connect_then_revokes_before_logout() {
+        run_prepared_agent_runtime_test(false);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    #[ignore = "requires disposable Windows VM, Cloud Files, and current-user DPAPI"]
+    fn initial_save_dispatch_marks_in_sync_and_reopens_clean_journal() {
+        run_prepared_agent_runtime_test(true);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    fn run_prepared_agent_runtime_test(automatic_initial_save: bool) {
         use raiun_cloudfiles_windows::{
             CancellationToken, DpapiEditRecordProtector, DurableEditRecoveryProvider, EditJournal,
             EditJournalScope, EditRecordProtector, EditRecoveryProvider,
@@ -6911,6 +6923,7 @@ mod tests {
         if matches!(
             std::env::var(CLIENT_MODE).as_deref(),
             Ok("hydrate-only"
+                | "initial-save-only"
                 | "edit-only"
                 | "edit-race"
                 | "edit-after-race"
@@ -6972,7 +6985,7 @@ mod tests {
                 edited.write_all(&bytes).expect("write synthetic edit");
                 edited.sync_all().expect("flush synthetic edit");
                 drop(edited);
-                if mode != "edit-race" {
+                if !matches!(mode.as_str(), "edit-race" | "initial-save-only") {
                     assert_eq!(
                         std::fs::read(&file).expect("client reads edited content"),
                         bytes
@@ -7484,6 +7497,132 @@ mod tests {
             String::from_utf8_lossy(&client_output.stdout),
             String::from_utf8_lossy(&client_output.stderr),
         );
+        if automatic_initial_save {
+            // This exact test instance alone enables the ordinary production
+            // handoff. No environment or persisted/production flag changes.
+            assert!(!WINDOWS_INITIAL_SAVE_DISPATCH_ENABLED);
+            agent
+                .provider
+                .initial_save_test_activation
+                .store(true, Ordering::Release);
+            // Defer readback until native completion: a second read-only
+            // close while the file is dirty could capture another snapshot.
+            let output = run_client("initial-save-only", false).0;
+            assert!(output.status.success(), "ordinary save failed: {output:?}");
+            let journal = EditJournal::open(
+                &state_directory,
+                journal_scope.clone(),
+                state_protector.clone(),
+            )
+            .expect("open the exact protected close-capture journal");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let saved_metadata = loop {
+                let snapshot = journal
+                    .recover_all()
+                    .expect("authenticate complete save history");
+                if snapshot.records.len() == 1 {
+                    let record = &snapshot.records[0];
+                    assert_eq!(record.metadata.scope, journal_scope);
+                    assert_eq!(
+                        record.metadata.generation,
+                        first_backend.scope().token_generation()
+                    );
+                    assert_eq!(record.metadata.relative_path, recovery_path);
+                    assert_eq!(record.content, modified_bytes);
+                    if matches!(
+                        snapshot.recovery_states.get(&record.metadata.record_id),
+                        Some(RecoveryAttemptState::VerifiedApplied {
+                            attempt_id: 1,
+                            attempts: 1
+                        })
+                    ) && !first_recovery
+                        .has_unresolved_edits()
+                        .expect("read durable local completion")
+                    {
+                        break record.metadata.clone();
+                    }
+                }
+                assert!(
+                    snapshot.records.len() <= 1,
+                    "unexpected additional snapshots; preserve scope"
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "automatic save did not complete; preserve root and protected journal"
+                );
+                thread::sleep(Duration::from_millis(50));
+            };
+            assert!(first_recovery.unresolved_edits().unwrap().is_empty());
+            assert!(
+                first_recovery
+                    .unresolved_metadata_bounded()
+                    .unwrap()
+                    .is_empty()
+            );
+            let (_, _, os_state) = agent
+                .provider
+                .read_only_placeholder_observation(NativeRestartProbePath::RecoveryDocument)
+                .expect("observe exact original placeholder without hydration");
+            let (_, _, flags, size) = os_state.expect("read Cloud Files OS state");
+            assert_ne!(flags & 0x8, 0, "CF_PLACEHOLDER_STATE_IN_SYNC must be set");
+            assert_eq!(size, modified_bytes.len() as u64);
+            assert_eq!(std::fs::read(&local_placeholder).unwrap(), modified_bytes);
+            {
+                let fixture = personal_fixture.recovery.lock().unwrap();
+                assert_eq!(fixture.put_count, 1);
+                assert_eq!(
+                    fixture.last_put_if_match.as_deref(),
+                    Some("\"synthetic-file-v1\"")
+                );
+                assert!(
+                    fixture.get_count >= 2,
+                    "upload verification and fresh completion readback both run"
+                );
+                assert_eq!(
+                    fixture.last_read_if_match.as_deref(),
+                    Some("\"synthetic-file-v2\"")
+                );
+                assert_eq!(fixture.etag, "\"synthetic-file-v2\"");
+                assert_eq!(fixture.body, modified_bytes);
+            }
+            emit_stage("initial_save_verified_os_in_sync_and_locally_acknowledged");
+            agent
+                .provider
+                .initial_save_test_activation
+                .store(false, Ordering::Release);
+            agent
+                .provider
+                .disconnect()
+                .expect("disconnect without unregistering retained root");
+            assert!(root.exists());
+            let root_lease =
+                raiun_cloudfiles_windows::pin_registered_configured_root(&root, first_identity)
+                    .expect("exact registration and root identity survive disconnect");
+            let reopened = DurableEditRecoveryProvider::new(
+                state_directory.clone(),
+                first_backend.scope().clone(),
+                root_lease.identity(),
+                DpapiEditRecordProtector::current_user().unwrap(),
+            );
+            assert!(!reopened.has_unresolved_edits().unwrap());
+            assert!(reopened.unresolved_edits().unwrap().is_empty());
+            assert!(reopened.unresolved_metadata_bounded().unwrap().is_empty());
+            let reopened_journal =
+                EditJournal::open(&state_directory, journal_scope, state_protector.clone())
+                    .unwrap();
+            let retained = reopened_journal.recover_all().unwrap();
+            assert_eq!(retained.records.len(), 1);
+            assert_eq!(retained.records[0].metadata, saved_metadata);
+            assert_eq!(retained.records[0].content, modified_bytes);
+            assert_eq!(
+                personal_fixture.recovery.lock().unwrap().put_count,
+                1,
+                "discovery must not replay upload"
+            );
+            emit_stage("initial_save_restart_discovery_clean_encrypted_body_retained");
+            personal_fixture.join().unwrap();
+            return;
+        }
         let (raced_edit_output, guard_race) = run_client("edit-race", true);
         let (file_rename_blocked, ancestor_rename_blocked, raced_observation) = guard_race
             .flatten()
