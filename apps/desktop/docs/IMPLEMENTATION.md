@@ -15,22 +15,30 @@ refer to maintainer archives that are not part of this public source tree.
 Windows save-back now has a fresh, read-only verification result that binds the
 protected edit metadata to an exact current remote resource, strong ETag, size
 and content hash, with authorization checked again after readback. An upload
-success or cached journal outcome cannot construct this result. This change
-does not acknowledge a local placeholder or retire a journal entry. The current
-backend lease, exact journal record, guarded local file and durable catalog/native
-update still need to be joined before production activation. Focused portable
-tests and Linux source gates pass; native Windows verification remains pending.
+success or cached journal outcome cannot construct this result. A leased
+existing-identity catalog refresh and guarded native completion operation build
+on that proof. The native operation pins the exact local file, checks its full
+hash and saved nonzero USN, then asks Windows to mark it in sync only if the USN
+still matches. Catalog publication and OS completion share the existing
+revocation/token fence. Fresh native handoff and durable journal resolution
+still need to be wired before production activation. Portable tests and Linux
+source gates pass; native Windows compile/runtime verification remains pending.
 
-## Next-release media recovery preparation — 22 October 2026 JST
+## Next-release media recovery — 23 October 2026 JST
 
 New media upload attempts retain the destination root resource identity alongside
 the existing account, origin, Space, job revision and attempt generation. The
 additive database migration preserves older attempts with an unknown (`NULL`)
-root identity; it does not infer one from current settings. This prepares exact
-scope checks for later recovery. Explicit remote verification and recovery UI
-actions are not implemented by this change, and uncertain uploads remain blocked
-with their staged copies retained. Linux source checks pass; this change is not
-in the published beta or the Windows candidate currently being checked.
+root identity; it does not infer one from current settings.
+
+The next Linux candidate adds an explicit **Verify uploaded copy** action for
+newly bound uncertain attempts. It conditionally reads the exact destination
+and compares its bytes with the saved attempt hash without reading or changing
+the original/staged copy. A match is a point-in-time observation; it does not
+commit a receipt, resume the schedule, clear recovery, or replay an upload.
+Legacy/unbound attempts remain inspection-only. Focused engine, agent and UI
+checks pass; exact-package native acceptance remains pending. This work is not
+in the published beta or the frozen Windows installer candidate.
 
 
 ## Current recorded state — R180 installed and left closed, 18 October 2026 JST

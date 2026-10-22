@@ -10,14 +10,14 @@ type JobRow = { job: MediaJob; status: RunStatus | null; queued: boolean; active
 type RecoveryCursor = { origin: string; space_id: string; source_root: string; source_relative_path: string; destination_path: string };
 type RecoveryItem = {
   origin: string; space_id: string; source_root: string; source_relative_path: string; destination_path: string;
-  state: string; configuration_revision: number | null; attempt_generation: number | null; source_size: number;
+  upload_verification_available?: boolean; state: string; configuration_revision: number | null; attempt_generation: number | null; source_size: number;
   updated_unix: number | null; staged_copy_present: boolean; staged_copy_size: number | null; stage_generation: number | null;
 };
 type RecoveryPage = { items: RecoveryItem[]; has_more: boolean; next_cursor: RecoveryCursor | null; account_has_unindexed_stage: boolean };
 type RecoveryPanel = {
   jobId: string; revision: number; accountId: string; profileKey: string; viewRevision: number;
   items: RecoveryItem[]; nextCursor: RecoveryCursor | null; hasMore: boolean; loading: boolean; loaded: boolean;
-  error: string; accountHasUnindexedStage: boolean; requestToken: number;
+  verifying?: boolean; verificationMessage?: string; error: string; accountHasUnindexedStage: boolean; requestToken: number;
 };
 type Context = {
   key(): string; connected(): boolean; reachable(): boolean; blocked(): boolean;
@@ -104,6 +104,7 @@ export class MediaJobsView {
         void this.loadRecoveryPage(false);
       }
     }));
+    root.querySelectorAll<HTMLButtonElement>('[data-media-verify]').forEach(button => button.addEventListener('click', () => void this.verifyUploadedCopy(Number(button.dataset.mediaVerify))));
     root.querySelector('[data-media-recovery-more]')?.addEventListener('click', () => void this.loadRecoveryPage(true));
     root.querySelectorAll<HTMLButtonElement>('[data-media-toggle],[data-media-run],[data-media-remove]').forEach(button => button.addEventListener('click', () => {
       const id = button.dataset.mediaToggle || button.dataset.mediaRun || button.dataset.mediaRemove;
@@ -132,15 +133,43 @@ export class MediaJobsView {
     }
   }
   private recoveryHtml(panel: RecoveryPanel) {
-    const rows = panel.items.map(item => {
+    const rows = panel.items.map((item, index) => {
       const source = `${item.source_root.replace(/[\\/]$/, '')}/${item.source_relative_path}`;
       const revision = item.configuration_revision == null ? 'Legacy or unbound revision' : `Backup revision ${item.configuration_revision}`;
       const copy = item.staged_copy_present
         ? `Retained copy present${item.staged_copy_size == null ? '' : ` · ${formatRecoveryBytes(item.staged_copy_size)}`}`
         : 'No verified retained copy found';
-      return `<article class="media-recovery-item"><div><b>${escape(item.state.replaceAll('_',' '))}</b><span>${escape(revision)} · ${escape(copy)}</span></div><p><span>Original</span><code>${escape(source)}</code></p><p><span>Destination</span><code>${escape(item.destination_path)}</code></p><small>${formatRecoveryBytes(item.source_size)} source size${item.attempt_generation == null ? '' : ` · attempt ${item.attempt_generation}`}</small></article>`;
+      return `<article class="media-recovery-item"><div><b>${escape(item.state.replaceAll('_',' '))}</b><span>${escape(revision)} · ${escape(copy)}</span></div><p><span>Original</span><code>${escape(source)}</code></p><p><span>Destination</span><code>${escape(item.destination_path)}</code></p><small>${formatRecoveryBytes(item.source_size)} source size${item.attempt_generation == null ? '' : ` · attempt ${item.attempt_generation}`}</small>${this.canVerify(panel, item) ? `<button class="button subtle" data-media-verify="${index}" ${panel.verifying || panel.loading || this.context.blocked() || !this.context.connected() ? 'disabled' : ''}>Verify uploaded copy</button>` : ''}</article>`;
     }).join('');
-    return `<section class="media-recovery" aria-label="Retained media copies"><p class="media-recovery-note">Read-only inspection: this shows local recovery metadata and whether a retained copy is present. It does not open, change, upload, or remove retained files.</p>${panel.error ? `<p class="media-recovery-error" role="alert">Could not inspect retained copies: ${escape(panel.error)}</p>` : ''}${panel.accountHasUnindexedStage ? '<p class="media-recovery-warning" role="status">Some local recovery data could not be safely matched to a backup record. Its name and contents are not shown here.</p>' : ''}${panel.loading && !panel.loaded ? '<p role="status">Loading retained-copy details…</p>' : ''}${panel.loaded && panel.items.length === 0 && !panel.accountHasUnindexedStage ? '<p class="media-empty-result">No retained copies or unresolved upload records were found for this backup.</p>' : ''}${rows}${panel.loading && panel.loaded ? '<p role="status">Loading next page…</p>' : ''}${panel.hasMore ? `<button class="button subtle" data-media-recovery-more ${panel.loading ? 'disabled' : ''}>Load next 100</button>` : ''}</section>`;
+    return `<section class="media-recovery" aria-label="Retained media copies"><p class="media-recovery-note">Read-only inspection: this shows local recovery metadata and whether a retained copy is present. It does not open, change, upload, or remove retained files.</p>${panel.error ? `<p class="media-recovery-error" role="alert">Could not inspect retained copies: ${escape(panel.error)}</p>` : ''}${panel.accountHasUnindexedStage ? '<p class="media-recovery-warning" role="status">Some local recovery data could not be safely matched to a backup record. Its name and contents are not shown here.</p>' : ''}${panel.loading && !panel.loaded ? '<p role="status">Loading retained-copy details…</p>' : ''}${panel.loaded && panel.items.length === 0 && !panel.accountHasUnindexedStage ? '<p class="media-empty-result">No retained copies or unresolved upload records were found for this backup.</p>' : ''}${panel.verificationMessage ? `<p role="status">${escape(panel.verificationMessage)}</p>` : ''}<p>A remote match does not resume backup or clear retained recovery.</p>${rows}${panel.loading && panel.loaded ? '<p role="status">Loading next page…</p>' : ''}${panel.hasMore ? `<button class="button subtle" data-media-recovery-more ${panel.loading || panel.verifying ? 'disabled' : ''}>Load next 100</button>` : ''}</section>`;
+  }
+  private canVerify(panel: RecoveryPanel, item: RecoveryItem) {
+    return item.upload_verification_available === true && item.state === 'uncertain'
+      && item.configuration_revision === panel.revision && Number.isSafeInteger(item.attempt_generation) && item.attempt_generation! > 0
+      && this.rows.some(row => row.job.id === panel.jobId && row.job.revision === panel.revision && row.job.account_id === panel.accountId
+        && row.active_account && !row.queued && row.status?.state !== 'running');
+  }
+  private async verifyUploadedCopy(index: number) {
+    const panel = this.recovery; const item = panel?.items[index];
+    if (!panel || !item || !this.recoveryIsCurrent(panel) || !this.canVerify(panel, item) || panel.loading || panel.verifying
+        || this.context.blocked() || !this.context.connected() || !this.context.reachable() || !this.context.supported()) return;
+    panel.verifying = true; panel.verificationMessage = 'Verifying the remote copy; recovery is unchanged…'; this.context.render();
+    try {
+      const response = await this.context.request<{job_id:string;account_id:string;revision:number;attempt_generation:number;source_relative_path:string;destination_path:string;status:string;recovery_retained:boolean;backup_resumed:boolean}>('media_job_verify_upload', {
+        job_id:panel.jobId, expected_account_id:panel.accountId, expected_revision:panel.revision,
+        attempt_generation:item.attempt_generation, source_relative_path:item.source_relative_path, destination_path:item.destination_path
+      });
+      if (!this.recoveryIsCurrent(panel) || !this.canVerify(panel, item)) return;
+      if (response.job_id !== panel.jobId || response.account_id !== panel.accountId || response.revision !== panel.revision
+          || response.attempt_generation !== item.attempt_generation || response.source_relative_path !== item.source_relative_path
+          || response.destination_path !== item.destination_path || response.recovery_retained !== true || response.backup_resumed !== false
+          || !['matched','not_matched'].includes(response.status)) throw new Error('Verification response did not match this retained attempt.');
+      panel.verificationMessage = response.status === 'matched' ? 'The uploaded copy matches. Backup has not resumed; retained recovery is still kept.' : 'The uploaded copy could not be matched. Retained recovery is unchanged.';
+    } catch (error) {
+      if (this.recoveryIsCurrent(panel)) panel.verificationMessage = String(error instanceof Error ? error.message : error);
+    } finally {
+      if (this.recoveryIsCurrent(panel)) { panel.verifying = false; this.context.render(); }
+    }
   }
   private recoveryIsCurrent(panel: RecoveryPanel) {
     return this.recovery === panel && panel.profileKey === this.context.key() && panel.viewRevision === this.revision
@@ -148,7 +177,7 @@ export class MediaJobsView {
   }
   private async loadRecoveryPage(append: boolean) {
     const panel = this.recovery;
-    if (!panel || panel.loading || !this.recoveryIsCurrent(panel)) return;
+    if (!panel || panel.loading || panel.verifying || !this.recoveryIsCurrent(panel)) return;
     if (append && !panel.hasMore) return;
     const requestToken = ++this.recoveryRequestToken;
     panel.requestToken = requestToken; panel.loading = true; panel.error = '';

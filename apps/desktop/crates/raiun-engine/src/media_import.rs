@@ -75,6 +75,8 @@ pub struct MediaImportRecoveryItem {
     /// partial stage operation that has no authenticated attempt row.
     pub configuration_revision: Option<u64>,
     pub attempt_generation: Option<u64>,
+    #[serde(default)]
+    pub upload_verification_available: bool,
     pub source_size: u64,
     pub updated_unix: Option<i64>,
     pub staged_copy_present: bool,
@@ -305,10 +307,19 @@ impl Engine {
             )
         });
         let fetch_limit = (limit + 1) as i64;
+        let root_column: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('media_upload_attempts') WHERE name='destination_root_id')",
+            [], |row| row.get(0),
+        ).map_err(crate::db_error)?;
+        let root_expression = if root_column {
+            "a.destination_root_id"
+        } else {
+            "NULL"
+        };
         let mut collected = BTreeMap::new();
         let mut statement = db
             .prepare(
-                "SELECT a.source_root,a.relative_path,a.destination_path,a.origin,a.space_id,a.generation,a.state,a.source_size,a.updated_unix,s.staged_path,s.staged_size,s.attempt_generation,a.job_revision FROM media_upload_attempts a LEFT JOIN media_upload_stages s ON s.job_id=a.job_id AND s.account_id=a.account_id AND s.origin=a.origin AND s.space_id=a.space_id AND s.source_root=a.source_root AND s.relative_path=a.relative_path AND s.destination_path=a.destination_path WHERE a.job_id=?1 AND a.account_id=?2 AND (a.state!='uploaded' OR s.job_id IS NOT NULL) AND (?3 IS NULL OR (a.origin,a.space_id,a.source_root,a.relative_path,a.destination_path)>(?3,?4,?5,?6,?7)) ORDER BY a.origin,a.space_id,a.source_root,a.relative_path,a.destination_path LIMIT ?8",
+                &format!("SELECT a.source_root,a.relative_path,a.destination_path,a.origin,a.space_id,a.generation,a.state,a.source_size,a.updated_unix,s.staged_path,s.staged_size,s.attempt_generation,a.job_revision,{root_expression} FROM media_upload_attempts a LEFT JOIN media_upload_stages s ON s.job_id=a.job_id AND s.account_id=a.account_id AND s.origin=a.origin AND s.space_id=a.space_id AND s.source_root=a.source_root AND s.relative_path=a.relative_path AND s.destination_path=a.destination_path WHERE a.job_id=?1 AND a.account_id=?2 AND (a.state!='uploaded' OR s.job_id IS NOT NULL) AND (?3 IS NULL OR (a.origin,a.space_id,a.source_root,a.relative_path,a.destination_path)>(?3,?4,?5,?6,?7)) ORDER BY a.origin,a.space_id,a.source_root,a.relative_path,a.destination_path LIMIT ?8"),
             )
             .map_err(crate::db_error)?;
         let rows = statement
@@ -337,6 +348,7 @@ impl Engine {
                     let staged_size: Option<i64> = row.get(10)?;
                     let stage_generation: Option<i64> = row.get(11)?;
                     let configuration_revision: i64 = row.get(12)?;
+                    let destination_root: Option<String> = row.get(13)?;
                     let stage_size = staged_size
                         .filter(|size| *size >= 0)
                         .map(|size| size as u64);
@@ -362,6 +374,10 @@ impl Engine {
                             source_root: PathBuf::from(source_root),
                             source_relative_path: relative_path,
                             destination_path,
+                            upload_verification_available: state == "uncertain"
+                                && generation > 0
+                                && configuration_revision > 0
+                                && destination_root.is_some_and(|root| !root.is_empty()),
                             state,
                             configuration_revision: u64::try_from(configuration_revision)
                                 .ok()
@@ -430,6 +446,7 @@ impl Engine {
                             destination_path,
                             state: "stage_only".to_owned(),
                             configuration_revision: None,
+                            upload_verification_available: false,
                             attempt_generation: None,
                             source_size: stage_size.unwrap_or_default(),
                             updated_unix: None,
@@ -468,6 +485,128 @@ impl Engine {
             next_cursor,
             account_has_unindexed_stage: untracked_media_stage_exists(state_dir, Some(&db))?,
         })
+    }
+
+    /// Compare a retained uncertain attempt with the current remote bytes.
+    /// This is observation only: no receipts, recovery state or schedules change.
+    pub fn verify_media_import_upload(
+        &self,
+        job: &MediaImportJob,
+        attempt_generation: u64,
+        source_relative_path: &str,
+        destination_path: &str,
+    ) -> Result<bool, CloudError> {
+        validate_media_import_jobs(std::slice::from_ref(job))
+            .map_err(|message| media_error(ErrorKind::Unsupported, message))?;
+        let refused = || {
+            media_error(
+                ErrorKind::Conflict,
+                "retained upload cannot be safely verified",
+            )
+        };
+        if attempt_generation == 0
+            || attempt_generation > i64::MAX as u64
+            || job.revision > i64::MAX as u64
+            || !destination_path
+                .starts_with(&format!("{}/", job.destination_root.trim_end_matches('/')))
+            || destination_path
+                .split('/')
+                .any(|part| matches!(part, "." | ".."))
+        {
+            return Err(refused());
+        }
+        let (account, origin) = self.media_account_scope(job)?;
+        let key = scope_key_values(
+            job,
+            &account,
+            &origin,
+            source_relative_path,
+            destination_path,
+        );
+        let db = open_media_status_db(&self.inner.state_dir)?.ok_or_else(refused)?;
+        // Repeat the exact immutable scope predicate after the remote read, too.
+        let read_attempt = || -> Result<(i64, String), CloudError> {
+            let running: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM media_job_runs WHERE job_id=?1 AND state='running')",
+                [&job.id], |row| row.get(0),
+            ).map_err(crate::db_error)?;
+            if running {
+                return Err(refused());
+            }
+            db.query_row(
+                "SELECT source_size,source_sha256 FROM media_upload_attempts WHERE job_id=?1 AND account_id=?2 AND origin=?3 AND space_id=?4 AND source_root=?5 AND relative_path=?6 AND destination_path=?7 AND generation=?8 AND job_revision=?9 AND destination_root_id=?10 AND state='uncertain'",
+                params![key.0,key.1,key.2,key.3,key.4,key.5,key.6,attempt_generation as i64,job.revision as i64,job.destination_root_resource_id],
+                |row| Ok((row.get(0)?,row.get(1)?)),
+            ).optional().map_err(crate::db_error)?.ok_or_else(refused)
+        };
+        let attempt = read_attempt()?;
+        if attempt.0 < 0
+            || attempt.0 as u64 > MAX_MEDIA_STAGED_FILE_BYTES
+            || attempt.1.len() != 64
+            || !attempt.1.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(refused());
+        }
+        let check_root = || -> Result<(), CloudError> {
+            let root = self.backend.stat(&job.space_id, &job.destination_root)?;
+            if root.path != job.destination_root
+                || root.id != job.destination_root_resource_id
+                || !root.directory
+                || root.encrypted
+                || !root.writable
+            {
+                return Err(refused());
+            }
+            Ok(())
+        };
+        check_root()?;
+        let before = self.backend.stat(&job.space_id, destination_path)?;
+        let strong_etag = before.etag.as_bytes();
+        if before.path != destination_path
+            || before.id.is_empty()
+            || before.directory
+            || before.encrypted
+            || before.size != attempt.0 as u64
+            || strong_etag.len() < 2
+            || strong_etag.first() != Some(&b'"')
+            || strong_etag.last() != Some(&b'"')
+            || strong_etag[1..strong_etag.len() - 1]
+                .iter()
+                .any(|b| !(0x21..=0x7e).contains(b) || *b == b'"')
+        {
+            return Err(refused());
+        }
+        // A private disposable directory holds only the conditional remote GET.
+        // Never open the source or retained staged copy for this action.
+        let directory = tempfile::tempdir().map_err(io_error)?;
+        // The real backend atomically publishes a staged file at this name.
+        // Keep no empty destination inode open across that replacement.
+        let temporary = directory.path().join("uploaded-copy");
+        let returned = self.backend.download(
+            &job.space_id,
+            destination_path,
+            Some(&before.etag),
+            &temporary,
+        )?;
+        let after = self.backend.stat(&job.space_id, destination_path)?;
+        let same = |entry: &RemoteEntry| {
+            entry.id == before.id
+                && entry.path == before.path
+                && entry.etag == before.etag
+                && entry.size == before.size
+                && !entry.directory
+                && !entry.encrypted
+        };
+        let matches = same(&returned)
+            && same(&after)
+            && fs::metadata(&temporary).map_err(io_error)?.len() == attempt.0 as u64
+            && hash_file(&temporary)? == attempt.1;
+        check_root()?;
+        self.media_account_scope(job)?;
+        if read_attempt()? != attempt {
+            return Err(refused());
+        }
+        Ok(matches)
     }
 
     /// Run one recurring media job pass. A candidate must have an unchanged

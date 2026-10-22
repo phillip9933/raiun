@@ -1358,6 +1358,81 @@ impl Runtime {
         }))
     }
 
+    fn media_job_verify_upload(&self, request: &Value) -> Result<Value, String> {
+        let job_id = request
+            .get("job_id")
+            .and_then(Value::as_str)
+            .ok_or("Missing job_id")?;
+        let revision = request
+            .get("expected_revision")
+            .and_then(Value::as_u64)
+            .ok_or("Missing expected_revision")?;
+        let expected_account = request
+            .get("expected_account_id")
+            .and_then(Value::as_str)
+            .ok_or("Missing expected_account_id")?;
+        let attempt = request
+            .get("attempt_generation")
+            .and_then(Value::as_u64)
+            .filter(|value| *value > 0 && *value <= i64::MAX as u64)
+            .ok_or("Invalid attempt_generation")?;
+        let source = request
+            .get("source_relative_path")
+            .and_then(Value::as_str)
+            .ok_or("Missing source_relative_path")?;
+        let destination = request
+            .get("destination_path")
+            .and_then(Value::as_str)
+            .ok_or("Missing destination_path")?;
+        let (generation, account, engine) = self.active_media_engine(Some(expected_account))?;
+        let _sync = self.sync_gate.lock().map_err(|_| "Sync state poisoned")?;
+        let settings = self
+            .settings
+            .lock()
+            .map_err(|_| "Settings poisoned")?
+            .clone();
+        let job = settings
+            .media_jobs
+            .iter()
+            .find(|job| job.id == job_id && job.account_id == account && job.revision == revision)
+            .ok_or("Media backup changed; reload retained copies")?;
+        let job_settings_root = settings.config.cloud_root.clone();
+        let current = || -> Result<(), String> {
+            if self.auth_transition.load(Ordering::Acquire)
+                || self.shutdown.load(Ordering::Acquire)
+                || self.offline_namespace.load(Ordering::Acquire)
+                || self.auth_generation.load(Ordering::Acquire) != generation
+            {
+                return Err("The active account changed during verification".into());
+            }
+            let settings = self.settings.lock().map_err(|_| "Settings poisoned")?;
+            if settings.account_id.as_deref() != Some(account.as_str())
+                || settings.config.cloud_root != job_settings_root
+                || settings
+                    .media_jobs
+                    .iter()
+                    .find(|candidate| candidate.id == job_id)
+                    != Some(job)
+            {
+                return Err("Media backup changed during verification".into());
+            }
+            Ok(())
+        };
+        current()?;
+        // No queueing, receipt commit or cleanup, even when the bytes match.
+        let verified = engine.verify_media_import_upload(job, attempt, source, destination);
+        current()?;
+        let matched = verified.map_err(
+            |_| "Could not safely verify the uploaded copy. Retained recovery is unchanged.",
+        )?;
+        Ok(
+            json!({"job_id":job_id,"account_id":account,"revision":revision,
+            "attempt_generation":attempt,"source_relative_path":source,"destination_path":destination,
+            "status":if matched { "matched" } else { "not_matched" },
+            "recovery_retained":true,"backup_resumed":false}),
+        )
+    }
+
     fn media_destination(&self, request: &Value) -> Result<Value, String> {
         let space_id = request
             .get("space_id")
@@ -2119,6 +2194,7 @@ impl Runtime {
             "media_job_run" => self.media_job_run(&request),
             "media_job_remove" => self.media_job_remove(&request),
             "media_job_recovery" => self.media_job_recovery_value(&request),
+            "media_job_verify_upload" => self.media_job_verify_upload(&request),
             "media_job_status" => {
                 let job_id = text("job_id")?;
                 let jobs = self.media_jobs_value()?;
@@ -4895,6 +4971,67 @@ mod tests {
         }));
         assert!(result.is_err());
         assert_eq!(runtime.settings.lock().unwrap().media_jobs.len(), 1);
+    }
+
+    #[test]
+    fn media_upload_verification_rejects_stale_requests_without_queueing_or_waking() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(runtime_for_mount_test(
+            dir.path().to_path_buf(),
+            false,
+            None,
+        ));
+        let engine = Engine::open(&dir.path().join("engine"), Arc::new(OfflineCacheFixture))
+            .unwrap()
+            .with_account_scope("account-a".into(), "https://fixture.example.test".into())
+            .unwrap();
+        {
+            let mut auth = runtime.auth_state.lock().unwrap();
+            auth.account_id = Some("account-a".into());
+            auth.engine = Some(engine);
+        }
+        let job = MediaImportJob {
+            id: "verify-backup".into(),
+            revision: 7,
+            account_id: "account-a".into(),
+            source_root: dir.path().join("source"),
+            space_id: "space-a".into(),
+            destination_root: "/folder".into(),
+            destination_root_resource_id: "folder".into(),
+            filter: raiun_core::MediaFilter::Photos,
+            organization: raiun_core::MediaOrganization::PreserveRelativePath,
+            filesystem_mtime_utc: false,
+            interval_seconds: 3600,
+            enabled: false,
+        };
+        {
+            let mut settings = runtime.settings.lock().unwrap();
+            settings.account_id = Some("account-a".into());
+            settings.media_jobs = vec![job.clone()];
+        }
+        let request = json!({"action":"media_job_verify_upload","job_id":job.id,
+            "expected_account_id":"account-a","expected_revision":7,"attempt_generation":1,
+            "source_relative_path":"photo.jpg","destination_path":"/folder/photo.jpg"});
+        for (field, value) in [
+            ("expected_account_id", json!("other-account")),
+            ("expected_revision", json!(6)),
+            ("attempt_generation", json!(true)),
+            ("attempt_generation", json!(0)),
+        ] {
+            let mut stale = request.clone();
+            stale[field] = value;
+            assert!(runtime.handle(stale).is_err());
+        }
+        // No retained row exists; this must remain a sanitized observation failure.
+        let error = runtime.handle(request.clone()).unwrap_err();
+        assert_eq!(
+            error,
+            "Could not safely verify the uploaded copy. Retained recovery is unchanged."
+        );
+        runtime.auth_transition.store(true, Ordering::Release);
+        assert!(runtime.handle(request).is_err());
+        assert!(runtime.pending_media_jobs.lock().unwrap().is_empty());
+        assert_eq!(runtime.settings.lock().unwrap().media_jobs, vec![job]);
     }
 
     #[test]

@@ -23,6 +23,11 @@ and [acceptance records](MVP-ACCEPTANCE.md).
 
 ## Linux beta milestone — owner update, 21 October 2026
 
+Owner priority update, 23 October: the Linux beta is published. Put the larger
+share of next-release implementation effort into Windows feature parity while
+continuing focused Linux beta improvements. The practical acceptance rules below
+and fixed capability scope still apply.
+
 The immediate delivery target is a usable Linux beta. The owner explicitly
 prioritized normal everyday workflows over exhaustive testing of every possible
 failure. The fixed capabilities below remain the product scope; whole-category

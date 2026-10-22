@@ -9,6 +9,9 @@ struct FakeCloud {
     entries: Mutex<HashMap<String, (RemoteEntry, Vec<u8>)>>,
     uploads: Mutex<Vec<(String, WriteCondition)>>,
     lose_upload_response: Mutex<bool>,
+    downloads: Mutex<usize>,
+    atomic_download_publish: Mutex<bool>,
+    change_etag_after_download: Mutex<bool>,
     mutate_source_after_upload: Mutex<Option<(PathBuf, Vec<u8>)>>,
     etag_counter: Mutex<u64>,
 }
@@ -91,7 +94,8 @@ impl CloudBackend for FakeCloud {
         expected_etag: Option<&str>,
         destination: &Path,
     ) -> Result<RemoteEntry, CloudError> {
-        let entries = self
+        *self.downloads.lock().unwrap() += 1;
+        let mut entries = self
             .entries
             .lock()
             .map_err(|_| CloudError::new(ErrorKind::Io, "poisoned"))?;
@@ -101,8 +105,23 @@ impl CloudBackend for FakeCloud {
         if expected_etag.is_some_and(|expected| expected != entry.etag) {
             return Err(CloudError::new(ErrorKind::Conflict, "etag changed"));
         }
-        fs::write(destination, bytes).map_err(io_error)?;
-        Ok(entry.clone())
+        if *self.atomic_download_publish.lock().unwrap() {
+            // Match OpenCloudClient: publish by replacing the destination name,
+            // rather than writing through any pre-existing destination handle.
+            let mut staged =
+                NamedTempFile::new_in(destination.parent().unwrap()).map_err(io_error)?;
+            staged.write_all(bytes).map_err(io_error)?;
+            staged
+                .persist(destination)
+                .map_err(|error| io_error(error.error))?;
+        } else {
+            fs::write(destination, bytes).map_err(io_error)?;
+        }
+        let returned = entry.clone();
+        if *self.change_etag_after_download.lock().unwrap() {
+            entries.get_mut(path).unwrap().0.etag = "\"changed\"".into();
+        }
+        Ok(returned)
     }
 
     fn upload(
@@ -667,4 +686,177 @@ fn a_replaced_destination_root_at_the_same_path_is_not_adopted() {
         cloud.file_bytes("/Photos/Camera/photo.jpg"),
         Some(vec![0xff, 0xd8, 0xff, 1])
     );
+}
+
+#[test]
+fn verify_retained_upload_matches_bytes_without_committing_or_replaying() {
+    let source = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    let cloud = Arc::new(FakeCloud::new());
+    let mut job = job(source.path());
+    image_source(source.path(), &[0xff, 0xd8, 0xff, 9]);
+    *cloud.lose_upload_response.lock().unwrap() = true;
+    let engine = engine(&state, &cloud);
+    engine.run_media_import_job_at(&job, 100).unwrap();
+    engine.run_media_import_job_at(&job, 111).unwrap();
+    let target = "/Photos/Camera/photo.jpg";
+    cloud
+        .entries
+        .lock()
+        .unwrap()
+        .get_mut(target)
+        .unwrap()
+        .0
+        .etag = "\"uploaded-v1\"".into();
+    let before =
+        Engine::media_import_recovery_at(state.path(), &job.id, "account-1", 100, None).unwrap();
+    assert!(before.items[0].upload_verification_available);
+    let stage: String = engine
+        .db()
+        .unwrap()
+        .query_row("SELECT staged_path FROM media_upload_stages", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let retained = fs::read(&stage).unwrap();
+    // Verification works even if original/staged names are unavailable: it never reads them.
+    let hidden_source = source.path().join("hidden-source");
+    fs::rename(source.path().join("Camera"), &hidden_source).unwrap();
+    let hidden_stage = format!("{stage}.hidden");
+    fs::rename(&stage, &hidden_stage).unwrap();
+    *cloud.atomic_download_publish.lock().unwrap() = true;
+    job.enabled = false; // Pausing the schedule must not prevent read-only observation.
+    assert!(
+        engine
+            .verify_media_import_upload(&job, 1, "Camera/photo.jpg", target)
+            .unwrap()
+    );
+    fs::rename(&hidden_stage, &stage).unwrap();
+    fs::rename(&hidden_source, source.path().join("Camera")).unwrap();
+    assert_eq!(fs::read(&stage).unwrap(), retained);
+    assert_eq!(cloud.uploads.lock().unwrap().len(), 1);
+    assert!(
+        engine
+            .media_import_receipt(&job, "Camera/photo.jpg", target)
+            .unwrap()
+            .is_none()
+    );
+    let after =
+        Engine::media_import_recovery_at(state.path(), &job.id, "account-1", 100, None).unwrap();
+    assert_eq!(before, after);
+
+    let downloads = *cloud.downloads.lock().unwrap();
+    let mut wrong = job.clone();
+    wrong.account_id = "other-account".into();
+    assert!(
+        engine
+            .verify_media_import_upload(&wrong, 1, "Camera/photo.jpg", target)
+            .is_err()
+    );
+    wrong = job.clone();
+    wrong.revision += 1;
+    assert!(
+        engine
+            .verify_media_import_upload(&wrong, 1, "Camera/photo.jpg", target)
+            .is_err()
+    );
+    wrong = job.clone();
+    wrong.destination_root_resource_id = "replacement".into();
+    assert!(
+        engine
+            .verify_media_import_upload(&wrong, 1, "Camera/photo.jpg", target)
+            .is_err()
+    );
+    assert!(
+        engine
+            .verify_media_import_upload(&job, 2, "Camera/photo.jpg", target)
+            .is_err()
+    );
+    assert!(
+        engine
+            .verify_media_import_upload(&job, 1, "other.jpg", target)
+            .is_err()
+    );
+    assert_eq!(*cloud.downloads.lock().unwrap(), downloads);
+    cloud
+        .entries
+        .lock()
+        .unwrap()
+        .get_mut("/Photos")
+        .unwrap()
+        .0
+        .id = "replaced-root".into();
+    assert!(
+        engine
+            .verify_media_import_upload(&job, 1, "Camera/photo.jpg", target)
+            .is_err()
+    );
+    cloud
+        .entries
+        .lock()
+        .unwrap()
+        .get_mut("/Photos")
+        .unwrap()
+        .0
+        .id = "id:/Photos".into();
+    cloud
+        .entries
+        .lock()
+        .unwrap()
+        .get_mut(target)
+        .unwrap()
+        .0
+        .etag = "W/\"weak\"".into();
+    assert!(
+        engine
+            .verify_media_import_upload(&job, 1, "Camera/photo.jpg", target)
+            .is_err()
+    );
+    assert_eq!(*cloud.downloads.lock().unwrap(), downloads);
+    cloud
+        .entries
+        .lock()
+        .unwrap()
+        .get_mut(target)
+        .unwrap()
+        .0
+        .etag = "\"uploaded-v1\"".into();
+    *cloud.change_etag_after_download.lock().unwrap() = true;
+    assert!(
+        !engine
+            .verify_media_import_upload(&job, 1, "Camera/photo.jpg", target)
+            .unwrap()
+    );
+    *cloud.change_etag_after_download.lock().unwrap() = false;
+    // Same-size replacement bytes are not a match, even with unchanged metadata.
+    cloud.entries.lock().unwrap().get_mut(target).unwrap().1 = b"nope".to_vec();
+    assert!(
+        !engine
+            .verify_media_import_upload(&job, 1, "Camera/photo.jpg", target)
+            .unwrap()
+    );
+    engine
+        .db()
+        .unwrap()
+        .execute(
+            "UPDATE media_upload_attempts SET destination_root_id=NULL",
+            [],
+        )
+        .unwrap();
+    assert!(
+        engine
+            .verify_media_import_upload(&job, 1, "Camera/photo.jpg", target)
+            .is_err()
+    );
+    let page =
+        Engine::media_import_recovery_at(state.path(), &job.id, "account-1", 100, None).unwrap();
+    assert!(!page.items[0].upload_verification_available);
+    engine.db().unwrap().execute_batch("UPDATE media_upload_attempts SET destination_root_id='id:/Photos'; UPDATE media_job_runs SET state='running'").unwrap();
+    assert!(
+        engine
+            .verify_media_import_upload(&job, 1, "Camera/photo.jpg", target)
+            .is_err()
+    );
+    assert_eq!(fs::read(&stage).unwrap(), retained);
+    assert_eq!(cloud.uploads.lock().unwrap().len(), 1);
 }

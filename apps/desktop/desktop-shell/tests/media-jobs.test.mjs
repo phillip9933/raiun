@@ -179,3 +179,50 @@ test('actual media preview results name the complete status without mislabeling 
   assert.match(limitedRows, /class="media-complete" role="status" aria-label="Scan completed\. This is a local path preview only\."/);
   assert.match(limitedRows, /Showing the first 1 of 2 source rows\./, 'row display limits retain their separate warning');
 });
+
+const verifiableItem = {origin:'https://cloud.test',space_id:'space-a',source_root:'/private/photos',source_relative_path:'Camera/a.jpg',destination_path:'/Backup/Camera/a.jpg',state:'uncertain',configuration_revision:4,attempt_generation:2,upload_verification_available:true,source_size:12,updated_unix:10,staged_copy_present:true,staged_copy_size:12,stage_generation:2};
+async function openVerifiable(view) {
+  await view.refresh(); const dom = recoveryDom(); view.bind(dom.root); dom.listeners.inspect(); await new Promise(resolve=>setImmediate(resolve));
+}
+test('explicit upload verification carries exact retained attempt and never resumes or clears it',async()=>{
+  const calls=[];
+  const {view}=setup(async(action,args)=>{
+    calls.push([action,args]);
+    if(action==='media_jobs') return {jobs:[recoveryRow]};
+    if(action==='media_job_recovery') return recoveryResponse([verifiableItem]);
+    return {job_id:'backup',account_id:'account-a',revision:4,attempt_generation:2,source_relative_path:verifiableItem.source_relative_path,destination_path:verifiableItem.destination_path,status:'matched',recovery_retained:true,backup_resumed:false};
+  });
+  await openVerifiable(view);
+  assert.match(view.html(),/Verify uploaded copy/);
+  assert.equal(calls.length,2);
+  await view.verifyUploadedCopy(0);
+  assert.deepEqual(calls.at(-1),['media_job_verify_upload',{job_id:'backup',expected_account_id:'account-a',expected_revision:4,attempt_generation:2,source_relative_path:verifiableItem.source_relative_path,destination_path:verifiableItem.destination_path}]);
+  assert.equal(calls.length,3);
+  assert.match(view.html(),/uploaded copy matches/);
+  assert.match(view.html(),/Backup has not resumed; retained recovery is still kept/);
+  assert.match(view.html(),/Retained copy present/);
+});
+test('verification refuses legacy, stale revision and running items without making requests',async()=>{
+  const calls=[];
+  const {view}=setup(async(action)=>{calls.push(action);return action==='media_jobs'?{jobs:[recoveryRow]}:recoveryResponse([verifiableItem]);});
+  await openVerifiable(view);
+  for(const change of [{upload_verification_available:false},{configuration_revision:3},{attempt_generation:null}]) {
+    view.recovery.items=[{...verifiableItem,...change}]; await view.verifyUploadedCopy(0); assert.doesNotMatch(view.html(),/Verify uploaded copy/);
+  }
+  view.recovery.items=[verifiableItem];view.rows=[{...recoveryRow,status:{state:'running'}}];await view.verifyUploadedCopy(0);
+  assert.deepEqual(calls,['media_jobs','media_job_recovery']);
+});
+test('late verification cannot surface after account or job revision changes',async()=>{
+  for(const change of ['account','revision']) {
+    let resolve;const pending=new Promise(done=>{resolve=done;});
+    const {view,switchAccount}=setup(async(action)=>action==='media_jobs'?{jobs:[recoveryRow]}:action==='media_job_recovery'?recoveryResponse([verifiableItem]):pending);
+    await openVerifiable(view); const checking=view.verifyUploadedCopy(0);
+    if(change==='account') switchAccount(); else view.rows=[{...recoveryRow,job:{...recoveryJob,revision:5}}];
+    resolve({job_id:'backup',account_id:'account-a',revision:4,attempt_generation:2,source_relative_path:verifiableItem.source_relative_path,destination_path:verifiableItem.destination_path,status:'matched',recovery_retained:true,backup_resumed:false});
+    await checking; assert.doesNotMatch(view.html(),/uploaded copy matches/);
+  }
+});
+test('mismatched verification response cannot claim a matching copy',async()=>{
+  const {view}=setup(async(action)=>action==='media_jobs'?{jobs:[recoveryRow]}:action==='media_job_recovery'?recoveryResponse([verifiableItem]):{job_id:'backup',account_id:'account-a',revision:4,attempt_generation:99,status:'matched',recovery_retained:true,backup_resumed:false});
+  await openVerifiable(view);await view.verifyUploadedCopy(0);assert.doesNotMatch(view.html(),/uploaded copy matches/);assert.match(view.html(),/did not match this retained attempt/);
+});
