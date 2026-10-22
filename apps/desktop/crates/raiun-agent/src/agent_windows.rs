@@ -7533,7 +7533,7 @@ mod tests {
         if automatic_initial_save {
             // This exact test instance alone enables the ordinary production
             // handoff. No environment or persisted/production flag changes.
-            assert!(!WINDOWS_INITIAL_SAVE_DISPATCH_ENABLED);
+            assert!(!super::WINDOWS_INITIAL_SAVE_DISPATCH_ENABLED);
             agent
                 .provider
                 .initial_save_test_activation
