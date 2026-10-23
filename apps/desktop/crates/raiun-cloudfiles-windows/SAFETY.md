@@ -271,3 +271,26 @@ closed and preserves recovery.
 These contracts follow [CfSetInSyncState](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfsetinsyncstate)
 and [FSCTL_READ_FILE_USN_DATA](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_read_file_usn_data).
 Source review and compilation do not establish runtime Cloud Files acceptance.
+
+
+The completion candidate opens the pinned entry with
+`CfOpenFileWithOplock(EXCLUSIVE | WRITE_ACCESS)`. Its opaque owner is closed only
+with `CfCloseHandle`. A successful `CfReferenceProtectedHandle` retains the
+borrowed Win32 handle through identity checks, full hashing, USN checks, native
+completion and durable acknowledgement; release precedes closing the owner.
+The borrowed handle is never converted to an owning `File` or independently
+closed. No foreground/share-all or ordinary-handle fallback is used.
+
+This handle is asynchronous. Each read/USN request has its own initialized x64
+`OVERLAPPED` and manual-reset event. The protected reference, structure, event
+and buffers remain live until `GetOverlappedResult` reports definitive completion.
+Pending submission is distinguished from failure. Reads must return the full
+bounded expected length; short reads and invalid USN output fail closed. Disk
+completion waits are blocking, not bounded timeouts or cancellation claims.
+Existing path/file identity, full-hash, two-USN, nonzero comparison and protected
+journal rules remain. This is an unaccepted native candidate, not evidence that
+ordinary handles caused the observed in-sync refusal.
+
+See [protected open](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfopenfilewithoplock),
+[borrowed handle](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfgetwin32handlefromprotectedhandle),
+and [overlapped completion](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult).

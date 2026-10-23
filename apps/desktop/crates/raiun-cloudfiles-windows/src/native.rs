@@ -632,6 +632,11 @@ unsafe extern "system" {
         hydrate_flags: u32,
         overlapped: *mut c_void,
     ) -> HResult;
+    fn CfOpenFileWithOplock(path: *const u16, flags: u32, protected: *mut Handle) -> HResult;
+    fn CfReferenceProtectedHandle(protected: Handle) -> u8;
+    fn CfGetWin32HandleFromProtectedHandle(protected: Handle) -> Handle;
+    fn CfReleaseProtectedHandle(protected: Handle);
+    fn CfCloseHandle(protected: Handle);
     fn CfSetInSyncState(
         file_handle: Handle,
         in_sync_state: u32,
@@ -696,6 +701,25 @@ unsafe extern "system" {
         output_len: u32,
         returned: *mut u32,
         overlapped: *mut c_void,
+    ) -> i32;
+    fn CreateEventW(
+        attributes: *const c_void,
+        manual_reset: i32,
+        initial: i32,
+        name: *const u16,
+    ) -> Handle;
+    fn ReadFile(
+        file: Handle,
+        buffer: *mut c_void,
+        length: u32,
+        returned: *mut u32,
+        overlapped: *mut CompletionOverlapped,
+    ) -> i32;
+    fn GetOverlappedResult(
+        file: Handle,
+        overlapped: *mut CompletionOverlapped,
+        returned: *mut u32,
+        wait: i32,
     ) -> i32;
     fn GetLastError() -> u32;
     fn CloseHandle(handle: Handle) -> i32;
@@ -1670,31 +1694,16 @@ impl ConfiguredRootConnection {
             return Err(Error::EditRecoveryUnavailable);
         }
         let path_wide = wide_path(&path)?;
-        // The no-follow chain pins every name; this ordinary stream handle
-        // excludes both writers and deletion for the entire hash/publication/CAS.
+        // The no-follow chain pins every name. An exclusive Cloud Files
+        // handle plus a retained reference protects the exact proof/CAS span.
         observe_completion!("open_immutable_completion_stream");
-        let raw = unsafe {
-            CreateFileW(
-                path_wide.as_ptr(),
-                GENERIC_READ | FILE_READ_ATTRIBUTES | FILE_WRITE_DATA,
-                FILE_SHARE_READ,
-                null(),
-                OPEN_EXISTING,
-                0,
-                null_mut(),
-            )
-        };
-        if raw.is_null() || raw == INVALID_HANDLE_VALUE {
-            return Err(win32_io_error("open verified edit completion handle"));
-        }
-        // SAFETY: raw is newly owned and transferred exactly once to File.
-        let mut file = unsafe { std::fs::File::from_raw_handle(raw) };
+        let file = ProtectedCompletionFile::open(&path_wide)?;
         observe_completion!("validate_opened_stream_identity");
-        let opened = root_snapshot(file.as_raw_handle())?;
+        let opened = root_snapshot(file.raw)?;
         let entry_final =
             final_path_for_handle(entry_guard.0).map_err(|_| Error::ConfiguredRootChanged)?;
-        let opened_final = final_path_for_handle(file.as_raw_handle())
-            .map_err(|_| Error::ConfiguredRootChanged)?;
+        let opened_final =
+            final_path_for_handle(file.raw).map_err(|_| Error::ConfiguredRootChanged)?;
         if !same_edit_snapshot(before, opened)
             || !windows_paths_equal(&entry_final, &opened_final)
             || !windows_path_is_within(&opened_final, &root_final)
@@ -1702,23 +1711,21 @@ impl ConfiguredRootConnection {
             return Err(Error::ConfiguredRootChanged);
         }
         observe_completion!("validate_publication_identity");
-        verify_completion_identity(file.as_raw_handle(), publication.identity())?;
+        verify_completion_identity(file.protected, publication.identity())?;
         // This is a fresh local revalidation snapshot, not a blind new USN
         // sampled after upload. Its full bytes must match the immutable record.
         observe_completion!("capture_nonzero_usn_and_hash");
-        let mut saved_usn = completion_usn(file.as_raw_handle(), metadata.local_file.file_index)?;
+        let mut saved_usn = completion_usn(file.raw, metadata.local_file.file_index)?;
         #[cfg(feature = "synthetic-agent-integration")]
         eprintln!("synthetic_save_completion_usn_first={saved_usn}");
         let len =
             usize::try_from(metadata.content_len).map_err(|_| Error::EditRecoveryUnavailable)?;
         let mut bytes = Zeroizing::new(vec![0_u8; len]);
-        file.read_exact(&mut bytes)
-            .map_err(|error| io_error("read verified edit completion", error))?;
+        file.read_complete(&mut bytes)?;
         if crate::recovery_reconcile::digest_hex(&bytes) != metadata.content_sha256
-            || !same_edit_snapshot(opened, root_snapshot(file.as_raw_handle())?)
+            || !same_edit_snapshot(opened, root_snapshot(file.raw)?)
             || {
-                let observed_usn =
-                    completion_usn(file.as_raw_handle(), metadata.local_file.file_index)?;
+                let observed_usn = completion_usn(file.raw, metadata.local_file.file_index)?;
                 #[cfg(feature = "synthetic-agent-integration")]
                 eprintln!("synthetic_save_completion_usn_second={observed_usn}");
                 observed_usn != saved_usn
@@ -1736,7 +1743,7 @@ impl ConfiguredRootConnection {
             observe_completion!("native_in_sync_cas");
             #[cfg(feature = "synthetic-agent-integration")]
             let diagnostic_input_usn = saved_usn;
-            let result = unsafe { CfSetInSyncState(file.as_raw_handle(), 1, 0, &mut saved_usn) };
+            let result = unsafe { CfSetInSyncState(file.protected, 1, 0, &mut saved_usn) };
             #[cfg(feature = "synthetic-agent-integration")]
             eprintln!("synthetic_save_completion_usn_input={diagnostic_input_usn}");
             if result < 0 {
@@ -1746,14 +1753,14 @@ impl ConfiguredRootConnection {
                     eprintln!("synthetic_save_completion_usn_failure input={diagnostic_input_usn} output_untrusted={saved_usn} hresult={result}");
                     // Diagnostic only: never refresh saved_usn, retry the CAS, or
                     // feed this read into publication or local acknowledgement.
-                    match completion_usn(file.as_raw_handle(), metadata.local_file.file_index) {
+                    match completion_usn(file.raw, metadata.local_file.file_index) {
                         Ok(observed_usn) => eprintln!("synthetic_save_completion_usn_after_failure={observed_usn}"),
                         Err(_) => eprintln!("synthetic_save_completion_usn_after_failure_unavailable"),
                     }
                 }
                 return Err(native_error("complete verified edit in-sync", result));
             }
-            if saved_usn == 0 || root_snapshot(file.as_raw_handle())?.identity != opened.identity {
+            if saved_usn == 0 || root_snapshot(file.raw)?.identity != opened.identity {
                 return Err(Error::ConfiguredRootChanged);
             }
             root.verify_identity(true)?;
@@ -6316,14 +6323,135 @@ fn verify_completion_identity(handle: Handle, expected: &[u8; 16]) -> Result<(),
     Ok(())
 }
 
+// CfOpenFileWithOplock returns an asynchronous opaque handle. The Win32
+// handle below is borrowed, never wrapped in File or independently closed.
+struct ProtectedCompletionFile {
+    protected: Handle,
+    raw: Handle,
+}
+impl ProtectedCompletionFile {
+    fn open(path: &[u16]) -> Result<Self, Error> {
+        let mut protected = null_mut();
+        // SAFETY: NUL-terminated pinned path, owned output; EXCLUSIVE (1) and
+        // WRITE_ACCESS (2), without FOREGROUND or share-all fallback.
+        let hr = unsafe { CfOpenFileWithOplock(path.as_ptr(), 1 | 2, &mut protected) };
+        if hr < 0 {
+            return Err(native_error("open protected edit completion", hr));
+        }
+        if protected.is_null() || protected == INVALID_HANDLE_VALUE {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        // SAFETY: owned Cf handle; successful reference prevents automatic
+        // underlying-handle closure until all proof I/O and CAS have drained.
+        if unsafe { CfReferenceProtectedHandle(protected) } == 0 {
+            unsafe { CfCloseHandle(protected) };
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        let raw = unsafe { CfGetWin32HandleFromProtectedHandle(protected) };
+        if raw.is_null() || raw == INVALID_HANDLE_VALUE {
+            unsafe {
+                CfReleaseProtectedHandle(protected);
+                CfCloseHandle(protected);
+            }
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        Ok(Self { protected, raw })
+    }
+    fn read_complete(&self, bytes: &mut [u8]) -> Result<(), Error> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let length = u32::try_from(bytes.len()).map_err(|_| Error::EditRecoveryUnavailable)?;
+        let mut io = CompletionIo::new()?;
+        // SAFETY: reference and caller buffer remain live until wait completes;
+        // offset zero, exact bounded length, distinct owned manual-reset event.
+        let result = unsafe {
+            ReadFile(
+                self.raw,
+                bytes.as_mut_ptr().cast(),
+                length,
+                null_mut(),
+                &mut io.overlapped,
+            )
+        };
+        if io.finish(self.raw, result)? != length {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        Ok(())
+    }
+}
+impl Drop for ProtectedCompletionFile {
+    fn drop(&mut self) {
+        // All asynchronous operations completed before returning from their
+        // methods. Release the borrow before closing only the opaque Cf owner.
+        unsafe {
+            CfReleaseProtectedHandle(self.protected);
+            CfCloseHandle(self.protected);
+        }
+    }
+}
+
+#[repr(C)]
+struct CompletionOverlapped {
+    internal: usize,
+    internal_high: usize,
+    offset: u32,
+    offset_high: u32,
+    event: Handle,
+}
+#[cfg(target_pointer_width = "64")]
+const _: () = {
+    assert!(size_of::<CompletionOverlapped>() == 32);
+    assert!(std::mem::align_of::<CompletionOverlapped>() == 8);
+};
+struct CompletionIo {
+    overlapped: CompletionOverlapped,
+    _event: RawOwnedHandle,
+}
+impl CompletionIo {
+    fn new() -> Result<Self, Error> {
+        // SAFETY: unnamed event, manual reset, initially nonsignaled.
+        let event = unsafe { CreateEventW(null(), 1, 0, null()) };
+        if event.is_null() {
+            return Err(win32_io_error("create completion I/O event"));
+        }
+        Ok(Self {
+            overlapped: CompletionOverlapped {
+                internal: 0,
+                internal_high: 0,
+                offset: 0,
+                offset_high: 0,
+                event,
+            },
+            _event: RawOwnedHandle(event),
+        })
+    }
+    fn finish(&mut self, handle: Handle, result: i32) -> Result<u32, Error> {
+        // Capture the submission error before any other Win32 call.
+        if result == 0 && unsafe { GetLastError() } != 997 {
+            // ERROR_IO_PENDING
+            return Err(win32_io_error("submit edit completion I/O"));
+        }
+        let mut returned = 0;
+        // SAFETY: exact submitted OVERLAPPED, event, referenced handle and all
+        // buffers remain alive. Wait for definitive completion, including on
+        // I/O error, before any referenced storage can be dropped. This is a
+        // blocking disk operation, not a timeout or cancellation acknowledgement.
+        if unsafe { GetOverlappedResult(handle, &mut self.overlapped, &mut returned, 1) } == 0 {
+            return Err(win32_io_error("finish edit completion I/O"));
+        }
+        Ok(returned)
+    }
+}
+
 fn completion_usn(handle: Handle, expected_file_id: u64) -> Result<i64, Error> {
-    // FSCTL_READ_FILE_USN_DATA, default USN_RECORD_V2. ReFS/V3 records are
-    // deliberately unsupported by this 64-bit-file-ID completion boundary.
+    // FSCTL_READ_FILE_USN_DATA, V2 only. This borrowed protected handle is
+    // asynchronous: retain aligned output, OVERLAPPED and event to completion.
     const FSCTL_READ_FILE_USN_DATA: u32 = 0x0009_00eb;
     let mut storage = vec![0_u64; 8192];
-    let mut returned = 0_u32;
-    // SAFETY: live held file handle, no input selects documented V2 output,
-    // writable aligned buffer and synchronous invocation; no pointers retained.
+    let mut io = CompletionIo::new()?;
+    // SAFETY: referenced live file, aligned bounded output and exact stable
+    // OVERLAPPED; no output inspected before definitive I/O completion.
     let result = unsafe {
         DeviceIoControl(
             handle,
@@ -6332,13 +6460,11 @@ fn completion_usn(handle: Handle, expected_file_id: u64) -> Result<i64, Error> {
             0,
             storage.as_mut_ptr().cast(),
             (storage.len() * size_of::<u64>()) as u32,
-            &mut returned,
             null_mut(),
+            (&mut io.overlapped as *mut CompletionOverlapped).cast(),
         )
     };
-    if result == 0 {
-        return Err(win32_io_error("read edit completion USN"));
-    }
+    let returned = io.finish(handle, result)?;
     let returned = returned as usize;
     if returned < 60 || returned > storage.len() * size_of::<u64>() {
         return Err(Error::EditRecoveryUnavailable);
