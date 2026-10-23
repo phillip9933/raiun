@@ -28,10 +28,13 @@ pub fn decode(value: &Value) -> Result<VaultInspectRequest, String> {
     if text(&mut fields, "action", 64)? != "vault_inspect" {
         return Err(invalid());
     }
-    // Match the existing Windows agent's single configured profile. The caller
-    // still derives account/client custody from its authenticated Runtime.
-    if fields.contains_key("profile_id") && text(&mut fields, "profile_id", 128)? != "default" {
-        return Err(invalid());
+    // Shape validation only; the agent compares this envelope with its trusted
+    // runtime profile before dispatch. The request never selects credentials.
+    if fields.contains_key("profile_id") {
+        let profile = text(&mut fields, "profile_id", 128)?;
+        if !super::valid_runtime_profile(&profile) {
+            return Err(invalid());
+        }
     }
     let space_id = text(&mut fields, "space_id", 512)?;
     let root_path = text(&mut fields, "root_path", 4096)?;

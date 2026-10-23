@@ -71,6 +71,10 @@ enum Command {
 }
 
 trait SessionStore: Send + Sync {
+    /// Production stores declare their trusted profile before any restore or mutation.
+    fn bound_profile(&self) -> Option<&str> {
+        None
+    }
     /// Persist the protected session blob without granting startup restore
     /// authority. The active pointer is published only after the auth worker
     /// wins the same state lock used by cancellation and logout.
@@ -152,6 +156,7 @@ struct WindowsRecoveryContext {
 }
 
 struct WindowsAgent {
+    profile_scope: String,
     session_store: Arc<dyn SessionStore>,
     state: Arc<Mutex<AccountState>>,
     generation: Arc<AtomicU64>,
@@ -1196,9 +1201,37 @@ impl Drop for ProviderManager {
     }
 }
 
+fn valid_runtime_profile(profile: &str) -> bool {
+    profile == "default"
+        || profile.strip_prefix("profile-").is_some_and(|suffix| {
+            suffix.len() == 32
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+
 impl WindowsAgent {
     fn new(session_store: impl SessionStore + 'static) -> Self {
+        Self::new_for_profile("default", session_store)
+            .expect("default runtime and session store must match")
+    }
+
+    fn new_for_profile(
+        profile: &str,
+        session_store: impl SessionStore + 'static,
+    ) -> Result<Self, String> {
+        if !valid_runtime_profile(profile) {
+            return Err("Invalid Windows runtime profile".into());
+        }
+        if session_store
+            .bound_profile()
+            .is_some_and(|bound| bound != profile)
+        {
+            return Err("Windows runtime and session store profiles differ".into());
+        }
         let agent = Self {
+            profile_scope: profile.into(),
             session_store: Arc::new(session_store),
             state: Arc::new(Mutex::new(AccountState::default())),
             generation: Arc::new(AtomicU64::new(1)),
@@ -1208,11 +1241,11 @@ impl WindowsAgent {
             folder_lifecycle: Mutex::new(()),
         };
         agent.restore_active_session();
-        agent
+        Ok(agent)
     }
 
     fn restore_active_session(&self) {
-        let restored = self.session_store.load_active("default");
+        let restored = self.session_store.load_active(self.profile_scope.as_str());
         let (session, error, cleanup_uncertain) = match restored {
             Ok(Some(session)) if session.refresh_token.is_some() => (Some(session), None, false),
             Ok(Some(session)) => {
@@ -1228,7 +1261,11 @@ impl WindowsAgent {
                 // blob so a surviving pointer cannot restore it next launch.
                 cleanup_uncertain |= self
                     .session_store
-                    .remove("default", &session.server, &session.client_id)
+                    .remove(
+                        self.profile_scope.as_str(),
+                        &session.server,
+                        &session.client_id,
+                    )
                     .is_err();
                 (
                     None,
@@ -1240,7 +1277,7 @@ impl WindowsAgent {
             Err(error) => (None, Some(error), false),
         };
         let root_configuration = session.as_ref().and_then(|session| {
-            load_root_configuration(&self.session_store, session)
+            load_root_configuration(&self.session_store, &self.profile_scope, session)
                 .ok()
                 .flatten()
         });
@@ -1257,6 +1294,12 @@ impl WindowsAgent {
     }
 
     fn handle_request(self: &Arc<Self>, request: &Value) -> Result<(Value, bool), String> {
+        if request
+            .get("profile_id")
+            .is_some_and(|value| value.as_str() != Some(self.profile_scope.as_str()))
+        {
+            return Err("The selected Windows profile does not own this request".into());
+        }
         reject_secret_request(request)?;
         let action = request
             .get("action")
@@ -1363,7 +1406,7 @@ impl WindowsAgent {
             "accounts" => {
                 let status = self.status()?;
                 Ok((
-                    json!({"selected":"default","items":[{"id":"default","label":"This PC","status":status}]}),
+                    json!({"selected":self.profile_scope.as_str(),"items":[{"id":self.profile_scope.as_str(),"label":"This PC","status":status}]}),
                     false,
                 ))
             }
@@ -1419,7 +1462,7 @@ impl WindowsAgent {
             "recovery_folder": null,
             "encrypted_edit_recovery_available": false,
             "offline_cache": null,
-            "profile_id": "default",
+            "profile_id": self.profile_scope.as_str(),
             "profile_label": "This PC",
             "auth_generation": state.active_generation,
             "provider_supported": provider_supported,
@@ -1440,7 +1483,7 @@ impl WindowsAgent {
     fn list_recovered_edits(&self, request: &Value) -> Result<Value, String> {
         if request
             .get("profile_id")
-            .is_some_and(|value| value.as_str() != Some("default"))
+            .is_some_and(|value| value.as_str() != Some(self.profile_scope.as_str()))
         {
             return Err("Select the current Windows account".into());
         }
@@ -1531,7 +1574,7 @@ impl WindowsAgent {
             return Err("The account changed; reopen saved edits".into());
         }
         Ok(
-            json!({"profile_id":"default", "auth_generation":verified.agent_generation,
+            json!({"profile_id":self.profile_scope.as_str(), "auth_generation":verified.agent_generation,
             "items":page.0, "next_after":next_after, "read_only":true,
             "recovery_scope_token":cursor_context}),
         )
@@ -1771,7 +1814,7 @@ impl WindowsAgent {
             .map_err(|_| "Folder setup is unavailable")?;
         if request
             .get("profile_id")
-            .is_some_and(|id| id.as_str() != Some("default"))
+            .is_some_and(|id| id.as_str() != Some(self.profile_scope.as_str()))
         {
             return Err("The selected account is unavailable".into());
         }
@@ -1818,7 +1861,7 @@ impl WindowsAgent {
                 .transpose()
                 .map_err(|_| "The account issuer is invalid")?;
             let scope = AccountScope::new(
-                "default".into(),
+                self.profile_scope.as_str().into(),
                 server,
                 session.client_id.clone(),
                 issuer,
@@ -1998,7 +2041,7 @@ impl WindowsAgent {
             .map(|owner| owner.state.clone())
             .unwrap_or_else(|| "prepared_not_registered".into());
         let configuration = RootConfiguration {
-            profile_scope: "default".into(),
+            profile_scope: self.profile_scope.as_str().into(),
             server: session.server.clone(),
             client_id: session.client_id.clone(),
             issuer: session.expected_issuer.clone(),
@@ -2455,6 +2498,7 @@ impl WindowsAgent {
         let state = Arc::clone(&self.state);
         let current_generation = Arc::clone(&self.generation);
         let store = Arc::clone(&self.session_store);
+        let profile_scope = self.profile_scope.clone();
         let provider = Arc::clone(&self.provider);
         let worker = thread::spawn(move || {
             let mut refreshed = session.clone();
@@ -2480,7 +2524,7 @@ impl WindowsAgent {
                         && state.active_generation == generation
                         && state.refreshing
                     {
-                        match store.save_pending("default", &refreshed) {
+                        match store.save_pending(profile_scope.as_str(), &refreshed) {
                             Ok(()) => {
                                 state.session = Some(refreshed);
                                 state.online_authenticated = true;
@@ -2500,7 +2544,7 @@ impl WindowsAgent {
                         }
                     }
                     if cleanup {
-                        let uncertain = revoke_and_remove(&store, &session);
+                        let uncertain = revoke_and_remove(&store, &profile_scope, &session);
                         if let Ok(mut state) = state.lock() {
                             state.session_cleanup_uncertain = uncertain;
                         }
@@ -2539,7 +2583,7 @@ impl WindowsAgent {
                         }
                     }
                     if cleanup {
-                        let uncertain = revoke_and_remove(&store, &session);
+                        let uncertain = revoke_and_remove(&store, &profile_scope, &session);
                         if let Ok(mut state) = state.lock() {
                             state.session_cleanup_uncertain = uncertain;
                         }
@@ -2645,6 +2689,7 @@ impl WindowsAgent {
         let state = Arc::clone(&self.state);
         let current_generation = Arc::clone(&self.generation);
         let store = Arc::clone(&self.session_store);
+        let profile_scope = self.profile_scope.clone();
         let provider = Arc::clone(&self.provider);
         let thread = thread::spawn(move || {
             let result = flow
@@ -2659,7 +2704,7 @@ impl WindowsAgent {
                 });
             match result {
                 Ok(session) if current_generation.load(Ordering::Acquire) == generation => {
-                    if let Err(error) = store.save_pending("default", &session) {
+                    if let Err(error) = store.save_pending(profile_scope.as_str(), &session) {
                         if current_generation.load(Ordering::Acquire) == generation {
                             if let Ok(mut state) = state.lock() {
                                 if state.active_generation == generation {
@@ -2671,15 +2716,17 @@ impl WindowsAgent {
                         return;
                     }
                     if current_generation.load(Ordering::Acquire) != generation {
-                        record_cleanup_failure(&state, &store, &session);
+                        record_cleanup_failure(&state, &store, &profile_scope, &session);
                         return;
                     }
                     let root_configuration =
-                        load_root_configuration(&store, &session).ok().flatten();
+                        load_root_configuration(&store, &profile_scope, &session)
+                            .ok()
+                            .flatten();
                     store.before_publish();
                     let installed = if let Ok(mut state) = state.lock() {
                         if state.authenticating && state.active_generation == generation {
-                            match store.publish_active("default", &session) {
+                            match store.publish_active(profile_scope.as_str(), &session) {
                                 Ok(()) => {
                                     state.session = Some(session.clone());
                                     state.root_configuration = root_configuration;
@@ -2705,7 +2752,7 @@ impl WindowsAgent {
                         false
                     };
                     if !installed {
-                        record_cleanup_failure(&state, &store, &session);
+                        record_cleanup_failure(&state, &store, &profile_scope, &session);
                     } else if let Err(error) =
                         WindowsAgent::maybe_connect_provider(&store, &state, &provider)
                     {
@@ -2841,12 +2888,20 @@ impl WindowsAgent {
         if let Some(session) = &session {
             cleanup_uncertain |= self
                 .session_store
-                .remove("default", &session.server, &session.client_id)
+                .remove(
+                    self.profile_scope.as_str(),
+                    &session.server,
+                    &session.client_id,
+                )
                 .is_err();
             if !preserve_registered_root {
                 cleanup_uncertain |= self
                     .session_store
-                    .remove_root_config("default", &session.server, &session.client_id)
+                    .remove_root_config(
+                        self.profile_scope.as_str(),
+                        &session.server,
+                        &session.client_id,
+                    )
                     .is_err();
             }
         }
@@ -2940,13 +2995,14 @@ impl WindowsAgent {
 fn record_cleanup_failure(
     state: &Arc<Mutex<AccountState>>,
     store: &Arc<dyn SessionStore>,
+    profile_scope: &str,
     session: &auth::Session,
 ) {
     // A cancelled flow only staged an unreferenced blob. It never published
     // startup restore authority, so failed cleanup can leave private bytes but
     // cannot resurrect the cancelled session on the next launch.
     let cleanup_uncertain = store
-        .remove("default", &session.server, &session.client_id)
+        .remove(profile_scope, &session.server, &session.client_id)
         .is_err();
     if !cleanup_uncertain {
         return;
@@ -2959,7 +3015,11 @@ fn record_cleanup_failure(
     }
 }
 
-fn revoke_and_remove(store: &Arc<dyn SessionStore>, session: &auth::Session) -> bool {
+fn revoke_and_remove(
+    store: &Arc<dyn SessionStore>,
+    profile_scope: &str,
+    session: &auth::Session,
+) -> bool {
     let pointer = store.revoke_active();
     let mut uncertain = pointer.is_err();
     if let Ok(Some((scope, server, client_id))) = pointer {
@@ -2969,7 +3029,7 @@ fn revoke_and_remove(store: &Arc<dyn SessionStore>, session: &auth::Session) -> 
     // If both operations fail, startup may retry refresh but never marks the
     // session connected without a successful token response.
     uncertain |= store
-        .remove("default", &session.server, &session.client_id)
+        .remove(profile_scope, &session.server, &session.client_id)
         .is_err();
     uncertain
 }
@@ -2999,9 +3059,11 @@ fn encode_root_configuration(configuration: &RootConfiguration) -> Result<Vec<u8
 
 fn load_root_configuration(
     store: &Arc<dyn SessionStore>,
+    expected_profile: &str,
     session: &auth::Session,
 ) -> Result<Option<RootConfiguration>, String> {
-    let Some(bytes) = store.load_root_config("default", &session.server, &session.client_id)?
+    let Some(bytes) =
+        store.load_root_config(expected_profile, &session.server, &session.client_id)?
     else {
         return Ok(None);
     };
@@ -3023,7 +3085,7 @@ fn load_root_configuration(
     let profile_scope = object
         .get("profile_scope")
         .and_then(Value::as_str)
-        .filter(|value| *value == "default")
+        .filter(|value| *value == expected_profile)
         .ok_or("Saved drive folder configuration is invalid")?;
     let server = object
         .get("server")
@@ -3744,12 +3806,21 @@ struct DpapiStore {
 
 impl DpapiStore {
     fn current_user() -> Result<Self, String> {
-        DpapiSessionStore::current_user()
-            .map(|store| Self {
-                store,
-                profile_scope: "default".into(),
-            })
-            .map_err(|_| "Could not initialize private current-user session storage".into())
+        Self::for_profile("default")
+    }
+    fn for_profile(profile: &str) -> Result<Self, String> {
+        if !valid_runtime_profile(profile) {
+            return Err("Invalid Windows runtime profile".into());
+        }
+        let base = DpapiSessionStore::current_user()
+            .map_err(|_| "Could not initialize private current-user session storage".to_owned())?;
+        let store = base
+            .for_profile(profile)
+            .map_err(|_| "Could not admit private profile storage".to_owned())?;
+        Ok(Self {
+            store,
+            profile_scope: profile.into(),
+        })
     }
     fn check_scope(&self, scope: &str) -> Result<(), String> {
         if scope != self.profile_scope {
@@ -3760,6 +3831,10 @@ impl DpapiStore {
 }
 
 impl SessionStore for DpapiStore {
+    fn bound_profile(&self) -> Option<&str> {
+        Some(&self.profile_scope)
+    }
+
     fn save_pending(&self, scope: &str, session: &auth::Session) -> Result<(), String> {
         self.check_scope(scope)?;
         let bytes = Zeroizing::new(
@@ -10302,7 +10377,7 @@ mod tests {
             )
             .unwrap();
         let stored: Arc<dyn SessionStore> = store;
-        let loaded = load_root_configuration(&stored, &session)
+        let loaded = load_root_configuration(&stored, "default", &session)
             .unwrap()
             .expect("legacy selected root remains available for review");
         assert!(loaded.registration_ownership.is_none());
@@ -11045,6 +11120,7 @@ mod tests {
             br#"{"old_user_root":"never_reuse"}"#.to_vec(),
         );
         let agent = Arc::new(WindowsAgent {
+            profile_scope: "default".into(),
             session_store: store.clone(),
             state: Arc::new(Mutex::new(AccountState::default())),
             generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
@@ -11112,6 +11188,7 @@ mod tests {
             br#"{"old_user_root":"never_reuse"}"#.to_vec(),
         );
         let agent = Arc::new(WindowsAgent {
+            profile_scope: "default".into(),
             session_store: store.clone(),
             state: Arc::new(Mutex::new(AccountState::default())),
             generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
@@ -11230,6 +11307,9 @@ mod tests {
             snapshot(&path) == before,
             "foreign calls must not alter any owned fixture bytes or names"
         );
+        // A mismatched constructor must refuse before restore or revocation.
+        assert!(WindowsAgent::new_for_profile(foreign, adapter).is_err());
+        assert!(snapshot(&path) == before);
         // Success-only exact fixture cleanup; preserve all evidence on panic.
         raw.clear_active_identity()
             .expect("clear synthetic pointer");
@@ -11237,9 +11317,98 @@ mod tests {
             .expect("remove synthetic session");
         raw.remove_root_config(foreign, server, client)
             .expect("remove synthetic root metadata");
-        drop(adapter);
         drop(raw);
         fs::remove_dir(&path).expect("remove only empty synthetic profile child");
+    }
+
+    #[test]
+    fn independent_profile_runtimes_reject_foreign_logout_and_preserve_other_session() {
+        let profile_a = "profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let profile_b = "profile-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let server = "https://synthetic.invalid";
+        let client = "synthetic-client";
+        let store_a = Arc::new(MemoryStore::default());
+        let store_b = Arc::new(MemoryStore::default());
+        let mut session_a = synthetic_session(server, client, unix_time_now() + 3600);
+        let mut session_b = session_a.clone();
+        session_a.access_token = "synthetic-profile-a-token".into();
+        session_b.access_token = "synthetic-profile-b-token".into();
+        seed_active_session(&store_a, profile_a, session_a);
+        seed_active_session(&store_b, profile_b, session_b);
+        let agent_a = Arc::new(WindowsAgent::new_for_profile(profile_a, store_a.clone()).unwrap());
+        let agent_b = Arc::new(WindowsAgent::new_for_profile(profile_b, store_b.clone()).unwrap());
+        // Restored runtimes normally refresh on status. Keep this storage/routing
+        // fixture offline via the existing retry deadline; no auth/network thread
+        // is started and no online authentication or capability is fabricated.
+        agent_a.state.lock().unwrap().refresh_retry_at = u64::MAX;
+        agent_b.state.lock().unwrap().refresh_retry_at = u64::MAX;
+        let key_a = (profile_a.to_owned(), server.to_owned(), client.to_owned());
+        let key_b = (profile_b.to_owned(), server.to_owned(), client.to_owned());
+        let preserved_a = || {
+            assert!(store_a.active_identity.lock().unwrap().as_ref() == Some(&key_a));
+            let sessions = store_a.sessions.lock().unwrap();
+            assert_eq!(sessions.len(), 1);
+            assert!(sessions.get(&key_a).unwrap().access_token == "synthetic-profile-a-token");
+        };
+        let preserved_b = || {
+            assert!(store_b.active_identity.lock().unwrap().as_ref() == Some(&key_b));
+            let sessions = store_b.sessions.lock().unwrap();
+            assert_eq!(sessions.len(), 1);
+            assert!(sessions.get(&key_b).unwrap().access_token == "synthetic-profile-b-token");
+        };
+        let status_a = agent_a
+            .handle_request(&json!({"action":"status", "profile_id":profile_a}))
+            .unwrap()
+            .0;
+        let status_b = agent_b
+            .handle_request(&json!({"action":"status", "profile_id":profile_b}))
+            .unwrap()
+            .0;
+        assert_eq!(status_a["profile_id"], profile_a);
+        assert_eq!(status_b["profile_id"], profile_b);
+        assert_eq!(status_a["connected"], false);
+        assert_eq!(status_b["connected"], false);
+        preserved_a();
+        preserved_b();
+        let generation_a = agent_a.state.lock().unwrap().active_generation;
+        assert!(
+            agent_a
+                .handle_request(&json!({"action":"logout", "profile_id":profile_b}))
+                .is_err()
+        );
+        assert_eq!(
+            agent_a.state.lock().unwrap().active_generation,
+            generation_a
+        );
+        preserved_a();
+        preserved_b();
+        let (logout, stopping) = agent_a
+            .handle_request(&json!({"action":"logout", "profile_id":profile_a}))
+            .unwrap();
+        assert_eq!(logout["logged_out"], true);
+        assert!(!stopping);
+        assert!(store_a.active_identity.lock().unwrap().is_none());
+        assert!(store_a.sessions.lock().unwrap().is_empty());
+        assert!(agent_a.state.lock().unwrap().session.is_none());
+        preserved_b();
+        assert!(
+            agent_b
+                .state
+                .lock()
+                .unwrap()
+                .session
+                .as_ref()
+                .unwrap()
+                .access_token
+                == "synthetic-profile-b-token"
+        );
+        agent_a.stop_and_join().unwrap();
+        agent_b.stop_and_join().unwrap();
+        drop(agent_a);
+        drop(agent_b);
+        assert!(store_a.active_identity.lock().unwrap().is_none());
+        assert!(store_a.sessions.lock().unwrap().is_empty());
+        preserved_b();
     }
 
     fn synthetic_session(server: &str, client_id: &str, expires_at: u64) -> auth::Session {
@@ -11599,6 +11768,7 @@ mod tests {
         let store = Arc::new(MemoryStore::default());
         *store.fail_saves.lock().unwrap() = true;
         let agent = Arc::new(WindowsAgent {
+            profile_scope: "default".into(),
             session_store: store,
             state: Arc::new(Mutex::new(AccountState::default())),
             generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
@@ -11646,6 +11816,7 @@ mod tests {
         let (server, fixture) = synthetic_oidc_server(false);
         let store = Arc::new(MemoryStore::default());
         let agent = Arc::new(WindowsAgent {
+            profile_scope: "default".into(),
             session_store: store.clone(),
             state: Arc::new(Mutex::new(AccountState::default())),
             generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
@@ -11677,6 +11848,7 @@ mod tests {
             release: Mutex::new(release_rx),
         }));
         let agent = Arc::new(WindowsAgent {
+            profile_scope: "default".into(),
             session_store: store.clone(),
             state: Arc::new(Mutex::new(AccountState::default())),
             generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
@@ -11764,7 +11936,7 @@ mod tests {
         let state = Arc::new(Mutex::new(AccountState::default()));
         let store_trait: Arc<dyn SessionStore> = store.clone();
 
-        record_cleanup_failure(&state, &store_trait, &session);
+        record_cleanup_failure(&state, &store_trait, "default", &session);
 
         assert_eq!(store.sessions.lock().unwrap().len(), 1);
         assert!(store.active_identity.lock().unwrap().is_none());

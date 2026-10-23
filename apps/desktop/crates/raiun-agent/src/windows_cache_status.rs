@@ -294,7 +294,7 @@ impl WindowsAgent {
         request: &Value,
         operation: Option<&str>,
     ) -> Result<Value, String> {
-        if request.get("profile_id").and_then(Value::as_str) != Some("default") {
+        if request.get("profile_id").and_then(Value::as_str) != Some(self.profile_scope.as_str()) {
             return Err("Select the current Windows account".into());
         }
         let generation = request
@@ -525,7 +525,7 @@ impl WindowsAgent {
         if let Some(mut status) = job_status {
             if matches!(operation, Some("list" | "folder_list")) {
                 // Attach scope only after the account/session/root postflight.
-                status["profile_id"] = json!("default");
+                status["profile_id"] = json!(self.profile_scope.as_str());
                 status["auth_generation"] = json!(generation);
                 status["recovery_scope_token"] = json!(token);
             }
@@ -537,12 +537,14 @@ impl WindowsAgent {
             raiun_cache::AvailabilityPolicy::AlwaysOffline => "always_offline",
             raiun_cache::AvailabilityPolicy::CloudOnly => "cloud_only",
         };
-        Ok(json!({"profile_id":"default", "auth_generation":generation,
+        Ok(
+            json!({"profile_id":self.profile_scope.as_str(), "auth_generation":generation,
             "recovery_scope_token":token, "read_only":true, "last_observed":true,
             "atomic_snapshot":false, "policy":policy,
             "pending_offline_intent":status.pending_offline_intent,
             "recorded_complete_version":status.recorded_complete_version,
-            "recorded_bytes":status.recorded_bytes}))
+            "recorded_bytes":status.recorded_bytes}),
+        )
     }
 
     pub(super) fn check_cache_status_account(
@@ -570,7 +572,7 @@ impl WindowsAgent {
             .ok_or("Choose the Windows drive")?;
         if session.expires_at <= unix_time_now().saturating_add(30)
             || !configuration.valid
-            || configuration.profile_scope != "default"
+            || configuration.profile_scope != self.profile_scope
             || configuration.server != session.server
             || configuration.client_id != session.client_id
         {
