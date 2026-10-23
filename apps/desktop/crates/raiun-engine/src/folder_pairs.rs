@@ -1,0 +1,421 @@
+//! Inert configuration document only; filesystem/root admission belongs to the caller.
+use raiun_core::{CONFIG_SCHEMA_VERSION, Config};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
+
+pub const MAX_DOCUMENT_BYTES: usize = 512 * 1024;
+pub const MAX_PAIRS: usize = 64;
+pub const MAX_RETIRED_IDS: usize = 4096;
+const VERSION: u32 = 1;
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountScope {
+    profile: String,
+    server: String,
+    client: String,
+    issuer: Option<String>,
+    subject: String,
+}
+impl std::fmt::Debug for AccountScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AccountScope([redacted])")
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentError {
+    Invalid,
+    ScopeMismatch,
+    StaleRevision,
+    RevisionExhausted,
+}
+type Result<T> = std::result::Result<T, DocumentError>;
+fn bounded(s: &str, max: usize) -> bool {
+    !s.trim().is_empty() && s.len() <= max && !s.chars().any(char::is_control)
+}
+fn canonical_url(s: &str) -> bool {
+    let Ok(u) = url::Url::parse(s) else {
+        return false;
+    };
+    matches!(u.scheme(), "https" | "http")
+        && u.host_str().is_some()
+        && u.username().is_empty()
+        && u.password().is_none()
+        && u.query().is_none()
+        && u.fragment().is_none()
+        && u.as_str() == s
+}
+impl AccountScope {
+    /// Inputs must originate from the trusted authenticated session, never the document.
+    pub fn new(
+        profile: String,
+        server: String,
+        client: String,
+        issuer: Option<String>,
+        subject: String,
+    ) -> Result<Self> {
+        if !bounded(&profile, 512)
+            || !bounded(&client, 2048)
+            || !bounded(&subject, 2048)
+            || server.len() > 4096
+            || !canonical_url(&server)
+            || issuer
+                .as_ref()
+                .is_some_and(|v| v.len() > 4096 || !canonical_url(v))
+        {
+            return Err(DocumentError::Invalid);
+        }
+        Ok(Self {
+            profile,
+            server,
+            client,
+            issuer,
+            subject,
+        })
+    }
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FolderPairsDocument {
+    version: u32,
+    scope: AccountScope,
+    revision: u64,
+    config: Config,
+    retired_pair_ids: Vec<String>,
+}
+impl FolderPairsDocument {
+    pub fn new(scope: AccountScope, config: Config) -> Result<Self> {
+        let value = Self {
+            version: VERSION,
+            scope,
+            revision: 0,
+            config,
+            retired_pair_ids: vec![],
+        };
+        value.encode()?;
+        Ok(value)
+    }
+    pub fn decode(bytes: &[u8], expected: &AccountScope) -> Result<Self> {
+        if bytes.is_empty() || bytes.len() > MAX_DOCUMENT_BYTES {
+            return Err(DocumentError::Invalid);
+        }
+        let value: Self = serde_json::from_slice(bytes).map_err(|_| DocumentError::Invalid)?;
+        if &value.scope != expected {
+            return Err(DocumentError::ScopeMismatch);
+        }
+        value.validate()?;
+        Ok(value)
+    }
+    fn validate(&self) -> Result<()> {
+        AccountScope::new(
+            self.scope.profile.clone(),
+            self.scope.server.clone(),
+            self.scope.client.clone(),
+            self.scope.issuer.clone(),
+            self.scope.subject.clone(),
+        )?;
+        if self.version != VERSION
+            || self.config.schema_version != CONFIG_SCHEMA_VERSION
+            || self.config.pairs.len() > MAX_PAIRS
+            || self.retired_pair_ids.len() > MAX_RETIRED_IDS
+        {
+            return Err(DocumentError::Invalid);
+        }
+        let mut ids = BTreeSet::new();
+        for id in &self.retired_pair_ids {
+            if !bounded(id, 128) || !ids.insert(id) {
+                return Err(DocumentError::Invalid);
+            }
+        }
+        for pair in &self.config.pairs {
+            if !bounded(&pair.id, 128)
+                || !bounded(&pair.space_id, 512)
+                || !ids.insert(&pair.id)
+                || pair.vault.is_some()
+                || pair.validate_exclusions().is_err()
+            {
+                return Err(DocumentError::Invalid);
+            }
+        }
+        // Deliberately no validate_config(): it probes paths. Admission happens at execution.
+        Ok(())
+    }
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        let bytes = serde_json::to_vec(self).map_err(|_| DocumentError::Invalid)?;
+        if bytes.len() > MAX_DOCUMENT_BYTES {
+            return Err(DocumentError::Invalid);
+        }
+        Ok(bytes)
+    }
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+    pub fn retired_pair_ids(&self) -> &[String] {
+        &self.retired_pair_ids
+    }
+    /// Creates an inert replacement; secure storage must CAS expected_revision atomically.
+    /// Every removed ID is retired automatically; retirement cannot be undone.
+    pub fn replace(&self, expected_revision: u64, config: Config) -> Result<Self> {
+        if expected_revision != self.revision {
+            return Err(DocumentError::StaleRevision);
+        }
+        let revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(DocumentError::RevisionExhausted)?;
+        let mut retired = self.retired_pair_ids.clone();
+        for pair in &self.config.pairs {
+            if !config.pairs.iter().any(|next| next.id == pair.id) {
+                retired.push(pair.id.clone());
+            }
+        }
+        let next = Self {
+            version: VERSION,
+            scope: self.scope.clone(),
+            revision,
+            config,
+            retired_pair_ids: retired,
+        };
+        next.encode()?;
+        Ok(next)
+    }
+}
+
+/// Typed persistence only. Callers retain responsibility for authentication,
+/// root admission and holding Engine policy-publication guards around updates.
+pub struct FolderPairsStore {
+    engine: crate::Engine,
+    scope: AccountScope,
+    scope_bytes: Vec<u8>,
+}
+#[derive(Debug)]
+pub enum StoreError {
+    Document(DocumentError),
+    Database(raiun_core::backend::CloudError),
+}
+impl From<DocumentError> for StoreError {
+    fn from(value: DocumentError) -> Self {
+        Self::Document(value)
+    }
+}
+impl From<raiun_core::backend::CloudError> for StoreError {
+    fn from(value: raiun_core::backend::CloudError) -> Self {
+        Self::Database(value)
+    }
+}
+impl FolderPairsStore {
+    /// Scope must come from the trusted authenticated account, never stored JSON.
+    pub fn new(
+        engine: crate::Engine,
+        scope: AccountScope,
+    ) -> std::result::Result<Self, StoreError> {
+        AccountScope::new(
+            scope.profile.clone(),
+            scope.server.clone(),
+            scope.client.clone(),
+            scope.issuer.clone(),
+            scope.subject.clone(),
+        )?;
+        let scope_bytes = serde_json::to_vec(&scope).map_err(|_| DocumentError::Invalid)?;
+        if scope_bytes.is_empty() || scope_bytes.len() > 16 * 1024 {
+            return Err(DocumentError::Invalid.into());
+        }
+        Ok(Self {
+            engine,
+            scope,
+            scope_bytes,
+        })
+    }
+    pub fn load(&self) -> std::result::Result<Option<FolderPairsDocument>, StoreError> {
+        self.engine
+            .load_folder_pair_document(&self.scope_bytes)?
+            .map(|bytes| FolderPairsDocument::decode(&bytes, &self.scope).map_err(StoreError::from))
+            .transpose()
+    }
+    pub fn create(&self, config: Config) -> std::result::Result<FolderPairsDocument, StoreError> {
+        let document = FolderPairsDocument::new(self.scope.clone(), config)?;
+        let next = document.encode()?;
+        self.engine
+            .compare_exchange_folder_pair_document(&self.scope_bytes, None, &next)?;
+        Ok(document)
+    }
+    pub fn replace(
+        &self,
+        expected_revision: u64,
+        config: Config,
+    ) -> std::result::Result<FolderPairsDocument, StoreError> {
+        let old = self
+            .engine
+            .load_folder_pair_document(&self.scope_bytes)?
+            .ok_or(DocumentError::StaleRevision)?;
+        let current = FolderPairsDocument::decode(&old, &self.scope)?;
+        let next = current.replace(expected_revision, config)?;
+        self.engine.compare_exchange_folder_pair_document(
+            &self.scope_bytes,
+            Some(&old),
+            &next.encode()?,
+        )?;
+        Ok(next)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raiun_core::{FolderPair, SyncMode};
+    fn scope() -> AccountScope {
+        AccountScope::new(
+            "default".into(),
+            "https://example.invalid/".into(),
+            "desktop".into(),
+            Some("https://issuer.invalid/".into()),
+            "alice".into(),
+        )
+        .unwrap()
+    }
+    fn config() -> Config {
+        Config {
+            schema_version: CONFIG_SCHEMA_VERSION,
+            cloud_root: "Z:\\offline-cloud".into(),
+            pairs: vec![FolderPair {
+                id: "one".into(),
+                local_path: "Z:\\offline-pair".into(),
+                space_id: "space".into(),
+                vault: None,
+                remote_path: "/".into(),
+                mode: SyncMode::TwoWay,
+                excluded_paths: vec!["private".into()],
+            }],
+        }
+    }
+    #[test]
+    fn full_scope_isolation_and_redaction() {
+        let s = scope();
+        let bytes = FolderPairsDocument::new(s.clone(), config())
+            .unwrap()
+            .encode()
+            .unwrap();
+        for field in ["profile", "server", "client", "issuer", "subject"] {
+            let mut v = serde_json::to_value(&s).unwrap();
+            v[field] = serde_json::json!(if field == "server" || field == "issuer" {
+                "https://other.invalid/"
+            } else {
+                "other"
+            });
+            let other: AccountScope = serde_json::from_value(v).unwrap();
+            assert!(matches!(
+                FolderPairsDocument::decode(&bytes, &other),
+                Err(DocumentError::ScopeMismatch)
+            ));
+        }
+        assert_eq!(format!("{s:?}"), "AccountScope([redacted])");
+        assert!(
+            AccountScope::new(
+                "p".into(),
+                "https://user:password@example.invalid/".into(),
+                "c".into(),
+                None,
+                "s".into()
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn restart_retirement_and_revision() {
+        let s = scope();
+        let doc = FolderPairsDocument::new(s.clone(), config()).unwrap();
+        let mut empty = config();
+        empty.pairs.clear();
+        let removed = doc.replace(0, empty).unwrap();
+        let restarted = FolderPairsDocument::decode(&removed.encode().unwrap(), &s).unwrap();
+        assert_eq!(restarted.retired_pair_ids(), &["one"]);
+        assert!(restarted.replace(1, config()).is_err());
+        assert!(matches!(
+            restarted.replace(0, config()),
+            Err(DocumentError::StaleRevision)
+        ));
+        let mut exhausted = restarted;
+        exhausted.revision = u64::MAX;
+        assert!(matches!(
+            exhausted.replace(u64::MAX, exhausted.config.clone()),
+            Err(DocumentError::RevisionExhausted)
+        ));
+    }
+    #[test]
+    fn invalid_duplicate_vault_and_exclusions_refuse() {
+        let s = scope();
+        let mut c = config();
+        c.pairs.push(c.pairs[0].clone());
+        assert!(FolderPairsDocument::new(s.clone(), c).is_err());
+        let mut c = config();
+        c.pairs[0].excluded_paths = vec!["../escape".into()];
+        assert!(FolderPairsDocument::new(s.clone(), c).is_err());
+        let mut c = config();
+        c.pairs[0].vault = Some(raiun_core::VaultBinding {
+            root_path: "/".into(),
+            root_resource_id: "vault".into(),
+        });
+        assert!(FolderPairsDocument::new(s.clone(), c).is_err());
+        let d = FolderPairsDocument::new(s.clone(), config()).unwrap();
+        let mut v = serde_json::to_value(&d).unwrap();
+        v["version"] = 2.into();
+        assert!(FolderPairsDocument::decode(&serde_json::to_vec(&v).unwrap(), &s).is_err());
+    }
+    #[test]
+    fn byte_pair_and_retirement_bounds() {
+        let s = scope();
+        assert!(FolderPairsDocument::decode(&vec![b' '; MAX_DOCUMENT_BYTES + 1], &s).is_err());
+        let mut c = config();
+        c.pairs = (0..65)
+            .map(|i| {
+                let mut p = c.pairs[0].clone();
+                p.id = i.to_string();
+                p
+            })
+            .collect();
+        assert!(FolderPairsDocument::new(s.clone(), c).is_err());
+        let mut d = FolderPairsDocument::new(s.clone(), config()).unwrap();
+        d.retired_pair_ids = (0..=MAX_RETIRED_IDS)
+            .map(|i| format!("retired-{i}"))
+            .collect();
+        assert!(d.encode().is_err());
+        d.retired_pair_ids = vec!["same".into(), "same".into()];
+        assert!(d.encode().is_err());
+        let mut c = config();
+        c.pairs[0].remote_path = "x".repeat(MAX_DOCUMENT_BYTES);
+        assert!(FolderPairsDocument::new(s, c).is_err());
+    }
+    #[test]
+    fn offline_and_existing_non_directory_paths_are_not_probed() {
+        let s = scope();
+        let mut c = config();
+        // An existing non-directory would be rejected by filesystem validation.
+        c.pairs[0].local_path = "/proc/version".into();
+        let d = FolderPairsDocument::new(s.clone(), c.clone()).unwrap();
+        let restored = FolderPairsDocument::decode(&d.encode().unwrap(), &s).unwrap();
+        assert_eq!(restored.config(), &c);
+        assert_eq!(restored.revision(), 0);
+    }
+    #[test]
+    fn engine_id_boundary_applies_to_active_and_retired_decode() {
+        let scope = scope();
+        let mut config = config();
+        config.pairs[0].id = "a".repeat(128);
+        let active = FolderPairsDocument::new(scope.clone(), config.clone()).unwrap();
+        assert!(FolderPairsDocument::decode(&active.encode().unwrap(), &scope).is_ok());
+        config.pairs[0].id.push('a');
+        assert!(FolderPairsDocument::new(scope.clone(), config).is_err());
+        let mut raw = serde_json::to_value(&active).unwrap();
+        raw["config"]["pairs"][0]["id"] = "a".repeat(129).into();
+        assert!(FolderPairsDocument::decode(&serde_json::to_vec(&raw).unwrap(), &scope).is_err());
+        let mut raw = serde_json::to_value(&active).unwrap();
+        raw["retired_pair_ids"] = serde_json::json!(["r".repeat(128)]);
+        assert!(FolderPairsDocument::decode(&serde_json::to_vec(&raw).unwrap(), &scope).is_ok());
+        raw["retired_pair_ids"] = serde_json::json!(["r".repeat(129)]);
+        assert!(FolderPairsDocument::decode(&serde_json::to_vec(&raw).unwrap(), &scope).is_err());
+    }
+}

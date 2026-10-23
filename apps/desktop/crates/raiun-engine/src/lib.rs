@@ -29,6 +29,7 @@ use tempfile::{Builder as TempBuilder, NamedTempFile};
 
 mod db_owner;
 mod folder_pair_document;
+pub mod folder_pairs;
 use db_owner::DbOwner;
 
 #[cfg(unix)]
@@ -2278,11 +2279,14 @@ impl Engine {
         let mut input = content;
         std::io::copy(&mut input, staged.as_file_mut()).map_err(io_error)?;
         staged.as_file().sync_all().map_err(io_error)?;
+        let staged_path = staged.path().to_path_buf();
+        #[cfg(windows)]
+        let _staged_path_owner = staged.into_temp_path();
         let uploaded = match self.upload_inner(
             None,
             space,
             &write.logical_path,
-            staged.path(),
+            &staged_path,
             write.base.clone(),
         ) {
             Ok(entry) => entry,
@@ -2300,7 +2304,7 @@ impl Engine {
             etag: uploaded.etag.clone(),
             protection: ContentProtection::Plaintext,
         };
-        let mut verified_bytes = File::open(staged.path()).map_err(io_error)?;
+        let mut verified_bytes = File::open(&staged_path).map_err(io_error)?;
         context
             .cache
             .publish_content(
@@ -3451,6 +3455,9 @@ impl Engine {
         let _guard = self.execution()?;
         self.validate_backend_binding(pair)?;
         validate_pair_runtime(pair)?;
+        #[cfg(windows)]
+        let _root_pin = raiun_control_windows::PinnedDirectory::open(Path::new(&pair.local_path))
+            .map_err(io_error)?;
         self.check_pair_policy(pair)?;
         let pair = self.normalize_pair_root(pair)?;
         self.clear_stage(&pair.id)?;
@@ -3596,11 +3603,14 @@ impl Engine {
                 )?;
                 let snapshot =
                     snapshot_local_file(&local_path, expected_local_hash, self.cache_dir())?;
+                let snapshot_path = snapshot.path().to_path_buf();
+                #[cfg(windows)]
+                let _snapshot_path_owner = snapshot.into_temp_path();
                 let uploaded = self.upload_inner(
                     Some(&pair.id),
                     &pair.space_id,
                     &remote.path,
-                    snapshot.path(),
+                    &snapshot_path,
                     WriteCondition::Match(expected_remote_etag.to_owned()),
                 )?;
                 // Do not bless the uploaded snapshot if the live local file
@@ -3694,6 +3704,9 @@ impl Engine {
         self.check_sync_paused()?;
         self.validate_backend_binding(pair)?;
         validate_pair_runtime(pair)?;
+        #[cfg(windows)]
+        let _root_pin = raiun_control_windows::PinnedDirectory::open(Path::new(&pair.local_path))
+            .map_err(io_error)?;
         self.check_pair_policy(pair)?;
         let pair = self.normalize_pair_root(pair)?;
         self.clear_stage(&pair.id)?;
@@ -3991,6 +4004,9 @@ impl Engine {
                 .map_err(db_error)?;
             let dir = PathBuf::from(dir);
             let mut batch = Vec::with_capacity(STAGE_BATCH_SIZE);
+            #[cfg(windows)]
+            let _directory_pin =
+                raiun_control_windows::PinnedDirectory::open(&dir).map_err(io_error)?;
             for item in fs::read_dir(&dir).map_err(io_error)? {
                 self.check_sync_paused()?;
                 let item = item.map_err(io_error)?;
@@ -4020,7 +4036,7 @@ impl Engine {
                     continue;
                 }
                 let meta = fs::symlink_metadata(&path).map_err(io_error)?;
-                if meta.file_type().is_symlink() {
+                if is_link_or_reparse(&meta) {
                     return Err(CloudError::new(
                         ErrorKind::Unsupported,
                         format!("symlink is unsupported in folder pair: {}", path.display()),
@@ -4405,6 +4421,9 @@ impl Engine {
     fn create_local_dir(&self, pair: &FolderPair, rel: &str) -> Result<(), CloudError> {
         let path = pair.local_path.join(rel);
         ensure_safe_pair_path(&pair.local_path, &path, true)?;
+        #[cfg(windows)]
+        let _created_pin = pin_or_create_pair_directory(&pair.local_path, &path)?;
+        #[cfg(not(windows))]
         fs::create_dir_all(&path).map_err(io_error)?;
         ensure_safe_pair_path(&pair.local_path, &path, false)
     }
@@ -4461,6 +4480,9 @@ impl Engine {
         let parent = destination.parent().ok_or_else(|| {
             CloudError::new(ErrorKind::Io, "local destination has no parent folder")
         })?;
+        #[cfg(windows)]
+        let _parent_pin = pin_or_create_pair_directory(&pair.local_path, parent)?;
+        #[cfg(not(windows))]
         fs::create_dir_all(parent).map_err(io_error)?;
         ensure_safe_pair_path(&pair.local_path, &destination, true)?;
         let staged = NamedTempFile::new_in(parent).map_err(io_error)?;
@@ -4589,6 +4611,20 @@ impl Engine {
         condition: WriteCondition,
         expected_root: Option<&str>,
     ) -> Result<RemoteEntry, CloudError> {
+        // Keep the exact Windows source and all ancestors stable through the
+        // backend's path reopen, upload and readback verification.
+        #[cfg(windows)]
+        let _source_pin = {
+            let parent = source.parent().ok_or_else(|| {
+                CloudError::new(ErrorKind::Unsupported, "upload source has no parent")
+            })?;
+            let name = source.file_name().ok_or_else(|| {
+                CloudError::new(ErrorKind::Unsupported, "upload source has no filename")
+            })?;
+            let parent = raiun_control_windows::PinnedDirectory::open(parent).map_err(io_error)?;
+            let (file, _) = parent.open_immutable_regular_file(name).map_err(io_error)?;
+            (file, parent)
+        };
         let before_hash = hash_file(source)?;
         let bytes = fs::metadata(source).map_err(io_error)?.len();
         let _metadata = self.metadata_publication()?;
@@ -4909,9 +4945,45 @@ fn path_exists(path: &Path) -> Result<bool, CloudError> {
     }
 }
 
+#[cfg(windows)]
+fn pin_or_create_pair_directory(
+    root: &Path,
+    directory: &Path,
+) -> Result<raiun_control_windows::PinnedDirectory, CloudError> {
+    let relative = directory.strip_prefix(root).map_err(|_| {
+        CloudError::new(
+            ErrorKind::Unsupported,
+            "local directory is outside the folder pair",
+        )
+    })?;
+    let mut pin = raiun_control_windows::PinnedDirectory::open(root).map_err(io_error)?;
+    for component in relative.components() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "local directory is not canonical",
+            ));
+        };
+        pin = pin.create_child_directory(name).map_err(io_error)?;
+    }
+    Ok(pin)
+}
+
+fn is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        metadata.file_attributes() & 0x400 != 0 // FILE_ATTRIBUTE_REPARSE_POINT
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
 fn ensure_pair_root_is_real_directory(path: &Path) -> Result<PathBuf, CloudError> {
     let before = fs::symlink_metadata(path).map_err(io_error)?;
-    if before.file_type().is_symlink() {
+    if is_link_or_reparse(&before) {
         return Err(CloudError::new(
             ErrorKind::Unsupported,
             "folder pair root must not be a symlink",
@@ -4925,7 +4997,7 @@ fn ensure_pair_root_is_real_directory(path: &Path) -> Result<PathBuf, CloudError
     }
     let canonical = fs::canonicalize(path).map_err(io_error)?;
     let after = fs::symlink_metadata(path).map_err(io_error)?;
-    if after.file_type().is_symlink() || !same_file(&before, &after) {
+    if is_link_or_reparse(&after) || !same_file(&before, &after) {
         return Err(CloudError::new(
             ErrorKind::Conflict,
             "folder pair root changed while it was being validated",
@@ -5267,10 +5339,15 @@ fn replace_existing_download(
     let parent = destination
         .parent()
         .ok_or_else(|| CloudError::new(ErrorKind::Io, "local destination has no parent folder"))?;
+    #[cfg(windows)]
+    let _parent_pin = raiun_control_windows::PinnedDirectory::open(parent).map_err(io_error)?;
     let backup_dir = TempBuilder::new()
         .prefix(".raiun-preserve-")
         .tempdir_in(parent)
         .map_err(io_error)?;
+    #[cfg(windows)]
+    let _backup_pin =
+        raiun_control_windows::PinnedDirectory::open(backup_dir.path()).map_err(io_error)?;
     let backup = backup_dir.path().join("previous-version");
 
     preserve_unix_permissions(&staged, destination)?;
@@ -5482,6 +5559,19 @@ fn cache_key(space: &str, path: &str) -> String {
     hex(&Sha256::digest(format!("{space}\0{path}").as_bytes()))
 }
 fn hash_file(path: &Path) -> Result<String, CloudError> {
+    #[cfg(windows)]
+    let parent_pin = raiun_control_windows::PinnedDirectory::open(
+        path.parent()
+            .ok_or_else(|| CloudError::new(ErrorKind::Unsupported, "hash source has no parent"))?,
+    )
+    .map_err(io_error)?;
+    #[cfg(windows)]
+    let (mut file, _) = parent_pin
+        .open_regular_file(path.file_name().ok_or_else(|| {
+            CloudError::new(ErrorKind::Unsupported, "hash source has no filename")
+        })?)
+        .map_err(io_error)?;
+    #[cfg(not(windows))]
     let mut file = File::open(path).map_err(io_error)?;
     let before = file.metadata().map_err(io_error)?;
     if !before.is_file() {
@@ -5623,7 +5713,7 @@ fn ensure_safe_pair_path(
             }
         }
         match fs::symlink_metadata(&current) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
+            Ok(metadata) if is_link_or_reparse(&metadata) => {
                 return Err(CloudError::new(
                     ErrorKind::Unsupported,
                     format!("symlink traversal is unsupported: {}", current.display()),
@@ -5775,6 +5865,9 @@ fn ensure_media_attempt_destination_root_column(db: &Connection) -> Result<(), C
 
 #[cfg(test)]
 mod tests {
+    mod folder_pair_store_tests {
+        include!("folder_pair_store_tests.rs");
+    }
     #[cfg(unix)]
     mod folder_cloud_only_tests {
         include!("folder_cloud_only_tests.rs");

@@ -145,6 +145,26 @@ impl PinnedDirectory {
         Ok((file, id))
     }
 
+    /// Hold one ordinary source file immutable while a path-based backend reads
+    /// it. Existing writers, reparse points, replacement and new writers are
+    /// refused; this does not require a private application-state ACL.
+    pub fn open_immutable_regular_file(
+        &self,
+        name: &OsStr,
+    ) -> io::Result<(File, PinnedFileIdentity)> {
+        self.verify_path()?;
+        validate_component(name)?;
+        let file = open_file_handle_with_share(
+            &self.path.join(name),
+            GENERIC_READ,
+            OPEN_EXISTING,
+            FILE_SHARE_READ,
+        )?;
+        let id = identity(&file)?;
+        self.verify_path()?;
+        Ok((file, id))
+    }
+
     /// Atomically rename a pinned staging file to an absent child. The rename
     /// is handle-based and does not replace an existing destination; this does
     /// not depend on filesystem hard-link support. The returned identity is
@@ -2145,5 +2165,40 @@ mod tests {
         drop(parent);
         let _ = std::fs::remove_dir(&link_path);
         std::fs::remove_dir_all(root).expect("remove private test tree");
+    }
+    #[test]
+    fn immutable_regular_file_pin_denies_writes_and_replacement_until_drop() {
+        let root = private_test_directory();
+        let path = root.join("source.bin");
+        let renamed = root.join("renamed.bin");
+        let expected = b"ordinary synthetic source";
+        std::fs::write(&path, expected).expect("create ordinary source");
+        let parent = PinnedDirectory::open(&root).expect("hold ordinary parent");
+        let (mut pinned, captured) = parent
+            .open_immutable_regular_file(OsStr::new("source.bin"))
+            .expect("pin immutable ordinary file");
+        assert_eq!(identity(&pinned).unwrap(), captured);
+        let mut actual = Vec::new();
+        pinned.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+        assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
+        assert!(std::fs::rename(&path, &renamed).is_err());
+        assert!(std::fs::remove_file(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        assert!(!renamed.exists());
+        drop(pinned);
+        let mut writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("ordinary write allowed after immutable pin drops");
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        writer.write_all(b"controlled").unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(&after[..10], b"controlled");
+        assert_eq!(&after[10..], &expected[10..]);
+        drop(parent);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

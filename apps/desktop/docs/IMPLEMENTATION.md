@@ -25,11 +25,17 @@ protected engine database. A single transaction compares the exact previous
 bytes and scope before committing a replacement; stale or mismatched writes
 cannot reset existing settings. Invalid restored rows fail explicitly. This
 avoids a separate Windows file-replacement implementation. The typed settings
-model and worker are not connected yet; this change does not enable folder sync.
+store checks the full account identity, document revision and retired pair IDs;
+its persistence cases now use the actual engine rather than a minimal test seam.
 
-This is storage integration, not a working Windows folder-sync capability.
-Exact-account configuration persistence, authenticated root admission and the
-worker/RPC path still need to be connected. Windows folder sync remains disabled.
+Windows ordinary-folder operations now retain directory handles during scanning
+and download installation, and an immutable source handle through upload and
+readback. Reparse points are rejected. Temporary upload writers are closed while
+cleanup ownership is retained. These guards still need native acceptance.
+
+This is storage and path integration, not a working Windows folder-sync
+capability. Authenticated account/root admission and the worker/RPC path still
+need to be connected. Windows folder sync remains disabled.
 The native save-back correction also awaits access to the isolated Windows VM;
 production provider activation remains off.
 
