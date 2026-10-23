@@ -1,5 +1,8 @@
 //! Ordinary folder work owned by the existing Windows command thread.
 use super::*;
+mod media_control {
+    include!("windows_media_control.rs");
+}
 use raiun_control_windows::{PinnedDirectory, PrivateDirectory};
 use raiun_core::{CONFIG_SCHEMA_VERSION, Config, FolderPair, SyncMode};
 use raiun_engine::{
@@ -22,6 +25,7 @@ pub(super) struct Setup {
 
 pub(super) struct Runtime {
     pub generation: u64,
+    account_id: String,
     engine: Engine,
     store: FolderPairsStore,
     client: Arc<OpenCloudClient>,
@@ -40,7 +44,7 @@ impl Runtime {
             return Err("The account changed before folder setup".into());
         }
         let engine = Engine::open_private_windows(setup.directory, setup.client.clone())
-            .and_then(|engine| engine.with_account_scope(setup.account_id, setup.origin))
+            .and_then(|engine| engine.with_account_scope(setup.account_id.clone(), setup.origin))
             .map_err(store_error)?;
         let store = FolderPairsStore::new(engine.clone(), setup.scope).map_err(store_error)?;
         if store.load().map_err(store_error)?.is_none() {
@@ -58,6 +62,7 @@ impl Runtime {
         }
         let mut runtime = Self {
             generation: setup.generation,
+            account_id: setup.account_id,
             engine,
             store,
             client: setup.client,
@@ -180,6 +185,10 @@ impl Runtime {
         let document = self.document()?;
         let mut config = document.config().clone();
         match request {
+            FolderRequest::Media(request) => {
+                let trusted_account_id = self.account_id.clone();
+                self.handle_media_metadata(request, authorized, &trusted_account_id)
+            }
             FolderRequest::Pause { paused } => {
                 self.check(authorized)?;
                 self.store

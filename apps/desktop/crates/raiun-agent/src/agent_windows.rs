@@ -16,8 +16,12 @@ mod windows_offline_jobs;
 mod windows_folder_requests;
 #[path = "windows_folder_sync.rs"]
 mod windows_folder_sync;
+#[path = "windows_media_requests.rs"]
+mod windows_media_requests;
 
 const WINDOWS_FOLDER_SYNC_ENABLED: bool = false;
+// Metadata-only media is not ordinary backup execution or recovery acceptance.
+const WINDOWS_MEDIA_METADATA_ENABLED: bool = false;
 
 use clap::{Parser, Subcommand};
 use raiun_cloudfiles_windows::{
@@ -1239,6 +1243,13 @@ impl WindowsAgent {
             | "space_pause" => {
                 if !WINDOWS_FOLDER_SYNC_ENABLED {
                     return Err("Windows folder sync is awaiting native acceptance".into());
+                }
+                Ok((self.folder_request(request)?, false))
+            }
+            "media_jobs" | "media_job_status" | "media_destination" | "media_job_set"
+            | "media_job_remove" | "media_job_run" => {
+                if !WINDOWS_MEDIA_METADATA_ENABLED {
+                    return Err("Windows media backups are not yet supported".into());
                 }
                 Ok((self.folder_request(request)?, false))
             }

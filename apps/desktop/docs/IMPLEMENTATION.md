@@ -59,8 +59,10 @@ The Windows settings document now also supports bounded media-job configuration
 with exact revision checks and legacy empty defaults. Updates preserve folder
 pairs and pause state; removal refuses known unresolved recovery. The runtime
 must still serialize removal with media runs and bind account, source and remote
-destination identity. This is storage groundwork only: Windows media backup
-remains unavailable and has no native acceptance claim.
+destination identity. A separate disabled metadata path now reuses the same
+worker for job settings, status and destination selection; it keeps the trusted
+account from runtime setup and refuses execution. Windows media backup remains
+unavailable and has no native acceptance claim.
 
 ## Next-release Windows save-back work — 23 October 2026 JST
 
