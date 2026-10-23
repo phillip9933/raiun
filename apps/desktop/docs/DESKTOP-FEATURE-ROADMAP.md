@@ -4,6 +4,10 @@ The owner-approved [Linux and Windows completion checklist](COMPLETION-CHECKLIST
 fixes the scope and completion criteria. Historical notes and optional ideas
 below do not automatically add release blockers.
 
+New owner-requested UI improvements are tracked in the shared
+[product backlog](../../../docs/PRODUCT-BACKLOG.md), including Transfers clarity
+and explanations of Photos only / Videos only sync presets.
+
 ## Current installation: R123, closed — 17 October 2026 JST
 
 The exact R123 Linux package is installed and left closed. Its isolated native

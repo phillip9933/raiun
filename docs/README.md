@@ -2,6 +2,7 @@
 
 | Guide | Purpose |
 | --- | --- |
+| [Product backlog](PRODUCT-BACKLOG.md) | Owner-requested Android and Desktop improvements |
 | [Monorepo layout](MONOREPO.md) | Platform boundaries, shared design and later desktop import |
 | [Coordinated releases](RELEASING.md) | Independent versions, tags, assets and launch checks |
 | [Android documentation](../apps/android/docs/README.md) | Android architecture, tests, encryption, scanner and release history |

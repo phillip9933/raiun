@@ -4,6 +4,7 @@ Start with [README](../README.md) for installation and current beta limits, and 
 
 | Document | Purpose |
 | --- | --- |
+| [Product backlog](../../../docs/PRODUCT-BACKLOG.md) | Queued Android and shared product improvements |
 | [Testing](TESTING.md) | Quality commands, device requirements and validation limits |
 | [Linux development](LINUX-DEVELOPMENT.md) | Installed local toolchain, commands and validation evidence |
 | [Encrypted vault plan](ENCRYPTED-VAULTS-PLAN.md) | Web-compatible encryption, biometric key access and phased delivery |
