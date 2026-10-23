@@ -13,7 +13,10 @@ use std::{
         io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
     },
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use sha2::{Digest, Sha256};
@@ -59,6 +62,9 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone)]
 pub struct DpapiSessionStore {
     root: PathBuf,
+    // Derived profile stores retain exact private directory/ancestor pins.
+    // Their OI/CI policy is verified, never rewritten by legacy root repair.
+    profile_directory: Option<Arc<crate::PrivateDirectory>>,
 }
 
 impl DpapiSessionStore {
@@ -98,7 +104,10 @@ impl DpapiSessionStore {
             ));
         }
         let root = local.join("Raiun").join("sessions");
-        let store = Self { root };
+        let store = Self {
+            root,
+            profile_directory: None,
+        };
         store.ensure_private_root()?;
         Ok(store)
     }
@@ -110,6 +119,12 @@ impl DpapiSessionStore {
     /// session/root APIs and validate restored account identity; directory
     /// separation does not replace those checks.
     pub fn for_profile(&self, profile: &str) -> io::Result<Self> {
+        if self.profile_directory.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Derive profiles from the base store",
+            ));
+        }
         if profile == "default" {
             return Ok(self.clone());
         }
@@ -132,6 +147,7 @@ impl DpapiSessionStore {
         child.verify_path()?;
         Ok(Self {
             root: child.path().to_path_buf(),
+            profile_directory: Some(Arc::new(child)),
         })
     }
 
@@ -578,6 +594,9 @@ impl DpapiSessionStore {
     }
 
     fn ensure_private_root(&self) -> io::Result<()> {
+        if let Some(directory) = &self.profile_directory {
+            return directory.verify_path();
+        }
         let sid = super::win32::current_user_sid_for_storage()?;
         let sddl = wide(&format!("D:P(A;;FA;;;{sid})"));
         let descriptor = security_descriptor(&sddl)?;
@@ -597,6 +616,10 @@ impl DpapiSessionStore {
     }
 
     fn ensure_existing_private_root(&self) -> io::Result<bool> {
+        if let Some(directory) = &self.profile_directory {
+            directory.verify_path()?;
+            return Ok(true);
+        }
         let sid = super::win32::current_user_sid_for_storage()?;
         let sddl = wide(&format!("D:P(A;;FA;;;{sid})"));
         let descriptor = security_descriptor(&sddl)?;
@@ -1067,6 +1090,7 @@ mod tests {
         eprintln!("synthetic_profile_store_root={}", root.display());
         let base = DpapiSessionStore {
             root: root.join("sessions"),
+            profile_directory: None,
         };
         base.ensure_private_root().unwrap();
         let a = "profile-00000000000000000000000000000000";
@@ -1082,6 +1106,8 @@ mod tests {
         }
         let first = base.for_profile(a).unwrap();
         let second = base.for_profile(b).unwrap();
+        assert!(first.for_profile("default").is_err());
+        assert!(first.for_profile(b).is_err());
         first
             .save(
                 Some(a),
@@ -1330,6 +1356,7 @@ mod tests {
             .join(format!("root-config-test-{}", std::process::id()));
         let store = DpapiSessionStore {
             root: isolated_root.join("sessions"),
+            profile_directory: None,
         };
         let config = br#"{"version":1,"root":"C:\\synthetic"}"#;
         store
@@ -1380,6 +1407,7 @@ mod tests {
             .join(format!("pointer-test-{}", std::process::id()));
         let store = DpapiSessionStore {
             root: isolated_root.join("sessions"),
+            profile_directory: None,
         };
         let profile = format!("synthetic-pointer-{}", std::process::id());
         store
