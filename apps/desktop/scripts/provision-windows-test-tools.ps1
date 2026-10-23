@@ -44,6 +44,7 @@ function Get-VsWherePath {
 }
 
 function Test-MsvcAndWindowsSdk {
+    $script:SelectedWindowsSdk = $null
     $vswhere = Get-VsWherePath
     if (-not $vswhere) {
         return $false
@@ -65,7 +66,19 @@ function Test-MsvcAndWindowsSdk {
     foreach ($version in $sdkVersions) {
         $header = Join-Path $version.FullName 'um\Windows.h'
         $library = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\Lib\$($version.Name)\um\x64\kernel32.lib"
-        if ((Test-Path -LiteralPath $header) -and (Test-Path -LiteralPath $library)) {
+        $cfApiHeader = Join-Path $version.FullName 'um\CfApi.h'
+        $cldApiLibrary = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\Lib\$($version.Name)\um\x64\CldApi.lib"
+        if ((Test-Path -LiteralPath $header -PathType Leaf) -and
+            (Test-Path -LiteralPath $library -PathType Leaf) -and
+            (Test-Path -LiteralPath $cfApiHeader -PathType Leaf) -and
+            (Test-Path -LiteralPath $cldApiLibrary -PathType Leaf)) {
+            $script:SelectedWindowsSdk = [ordered]@{
+                version = $version.Name
+                windows_header = $header
+                kernel32_library = $library
+                cfapi_header = $cfApiHeader
+                cldapi_library = $cldApiLibrary
+            }
             return $true
         }
     }
@@ -176,6 +189,9 @@ if ($rustcVersion -notmatch 'host: x86_64-pc-windows-msvc') {
     throw 'The active Rust compiler is not targeting x86_64-pc-windows-msvc.'
 }
 
+if ($script:SelectedWindowsSdk) {
+    Write-Host ('Qualified Windows SDK: ' + ($script:SelectedWindowsSdk | ConvertTo-Json -Compress))
+}
 Write-Host 'Windows test toolchain is ready.'
 Write-Host "Rust tools: $env:USERPROFILE\.cargo\bin (no PATH changes made)"
 Write-Host 'Open Developer PowerShell for Visual Studio before running scripts/test-windows-vm.ps1.'
