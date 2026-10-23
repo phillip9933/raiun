@@ -3738,18 +3738,30 @@ fn unix_time_now() -> u64 {
 
 struct DpapiStore {
     store: DpapiSessionStore,
+    // Trusted runtime identity, never selected by an individual RPC payload.
+    profile_scope: String,
 }
 
 impl DpapiStore {
     fn current_user() -> Result<Self, String> {
         DpapiSessionStore::current_user()
-            .map(|store| Self { store })
+            .map(|store| Self {
+                store,
+                profile_scope: "default".into(),
+            })
             .map_err(|_| "Could not initialize private current-user session storage".into())
+    }
+    fn check_scope(&self, scope: &str) -> Result<(), String> {
+        if scope != self.profile_scope {
+            return Err("Protected Windows storage belongs to another profile".into());
+        }
+        Ok(())
     }
 }
 
 impl SessionStore for DpapiStore {
     fn save_pending(&self, scope: &str, session: &auth::Session) -> Result<(), String> {
+        self.check_scope(scope)?;
         let bytes = Zeroizing::new(
             serde_json::to_vec(session).map_err(|_| "Could not serialize the sign-in session")?,
         );
@@ -3762,12 +3774,14 @@ impl SessionStore for DpapiStore {
     }
 
     fn publish_active(&self, scope: &str, session: &auth::Session) -> Result<(), String> {
+        self.check_scope(scope)?;
         self.store
             .set_active_identity(scope, &session.server, &session.client_id)
             .map_err(|_| "Could not save the active session pointer in protected storage".into())
     }
 
     fn load_active(&self, expected_scope: &str) -> Result<Option<auth::Session>, String> {
+        self.check_scope(expected_scope)?;
         let identity = self
             .store
             .active_identity()
@@ -3798,6 +3812,9 @@ impl SessionStore for DpapiStore {
             .store
             .active_identity()
             .map_err(|_| "Could not read the active session pointer".to_string())?;
+        if let Some((profile, _, _)) = &identity {
+            self.check_scope(profile)?;
+        }
         self.store
             .clear_active_identity()
             .map_err(|_| "Could not revoke the active session pointer".to_string())?;
@@ -3805,6 +3822,7 @@ impl SessionStore for DpapiStore {
     }
 
     fn remove(&self, scope: &str, server: &str, client_id: &str) -> Result<(), String> {
+        self.check_scope(scope)?;
         self.store
             .remove(Some(scope), server, client_id)
             .map_err(|_| "Could not remove the session from Windows protected storage".into())
@@ -3817,6 +3835,7 @@ impl SessionStore for DpapiStore {
         client_id: &str,
         bytes: &[u8],
     ) -> Result<(), String> {
+        self.check_scope(scope)?;
         self.store
             .save_root_config(scope, server, client_id, bytes)
             .map_err(|_| "Could not save the drive folder in private Windows storage".into())
@@ -3828,12 +3847,14 @@ impl SessionStore for DpapiStore {
         server: &str,
         client_id: &str,
     ) -> Result<Option<Vec<u8>>, String> {
+        self.check_scope(scope)?;
         self.store
             .load_root_config(scope, server, client_id)
             .map_err(|_| "Could not read the drive folder from private Windows storage".into())
     }
 
     fn remove_root_config(&self, scope: &str, server: &str, client_id: &str) -> Result<(), String> {
+        self.check_scope(scope)?;
         self.store
             .remove_root_config(scope, server, client_id)
             .map_err(|_| "Could not clear the drive folder from private Windows storage".into())
@@ -11118,6 +11139,107 @@ mod tests {
                 .as_deref(),
             Some(br#"{"old_user_root":"never_reuse"}"#.as_slice())
         );
+    }
+
+    #[test]
+    #[ignore = "requires isolated native Windows user profile and current-user DPAPI"]
+    fn dpapi_adapter_rejects_foreign_scope_without_mutating_fixture() {
+        use std::{collections::BTreeMap, fs};
+
+        let base = super::DpapiSessionStore::current_user().expect("open current-user storage");
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce).expect("generate unique synthetic profile ID");
+        let profile = format!("profile-{:032x}", u128::from_be_bytes(nonce));
+        let foreign = if profile == "profile-ffffffffffffffffffffffffffffffff" {
+            "profile-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        } else {
+            "profile-ffffffffffffffffffffffffffffffff"
+        };
+        let path = base.local_edit_state_directory().join(&profile);
+        assert!(
+            matches!(fs::symlink_metadata(&path), Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+            "synthetic profile must not already exist"
+        );
+        let raw = base
+            .for_profile(&profile)
+            .expect("create unique private profile fixture");
+        assert_eq!(raw.local_edit_state_directory(), path);
+        // Only this new child is read below; never read the base/default pointer.
+        let server = "https://synthetic.invalid";
+        let client = "synthetic-client";
+        let session = synthetic_session(server, client, unix_time_now() + 3600);
+        let body = serde_json::to_vec(&session).expect("encode synthetic session");
+        let roots = br#"{"synthetic_root":"not-a-user-folder"}"#;
+        // Intentionally seed a foreign identity through the raw storage API inside
+        // our own new child. This exercises the adapter's independent scope fence.
+        raw.save(Some(foreign), server, client, &body)
+            .expect("seed foreign synthetic session");
+        raw.save_root_config(foreign, server, client, roots)
+            .expect("seed foreign synthetic root metadata");
+        raw.set_active_identity(foreign, server, client)
+            .expect("seed foreign synthetic pointer");
+        let snapshot = |directory: &std::path::Path| -> BTreeMap<std::ffi::OsString, Vec<u8>> {
+            fs::read_dir(directory)
+                .expect("enumerate only owned fixture")
+                .map(|entry| {
+                    let entry = entry.expect("fixture entry");
+                    (
+                        entry.file_name(),
+                        fs::read(entry.path()).expect("read owned fixture bytes"),
+                    )
+                })
+                .collect()
+        };
+        let before = snapshot(&path);
+        let adapter = super::DpapiStore {
+            store: raw.clone(),
+            profile_scope: profile.clone(),
+        };
+        assert!(adapter.save_pending(foreign, &session).is_err());
+        assert!(adapter.publish_active(foreign, &session).is_err());
+        assert!(adapter.load_active(foreign).is_err());
+        assert!(adapter.remove(foreign, server, client).is_err());
+        assert!(
+            adapter
+                .save_root_config(foreign, server, client, b"replacement")
+                .is_err()
+        );
+        assert!(adapter.load_root_config(foreign, server, client).is_err());
+        assert!(adapter.remove_root_config(foreign, server, client).is_err());
+        // Even a trusted-scope load must refuse the foreign pointer; revoke must
+        // check before clear_active_identity rather than destroying it first.
+        assert!(adapter.load_active(&profile).is_err());
+        assert!(adapter.revoke_active().is_err());
+        assert_eq!(
+            raw.active_identity().expect("read owned synthetic pointer"),
+            Some((foreign.into(), server.into(), client.into()))
+        );
+        assert_eq!(
+            raw.load(Some(foreign), server, client)
+                .expect("read owned session")
+                .expect("owned session exists")
+                .as_slice(),
+            body.as_slice()
+        );
+        assert_eq!(
+            raw.load_root_config(foreign, server, client)
+                .expect("read owned root metadata"),
+            Some(roots.to_vec())
+        );
+        assert!(
+            snapshot(&path) == before,
+            "foreign calls must not alter any owned fixture bytes or names"
+        );
+        // Success-only exact fixture cleanup; preserve all evidence on panic.
+        raw.clear_active_identity()
+            .expect("clear synthetic pointer");
+        raw.remove(Some(foreign), server, client)
+            .expect("remove synthetic session");
+        raw.remove_root_config(foreign, server, client)
+            .expect("remove synthetic root metadata");
+        drop(adapter);
+        drop(raw);
+        fs::remove_dir(&path).expect("remove only empty synthetic profile child");
     }
 
     fn synthetic_session(server: &str, client_id: &str, expires_at: u64) -> auth::Session {
