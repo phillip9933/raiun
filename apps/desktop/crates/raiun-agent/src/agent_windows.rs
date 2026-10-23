@@ -1052,7 +1052,7 @@ impl ProviderManager {
             .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
         result
             .recv_timeout(Duration::from_millis(250))
-            .map_err(|_| "Close callback diagnostic unavailable within its bound".into())?
+            .map_err(|_| "Close callback diagnostic unavailable within its bound".to_owned())?
     }
 
     fn is_connected(&self) -> bool {
