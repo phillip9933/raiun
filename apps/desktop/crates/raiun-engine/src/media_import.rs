@@ -7,6 +7,7 @@
 
 use crate::{Engine, hash_file, io_error, now_unix};
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
+#[cfg(not(windows))]
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 use raiun_core::backend::{CloudError, ErrorKind, RemoteEntry, WriteCondition};
@@ -793,43 +794,57 @@ impl Engine {
         report: &mut MediaImportRunReport,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<(), CloudError> {
-        let source_root = fs::canonicalize(&job.source_root).map_err(io_error)?;
-        let root_metadata = fs::symlink_metadata(&job.source_root).map_err(io_error)?;
-        if source_root != job.source_root
-            || root_metadata.file_type().is_symlink()
-            || !root_metadata.is_dir()
-        {
-            return Err(media_error(
-                ErrorKind::Conflict,
-                "media source folder changed identity",
-            ));
-        }
-        // Retain one opened directory capability for scanning, signature
-        // checks, and staging. Reopening the configured string for each file
-        // would let an ancestor/root replacement redirect later reads.
-        let opened_root =
-            Dir::open_ambient_dir(&source_root, ambient_authority()).map_err(io_error)?;
-        let opened_metadata = opened_root.dir_metadata().map_err(io_error)?;
-        if !opened_metadata.is_dir() {
-            return Err(media_error(
-                ErrorKind::Conflict,
-                "media source folder changed identity",
-            ));
-        }
-        #[cfg(unix)]
-        {
-            if cap_fs_ext::MetadataExt::dev(&opened_metadata)
-                != std::os::unix::fs::MetadataExt::dev(&root_metadata)
-                || cap_fs_ext::MetadataExt::ino(&opened_metadata)
-                    != std::os::unix::fs::MetadataExt::ino(&root_metadata)
+        // Windows traversal starts from the exact already-open root object;
+        // retain the owner and its ancestor pins through scanning and staging.
+        #[cfg(windows)]
+        let source_root_pin =
+            raiun_control_windows::PinnedDirectory::open(&job.source_root).map_err(io_error)?;
+        #[cfg(windows)]
+        let source_root = Dir::from_std_file(
+            source_root_pin
+                .try_clone_directory_file()
+                .map_err(io_error)?,
+        );
+        #[cfg(not(windows))]
+        let source_root = {
+            let source_root = fs::canonicalize(&job.source_root).map_err(io_error)?;
+            let root_metadata = fs::symlink_metadata(&job.source_root).map_err(io_error)?;
+            if source_root != job.source_root
+                || root_metadata.file_type().is_symlink()
+                || !root_metadata.is_dir()
             {
                 return Err(media_error(
                     ErrorKind::Conflict,
                     "media source folder changed identity",
                 ));
             }
-        }
-        let source_root = opened_root;
+            // Retain one opened directory capability for scanning, signature
+            // checks, and staging. Reopening the configured string for each file
+            // would let an ancestor/root replacement redirect later reads.
+            let opened_root =
+                Dir::open_ambient_dir(&source_root, ambient_authority()).map_err(io_error)?;
+            let opened_metadata = opened_root.dir_metadata().map_err(io_error)?;
+            if !opened_metadata.is_dir() {
+                return Err(media_error(
+                    ErrorKind::Conflict,
+                    "media source folder changed identity",
+                ));
+            }
+            #[cfg(unix)]
+            {
+                if cap_fs_ext::MetadataExt::dev(&opened_metadata)
+                    != std::os::unix::fs::MetadataExt::dev(&root_metadata)
+                    || cap_fs_ext::MetadataExt::ino(&opened_metadata)
+                        != std::os::unix::fs::MetadataExt::ino(&root_metadata)
+                {
+                    return Err(media_error(
+                        ErrorKind::Conflict,
+                        "media source folder changed identity",
+                    ));
+                }
+            }
+            opened_root
+        };
         let scan = scan_media_dir(
             &source_root,
             MediaScanOptions {

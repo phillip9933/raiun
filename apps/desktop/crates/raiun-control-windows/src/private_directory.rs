@@ -115,6 +115,27 @@ impl PinnedDirectory {
         self.identity
     }
 
+    /// Duplicate this already-open directory for capability-based traversal.
+    /// Keep this owner alive to retain every ancestor pin while using the file.
+    pub fn try_clone_directory_file(&self) -> io::Result<File> {
+        self.verify_path()?;
+        let file = self
+            ._handles
+            .last()
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "Pinned directory is empty")
+            })?
+            .try_clone()?;
+        if identity(&file)? != self.identity {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Pinned directory identity changed",
+            ));
+        }
+        self.verify_path()?;
+        Ok(file)
+    }
+
     /// Create an immutable child file without following an existing reparse
     /// point. The returned handle remains pinned against rename/delete.
     pub fn create_new_file(&self, name: &OsStr) -> io::Result<(File, PinnedFileIdentity)> {

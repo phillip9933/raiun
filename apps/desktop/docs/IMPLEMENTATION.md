@@ -64,6 +64,13 @@ worker for job settings, status and destination selection; it keeps the trusted
 account from runtime setup and refuses execution. Windows media backup remains
 unavailable and has no native acceptance claim.
 
+The Windows media scan now starts from a duplicate of the already-pinned source
+directory handle, retaining the original root and ancestor handles through the
+scan/staging call. It does not reopen the configured root by name. Windows
+immutable source-file and private staging/recovery integration are still open;
+this root bridge alone does not enable media execution or establish native
+media-backup acceptance.
+
 ## Next-release Windows save-back work — 23 October 2026 JST
 
 Windows save-back now has a fresh, read-only verification result that binds the
