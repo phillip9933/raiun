@@ -1,6 +1,6 @@
 //! Account routing and durable exclusion reservations. Production activation
 //! is enabled in non-test candidates after focused native broker acceptance.
-use super::windows_profile_registry::{Registry, RootReservation};
+use super::windows_profile_registry::{Registry, RootReservation, SourceKind, SourceReservation};
 use super::*;
 use std::collections::BTreeMap;
 
@@ -377,13 +377,22 @@ fn inventory_saved_source_exclusions(
                 .path()
                 .to_str()
                 .ok_or("Saved source path is invalid")?;
-            registry = registry.with_reserved_root(
+            let kind = match source.kind() {
+                raiun_engine::folder_pairs::SavedSourceKind::FolderPair => SourceKind::FolderPair,
+                raiun_engine::folder_pairs::SavedSourceKind::MediaJob => SourceKind::MediaJob,
+            };
+            registry = registry.with_reserved_source(
                 &profile,
-                RootReservation::new(
-                    path.into(),
-                    identity.volume_serial,
-                    identity.file_index,
-                    false,
+                SourceReservation::new(
+                    exclusions.scope_digest().into(),
+                    kind,
+                    source.id().into(),
+                    RootReservation::new(
+                        path.into(),
+                        identity.volume_serial,
+                        identity.file_index,
+                        false,
+                    )?,
                 )?,
             )?;
             pin.verify_path()
@@ -429,7 +438,12 @@ fn pin_reservation(root: &RootReservation) -> Result<ReservedPin, String> {
 fn validate_separation(registry: &Registry) -> Result<(), String> {
     let mut roots = Vec::new();
     for (id, profile) in registry.profiles() {
-        for root in profile.root_reservations() {
+        for root in profile.root_reservations().iter().chain(
+            profile
+                .source_reservations()
+                .iter()
+                .map(SourceReservation::root),
+        ) {
             let pin = pin_reservation(root)?;
             let registered = match &pin {
                 ReservedPin::Plain(_) => None,

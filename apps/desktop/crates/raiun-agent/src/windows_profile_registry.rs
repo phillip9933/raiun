@@ -3,12 +3,13 @@
 //! Selection changes only the selected ID; it does not stop or revoke runtimes.
 //! The caller owns random ID allocation, protected persistence and runtime admission.
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 const DEFAULT_ID: &str = "default";
 const REGISTRY_VERSION: u32 = 1;
 const MAX_REGISTRY_BYTES: usize = 1_048_576;
 const MAX_PROFILES: usize = 16;
 const MAX_LABEL_BYTES: usize = 256;
+const MAX_SOURCE_RESERVATIONS: usize = 128;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -16,10 +17,15 @@ pub struct ProfileRecord {
     label: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     root_reservations: Vec<RootReservation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    source_reservations: Vec<SourceReservation>,
 }
 impl ProfileRecord {
     pub fn root_reservations(&self) -> &[RootReservation] {
         &self.root_reservations
+    }
+    pub fn source_reservations(&self) -> &[SourceReservation] {
+        &self.source_reservations
     }
     pub fn label(&self) -> &str {
         &self.label
@@ -99,6 +105,76 @@ impl RootReservation {
     }
 }
 
+/// Saved-source exclusion only; never an authenticated account or execution permit.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceKind {
+    FolderPair,
+    MediaJob,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceReservation {
+    scope_digest: String,
+    kind: SourceKind,
+    id: String,
+    root: RootReservation,
+}
+impl std::fmt::Debug for SourceReservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourceReservation").finish_non_exhaustive()
+    }
+}
+impl SourceReservation {
+    pub fn new(
+        scope_digest: String,
+        kind: SourceKind,
+        id: String,
+        root: RootReservation,
+    ) -> Result<Self, String> {
+        let value = Self {
+            scope_digest,
+            kind,
+            id,
+            root,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+    pub fn scope_digest(&self) -> &str {
+        &self.scope_digest
+    }
+    pub fn kind(&self) -> SourceKind {
+        self.kind
+    }
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn root(&self) -> &RootReservation {
+        &self.root
+    }
+    fn key(&self) -> (&str, SourceKind, &str, &str) {
+        (&self.scope_digest, self.kind, &self.id, self.root.path())
+    }
+    fn validate(&self) -> Result<(), String> {
+        self.root.validate()?;
+        if self.root.may_be_registered()
+            || self.scope_digest.len() != 64
+            || !self
+                .scope_digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || self.id.trim().is_empty()
+            || self.id.len() > 128
+            || self.id.chars().any(char::is_control)
+        {
+            return Err("Invalid source reservation".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Registry {
@@ -148,6 +224,7 @@ impl Registry {
                     ProfileRecord {
                         label: "Default".into(),
                         root_reservations: Vec::new(),
+                        source_reservations: Vec::new(),
                     },
                 )]),
             });
@@ -190,6 +267,7 @@ impl Registry {
             ProfileRecord {
                 label: label.trim().into(),
                 root_reservations: Vec::new(),
+                source_reservations: Vec::new(),
             },
         );
         validate_registry(&next)?;
@@ -219,6 +297,36 @@ impl Registry {
             record.root_reservations.push(reservation);
         }
         next.encode()?; // Enforce the aggregate document byte bound before returning.
+        Ok(next)
+    }
+    /// Append an unpublished exclusion candidate. Old paths are never retired;
+    /// an exact saved source key cannot silently acquire a replacement identity.
+    pub fn with_reserved_source(
+        &self,
+        profile: &str,
+        row: SourceReservation,
+    ) -> Result<Self, String> {
+        validate_registry(self)?;
+        row.validate()?;
+        let mut next = self.clone();
+        let record = next.profiles.get_mut(profile).ok_or("Unknown profile_id")?;
+        if let Some(old) = record
+            .source_reservations
+            .iter()
+            .find(|old| old.key() == row.key())
+        {
+            if old.root.volume_serial() != row.root.volume_serial()
+                || old.root.file_index() != row.root.file_index()
+            {
+                return Err("A saved source changed identity".into());
+            }
+        } else {
+            if record.source_reservations.len() >= MAX_SOURCE_RESERVATIONS {
+                return Err("Source reservation limit reached".into());
+            }
+            record.source_reservations.push(row);
+        }
+        next.encode()?;
         Ok(next)
     }
     pub fn with_selected(&self, id: &str) -> Result<Self, String> {
@@ -254,6 +362,16 @@ fn validate_registry(registry: &Registry) -> Result<(), String> {
         }
         for reservation in &record.root_reservations {
             reservation.validate()?;
+        }
+        if record.source_reservations.len() > MAX_SOURCE_RESERVATIONS {
+            return Err("Source reservation limit reached".into());
+        }
+        let mut keys = BTreeSet::new();
+        for source in &record.source_reservations {
+            source.validate()?;
+            if !keys.insert(source.key()) {
+                return Err("Duplicate source reservation".into());
+            }
         }
     }
     Ok(())
@@ -408,5 +526,108 @@ mod tests {
         let mut value: serde_json::Value = serde_json::from_slice(&full.encode().unwrap()).unwrap();
         value["profiles"]["default"]["root_reservations"][0]["unexpected"] = true.into();
         assert!(Registry::decode_or_default(Some(&serde_json::to_vec(&value).unwrap())).is_err());
+    }
+    fn source(path: &str, index: u64, kind: SourceKind) -> SourceReservation {
+        SourceReservation::new(
+            "a".repeat(64),
+            kind,
+            "saved-id".into(),
+            RootReservation::new(path.into(), 7, index, false).unwrap(),
+        )
+        .unwrap()
+    }
+    #[test]
+    fn source_reservations_are_legacy_default_additive_and_identity_bound() {
+        let original = Registry::decode_or_default(Some(
+            br#"{"version":1,"selected":"default","profiles":{"default":{"label":"Default"}}}"#,
+        ))
+        .unwrap();
+        assert!(
+            original.profiles()["default"]
+                .source_reservations()
+                .is_empty()
+        );
+        let first = original
+            .with_reserved_source("default", source(r"C:\Photos", 10, SourceKind::MediaJob))
+            .unwrap();
+        let same = first
+            .with_reserved_source("default", source(r"C:\Photos", 10, SourceKind::MediaJob))
+            .unwrap();
+        assert_eq!(same.encode().unwrap(), first.encode().unwrap());
+        assert!(
+            first
+                .with_reserved_source("default", source(r"C:\Photos", 11, SourceKind::MediaJob))
+                .is_err()
+        );
+        let next = first
+            .with_reserved_source("default", source(r"D:\Photos", 11, SourceKind::MediaJob))
+            .unwrap()
+            .with_reserved_source("default", source(r"C:\Photos", 10, SourceKind::FolderPair))
+            .unwrap();
+        let restored = Registry::decode_or_default(Some(&next.encode().unwrap())).unwrap();
+        let rows = restored.profiles()["default"].source_reservations();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].root().path(), r"C:\Photos");
+        assert_eq!(rows[0].root().file_index(), 10);
+        assert_eq!(rows[0].scope_digest(), "a".repeat(64));
+        assert_eq!(rows[0].id(), "saved-id");
+        assert!(rows[0].kind() == SourceKind::MediaJob);
+        assert!(
+            restored.profiles()["default"]
+                .root_reservations()
+                .is_empty()
+        );
+        assert!(
+            original.profiles()["default"]
+                .source_reservations()
+                .is_empty()
+        );
+        assert!(
+            next.with_reserved_source("missing", source(r"C:\Safe", 12, SourceKind::MediaJob))
+                .is_err()
+        );
+    }
+    #[test]
+    fn source_reservation_bounds_and_restored_schema_fail_closed() {
+        let mut full = Registry::decode_or_default(None).unwrap();
+        for i in 0..128 {
+            full = full
+                .with_reserved_source(
+                    "default",
+                    source(&format!(r"C:\Source{i}"), i + 1, SourceKind::FolderPair),
+                )
+                .unwrap();
+        }
+        assert!(
+            full.with_reserved_source(
+                "default",
+                source(r"C:\Overflow", 130, SourceKind::FolderPair)
+            )
+            .is_err()
+        );
+        let mut raw = serde_json::to_value(&full).unwrap();
+        let duplicate = raw["profiles"]["default"]["source_reservations"][0].clone();
+        raw["profiles"]["default"]["source_reservations"][1] = duplicate.clone();
+        assert!(Registry::decode_or_default(Some(&serde_json::to_vec(&raw).unwrap())).is_err());
+        for (field, value) in [
+            ("scope_digest", serde_json::json!("A".repeat(64))),
+            ("id", serde_json::json!("x".repeat(129))),
+            ("kind", serde_json::json!("unknown")),
+        ] {
+            let mut invalid = serde_json::to_value(&full).unwrap();
+            invalid["profiles"]["default"]["source_reservations"][0][field] = value;
+            assert!(
+                Registry::decode_or_default(Some(&serde_json::to_vec(&invalid).unwrap())).is_err()
+            );
+        }
+        let mut registered = serde_json::to_value(&full).unwrap();
+        registered["profiles"]["default"]["source_reservations"][0]["root"]["may_be_registered"] =
+            true.into();
+        assert!(
+            Registry::decode_or_default(Some(&serde_json::to_vec(&registered).unwrap())).is_err()
+        );
+        let mut volume = source(r"C:\Safe", 1, SourceKind::MediaJob);
+        volume.root.may_be_registered = true;
+        assert!(volume.validate().is_err());
     }
 }
