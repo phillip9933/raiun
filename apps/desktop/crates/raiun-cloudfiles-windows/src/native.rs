@@ -1613,6 +1613,13 @@ impl ConfiguredRootConnection {
         local_components: &[&str],
         publication: &crate::VerifiedEditPublication<'_, '_>,
     ) -> Result<(), Error> {
+        macro_rules! observe_completion {
+            ($stage:literal) => {
+                #[cfg(feature = "synthetic-agent-integration")]
+                eprintln!("synthetic_save_completion_stage={}", $stage);
+            };
+        }
+        observe_completion!("connection_and_scope");
         if !self.connected
             || local_components.is_empty()
             || local_components
@@ -1637,25 +1644,35 @@ impl ConfiguredRootConnection {
         {
             return Err(Error::EditRecoveryUnavailable);
         }
+        observe_completion!("root_identity_and_registration");
         root.verify_identity(true)?;
         root.verify_registered()?;
         let mut path = root.path.clone();
         for component in local_components {
             path.push(component);
         }
+        observe_completion!("pin_local_components");
         let (root_final, _ancestors, entry_guard, before) = pin_callback_path_chain(
             &path,
             root.identity,
             metadata.local_file.file_index,
             metadata.content_len,
         )
-        .map_err(|_| Error::ConfiguredRootChanged)?;
+        .map_err(|stage| {
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!("synthetic_save_completion_pin_refused stage={stage}");
+            #[cfg(not(feature = "synthetic-agent-integration"))]
+            let _ = stage;
+            Error::ConfiguredRootChanged
+        })?;
+        observe_completion!("require_full_local_content");
         if before.placeholder_state & CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK != 0 {
             return Err(Error::EditRecoveryUnavailable);
         }
         let path_wide = wide_path(&path)?;
         // The no-follow chain pins every name; this ordinary stream handle
         // excludes both writers and deletion for the entire hash/publication/CAS.
+        observe_completion!("open_immutable_completion_stream");
         let raw = unsafe {
             CreateFileW(
                 path_wide.as_ptr(),
@@ -1672,6 +1689,7 @@ impl ConfiguredRootConnection {
         }
         // SAFETY: raw is newly owned and transferred exactly once to File.
         let mut file = unsafe { std::fs::File::from_raw_handle(raw) };
+        observe_completion!("validate_opened_stream_identity");
         let opened = root_snapshot(file.as_raw_handle())?;
         let entry_final =
             final_path_for_handle(entry_guard.0).map_err(|_| Error::ConfiguredRootChanged)?;
@@ -1683,9 +1701,11 @@ impl ConfiguredRootConnection {
         {
             return Err(Error::ConfiguredRootChanged);
         }
+        observe_completion!("validate_publication_identity");
         verify_completion_identity(file.as_raw_handle(), publication.identity())?;
         // This is a fresh local revalidation snapshot, not a blind new USN
         // sampled after upload. Its full bytes must match the immutable record.
+        observe_completion!("capture_nonzero_usn_and_hash");
         let mut saved_usn = completion_usn(file.as_raw_handle(), metadata.local_file.file_index)?;
         let len =
             usize::try_from(metadata.content_len).map_err(|_| Error::EditRecoveryUnavailable)?;
@@ -1703,7 +1723,9 @@ impl ConfiguredRootConnection {
         // SAFETY: this held, identity-validated writable file belongs to the
         // registered root. Nonzero saved_usn makes the OS reject intervening
         // changes. Never retry with zero or replace the saved snapshot here.
+        observe_completion!("acquire_publication_and_token_permit");
         publication.publish_and_complete(|| {
+            observe_completion!("native_in_sync_cas");
             let result = unsafe { CfSetInSyncState(file.as_raw_handle(), 1, 0, &mut saved_usn) };
             if result < 0 {
                 return Err(native_error("complete verified edit in-sync", result));
@@ -1716,11 +1738,18 @@ impl ConfiguredRootConnection {
             // Still under the same publication/token permit and held local
             // handle: record only this exact native-completed snapshot. If
             // persistence fails, its encrypted body remains unresolved.
+            observe_completion!("persist_local_completion");
             recovery
                 .record_local_completion(crate::CompletedLocalEdit::from_native_completion(
                     metadata,
                 ))
-                .map_err(|_| Error::EditRecoveryUnavailable)
+                .map_err(|error| {
+                    #[cfg(feature = "synthetic-agent-integration")]
+                    eprintln!("synthetic_save_completion_journal_refused error={error:?}");
+                    #[cfg(not(feature = "synthetic-agent-integration"))]
+                    let _ = error;
+                    Error::EditRecoveryUnavailable
+                })
         })
     }
     pub(super) fn take_initial_edit(&self) -> Result<Option<crate::PendingInitialEdit>, Error> {
@@ -6719,6 +6748,8 @@ fn native_error(operation: &'static str, hresult: HResult) -> Error {
 
 fn win32_io_error(operation: &'static str) -> Error {
     let code = unsafe { GetLastError() } as i32;
+    #[cfg(feature = "synthetic-agent-integration")]
+    eprintln!("synthetic_native_io_error operation={operation} win32={code}");
     Error::Io {
         operation,
         kind: std::io::Error::from_raw_os_error(code).kind(),

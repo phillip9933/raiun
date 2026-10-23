@@ -3231,9 +3231,11 @@ fn dispatch_one_initial_edit(
                 .dispatch_verified(&remote)
                 .map_err(|_| "The initial save requires recovery review".to_owned())?;
             if let Some(proof) = dispatched.proof {
-                let location = dispatched
-                    .location
-                    .ok_or_else(|| "The saved edit needs local recovery review".to_owned())?;
+                let location = dispatched.location.ok_or_else(|| {
+                    #[cfg(all(test, debug_assertions))]
+                    eprintln!("synthetic_save_completion_missing_location");
+                    "The saved edit needs local recovery review".to_owned()
+                })?;
                 if generation.load(Ordering::Acquire) != binding.generation
                     || location.root_identity() != binding.identity
                     || location.local_file_identity() != proof.metadata().local_file
@@ -3247,7 +3249,13 @@ fn dispatch_one_initial_edit(
                     location.components().iter().map(String::as_str).collect();
                 connection
                     .acknowledge_verified_edit(&components, &publication)
-                    .map_err(|_| "The saved edit needs local recovery review".to_owned())?;
+                    .map_err(|error| {
+                        #[cfg(all(test, debug_assertions))]
+                        eprintln!("synthetic_save_completion_rejected: {error}");
+                        #[cfg(not(all(test, debug_assertions)))]
+                        let _ = error;
+                        "The saved edit needs local recovery review".to_owned()
+                    })?;
             } else if matches!(
                 dispatched.outcome,
                 raiun_cloudfiles_windows::ReconciliationOutcome::VerifiedApplied { .. }
