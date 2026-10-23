@@ -1044,6 +1044,17 @@ impl ProviderManager {
             .map_err(|_| "Windows Cloud Files connection manager stopped unexpectedly")?
     }
 
+    #[cfg(test)]
+    fn close_failure_observation(&self) -> Result<NativeCloseObservation, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::CloseObservation(response))
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result
+            .recv_timeout(Duration::from_millis(250))
+            .map_err(|_| "Close callback diagnostic unavailable within its bound".into())?
+    }
+
     fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Acquire)
     }
@@ -7989,6 +8000,14 @@ mod tests {
                     snapshot.records.len() <= 1,
                     "unexpected additional snapshots; preserve scope"
                 );
+                if Instant::now() >= deadline {
+                    // Read existing bounded callback telemetry once on failure;
+                    // no reopen, rescan or retry. Diagnostic collection alone
+                    // has a 250ms bound after the unchanged save deadline.
+                    if let Ok(observation) = agent.provider.close_failure_observation() {
+                        emit_close_observation(observation);
+                    }
+                }
                 assert!(
                     Instant::now() < deadline,
                     "automatic save did not complete; preserve root and protected journal; record_count={}; incomplete_staging_files={:?}; recovery_states={:?}; last_dispatch={:?}; fixture_counts_put_get_range_bodylen={:?}",
