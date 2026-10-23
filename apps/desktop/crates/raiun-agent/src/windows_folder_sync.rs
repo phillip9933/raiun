@@ -3,6 +3,9 @@ use super::*;
 mod media_control {
     include!("windows_media_control.rs");
 }
+mod vault_control {
+    include!("windows_vault_control.rs");
+}
 use raiun_control_windows::{PinnedDirectory, PrivateDirectory};
 use raiun_core::{CONFIG_SCHEMA_VERSION, Config, FolderPair, SyncMode};
 use raiun_engine::{
@@ -187,6 +190,9 @@ impl Runtime {
         let document = self.document()?;
         let mut config = document.config().clone();
         match request {
+            FolderRequest::VaultInspect(request) => {
+                self.inspect_vault_metadata(request, authorized)
+            }
             FolderRequest::Media(request) => {
                 let trusted_account_id = self.account_id.clone();
                 self.handle_media_metadata(request, authorized, &trusted_account_id)

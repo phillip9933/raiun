@@ -18,9 +18,11 @@ mod windows_folder_requests;
 mod windows_folder_sync;
 #[path = "windows_media_requests.rs"]
 mod windows_media_requests;
+#[path = "windows_vault_requests.rs"]
+mod windows_vault_requests;
 
 const WINDOWS_FOLDER_SYNC_ENABLED: bool = false;
-// Metadata-only media is not ordinary backup execution or recovery acceptance.
+// Media controls remain gated pending worker and package acceptance.
 const WINDOWS_MEDIA_METADATA_ENABLED: bool = false;
 
 use clap::{Parser, Subcommand};
@@ -802,7 +804,14 @@ impl ProviderManager {
                             Err(std::sync::mpsc::TryRecvError::Empty) => {}
                         }
                         if let Some(runtime) = folders.as_mut() {
-                            if let Some(result) = runtime.periodic_tick(&worker_generation) {
+                            // A read-only metadata request may install this worker.
+                            // Disabled features must also suppress background work.
+                            let ordinary = if WINDOWS_FOLDER_SYNC_ENABLED {
+                                runtime.periodic_tick(&worker_generation)
+                            } else {
+                                None
+                            };
+                            if let Some(result) = ordinary {
                                 if let Ok(mut error) = worker_folder_error.lock() { *error = result.err(); }
                             } else if WINDOWS_MEDIA_METADATA_ENABLED {
                                 if let Some(result) = runtime.periodic_media_tick(&worker_generation) {
@@ -1267,6 +1276,8 @@ impl WindowsAgent {
                 }
                 Ok((self.folder_request(request)?, false))
             }
+            // Inspection is read-only and grants no session, key or native route.
+            "vault_inspect" => Ok((self.folder_request(request)?, false)),
             "windows_recovery_retry" => Ok((self.retry_recovered_edit(request)?, false)),
             "windows_file_cache_status" => Ok((self.windows_file_cache_status(request)?, false)),
             "windows_offline_folders" => {
@@ -3937,6 +3948,9 @@ fn request_timeout(request: &Value) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    mod windows_media_worker_test {
+        include!("windows_media_worker_test.rs");
+    }
     mod windows_folder_worker_test {
         include!("windows_folder_worker_test.rs");
     }
@@ -10295,6 +10309,7 @@ mod tests {
     }
 
     struct SyntheticRecoveryFile {
+        present: bool,
         body: Vec<u8>,
         etag: String,
         put_count: usize,
@@ -10364,6 +10379,26 @@ mod tests {
         native_read_files_enabled: bool,
         recovery_read_probe_enabled: bool,
     ) -> (String, SyntheticPersonalSpacesFixture) {
+        synthetic_personal_spaces_server_inner_with_media_leaf(
+            emit_stage,
+            native_read_files_enabled,
+            recovery_read_probe_enabled,
+            false,
+        )
+    }
+
+    fn synthetic_personal_spaces_server_with_absent_media_leaf(
+        emit_stage: impl Fn(&str),
+    ) -> (String, SyntheticPersonalSpacesFixture) {
+        synthetic_personal_spaces_server_inner_with_media_leaf(emit_stage, true, false, true)
+    }
+
+    fn synthetic_personal_spaces_server_inner_with_media_leaf(
+        emit_stage: impl Fn(&str),
+        native_read_files_enabled: bool,
+        recovery_read_probe_enabled: bool,
+        initially_absent: bool,
+    ) -> (String, SyntheticPersonalSpacesFixture) {
         emit_stage("listener_bind_begin");
         let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|error| {
             emit_stage(&format!("listener_bind_error_kind_{:?}", error.kind()));
@@ -10385,7 +10420,12 @@ mod tests {
         let worker_server = server.clone();
         let webdav = format!("{server}/remote.php/dav/personal/synthetic-personal-drive");
         let recovery = Arc::new(Mutex::new(SyntheticRecoveryFile {
-            body: b"original synthetic placeholder bytes".to_vec(),
+            present: !initially_absent,
+            body: if initially_absent {
+                Vec::new()
+            } else {
+                b"original synthetic placeholder bytes".to_vec()
+            },
             etag: "\"synthetic-file-v1\"".into(),
             put_count: 0,
             get_count: 0,
@@ -10525,6 +10565,10 @@ mod tests {
                             ("synthetic-recovery-directory", "RecoveryRoot", true, "\"synthetic-recovery-directory-etag\"".to_owned(), 0)
                         } else if normalized == format!("{project_prefix}/RecoveryRoot/document.bin") {
                             let snapshot = worker_recovery.lock().unwrap();
+                            if !snapshot.present {
+                                write!(request_stream, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                                continue;
+                            }
                             ("synthetic-recovery-file", "document.bin", false, snapshot.etag.clone(), snapshot.body.len())
                         } else if recovery_read_probe_enabled
                             && normalized == format!("{project_prefix}/RecoveryRoot/read-probe.bin")
@@ -10587,6 +10631,7 @@ mod tests {
                         && normalized == format!("{project_prefix}/RecoveryRoot")
                     {
                         let snapshot = worker_recovery.lock().unwrap();
+                        if snapshot.present {
                         entries.push((
                             format!("{project_prefix}/RecoveryRoot/document.bin"),
                             "synthetic-recovery-file".into(),
@@ -10595,6 +10640,7 @@ mod tests {
                             snapshot.etag.clone(),
                             snapshot.body.len(),
                         ));
+                        }
                         if recovery_read_probe_enabled {
                             entries.push((
                                 format!("{project_prefix}/RecoveryRoot/read-probe.bin"),
@@ -10641,10 +10687,13 @@ mod tests {
                         .find(|(name, _)| name == "if-match")
                         .map(|(_, value)| value.clone());
                     let mut snapshot = worker_recovery.lock().unwrap();
-                    if if_match.as_deref() != Some(snapshot.etag.as_str()) {
+                    let absent_condition = headers.iter().find(|(name, _)| name == "if-none-match").map(|(_, value)| value.as_str());
+                    if (snapshot.present && if_match.as_deref() != Some(snapshot.etag.as_str()))
+                        || (!snapshot.present && (if_match.is_some() || absent_condition != Some("*"))) {
                         write!(request_stream, "HTTP/1.1 412 Precondition Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
                         continue;
                     }
+                    snapshot.present = true;
                     snapshot.put_count += 1;
                     snapshot.last_put_if_match = if_match;
                     snapshot.body = body;
@@ -10659,6 +10708,10 @@ mod tests {
                         .find(|(name, _)| name == "if-match")
                         .map(|(_, value)| value.clone());
                     let mut snapshot = worker_recovery.lock().unwrap();
+                    if !snapshot.present {
+                        write!(request_stream, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                        continue;
+                    }
                     if if_match.as_deref() != Some(snapshot.etag.as_str()) {
                         write!(request_stream, "HTTP/1.1 412 Precondition Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
                         continue;

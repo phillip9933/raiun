@@ -3,6 +3,7 @@ use raiun_core::{FolderPair, validate_remote_path};
 use serde_json::{Map, Value};
 
 pub enum FolderRequest {
+    VaultInspect(super::windows_vault_requests::VaultInspectRequest),
     Media(super::windows_media_requests::MediaRequest),
     Pause {
         paused: bool,
@@ -72,6 +73,9 @@ pub fn decode(request: &Value) -> Result<FolderRequest, String> {
         "media_jobs" | "media_job_status" | "media_destination" | "media_job_set"
         | "media_job_remove" | "media_job_run" | "media_job_recovery" => {
             return super::windows_media_requests::decode(request).map(FolderRequest::Media);
+        }
+        "vault_inspect" => {
+            return super::windows_vault_requests::decode(request).map(FolderRequest::VaultInspect);
         }
         "pairs" => FolderRequest::Pairs,
         "spaces" => FolderRequest::Spaces,

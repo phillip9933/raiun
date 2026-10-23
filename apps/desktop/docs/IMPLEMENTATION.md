@@ -44,11 +44,17 @@ Idle media selection also reuses this worker, durable run status and existing
 intervals; it does not replay uncertain attempts or create another scheduler.
 Fresh admission does not claim persisted historical source identity across restarts.
 
-Linux source gates and early Windows compilation cover the preceding integration;
-final idle-scheduling compilation and focused Windows engine/worker acceptance
-are still progressing. Media execution
-and its UI capability remain disabled. These source changes do not establish
-Windows media-backup completion or a new public release.
+Early Windows compilation now covers idle scheduling. Two ordinary-user MSVC
+engine cases passed normal media import/verified updates and collision/lost-response
+recovery across engine reopen. The actual worker-control acceptance case is next;
+this is not GUI or packaged acceptance. Media execution and its UI capability
+remain disabled, and no new public release is claimed.
+
+Windows also has a read-only vault-inspection path using existing authenticated
+Graph/DAV metadata. It grants no unlocked session, remembered password, verified
+cryptographic state or decrypted native route; the vault UI capability stays off.
+Installing the account worker for inspection cannot start background transfers
+while the corresponding folder/media feature flags are disabled.
 
 ## Next-release Windows save-back work — 23 October 2026 JST
 
