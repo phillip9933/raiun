@@ -86,6 +86,8 @@ pub struct FolderPairsDocument {
     paused: bool,
     #[serde(default)]
     paused_space_ids: Vec<String>,
+    #[serde(default)]
+    media_jobs: Vec<raiun_core::MediaImportJob>,
 }
 impl FolderPairsDocument {
     pub fn new(scope: AccountScope, config: Config) -> Result<Self> {
@@ -97,6 +99,7 @@ impl FolderPairsDocument {
             retired_pair_ids: vec![],
             paused: false,
             paused_space_ids: vec![],
+            media_jobs: vec![],
         };
         value.encode()?;
         Ok(value)
@@ -127,6 +130,8 @@ impl FolderPairsDocument {
         {
             return Err(DocumentError::Invalid);
         }
+        raiun_core::validate_media_import_jobs(&self.media_jobs)
+            .map_err(|_| DocumentError::Invalid)?;
         let mut paused_ids = BTreeSet::new();
         if self.paused_space_ids.len() > 256
             || self
@@ -169,6 +174,9 @@ impl FolderPairsDocument {
     pub fn config(&self) -> &Config {
         &self.config
     }
+    pub fn media_jobs(&self) -> &[raiun_core::MediaImportJob] {
+        &self.media_jobs
+    }
     pub fn paused(&self) -> bool {
         self.paused
     }
@@ -202,6 +210,7 @@ impl FolderPairsDocument {
             retired_pair_ids: retired,
             paused: self.paused,
             paused_space_ids: self.paused_space_ids.clone(),
+            media_jobs: self.media_jobs.clone(),
         };
         next.encode()?;
         Ok(next)
@@ -265,6 +274,93 @@ impl FolderPairsStore {
         self.engine
             .compare_exchange_folder_pair_document(&self.scope_bytes, None, &next)?;
         Ok(document)
+    }
+    /// Caller authenticates job account/destination/source and fences runtime work.
+    pub fn set_media_job(
+        &self,
+        expected_document_revision: u64,
+        expected_job_revision: u64,
+        mut job: raiun_core::MediaImportJob,
+    ) -> std::result::Result<FolderPairsDocument, StoreError> {
+        let old = self
+            .engine
+            .load_folder_pair_document(&self.scope_bytes)?
+            .ok_or(DocumentError::StaleRevision)?;
+        let mut next = FolderPairsDocument::decode(&old, &self.scope)?;
+        if next.revision != expected_document_revision {
+            return Err(DocumentError::StaleRevision.into());
+        }
+        if let Some(existing) = next
+            .media_jobs
+            .iter_mut()
+            .find(|existing| existing.id == job.id)
+        {
+            if existing.revision != expected_job_revision
+                || job.revision != expected_job_revision
+                || existing.account_id != job.account_id
+            {
+                return Err(DocumentError::StaleRevision.into());
+            }
+            job.revision = existing
+                .revision
+                .checked_add(1)
+                .ok_or(DocumentError::RevisionExhausted)?;
+            *existing = job;
+        } else {
+            if expected_job_revision != 0 || job.revision != 0 {
+                return Err(DocumentError::StaleRevision.into());
+            }
+            job.revision = 1;
+            next.media_jobs.push(job);
+        }
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or(DocumentError::RevisionExhausted)?;
+        self.engine.compare_exchange_folder_pair_document(
+            &self.scope_bytes,
+            Some(&old),
+            &next.encode()?,
+        )?;
+        Ok(next)
+    }
+    /// Refuses currently observed unresolved durable attempts/recovery.
+    /// Removing configuration does not delete Engine history or recovery bodies.
+    pub fn remove_media_job(
+        &self,
+        expected_document_revision: u64,
+        id: &str,
+        expected_job_revision: u64,
+    ) -> std::result::Result<FolderPairsDocument, StoreError> {
+        let old = self
+            .engine
+            .load_folder_pair_document(&self.scope_bytes)?
+            .ok_or(DocumentError::StaleRevision)?;
+        let mut next = FolderPairsDocument::decode(&old, &self.scope)?;
+        if next.revision != expected_document_revision {
+            return Err(DocumentError::StaleRevision.into());
+        }
+        let index = next
+            .media_jobs
+            .iter()
+            .position(|job| job.id == id && job.revision == expected_job_revision)
+            .ok_or(DocumentError::StaleRevision)?;
+        // Fail closed here too: callers cannot hide known retained recovery simply
+        // by forgetting their preflight. Runtime serialization is still required.
+        if self.engine.media_import_has_unresolved(id)? {
+            return Err(DocumentError::Invalid.into());
+        }
+        next.media_jobs.remove(index);
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or(DocumentError::RevisionExhausted)?;
+        self.engine.compare_exchange_folder_pair_document(
+            &self.scope_bytes,
+            Some(&old),
+            &next.encode()?,
+        )?;
+        Ok(next)
     }
     pub fn set_pause(
         &self,

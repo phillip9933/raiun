@@ -55,6 +55,13 @@ checks pass, but the test link lacks the Windows SDK CldApi import library.
 The new isolated Windows VM is being prepared for the official MSVC/SDK build;
 production provider activation remains off.
 
+The Windows settings document now also supports bounded media-job configuration
+with exact revision checks and legacy empty defaults. Updates preserve folder
+pairs and pause state; removal refuses known unresolved recovery. The runtime
+must still serialize removal with media runs and bind account, source and remote
+destination identity. This is storage groundwork only: Windows media backup
+remains unavailable and has no native acceptance claim.
+
 ## Next-release Windows save-back work — 23 October 2026 JST
 
 Windows save-back now has a fresh, read-only verification result that binds the
