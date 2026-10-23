@@ -41,11 +41,18 @@ folder settings and explicit sync RPC shapes. Sync acknowledgement means work
 was queued; it does not report successful completion. Account changes revoke
 subsequent sync steps and drain the worker before credential replacement.
 
-Windows folder sync remains disabled pending focused native acceptance. Its
-first workflow is explicit sync; automatic scheduling and durable pause/resume
-are not implemented in this slice. This does not claim packaged GUI acceptance
-or completion of the whole folder-sync category.
-The native save-back correction also awaits access to the isolated Windows VM;
+The gated runtime also has idle reconciliation on the existing worker and
+account-scoped persisted global/Space pause. Pause acknowledges only after the
+previous sync drains; resume does not clear account revocation. Status reads a
+generation-qualified snapshot without waiting behind a transfer. Commands and
+fresh native save-back retain priority; repeated save-back errors suspend idle
+reconciliation. No additional scheduler thread is created.
+
+Windows folder sync remains disabled pending focused native acceptance. This
+does not claim packaged GUI acceptance or completion of the folder-sync
+category. The native save-back correction also remains unaccepted: GNU source
+checks pass, but the test link lacks the Windows SDK CldApi import library.
+The new isolated Windows VM is being prepared for the official MSVC/SDK build;
 production provider activation remains off.
 
 ## Next-release Windows save-back work — 23 October 2026 JST

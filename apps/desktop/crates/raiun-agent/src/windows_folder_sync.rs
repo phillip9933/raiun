@@ -28,6 +28,7 @@ pub(super) struct Runtime {
     spaces: Vec<CloudSpace>,
     roots: BTreeMap<String, PinnedDirectory>,
     cloud_root: Option<RootConfiguration>,
+    next_periodic_sync: std::time::Instant,
 }
 
 fn store_error(_: impl std::fmt::Debug) -> String {
@@ -67,6 +68,7 @@ impl Runtime {
                 .collect(),
             roots: BTreeMap::new(),
             cloud_root: setup.cloud_root,
+            next_periodic_sync: std::time::Instant::now() + Duration::from_secs(30),
         };
         let document = runtime.document()?;
         for id in document.retired_pair_ids() {
@@ -85,6 +87,10 @@ impl Runtime {
         }
         runtime.check(authorized)?;
         Ok(runtime)
+    }
+    pub fn pause_snapshot(&self) -> Result<(bool, Vec<String>), String> {
+        let document = self.document()?;
+        Ok((document.paused(), document.paused_space_ids().to_vec()))
     }
     pub fn revocation_handle(&self) -> SyncRevocationHandle {
         self.engine.revocation_handle()
@@ -174,6 +180,33 @@ impl Runtime {
         let document = self.document()?;
         let mut config = document.config().clone();
         match request {
+            FolderRequest::Pause { paused } => {
+                self.check(authorized)?;
+                self.store
+                    .set_pause(
+                        document.revision(),
+                        paused,
+                        document.paused_space_ids().to_vec(),
+                    )
+                    .map_err(store_error)?;
+                // This command runs only after any earlier sync finishes.
+                // Never clear Engine's revocation flag to implement resume.
+                Ok(json!({}))
+            }
+            FolderRequest::SpacePause { space_id, paused } => {
+                self.space(&space_id)?;
+                let mut ids = document.paused_space_ids().to_vec();
+                ids.retain(|id| id != &space_id);
+                if paused {
+                    ids.push(space_id.clone());
+                }
+                ids.sort();
+                self.check(authorized)?;
+                self.store
+                    .set_pause(document.revision(), document.paused(), ids.clone())
+                    .map_err(store_error)?;
+                Ok(json!({"space_id":space_id,"paused":paused,"paused_space_ids":ids}))
+            }
             FolderRequest::Pairs => serde_json::to_value(config.pairs).map_err(store_error),
             FolderRequest::Spaces => serde_json::to_value(&self.spaces).map_err(store_error),
             FolderRequest::List { space_id, path } => {
@@ -279,11 +312,25 @@ impl Runtime {
             self.space(id)?;
         }
         let document = self.document()?;
+        if document.paused() {
+            return Err("Sync is paused globally".into());
+        }
+        if space.is_some_and(|id| {
+            document
+                .paused_space_ids()
+                .iter()
+                .any(|paused| paused == id)
+        }) {
+            return Err("Sync is paused for this Space".into());
+        }
         let pairs = document
             .config()
             .pairs
             .iter()
-            .filter(|pair| space.is_none_or(|id| pair.space_id == id))
+            .filter(|pair| {
+                space.is_none_or(|id| pair.space_id == id)
+                    && !document.paused_space_ids().contains(&pair.space_id)
+            })
             .cloned()
             .collect::<Vec<_>>();
         if pairs.is_empty() {
@@ -292,7 +339,7 @@ impl Runtime {
         Ok((document.revision(), pairs))
     }
     pub fn run_sync(
-        &self,
+        &mut self,
         revision: u64,
         pairs: Vec<FolderPair>,
         authorized: &AtomicU64,
@@ -300,8 +347,19 @@ impl Runtime {
         for pair in pairs {
             self.check(authorized)?;
             let current = self.document()?;
-            if current.revision() != revision || !current.config().pairs.contains(&pair) {
+            if current.paused()
+                || current.paused_space_ids().contains(&pair.space_id)
+                || current.revision() != revision
+                || !current.config().pairs.contains(&pair)
+            {
                 return Err("Folder settings changed before sync".into());
+            }
+            // Only a never-admitted restored pair may acquire its first pin.
+            // Existing pins are verified below and never silently replaced.
+            if !self.roots.contains_key(&pair.id) {
+                let pin = self.admit(&pair, current.config(), Some(&pair.id))?;
+                self.check(authorized)?;
+                self.roots.insert(pair.id.clone(), pin);
             }
             self.roots
                 .get(&pair.id)
@@ -313,6 +371,31 @@ impl Runtime {
             )?;
         }
         Ok(())
+    }
+    /// Idle-only ordinary reconciliation, not recovered-edit replay.
+    pub fn periodic_tick(&mut self, authorized: &AtomicU64) -> Option<Result<(), String>> {
+        if self.check(authorized).is_err() || std::time::Instant::now() < self.next_periodic_sync {
+            return None;
+        }
+        if self.document().is_ok_and(|document| {
+            document.paused()
+                || document
+                    .config()
+                    .pairs
+                    .iter()
+                    .all(|pair| document.paused_space_ids().contains(&pair.space_id))
+        }) {
+            self.next_periodic_sync = std::time::Instant::now() + Duration::from_secs(30);
+            return None;
+        }
+        let result = (|| {
+            let (revision, pairs) = self.prepare_sync(None, authorized)?;
+            self.run_sync(revision, pairs, authorized)
+        })();
+        // Unix ordinary cadence is 30 seconds; failures wait a full minute.
+        self.next_periodic_sync =
+            std::time::Instant::now() + Duration::from_secs(if result.is_ok() { 30 } else { 60 });
+        Some(result)
     }
     fn check(&self, authorized: &AtomicU64) -> Result<(), String> {
         if self.generation == 0 || authorized.load(Ordering::Acquire) != self.generation {

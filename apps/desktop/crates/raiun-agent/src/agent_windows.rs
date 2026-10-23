@@ -155,6 +155,13 @@ struct WindowsAgent {
     folder_lifecycle: Mutex<()>,
 }
 
+#[derive(Clone)]
+struct FolderPauseSnapshot {
+    generation: u64,
+    paused: bool,
+    paused_space_ids: Vec<String>,
+}
+
 /// Own the native Cloud Files connection on one dedicated thread. The native
 /// connection contains OS handles and callback lifetime state, so it never
 /// crosses a Rust thread boundary. All auth/session transitions synchronously
@@ -169,6 +176,7 @@ struct ProviderManager {
     folder_generation: Arc<AtomicU64>,
     folder_revocation: Arc<Mutex<Option<raiun_engine::SyncRevocationHandle>>>,
     folder_error: Arc<Mutex<Option<String>>>,
+    folder_pause: Arc<Mutex<Option<FolderPauseSnapshot>>>,
     // Per-instance native-test capability; absent from production binaries and
     // never controlled by environment, IPC, configuration, or another agent.
     #[cfg(all(test, debug_assertions))]
@@ -333,6 +341,8 @@ impl ProviderManager {
         let worker_folder_revocation = Arc::clone(&folder_revocation);
         let folder_error = Arc::new(Mutex::new(None));
         let worker_folder_error = Arc::clone(&folder_error);
+        let folder_pause = Arc::new(Mutex::new(None::<FolderPauseSnapshot>));
+        let worker_folder_pause = Arc::clone(&folder_pause);
         let worker = thread::Builder::new()
             .name("raiun-windows-cloud-files".into())
             .spawn(move || {
@@ -342,12 +352,16 @@ impl ProviderManager {
                     None;
                 let mut active_binding: Option<ActiveProviderBinding> = None;
                 let mut folders: Option<windows_folder_sync::Runtime> = None;
+                let mut pending_command = None;
                 loop {
-                    let command = match receiver.recv_timeout(Duration::from_millis(250)) {
+                    let command = match pending_command.take().map_or_else(
+                        || receiver.recv_timeout(Duration::from_millis(250)), Ok,
+                    ) {
                         Ok(command) => Some(command),
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     };
+                    let handled_command = command.is_some();
                     if let Some(command) = command {
                     match command {
                         ProviderCommand::InstallFolders { setup, response } => {
@@ -356,10 +370,13 @@ impl ProviderManager {
                                 if worker_generation.load(Ordering::Acquire) != generation { return Err("The account changed before folder setup".into()); }
                                 if folders.as_ref().is_some_and(|runtime| runtime.generation == generation) { return Ok(()); }
                                 let runtime = windows_folder_sync::Runtime::open(*setup, &worker_generation)?;
+                                let (paused, paused_space_ids) = runtime.pause_snapshot()?;
                                 let mut cancellation = worker_folder_revocation.lock().map_err(|_| "Folder cancellation is unavailable")?;
                                 if worker_generation.load(Ordering::Acquire) != generation { return Err("The account changed during folder setup".into()); }
+                                let mut pause_status = worker_folder_pause.lock().map_err(|_| "Folder status unavailable")?;
                                 if let Some(previous) = cancellation.take() { previous.revoke(); }
                                 *cancellation = Some(runtime.revocation_handle());
+                                *pause_status = Some(FolderPauseSnapshot { generation, paused, paused_space_ids });
                                 folders = Some(runtime);
                                 worker_folder_generation.store(generation, Ordering::Release);
                                 Ok(())
@@ -382,7 +399,18 @@ impl ProviderManager {
                                     Err(error) => { let _ = response.send(Err(error)); }
                                 }
                             } else {
+                                let changes_pause = matches!(&request, windows_folder_requests::FolderRequest::Pause { .. } | windows_folder_requests::FolderRequest::SpacePause { .. });
                                 let result = runtime.handle(request, &worker_generation);
+                                if result.is_ok() && changes_pause {
+                                    // Snapshot publication shares the install/revocation lock.
+                                    if let Ok(_cancellation) = worker_folder_revocation.lock() {
+                                        if worker_generation.load(Ordering::Acquire) == generation && worker_folder_generation.load(Ordering::Acquire) == generation {
+                                            if let Ok(mut snapshot) = worker_folder_pause.lock() {
+                                                *snapshot = runtime.pause_snapshot().ok().map(|(paused, paused_space_ids)| FolderPauseSnapshot { generation, paused, paused_space_ids });
+                                            }
+                                        }
+                                    }
+                                }
                                 let _ = response.send(result);
                             }
                         }
@@ -695,6 +723,7 @@ impl ProviderManager {
                             if let Ok(mut handle) = worker_folder_revocation.lock() { if let Some(handle) = handle.take() { handle.revoke(); } }
                             drop(folders.take());
                             worker_folder_generation.store(0, Ordering::Release);
+                            if let Ok(mut snapshot) = worker_folder_pause.lock() { *snapshot = None; }
                             if let Ok(mut error) = worker_folder_error.lock() { *error = None; }
                             worker_jobs.cancel_all();
                             let result = disconnect_provider_connection(
@@ -711,6 +740,7 @@ impl ProviderManager {
                             if let Ok(mut handle) = worker_folder_revocation.lock() { if let Some(handle) = handle.take() { handle.revoke(); } }
                             drop(folders.take());
                             worker_folder_generation.store(0, Ordering::Release);
+                            if let Ok(mut snapshot) = worker_folder_pause.lock() { *snapshot = None; }
                             if let Ok(mut error) = worker_folder_error.lock() { *error = None; }
                             worker_jobs.cancel_all();
                             let result = disconnect_provider_connection(
@@ -723,12 +753,25 @@ impl ProviderManager {
                         }
                     }
                     }
+                    let mut dispatched_initial = false;
                     if worker_initial_save_activation.load(Ordering::Acquire) {
-                        // One fresh receipt per iteration; commands retain
-                        // priority. Any failure leaves the immutable recovery
-                        // body available and never schedules a recovered scan.
-                        let _ = dispatch_one_initial_edit(connection.as_ref(), backend.as_ref(),
-                            active_binding.as_ref(), &worker_generation);
+                        // Fresh initial-save work retains priority; never scan recovery here.
+                        dispatched_initial = !matches!(dispatch_one_initial_edit(
+                            connection.as_ref(), backend.as_ref(), active_binding.as_ref(),
+                            &worker_generation), Ok(None));
+                    }
+                    if !handled_command && !dispatched_initial {
+                        // Pick up commands arriving during initial-save inspection first.
+                        match receiver.try_recv() {
+                            Ok(command) => { pending_command = Some(command); continue; }
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                        }
+                        if let Some(runtime) = folders.as_mut() {
+                            if let Some(result) = runtime.periodic_tick(&worker_generation) {
+                                if let Ok(mut error) = worker_folder_error.lock() { *error = result.err(); }
+                            }
+                        }
                     }
                 }
                 worker_jobs.cancel_all();
@@ -746,6 +789,7 @@ impl ProviderManager {
             folder_generation,
             folder_revocation,
             folder_error,
+            folder_pause,
             offline_jobs,
             recovery_cursor_nonce: {
                 let mut nonce = [0; 32];
@@ -810,6 +854,22 @@ impl ProviderManager {
             }
         }
         self.folder_generation.store(0, Ordering::Release);
+        if let Ok(mut snapshot) = self.folder_pause.lock() {
+            *snapshot = None;
+        }
+    }
+
+    fn pause_snapshot(&self, generation: u64, online: bool) -> Option<FolderPauseSnapshot> {
+        self.folder_pause
+            .lock()
+            .ok()
+            .and_then(|snapshot| snapshot.clone())
+            .filter(|snapshot| {
+                online
+                    && snapshot.generation == generation
+                    && self.authorized_generation.load(Ordering::Acquire) == generation
+                    && self.folder_generation.load(Ordering::Acquire) == generation
+            })
     }
 
     fn install_folders(&self, setup: windows_folder_sync::Setup) -> Result<(), String> {
@@ -957,6 +1017,9 @@ impl ProviderManager {
             handle.revoke();
         }
         self.folder_generation.store(0, Ordering::Release);
+        if let Ok(mut snapshot) = self.folder_pause.lock() {
+            *snapshot = None;
+        }
         self.offline_jobs
             .cancel_and_authorize(&self.authorized_generation, generation);
     }
@@ -1149,7 +1212,9 @@ impl WindowsAgent {
             | "pair_remove"
             | "space_disconnect"
             | "space_sync_now"
-            | "sync_now" => {
+            | "sync_now"
+            | "pause"
+            | "space_pause" => {
                 if !WINDOWS_FOLDER_SYNC_ENABLED {
                     return Err("Windows folder sync is awaiting native acceptance".into());
                 }
@@ -1220,7 +1285,7 @@ impl WindowsAgent {
                         "runtime": {
                             "connected": state.session.is_some() && state.online_authenticated,
                             "mounted": mounted,
-                            "sync_paused": false,
+                            "sync_paused": self.provider.pause_snapshot(state.active_generation, state.online_authenticated).map(|snapshot| snapshot.paused),
                         },
                     }),
                     false,
@@ -1261,13 +1326,16 @@ impl WindowsAgent {
             .lock()
             .map_err(|_| "Account state is unavailable")?;
         let session = state.session.as_ref();
+        let pause = self
+            .provider
+            .pause_snapshot(state.active_generation, state.online_authenticated);
         Ok(json!({
             "connected": session.is_some() && state.online_authenticated,
             "offline": session.is_some() && !state.online_authenticated,
             "server": session.map(|value| value.server.as_str()),
             "client_id": session.map(|value| value.client_id.as_str()),
-            "paused": false,
-            "paused_space_ids": [],
+            "paused": pause.as_ref().map(|snapshot| snapshot.paused),
+            "paused_space_ids": pause.as_ref().map(|snapshot| &snapshot.paused_space_ids),
             "mounted": mounted,
             "cloud_root": state.root_configuration.as_ref().map(|value| value.path.as_str()),
             "root_configuration": state.root_configuration.as_ref().map(|value| json!({

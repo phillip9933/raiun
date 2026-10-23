@@ -82,6 +82,10 @@ pub struct FolderPairsDocument {
     revision: u64,
     config: Config,
     retired_pair_ids: Vec<String>,
+    #[serde(default)]
+    paused: bool,
+    #[serde(default)]
+    paused_space_ids: Vec<String>,
 }
 impl FolderPairsDocument {
     pub fn new(scope: AccountScope, config: Config) -> Result<Self> {
@@ -91,6 +95,8 @@ impl FolderPairsDocument {
             revision: 0,
             config,
             retired_pair_ids: vec![],
+            paused: false,
+            paused_space_ids: vec![],
         };
         value.encode()?;
         Ok(value)
@@ -118,6 +124,15 @@ impl FolderPairsDocument {
             || self.config.schema_version != CONFIG_SCHEMA_VERSION
             || self.config.pairs.len() > MAX_PAIRS
             || self.retired_pair_ids.len() > MAX_RETIRED_IDS
+        {
+            return Err(DocumentError::Invalid);
+        }
+        let mut paused_ids = BTreeSet::new();
+        if self.paused_space_ids.len() > 256
+            || self
+                .paused_space_ids
+                .iter()
+                .any(|id| !bounded(id, 512) || id.trim() != id || !paused_ids.insert(id))
         {
             return Err(DocumentError::Invalid);
         }
@@ -154,6 +169,12 @@ impl FolderPairsDocument {
     pub fn config(&self) -> &Config {
         &self.config
     }
+    pub fn paused(&self) -> bool {
+        self.paused
+    }
+    pub fn paused_space_ids(&self) -> &[String] {
+        &self.paused_space_ids
+    }
     pub fn retired_pair_ids(&self) -> &[String] {
         &self.retired_pair_ids
     }
@@ -179,6 +200,8 @@ impl FolderPairsDocument {
             revision,
             config,
             retired_pair_ids: retired,
+            paused: self.paused,
+            paused_space_ids: self.paused_space_ids.clone(),
         };
         next.encode()?;
         Ok(next)
@@ -242,6 +265,34 @@ impl FolderPairsStore {
         self.engine
             .compare_exchange_folder_pair_document(&self.scope_bytes, None, &next)?;
         Ok(document)
+    }
+    pub fn set_pause(
+        &self,
+        expected_revision: u64,
+        paused: bool,
+        mut paused_space_ids: Vec<String>,
+    ) -> std::result::Result<FolderPairsDocument, StoreError> {
+        let old = self
+            .engine
+            .load_folder_pair_document(&self.scope_bytes)?
+            .ok_or(DocumentError::StaleRevision)?;
+        let mut next = FolderPairsDocument::decode(&old, &self.scope)?;
+        if next.revision != expected_revision {
+            return Err(DocumentError::StaleRevision.into());
+        }
+        next.revision = next
+            .revision
+            .checked_add(1)
+            .ok_or(DocumentError::RevisionExhausted)?;
+        paused_space_ids.sort();
+        next.paused = paused;
+        next.paused_space_ids = paused_space_ids;
+        self.engine.compare_exchange_folder_pair_document(
+            &self.scope_bytes,
+            Some(&old),
+            &next.encode()?,
+        )?;
+        Ok(next)
     }
     pub fn replace(
         &self,

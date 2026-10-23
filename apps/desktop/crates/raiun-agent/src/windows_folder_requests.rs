@@ -3,6 +3,13 @@ use raiun_core::{FolderPair, validate_remote_path};
 use serde_json::{Map, Value};
 
 pub enum FolderRequest {
+    Pause {
+        paused: bool,
+    },
+    SpacePause {
+        space_id: String,
+        paused: bool,
+    },
     Pairs,
     Spaces,
     List {
@@ -48,6 +55,19 @@ pub fn decode(request: &Value) -> Result<FolderRequest, String> {
     // This is an envelope field, NOT evidence of authenticated profile ownership.
     fields.remove("profile_id");
     let decoded = match action.as_str() {
+        "pause" => FolderRequest::Pause {
+            paused: fields
+                .remove("paused")
+                .and_then(|value| value.as_bool())
+                .ok_or_else(invalid)?,
+        },
+        "space_pause" => FolderRequest::SpacePause {
+            space_id: text(&mut fields, "space_id", 512)?,
+            paused: fields
+                .remove("paused")
+                .and_then(|value| value.as_bool())
+                .ok_or_else(invalid)?,
+        },
         "pairs" => FolderRequest::Pairs,
         "spaces" => FolderRequest::Spaces,
         "list" => {
@@ -117,6 +137,24 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
+    fn pause_contracts_require_boolean_and_exact_fields() {
+        assert!(matches!(
+            decode(&json!({"action":"pause","paused":true})),
+            Ok(FolderRequest::Pause { paused: true })
+        ));
+        assert!(matches!(
+            decode(&json!({"action":"space_pause","space_id":"s","paused":false})),
+            Ok(FolderRequest::SpacePause { paused: false, .. })
+        ));
+        for request in [
+            json!({"action":"pause","paused":"true"}),
+            json!({"action":"space_pause","paused":true}),
+            json!({"action":"pause","paused":false,"extra":1}),
+        ] {
+            assert!(decode(&request).is_err());
+        }
+    }
+    #[test]
     fn existing_actions_and_envelopes_decode() {
         for (action, fields) in [
             ("pairs", json!({})),
@@ -147,7 +185,6 @@ mod tests {
     fn unknown_fields_vault_and_unsupported_actions_refuse_opaquely() {
         for request in [
             json!({"action":"pairs","token":"secret"}),
-            json!({"action":"pause","paused":true}),
             json!({"action":"pair_update","id":"p"}),
             json!({"action":"sync_now","id":"p"}),
             json!({"action":"list","space_id":"s","path":"/","cursor":"extra"}),
