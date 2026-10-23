@@ -21,6 +21,14 @@ mod windows_media_requests;
 #[path = "windows_vault_requests.rs"]
 mod windows_vault_requests;
 
+#[path = "windows_profile_registry.rs"]
+mod windows_profile_registry;
+#[path = "windows_profiles.rs"]
+mod windows_profiles;
+
+// Broker wiring compiles now; activation awaits root/pair/media admission,
+// account-creation UI flow and focused native broker acceptance.
+const WINDOWS_ACCOUNTS_ENABLED: bool = false;
 const WINDOWS_FOLDER_SYNC_ENABLED: bool = false;
 // Media controls remain gated pending worker and package acceptance.
 const WINDOWS_MEDIA_METADATA_ENABLED: bool = false;
@@ -3972,7 +3980,13 @@ pub(super) fn run() -> Result<(), String> {
     let args = Args::parse();
     match args.command {
         Command::Request { message } => request_once(&message),
-        Command::Serve => serve(session_store_factory()?),
+        Command::Serve => {
+            if WINDOWS_ACCOUNTS_ENABLED {
+                windows_profiles::serve_profiles()
+            } else {
+                serve(session_store_factory()?)
+            }
+        }
     }
 }
 
