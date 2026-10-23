@@ -3813,6 +3813,9 @@ fn request_timeout(request: &Value) -> Duration {
 
 #[cfg(test)]
 mod tests {
+    mod windows_folder_worker_test {
+        include!("windows_folder_worker_test.rs");
+    }
     use super::{
         AccountState, ActiveProviderBinding, AgentGenerationRecoveryRemote, CloudSpace,
         PROVIDER_UNAVAILABLE, RecoveryRemoteHandle, RegistrationOwnership, SessionStore,
