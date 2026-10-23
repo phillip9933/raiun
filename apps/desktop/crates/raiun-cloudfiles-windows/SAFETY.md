@@ -251,8 +251,11 @@ USN and metadata. This fresh local revalidation permits a reopened handle after
 upload; merely sampling a new USN without rehashing would be insufficient.
 `FSCTL_READ_FILE_USN_DATA` uses a bounded aligned output buffer and accepts only
 well-sized V2 records with the exact 64-bit file ID. Unsupported/zero USNs and V3
-identities fail closed. The same held stream and saved nonzero USN are passed to
-the conditional in-sync call; there is no unconditional or zero-USN fallback.
+identities fail closed. The two matching positive USN reads are consistency
+observations. Content exclusion is enforced by the combined publication and
+exclusive-reference boundary described below; the OS call requests final-USN
+output without a USN comparison. This is the sole design path, never a fallback
+or retry after comparison failure.
 No dehydration, truncation, path-based deletion or journal retirement occurs.
 If post-completion validation fails, recovery remains even if the OS has already
 accepted the in-sync state. The fresh handoff carries the actual pinned local
@@ -287,10 +290,28 @@ and buffers remain live until `GetOverlappedResult` reports definitive completio
 Pending submission is distinguished from failure. Reads must return the full
 bounded expected length; short reads and invalid USN output fail closed. Disk
 completion waits are blocking, not bounded timeouts or cancellation claims.
-Existing path/file identity, full-hash, two-USN, nonzero comparison and protected
-journal rules remain. This is an unaccepted native candidate, not evidence that
+Existing path/file identity, full-hash, two positive USN observations and
+protected journal rules remain. This is an unaccepted native candidate, not evidence that
 ordinary handles caused the observed in-sync refusal.
 
 See [protected open](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfopenfilewithoplock),
 [borrowed handle](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfgetwin32handlefromprotectedhandle),
 and [overlapped completion](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult).
+
+The backend's existing publication/token permit is acquired **before** the
+protected open/reference and retained through fresh residency checks, full hash,
+OS marking, identity/root postchecks and durable acknowledgement. The same
+backend permit surrounds every payload-bearing `CfExecute`; no separate gate or
+new actor is introduced. Acquiring the reference before waiting for this permit
+would invert the order against an already publishing callback and is forbidden.
+Partial residency is refused before reading, preventing a hydration callback
+from waiting on the permit/state held by its own read.
+
+Successful share-none open excludes ordinary write handles. RH grant excludes
+pre-existing writable mappings, and the retained reference preserves the borrowed
+handle across the operation. RH/reference alone is not sufficient: provider
+payload writes are independently excluded by the publication permit. Together
+these guards retain the exact verified local content through OS marking and
+journal acknowledgement. The returned positive USN is only an observation.
+Native writer-exclusion and normal save/lifecycle acceptance remain required;
+source review does not establish those results.

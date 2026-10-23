@@ -65,9 +65,12 @@ and content hash, with authorization checked again after readback. An upload
 success or cached journal outcome cannot construct this result. A leased
 existing-identity catalog refresh and guarded native completion operation build
 on that proof. The native operation pins the exact local file, checks its full
-hash and saved nonzero USN, then asks Windows to mark it in sync only if the USN
-still matches. Catalog publication and OS completion share the existing
-revocation/token fence. The fresh callback now carries its actual pinned local
+hash and two matching positive USN observations. The current candidate holds
+the existing publication/token fence before opening an exclusive protected file
+handle and retains both through proof, OS marking and durable acknowledgement.
+The shared fence also excludes provider payload writes; the protected reference
+excludes ordinary writers. OS marking requests final-USN output without a USN
+comparison as this design's sole path, never a failure fallback or retry. The fresh callback now carries its actual pinned local
 path and opaque identity, separately from the remote path. The worker joins that
 handoff to a fresh readback proof, native completion, and a protected terminal
 local-acknowledgement event. That event resolves only the exact immutable record;
@@ -85,10 +88,12 @@ showed both pre-CAS reads at USN 150231648 and a single read after refusal at
 150240984. This establishes journal movement, not the reason or a successful fix.
 Posting pending NTFS journal reasons before the first snapshot was tested and
 also failed at the same comparison; that experiment has been removed. The close
-callback was captured and journaled successfully in that run. Recovery remains
-retained, and the next correction must preserve the full hash and nonzero OS
-comparison. There is no post-proof refresh or retry, and no successful native
-completion or lifecycle acceptance is claimed.
+callback was captured and journaled successfully in that run. A later protected
+handle with the same OS comparison also refused completion. The current combined
+content-exclusion design is independently reviewed but still requires native
+writer-exclusion, normal save and lifecycle acceptance. Recovery remains retained;
+there is no post-proof refresh or retry, and no successful native completion is
+claimed.
 
 ## Next-release media recovery — 23 October 2026 JST
 

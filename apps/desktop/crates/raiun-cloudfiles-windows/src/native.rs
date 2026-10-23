@@ -1668,89 +1668,99 @@ impl ConfiguredRootConnection {
         {
             return Err(Error::EditRecoveryUnavailable);
         }
-        observe_completion!("root_identity_and_registration");
-        root.verify_identity(true)?;
-        root.verify_registered()?;
-        let mut path = root.path.clone();
-        for component in local_components {
-            path.push(component);
-        }
-        observe_completion!("pin_local_components");
-        let (root_final, _ancestors, entry_guard, before) = pin_callback_path_chain(
-            &path,
-            root.identity,
-            metadata.local_file.file_index,
-            metadata.content_len,
-        )
-        .map_err(|stage| {
-            #[cfg(feature = "synthetic-agent-integration")]
-            eprintln!("synthetic_save_completion_pin_refused stage={stage}");
-            #[cfg(not(feature = "synthetic-agent-integration"))]
-            let _ = stage;
-            Error::ConfiguredRootChanged
-        })?;
-        observe_completion!("require_full_local_content");
-        if before.placeholder_state & CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK != 0 {
-            return Err(Error::EditRecoveryUnavailable);
-        }
-        let path_wide = wide_path(&path)?;
-        // The no-follow chain pins every name. An exclusive Cloud Files
-        // handle plus a retained reference protects the exact proof/CAS span.
-        observe_completion!("open_immutable_completion_stream");
-        let file = ProtectedCompletionFile::open(&path_wide)?;
-        observe_completion!("validate_opened_stream_identity");
-        let opened = root_snapshot(file.raw)?;
-        let entry_final =
-            final_path_for_handle(entry_guard.0).map_err(|_| Error::ConfiguredRootChanged)?;
-        let opened_final =
-            final_path_for_handle(file.raw).map_err(|_| Error::ConfiguredRootChanged)?;
-        if !same_edit_snapshot(before, opened)
-            || !windows_paths_equal(&entry_final, &opened_final)
-            || !windows_path_is_within(&opened_final, &root_final)
-        {
-            return Err(Error::ConfiguredRootChanged);
-        }
-        observe_completion!("validate_publication_identity");
-        verify_completion_identity(file.protected, publication.identity())?;
-        // This is a fresh local revalidation snapshot, not a blind new USN
-        // sampled after upload. Its full bytes must match the immutable record.
-        observe_completion!("capture_nonzero_usn_and_hash");
-        let mut saved_usn = completion_usn(file.raw, metadata.local_file.file_index)?;
-        #[cfg(feature = "synthetic-agent-integration")]
-        eprintln!("synthetic_save_completion_usn_first={saved_usn}");
-        let len =
-            usize::try_from(metadata.content_len).map_err(|_| Error::EditRecoveryUnavailable)?;
-        let mut bytes = Zeroizing::new(vec![0_u8; len]);
-        file.read_complete(&mut bytes)?;
-        if crate::recovery_reconcile::digest_hex(&bytes) != metadata.content_sha256
-            || !same_edit_snapshot(opened, root_snapshot(file.raw)?)
-            || {
-                let observed_usn = completion_usn(file.raw, metadata.local_file.file_index)?;
-                #[cfg(feature = "synthetic-agent-integration")]
-                eprintln!("synthetic_save_completion_usn_second={observed_usn}");
-                observed_usn != saved_usn
-            }
-        {
-            return Err(Error::EditRecoveryUnavailable);
-        }
-        root.verify_identity(true)?;
-        root.verify_registered()?;
-        // SAFETY: this held, identity-validated writable file belongs to the
-        // registered root. Nonzero saved_usn makes the OS reject intervening
-        // changes. Never retry with zero or replace the saved snapshot here.
+        // The existing backend publication fence also guards every payload
+        // CfExecute. Acquire it BEFORE the protected open/reference, avoiding
+        // gate/oplock inversion and excluding provider writes for the proof.
         observe_completion!("acquire_publication_and_token_permit");
         publication.publish_and_complete(|| {
-            observe_completion!("native_in_sync_cas");
+            observe_completion!("root_identity_and_registration");
+            root.verify_identity(true)?;
+            root.verify_registered()?;
+            let mut path = root.path.clone();
+            for component in local_components {
+                path.push(component);
+            }
+            observe_completion!("pin_local_components");
+            let (root_final, _ancestors, entry_guard, before) = pin_callback_path_chain(
+                &path,
+                root.identity,
+                metadata.local_file.file_index,
+                metadata.content_len,
+            )
+            .map_err(|stage| {
+                #[cfg(feature = "synthetic-agent-integration")]
+                eprintln!("synthetic_save_completion_pin_refused stage={stage}");
+                #[cfg(not(feature = "synthetic-agent-integration"))]
+                let _ = stage;
+                Error::ConfiguredRootChanged
+            })?;
+            observe_completion!("require_full_local_content");
+            if before.placeholder_state & CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK != 0 {
+                return Err(Error::EditRecoveryUnavailable);
+            }
+            let path_wide = wide_path(&path)?;
+            // The no-follow chain pins every name. An exclusive Cloud Files
+            // handle plus a retained reference protects the exact completion span.
+            observe_completion!("open_immutable_completion_stream");
+            let file = ProtectedCompletionFile::open(&path_wide)?;
+            observe_completion!("validate_opened_stream_identity");
+            let opened = root_snapshot(file.raw)?;
+            let entry_final =
+                final_path_for_handle(entry_guard.0).map_err(|_| Error::ConfiguredRootChanged)?;
+            let opened_final =
+                final_path_for_handle(file.raw).map_err(|_| Error::ConfiguredRootChanged)?;
+            if !same_edit_snapshot(before, opened)
+                || !windows_paths_equal(&entry_final, &opened_final)
+                || !windows_path_is_within(&opened_final, &root_final)
+            {
+                return Err(Error::ConfiguredRootChanged);
+            }
+            observe_completion!("validate_publication_identity");
+            verify_completion_identity(file.protected, publication.identity())?;
+            // This is a fresh local revalidation snapshot, not a blind new USN
+            // sampled after upload. Its full bytes must match the immutable record.
+            observe_completion!("capture_nonzero_usn_and_hash");
+            let saved_usn = completion_usn(file.raw, metadata.local_file.file_index)?;
             #[cfg(feature = "synthetic-agent-integration")]
-            let diagnostic_input_usn = saved_usn;
-            let result = unsafe { CfSetInSyncState(file.protected, 1, 0, &mut saved_usn) };
+            eprintln!("synthetic_save_completion_usn_first={saved_usn}");
+            let len =
+                usize::try_from(metadata.content_len).map_err(|_| Error::EditRecoveryUnavailable)?;
+            let mut bytes = Zeroizing::new(vec![0_u8; len]);
+            file.read_complete(&mut bytes)?;
+            if crate::recovery_reconcile::digest_hex(&bytes) != metadata.content_sha256
+                || !same_edit_snapshot(opened, root_snapshot(file.raw)?)
+                || {
+                    let observed_usn = completion_usn(file.raw, metadata.local_file.file_index)?;
+                    #[cfg(feature = "synthetic-agent-integration")]
+                    eprintln!("synthetic_save_completion_usn_second={observed_usn}");
+                    observed_usn != saved_usn
+                }
+            {
+                return Err(Error::EditRecoveryUnavailable);
+            }
+            root.verify_identity(true)?;
+            root.verify_registered()?;
+            // The exclusive referenced handle excludes ordinary writers and the
+            // same retained publication fence excludes provider payload writes.
+            // Both cover the fresh fully-resident hash through durable ACK. OS USN
+            // comparison is omitted BY DESIGN under this combined content fence,
+            // never as a fallback/retry after a failed comparison. The two positive
+            // USN reads above remain an additional pre-call consistency check.
+            observe_completion!("native_in_sync_exclusive");
+            let mut completed_usn = 0_i64;
+            #[cfg(feature = "synthetic-agent-integration")]
+            let diagnostic_input_usn = completed_usn;
+            // SAFETY: same opaque exclusive owner, referenced throughout this
+            // closure. Zero input requests only final-USN output; it is not
+            // used as a conditional proof or to refresh an earlier snapshot.
+            let result = unsafe { CfSetInSyncState(file.protected, 1, 0, &mut completed_usn) };
             #[cfg(feature = "synthetic-agent-integration")]
             eprintln!("synthetic_save_completion_usn_input={diagnostic_input_usn}");
             if result < 0 {
                 #[cfg(feature = "synthetic-agent-integration")]
                 {
                     // Output is not acknowledgement authority on a failed call.
-                    eprintln!("synthetic_save_completion_usn_failure input={diagnostic_input_usn} output_untrusted={saved_usn} hresult={result}");
+                    eprintln!("synthetic_save_completion_usn_failure input={diagnostic_input_usn} output_untrusted={completed_usn} hresult={result}");
                     // Diagnostic only: never refresh saved_usn, retry the CAS, or
                     // feed this read into publication or local acknowledgement.
                     match completion_usn(file.raw, metadata.local_file.file_index) {
@@ -1760,11 +1770,12 @@ impl ConfiguredRootConnection {
                 }
                 return Err(native_error("complete verified edit in-sync", result));
             }
-            if saved_usn == 0 || root_snapshot(file.raw)?.identity != opened.identity {
+            if completed_usn <= 0 || root_snapshot(file.raw)?.identity != opened.identity {
                 return Err(Error::ConfiguredRootChanged);
             }
             root.verify_identity(true)?;
             root.verify_registered()?;
+            verify_completion_identity(file.protected, publication.identity())?;
             // Still under the same publication/token permit and held local
             // handle: record only this exact native-completed snapshot. If
             // persistence fails, its encrypted body remains unresolved.
@@ -6936,6 +6947,114 @@ mod backend_tests {
         sync::{Arc, Condvar, Mutex, atomic::Ordering, mpsc},
         thread,
     };
+
+    #[test]
+    #[ignore = "requires isolated native Windows Cloud Files API; ordinary synthetic file only"]
+    fn protected_completion_reference_excludes_writer_until_drop() {
+        use std::{fs, fs::OpenOptions, io::Write, sync::mpsc, thread, time::Duration};
+
+        let root = super::create_private_test_root().expect("create private synthetic directory");
+        // No TempDir/Drop cleanup: preserve the synthetic root on every failure.
+        eprintln!("protected completion writer test root: {}", root.display());
+        let path = root.join("protected-completion.bin");
+        let original = b"original synthetic bytes";
+        let replacement = b"modified synthetic bytes";
+        assert_eq!(original.len(), replacement.len());
+        {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .expect("create ordinary synthetic file");
+            file.write_all(original).expect("write initial bytes");
+            file.sync_all().expect("sync initial bytes");
+        }
+        let wide = super::wide_path(&path).expect("bounded synthetic path");
+        let guard =
+            super::ProtectedCompletionFile::open(&wide).expect("open and reference protected file");
+        enum Outcome {
+            SharingDenied,
+            Completed(Result<(), String>),
+        }
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (outcome_tx, outcome_rx) = mpsc::sync_channel(2);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let writer_path = path.clone();
+        let writer = thread::spawn(move || {
+            if entered_tx.send(()).is_err() {
+                return;
+            }
+            let opened = OpenOptions::new().write(true).open(&writer_path);
+            let opened = match opened {
+                Err(error) if error.raw_os_error() == Some(32) => {
+                    if outcome_tx.send(Outcome::SharingDenied).is_err() {
+                        return;
+                    }
+                    if release_rx.recv().is_err() {
+                        return;
+                    }
+                    OpenOptions::new().write(true).open(&writer_path)
+                }
+                other => other,
+            };
+            let result = opened
+                .and_then(|mut file| {
+                    file.write_all(replacement)?;
+                    file.sync_all()
+                })
+                .map_err(|error| error.to_string());
+            let _ = outcome_tx.send(Outcome::Completed(result));
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("writer announced attempt");
+        let mut denial_seen = false;
+        match outcome_rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(Outcome::SharingDenied) => {
+                denial_seen = true;
+                eprintln!("writer denied with ERROR_SHARING_VIOLATION while referenced")
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                eprintln!("writer not completed during held-reference observation")
+            }
+            Ok(Outcome::Completed(result)) => {
+                panic!("writer completed before guard release: {result:?}")
+            }
+            Err(error) => panic!("writer channel disconnected before guard release: {error}"),
+        }
+        // A second ordinary read-open can itself block on this oplock. Read via
+        // the existing guard's actual overlapped reader instead.
+        let mut held_bytes = vec![0; original.len()];
+        guard
+            .read_complete(&mut held_bytes)
+            .expect("read under protected reference");
+        assert_eq!(held_bytes, original);
+        drop(guard);
+        // Required only for the immediate sharing-denial branch; a blocked open
+        // may already have completed after the guard dropped.
+        let _ = release_tx.send(());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match outcome_rx
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .expect("writer completes after guard release")
+            {
+                Outcome::Completed(result) => {
+                    result.expect("writer succeeds after guard release");
+                    break;
+                }
+                Outcome::SharingDenied if !denial_seen => denial_seen = true,
+                Outcome::SharingDenied => panic!("duplicate sharing-denial observation"),
+            }
+        }
+        writer.join().expect("writer thread exits");
+        assert_eq!(
+            fs::read(&path).expect("read modified synthetic file"),
+            replacement
+        );
+        fs::remove_file(&path).expect("remove successful synthetic file");
+        fs::remove_dir(&root).expect("remove successful empty synthetic directory");
+    }
 
     #[test]
     fn initialization_fence_rejects_fetches_without_hiding_dirty_recovery() {
