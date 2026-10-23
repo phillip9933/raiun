@@ -67,9 +67,10 @@ unavailable and has no native acceptance claim.
 The Windows media scan now starts from a duplicate of the already-pinned source
 directory handle, retaining the original root and ancestor handles through the
 scan/staging call. It does not reopen the configured root by name. Windows
-immutable source-file and private staging/recovery integration are still open;
-this root bridge alone does not enable media execution or establish native
-media-backup acceptance.
+source signature/staging reads now deny write/delete sharing and reject reparse
+entries before reading; scanner child directories also retain no-delete handles.
+Private staging/recovery integration is still open. These source guards do not
+enable media execution or establish native media-backup acceptance.
 
 ## Next-release Windows save-back work — 23 October 2026 JST
 

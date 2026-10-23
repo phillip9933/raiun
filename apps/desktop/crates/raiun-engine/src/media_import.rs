@@ -1380,6 +1380,18 @@ fn source_signature(
     })
 }
 
+fn media_reparse_point(metadata: &cap_std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use cap_std::fs::MetadataExt;
+        metadata.file_attributes() & 0x0000_0400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
 fn open_source_file(root: &Dir, relative: &str) -> Result<cap_std::fs::File, CloudError> {
     let mut directory = root.try_clone().map_err(io_error)?;
     let mut components = relative.split('/').peekable();
@@ -1401,8 +1413,15 @@ fn open_source_file(root: &Dir, relative: &str) -> Result<cap_std::fs::File, Clo
                 use cap_std::fs::OpenOptionsExt;
                 options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
             }
+            #[cfg(windows)]
+            {
+                use cap_std::fs::OpenOptionsExt;
+                // Retain directory identity without preventing ordinary writes.
+                options.share_mode(0x0000_0001 | 0x0000_0002);
+            }
             let handle = directory.open_with(component, &options).map_err(io_error)?;
-            if !handle.metadata().map_err(io_error)?.is_dir() {
+            let metadata = handle.metadata().map_err(io_error)?;
+            if !metadata.is_dir() || media_reparse_point(&metadata) {
                 return Err(media_error(
                     ErrorKind::Conflict,
                     "media source parent changed identity",
@@ -1418,8 +1437,15 @@ fn open_source_file(root: &Dir, relative: &str) -> Result<cap_std::fs::File, Clo
             use cap_std::fs::OpenOptionsExt;
             options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
         }
+        #[cfg(windows)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            // FILE_SHARE_READ alone excludes writers and deletion during reads.
+            options.share_mode(0x0000_0001);
+        }
         let file = directory.open_with(component, &options).map_err(io_error)?;
-        if !file.metadata().map_err(io_error)?.is_file() {
+        let metadata = file.metadata().map_err(io_error)?;
+        if !metadata.is_file() || media_reparse_point(&metadata) {
             return Err(media_error(
                 ErrorKind::Unsupported,
                 "media source must be a regular non-symlink file",
