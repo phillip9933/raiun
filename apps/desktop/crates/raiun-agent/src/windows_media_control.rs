@@ -1,4 +1,4 @@
-// Metadata-only helper, intended as a child module of windows_folder_sync.
+// Media control helper, intended as a child module of windows_folder_sync.
 // Caller supplies the authenticated Runtime account identity, never a request-derived one.
 use super::super::windows_media_requests::MediaRequest;
 use super::*;
@@ -193,9 +193,117 @@ impl Runtime {
                 {
                     return Err("Media backup account or settings changed".into());
                 }
-                Err("Media backup execution is not supported by this Windows worker".into())
+                Err("Media backup runs must be queued by the Windows worker".into())
             }
         }
+    }
+    /// Prepare one explicit run from saved metadata, not caller-supplied paths.
+    /// This is fresh admission, not historical source identity continuity.
+    pub fn prepare_media_run(
+        &self,
+        job_id: &str,
+        expected_revision: u64,
+        expected_account: &str,
+        authorized: &AtomicU64,
+    ) -> Result<(u64, MediaImportJob, PinnedDirectory), String> {
+        self.check(authorized)?;
+        if expected_account != self.account_id || self.engine.revocation_handle().is_revoked() {
+            return Err("The media account changed or was revoked".into());
+        }
+        let document = self.document()?;
+        let job = document
+            .media_jobs()
+            .iter()
+            .find(|job| job.id == job_id)
+            .ok_or("Media backup was not found")?
+            .clone();
+        if job.account_id != self.account_id
+            || job.revision != expected_revision
+            || !job.enabled
+            || document.paused()
+            || document.paused_space_ids().contains(&job.space_id)
+        {
+            return Err("Media backup settings changed or are paused".into());
+        }
+        if self
+            .engine
+            .media_import_has_unresolved(&job.id)
+            .map_err(store_error)?
+        {
+            return Err("Retained media recovery needs review before another run".into());
+        }
+        let destination =
+            self.media_destination_entry(&job.space_id, &job.destination_root, authorized)?;
+        if destination.id != job.destination_root_resource_id {
+            return Err("The media destination changed; choose it again".into());
+        }
+        let pin = self.admit_media_source(&job, document.config(), document.media_jobs())?;
+        pin.verify_path().map_err(|_| "The media source changed")?;
+        self.check(authorized)?;
+        let current = self.document()?;
+        if current.revision() != document.revision()
+            || !current.media_jobs().contains(&job)
+            || self.engine.revocation_handle().is_revoked()
+        {
+            return Err("Media backup changed before it could be queued".into());
+        }
+        Ok((document.revision(), job, pin))
+    }
+
+    /// Keep the prepared source pin alive until Engine returns. The caller sends
+    /// only queued acceptance before this method and serializes later commands.
+    pub fn run_media_job(
+        &mut self,
+        revision: u64,
+        job: MediaImportJob,
+        pin: PinnedDirectory,
+        authorized: &AtomicU64,
+    ) -> Result<(), String> {
+        self.check(authorized)?;
+        let current = self.document()?;
+        let revocation = self.engine.revocation_handle();
+        if revocation.is_revoked()
+            || current.revision() != revision
+            || !current.media_jobs().contains(&job)
+            || job.account_id != self.account_id
+            || !job.enabled
+            || current.paused()
+            || current.paused_space_ids().contains(&job.space_id)
+        {
+            return Err("Media backup changed or was paused before execution".into());
+        }
+        pin.verify_path().map_err(|_| "The media source changed")?;
+        let destination =
+            self.media_destination_entry(&job.space_id, &job.destination_root, authorized)?;
+        if destination.id != job.destination_root_resource_id {
+            return Err("The media destination changed before execution".into());
+        }
+        // A retained unresolved stage is never an automatic retry candidate.
+        if self
+            .engine
+            .media_import_has_unresolved(&job.id)
+            .map_err(store_error)?
+        {
+            return Err("Retained media recovery needs review before another run".into());
+        }
+        self.check(authorized)?;
+        let generation = self.generation;
+        let result = self
+            .engine
+            .run_media_import_job_from_root_cancellable(&job, &pin, &|| {
+                authorized.load(Ordering::Acquire) != generation
+                    || revocation.is_revoked()
+                    || pin.verify_path().is_err()
+            });
+        self.check(authorized)?;
+        if revocation.is_revoked() {
+            return Err("Media run was interrupted by an account transition".into());
+        }
+        pin.verify_path()
+            .map_err(|_| "The media source changed during execution")?;
+        result.map(|_| ()).map_err(|_| {
+            "Media backup needs attention; source and retained recovery were preserved".into()
+        })
     }
     fn admit_media_source(
         &self,

@@ -56,6 +56,11 @@ pub const MAX_MEDIA_RECEIPTS_PER_ACCOUNT: i64 = 1_000_000;
 pub const MAX_MEDIA_STAGED_FILE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const MAX_MEDIA_STAGED_TOTAL_BYTES: i64 = 32 * 1024 * 1024 * 1024;
 pub const MAX_MEDIA_RECOVERY_PAGE: usize = 100;
+#[cfg(windows)]
+type MediaSourceRootIdentity = raiun_control_windows::PinnedFileIdentity;
+#[cfg(not(windows))]
+type MediaSourceRootIdentity = ();
+
 const MEDIA_RUN_CANCELLED: &str = "media job stopped before the next safe processing boundary";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -526,11 +531,43 @@ impl Engine {
         self.run_media_import_job_at_cancellable(job, now, &|| false)
     }
 
+    /// Run from the caller's admitted Windows root, retaining its no-delete
+    /// ancestor chain and joining its identity to the Engine's opened root.
+    #[cfg(windows)]
+    pub fn run_media_import_job_from_root_cancellable(
+        &self,
+        job: &MediaImportJob,
+        root: &raiun_control_windows::PinnedDirectory,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<MediaImportRunReport, CloudError> {
+        root.verify_path().map_err(io_error)?;
+        if root.path() != job.source_root.as_path() {
+            return Err(media_error(
+                ErrorKind::Conflict,
+                "media source does not match its admitted root",
+            ));
+        }
+        let result =
+            self.run_media_import_job_with_root(job, now_unix(), cancelled, Some(root.identity()));
+        root.verify_path().map_err(io_error)?;
+        result
+    }
+
     fn run_media_import_job_at_cancellable(
         &self,
         job: &MediaImportJob,
         now: i64,
         cancelled: &dyn Fn() -> bool,
+    ) -> Result<MediaImportRunReport, CloudError> {
+        self.run_media_import_job_with_root(job, now, cancelled, None)
+    }
+
+    fn run_media_import_job_with_root(
+        &self,
+        job: &MediaImportJob,
+        now: i64,
+        cancelled: &dyn Fn() -> bool,
+        expected_source_root: Option<MediaSourceRootIdentity>,
     ) -> Result<MediaImportRunReport, CloudError> {
         validate_media_import_jobs(std::slice::from_ref(job))
             .map_err(|message| media_error(ErrorKind::Unsupported, message))?;
@@ -545,7 +582,15 @@ impl Engine {
             ..MediaImportRunReport::default()
         };
 
-        let result = self.run_media_scan(job, &account_id, &origin, now, &mut report, cancelled);
+        let result = self.run_media_scan(
+            job,
+            &account_id,
+            &origin,
+            now,
+            &mut report,
+            cancelled,
+            expected_source_root,
+        );
         match result {
             Ok(()) => {
                 finish_run(self, &report, None, now)?;
@@ -600,6 +645,7 @@ impl Engine {
         Ok((account.account_id.clone(), account.origin.clone()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_media_scan(
         &self,
         job: &MediaImportJob,
@@ -608,12 +654,23 @@ impl Engine {
         now: i64,
         report: &mut MediaImportRunReport,
         cancelled: &dyn Fn() -> bool,
+        expected_source_root: Option<MediaSourceRootIdentity>,
     ) -> Result<(), CloudError> {
+        check_media_cancelled(cancelled)?;
+        #[cfg(not(windows))]
+        let _ = expected_source_root;
         // Windows traversal starts from the exact already-open root object;
         // retain the owner and its ancestor pins through scanning and staging.
         #[cfg(windows)]
         let source_root_pin =
             raiun_control_windows::PinnedDirectory::open(&job.source_root).map_err(io_error)?;
+        #[cfg(windows)]
+        if expected_source_root.is_some_and(|expected| expected != source_root_pin.identity()) {
+            return Err(media_error(
+                ErrorKind::Conflict,
+                "media source root changed after admission",
+            ));
+        }
         #[cfg(windows)]
         let source_root = Dir::from_std_file(
             source_root_pin

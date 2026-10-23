@@ -59,6 +59,10 @@ pub struct SyncRevocationHandle {
     paused: Arc<AtomicBool>,
 }
 impl SyncRevocationHandle {
+    pub fn is_revoked(&self) -> bool {
+        self.paused.load(Ordering::Acquire)
+    }
+
     pub fn revoke(&self) {
         self.paused.store(true, Ordering::Release);
     }

@@ -408,6 +408,16 @@ impl ProviderManager {
                                     }
                                     Err(error) => { let _ = response.send(Err(error)); }
                                 }
+                            } else if let windows_folder_requests::FolderRequest::Media(windows_media_requests::MediaRequest::Run { job_id, expected_revision, expected_account_id }) = request {
+                                match runtime.prepare_media_run(&job_id, expected_revision, &expected_account_id, &worker_generation) {
+                                    Ok((revision, job, pin)) => {
+                                        let accepted = json!({"accepted":true,"queued":true,"job_id":job.id.clone(),"revision":job.revision});
+                                        let _ = response.send(Ok(accepted));
+                                        let result = runtime.run_media_job(revision, job, pin, &worker_generation);
+                                        if let Ok(mut error) = worker_folder_error.lock() { *error = result.err(); }
+                                    }
+                                    Err(error) => { let _ = response.send(Err(error)); }
+                                }
                             } else {
                                 let changes_pause = matches!(&request, windows_folder_requests::FolderRequest::Pause { .. } | windows_folder_requests::FolderRequest::SpacePause { .. });
                                 let result = runtime.handle(request, &worker_generation);

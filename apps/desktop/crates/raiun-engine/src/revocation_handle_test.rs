@@ -14,8 +14,11 @@ fn revocation_handle_crosses_thread_without_moving_engine_and_fences_sync() {
         .map(|(path, (_, bytes))| (path.clone(), bytes.clone()))
         .collect::<BTreeMap<_, _>>();
     let handle = engine.revocation_handle();
+    assert!(!handle.is_revoked());
+    let observation = handle.clone();
     // The closure owns only the cancellation handle; Engine/DbOwner stays here.
     std::thread::spawn(move || handle.revoke()).join().unwrap();
+    assert!(observation.is_revoked());
     let error = engine
         .sync_pair(&pair)
         .expect_err("revoked sync must refuse");
