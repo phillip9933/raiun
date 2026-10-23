@@ -3067,11 +3067,41 @@ fn load_root_configuration(
     else {
         return Ok(None);
     };
+    let mut configuration = decode_root_metadata(&bytes, expected_profile)?;
+    // Metadata alone only reserves a local path. Restoring a provider still
+    // requires exact binding to this real session, including issuer identity.
+    if configuration.server != session.server
+        || configuration.client_id != session.client_id
+        || configuration.issuer != session.expected_issuer
+    {
+        return Err("Saved drive folder configuration identity does not match".into());
+    }
+    let expected = raiun_cloudfiles_windows::ConfiguredRootIdentity {
+        volume_serial: configuration.volume_serial,
+        file_index: configuration.file_index,
+    };
+    let lease = if configuration
+        .registration_ownership
+        .as_ref()
+        .is_some_and(|owner| owner.state != "prepared_not_registered")
+    {
+        pin_registered_configured_root(Path::new(&configuration.path), expected)
+    } else {
+        pin_configured_root(Path::new(&configuration.path))
+    };
+    configuration.valid = lease.is_ok_and(|lease| lease.identity() == expected);
+    Ok(Some(configuration))
+}
+
+/// Decode protected root metadata for exclusion/reservation only. This does
+/// not restore credentials, inspect/register a root, or grant provider authority.
+/// The authenticated loader separately binds the server/client/issuer and root.
+fn decode_root_metadata(bytes: &[u8], expected_profile: &str) -> Result<RootConfiguration, String> {
     if bytes.is_empty() || bytes.len() > MAX_ROOT_CONFIG_BYTES {
         return Err("Saved drive folder configuration is invalid".into());
     }
-    let value: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| "Saved drive folder configuration is invalid")?;
+    let value: Value =
+        serde_json::from_slice(bytes).map_err(|_| "Saved drive folder configuration is invalid")?;
     let version = value["version"]
         .as_u64()
         .ok_or("Saved drive folder configuration is invalid")?;
@@ -3090,18 +3120,26 @@ fn load_root_configuration(
     let server = object
         .get("server")
         .and_then(Value::as_str)
-        .filter(|value| *value == session.server)
+        .filter(|value| {
+            !value.is_empty() && value.len() <= 4096 && !value.chars().any(char::is_control)
+        })
         .ok_or("Saved drive folder configuration identity does not match")?;
     let client_id = object
         .get("client_id")
         .and_then(Value::as_str)
-        .filter(|value| *value == session.client_id)
+        .filter(|value| {
+            !value.is_empty() && value.len() <= 4096 && !value.chars().any(char::is_control)
+        })
         .ok_or("Saved drive folder configuration identity does not match")?;
     let issuer = match object.get("issuer") {
-        Some(Value::String(issuer)) if session.expected_issuer.as_ref() == Some(issuer) => {
+        Some(Value::String(issuer))
+            if !issuer.is_empty()
+                && issuer.len() <= 4096
+                && !issuer.chars().any(char::is_control) =>
+        {
             Some(issuer.clone())
         }
-        Some(Value::Null) if session.expected_issuer.is_none() => None,
+        Some(Value::Null) => None,
         _ => return Err("Saved drive folder configuration identity does not match".into()),
     };
     let path = object
@@ -3198,20 +3236,7 @@ fn load_root_configuration(
             None => return Err("Saved drive folder ownership record is invalid".into()),
         }
     };
-    let expected = raiun_cloudfiles_windows::ConfiguredRootIdentity {
-        volume_serial,
-        file_index,
-    };
-    let lease = if registration_ownership
-        .as_ref()
-        .is_some_and(|owner| owner.state != "prepared_not_registered")
-    {
-        pin_registered_configured_root(Path::new(path), expected)
-    } else {
-        pin_configured_root(Path::new(path))
-    };
-    let valid = lease.is_ok_and(|lease| lease.identity() == expected);
-    Ok(Some(RootConfiguration {
+    Ok(RootConfiguration {
         profile_scope: profile_scope.to_owned(),
         server: server.to_owned(),
         client_id: client_id.to_owned(),
@@ -3220,8 +3245,8 @@ fn load_root_configuration(
         volume_serial,
         file_index,
         registration_ownership,
-        valid,
-    }))
+        valid: false,
+    })
 }
 
 fn verified_personal_root_identity(
@@ -11319,6 +11344,44 @@ mod tests {
             .expect("remove synthetic root metadata");
         drop(raw);
         fs::remove_dir(&path).expect("remove only empty synthetic profile child");
+    }
+
+    #[test]
+    fn root_inventory_metadata_cannot_restore_a_different_issuer() {
+        let session = synthetic_session(
+            "https://synthetic.invalid",
+            "synthetic-client",
+            unix_time_now() + 3600,
+        );
+        let configuration = super::RootConfiguration {
+            profile_scope: "default".into(),
+            server: session.server.clone(),
+            client_id: session.client_id.clone(),
+            issuer: session.expected_issuer.clone(),
+            path: "C:\\SyntheticReservation".into(),
+            volume_serial: 1,
+            file_index: 42,
+            registration_ownership: None,
+            valid: true,
+        };
+        let bytes = encode_root_configuration(&configuration).unwrap();
+        let decoded = super::decode_root_metadata(&bytes, "default").unwrap();
+        assert!(
+            !decoded.valid,
+            "inventory decoding grants exclusion only, never attach authority"
+        );
+        assert_eq!(decoded.path, configuration.path);
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::default());
+        store
+            .save_root_config("default", &session.server, &session.client_id, &bytes)
+            .unwrap();
+        let mut foreign = session;
+        foreign.expected_issuer = Some("https://different-issuer.invalid".into());
+        assert!(load_root_configuration(&store, "default", &foreign).is_err());
+        assert!(
+            super::decode_root_metadata(&bytes, "profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .is_err()
+        );
     }
 
     #[test]
