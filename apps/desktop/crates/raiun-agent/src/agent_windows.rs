@@ -7955,7 +7955,7 @@ mod tests {
                         .unwrap()
                         .as_deref(),
                     {
-                        let remote = fixture.recovery.lock().unwrap();
+                        let remote = personal_fixture.recovery.lock().unwrap();
                         (
                             remote.put_count,
                             remote.get_count,
