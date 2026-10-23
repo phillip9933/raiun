@@ -99,6 +99,7 @@ const IO_REPARSE_TAG_CLOUD: u32 = 0x9000_001a;
 const IO_REPARSE_TAG_CLOUD_MASK: u32 = 0xffff_00ff;
 const FILE_READ_ATTRIBUTES: u32 = 0x80;
 const FILE_WRITE_DATA: u32 = 0x2;
+const WRITE_DAC: u32 = 0x0004_0000;
 const GENERIC_READ: u32 = 0x8000_0000;
 const DELETE_ACCESS: u32 = 0x0001_0000;
 const FILE_SHARE_READ: u32 = 1;
@@ -1670,13 +1671,15 @@ impl ConfiguredRootConnection {
             return Err(Error::EditRecoveryUnavailable);
         }
         let path_wide = wide_path(&path)?;
-        // The no-follow chain pins every name; this ordinary stream handle
-        // excludes both writers and deletion for the entire hash/publication/CAS.
+        // The no-follow chain pins every name. Keep the data stream read-only
+        // and exclude writers/deletion through hash/publication/CAS. CfSetInSyncState
+        // permits WRITE_DAC authority; this path never changes the file's DACL.
+        // Access denial remains a failure, with no weaker completion fallback.
         observe_completion!("open_immutable_completion_stream");
         let raw = unsafe {
             CreateFileW(
                 path_wide.as_ptr(),
-                GENERIC_READ | FILE_READ_ATTRIBUTES | FILE_WRITE_DATA,
+                GENERIC_READ | FILE_READ_ATTRIBUTES | WRITE_DAC,
                 FILE_SHARE_READ,
                 null(),
                 OPEN_EXISTING,
@@ -1720,7 +1723,7 @@ impl ConfiguredRootConnection {
         }
         root.verify_identity(true)?;
         root.verify_registered()?;
-        // SAFETY: this held, identity-validated writable file belongs to the
+        // SAFETY: this held, identity-validated metadata-authorized file belongs to the
         // registered root. Nonzero saved_usn makes the OS reject intervening
         // changes. Never retry with zero or replace the saved snapshot here.
         observe_completion!("acquire_publication_and_token_permit");
