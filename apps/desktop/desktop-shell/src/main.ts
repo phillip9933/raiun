@@ -144,6 +144,7 @@ const mediaJobs = new MediaJobsView({
   connected: () => state.status?.connected === true,
   reachable: () => state.agentReachable,
   supported: () => featureAvailable('media_jobs_supported'),
+  supportsVerifyUpload: () => !isWindowsAgentStatus(state.status),
   blocked: () => state.mutationBusy > 0 || state.nativeDialogBusy || state.accountSwitching,
   spaces: () => state.spaces,
   request,

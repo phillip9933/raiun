@@ -21,6 +21,7 @@ type RecoveryPanel = {
 };
 type Context = {
   key(): string; connected(): boolean; reachable(): boolean; blocked(): boolean;
+  supportsVerifyUpload?(): boolean;
   supported(): boolean; spaces(): { id: string; name: string; writable: boolean; encrypted: boolean }[];
   request<T>(action: string, args?: Record<string, unknown>): Promise<T>;
   chooseSource(): Promise<string | null>; confirm(message: string): Promise<boolean>; busy(value: boolean): void; render(): void;
@@ -146,7 +147,7 @@ export class MediaJobsView {
     return `<section class="media-recovery" aria-label="Retained media copies"><p class="media-recovery-note">Read-only inspection: this shows local recovery metadata and whether a retained copy is present. It does not open, change, upload, or remove retained files.</p>${panel.error ? `<p class="media-recovery-error" role="alert">Could not inspect retained copies: ${escape(panel.error)}</p>` : ''}${panel.accountHasUnindexedStage ? '<p class="media-recovery-warning" role="status">Some local recovery data could not be safely matched to a backup record. Its name and contents are not shown here.</p>' : ''}${panel.loading && !panel.loaded ? '<p role="status">Loading retained-copy details…</p>' : ''}${panel.loaded && panel.items.length === 0 && !panel.accountHasUnindexedStage ? '<p class="media-empty-result">No retained copies or unresolved upload records were found for this backup.</p>' : ''}${panel.verificationMessage ? `<p role="status">${escape(panel.verificationMessage)}</p>` : ''}<p>A remote match does not resume backup or clear retained recovery.</p>${rows}${panel.loading && panel.loaded ? '<p role="status">Loading next page…</p>' : ''}${panel.hasMore ? `<button class="button subtle" data-media-recovery-more ${panel.loading || panel.verifying ? 'disabled' : ''}>Load next 100</button>` : ''}</section>`;
   }
   private canVerify(panel: RecoveryPanel, item: RecoveryItem) {
-    return item.upload_verification_available === true && item.state === 'uncertain'
+    return this.context.supportsVerifyUpload?.() !== false && item.upload_verification_available === true && item.state === 'uncertain'
       && item.configuration_revision === panel.revision && Number.isSafeInteger(item.attempt_generation) && item.attempt_generation! > 0
       && this.rows.some(row => row.job.id === panel.jobId && row.job.revision === panel.revision && row.job.account_id === panel.accountId
         && row.active_account && !row.queued && row.status?.state !== 'running');
