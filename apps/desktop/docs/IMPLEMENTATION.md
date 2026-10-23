@@ -10,6 +10,31 @@ below are historical engineering evidence, not semantic release versions or
 claims that each workflow is verified on this beta. Local evidence/output paths
 refer to maintainer archives that are not part of this public source tree.
 
+## Local next-release packages — 23 October 2026 JST
+
+The frozen `4fb6b43` candidate now has an unsigned Windows installer built from
+non-test Agent/CLI/Tauri binaries. An isolated ordinary-user fresh installation
+passed installed-file hash/version checks, offline account creation/switching,
+selection persistence after relaunch and two normal tray quits. The app and
+agent were absent afterward and the VM shut down normally. This does not verify
+prior-version upgrade or authenticated cloud/file-manager use. Earlier native
+save/lifecycle and account-isolation component evidence remains separate.
+
+The same source built a Linux tarball and AppImage on Ubuntu 24.04/glibc 2.39.
+Exact tarball and extracted AppImage payloads displayed the revised Transfers
+and Media Include explanations in isolated UI checks, with no remote writes.
+Normal Quit and independent closure were verified. Original harness failures
+(counter comparison and cleanup permissions) remain recorded; they are not
+reported as an overall successful test run. Direct AppImage FUSE/file-manager
+integration was not exercised. These packages are local candidates, with no
+publication or new laptop installation.
+
+Later source changes are separate from these frozen packages. Windows folder
+admission now also rejects overlap with saved same-account media sources,
+including disabled jobs and restored pairs. Windows compilation/lint passed;
+its focused native regression and cross-profile source admission remain pending.
+Folder/media feature flags stay disabled until that admission is integrated.
+
 ## Windows cloud-drive candidate — 23 October 2026 JST
 
 The isolated ordinary-user Windows save and conditional lifecycle checks passed
@@ -18,8 +43,8 @@ native in-sync marking, all identity postchecks and protected local completion;
 reopen/lifecycle also passed. The non-test candidate now enables the existing
 account-bound provider and verified-save path. Ordinary unit tests remain
 kernel-inactive and ignored native fixtures retain explicit per-instance opt-in.
-Actual non-test package installation, GUI and native file-manager smoke remain
-required before delivery. No new Windows release has been published, and no real
+Actual non-test package installation and offline GUI checks passed as described
+above; authenticated native file-manager package acceptance remains unclaimed. No new Windows release has been published, and no real
 cloud account or files were used for acceptance. Folder/media and vault
 capability gates remain independent and disabled.
 
@@ -39,7 +64,7 @@ refusal and registry replacement/reopen. Four focused native checks also passed
 logged-out root inventory, lifetime owner exclusion, issuer-bound metadata decoding
 and integrated broker routing/persistence/reopen. Account switching is now exposed
 only by the non-test broker; ordinary unit builds remain inactive. The exact
-non-test installer and sign-in-first account dialog still require focused offline
+non-test installer and sign-in-first account dialog passed focused offline
 package acceptance; authenticated live-account acceptance remains unclaimed. Cross-account folder/media source admission
 is required before enabling those separate features; they remain blocked.
 These source changes are unpublished and do not change the installed beta.
