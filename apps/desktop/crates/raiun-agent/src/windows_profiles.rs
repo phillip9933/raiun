@@ -43,6 +43,7 @@ impl WindowsProfiles {
                 )?;
             }
         }
+        registry = inventory_saved_source_exclusions(&storage, registry)?;
         validate_separation(&registry)?;
         let encoded = registry.encode()?;
         if bytes.as_deref() != Some(encoded.as_slice()) {
@@ -314,6 +315,85 @@ impl WindowsProfiles {
             }
         }
     }
+}
+
+// Saved engine documents reserve paths only; they cannot restore credentials or
+// authorize worker execution. Run before any account runtime is constructed.
+fn inventory_saved_source_exclusions(
+    storage: &DpapiSessionStore,
+    mut registry: Registry,
+) -> Result<Registry, String> {
+    use raiun_control_windows::{PinnedDirectory, PrivateDirectory};
+    use raiun_engine::folder_pairs::SavedSourceExclusions;
+    let parent = PinnedDirectory::open(storage.local_edit_state_directory())
+        .map_err(|_| "Could not pin saved folder settings")?;
+    let profiles = registry.profiles().keys().cloned().collect::<Vec<_>>();
+    let known = profiles.iter().map(String::as_str).collect::<Vec<_>>();
+    let entries = std::fs::read_dir(storage.local_edit_state_directory())
+        .map_err(|_| "Could not inventory saved folder settings")?;
+    let mut stores = 0;
+    for (index, entry) in entries.enumerate() {
+        if index >= 4096 {
+            return Err("Saved folder inventory exceeds its entry limit".into());
+        }
+        let entry = entry.map_err(|_| "Saved folder inventory is unavailable")?;
+        let name = entry.file_name();
+        let Some(text) = name.to_str() else {
+            return Err("Saved folder inventory has an invalid name".into());
+        };
+        if !text.to_ascii_lowercase().starts_with("folder-sync-") {
+            continue;
+        }
+        let digest = text
+            .strip_prefix("folder-sync-")
+            .ok_or("Saved folder settings use a noncanonical name")?;
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("Saved folder settings use a noncanonical name".into());
+        }
+        stores += 1;
+        if stores > 64 {
+            return Err("Too many saved folder settings stores".into());
+        }
+        parent
+            .verify_path()
+            .map_err(|_| "Saved folder settings changed")?;
+        let directory = PrivateDirectory::open_under(&parent, &name)
+            .map_err(|_| "Saved folder settings are not private or changed")?;
+        let Some((profile, exclusions)) =
+            SavedSourceExclusions::read_windows_existing(directory, &known)
+                .map_err(|_| "Saved folder settings could not be safely inventoried")?
+        else {
+            continue;
+        };
+        for source in exclusions.sources() {
+            let pin = PinnedDirectory::open(source.path())
+                .map_err(|_| "A saved source is unavailable; its settings were preserved")?;
+            let identity = pin.identity();
+            let path = source
+                .path()
+                .to_str()
+                .ok_or("Saved source path is invalid")?;
+            registry = registry.with_reserved_root(
+                &profile,
+                RootReservation::new(
+                    path.into(),
+                    identity.volume_serial,
+                    identity.file_index,
+                    false,
+                )?,
+            )?;
+            pin.verify_path()
+                .map_err(|_| "A saved source changed during inventory")?;
+        }
+    }
+    parent
+        .verify_path()
+        .map_err(|_| "Saved folder settings changed")?;
+    Ok(registry)
 }
 
 // A reservation can be a plain directory (including an unpopulated registered

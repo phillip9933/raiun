@@ -245,18 +245,38 @@ impl RegisteredRollbackDb {
         Self::open_for(directory, DatabasePurpose::Engine)
     }
 
+    /// Open an existing engine database without creating it or initializing
+    /// engine schema. This is protected rollback-mode access, not physically
+    /// read-only: SQLite may recover an existing hot journal. Callers performing
+    /// inventory must issue only bounded reads and never treat saved scope as auth.
+    #[cfg(feature = "trusted-engine-integration")]
+    pub fn open_engine_existing(directory: PrivateDirectory) -> rusqlite::Result<Self> {
+        Self::open_for_with_creation(directory, DatabasePurpose::Engine, false)
+    }
+
     fn open_for(directory: PrivateDirectory, purpose: DatabasePurpose) -> rusqlite::Result<Self> {
+        Self::open_for_with_creation(directory, purpose, true)
+    }
+
+    fn open_for_with_creation(
+        directory: PrivateDirectory,
+        purpose: DatabasePurpose,
+        create: bool,
+    ) -> rusqlite::Result<Self> {
         let registration = VfsRegistration::new_for(directory, purpose)?;
         let context = &*registration.context;
         let db_path = context.database_path.to_str().map_err(|_| {
             rusqlite::Error::InvalidPath(PathBuf::from(context.purpose.database_name()))
         })?;
+        let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        if create {
+            flags |= OpenFlags::SQLITE_OPEN_CREATE;
+        }
         let connection = Connection::open_with_flags_and_vfs(
             db_path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            flags,
             context.vfs_name.to_str().unwrap_or_default(),
         )?;
         let journal_mode: String =
@@ -2205,6 +2225,10 @@ mod tests {
     fn trusted_engine_bridge_commits_rolls_back_and_reopens_fixed_database() {
         let root = tempfile::tempdir().unwrap();
         let (_parent, private) = private_directory(root.path());
+        assert!(RegisteredRollbackDb::open_engine_existing(private).is_err());
+        assert!(!root.path().join("private/engine.sqlite3").exists());
+        assert!(!root.path().join("private/engine.sqlite3-journal").exists());
+        let (_parent, private) = reopen_private_directory(root.path());
         let db = RegisteredRollbackDb::open_engine(private).unwrap();
         let connection = db.borrow_engine_connection();
         connection.execute_batch("CREATE TABLE engine_probe(value INTEGER NOT NULL); INSERT INTO engine_probe VALUES (7);").unwrap();
@@ -2217,7 +2241,7 @@ mod tests {
         transaction.rollback().unwrap();
         assert!(db.close().is_ok());
         let (_parent, private) = reopen_private_directory(root.path());
-        let db = RegisteredRollbackDb::open_engine(private).unwrap();
+        let db = RegisteredRollbackDb::open_engine_existing(private).unwrap();
         let values: (i64, i64) = db
             .borrow_engine_connection()
             .query_row("SELECT count(*), sum(value) FROM engine_probe", [], |row| {

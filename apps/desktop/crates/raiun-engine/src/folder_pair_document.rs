@@ -59,6 +59,44 @@ fn current(connection: &Connection, scope: &[u8]) -> Result<Option<Vec<u8>>, Clo
         Some(_) => Err(invalid()),
     }
 }
+/// Bounded exclusion inventory only. Does not initialize schema or grant a
+/// saved account scope authority. Even a malformed table returns at most two
+/// bounded rows; extra rows and invalid metadata fail closed.
+#[cfg(any(windows, test))]
+type SourceInventory = (Vec<u8>, Vec<u8>);
+
+#[cfg(any(windows, test))]
+pub(crate) fn source_inventory(
+    connection: &Connection,
+) -> Result<Option<SourceInventory>, CloudError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT CASE WHEN id=1 AND typeof(scope)='blob' AND length(scope) BETWEEN 1 AND 16384
+                  THEN scope ELSE NULL END,
+                CASE WHEN id=1 AND typeof(document)='blob' AND length(document) BETWEEN 1 AND 524288
+                  THEN document ELSE NULL END
+         FROM folder_pair_document LIMIT 2",
+        )
+        .map_err(sql)?;
+    let mut rows = statement.query([]).map_err(sql)?;
+    let Some(row) = rows.next().map_err(sql)? else {
+        return Ok(None);
+    };
+    let scope: Option<Vec<u8>> = row.get(0).map_err(sql)?;
+    let document: Option<Vec<u8>> = row.get(1).map_err(sql)?;
+    if rows.next().map_err(sql)?.is_some() {
+        return Err(invalid());
+    }
+    match (scope, document) {
+        (Some(scope), Some(document))
+            if bounded(&scope, MAX_SCOPE) && bounded(&document, MAX_DOCUMENT) =>
+        {
+            Ok(Some((scope, document)))
+        }
+        _ => Err(invalid()),
+    }
+}
+
 pub(crate) fn load(connection: &Connection, scope: &[u8]) -> Result<Option<Vec<u8>>, CloudError> {
     if !bounded(scope, MAX_SCOPE) {
         return Err(invalid());
@@ -100,6 +138,34 @@ mod tests {
         connection.execute_batch(SCHEMA).unwrap();
         connection
     }
+    #[test]
+    fn source_inventory_is_bounded_and_refuses_extra_or_invalid_rows() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("CREATE TABLE folder_pair_document(id, scope, document)")
+            .unwrap();
+        assert_eq!(source_inventory(&connection).unwrap(), None);
+        connection
+            .execute(
+                "INSERT INTO folder_pair_document VALUES(1,?1,?2)",
+                params![b"scope".as_slice(), b"document".as_slice()],
+            )
+            .unwrap();
+        assert_eq!(
+            source_inventory(&connection).unwrap(),
+            Some((b"scope".to_vec(), b"document".to_vec()))
+        );
+        connection
+            .execute(
+                "INSERT INTO folder_pair_document VALUES(2,?1,?2)",
+                params![b"other".as_slice(), b"other".as_slice()],
+            )
+            .unwrap();
+        assert!(source_inventory(&connection).is_err());
+        connection.execute_batch("DELETE FROM folder_pair_document; INSERT INTO folder_pair_document VALUES(1,zeroblob(16385),x'01')").unwrap();
+        assert!(source_inventory(&connection).is_err());
+    }
+
     #[test]
     fn persist_reopen_and_scope_mismatch() {
         let dir = tempfile::tempdir().unwrap();

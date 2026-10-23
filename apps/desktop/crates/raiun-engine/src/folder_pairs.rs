@@ -1,6 +1,7 @@
 //! Inert configuration document only; filesystem/root admission belongs to the caller.
 use raiun_core::{CONFIG_SCHEMA_VERSION, Config};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 pub const MAX_DOCUMENT_BYTES: usize = 512 * 1024;
@@ -214,6 +215,146 @@ impl FolderPairsDocument {
         };
         next.encode()?;
         Ok(next)
+    }
+}
+
+/// Exclusion metadata only; these values never establish account or root authority.
+pub struct SavedSourceExclusions {
+    scope_digest: String,
+    sources: Vec<SavedSourceExclusion>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SavedSourceKind {
+    FolderPair,
+    MediaJob,
+}
+
+/// One saved source, including disabled jobs. Paths are lexical, not admitted roots.
+pub struct SavedSourceExclusion {
+    kind: SavedSourceKind,
+    id: String,
+    path: std::path::PathBuf,
+}
+impl SavedSourceExclusion {
+    pub fn kind(&self) -> SavedSourceKind {
+        self.kind
+    }
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+impl SavedSourceExclusions {
+    /// Inspect an existing protected Windows engine store for exclusions only.
+    /// No engine/cache/schema is initialized. SQLite may recover a hot rollback
+    /// journal; this is not a physically read-only opener. The caller supplies
+    /// known registry profiles and must still pin source identities before use.
+    #[cfg(windows)]
+    pub fn read_windows_existing(
+        directory: raiun_control_windows::PrivateDirectory,
+        known_profiles: &[&str],
+    ) -> Result<Option<(String, Self)>> {
+        if known_profiles.is_empty() || known_profiles.len() > 16 {
+            return Err(DocumentError::Invalid);
+        }
+        let name = directory
+            .path()
+            .file_name()
+            .and_then(|v| v.to_str())
+            .ok_or(DocumentError::Invalid)?
+            .to_owned();
+        let digest = name
+            .strip_prefix("folder-sync-")
+            .ok_or(DocumentError::Invalid)?;
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
+        {
+            return Err(DocumentError::Invalid);
+        }
+        let db = raiun_sqlite_windows::RegisteredRollbackDb::open_engine_existing(directory)
+            .map_err(|_| DocumentError::Invalid)?;
+        let raw = crate::folder_pair_document::source_inventory(db.borrow_engine_connection())
+            .map_err(|_| DocumentError::Invalid)?;
+        let Some((scope, document)) = raw else {
+            return Ok(None);
+        };
+        let saved: AccountScope =
+            serde_json::from_slice(&scope).map_err(|_| DocumentError::Invalid)?;
+        if !known_profiles.contains(&saved.profile.as_str()) {
+            return Err(DocumentError::ScopeMismatch);
+        }
+        let exclusions = Self::decode(&scope, &document, &saved.profile)?;
+        if name != format!("folder-sync-{}", exclusions.scope_digest()) {
+            return Err(DocumentError::ScopeMismatch);
+        }
+        db.close().map_err(|_| DocumentError::Invalid)?;
+        Ok(Some((saved.profile, exclusions)))
+    }
+
+    /// Decode protected inventory bytes for exclusion checks, never runtime restoration.
+    /// No filesystem, database, credential or network access is performed.
+    pub fn decode(stored_scope: &[u8], document: &[u8], expected_profile: &str) -> Result<Self> {
+        if stored_scope.is_empty() || stored_scope.len() > 16 * 1024 {
+            return Err(DocumentError::Invalid);
+        }
+        let scope: AccountScope =
+            serde_json::from_slice(stored_scope).map_err(|_| DocumentError::Invalid)?;
+        AccountScope::new(
+            scope.profile.clone(),
+            scope.server.clone(),
+            scope.client.clone(),
+            scope.issuer.clone(),
+            scope.subject.clone(),
+        )?;
+        if scope.profile != expected_profile {
+            return Err(DocumentError::ScopeMismatch);
+        }
+        let canonical = serde_json::to_vec(&scope).map_err(|_| DocumentError::Invalid)?;
+        if canonical != stored_scope {
+            return Err(DocumentError::Invalid);
+        }
+        let document = FolderPairsDocument::decode(document, &scope)?;
+        if document
+            .media_jobs
+            .iter()
+            .any(|job| job.account_id != scope.subject)
+        {
+            return Err(DocumentError::ScopeMismatch);
+        }
+        let mut sources = Vec::new();
+        for (kind, id, path) in document
+            .config
+            .pairs
+            .into_iter()
+            .map(|pair| (SavedSourceKind::FolderPair, pair.id, pair.local_path))
+            .chain(
+                document
+                    .media_jobs
+                    .into_iter()
+                    .map(|job| (SavedSourceKind::MediaJob, job.id, job.source_root)),
+            )
+        {
+            let text = path.to_str().ok_or(DocumentError::Invalid)?;
+            if !path.is_absolute() || !bounded(text, 32_000) {
+                return Err(DocumentError::Invalid);
+            }
+            sources.push(SavedSourceExclusion { kind, id, path });
+        }
+        Ok(Self {
+            scope_digest: format!("{:x}", Sha256::digest(stored_scope)),
+            sources,
+        })
+    }
+    pub fn scope_digest(&self) -> &str {
+        &self.scope_digest
+    }
+    pub fn sources(&self) -> &[SavedSourceExclusion] {
+        &self.sources
     }
 }
 
@@ -564,5 +705,99 @@ mod tests {
         assert!(FolderPairsDocument::decode(&serde_json::to_vec(&raw).unwrap(), &scope).is_ok());
         raw["retired_pair_ids"] = serde_json::json!(["r".repeat(129)]);
         assert!(FolderPairsDocument::decode(&serde_json::to_vec(&raw).unwrap(), &scope).is_err());
+    }
+    fn exclusion_document() -> FolderPairsDocument {
+        let mut config = config();
+        config.pairs[0].local_path = std::env::temp_dir().join("raiun-saved-pair-offline");
+        let mut document = FolderPairsDocument::new(scope(), config).unwrap();
+        document.paused = true;
+        document.media_jobs.push(raiun_core::MediaImportJob {
+            id: "disabled-media".into(),
+            revision: 1,
+            account_id: "alice".into(),
+            source_root: std::env::temp_dir().join("raiun-saved-media-offline"),
+            space_id: "space".into(),
+            destination_root: "/Photos".into(),
+            destination_root_resource_id: "photos-root".into(),
+            filter: raiun_core::MediaFilter::All,
+            organization: raiun_core::MediaOrganization::PreserveRelativePath,
+            filesystem_mtime_utc: false,
+            interval_seconds: 3600,
+            enabled: false,
+        });
+        document
+    }
+
+    #[test]
+    fn saved_source_exclusions_bind_canonical_scope_and_include_disabled_media() {
+        let document = exclusion_document();
+        let scope_bytes = serde_json::to_vec(&scope()).unwrap();
+        let decoded =
+            SavedSourceExclusions::decode(&scope_bytes, &document.encode().unwrap(), "default")
+                .unwrap();
+        assert_eq!(
+            decoded.scope_digest(),
+            format!("{:x}", Sha256::digest(&scope_bytes))
+        );
+        assert_eq!(decoded.sources().len(), 2);
+        let pair = &decoded.sources()[0];
+        assert!(pair.kind() == SavedSourceKind::FolderPair);
+        assert_eq!(pair.id(), "one");
+        assert_eq!(pair.path(), document.config.pairs[0].local_path);
+        let media = &decoded.sources()[1];
+        assert!(media.kind() == SavedSourceKind::MediaJob);
+        assert_eq!(media.id(), "disabled-media");
+        assert_eq!(media.path(), document.media_jobs[0].source_root);
+    }
+
+    #[test]
+    fn saved_source_exclusions_reject_foreign_noncanonical_and_malformed_bytes() {
+        let scope_bytes = serde_json::to_vec(&scope()).unwrap();
+        let bytes = exclusion_document().encode().unwrap();
+        assert!(matches!(
+            SavedSourceExclusions::decode(&scope_bytes, &bytes, "foreign"),
+            Err(DocumentError::ScopeMismatch)
+        ));
+        let mut foreign = exclusion_document();
+        foreign.scope.subject = "someone-else".into();
+        assert!(matches!(
+            SavedSourceExclusions::decode(&scope_bytes, &foreign.encode().unwrap(), "default"),
+            Err(DocumentError::ScopeMismatch)
+        ));
+        let mut spaced = vec![b' '];
+        spaced.extend_from_slice(&scope_bytes);
+        for invalid in [&[][..], b"{}", &spaced, &vec![b'x'; 16 * 1024 + 1]] {
+            assert!(SavedSourceExclusions::decode(invalid, &bytes, "default").is_err());
+        }
+        for invalid in [&[][..], b"{}", &vec![b'x'; MAX_DOCUMENT_BYTES + 1]] {
+            assert!(SavedSourceExclusions::decode(&scope_bytes, invalid, "default").is_err());
+        }
+    }
+
+    #[test]
+    fn saved_source_exclusions_reject_media_account_mismatch_and_invalid_pair_paths() {
+        let scope_bytes = serde_json::to_vec(&scope()).unwrap();
+        let mut wrong_account = exclusion_document();
+        wrong_account.media_jobs[0].account_id = "foreign".into();
+        assert!(matches!(
+            SavedSourceExclusions::decode(
+                &scope_bytes,
+                &wrong_account.encode().unwrap(),
+                "default"
+            ),
+            Err(DocumentError::ScopeMismatch)
+        ));
+        for path in [
+            std::path::PathBuf::from("relative/source"),
+            std::env::temp_dir().join("control\nsource"),
+            std::env::temp_dir().join("x".repeat(32_001)),
+        ] {
+            let mut document = exclusion_document();
+            document.config.pairs[0].local_path = path;
+            assert!(
+                SavedSourceExclusions::decode(&scope_bytes, &document.encode().unwrap(), "default")
+                    .is_err()
+            );
+        }
     }
 }
