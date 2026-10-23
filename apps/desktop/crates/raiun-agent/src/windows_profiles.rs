@@ -476,3 +476,157 @@ pub(super) fn serve_profiles() -> Result<(), String> {
     }
     result.and(stopped)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "one-shot NIC-less lab VM; task-qualified ordinary RaiunLabUser; leaves registry evidence"]
+    fn fresh_lab_broker_persists_profiles_without_stopping_other_runtimes() {
+        assert_eq!(
+            std::env::var("USERNAME").as_deref(),
+            Ok("RaiunLabUser"),
+            "requires dedicated synthetic user"
+        );
+        // Ordinary-user admission is also required by the operator task. This
+        // fixed read-only child checks inherited token membership, no auth/data.
+        let token = std::process::Command::new("powershell.exe")
+            .env_remove("PSModulePath")
+            .args(["-NoProfile", "-NonInteractive", "-Command",
+                "$p=[Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()); if($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){exit 7}; exit 0"])
+            .output().expect("qualify ordinary inherited Windows token");
+        assert!(
+            token.status.success(),
+            "requires qualified ordinary-user token"
+        );
+        let storage = DpapiSessionStore::current_user().expect("open synthetic user's storage");
+        let owner = storage
+            .lock_profile_registry()
+            .expect("own registry before first read");
+        assert!(
+            storage
+                .load_profile_registry()
+                .expect("read fresh registry")
+                .is_none(),
+            "existing registry forbids replay: preserve it, never reset"
+        );
+        assert!(
+            storage
+                .active_identity()
+                .expect("read fresh active pointer")
+                .is_none(),
+            "existing active identity forbids this acceptance case"
+        );
+        let mut default_before = storage
+            .load_root_config_inventory("default")
+            .expect("capture only root metadata");
+        default_before.sort();
+        let broker =
+            WindowsProfiles::open(storage.clone()).expect("open fresh broker while lease held");
+        let a = broker
+            .handle(&json!({"action":"account_add","label":"Synthetic A"}))
+            .unwrap()
+            .0["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let b = broker
+            .handle(&json!({"action":"account_add","label":"Synthetic B"}))
+            .unwrap()
+            .0["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_ne!(a, b);
+        let runtime_a = broker.resolve(&json!({"profile_id":a})).unwrap().1;
+        let runtime_b = broker.resolve(&json!({"profile_id":b})).unwrap().1;
+        assert!(!Arc::ptr_eq(&runtime_a, &runtime_b));
+        let generation_a = runtime_a
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        let generation_b = runtime_b
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        for selected in [&a, &b] {
+            broker
+                .handle(&json!({"action":"account_select","profile_id":selected}))
+                .unwrap();
+            assert_eq!(
+                runtime_a
+                    .generation
+                    .load(std::sync::atomic::Ordering::Acquire),
+                generation_a
+            );
+            assert_eq!(
+                runtime_b
+                    .generation
+                    .load(std::sync::atomic::Ordering::Acquire),
+                generation_b
+            );
+            let persisted = Registry::decode_or_default(Some(
+                &storage.load_profile_registry().unwrap().unwrap(),
+            ))
+            .unwrap();
+            assert_eq!(persisted.selected(), selected);
+            let (resolved, selected_runtime) = broker.resolve(&json!({"action":"status"})).unwrap();
+            assert_eq!(&resolved, selected);
+            assert!(Arc::ptr_eq(
+                &selected_runtime,
+                if selected == &a {
+                    &runtime_a
+                } else {
+                    &runtime_b
+                }
+            ));
+            assert!(Arc::ptr_eq(
+                &broker.resolve(&json!({"profile_id":a})).unwrap().1,
+                &runtime_a
+            ));
+            assert!(Arc::ptr_eq(
+                &broker.resolve(&json!({"profile_id":b})).unwrap().1,
+                &runtime_b
+            ));
+        }
+        assert!(broker.handle(&json!({"action":"status","profile_id":"profile-ffffffffffffffffffffffffffffffff"})).is_err());
+        assert!(
+            runtime_a
+                .handle_request(&json!({"action":"status","profile_id":b}))
+                .is_err()
+        );
+        assert!(
+            broker
+                .handle(&json!({"action":"status","profile_id":17}))
+                .is_err()
+        );
+        broker.stop_all().expect("stop/join every runtime");
+        drop(runtime_a);
+        drop(runtime_b);
+        drop(broker);
+        // Keep the SAME owner lease through restart; never release a live
+        // broker to another process between durable selection and reopen.
+        let reopened = WindowsProfiles::open(storage.clone()).expect("reopen durable broker");
+        {
+            let state = reopened.state.lock().unwrap();
+            assert_eq!(state.registry.selected(), b);
+            assert_eq!(state.registry.profiles().len(), 3);
+            assert_eq!(state.registry.profiles()[&a].label(), "Synthetic A");
+            assert_eq!(state.registry.profiles()[&b].label(), "Synthetic B");
+            assert!(state.runtimes.contains_key("default"));
+            assert!(state.runtimes.contains_key(&a));
+            assert!(state.runtimes.contains_key(&b));
+        }
+        let mut default_after = storage.load_root_config_inventory("default").unwrap();
+        default_after.sort();
+        assert!(
+            default_before == default_after,
+            "default root metadata bytes must remain unchanged"
+        );
+        assert!(storage.active_identity().unwrap().is_none());
+        reopened.stop_all().expect("stop/join reopened runtimes");
+        drop(reopened);
+        drop(owner);
+        // Deliberately no cleanup/reset: new registry and synthetic profiles
+        // remain as evidence on success/failure; the absence gate prevents replay.
+    }
+}
