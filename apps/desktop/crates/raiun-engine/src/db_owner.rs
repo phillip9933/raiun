@@ -9,6 +9,7 @@ pub(super) enum DbOwner {
     PrivateWindows {
         database: raiun_sqlite_windows::RegisteredRollbackDb,
         _cache_directory: raiun_control_windows::PrivateDirectory,
+        media_directory: std::sync::Arc<raiun_control_windows::PrivateDirectory>,
     },
 }
 
@@ -24,6 +25,18 @@ impl Deref for DbOwner {
 }
 
 impl DbOwner {
+    #[cfg(windows)]
+    pub(super) fn media_directory(
+        &self,
+    ) -> Option<std::sync::Arc<raiun_control_windows::PrivateDirectory>> {
+        match self {
+            Self::PrivateWindows {
+                media_directory, ..
+            } => Some(std::sync::Arc::clone(media_directory)),
+            Self::Portable(_) => None,
+        }
+    }
+
     // No DerefMut: callers cannot extract/replace the connection and outlive
     // its pinned VFS. A transaction borrows the serialized database owner.
     pub(super) fn transaction(&mut self) -> rusqlite::Result<Transaction<'_>> {

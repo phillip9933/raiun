@@ -426,11 +426,18 @@ impl Engine {
             PrivateDirectory::create_or_open_under(&parent, std::ffi::OsStr::new("cache"))
                 .map_err(io_error)?;
         let cache_dir = cache_directory.path().to_path_buf();
+        // Retain the private staging root alongside the guarded database. No
+        // legacy directory ACL is repaired or accepted implicitly.
+        let media_directory = Arc::new(
+            PrivateDirectory::create_or_open_under(&parent, std::ffi::OsStr::new("media-staging"))
+                .map_err(io_error)?,
+        );
         let database =
             raiun_sqlite_windows::RegisteredRollbackDb::open_engine(directory).map_err(db_error)?;
         let owner = DbOwner::PrivateWindows {
             database,
             _cache_directory: cache_directory,
+            media_directory,
         };
         Self::initialize(state_dir, cache_dir, owner, backend)
     }

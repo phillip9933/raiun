@@ -24,7 +24,32 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
+#[cfg(not(windows))]
 use tempfile::NamedTempFile;
+#[cfg(windows)]
+#[path = "windows_media_stage.rs"]
+mod windows_media_stage;
+#[cfg(windows)]
+use windows_media_stage::{StageWriter, StagedMedia};
+
+#[cfg(not(windows))]
+struct StagedMedia(PathBuf);
+
+#[cfg(not(windows))]
+impl StagedMedia {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+    fn matches_signature(&mut self, expected: &SourceSignature) -> Result<bool, CloudError> {
+        Ok(
+            fs::metadata(&self.0).map_err(io_error)?.len() == expected.size
+                && hash_file(&self.0)? == expected.sha256,
+        )
+    }
+    fn cleanup(self) -> std::io::Result<()> {
+        fs::remove_file(self.0)
+    }
+}
 
 pub const MEDIA_STABLE_FILE_SECONDS: i64 = 10;
 pub const MAX_MEDIA_RECEIPTS_PER_ACCOUNT: i64 = 1_000_000;
@@ -1033,10 +1058,10 @@ impl Engine {
                 Err(error) => return Err(error),
             },
         };
-        let staged_path =
-            stage_source_file(self, source_root, relative_path, signature, cancelled)?;
+        let mut staged = stage_source_file(self, source_root, relative_path, signature, cancelled)?;
+        let staged_path = staged.path().to_path_buf();
         if let Err(error) = check_media_cancelled(cancelled) {
-            let _ = fs::remove_file(&staged_path);
+            let _ = staged.cleanup();
             return Err(error);
         }
         let attempt = match begin_attempt(
@@ -1054,7 +1079,10 @@ impl Engine {
         ) {
             Ok(attempt) => attempt,
             Err(error) => {
-                let _ = fs::remove_file(&staged_path);
+                // A durable attempt may have committed before an ambiguous
+                // database error. Keep the private Windows copy for recovery.
+                #[cfg(not(windows))]
+                let _ = staged.cleanup();
                 return Err(error);
             }
         };
@@ -1062,18 +1090,10 @@ impl Engine {
         let uploaded = self.upload_inner(None, &job.space_id, destination_path, &staged_path, base);
         match uploaded {
             Ok(remote) => {
-                let still_same = fs::metadata(&staged_path)
-                    .map_err(io_error)
-                    .and_then(|metadata| {
-                        hash_file(&staged_path).map(|hash| SourceSignature {
-                            size: metadata.len(),
-                            mtime_seconds: signature.mtime_seconds,
-                            mtime_nanoseconds: signature.mtime_nanoseconds,
-                            sha256: hash,
-                        })
-                    })
-                    .and_then(|staged_after| {
-                        if &staged_after != signature {
+                let still_same = staged
+                    .matches_signature(signature)
+                    .and_then(|staged_same| {
+                        if !staged_same {
                             return Ok(false);
                         }
                         source_signature(source_root, relative_path, &|| false)
@@ -1131,7 +1151,7 @@ impl Engine {
                     )?;
                     return Ok(CandidateOutcome::Attention);
                 }
-                let _ = fs::remove_file(&staged_path);
+                let _ = staged.cleanup();
                 Ok(CandidateOutcome::Uploaded)
             }
             Err(error) => {
@@ -1479,41 +1499,16 @@ fn stage_source_file(
     relative: &str,
     expected: &SourceSignature,
     cancelled: &dyn Fn() -> bool,
-) -> Result<PathBuf, CloudError> {
-    let staging_dir = engine.inner.state_dir.join("media-staging");
-    let staging_existed = fs::symlink_metadata(&staging_dir).is_ok();
-    fs::create_dir_all(&staging_dir).map_err(io_error)?;
-    let staging_metadata = fs::symlink_metadata(&staging_dir).map_err(io_error)?;
-    if staging_metadata.file_type().is_symlink() || !staging_metadata.is_dir() {
-        return Err(media_error(
-            ErrorKind::Unsupported,
-            "media staging directory must be a private real directory",
-        ));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&staging_dir, fs::Permissions::from_mode(0o700)).map_err(io_error)?;
-    }
-    if !staging_existed {
-        sync_media_directory(&engine.inner.state_dir)?;
-    }
+) -> Result<StagedMedia, CloudError> {
     if expected.size > MAX_MEDIA_STAGED_FILE_BYTES {
         return Err(media_error(
             ErrorKind::Unsupported,
             "media file exceeds the staging size limit",
         ));
     }
-    let staged_total = staging_directory_bytes(&staging_dir)?;
-    if staged_total.saturating_add(expected.size) > MAX_MEDIA_STAGED_TOTAL_BYTES as u64 {
-        return Err(media_error(
-            ErrorKind::Io,
-            "media staging quota is full; unresolved copies were preserved",
-        ));
-    }
+    let mut staged = new_stage_writer(engine, expected.size)?;
     let mut source = open_source_file(root, relative)?;
     let before = source.metadata().map_err(io_error)?;
-    let mut staged = NamedTempFile::new_in(&staging_dir).map_err(io_error)?;
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 128 * 1024];
     let mut size = 0u64;
@@ -1560,11 +1555,71 @@ fn stage_source_file(
             "source changed while preparing its immutable upload copy",
         ));
     }
-    let (_, path) = staged.keep().map_err(|error| io_error(error.error))?;
-    sync_media_directory(&staging_dir)?;
-    Ok(path)
+    finish_staged_file(staged, expected)
 }
 
+#[cfg(not(windows))]
+fn new_stage_writer(engine: &Engine, size: u64) -> Result<NamedTempFile, CloudError> {
+    let staging_dir = engine.inner.state_dir.join("media-staging");
+    let staging_existed = fs::symlink_metadata(&staging_dir).is_ok();
+    fs::create_dir_all(&staging_dir).map_err(io_error)?;
+    let staging_metadata = fs::symlink_metadata(&staging_dir).map_err(io_error)?;
+    if staging_metadata.file_type().is_symlink() || !staging_metadata.is_dir() {
+        return Err(media_error(
+            ErrorKind::Unsupported,
+            "media staging directory must be a private real directory",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&staging_dir, fs::Permissions::from_mode(0o700)).map_err(io_error)?;
+    }
+    if !staging_existed {
+        sync_media_directory(&engine.inner.state_dir)?;
+    }
+    let staged_total = staging_directory_bytes(&staging_dir)?;
+    if staged_total.saturating_add(size) > MAX_MEDIA_STAGED_TOTAL_BYTES as u64 {
+        return Err(media_error(
+            ErrorKind::Io,
+            "media staging quota is full; unresolved copies were preserved",
+        ));
+    }
+    NamedTempFile::new_in(&staging_dir).map_err(io_error)
+}
+
+#[cfg(windows)]
+fn new_stage_writer(engine: &Engine, size: u64) -> Result<StageWriter, CloudError> {
+    if windows_media_stage::directory_bytes(engine)?.saturating_add(size)
+        > MAX_MEDIA_STAGED_TOTAL_BYTES as u64
+    {
+        return Err(media_error(
+            ErrorKind::Io,
+            "media staging quota is full; unresolved copies were preserved",
+        ));
+    }
+    StageWriter::create(engine)
+}
+
+#[cfg(not(windows))]
+fn finish_staged_file(
+    staged: NamedTempFile,
+    _expected: &SourceSignature,
+) -> Result<StagedMedia, CloudError> {
+    let (_, path) = staged.keep().map_err(|error| io_error(error.error))?;
+    sync_media_directory(path.parent().expect("media stage parent"))?;
+    Ok(StagedMedia(path))
+}
+
+#[cfg(windows)]
+fn finish_staged_file(
+    staged: StageWriter,
+    expected: &SourceSignature,
+) -> Result<StagedMedia, CloudError> {
+    staged.finish(expected)
+}
+
+#[cfg(not(windows))]
 fn staging_directory_bytes(path: &Path) -> Result<u64, CloudError> {
     let mut total = 0u64;
     let mut entries = 0usize;
@@ -1676,7 +1731,7 @@ fn sync_media_directory(path: &Path) -> Result<(), CloudError> {
         .map_err(io_error)
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(windows)))]
 fn sync_media_directory(_path: &Path) -> Result<(), CloudError> {
     Ok(())
 }
@@ -1875,10 +1930,13 @@ fn begin_attempt(
     let job_revision = i64::try_from(job.revision)
         .map_err(|_| media_error(ErrorKind::Io, "media job revision cannot be stored safely"))?;
     let key = scope_key_values(job, account_id, origin, relative_path, destination_path);
+    #[cfg(windows)]
+    let staged_total = windows_media_stage::directory_bytes(engine)?;
+    #[cfg(not(windows))]
+    let staged_total = staging_directory_bytes(&engine.inner.state_dir.join("media-staging"))?;
+    let staged_size = fs::metadata(staged_path).map_err(io_error)?.len();
     let mut db = engine.db()?;
     let tx = db.transaction().map_err(crate::db_error)?;
-    let staged_size = fs::metadata(staged_path).map_err(io_error)?.len();
-    let staged_total = staging_directory_bytes(&engine.inner.state_dir.join("media-staging"))?;
     if staged_total > MAX_MEDIA_STAGED_TOTAL_BYTES as u64 {
         return Err(media_error(
             ErrorKind::Io,
