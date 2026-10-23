@@ -252,6 +252,21 @@ impl DpapiSessionStore {
         Ok(records)
     }
 
+    /// Acquire the persistent broker ownership lock before registry access.
+    /// The returned exact-file/directory lease must outlive every account
+    /// runtime and all shutdown joins. Existing lock files are never reset.
+    pub fn lock_profile_registry(&self) -> io::Result<crate::OwnedPrivateReader> {
+        let directory = self.profile_registry_directory()?;
+        match directory.create_new_file(std::ffi::OsStr::new("broker.lock")) {
+            Ok((file, _)) => drop(file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+            Err(error) => return Err(error),
+        }
+        let mut lease = directory.open_owned_immutable_file(std::ffi::OsStr::new("broker.lock"))?;
+        lease.try_lock_exclusive()?;
+        Ok(lease)
+    }
+
     /// Read the fixed non-secret account registry without scanning credentials.
     /// Only verified absence returns None; malformed content remains the caller's
     /// responsibility and must never be interpreted as a default migration.
@@ -1270,6 +1285,44 @@ fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires isolated ordinary Windows user and native private-storage ACL support"]
+    fn registry_broker_lock_excludes_a_second_owner_until_release() {
+        let root = std::env::temp_dir().join(format!(
+            "raiun-broker-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        eprintln!("synthetic_broker_lock_fixture={}", root.display());
+        let store = DpapiSessionStore {
+            root: root.join("sessions"),
+            profile_directory: None,
+        };
+        let first = store.lock_profile_registry().unwrap();
+        let identity = first.identity();
+        assert!(store.lock_profile_registry().is_err());
+        first.verify().unwrap();
+        let path = store.root.join("profiles").join("broker.lock");
+        assert!(std::fs::rename(&path, path.with_extension("replacement")).is_err());
+        first.verify().unwrap();
+        drop(first);
+        let second = store.lock_profile_registry().unwrap();
+        assert_eq!(
+            second.identity(),
+            identity,
+            "reacquisition must retain the persistent lock entry"
+        );
+        assert!(store.lock_profile_registry().is_err());
+        drop(second);
+        drop(store);
+        // Success-only cleanup after every lock and directory pin is released.
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     #[ignore = "requires isolated ordinary Windows user and native private-storage ACL support"]

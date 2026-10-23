@@ -15,9 +15,7 @@ pub(super) struct WindowsProfiles {
 }
 
 impl WindowsProfiles {
-    pub(super) fn open() -> Result<Self, String> {
-        let storage =
-            DpapiSessionStore::current_user().map_err(|_| "Account storage is unavailable")?;
+    fn open(storage: DpapiSessionStore) -> Result<Self, String> {
         let bytes = storage
             .load_profile_registry()
             .map_err(|_| "Could not read the account registry")?;
@@ -239,12 +237,22 @@ impl WindowsProfiles {
                     .get("cloud_root")
                     .and_then(Value::as_str)
                     .ok_or("Choose a Windows drive folder")?;
-                let previous = runtime
-                    .state
-                    .lock()
-                    .map_err(|_| "Account state is unavailable")?
-                    .root_configuration
-                    .clone();
+                let previous = {
+                    let state = runtime
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?;
+                    if state.session.is_none()
+                        || !state.online_authenticated
+                        || state.authenticating
+                        || state.refreshing
+                        || state.logout_pending
+                        || state.session_cleanup_uncertain
+                    {
+                        return Err("Connect this account before choosing a drive folder".into());
+                    }
+                    state.root_configuration.clone()
+                };
                 // Keep the same root pinned across reservation publication and
                 // the existing authenticated configure operation's revalidation.
                 let lease = match previous.as_ref().filter(|root| {
@@ -414,12 +422,17 @@ fn validate_separation(registry: &Registry) -> Result<(), String> {
     Ok(())
 }
 
-/// Claim the first-instance pipe before reading/mutating the registry. Every
-/// admitted registry request retains its accepted pipe stream until publication.
+/// Claim the pipe and a persistent exact-file ownership lease before registry
+/// access. The lease spans pipe gaps and outlives every account shutdown join.
 pub(super) fn serve_profiles() -> Result<(), String> {
     let first = NamedPipeListener::bind(Duration::from_millis(500))
         .map_err(|_| "Could not claim the current-user control pipe")?;
-    let broker = WindowsProfiles::open()?;
+    let storage =
+        DpapiSessionStore::current_user().map_err(|_| "Account storage is unavailable")?;
+    let owner = storage.lock_profile_registry().map_err(
+        |_| "Another account broker owns this Windows profile, or its lock is unavailable",
+    )?;
+    let broker = WindowsProfiles::open(storage)?;
     let result = (|| {
         let mut listener = Some(first);
         loop {
@@ -452,5 +465,10 @@ pub(super) fn serve_profiles() -> Result<(), String> {
         Ok(())
     })();
     let stopped = broker.stop_all();
+    if stopped.is_err() {
+        // Fail closed until process exit if any runtime could remain alive.
+        // Do not hand its registry to another broker after a failed drain.
+        std::mem::forget(owner);
+    }
     result.and(stopped)
 }

@@ -745,6 +745,14 @@ pub struct OwnedPrivateReader {
 }
 
 impl OwnedPrivateReader {
+    /// Retain a process-lifetime exclusion lock on this exact immutable file.
+    /// Closing the reader releases the OS lock. Persistent lock entries must
+    /// never be deleted/recreated; replacement is denied by this reader's pin.
+    pub fn try_lock_exclusive(&mut self) -> io::Result<()> {
+        self.verify()?;
+        fs2::FileExt::try_lock_exclusive(&self.file)
+    }
+
     pub fn identity(&self) -> PinnedFileIdentity {
         self.identity
     }
