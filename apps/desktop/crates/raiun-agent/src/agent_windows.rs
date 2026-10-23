@@ -183,6 +183,8 @@ struct ProviderManager {
     lifecycle_test_activation: AtomicBool,
     #[cfg(all(test, debug_assertions))]
     initial_save_test_activation: Arc<AtomicBool>,
+    #[cfg(all(test, debug_assertions))]
+    initial_save_test_observation: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -333,6 +335,10 @@ impl ProviderManager {
         let initial_save_activation =
             Arc::new(AtomicBool::new(WINDOWS_INITIAL_SAVE_DISPATCH_ENABLED));
         let worker_initial_save_activation = Arc::clone(&initial_save_activation);
+        #[cfg(all(test, debug_assertions))]
+        let initial_save_test_observation = Arc::new(Mutex::new(None::<String>));
+        #[cfg(all(test, debug_assertions))]
+        let worker_initial_save_test_observation = Arc::clone(&initial_save_test_observation);
         let offline_jobs = Arc::new(windows_offline_jobs::OfflineJobs::default());
         let worker_jobs = Arc::clone(&offline_jobs);
         let folder_generation = Arc::new(AtomicU64::new(0));
@@ -756,9 +762,23 @@ impl ProviderManager {
                     let mut dispatched_initial = false;
                     if worker_initial_save_activation.load(Ordering::Acquire) {
                         // Fresh initial-save work retains priority; never scan recovery here.
-                        dispatched_initial = !matches!(dispatch_one_initial_edit(
+                        let result = dispatch_one_initial_edit(
                             connection.as_ref(), backend.as_ref(), active_binding.as_ref(),
-                            &worker_generation), Ok(None));
+                            &worker_generation);
+                        dispatched_initial = !matches!(&result, Ok(None));
+                        #[cfg(all(test, debug_assertions))]
+                        if dispatched_initial {
+                            if let Ok(mut observation) = worker_initial_save_test_observation.lock() {
+                                *observation = Some(match &result {
+                                    Err(message) => format!("error: {message}"),
+                                    Ok(Some(raiun_cloudfiles_windows::ReconciliationOutcome::VerifiedApplied { .. })) => "verified_applied".into(),
+                                    Ok(Some(raiun_cloudfiles_windows::ReconciliationOutcome::Conflict(_))) => "conflict".into(),
+                                    Ok(Some(raiun_cloudfiles_windows::ReconciliationOutcome::Ambiguous)) => "ambiguous".into(),
+                                    Ok(Some(raiun_cloudfiles_windows::ReconciliationOutcome::Deferred)) => "deferred".into(),
+                                    Ok(None) => unreachable!("empty dispatch is not observed"),
+                                });
+                            }
+                        }
                     }
                     if !handled_command && !dispatched_initial {
                         // Pick up commands arriving during initial-save inspection first.
@@ -800,6 +820,8 @@ impl ProviderManager {
             lifecycle_test_activation: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions))]
             initial_save_test_activation: initial_save_activation,
+            #[cfg(all(test, debug_assertions))]
+            initial_save_test_observation,
         }
     }
 
@@ -7922,7 +7944,25 @@ mod tests {
                 );
                 assert!(
                     Instant::now() < deadline,
-                    "automatic save did not complete; preserve root and protected journal"
+                    "automatic save did not complete; preserve root and protected journal; record_count={}; incomplete_staging_files={:?}; recovery_states={:?}; last_dispatch={:?}; fixture_counts_put_get_range_bodylen={:?}",
+                    snapshot.records.len(),
+                    snapshot.incomplete_staging_files,
+                    snapshot.recovery_states.values().collect::<Vec<_>>(),
+                    agent
+                        .provider
+                        .initial_save_test_observation
+                        .lock()
+                        .unwrap()
+                        .as_deref(),
+                    {
+                        let remote = fixture.recovery.lock().unwrap();
+                        (
+                            remote.put_count,
+                            remote.get_count,
+                            remote.range_count,
+                            remote.body.len(),
+                        )
+                    },
                 );
                 thread::sleep(Duration::from_millis(50));
             };
