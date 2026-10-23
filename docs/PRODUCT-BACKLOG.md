@@ -22,3 +22,8 @@ work, not additions to the current Desktop beta completion baseline.
 - Keep the wording consistent across apps while reflecting any actual platform
   differences. Verify descriptions against the implemented filters; this item
   does not change filtering behavior or add new formats.
+
+Desktop progress (23 October): the media preview, recurring-backup setup and
+saved backup cards now explain the Include filter, recursive subfolders and
+skipped symbolic links. Types are recognized from contents rather than filename
+extensions. This copy does not change filtering. Android wording remains queued.
