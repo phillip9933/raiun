@@ -7,7 +7,7 @@ mod vault_control {
     include!("windows_vault_control.rs");
 }
 use raiun_control_windows::{PinnedDirectory, PrivateDirectory};
-use raiun_core::{CONFIG_SCHEMA_VERSION, Config, FolderPair, SyncMode};
+use raiun_core::{CONFIG_SCHEMA_VERSION, Config, FolderPair, MediaImportJob, SyncMode};
 use raiun_engine::{
     Engine, SyncRevocationHandle,
     folder_pairs::{AccountScope, FolderPairsDocument, FolderPairsStore},
@@ -87,7 +87,7 @@ impl Runtime {
         for pair in &document.config().pairs {
             runtime.check(authorized)?;
             // A disconnected drive must not hide all settings or prevent removal.
-            if let Ok(pin) = runtime.admit(pair, document.config(), Some(&pair.id)) {
+            if let Ok(pin) = runtime.admit_pair(pair, &document, Some(&pair.id)) {
                 runtime.roots.insert(pair.id.clone(), pin);
             }
             runtime
@@ -116,6 +116,22 @@ impl Runtime {
             .iter()
             .find(|space| space.id == id && !space.encrypted)
             .ok_or_else(|| "This Space is unavailable to ordinary folder sync".into())
+    }
+    // Keep the shared ordinary-root helper usable by media admission without
+    // making a job reject its own source. Only pair callers add this check.
+    fn admit_pair(
+        &self,
+        pair: &FolderPair,
+        document: &FolderPairsDocument,
+        replacing: Option<&str>,
+    ) -> Result<PinnedDirectory, String> {
+        let pin = self.admit(pair, document.config(), replacing)?;
+        ensure_pair_media_sources_disjoint(
+            &pair.local_path,
+            &self.account_id,
+            document.media_jobs(),
+        )?;
+        Ok(pin)
     }
     fn admit(
         &self,
@@ -242,7 +258,7 @@ impl Runtime {
                 if config.pairs.iter().any(|old| old.id == pair.id) {
                     return Err("This folder connection already exists".into());
                 }
-                let pin = self.admit(&pair, &config, None)?;
+                let pin = self.admit_pair(&pair, &document, None)?;
                 let policy = self
                     .engine
                     .prepare_pair_policy(&pair)
@@ -374,7 +390,7 @@ impl Runtime {
             // Only a never-admitted restored pair may acquire its first pin.
             // Existing pins are verified below and never silently replaced.
             if !self.roots.contains_key(&pair.id) {
-                let pin = self.admit(&pair, current.config(), Some(&pair.id))?;
+                let pin = self.admit_pair(&pair, &current, Some(&pair.id))?;
                 self.check(authorized)?;
                 self.roots.insert(pair.id.clone(), pin);
             }
@@ -420,5 +436,63 @@ impl Runtime {
         } else {
             Ok(())
         }
+    }
+}
+
+// Disabled jobs still retain their source/recovery state. Cross-profile source
+// admission remains broker-owned; this checks only the current account.
+fn ensure_pair_media_sources_disjoint(
+    local_path: &Path,
+    account_id: &str,
+    jobs: &[MediaImportJob],
+) -> Result<(), String> {
+    for job in jobs.iter().filter(|job| job.account_id == account_id) {
+        if configured_roots_overlap(&job.source_root, local_path)
+            .map_err(|_| "Could not verify media source boundaries")?
+        {
+            return Err("Folder sync cannot overlap a media backup source".into());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod source_overlap_tests {
+    use super::*;
+
+    #[test]
+    fn folder_pair_rejects_existing_media_source_without_replacing_its_own_job() {
+        let mut nonce = [0_u8; 16];
+        getrandom::fill(&mut nonce).unwrap();
+        let nonce: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+        let temp = std::env::temp_dir().join(format!("raiun-pair-media-overlap-{nonce}"));
+        std::fs::create_dir(&temp).unwrap();
+        let source = temp.join("photos");
+        let child = source.join("child");
+        let separate = temp.join("documents");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir(&separate).unwrap();
+        let job = MediaImportJob {
+            id: "same-as-pair".into(),
+            revision: 1,
+            account_id: "synthetic-account".into(),
+            source_root: source.clone(),
+            space_id: "synthetic-space".into(),
+            destination_root: "/backup".into(),
+            destination_root_resource_id: "synthetic-destination".into(),
+            filter: raiun_core::MediaFilter::All,
+            organization: raiun_core::MediaOrganization::PreserveRelativePath,
+            filesystem_mtime_utc: false,
+            interval_seconds: 3600,
+            enabled: false,
+        };
+        // A disabled media job is still reserved, even if its ID equals a pair ID.
+        let jobs = [job];
+        for path in [source.as_path(), child.as_path(), temp.as_path()] {
+            assert!(ensure_pair_media_sources_disjoint(path, "synthetic-account", &jobs).is_err());
+        }
+        assert!(ensure_pair_media_sources_disjoint(&separate, "synthetic-account", &jobs).is_ok());
+        assert!(ensure_pair_media_sources_disjoint(&source, "different-account", &jobs).is_ok());
+        std::fs::remove_dir_all(&temp).unwrap();
     }
 }
