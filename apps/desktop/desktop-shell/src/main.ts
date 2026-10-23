@@ -26,7 +26,7 @@ import { isVaultPasswordValidationError, shouldAnnounceVaultCloseBlocked, vaultD
 import raiunLogo from '../src-tauri/icons/raiun.svg';
 
 type OfflineCacheSummary = { available: boolean; quota_bytes: number; used_bytes: number; pinned_bytes: number; protected_bytes: number; over_quota: boolean; unavailable_reason?: string | null };
-type Status = { connected: boolean; offline_namespace?: boolean; server?: string | null; client_id?: string | null; paused?: boolean; paused_space_ids?: string[]; mounted?: boolean; cloud_root?: string | null; error?: string | null; autostart?: boolean | null; recovery_folder?: string | null; encrypted_edit_recovery_available?: boolean; offline_cache?: OfflineCacheSummary | null; profile_id?: string | null; profile_label?: string | null; auth_generation?: number; root_configuration?: { valid: boolean; identity_bound: boolean; registration_state: string | null; recovery_scope_token?: unknown } | null; stopped?: boolean; authenticating?: boolean; provider_supported?: boolean; folder_sync_supported?: boolean; media_jobs_supported?: boolean; vaults_supported?: boolean; account_switch_supported?: boolean; pause_supported?: boolean; session_cleanup_uncertain?: boolean };
+type Status = { connected: boolean; offline_namespace?: boolean; server?: string | null; client_id?: string | null; paused?: boolean; paused_space_ids?: string[]; mounted?: boolean; cloud_root?: string | null; error?: string | null; autostart?: boolean | null; recovery_folder?: string | null; encrypted_edit_recovery_available?: boolean; offline_cache?: OfflineCacheSummary | null; profile_id?: string | null; profile_label?: string | null; auth_generation?: number; root_configuration?: { valid: boolean; identity_bound: boolean; registration_state: string | null; recovery_scope_token?: unknown } | null; stopped?: boolean; authenticating?: boolean; provider_supported?: boolean; folder_sync_supported?: boolean; media_jobs_supported?: boolean; vaults_supported?: boolean; account_switch_supported?: boolean; account_setup_requires_sign_in?: boolean; pause_supported?: boolean; session_cleanup_uncertain?: boolean };
 type Account = { id: string; label: string; status: Status };
 type AccountsResult = { selected: string | null; items: Account[] };
 type ShellUnlockIntent = { profile_id: string; space_id: string; root_resource_id: string };
@@ -2045,6 +2045,9 @@ function addModal() {
 }
 function addAccountModal() {
   const blocked = state.addAccountBusy;
+  if (state.status?.account_setup_requires_sign_in === true && state.addAccountStep === 'details') {
+    return `<div class="modal-backdrop" data-backdrop="account"><section class="modal account-modal" role="dialog" aria-modal="true" aria-labelledby="account-title"><div class="modal-top"><div><div class="eyebrow">ANOTHER CLOUD ACCOUNT</div><h2 id="account-title">Add an account</h2></div><button class="icon-button" data-action="close-add-account" aria-label="Close" ${blocked ? 'disabled' : ''}>${svg('close')}</button></div><p class="modal-lede">Choose a label now. Next, sign in from Settings and choose this account’s separate Windows drive folder.</p><label class="field-label" for="account-label">Account label</label><input class="account-form-input" id="account-label" value="${esc(state.addAccountLabel)}" placeholder="For example, Work" maxlength="80" ${blocked ? 'disabled' : ''}/>${state.addAccountError ? `<div class="account-setup-error" role="alert">${esc(state.addAccountError)}</div>` : ''}<div class="modal-actions"><button class="button subtle" data-action="close-add-account" ${blocked ? 'disabled' : ''}>Cancel</button><button class="button primary" data-action="save-account" ${blocked || !state.addAccountLabel.trim() ? 'disabled' : ''}>${blocked ? 'Adding…' : 'Add account'}</button></div></section></div>`;
+  }
   const connected = state.status?.connected === true;
   const mounted = state.status?.mounted === true;
   const ready = connected && mounted;
@@ -2690,6 +2693,7 @@ async function handleAction(action: string, element?: HTMLElement) {
     case 'retry-account-mount': await retryAccountMount(); break;
     case 'finish-account-setup': if (state.status?.connected && state.status.mounted) { state.message = `${selectedAccountLabel()} is signed in and its drive is mounted.`; closeAccountSetup(); } break;
     case 'choose-account-root': {
+      if (state.status?.account_setup_requires_sign_in === true) return;
       const epoch = state.accountEpoch;
       state.nativeDialogBusy = true;
       render();
@@ -4971,7 +4975,7 @@ function normalizeServerAddress(value: string): { ok: true; server: string } | {
 function updateAddAccountSubmit() {
   const submit = app.querySelector<HTMLButtonElement>('[data-action="save-account"]');
   const server = normalizeServerAddress(state.addAccountServer);
-  if (submit) submit.disabled = state.addAccountBusy || !state.addAccountLabel.trim() || !state.addAccountRoot || !server.ok;
+  if (submit) submit.disabled = state.addAccountBusy || !state.addAccountLabel.trim() || (state.status?.account_setup_requires_sign_in !== true && (!state.addAccountRoot || !server.ok));
 }
 function closeAccountSetup() {
   state.addAccountOpen = false;
@@ -5004,14 +5008,15 @@ async function addAccount() {
   if (!featureAvailable('account_switch_supported')) return;
   if (state.addAccountBusy) return;
   const label = state.addAccountLabel.trim();
+  const signInFirst = state.status?.account_setup_requires_sign_in === true;
   const cloudRoot = state.addAccountRoot.trim();
   const normalized = normalizeServerAddress(state.addAccountServer);
-  if (!label || !cloudRoot || !normalized.ok) {
-    state.addAccountError = !normalized.ok ? normalized.error : 'Enter an account label and choose its separate drive folder.';
+  if (!label || (!signInFirst && (!cloudRoot || !normalized.ok))) {
+    state.addAccountError = signInFirst ? 'Enter an account label.' : !normalized.ok ? normalized.error : 'Enter an account label and choose its separate drive folder.';
     render();
     return;
   }
-  state.addAccountServer = normalized.server;
+  if (!signInFirst && normalized.ok) state.addAccountServer = normalized.server;
   state.addAccountBusy = true;
   state.mutationBusy++;
   state.addAccountError = '';
@@ -5019,7 +5024,7 @@ async function addAccount() {
   try {
     let profileId = state.addAccountCreatedId;
     if (!profileId) {
-      const created = await request<{ id: string }>('account_add', { label, cloud_root: cloudRoot });
+      const created = await request<{ id: string }>('account_add', signInFirst ? { label } : { label, cloud_root: cloudRoot });
       profileId = created.id;
       state.addAccountCreatedId = profileId;
     }
@@ -5027,11 +5032,19 @@ async function addAccount() {
     await request('account_select', { profile_id: profileId });
     state.page = 'settings';
     await syncAccountsForSelection(profileId);
+    if (signInFirst) {
+      const epoch = state.accountEpoch;
+      await refresh(false, true);
+      if (!isCurrentAccount(epoch, profileId)) return;
+      closeAccountSetup();
+      state.message = 'Account added. Sign in from Settings, then choose this account’s Windows drive folder.';
+      return;
+    }
     state.addAccountOpen = true;
     state.addAccountStep = 'waiting';
     state.addAccountLabel = label;
     state.addAccountRoot = cloudRoot;
-    state.addAccountServer = normalized.server;
+    if (normalized.ok) state.addAccountServer = normalized.server;
     state.addAccountClientId = state.addAccountClientId.trim();
     await refresh(false, true);
     await beginNewAccountSignIn();

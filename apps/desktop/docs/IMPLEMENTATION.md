@@ -10,6 +10,23 @@ below are historical engineering evidence, not semantic release versions or
 claims that each workflow is verified on this beta. Local evidence/output paths
 refer to maintainer archives that are not part of this public source tree.
 
+## Windows accounts — 23 October 2026 JST
+
+A compiled, gated broker now routes independent profile runtimes, persists
+selection before publishing it, refreshes every account and joins every runtime
+on shutdown. Selecting an account does not log out the others. A persistent
+private-file ownership lock spans registry access, pipe reconnections and all
+shutdown joins. Configure requires an authenticated session before reserving a
+root; exclusions are persisted before configuration and retained after failure
+or logout. Protected metadata inventory includes logged-out registered roots;
+metadata alone cannot authorize account restoration or native registration.
+
+Native component tests have passed profile/session isolation, foreign-scope
+refusal and registry replacement/reopen. The broker capability remains disabled:
+its lifetime lock, integrated routing/restart, cross-account folder/media source
+admission and sign-in-first account dialog still require focused acceptance.
+These source changes are unpublished and do not change the installed beta.
+
 ## Windows folder and media integration — 23 October 2026 JST
 
 The Windows engine retains private state, cache and media-staging directories

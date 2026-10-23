@@ -158,6 +158,7 @@ impl WindowsProfiles {
                 for (id, label, runtime) in profiles {
                     let mut status = runtime.status()?;
                     status["profile_label"] = json!(label);
+                    status["account_setup_requires_sign_in"] = json!(true);
                     items.push(json!({"id":id,"label":label,"status":status}));
                 }
                 Ok((json!({"selected":selected,"items":items}), false))
@@ -305,6 +306,7 @@ impl WindowsProfiles {
                         .lock()
                         .map_err(|_| "Account state is unavailable")?;
                     response["profile_label"] = json!(state.registry.profiles()[&id].label());
+                    response["account_setup_requires_sign_in"] = json!(true);
                 }
                 Ok((response, stop))
             }
@@ -425,13 +427,15 @@ fn validate_separation(registry: &Registry) -> Result<(), String> {
 /// Claim the pipe and a persistent exact-file ownership lease before registry
 /// access. The lease spans pipe gaps and outlives every account shutdown join.
 pub(super) fn serve_profiles() -> Result<(), String> {
-    let first = NamedPipeListener::bind(Duration::from_millis(500))
-        .map_err(|_| "Could not claim the current-user control pipe")?;
     let storage =
         DpapiSessionStore::current_user().map_err(|_| "Account storage is unavailable")?;
     let owner = storage.lock_profile_registry().map_err(
         |_| "Another account broker owns this Windows profile, or its lock is unavailable",
     )?;
+    // A competing broker must lose the lifetime lock before it can briefly
+    // claim a pipe gap and disrupt the current owner's next listener bind.
+    let first = NamedPipeListener::bind(Duration::from_millis(500))
+        .map_err(|_| "Could not claim the current-user control pipe")?;
     let broker = WindowsProfiles::open(storage)?;
     let result = (|| {
         let mut listener = Some(first);
