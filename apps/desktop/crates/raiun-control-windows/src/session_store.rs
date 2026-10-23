@@ -103,6 +103,38 @@ impl DpapiSessionStore {
         Ok(store)
     }
 
+    /// Derive independent private storage for a trusted registry profile.
+    /// Default retains the existing location for upgrade compatibility. This
+    /// only creates/validates storage; it does not select, restore or sign in.
+    /// Callers must still pass the same trusted profile to identity-scoped
+    /// session/root APIs and validate restored account identity; directory
+    /// separation does not replace those checks.
+    pub fn for_profile(&self, profile: &str) -> io::Result<Self> {
+        if profile == "default" {
+            return Ok(self.clone());
+        }
+        if !profile.strip_prefix("profile-").is_some_and(|suffix| {
+            suffix.len() == 32
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid profile identity",
+            ));
+        }
+        // Reuse pinned private-directory admission. Existing children must
+        // already have the exact private policy; never repair them here.
+        let parent = crate::PinnedDirectory::open(&self.root)?;
+        let child =
+            crate::PrivateDirectory::create_or_open_under(&parent, std::ffi::OsStr::new(profile))?;
+        child.verify_path()?;
+        Ok(Self {
+            root: child.path().to_path_buf(),
+        })
+    }
+
     /// Private per-user application state directory used for protected local
     /// recovery records. The returned path is trusted local state, never IPC.
     pub fn local_edit_state_directory(&self) -> &Path {
@@ -1020,6 +1052,98 @@ fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_stores_preserve_default_and_separate_restore_pointers_and_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "raiun-profile-store-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        eprintln!("synthetic_profile_store_root={}", root.display());
+        let base = DpapiSessionStore {
+            root: root.join("sessions"),
+        };
+        base.ensure_private_root().unwrap();
+        let a = "profile-00000000000000000000000000000000";
+        let b = "profile-11111111111111111111111111111111";
+        assert_eq!(base.for_profile("default").unwrap().root, base.root);
+        for invalid in [
+            "",
+            "../other",
+            "profile-other",
+            "profile-0000000000000000000000000000000A",
+        ] {
+            assert!(base.for_profile(invalid).is_err());
+        }
+        let first = base.for_profile(a).unwrap();
+        let second = base.for_profile(b).unwrap();
+        first
+            .save(
+                Some(a),
+                "https://synthetic.invalid",
+                "client",
+                b"first synthetic",
+            )
+            .unwrap();
+        first
+            .set_active_identity(a, "https://synthetic.invalid", "client")
+            .unwrap();
+        first
+            .save_root_config(a, "https://synthetic.invalid", "client", b"{}")
+            .unwrap();
+        assert!(base.active_identity().unwrap().is_none());
+        assert!(second.active_identity().unwrap().is_none());
+        assert!(
+            second
+                .load(Some(a), "https://synthetic.invalid", "client")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            second
+                .load_root_config(a, "https://synthetic.invalid", "client")
+                .unwrap()
+                .is_none()
+        );
+        second
+            .save(
+                Some(b),
+                "https://synthetic.invalid",
+                "client",
+                b"second synthetic",
+            )
+            .unwrap();
+        second
+            .set_active_identity(b, "https://synthetic.invalid", "client")
+            .unwrap();
+        first.clear_active_identity().unwrap();
+        assert_eq!(second.active_identity().unwrap().unwrap().0, b);
+        assert!(first.active_identity().unwrap().is_none());
+        assert_eq!(
+            &*base
+                .for_profile(a)
+                .unwrap()
+                .load(Some(a), "https://synthetic.invalid", "client")
+                .unwrap()
+                .unwrap(),
+            b"first synthetic"
+        );
+        assert_eq!(
+            &*second
+                .load(Some(b), "https://synthetic.invalid", "client")
+                .unwrap()
+                .unwrap(),
+            b"second synthetic"
+        );
+        drop((first, second, base));
+        // Only the exact fresh synthetic scope is removed after full success.
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn identity_digest_does_not_disclose_server_or_client_labels() {
