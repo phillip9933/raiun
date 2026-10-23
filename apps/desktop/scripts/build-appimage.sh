@@ -79,12 +79,18 @@ for p in sorted(app.rglob('*')):
  if versions and tuple(map(int,versions[-1].split('.')))>(2,39): raise SystemExit('ELF exceeds Ubuntu24 baseline: '+str(p))
  if p.name=='libc.so.6' or p.name.startswith('ld-linux'): raise SystemExit('Bundled glibc/loader refused')
  rows.append({'path':str(p.relative_to(app)),'sha256':hashlib.sha256(b).hexdigest(),'bytes':len(b),'max_glibc':versions[-1] if versions else None})
-source=subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
-dirty=bool(subprocess.check_output(['git','status','--porcelain'],text=True))
+# Filtered source exports deliberately omit Git metadata. External archive
+# receipts identify their exact input; never describe such exports as clean.
+source='unknown'; dirty=True
+try:
+ source=subprocess.check_output(['git','rev-parse','HEAD'],text=True,stderr=subprocess.DEVNULL).strip()
+ dirty=bool(subprocess.check_output(['git','status','--porcelain'],text=True,stderr=subprocess.DEVNULL))
+except subprocess.CalledProcessError:
+ source='unknown'; dirty=True
+(out/'source-commit.txt').write_text(source+'\n')
 (out/'build-provenance.json').write_text(json.dumps({'source_commit':source,'dirty':dirty,'baseline':'Ubuntu 24.04 x86_64 / glibc 2.39','artifact_sha256':hashlib.sha256(artifact.read_bytes()).hexdigest(),'elf_files':rows,'url_handler':'Optional AppImageLauncher integration required; no automatic host installation','host_services':['Secret Service','D-Bus','fusermount3','system TLS trust']},indent=2)+'\n')
 PYAUDIT
 sha256sum "$artifact" > "$artifact.sha256"
-git rev-parse HEAD > "$out/source-commit.txt"
 cp "$work/first-party.json" "$out/first-party.json"
 cp "$work/runtime-metadata.json" "$out/runtime-metadata.json"
 printf 'Built %s\n' "$artifact"

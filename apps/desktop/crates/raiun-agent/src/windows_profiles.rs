@@ -1,5 +1,5 @@
 //! Account routing and durable exclusion reservations. Production activation
-//! remains separate until broker/UI and native acceptance are complete.
+//! is enabled in non-test candidates after focused native broker acceptance.
 use super::windows_profile_registry::{Registry, RootReservation};
 use super::*;
 use std::collections::BTreeMap;
@@ -159,6 +159,7 @@ impl WindowsProfiles {
                     let mut status = runtime.status()?;
                     status["profile_label"] = json!(label);
                     status["account_setup_requires_sign_in"] = json!(true);
+                    status["account_switch_supported"] = json!(WINDOWS_ACCOUNTS_ENABLED);
                     items.push(json!({"id":id,"label":label,"status":status}));
                 }
                 Ok((json!({"selected":selected,"items":items}), false))
@@ -307,6 +308,7 @@ impl WindowsProfiles {
                         .map_err(|_| "Account state is unavailable")?;
                     response["profile_label"] = json!(state.registry.profiles()[&id].label());
                     response["account_setup_requires_sign_in"] = json!(true);
+                    response["account_switch_supported"] = json!(WINDOWS_ACCOUNTS_ENABLED);
                 }
                 Ok((response, stop))
             }

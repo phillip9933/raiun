@@ -20,12 +20,12 @@ account-bound provider and verified-save path. Ordinary unit tests remain
 kernel-inactive and ignored native fixtures retain explicit per-instance opt-in.
 Actual non-test package installation, GUI and native file-manager smoke remain
 required before delivery. No new Windows release has been published, and no real
-cloud account or files were used for acceptance. Folder/media, vault and account
-broker capability gates remain independent and disabled.
+cloud account or files were used for acceptance. Folder/media and vault
+capability gates remain independent and disabled.
 
 ## Windows accounts — 23 October 2026 JST
 
-A compiled, gated broker now routes independent profile runtimes, persists
+The non-test candidate broker now routes independent profile runtimes, persists
 selection before publishing it, refreshes every account and joins every runtime
 on shutdown. Selecting an account does not log out the others. A persistent
 private-file ownership lock spans registry access, pipe reconnections and all
@@ -35,9 +35,12 @@ or logout. Protected metadata inventory includes logged-out registered roots;
 metadata alone cannot authorize account restoration or native registration.
 
 Native component tests have passed profile/session isolation, foreign-scope
-refusal and registry replacement/reopen. The broker capability remains disabled:
-its lifetime lock, integrated routing/reopen and sign-in-first account dialog
-still require focused acceptance. Cross-account folder/media source admission
+refusal and registry replacement/reopen. Four focused native checks also passed
+logged-out root inventory, lifetime owner exclusion, issuer-bound metadata decoding
+and integrated broker routing/persistence/reopen. Account switching is now exposed
+only by the non-test broker; ordinary unit builds remain inactive. The exact
+non-test installer and sign-in-first account dialog still require focused offline
+package acceptance; authenticated live-account acceptance remains unclaimed. Cross-account folder/media source admission
 is required before enabling those separate features; they remain blocked.
 These source changes are unpublished and do not change the installed beta.
 

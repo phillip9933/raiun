@@ -26,9 +26,9 @@ mod windows_profile_registry;
 #[path = "windows_profiles.rs"]
 mod windows_profiles;
 
-// Broker wiring compiles now; activation awaits root/pair/media admission,
-// account-creation UI flow and focused native broker acceptance.
-const WINDOWS_ACCOUNTS_ENABLED: bool = false;
+// Focused native broker acceptance passed. Enable candidate account routing;
+// pair/media admission remains independently disabled below.
+const WINDOWS_ACCOUNTS_ENABLED: bool = !cfg!(test);
 const WINDOWS_FOLDER_SYNC_ENABLED: bool = false;
 // Media controls remain gated pending worker and package acceptance.
 const WINDOWS_MEDIA_METADATA_ENABLED: bool = false;
