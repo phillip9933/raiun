@@ -9,6 +9,8 @@ publish.workspace = true
 default = []
 # Internal workspace integration only; callers are trusted to retain SQL policy.
 trusted-cache-integration = []
+# Internal engine bridge; fixed engine filename, same rollback-only policy.
+trusted-engine-integration = []
 
 [dependencies]
 

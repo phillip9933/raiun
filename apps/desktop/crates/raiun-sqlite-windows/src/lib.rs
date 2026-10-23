@@ -1,9 +1,10 @@
-//! Test-only rollback-journal SQLite VFS prototype.
+//! Guarded Windows rollback-journal SQLite adapter.
 //!
-//! This crate is not wired into `raiun-cache` and does not enable the Windows
-//! cache. Its Windows-only VFS accepts one fixed database and its rollback
-//! journal. WAL, shared memory, temporary databases, attached databases, and
-//! other paths are rejected.
+//! Each connection admits one fixed-purpose database and its rollback journal
+//! beneath a held private directory. Cache integration uses `cache.sqlite3`;
+//! trusted engine integration uses `engine.sqlite3`. WAL, shared memory,
+//! temporary/attached databases and other paths are rejected. The caller owns
+//! authenticated account selection and runtime activation.
 
 #[cfg(windows)]
 #[allow(unsafe_code)]

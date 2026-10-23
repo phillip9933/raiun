@@ -10,6 +10,22 @@ below are historical engineering evidence, not semantic release versions or
 claims that each workflow is verified on this beta. Local evidence/output paths
 refer to maintainer archives that are not part of this public source tree.
 
+## Windows folder-sync integration — 23 October 2026 JST
+
+The shared sync engine now has a Windows constructor that retains a private
+state-directory handle, a private cache child, and the existing guarded SQLite
+adapter for the connection lifetime. Its fixed `engine.sqlite3` database uses
+rollback journaling; the existing cache database stays separate. Linux retains
+its existing WAL configuration and lock timeout. Focused Windows tests cover
+persistence, rollback, fixed filenames and preservation of an unexpected WAL.
+Windows compilation and native execution are still pending for this change.
+
+This is storage integration, not a working Windows folder-sync capability.
+Exact-account configuration persistence, authenticated root admission and the
+worker/RPC path still need to be connected. Windows folder sync remains disabled.
+The native save-back correction also awaits access to the isolated Windows VM;
+production provider activation remains off.
+
 ## Next-release Windows save-back work — 23 October 2026 JST
 
 Windows save-back now has a fresh, read-only verification result that binds the

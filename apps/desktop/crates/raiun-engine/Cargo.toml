@@ -16,6 +16,10 @@ sha2 = "0.10"
 tempfile.workspace = true
 url = "2"
 
+[target.'cfg(windows)'.dependencies]
+raiun-control-windows = { path = "../raiun-control-windows" }
+raiun-sqlite-windows = { path = "../raiun-sqlite-windows", features = ["trusted-engine-integration"] }
+
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1.5", features = ["fs"] }
 

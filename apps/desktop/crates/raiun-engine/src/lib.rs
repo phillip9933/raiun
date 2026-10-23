@@ -27,6 +27,9 @@ use std::sync::{
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::{Builder as TempBuilder, NamedTempFile};
 
+mod db_owner;
+use db_owner::DbOwner;
+
 #[cfg(unix)]
 mod folder_cloud_only;
 pub mod media_import;
@@ -184,7 +187,7 @@ struct RefreshTree {
 struct Inner {
     state_dir: PathBuf,
     cache_dir: PathBuf,
-    db: Mutex<Connection>,
+    db: Mutex<DbOwner>,
     execution: Mutex<()>,
     /// Last published exclusion policy for each pair. `None` is a retired
     /// pair ID and prevents a stale scheduler snapshot from reactivating it.
@@ -369,9 +372,47 @@ impl Engine {
         let db = Connection::open(db_path).map_err(db_error)?;
         db.busy_timeout(std::time::Duration::from_secs(10))
             .map_err(db_error)?;
+        db.execute_batch("PRAGMA journal_mode=WAL;")
+            .map_err(db_error)?;
+        Self::initialize(state_dir, cache_dir, DbOwner::Portable(db), backend)
+    }
+
+    /// Open the fixed Windows engine database through a held private-directory
+    /// and rollback VFS. The agent must derive this directory from the exact
+    /// authenticated account, and separately fence roots and remote writes.
+    /// No native provider, scheduler, or account capability is enabled here.
+    #[cfg(windows)]
+    pub fn open_private_windows(
+        directory: raiun_control_windows::PrivateDirectory,
+        backend: Arc<dyn CloudBackend>,
+    ) -> Result<Self, CloudError> {
+        use raiun_control_windows::{PinnedDirectory, PrivateDirectory};
+        directory.verify_path().map_err(io_error)?;
+        let state_dir = directory.path().to_path_buf();
+        let parent = PinnedDirectory::open(&state_dir).map_err(io_error)?;
+        let cache_directory =
+            PrivateDirectory::create_or_open_under(&parent, std::ffi::OsStr::new("cache"))
+                .map_err(io_error)?;
+        let cache_dir = cache_directory.path().to_path_buf();
+        let database =
+            raiun_sqlite_windows::RegisteredRollbackDb::open_engine(directory).map_err(db_error)?;
+        let owner = DbOwner::PrivateWindows {
+            database,
+            _cache_directory: cache_directory,
+        };
+        Self::initialize(state_dir, cache_dir, owner, backend)
+    }
+
+    fn initialize(
+        state_dir: PathBuf,
+        cache_dir: PathBuf,
+        db: DbOwner,
+        backend: Arc<dyn CloudBackend>,
+    ) -> Result<Self, CloudError> {
+        db.busy_timeout(std::time::Duration::from_secs(10))
+            .map_err(db_error)?;
         db.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA foreign_keys=ON;
+            "PRAGMA foreign_keys=ON;
              CREATE TABLE IF NOT EXISTS transfers (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
                pair_id TEXT, space_id TEXT NOT NULL, path TEXT NOT NULL,
@@ -4807,7 +4848,7 @@ impl Engine {
     fn cache_dir(&self) -> &Path {
         &self.inner.cache_dir
     }
-    fn db(&self) -> Result<MutexGuard<'_, Connection>, CloudError> {
+    fn db(&self) -> Result<MutexGuard<'_, DbOwner>, CloudError> {
         self.inner
             .db
             .lock()
