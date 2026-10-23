@@ -79,8 +79,16 @@ pass. Actual MSVC compilation and linking now pass, but the focused ordinary-use
 save case still fails at Windows' final in-sync comparison (`0x80070179`) after
 verified upload/readback. An access-mask experiment did not resolve it and was
 reverted. Recovery remains retained, lifecycle acceptance was not advanced after
-the failure, and both activation switches remain off. Bounded numeric USN
-diagnostics are the next investigation; no comparison is bypassed or retried.
+the failure, and both activation switches remain off. Actual numeric diagnostics
+showed both pre-CAS reads at USN 150231648 and a single read after refusal at
+150240984. This establishes journal movement, not the reason or a successful fix.
+A focused candidate posts pending NTFS journal reasons once on the same validated,
+immutable file before its first completion snapshot, using
+[FSCTL_WRITE_USN_CLOSE_RECORD](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/059a4dea-601f-44a4-b368-7a7f5b668696).
+It then requires an equal independently read USN, the full matching content hash,
+a second unchanged USN and the original nonzero OS comparison. Unsupported or
+malformed results fail closed. There is no post-proof refresh or retry; native
+acceptance of this candidate remains pending.
 
 ## Next-release media recovery — 23 October 2026 JST
 
