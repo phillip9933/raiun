@@ -1770,11 +1770,21 @@ impl ConfiguredRootConnection {
                 }
                 return Err(native_error("complete verified edit in-sync", result));
             }
-            if completed_usn <= 0 || root_snapshot(file.raw)?.identity != opened.identity {
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!("synthetic_save_completion_usn_success={completed_usn} hresult={result}");
+            observe_completion!("validate_completed_usn");
+            if completed_usn <= 0 {
                 return Err(Error::ConfiguredRootChanged);
             }
+            observe_completion!("validate_completed_file_identity");
+            if root_snapshot(file.raw)?.identity != opened.identity {
+                return Err(Error::ConfiguredRootChanged);
+            }
+            observe_completion!("validate_completed_root_identity");
             root.verify_identity(true)?;
+            observe_completion!("validate_completed_registration");
             root.verify_registered()?;
+            observe_completion!("validate_completed_publication_identity");
             verify_completion_identity(file.protected, publication.identity())?;
             // Still under the same publication/token permit and held local
             // handle: record only this exact native-completed snapshot. If
