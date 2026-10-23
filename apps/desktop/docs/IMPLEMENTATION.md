@@ -10,67 +10,45 @@ below are historical engineering evidence, not semantic release versions or
 claims that each workflow is verified on this beta. Local evidence/output paths
 refer to maintainer archives that are not part of this public source tree.
 
-## Windows folder-sync integration — 23 October 2026 JST
+## Windows folder and media integration — 23 October 2026 JST
 
-The shared sync engine now has a Windows constructor that retains a private
-state-directory handle, a private cache child, and the existing guarded SQLite
-adapter for the connection lifetime. Its fixed `engine.sqlite3` database uses
-rollback journaling; the existing cache database stays separate. Linux retains
-its existing WAL configuration and lock timeout. Focused Windows tests cover
-persistence, rollback, fixed filenames and preservation of an unexpected WAL.
-Windows compilation and native execution are still pending for this change.
+The Windows engine retains private state, cache and media-staging directories
+with its guarded SQLite owner. Its fixed `engine.sqlite3` uses rollback
+journaling; Linux retains WAL. The account-scoped settings document compares
+exact previous bytes, full account identity and revision before publication,
+preserving folder pairs, pause settings, media jobs and retired pair IDs.
 
-Account-scoped folder settings now have bounded persistence in the same
-protected engine database. A single transaction compares the exact previous
-bytes and scope before committing a replacement; stale or mismatched writes
-cannot reset existing settings. Invalid restored rows fail explicitly. This
-avoids a separate Windows file-replacement implementation. The typed settings
-store checks the full account identity, document revision and retired pair IDs;
-its persistence cases now use the actual engine rather than a minimal test seam.
+The existing Windows command worker owns ordinary-folder operations independently
+of Cloud Files registration. One focused ordinary-user native workflow passed
+initial download, conditional edit upload, pause/resume, exclusion, removal and
+runtime reopen while preserving local data. This is component acceptance;
+production capability flags remain off and packaged GUI acceptance is pending.
+Account transitions revoke subsequent writes and drain the worker before
+credential replacement. Source and destination handles reject reparse points;
+immutable source handles span upload and verified readback.
 
-Windows ordinary-folder operations now retain directory handles during scanning
-and download installation, and an immutable source handle through upload and
-readback. Reparse points are rejected. Temporary upload writers are closed while
-cleanup ownership is retained. These guards still need native acceptance.
+Media source traversal uses a duplicate of a pinned directory handle. Protected
+staging uses existing private-file APIs, flushes and no-replace publication,
+then retains an immutable reader through attempt creation, upload, readback and
+receipt commit. Cleanup checks the exact file identity; uncertain results retain
+recovery. Local recovery can use the held account-bound engine database instead
+of reopening SQLite by path. Existing Windows recovery RPCs check the saved job,
+account and revision before and after the read.
 
-A gated ordinary-folder runtime is now connected to the existing Windows
-command thread, independently of Cloud Files registration. It derives private
-storage from the full verified account identity, keeps its database owner on
-that worker, admits non-overlapping local roots, and supports the existing
-folder settings and explicit sync RPC shapes. Sync acknowledgement means work
-was queued; it does not report successful completion. Account changes revoke
-subsequent sync steps and drain the worker before credential replacement.
+Explicit media runs now have gated prepare → queued acknowledgement → execution
+on that same worker. Preparation checks enabled state, global/Space pause,
+recovery, overlap and the live destination identity. The admitted source pin
+stays held, and Engine compares its identity with the opened root before scanning.
+Cancellation checks account generation, revocation and source-path validity.
+Idle media selection also reuses this worker, durable run status and existing
+intervals; it does not replay uncertain attempts or create another scheduler.
+Fresh admission does not claim persisted historical source identity across restarts.
 
-The gated runtime also has idle reconciliation on the existing worker and
-account-scoped persisted global/Space pause. Pause acknowledges only after the
-previous sync drains; resume does not clear account revocation. Status reads a
-generation-qualified snapshot without waiting behind a transfer. Commands and
-fresh native save-back retain priority; repeated save-back errors suspend idle
-reconciliation. No additional scheduler thread is created.
-
-Windows folder sync remains disabled pending focused native acceptance. This
-does not claim packaged GUI acceptance or completion of the folder-sync
-category. The native save-back correction also remains unaccepted: GNU source
-checks pass, but the test link lacks the Windows SDK CldApi import library.
-The new isolated Windows VM is being prepared for the official MSVC/SDK build;
-production provider activation remains off.
-
-The Windows settings document now also supports bounded media-job configuration
-with exact revision checks and legacy empty defaults. Updates preserve folder
-pairs and pause state; removal refuses known unresolved recovery. The runtime
-must still serialize removal with media runs and bind account, source and remote
-destination identity. A separate disabled metadata path now reuses the same
-worker for job settings, status and destination selection; it keeps the trusted
-account from runtime setup and refuses execution. Windows media backup remains
-unavailable and has no native acceptance claim.
-
-The Windows media scan now starts from a duplicate of the already-pinned source
-directory handle, retaining the original root and ancestor handles through the
-scan/staging call. It does not reopen the configured root by name. Windows
-source signature/staging reads now deny write/delete sharing and reject reparse
-entries before reading; scanner child directories also retain no-delete handles.
-Private staging/recovery integration is still open. These source guards do not
-enable media execution or establish native media-backup acceptance.
+Linux source gates and early Windows compilation cover the preceding integration;
+final idle-scheduling compilation and focused Windows engine/worker acceptance
+are still progressing. Media execution
+and its UI capability remain disabled. These source changes do not establish
+Windows media-backup completion or a new public release.
 
 ## Next-release Windows save-back work — 23 October 2026 JST
 
@@ -91,8 +69,12 @@ same account generation. Remote verification alone leaves recovery unresolved.
 Publication, OS completion, and the durable event share the same account fence;
 a partial failure keeps recovery available. Retained acknowledged snapshots still
 count toward the existing journal quota; this change does not delete them. Focused portable integration checks
-pass. The joined source still requires native compile and focused save/restart
-acceptance before production activation; both activation switches remain off.
+pass. Actual MSVC compilation and linking now pass, but the focused ordinary-user
+save case still fails at Windows' final in-sync comparison (`0x80070179`) after
+verified upload/readback. An access-mask experiment did not resolve it and was
+reverted. Recovery remains retained, lifecycle acceptance was not advanced after
+the failure, and both activation switches remain off. Bounded numeric USN
+diagnostics are the next investigation; no comparison is bypassed or retried.
 
 ## Next-release media recovery — 23 October 2026 JST
 
@@ -107,8 +89,10 @@ and compares its bytes with the saved attempt hash without reading or changing
 the original/staged copy. A match is a point-in-time observation; it does not
 commit a receipt, resume the schedule, clear recovery, or replay an upload.
 Legacy/unbound attempts remain inspection-only. Focused engine, agent and UI
-checks pass; exact-package native acceptance remains pending. This work is not
-in the published beta or the frozen Windows installer candidate.
+checks pass. The exact Linux candidate's single native action passed with source
+and recovery unchanged, no additional PUT/MOVE/DELETE, and normal app closure.
+That acceptance is scoped to this action. This work is not in the published beta
+or the older frozen Windows installer candidate.
 
 
 ## Current recorded state — R180 installed and left closed, 18 October 2026 JST

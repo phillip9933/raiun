@@ -33,6 +33,7 @@ pub(super) struct Runtime {
     roots: BTreeMap<String, PinnedDirectory>,
     cloud_root: Option<RootConfiguration>,
     next_periodic_sync: std::time::Instant,
+    next_media_sync: std::time::Instant,
 }
 
 fn store_error(_: impl std::fmt::Debug) -> String {
@@ -74,6 +75,7 @@ impl Runtime {
             roots: BTreeMap::new(),
             cloud_root: setup.cloud_root,
             next_periodic_sync: std::time::Instant::now() + Duration::from_secs(30),
+            next_media_sync: std::time::Instant::now() + Duration::from_secs(30),
         };
         let document = runtime.document()?;
         for id in document.retired_pair_ids() {

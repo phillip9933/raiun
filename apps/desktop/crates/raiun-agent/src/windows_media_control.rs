@@ -197,6 +197,71 @@ impl Runtime {
             }
         }
     }
+    /// Idle recurring selection uses durable status; uncertain attempts never replay.
+    pub fn periodic_media_tick(&mut self, authorized: &AtomicU64) -> Option<Result<(), String>> {
+        if self.check(authorized).is_err()
+            || self.engine.revocation_handle().is_revoked()
+            || std::time::Instant::now() < self.next_media_sync
+        {
+            return None;
+        }
+        let result = (|| {
+            let document = self.document()?;
+            if document.paused() {
+                return Ok(false);
+            }
+            let now = unix_time_now().min(i64::MAX as u64) as i64;
+            let mut preparation_error = None;
+            for job in document.media_jobs() {
+                if !job.enabled
+                    || job.account_id != self.account_id
+                    || document.paused_space_ids().contains(&job.space_id)
+                {
+                    continue;
+                }
+                let status = self
+                    .engine
+                    .media_import_status(&job.id)
+                    .map_err(store_error)?;
+                if !media_job_is_due(status.as_ref(), now, job.interval_seconds)
+                    || self
+                        .engine
+                        .media_import_has_unresolved(&job.id)
+                        .map_err(store_error)?
+                {
+                    continue;
+                }
+                let (revision, job, pin) = match self.prepare_media_run(
+                    &job.id, job.revision, &self.account_id, authorized,
+                ) {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        self.check(authorized)?;
+                        if self.engine.revocation_handle().is_revoked() {
+                            return Err("The media account was revoked".into());
+                        }
+                        // An offline camera must not hide another due source.
+                        preparation_error.get_or_insert(error);
+                        continue;
+                    }
+                };
+                self.run_media_job(revision, job, pin, authorized)?;
+                return Ok(true); // At most one job before returning to command arbitration.
+            }
+            match preparation_error {
+                Some(error) => Err(error),
+                None => Ok(false),
+            }
+        })();
+        self.next_media_sync =
+            std::time::Instant::now() + Duration::from_secs(if result.is_ok() { 30 } else { 60 });
+        match result {
+            Ok(false) => None,
+            Ok(true) => Some(Ok(())),
+            Err(error) => Some(Err(error)),
+        }
+    }
+
     /// Prepare one explicit run from saved metadata, not caller-supplied paths.
     /// This is fresh admission, not historical source identity continuity.
     pub fn prepare_media_run(
@@ -338,4 +403,24 @@ impl Runtime {
         }
         Ok(pin)
     }
+}
+
+// Same durable due-state rule as Unix: no retry of running/attention/uncertain state.
+fn media_job_is_due(
+    status: Option<&raiun_engine::MediaImportRunStatus>,
+    now: i64,
+    interval_seconds: u32,
+) -> bool {
+    let Some(status) = status else {
+        return true;
+    };
+    if !matches!(status.state.as_str(), "completed" | "interrupted") {
+        return false;
+    }
+    let delay = if status.state == "completed" && status.waiting_for_stability > 0 {
+        i64::from(interval_seconds.min(raiun_engine::MEDIA_STABLE_FILE_SECONDS as u32))
+    } else {
+        i64::from(interval_seconds)
+    };
+    now.saturating_sub(status.updated_unix) >= delay
 }

@@ -804,6 +804,10 @@ impl ProviderManager {
                         if let Some(runtime) = folders.as_mut() {
                             if let Some(result) = runtime.periodic_tick(&worker_generation) {
                                 if let Ok(mut error) = worker_folder_error.lock() { *error = result.err(); }
+                            } else if WINDOWS_MEDIA_METADATA_ENABLED {
+                                if let Some(result) = runtime.periodic_media_tick(&worker_generation) {
+                                    if let Ok(mut error) = worker_folder_error.lock() { *error = result.err(); }
+                                }
                             }
                         }
                     }
