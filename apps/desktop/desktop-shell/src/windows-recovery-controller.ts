@@ -10,7 +10,7 @@ import {
 
 export type WindowsRecoveryContext = {
   accountEpoch: number;
-  profileId: 'default';
+  profileId: string;
   server: string | null;
   clientId: string | null;
   cloudRoot: string | null;
@@ -104,12 +104,12 @@ export function eligibleWindowsRecoveryContext(
   identity: { accountEpoch: number; server: string | null; clientId: string | null; cloudRoot: string | null }
 ): { eligibility: WindowsRecoveryEligibility; context: WindowsRecoveryContext | null } {
   const eligibility = windowsRecoveryEligibility(agentReachable, selectedProfileId, status);
-  if (!eligibility.available || selectedProfileId !== 'default') return { eligibility, context: null };
+  if (!eligibility.available) return { eligibility, context: null };
   return {
     eligibility,
     context: {
       accountEpoch: identity.accountEpoch,
-      profileId: 'default',
+      profileId: eligibility.profileId,
       server: identity.server,
       clientId: identity.clientId,
       cloudRoot: identity.cloudRoot,

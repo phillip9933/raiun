@@ -112,7 +112,7 @@ const pendingWritesUi = { authGeneration: null as number | null, accountScope: n
 const encryptedRetryLatestUi = { scopes: [] as { key: string; spaceId: string; rootResourceId: string }[], scopesTruncated: false, discoveryLoading: false, discoveryError: '', statuses: new Map<string, VaultEditLatestResult>(), errors: new Map<string, string>(), loading: new Set<string>(), accountEpoch: -1, generation: 0, timer: 0 as number, running: false };
 const windowsRecoveryController = new WindowsRecoveryController();
 const windowsOfflineFileController = new WindowsOfflineFileController();
-type WindowsOfflineFilesPage = { profile_id: 'default'; auth_generation: number; recovery_scope_token: string; items: WindowsOfflineFileRow[]; next_cursor: string | null; unavailable_rows: number; read_only: true; last_observed: true; atomic_snapshot: false };
+type WindowsOfflineFilesPage = { profile_id: string; auth_generation: number; recovery_scope_token: string; items: WindowsOfflineFileRow[]; next_cursor: string | null; unavailable_rows: number; read_only: true; last_observed: true; atomic_snapshot: false };
 const windowsOfflineFilesUi = { items: [] as WindowsOfflineFileRow[], nextCursor: null as string | null, unavailableRows: 0, loaded: false, loading: false, error: '', selectedKey: '', generation: 0, contextKey: '', pollTimer: 0 as number };
 let windowsOfflineFolderPollTimer = 0;
 const windowsOfflineFoldersPanel = new WindowsOfflineFolderPanel({
@@ -255,7 +255,7 @@ async function loadWindowsRecoveryList() {
   if (current && windowsRecoveryContextKey(current) === windowsRecoveryContextKey(context)) render();
 }
 function currentWindowsOfflineFolderContext(): WindowsOfflineFolderContext | null {
-  if (!isWindowsAgentStatus(state.status) || state.selectedAccount !== 'default' || state.accountSwitching) return null;
+  if (!isWindowsAgentStatus(state.status) || state.accountSwitching) return null;
   // Preserve a known job handle through a transient unreachable agent. Cached
   // identity only maintains the handle; actions still require a live mounted
   // drive and every RPC rechecks native account/root/session authority.
@@ -290,7 +290,7 @@ function windowsOfflineFoldersCard(): string {
 
 function currentWindowsOfflineContext(): WindowsOfflineFileContext | null {
   const { context } = windowsRecoveryBinding();
-  if (!isWindowsAgentStatus(state.status) || !context || state.selectedAccount !== 'default' || state.accountSwitching || state.status?.mounted !== true) return null;
+  if (!isWindowsAgentStatus(state.status) || !context || state.accountSwitching || state.status?.mounted !== true) return null;
   return { ...context, flowGeneration: windowsOfflineFilesUi.generation };
 }
 function windowsOfflineContextKey(context: WindowsOfflineFileContext): string {

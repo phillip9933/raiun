@@ -3,13 +3,15 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import ts from 'typescript';
 
+const recoverySource = await readFile(new URL('../src/windows-recovery.ts', import.meta.url), 'utf8');
+const recoveryUrl = `data:text/javascript;base64,${Buffer.from(ts.transpileModule(recoverySource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText).toString('base64')}`;
 const source = await readFile(new URL('../src/windows-offline-folder-panel.ts', import.meta.url), 'utf8');
 const controllerSource = await readFile(new URL('../src/windows-offline-folder.ts', import.meta.url), 'utf8');
 const viewSource = await readFile(new URL('../src/windows-offline-folder-view.ts', import.meta.url), 'utf8');
 const transpile = (text) => ts.transpileModule(text, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 }
 }).outputText;
-const controllerUrl = `data:text/javascript;base64,${Buffer.from(transpile(controllerSource)).toString('base64')}`;
+const controllerUrl = `data:text/javascript;base64,${Buffer.from(transpile(controllerSource).replace("from './windows-recovery'", `from '${recoveryUrl}'`)).toString('base64')}`;
 const viewUrl = `data:text/javascript;base64,${Buffer.from(transpile(viewSource)).toString('base64')}`;
 const compiled = transpile(source)
   .replace("from './windows-offline-folder'", `from '${controllerUrl}'`)

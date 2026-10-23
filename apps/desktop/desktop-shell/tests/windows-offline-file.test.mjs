@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import ts from 'typescript';
 
+const recoverySource = await readFile(new URL('../src/windows-recovery.ts', import.meta.url), 'utf8');
+const recoveryUrl = `data:text/javascript;base64,${Buffer.from(ts.transpileModule(recoverySource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText).toString('base64')}`;
 const source = await readFile(new URL('../src/windows-offline-file.ts', import.meta.url), 'utf8');
 const compiled = ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 }
-}).outputText;
+}).outputText.replace("from './windows-recovery'", `from '${recoveryUrl}'`);
 const {
   WindowsOfflineFileController,
   windowsOfflineFileContextKey,
@@ -253,4 +255,23 @@ test('poll and cancel during a pending start do not supersede or discard its adm
   assert.equal(controller.state.loading, false);
   assert.equal(controller.state.admissionUncertain, false);
   assert.equal(controller.state.job.job_id, 'a'.repeat(32));
+});
+
+test('added profile file requests remain scoped and discard a same-generation foreign-profile reply', async () => {
+  const a = context({ profileId: 'profile-' + '1'.repeat(32) }), b = context({ profileId: 'profile-' + '2'.repeat(32) });
+  const controller = new WindowsOfflineFileController();
+  const calls = [];
+  await controller.loadCacheStatus(a, row(), async (action, args) => {
+    calls.push({ action, args }); return cacheStatus({ profile_id: a.profileId });
+  }, () => true);
+  assert.equal(calls[0].args.profile_id, a.profileId);
+  assert.equal(controller.state.cacheStatus.profile_id, a.profileId);
+  assert.throws(() => validateWindowsFileCacheStatus(cacheStatus({ profile_id: b.profileId }), a));
+  const pending = deferred();
+  const loading = controller.loadCacheStatus(a, row(), () => pending.promise, () => true);
+  controller.setSelection(b, row());
+  pending.resolve(cacheStatus({ profile_id: a.profileId }));
+  await loading;
+  assert.equal(controller.state.cacheStatus, null);
+  assert.notEqual(windowsOfflineFileContextKey(a, row()), windowsOfflineFileContextKey(b, row()));
 });

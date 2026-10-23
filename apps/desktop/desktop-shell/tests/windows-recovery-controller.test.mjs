@@ -151,3 +151,30 @@ test('a failed refresh clears the prior successful page before reporting the fai
   assert.equal(controller.state.error, 'synthetic refresh failure');
   assert.equal(controller.state.loading, false);
 });
+
+test('actual main offline contexts accept only matching selected/status added-profile identity', async () => {
+  const main = await readFile(new URL('../src/main.ts', import.meta.url), 'utf8');
+  const tree = ts.createSourceFile('main.ts', main, ts.ScriptTarget.Latest, true);
+  const names = new Set(['currentWindowsOfflineFolderContext', 'currentWindowsOfflineContext']);
+  const selected = tree.statements.filter(node => ts.isFunctionDeclaration(node) && names.has(node.name?.text));
+  assert.equal(selected.length, 2);
+  const js = ts.transpileModule(selected.map(node => node.getText(tree)).join('\n'), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 }
+  }).outputText;
+  const profile = 'profile-' + '1'.repeat(32);
+  const state = { selectedAccount: profile, accountEpoch: 4, accountSwitching: false,
+    status: { ...status, profile_id: profile, mounted: true, server: identity.server, client_id: identity.clientId, cloud_root: identity.cloudRoot } };
+  const binding = () => eligibleWindowsRecoveryContext(true, state.selectedAccount, state.status, { ...identity, accountEpoch: state.accountEpoch });
+  const contexts = new Function('state', 'isWindowsAgentStatus', 'eligibleWindowsRecoveryContext', 'windowsRecoveryBinding', 'windowsOfflineFilesUi',
+    `${js}; return { folder: currentWindowsOfflineFolderContext, file: currentWindowsOfflineContext };`
+  )(state, () => true, eligibleWindowsRecoveryContext, binding, { generation: 9 });
+  assert.equal(contexts.folder().profileId, profile);
+  assert.equal(contexts.file().profileId, profile);
+  assert.equal(contexts.file().accountEpoch, 4);
+  state.selectedAccount = 'profile-' + '2'.repeat(32);
+  assert.equal(contexts.folder(), null);
+  assert.equal(contexts.file(), null);
+  state.selectedAccount = profile; state.accountSwitching = true;
+  assert.equal(contexts.folder(), null);
+  assert.equal(contexts.file(), null);
+});

@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import ts from 'typescript';
 
+const recoverySource = await readFile(new URL('../src/windows-recovery.ts', import.meta.url), 'utf8');
+const recoveryUrl = `data:text/javascript;base64,${Buffer.from(ts.transpileModule(recoverySource, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 } }).outputText).toString('base64')}`;
 const source = await readFile(new URL('../src/windows-offline-folder.ts', import.meta.url), 'utf8');
 const compiled = ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 }
-}).outputText;
+}).outputText.replace("from './windows-recovery'", `from '${recoveryUrl}'`);
 const {
   WindowsOfflineFolderController,
   windowsOfflineFolderContextKey,
@@ -227,4 +229,25 @@ test('invalid folder metadata is refused before any RPC is sent', async () => {
   }, () => true);
   assert.equal(calls, 0);
   assert.match(controller.state.error, /folder/i);
+});
+
+test('added profile folder prepare/start keeps its scope and cannot start after profile replacement', async () => {
+  const a = context({ profileId: 'profile-' + '1'.repeat(32) }), b = context({ profileId: 'profile-' + '2'.repeat(32) });
+  const controller = new WindowsOfflineFolderController();
+  const calls = [];
+  await controller.start(a, row(), async (action, args) => {
+    calls.push({ action, args }); return action.endsWith('_prepare') ? prepared() : job();
+  }, () => true);
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every(call => call.args.profile_id === a.profileId));
+  const next = new WindowsOfflineFolderController(), pending = deferred();
+  const laterCalls = [];
+  const loading = next.start(a, row(), async (action) => {
+    laterCalls.push(action); return pending.promise;
+  }, () => true);
+  next.setSelection(b, row());
+  pending.resolve(prepared());
+  await loading;
+  assert.deepEqual(laterCalls, ['windows_offline_folder_prepare']);
+  assert.equal(next.state.job, null);
 });

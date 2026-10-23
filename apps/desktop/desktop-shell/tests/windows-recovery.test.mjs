@@ -141,3 +141,20 @@ test('fixes the page request bound at 50 and rejects a space ID over the journal
 test('rejects unsafe auth generations', () => {
   assert.throws(() => validateWindowsRecoveryPage(page(), { ...expectation, authGeneration: Number.MAX_SAFE_INTEGER + 1 }));
 });
+
+test('added profile eligibility and recovery pages stay bound to the exact selected profile', () => {
+  const a = 'profile-' + '1'.repeat(32), b = 'profile-' + '2'.repeat(32);
+  const scopedStatus = { ...status, profile_id: a };
+  const expected = { ...expectation, profileId: a };
+  assert.deepEqual(windowsRecoveryEligibility(true, a, scopedStatus), {
+    available: true, profileId: a, authGeneration: 7, recoveryScopeToken: 'b'.repeat(64)
+  });
+  assert.equal(validateWindowsRecoveryPage(page([item], { profile_id: a }), expected).profile_id, a);
+  assert.throws(() => validateWindowsRecoveryPage(page([item], { profile_id: b }), expected));
+  assert.deepEqual(windowsRecoveryEligibility(true, b, scopedStatus), { available: false, reason: 'wrong_profile' });
+  for (const invalid of ['', '1'.repeat(32), 'profile-' + '1'.repeat(31), 'profile-' + 'A'.repeat(32), 'profile-' + '1'.repeat(32) + '\n', '../default', null]) {
+    assert.deepEqual(windowsRecoveryEligibility(true, invalid, { ...status, profile_id: invalid }), {
+      available: false, reason: 'wrong_profile'
+    });
+  }
+});

@@ -20,7 +20,7 @@ export type WindowsRecoveryUnavailableReason =
   | 'invalid_generation';
 
 export type WindowsRecoveryEligibility =
-  | { available: true; profileId: 'default'; authGeneration: number; recoveryScopeToken: string }
+  | { available: true; profileId: string; authGeneration: number; recoveryScopeToken: string }
   | { available: false; reason: WindowsRecoveryUnavailableReason };
 
 export type WindowsRecoveryItem = {
@@ -35,7 +35,7 @@ export type WindowsRecoveryItem = {
 };
 
 export type WindowsRecoveryPage = {
-  profile_id: 'default';
+  profile_id: string;
   auth_generation: number;
   recovery_scope_token: string;
   items: WindowsRecoveryItem[];
@@ -44,7 +44,7 @@ export type WindowsRecoveryPage = {
 };
 
 export type WindowsRecoveryPageExpectation = {
-  profileId: 'default';
+  profileId: string;
   authGeneration: number;
   recoveryScopeToken: string;
   seen?: ReadonlySet<string>;
@@ -119,6 +119,10 @@ function itemKey(recordId: string, generation: number): string {
   return `${recordId}:${generation}`;
 }
 
+export function validWindowsProfileId(value: unknown): value is string {
+  return typeof value === 'string' && (value === 'default' || (value.length === 40 && /^profile-[0-9a-f]{32}$/.test(value)));
+}
+
 /**
  * Keep Windows recovery discovery available as a separate read-only capability;
  * provider_supported remains false while the normal Cloud Files provider is off.
@@ -129,7 +133,7 @@ export function windowsRecoveryEligibility(
   status: WindowsRecoveryAgentStatus | null
 ): WindowsRecoveryEligibility {
   if (!agentReachable) return { available: false, reason: 'agent_unreachable' };
-  if (selectedProfileId !== 'default' || status?.profile_id !== 'default') {
+  if (!validWindowsProfileId(selectedProfileId) || status?.profile_id !== selectedProfileId) {
     return { available: false, reason: 'wrong_profile' };
   }
   if (status.connected !== true) return { available: false, reason: 'account_disconnected' };
@@ -143,7 +147,7 @@ export function windowsRecoveryEligibility(
   if (!safePositiveInteger(status.auth_generation)) return { available: false, reason: 'invalid_generation' };
   return {
     available: true,
-    profileId: 'default',
+    profileId: selectedProfileId,
     authGeneration: status.auth_generation,
     recoveryScopeToken: root.recovery_scope_token
   };
@@ -154,7 +158,7 @@ export function validateWindowsRecoveryPage(
   value: unknown,
   expectation: WindowsRecoveryPageExpectation
 ): WindowsRecoveryPage {
-  if (expectation.profileId !== 'default' || !safePositiveInteger(expectation.authGeneration) ||
+  if (!validWindowsProfileId(expectation.profileId) || !safePositiveInteger(expectation.authGeneration) ||
       !validRecoveryScopeToken(expectation.recoveryScopeToken) ||
       WINDOWS_RECOVERY_PAGE_LIMIT > AGENT_PAGE_LIMIT) {
     throw new Error('Windows recovery request context is invalid.');
@@ -200,7 +204,7 @@ export function validateWindowsRecoveryPage(
     });
   }
   return {
-    profile_id: 'default',
+    profile_id: expectation.profileId,
     auth_generation: expectation.authGeneration,
     recovery_scope_token: expectation.recoveryScopeToken,
     items,
