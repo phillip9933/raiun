@@ -1707,6 +1707,8 @@ impl ConfiguredRootConnection {
         // sampled after upload. Its full bytes must match the immutable record.
         observe_completion!("capture_nonzero_usn_and_hash");
         let mut saved_usn = completion_usn(file.as_raw_handle(), metadata.local_file.file_index)?;
+        #[cfg(feature = "synthetic-agent-integration")]
+        eprintln!("synthetic_save_completion_usn_first={saved_usn}");
         let len =
             usize::try_from(metadata.content_len).map_err(|_| Error::EditRecoveryUnavailable)?;
         let mut bytes = Zeroizing::new(vec![0_u8; len]);
@@ -1714,7 +1716,13 @@ impl ConfiguredRootConnection {
             .map_err(|error| io_error("read verified edit completion", error))?;
         if crate::recovery_reconcile::digest_hex(&bytes) != metadata.content_sha256
             || !same_edit_snapshot(opened, root_snapshot(file.as_raw_handle())?)
-            || completion_usn(file.as_raw_handle(), metadata.local_file.file_index)? != saved_usn
+            || {
+                let observed_usn =
+                    completion_usn(file.as_raw_handle(), metadata.local_file.file_index)?;
+                #[cfg(feature = "synthetic-agent-integration")]
+                eprintln!("synthetic_save_completion_usn_second={observed_usn}");
+                observed_usn != saved_usn
+            }
         {
             return Err(Error::EditRecoveryUnavailable);
         }
@@ -1726,8 +1734,23 @@ impl ConfiguredRootConnection {
         observe_completion!("acquire_publication_and_token_permit");
         publication.publish_and_complete(|| {
             observe_completion!("native_in_sync_cas");
+            #[cfg(feature = "synthetic-agent-integration")]
+            let diagnostic_input_usn = saved_usn;
             let result = unsafe { CfSetInSyncState(file.as_raw_handle(), 1, 0, &mut saved_usn) };
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!("synthetic_save_completion_usn_input={diagnostic_input_usn}");
             if result < 0 {
+                #[cfg(feature = "synthetic-agent-integration")]
+                {
+                    // Output is not acknowledgement authority on a failed call.
+                    eprintln!("synthetic_save_completion_usn_failure input={diagnostic_input_usn} output_untrusted={saved_usn} hresult={result}");
+                    // Diagnostic only: never refresh saved_usn, retry the CAS, or
+                    // feed this read into publication or local acknowledgement.
+                    match completion_usn(file.as_raw_handle(), metadata.local_file.file_index) {
+                        Ok(observed_usn) => eprintln!("synthetic_save_completion_usn_after_failure={observed_usn}"),
+                        Err(_) => eprintln!("synthetic_save_completion_usn_after_failure_unavailable"),
+                    }
+                }
                 return Err(native_error("complete verified edit in-sync", result));
             }
             if saved_usn == 0 || root_snapshot(file.as_raw_handle())?.identity != opened.identity {

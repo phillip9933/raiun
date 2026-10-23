@@ -541,12 +541,8 @@ impl Engine {
         cancelled: &dyn Fn() -> bool,
     ) -> Result<MediaImportRunReport, CloudError> {
         root.verify_path().map_err(io_error)?;
-        if root.path() != job.source_root.as_path() {
-            return Err(media_error(
-                ErrorKind::Conflict,
-                "media source does not match its admitted root",
-            ));
-        }
+        // The scan joins the opened configured root to this admitted file ID;
+        // path spelling is not authority for an independently opened handle.
         let result =
             self.run_media_import_job_with_root(job, now_unix(), cancelled, Some(root.identity()));
         root.verify_path().map_err(io_error)?;
