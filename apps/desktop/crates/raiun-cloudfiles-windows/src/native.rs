@@ -5838,6 +5838,23 @@ pub(super) fn registered_configured_root_overlaps(
     root_identity_chains_overlap(&left, &right)
 }
 
+pub(super) fn registered_configured_roots_overlap(
+    left: &Path,
+    expected_left: crate::ConfiguredRootIdentity,
+    right: &Path,
+    expected_right: crate::ConfiguredRootIdentity,
+) -> Result<bool, Error> {
+    // Reuse exact OS-registration admission for both roots, retaining its
+    // handles while the ancestry snapshots recheck both expected identities.
+    let _left_lease = pin_registered_configured_root(left, expected_left)?;
+    let _right_lease = pin_registered_configured_root(right, expected_right)?;
+    let (left, _left_handles) =
+        inspect_configured_root_chain_for_registration(left, expected_left)?;
+    let (right, _right_handles) =
+        inspect_configured_root_chain_for_registration(right, expected_right)?;
+    root_identity_chains_overlap(&left, &right)
+}
+
 fn root_identity_chains_overlap(
     left: &[crate::ConfiguredRootIdentity],
     right: &[crate::ConfiguredRootIdentity],

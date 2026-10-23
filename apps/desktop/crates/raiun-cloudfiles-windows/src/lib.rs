@@ -498,6 +498,26 @@ pub fn registered_configured_root_overlaps(
     }
 }
 
+/// Compare two exactly identified, OS-registered Cloud Files roots.
+/// Only each final root may carry Cloud Files reparse state; ancestors remain
+/// plain and pinned. No registration, repair or account authorization occurs.
+pub fn registered_configured_roots_overlap(
+    left: &std::path::Path,
+    expected_left: ConfiguredRootIdentity,
+    right: &std::path::Path,
+    expected_right: ConfiguredRootIdentity,
+) -> Result<bool, Error> {
+    #[cfg(windows)]
+    {
+        native::registered_configured_roots_overlap(left, expected_left, right, expected_right)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (left, expected_left, right, expected_right);
+        Err(Error::UnsupportedPlatform)
+    }
+}
+
 /// Query the Windows Cloud Files API version.
 ///
 /// Success indicates only that the platform API answered the query.
