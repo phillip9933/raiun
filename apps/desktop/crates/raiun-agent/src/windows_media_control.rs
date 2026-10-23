@@ -27,7 +27,7 @@ impl Runtime {
         Ok(entry)
     }
 
-    /// No run/automatic dispatch/recovery verification in this metadata slice.
+    /// Local recovery metadata is read-only; no run, automatic dispatch, or upload verification.
     /// trusted_account_id must be retained from Setup verification by the caller.
     pub fn handle_media_metadata(
         &mut self,
@@ -136,11 +136,61 @@ impl Runtime {
                     .map_err(store_error)?;
                 Ok(json!({"removed":true,"job_id":job_id}))
             }
-            MediaRequest::Run { job_id, expected_revision, expected_account_id } => {
-                let job = document.media_jobs().iter().find(|job| job.id == job_id)
+            MediaRequest::Recovery {
+                job_id,
+                expected_revision,
+                expected_account_id,
+                limit,
+                cursor,
+            } => {
+                if trusted_account_id != self.account_id
+                    || expected_account_id != trusted_account_id
+                {
+                    return Err("Media recovery belongs to another saved account".into());
+                }
+                let job = document
+                    .media_jobs()
+                    .iter()
+                    .find(|job| job.id == job_id)
                     .ok_or("Media backup was not found")?;
-                if expected_account_id != trusted_account_id || job.account_id != trusted_account_id
-                    || job.revision != expected_revision {
+                if job.account_id != trusted_account_id || job.revision != expected_revision {
+                    return Err("Media backup changed or belongs to another account".into());
+                }
+                let page = self
+                    .engine
+                    .media_import_recovery(&job_id, trusted_account_id, limit, cursor.as_ref())
+                    .map_err(|_| "Could not read local media recovery status")?;
+                self.check(authorized)?;
+                let current = self.document()?;
+                if current
+                    .media_jobs()
+                    .iter()
+                    .find(|job| job.id == job_id)
+                    .is_none_or(|job| {
+                        job.account_id != trusted_account_id || job.revision != expected_revision
+                    })
+                {
+                    return Err("Media backup changed while reading recovery status".into());
+                }
+                self.check(authorized)?;
+                Ok(
+                    json!({"job_id":job_id,"account_id":trusted_account_id,"revision":expected_revision,"page":page}),
+                )
+            }
+            MediaRequest::Run {
+                job_id,
+                expected_revision,
+                expected_account_id,
+            } => {
+                let job = document
+                    .media_jobs()
+                    .iter()
+                    .find(|job| job.id == job_id)
+                    .ok_or("Media backup was not found")?;
+                if expected_account_id != trusted_account_id
+                    || job.account_id != trusted_account_id
+                    || job.revision != expected_revision
+                {
                     return Err("Media backup account or settings changed".into());
                 }
                 Err("Media backup execution is not supported by this Windows worker".into())

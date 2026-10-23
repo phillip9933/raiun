@@ -1247,7 +1247,7 @@ impl WindowsAgent {
                 Ok((self.folder_request(request)?, false))
             }
             "media_jobs" | "media_job_status" | "media_destination" | "media_job_set"
-            | "media_job_remove" | "media_job_run" => {
+            | "media_job_remove" | "media_job_run" | "media_job_recovery" => {
                 if !WINDOWS_MEDIA_METADATA_ENABLED {
                     return Err("Windows media backups are not yet supported".into());
                 }

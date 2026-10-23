@@ -70,7 +70,7 @@ pub fn decode(request: &Value) -> Result<FolderRequest, String> {
                 .ok_or_else(invalid)?,
         },
         "media_jobs" | "media_job_status" | "media_destination" | "media_job_set"
-        | "media_job_remove" | "media_job_run" => {
+        | "media_job_remove" | "media_job_run" | "media_job_recovery" => {
             return super::windows_media_requests::decode(request).map(FolderRequest::Media);
         }
         "pairs" => FolderRequest::Pairs,

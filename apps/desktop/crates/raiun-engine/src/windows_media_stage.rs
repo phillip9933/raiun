@@ -3,7 +3,9 @@ use super::{
     CloudError, Engine, ErrorKind, MAX_MEDIA_STAGED_FILE_BYTES, MAX_MEDIA_STAGED_TOTAL_BYTES,
     SourceSignature, hash_reader, io_error,
 };
-use raiun_control_windows::{OwnedPrivateReader, PinnedFileIdentity, PrivateDirectory};
+use raiun_control_windows::{
+    OwnedPrivateReader, PinnedDirectory, PinnedFileIdentity, PrivateDirectory,
+};
 use std::{
     ffi::OsString,
     fs::{self, File},
@@ -54,6 +56,31 @@ fn bytes_in(directory: &Arc<PrivateDirectory>) -> Result<u64, CloudError> {
     directory.verify_path().map_err(io_error)?;
     Ok(total)
 }
+/// Read-only recovery admission: validate both the account state root and its
+/// protected staging child, without creating entries or repairing permissions.
+pub(super) fn existing_directory(state_dir: &Path) -> io::Result<Option<Arc<PrivateDirectory>>> {
+    let open = || -> io::Result<Arc<PrivateDirectory>> {
+        let parent_path = state_dir
+            .parent()
+            .ok_or_else(|| io::Error::other("Missing private media parent"))?;
+        let name = state_dir
+            .file_name()
+            .ok_or_else(|| io::Error::other("Missing private media root"))?;
+        let parent = PinnedDirectory::open(parent_path)?;
+        let root = PrivateDirectory::open_under(&parent, name)?;
+        let root_pin = PinnedDirectory::open(root.path())?;
+        let staging =
+            PrivateDirectory::open_under(&root_pin, std::ffi::OsStr::new("media-staging"))?;
+        root.verify_path()?;
+        Ok(Arc::new(staging))
+    };
+    match open() {
+        Ok(directory) => Ok(Some(directory)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 pub(super) fn directory_bytes(engine: &Engine) -> Result<u64, CloudError> {
     let directory = directory(engine)?; // DB guard ends before enumeration/I/O.
     bytes_in(&directory)

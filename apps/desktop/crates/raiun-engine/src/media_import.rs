@@ -260,33 +260,7 @@ impl Engine {
         limit: usize,
         cursor: Option<&MediaImportRecoveryCursor>,
     ) -> Result<MediaImportRecoveryPage, CloudError> {
-        validate_media_job_id(job_id)?;
-        if account_id.is_empty()
-            || account_id.len() > 256
-            || account_id.chars().any(char::is_control)
-            || !(1..=MAX_MEDIA_RECOVERY_PAGE).contains(&limit)
-        {
-            return Err(media_error(
-                ErrorKind::Unsupported,
-                "media recovery scope or page size is invalid",
-            ));
-        }
-        if let Some(cursor) = cursor {
-            for value in [
-                &cursor.origin,
-                &cursor.space_id,
-                &cursor.source_root,
-                &cursor.source_relative_path,
-                &cursor.destination_path,
-            ] {
-                if value.is_empty() || value.len() > 4_096 || value.chars().any(char::is_control) {
-                    return Err(media_error(
-                        ErrorKind::Unsupported,
-                        "media recovery cursor is invalid",
-                    ));
-                }
-            }
-        }
+        validate_media_recovery_query(job_id, account_id, limit, cursor)?;
         let Some(db) = open_media_status_db(state_dir)? else {
             return Ok(MediaImportRecoveryPage {
                 items: Vec::new(),
@@ -295,222 +269,38 @@ impl Engine {
                 account_has_unindexed_stage: untracked_media_stage_exists(state_dir, None)?,
             });
         };
-        let has_attempt_table: bool = db
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_upload_attempts')",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(crate::db_error)?;
-        if !has_attempt_table {
-            return Ok(MediaImportRecoveryPage {
-                items: Vec::new(),
-                has_more: false,
-                next_cursor: None,
-                account_has_unindexed_stage: untracked_media_stage_exists(state_dir, Some(&db))?,
-            });
-        }
-        let has_stage_table: bool = db
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_upload_stages')",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(crate::db_error)?;
-        if !has_stage_table {
+        media_recovery_page(&db, state_dir, job_id, account_id, limit, cursor)
+    }
+
+    /// Read local recovery using this Engine's held database owner. This requires
+    /// the exact bound account but deliberately does not require online transport.
+    pub fn media_import_recovery(
+        &self,
+        job_id: &str,
+        account_id: &str,
+        limit: usize,
+        cursor: Option<&MediaImportRecoveryCursor>,
+    ) -> Result<MediaImportRecoveryPage, CloudError> {
+        validate_media_recovery_query(job_id, account_id, limit, cursor)?;
+        if self
+            .account_scope
+            .as_ref()
+            .is_none_or(|scope| scope.account_id != account_id)
+        {
             return Err(media_error(
-                ErrorKind::Io,
-                "media recovery index is incomplete; retained data was not changed",
+                ErrorKind::Conflict,
+                "media recovery account does not match this Engine",
             ));
         }
-        let after = cursor.map(|cursor| {
-            (
-                cursor.origin.as_str(),
-                cursor.space_id.as_str(),
-                cursor.source_root.as_str(),
-                cursor.source_relative_path.as_str(),
-                cursor.destination_path.as_str(),
-            )
-        });
-        let fetch_limit = (limit + 1) as i64;
-        let root_column: bool = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('media_upload_attempts') WHERE name='destination_root_id')",
-            [], |row| row.get(0),
-        ).map_err(crate::db_error)?;
-        let root_expression = if root_column {
-            "a.destination_root_id"
-        } else {
-            "NULL"
-        };
-        let mut collected = BTreeMap::new();
-        let mut statement = db
-            .prepare(
-                &format!("SELECT a.source_root,a.relative_path,a.destination_path,a.origin,a.space_id,a.generation,a.state,a.source_size,a.updated_unix,s.staged_path,s.staged_size,s.attempt_generation,a.job_revision,{root_expression} FROM media_upload_attempts a LEFT JOIN media_upload_stages s ON s.job_id=a.job_id AND s.account_id=a.account_id AND s.origin=a.origin AND s.space_id=a.space_id AND s.source_root=a.source_root AND s.relative_path=a.relative_path AND s.destination_path=a.destination_path WHERE a.job_id=?1 AND a.account_id=?2 AND (a.state!='uploaded' OR s.job_id IS NOT NULL) AND (?3 IS NULL OR (a.origin,a.space_id,a.source_root,a.relative_path,a.destination_path)>(?3,?4,?5,?6,?7)) ORDER BY a.origin,a.space_id,a.source_root,a.relative_path,a.destination_path LIMIT ?8"),
-            )
-            .map_err(crate::db_error)?;
-        let rows = statement
-            .query_map(
-                params![
-                    job_id,
-                    account_id,
-                    after.map(|key| key.0),
-                    after.map(|key| key.1),
-                    after.map(|key| key.2),
-                    after.map(|key| key.3),
-                    after.map(|key| key.4),
-                    fetch_limit
-                ],
-                |row| {
-                    let source_root: String = row.get(0)?;
-                    let relative_path: String = row.get(1)?;
-                    let destination_path: String = row.get(2)?;
-                    let origin: String = row.get(3)?;
-                    let space_id: String = row.get(4)?;
-                    let generation: i64 = row.get(5)?;
-                    let raw_state: String = row.get(6)?;
-                    let source_size: i64 = row.get(7)?;
-                    let updated_unix: i64 = row.get(8)?;
-                    let staged_path: Option<String> = row.get(9)?;
-                    let staged_size: Option<i64> = row.get(10)?;
-                    let stage_generation: Option<i64> = row.get(11)?;
-                    let configuration_revision: i64 = row.get(12)?;
-                    let destination_root: Option<String> = row.get(13)?;
-                    let stage_size = staged_size
-                        .filter(|size| *size >= 0)
-                        .map(|size| size as u64);
-                    let stage_present =
-                        staged_path
-                            .as_deref()
-                            .zip(stage_size)
-                            .is_some_and(|(path, size)| {
-                                media_stage_file_matches(state_dir, path, size)
-                            });
-                    let state = sanitized_recovery_state(&raw_state, generation, stage_generation);
-                    Ok((
-                        (
-                            origin.clone(),
-                            space_id.clone(),
-                            source_root.clone(),
-                            relative_path.clone(),
-                            destination_path.clone(),
-                        ),
-                        MediaImportRecoveryItem {
-                            origin,
-                            space_id,
-                            source_root: PathBuf::from(source_root),
-                            source_relative_path: relative_path,
-                            destination_path,
-                            upload_verification_available: state == "uncertain"
-                                && generation > 0
-                                && configuration_revision > 0
-                                && destination_root.is_some_and(|root| !root.is_empty()),
-                            state,
-                            configuration_revision: u64::try_from(configuration_revision)
-                                .ok()
-                                .filter(|revision| *revision > 0),
-                            attempt_generation: u64::try_from(generation).ok(),
-                            source_size: source_size.max(0) as u64,
-                            updated_unix: Some(updated_unix),
-                            staged_copy_present: stage_present,
-                            staged_copy_size: stage_size,
-                            stage_generation: stage_generation
-                                .and_then(|generation| u64::try_from(generation).ok()),
-                        },
-                    ))
-                },
-            )
-            .map_err(crate::db_error)?;
-        for row in rows {
-            let (key, item) = row.map_err(crate::db_error)?;
-            collected.insert(key, item);
-        }
-        drop(statement);
-
-        let mut statement = db
-            .prepare(
-                "SELECT s.source_root,s.relative_path,s.destination_path,s.origin,s.space_id,s.attempt_generation,s.staged_path,s.staged_size FROM media_upload_stages s WHERE s.job_id=?1 AND s.account_id=?2 AND NOT EXISTS (SELECT 1 FROM media_upload_attempts a WHERE a.job_id=s.job_id AND a.account_id=s.account_id AND a.origin=s.origin AND a.space_id=s.space_id AND a.source_root=s.source_root AND a.relative_path=s.relative_path AND a.destination_path=s.destination_path) AND (?3 IS NULL OR (s.origin,s.space_id,s.source_root,s.relative_path,s.destination_path)>(?3,?4,?5,?6,?7)) ORDER BY s.origin,s.space_id,s.source_root,s.relative_path,s.destination_path LIMIT ?8",
-            )
-            .map_err(crate::db_error)?;
-        let rows = statement
-            .query_map(
-                params![
-                    job_id,
-                    account_id,
-                    after.map(|key| key.0),
-                    after.map(|key| key.1),
-                    after.map(|key| key.2),
-                    after.map(|key| key.3),
-                    after.map(|key| key.4),
-                    fetch_limit
-                ],
-                |row| {
-                    let source_root: String = row.get(0)?;
-                    let relative_path: String = row.get(1)?;
-                    let destination_path: String = row.get(2)?;
-                    let origin: String = row.get(3)?;
-                    let space_id: String = row.get(4)?;
-                    let stage_generation: i64 = row.get(5)?;
-                    let staged_path: String = row.get(6)?;
-                    let staged_size: i64 = row.get(7)?;
-                    let stage_size = u64::try_from(staged_size).ok();
-                    let stage_present = stage_size.is_some_and(|size| {
-                        media_stage_file_matches(state_dir, &staged_path, size)
-                    });
-                    Ok((
-                        (
-                            origin.clone(),
-                            space_id.clone(),
-                            source_root.clone(),
-                            relative_path.clone(),
-                            destination_path.clone(),
-                        ),
-                        MediaImportRecoveryItem {
-                            origin,
-                            space_id,
-                            source_root: PathBuf::from(source_root),
-                            source_relative_path: relative_path,
-                            destination_path,
-                            state: "stage_only".to_owned(),
-                            configuration_revision: None,
-                            upload_verification_available: false,
-                            attempt_generation: None,
-                            source_size: stage_size.unwrap_or_default(),
-                            updated_unix: None,
-                            staged_copy_present: stage_present,
-                            staged_copy_size: stage_size,
-                            stage_generation: u64::try_from(stage_generation).ok(),
-                        },
-                    ))
-                },
-            )
-            .map_err(crate::db_error)?;
-        for row in rows {
-            let (key, item) = row.map_err(crate::db_error)?;
-            collected.entry(key).or_insert(item);
-        }
-        drop(statement);
-
-        let mut rows: Vec<_> = collected.into_iter().collect();
-        rows.sort_by(|left, right| left.0.cmp(&right.0));
-        let has_more = rows.len() > limit;
-        rows.truncate(limit);
-        let next_cursor = if has_more {
-            rows.last().map(|(key, _)| MediaImportRecoveryCursor {
-                origin: key.0.clone(),
-                space_id: key.1.clone(),
-                source_root: key.2.clone(),
-                source_relative_path: key.3.clone(),
-                destination_path: key.4.clone(),
-            })
-        } else {
-            None
-        };
-        Ok(MediaImportRecoveryPage {
-            items: rows.into_iter().map(|(_, item)| item).collect(),
-            has_more,
-            next_cursor,
-            account_has_unindexed_stage: untracked_media_stage_exists(state_dir, Some(&db))?,
-        })
+        let db = self.db()?;
+        media_recovery_page(
+            &db,
+            &self.inner.state_dir,
+            job_id,
+            account_id,
+            limit,
+            cursor,
+        )
     }
 
     /// Compare a retained uncertain attempt with the current remote bytes.
@@ -1301,6 +1091,286 @@ fn sanitized_recovery_state(
     .to_owned()
 }
 
+fn validate_media_recovery_query(
+    job_id: &str,
+    account_id: &str,
+    limit: usize,
+    cursor: Option<&MediaImportRecoveryCursor>,
+) -> Result<(), CloudError> {
+    validate_media_job_id(job_id)?;
+    if account_id.is_empty()
+        || account_id.len() > 256
+        || account_id.chars().any(char::is_control)
+        || !(1..=MAX_MEDIA_RECOVERY_PAGE).contains(&limit)
+    {
+        return Err(media_error(
+            ErrorKind::Unsupported,
+            "media recovery scope or page size is invalid",
+        ));
+    }
+    if let Some(cursor) = cursor {
+        for value in [
+            &cursor.origin,
+            &cursor.space_id,
+            &cursor.source_root,
+            &cursor.source_relative_path,
+            &cursor.destination_path,
+        ] {
+            if value.is_empty() || value.len() > 4_096 || value.chars().any(char::is_control) {
+                return Err(media_error(
+                    ErrorKind::Unsupported,
+                    "media recovery cursor is invalid",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+// Inputs are validated by both entry points before the database is accessed.
+fn media_recovery_page(
+    db: &Connection,
+    state_dir: &Path,
+    job_id: &str,
+    account_id: &str,
+    limit: usize,
+    cursor: Option<&MediaImportRecoveryCursor>,
+) -> Result<MediaImportRecoveryPage, CloudError> {
+    let has_attempt_table: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_upload_attempts')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(crate::db_error)?;
+    if !has_attempt_table {
+        return Ok(MediaImportRecoveryPage {
+            items: Vec::new(),
+            has_more: false,
+            next_cursor: None,
+            account_has_unindexed_stage: untracked_media_stage_exists(state_dir, Some(db))?,
+        });
+    }
+    let has_stage_table: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='media_upload_stages')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(crate::db_error)?;
+    if !has_stage_table {
+        return Err(media_error(
+            ErrorKind::Io,
+            "media recovery index is incomplete; retained data was not changed",
+        ));
+    }
+    let after = cursor.map(|cursor| {
+        (
+            cursor.origin.as_str(),
+            cursor.space_id.as_str(),
+            cursor.source_root.as_str(),
+            cursor.source_relative_path.as_str(),
+            cursor.destination_path.as_str(),
+        )
+    });
+    let fetch_limit = (limit + 1) as i64;
+    let root_column: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('media_upload_attempts') WHERE name='destination_root_id')",
+        [], |row| row.get(0),
+    ).map_err(crate::db_error)?;
+    let root_expression = if root_column {
+        "a.destination_root_id"
+    } else {
+        "NULL"
+    };
+    let mut collected = BTreeMap::new();
+    let mut statement = db
+        .prepare(
+            &format!("SELECT a.source_root,a.relative_path,a.destination_path,a.origin,a.space_id,a.generation,a.state,a.source_size,a.updated_unix,s.staged_path,s.staged_size,s.attempt_generation,a.job_revision,{root_expression} FROM media_upload_attempts a LEFT JOIN media_upload_stages s ON s.job_id=a.job_id AND s.account_id=a.account_id AND s.origin=a.origin AND s.space_id=a.space_id AND s.source_root=a.source_root AND s.relative_path=a.relative_path AND s.destination_path=a.destination_path WHERE a.job_id=?1 AND a.account_id=?2 AND (a.state!='uploaded' OR s.job_id IS NOT NULL) AND (?3 IS NULL OR (a.origin,a.space_id,a.source_root,a.relative_path,a.destination_path)>(?3,?4,?5,?6,?7)) ORDER BY a.origin,a.space_id,a.source_root,a.relative_path,a.destination_path LIMIT ?8"),
+        )
+        .map_err(crate::db_error)?;
+    let rows = statement
+        .query_map(
+            params![
+                job_id,
+                account_id,
+                after.map(|key| key.0),
+                after.map(|key| key.1),
+                after.map(|key| key.2),
+                after.map(|key| key.3),
+                after.map(|key| key.4),
+                fetch_limit
+            ],
+            |row| {
+                let source_root: String = row.get(0)?;
+                let relative_path: String = row.get(1)?;
+                let destination_path: String = row.get(2)?;
+                let origin: String = row.get(3)?;
+                let space_id: String = row.get(4)?;
+                let generation: i64 = row.get(5)?;
+                let raw_state: String = row.get(6)?;
+                let source_size: i64 = row.get(7)?;
+                let updated_unix: i64 = row.get(8)?;
+                let staged_path: Option<String> = row.get(9)?;
+                let staged_size: Option<i64> = row.get(10)?;
+                let stage_generation: Option<i64> = row.get(11)?;
+                let configuration_revision: i64 = row.get(12)?;
+                let destination_root: Option<String> = row.get(13)?;
+                let stage_size = staged_size
+                    .filter(|size| *size >= 0)
+                    .map(|size| size as u64);
+                let stage_present = staged_path
+                    .as_deref()
+                    .zip(stage_size)
+                    .is_some_and(|(path, size)| media_stage_file_matches(state_dir, path, size));
+                let state = sanitized_recovery_state(&raw_state, generation, stage_generation);
+                Ok((
+                    (
+                        origin.clone(),
+                        space_id.clone(),
+                        source_root.clone(),
+                        relative_path.clone(),
+                        destination_path.clone(),
+                    ),
+                    MediaImportRecoveryItem {
+                        origin,
+                        space_id,
+                        source_root: PathBuf::from(source_root),
+                        source_relative_path: relative_path,
+                        destination_path,
+                        upload_verification_available: state == "uncertain"
+                            && generation > 0
+                            && configuration_revision > 0
+                            && destination_root.is_some_and(|root| !root.is_empty()),
+                        state,
+                        configuration_revision: u64::try_from(configuration_revision)
+                            .ok()
+                            .filter(|revision| *revision > 0),
+                        attempt_generation: u64::try_from(generation).ok(),
+                        source_size: source_size.max(0) as u64,
+                        updated_unix: Some(updated_unix),
+                        staged_copy_present: stage_present,
+                        staged_copy_size: stage_size,
+                        stage_generation: stage_generation
+                            .and_then(|generation| u64::try_from(generation).ok()),
+                    },
+                ))
+            },
+        )
+        .map_err(crate::db_error)?;
+    for row in rows {
+        let (key, item) = row.map_err(crate::db_error)?;
+        collected.insert(key, item);
+    }
+    drop(statement);
+
+    let mut statement = db
+        .prepare(
+            "SELECT s.source_root,s.relative_path,s.destination_path,s.origin,s.space_id,s.attempt_generation,s.staged_path,s.staged_size FROM media_upload_stages s WHERE s.job_id=?1 AND s.account_id=?2 AND NOT EXISTS (SELECT 1 FROM media_upload_attempts a WHERE a.job_id=s.job_id AND a.account_id=s.account_id AND a.origin=s.origin AND a.space_id=s.space_id AND a.source_root=s.source_root AND a.relative_path=s.relative_path AND a.destination_path=s.destination_path) AND (?3 IS NULL OR (s.origin,s.space_id,s.source_root,s.relative_path,s.destination_path)>(?3,?4,?5,?6,?7)) ORDER BY s.origin,s.space_id,s.source_root,s.relative_path,s.destination_path LIMIT ?8",
+        )
+        .map_err(crate::db_error)?;
+    let rows = statement
+        .query_map(
+            params![
+                job_id,
+                account_id,
+                after.map(|key| key.0),
+                after.map(|key| key.1),
+                after.map(|key| key.2),
+                after.map(|key| key.3),
+                after.map(|key| key.4),
+                fetch_limit
+            ],
+            |row| {
+                let source_root: String = row.get(0)?;
+                let relative_path: String = row.get(1)?;
+                let destination_path: String = row.get(2)?;
+                let origin: String = row.get(3)?;
+                let space_id: String = row.get(4)?;
+                let stage_generation: i64 = row.get(5)?;
+                let staged_path: String = row.get(6)?;
+                let staged_size: i64 = row.get(7)?;
+                let stage_size = u64::try_from(staged_size).ok();
+                let stage_present = stage_size
+                    .is_some_and(|size| media_stage_file_matches(state_dir, &staged_path, size));
+                Ok((
+                    (
+                        origin.clone(),
+                        space_id.clone(),
+                        source_root.clone(),
+                        relative_path.clone(),
+                        destination_path.clone(),
+                    ),
+                    MediaImportRecoveryItem {
+                        origin,
+                        space_id,
+                        source_root: PathBuf::from(source_root),
+                        source_relative_path: relative_path,
+                        destination_path,
+                        state: "stage_only".to_owned(),
+                        configuration_revision: None,
+                        upload_verification_available: false,
+                        attempt_generation: None,
+                        source_size: stage_size.unwrap_or_default(),
+                        updated_unix: None,
+                        staged_copy_present: stage_present,
+                        staged_copy_size: stage_size,
+                        stage_generation: u64::try_from(stage_generation).ok(),
+                    },
+                ))
+            },
+        )
+        .map_err(crate::db_error)?;
+    for row in rows {
+        let (key, item) = row.map_err(crate::db_error)?;
+        collected.entry(key).or_insert(item);
+    }
+    drop(statement);
+
+    let mut rows: Vec<_> = collected.into_iter().collect();
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+    let has_more = rows.len() > limit;
+    rows.truncate(limit);
+    let next_cursor = if has_more {
+        rows.last().map(|(key, _)| MediaImportRecoveryCursor {
+            origin: key.0.clone(),
+            space_id: key.1.clone(),
+            source_root: key.2.clone(),
+            source_relative_path: key.3.clone(),
+            destination_path: key.4.clone(),
+        })
+    } else {
+        None
+    };
+    Ok(MediaImportRecoveryPage {
+        items: rows.into_iter().map(|(_, item)| item).collect(),
+        has_more,
+        next_cursor,
+        account_has_unindexed_stage: untracked_media_stage_exists(state_dir, Some(db))?,
+    })
+}
+
+#[cfg(windows)]
+fn media_stage_file_matches(state_dir: &Path, stored_path: &str, expected_size: u64) -> bool {
+    let Ok(Some(directory)) = windows_media_stage::existing_directory(state_dir) else {
+        return false;
+    };
+    let candidate = Path::new(stored_path);
+    if candidate.parent() != Some(directory.path()) {
+        return false;
+    }
+    let Some(name) = candidate.file_name() else {
+        return false;
+    };
+    let Ok(reader) = directory.open_owned_immutable_file(name) else {
+        return false;
+    };
+    reader
+        .metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() == expected_size)
+}
+
+#[cfg(not(windows))]
 fn media_stage_file_matches(state_dir: &Path, stored_path: &str, expected_size: u64) -> bool {
     let staging_dir = state_dir.join("media-staging");
     let Ok(directory_metadata) = fs::symlink_metadata(&staging_dir) else {
@@ -1650,6 +1720,12 @@ fn untracked_media_stage_exists(
     state_dir: &Path,
     db: Option<&Connection>,
 ) -> Result<bool, CloudError> {
+    #[cfg(windows)]
+    let private_directory =
+        match windows_media_stage::existing_directory(state_dir).map_err(io_error)? {
+            Some(directory) => directory,
+            None => return Ok(false),
+        };
     let staging_dir = state_dir.join("media-staging");
     let metadata = match fs::symlink_metadata(&staging_dir) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => metadata,
@@ -1705,6 +1781,12 @@ fn untracked_media_stage_exists(
             ));
         }
         let entry = entry.map_err(io_error)?;
+        // Every enumerated child must still satisfy the protected private-file
+        // policy; a pathname or generic regular-file attribute is insufficient.
+        #[cfg(windows)]
+        let _reader = private_directory
+            .open_owned_immutable_file(&entry.file_name())
+            .map_err(io_error)?;
         if !entry.file_type().map_err(io_error)?.is_file() {
             return Err(media_error(
                 ErrorKind::Unsupported,
@@ -1721,6 +1803,8 @@ fn untracked_media_stage_exists(
             return Ok(true);
         }
     }
+    #[cfg(windows)]
+    private_directory.verify_path().map_err(io_error)?;
     Ok(false)
 }
 
