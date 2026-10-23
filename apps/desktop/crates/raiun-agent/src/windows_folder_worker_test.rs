@@ -1,4 +1,6 @@
 use super::*;
+use super::super::{OpenCloudClient, windows_folder_requests, windows_folder_sync};
+use raiun_core::backend::CloudBackend;
 
 #[test]
 #[ignore = "requires isolated Windows test environment, loopback synthetic server and private ordinary folders; no Cloud Files registration or GUI acceptance"]
