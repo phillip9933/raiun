@@ -4,7 +4,10 @@ $ErrorActionPreference = 'Stop'
 # Run from an elevated PowerShell session. This does not touch Windows accounts,
 # activation, repository contents, or system PATH.
 
-function Assert-ExitCode([string] $Label, [int] $Code) {
+function Assert-ExitCode([string] $Label, [object] $Code) {
+    if (($Code -isnot [int]) -and ($Code -isnot [long])) {
+        throw "$Label did not return a numeric process exit code."
+    }
     if ($Code -eq 3010) {
         Write-Host "$Label completed; Windows reports that a reboot is required (3010)."
         $script:RebootRequired = $true
@@ -23,8 +26,19 @@ function Invoke-Installer([string] $FilePath, [string[]] $Arguments, [string] $L
     Remove-Item -LiteralPath $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
     Write-Host "Running $Label..."
     Write-Host "Installer output: $stdoutLog ; $stderrLog"
-    $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -Wait -PassThru -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
-    if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
+    $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -PassThru -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
+    # Retain the native handle before waiting; an unavailable exit code is never success.
+    $retainedHandle = $process.Handle
+    if ($retainedHandle -eq [IntPtr]::Zero) {
+        throw "$Label process handle is unavailable."
+    }
+    $process.WaitForExit()
+    $process.Refresh()
+    $exitCode = $process.ExitCode
+    if (($exitCode -isnot [int]) -and ($exitCode -isnot [long])) {
+        throw "$Label did not return a numeric process exit code."
+    }
+    if ($exitCode -ne 0 -and $exitCode -ne 3010) {
         foreach ($logPath in @($stdoutLog, $stderrLog)) {
             if (Test-Path -LiteralPath $logPath) {
                 Write-Host "Last installer output from ${logPath}:"
@@ -32,7 +46,7 @@ function Invoke-Installer([string] $FilePath, [string[]] $Arguments, [string] $L
             }
         }
     }
-    Assert-ExitCode $Label $process.ExitCode
+    Assert-ExitCode $Label $exitCode
 }
 
 function Get-VsWherePath {
