@@ -2,7 +2,7 @@ use super::*;
 use raiun_core::backend::{CloudBackend, CloudSpace};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tempfile::TempDir;
+use tempfile::{NamedTempFile, TempDir};
 
 #[derive(Default)]
 struct FakeCloud {

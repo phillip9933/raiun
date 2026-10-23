@@ -1619,7 +1619,7 @@ fn finish_staged_file(
     staged.finish(expected)
 }
 
-#[cfg(not(windows))]
+#[cfg(any(not(windows), test))]
 fn staging_directory_bytes(path: &Path) -> Result<u64, CloudError> {
     let mut total = 0u64;
     let mut entries = 0usize;
