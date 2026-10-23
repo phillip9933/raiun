@@ -152,6 +152,106 @@ impl DpapiSessionStore {
         })
     }
 
+    /// Inventory only bounded, protected root-configuration metadata for a trusted
+    /// profile. This preserves reservations after logout removes the active
+    /// session pointer. It never reads/decrypts session files or grants account
+    /// authority; the broker must fully decode ownership before using a record.
+    /// The broker must serialize inventory with root-config mutations (normally
+    /// before starting runtimes). Any malformed, foreign, unreadable or excessive
+    /// inventory fails closed.
+    pub fn load_root_config_inventory(&self, expected_profile: &str) -> io::Result<Vec<Vec<u8>>> {
+        validate_identity(Some(expected_profile), "inventory", "inventory")?;
+        if !self.ensure_existing_private_root()? {
+            return Ok(Vec::new());
+        }
+        let parent = crate::PinnedDirectory::open(&self.root)?;
+        let mut records = Vec::new();
+        for (index, entry) in std::fs::read_dir(&self.root)?.enumerate() {
+            if index >= 4096 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Root metadata inventory exceeds its entry limit",
+                ));
+            }
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name_text) = name.to_str() else {
+                continue;
+            };
+            if !name_text.to_ascii_lowercase().ends_with(".root-config") {
+                continue;
+            }
+            let digest = name_text.strip_suffix(".root-config").ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Root metadata filename is not canonical",
+                )
+            })?;
+            if records.len() >= 64
+                || digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Root metadata inventory is invalid",
+                ));
+            }
+            let (mut file, _) = parent.open_immutable_regular_file(&name)?;
+            crate::private_directory::verify_private_metadata_file(&file)?;
+            if file.metadata()?.len() > MAX_ROOT_CONFIG_BYTES as u64 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Stored root configuration exceeds the storage limit",
+                ));
+            }
+            let mut bytes = Vec::new();
+            Read::by_ref(&mut file)
+                .take((MAX_ROOT_CONFIG_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            if bytes.is_empty() || bytes.len() > MAX_ROOT_CONFIG_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Stored root configuration has an invalid size",
+                ));
+            }
+            let metadata: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Stored root configuration is invalid",
+                )
+            })?;
+            let scope = metadata
+                .get("profile_scope")
+                .and_then(serde_json::Value::as_str);
+            let server = metadata.get("server").and_then(serde_json::Value::as_str);
+            let client = metadata
+                .get("client_id")
+                .and_then(serde_json::Value::as_str);
+            let (Some(scope), Some(server), Some(client)) = (scope, server, client) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Root metadata identity is invalid",
+                ));
+            };
+            validate_identity(Some(scope), server, client)?;
+            if scope != expected_profile
+                || hex(&identity_digest(Some(scope), server, client)) != digest
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Root metadata identity does not match",
+                ));
+            }
+            crate::private_directory::verify_private_metadata_file(&file)?;
+            parent.verify_path()?;
+            records.push(bytes);
+        }
+        parent.verify_path()?;
+        Ok(records)
+    }
+
     /// Read the fixed non-secret account registry without scanning credentials.
     /// Only verified absence returns None; malformed content remains the caller's
     /// responsibility and must never be interpreted as a default migration.
@@ -1170,6 +1270,66 @@ fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires isolated ordinary Windows user and native private-storage ACL support"]
+    fn root_inventory_survives_logout_pointer_removal() {
+        let root = std::env::temp_dir().join(format!(
+            "raiun-root-inventory-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        eprintln!("synthetic_root_inventory_fixture={}", root.display());
+        let store = DpapiSessionStore {
+            root: root.join("sessions"),
+            profile_directory: None,
+        };
+        store.ensure_private_root().unwrap();
+        let server = "https://synthetic.invalid";
+        let client = "synthetic-client";
+        let metadata = serde_json::to_vec(&serde_json::json!({"version":2,"profile_scope":"default","server":server,"client_id":client,"path":"C:\\Synthetic"})).unwrap();
+        store
+            .save_root_config("default", server, client, &metadata)
+            .unwrap();
+        // If inventory tried to read credentials instead of metadata, these
+        // deliberately invalid opaque session bytes could not be decrypted.
+        let session_path = store.session_path(&identity_digest(Some("default"), server, client));
+        let sentinel = b"synthetic non-session sentinel";
+        let temporary = store.write_temp(&session_path, sentinel).unwrap();
+        std::fs::rename(temporary, &session_path).unwrap();
+        store
+            .set_active_identity("default", server, client)
+            .unwrap();
+        store.clear_active_identity().unwrap();
+        assert!(store.active_identity().unwrap().is_none());
+        assert_eq!(
+            store.load_root_config_inventory("default").unwrap(),
+            vec![metadata.clone()]
+        );
+        assert!(
+            store
+                .load_root_config_inventory("profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&session_path).unwrap(), sentinel);
+        assert_eq!(
+            store.load_root_config("default", server, client).unwrap(),
+            Some(metadata)
+        );
+        let canonical = store.root_config_path(&identity_digest(Some("default"), server, client));
+        let intermediate = canonical.with_extension("case-probe");
+        let alternate = canonical.with_extension("ROOT-CONFIG");
+        std::fs::rename(&canonical, &intermediate).unwrap();
+        std::fs::rename(&intermediate, &alternate).unwrap();
+        assert!(store.load_root_config_inventory("default").is_err());
+        drop(store);
+        // Success-only cleanup of the exact newly-created fixture.
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     #[ignore = "requires isolated ordinary Windows user and native private-storage ACL support"]

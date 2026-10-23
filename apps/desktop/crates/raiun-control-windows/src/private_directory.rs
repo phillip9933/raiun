@@ -780,6 +780,12 @@ impl Seek for OwnedPrivateReader {
     }
 }
 
+/// Validate an already immutably pinned metadata file without repairing ACLs.
+/// Kept crate-private for the fixed legacy root-configuration inventory.
+pub(crate) fn verify_private_metadata_file(file: &File) -> io::Result<()> {
+    validate_private_handle(file, PrivateEntryKind::File)
+}
+
 #[derive(Clone, Copy)]
 enum PrivateEntryKind {
     Directory,
