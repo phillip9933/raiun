@@ -46,8 +46,9 @@ Fresh admission does not claim persisted historical source identity across resta
 
 Early Windows compilation now covers idle scheduling. Two ordinary-user MSVC
 engine cases passed normal media import/verified updates and collision/lost-response
-recovery across engine reopen. The actual worker-control acceptance case is next;
-this is not GUI or packaged acceptance. Media execution and its UI capability
+recovery across engine reopen. The actual ordinary-user worker-control case also passed stability waiting,
+verified upload, pause and account-scoped recovery checks. This is not GUI or
+packaged acceptance. Media execution and its UI capability
 remain disabled, and no new public release is claimed.
 
 Windows also has a read-only vault-inspection path using existing authenticated
@@ -82,13 +83,12 @@ reverted. Recovery remains retained, lifecycle acceptance was not advanced after
 the failure, and both activation switches remain off. Actual numeric diagnostics
 showed both pre-CAS reads at USN 150231648 and a single read after refusal at
 150240984. This establishes journal movement, not the reason or a successful fix.
-A focused candidate posts pending NTFS journal reasons once on the same validated,
-immutable file before its first completion snapshot, using
-[FSCTL_WRITE_USN_CLOSE_RECORD](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/059a4dea-601f-44a4-b368-7a7f5b668696).
-It then requires an equal independently read USN, the full matching content hash,
-a second unchanged USN and the original nonzero OS comparison. Unsupported or
-malformed results fail closed. There is no post-proof refresh or retry; native
-acceptance of this candidate remains pending.
+Posting pending NTFS journal reasons before the first snapshot was tested and
+also failed at the same comparison; that experiment has been removed. The close
+callback was captured and journaled successfully in that run. Recovery remains
+retained, and the next correction must preserve the full hash and nonzero OS
+comparison. There is no post-proof refresh or retry, and no successful native
+completion or lifecycle acceptance is claimed.
 
 ## Next-release media recovery — 23 October 2026 JST
 

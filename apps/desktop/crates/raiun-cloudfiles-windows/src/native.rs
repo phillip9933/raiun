@@ -1703,19 +1703,10 @@ impl ConfiguredRootConnection {
         }
         observe_completion!("validate_publication_identity");
         verify_completion_identity(file.as_raw_handle(), publication.identity())?;
-        // Post pending journal changes before the first completion snapshot.
-        // FSCTL_READ_FILE_USN_DATA alone can still return the last journaled
-        // value while a close update is pending. This does not close our file
-        // or release its writer/deletion exclusion. Never use it as a retry.
-        observe_completion!("post_pending_usn_before_snapshot");
-        let posted_usn = post_completion_usn(file.as_raw_handle())?;
         // This is a fresh local revalidation snapshot, not a blind new USN
         // sampled after upload. Its full bytes must match the immutable record.
         observe_completion!("capture_nonzero_usn_and_hash");
         let mut saved_usn = completion_usn(file.as_raw_handle(), metadata.local_file.file_index)?;
-        if saved_usn != posted_usn {
-            return Err(Error::EditRecoveryUnavailable);
-        }
         #[cfg(feature = "synthetic-agent-integration")]
         eprintln!("synthetic_save_completion_usn_first={saved_usn}");
         let len =
@@ -6323,37 +6314,6 @@ fn verify_completion_identity(handle: Handle, expected: &[u8; 16]) -> Result<(),
         return Err(Error::ConfiguredRootChanged);
     }
     Ok(())
-}
-
-// Flush pending USN reasons on the already identity-validated, immutable file
-// before capturing and hashing a completion snapshot. MS-FSCC 2.3.92 permits
-// this independently of closing the handle; MS-FSA 2.1.5.10.42 returns one USN.
-fn post_completion_usn(handle: Handle) -> Result<i64, Error> {
-    const FSCTL_WRITE_USN_CLOSE_RECORD: u32 = 0x0009_00ef;
-    let mut usn = 0_i64;
-    let mut returned = 0_u32;
-    // SAFETY: same live owned file handle retained through full hashing and
-    // native CAS, aligned exact-size writable output and synchronous call.
-    // No path is reopened, file bytes written, or pointers retained.
-    let result = unsafe {
-        DeviceIoControl(
-            handle,
-            FSCTL_WRITE_USN_CLOSE_RECORD,
-            null(),
-            0,
-            (&mut usn as *mut i64).cast(),
-            size_of::<i64>() as u32,
-            &mut returned,
-            null_mut(),
-        )
-    };
-    if result == 0 {
-        return Err(win32_io_error("post pending edit completion USN"));
-    }
-    if returned != size_of::<i64>() as u32 || usn <= 0 {
-        return Err(Error::EditRecoveryUnavailable);
-    }
-    Ok(usn)
 }
 
 fn completion_usn(handle: Handle, expected_file_id: u64) -> Result<i64, Error> {
