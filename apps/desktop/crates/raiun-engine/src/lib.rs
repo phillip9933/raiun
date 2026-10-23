@@ -28,6 +28,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::{Builder as TempBuilder, NamedTempFile};
 
 mod db_owner;
+mod folder_pair_document;
 use db_owner::DbOwner;
 
 #[cfg(unix)]
@@ -363,6 +364,23 @@ struct Baseline {
 }
 
 impl Engine {
+    /// Load opaque settings only for the exact caller-authenticated scope.
+    pub fn load_folder_pair_document(&self, scope: &[u8]) -> Result<Option<Vec<u8>>, CloudError> {
+        let database = self.db()?;
+        folder_pair_document::load(&database, scope)
+    }
+
+    /// Atomically publish exact expected bytes; account/root authorization is caller-owned.
+    pub fn compare_exchange_folder_pair_document(
+        &self,
+        scope: &[u8],
+        expected: Option<&[u8]>,
+        next: &[u8],
+    ) -> Result<(), CloudError> {
+        let database = self.db()?;
+        folder_pair_document::compare_exchange(&database, scope, expected, next)
+    }
+
     pub fn open(state_dir: &Path, backend: Arc<dyn CloudBackend>) -> Result<Self, CloudError> {
         fs::create_dir_all(state_dir).map_err(io_error)?;
         let state_dir = fs::canonicalize(state_dir).map_err(io_error)?;
@@ -410,6 +428,8 @@ impl Engine {
         backend: Arc<dyn CloudBackend>,
     ) -> Result<Self, CloudError> {
         db.busy_timeout(std::time::Duration::from_secs(10))
+            .map_err(db_error)?;
+        db.execute_batch(folder_pair_document::SCHEMA)
             .map_err(db_error)?;
         db.execute_batch(
             "PRAGMA foreign_keys=ON;

@@ -20,6 +20,13 @@ its existing WAL configuration and lock timeout. Focused Windows tests cover
 persistence, rollback, fixed filenames and preservation of an unexpected WAL.
 Windows compilation and native execution are still pending for this change.
 
+Account-scoped folder settings now have bounded persistence in the same
+protected engine database. A single transaction compares the exact previous
+bytes and scope before committing a replacement; stale or mismatched writes
+cannot reset existing settings. Invalid restored rows fail explicitly. This
+avoids a separate Windows file-replacement implementation. The typed settings
+model and worker are not connected yet; this change does not enable folder sync.
+
 This is storage integration, not a working Windows folder-sync capability.
 Exact-account configuration persistence, authenticated root admission and the
 worker/RPC path still need to be connected. Windows folder sync remains disabled.
