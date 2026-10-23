@@ -232,7 +232,10 @@ impl Runtime {
                     continue;
                 }
                 let (revision, job, pin) = match self.prepare_media_run(
-                    &job.id, job.revision, &self.account_id, authorized,
+                    &job.id,
+                    job.revision,
+                    &self.account_id,
+                    authorized,
                 ) {
                     Ok(prepared) => prepared,
                     Err(error) => {
@@ -388,6 +391,12 @@ impl Runtime {
             excluded_paths: vec![],
         };
         let pin = self.admit(&pair, config, None)?;
+        self.check_source_admission(
+            &job.source_root,
+            &pin,
+            windows_profile_registry::SourceKind::MediaJob,
+            &job.id,
+        )?;
         for other in jobs
             .iter()
             .filter(|other| other.id != job.id && other.account_id == job.account_id)

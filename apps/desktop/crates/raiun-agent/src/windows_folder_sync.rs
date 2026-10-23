@@ -6,6 +6,7 @@ mod media_control {
 mod vault_control {
     include!("windows_vault_control.rs");
 }
+use raiun_cloudfiles_windows::ConfiguredRootIdentity;
 use raiun_control_windows::{PinnedDirectory, PrivateDirectory};
 use raiun_core::{CONFIG_SCHEMA_VERSION, Config, FolderPair, MediaImportJob, SyncMode};
 use raiun_engine::{
@@ -14,8 +15,17 @@ use raiun_engine::{
 };
 use std::collections::BTreeMap;
 use windows_folder_requests::FolderRequest;
+use windows_profile_registry::{Registry, SourceKind};
+
+pub(super) enum SourceAdmissions {
+    Broker {
+        profile: String,
+        registry: SharedSourceAdmissions,
+    },
+}
 
 pub(super) struct Setup {
+    pub source_admissions: SourceAdmissions,
     pub generation: u64,
     pub scope: AccountScope,
     pub account_id: String,
@@ -27,6 +37,8 @@ pub(super) struct Setup {
 }
 
 pub(super) struct Runtime {
+    source_admissions: SourceAdmissions,
+    scope_digest: String,
     pub generation: u64,
     account_id: String,
     engine: Engine,
@@ -39,6 +51,27 @@ pub(super) struct Runtime {
     next_media_sync: std::time::Instant,
 }
 
+fn source_receipt_matches(
+    snapshot: &Registry,
+    profile: &str,
+    scope_digest: &str,
+    kind: SourceKind,
+    id: &str,
+    path: &Path,
+    identity: ConfiguredRootIdentity,
+) -> bool {
+    snapshot.profiles().get(profile).is_some_and(|record| {
+        record.source_reservations().iter().any(|row| {
+            row.scope_digest() == scope_digest
+                && row.kind() == kind
+                && row.id() == id
+                && Some(row.root().path()) == path.to_str()
+                && row.root().volume_serial() == identity.volume_serial
+                && row.root().file_index() == identity.file_index
+        })
+    })
+}
+
 fn store_error(_: impl std::fmt::Debug) -> String {
     "Folder settings could not be read or saved; previous settings were preserved".into()
 }
@@ -47,6 +80,9 @@ impl Runtime {
         if setup.generation == 0 || authorized.load(Ordering::Acquire) != setup.generation {
             return Err("The account changed before folder setup".into());
         }
+        use sha2::Digest;
+        let scope_bytes = serde_json::to_vec(&setup.scope).map_err(store_error)?;
+        let scope_digest = format!("{:x}", sha2::Sha256::digest(&scope_bytes));
         let engine = Engine::open_private_windows(setup.directory, setup.client.clone())
             .and_then(|engine| engine.with_account_scope(setup.account_id.clone(), setup.origin))
             .map_err(store_error)?;
@@ -65,6 +101,8 @@ impl Runtime {
                 .map_err(store_error)?;
         }
         let mut runtime = Self {
+            source_admissions: setup.source_admissions,
+            scope_digest,
             generation: setup.generation,
             account_id: setup.account_id,
             engine,
@@ -126,6 +164,12 @@ impl Runtime {
         replacing: Option<&str>,
     ) -> Result<PinnedDirectory, String> {
         let pin = self.admit(pair, document.config(), replacing)?;
+        self.check_source_admission(
+            &pair.local_path,
+            &pin,
+            windows_profile_registry::SourceKind::FolderPair,
+            &pair.id,
+        )?;
         ensure_pair_media_sources_disjoint(
             &pair.local_path,
             &self.account_id,
@@ -133,6 +177,44 @@ impl Runtime {
         )?;
         Ok(pin)
     }
+    fn check_source_admission(
+        &self,
+        path: &Path,
+        pin: &PinnedDirectory,
+        kind: windows_profile_registry::SourceKind,
+        id: &str,
+    ) -> Result<(), String> {
+        let SourceAdmissions::Broker { profile, registry } = &self.source_admissions;
+        // Clone immutable admission state, releasing its independent mutex
+        // before physical checks/network/SQL. No worker calls back to broker.
+        let snapshot = registry
+            .lock()
+            .map_err(|_| "Source admission is unavailable")?
+            .clone();
+        let identity = pin.identity();
+        if !source_receipt_matches(
+            &snapshot,
+            profile,
+            &self.scope_digest,
+            kind,
+            id,
+            path,
+            ConfiguredRootIdentity {
+                volume_serial: identity.volume_serial,
+                file_index: identity.file_index,
+            },
+        ) {
+            return Err(if snapshot.profiles().contains_key(profile) {
+                "This saved source needs broker admission; settings and local data were preserved"
+            } else {
+                "Source account is unavailable"
+            }
+            .into());
+        }
+        pin.verify_path()
+            .map_err(|_| "The admitted source changed".into())
+    }
+
     fn admit(
         &self,
         pair: &FolderPair,
@@ -241,6 +323,11 @@ impl Runtime {
                 Ok(json!({"space_id":space_id,"paused":paused,"paused_space_ids":ids}))
             }
             FolderRequest::Pairs => serde_json::to_value(config.pairs).map_err(store_error),
+            FolderRequest::Transfers => {
+                let transfers = self.engine.transfers(500).map_err(store_error)?;
+                self.check(authorized)?;
+                serde_json::to_value(transfers).map_err(store_error)
+            }
             FolderRequest::Spaces => serde_json::to_value(&self.spaces).map_err(store_error),
             FolderRequest::List { space_id, path } => {
                 self.space(&space_id)?;
@@ -399,6 +486,14 @@ impl Runtime {
                 .ok_or("The local folder was not admitted")?
                 .verify_path()
                 .map_err(|_| "The selected local folder changed")?;
+            self.check_source_admission(
+                &pair.local_path,
+                self.roots
+                    .get(&pair.id)
+                    .ok_or("The local folder was not admitted")?,
+                windows_profile_registry::SourceKind::FolderPair,
+                &pair.id,
+            )?;
             self.engine.sync_pair(&pair).map_err(
                 |_| "Folder sync needs attention; local and recovery data were preserved",
             )?;
@@ -459,6 +554,110 @@ fn ensure_pair_media_sources_disjoint(
 #[cfg(test)]
 mod source_overlap_tests {
     use super::*;
+
+    #[test]
+    fn source_receipt_requires_exact_profile_scope_kind_id_path_and_physical_identity() {
+        use windows_profile_registry::{RootReservation, SourceReservation};
+        let profile = "profile-11111111111111111111111111111111";
+        let foreign_profile = "profile-22222222222222222222222222222222";
+        let scope = "a".repeat(64);
+        let path = Path::new(r"C:\SyntheticSource");
+        let identity = ConfiguredRootIdentity {
+            volume_serial: 7,
+            file_index: 11,
+        };
+        let snapshot = Registry::decode_or_default(None)
+            .unwrap()
+            .with_added(profile, "Synthetic A")
+            .unwrap()
+            .with_added(foreign_profile, "Synthetic B")
+            .unwrap()
+            .with_reserved_source(
+                profile,
+                SourceReservation::new(
+                    scope.clone(),
+                    SourceKind::FolderPair,
+                    "pair-one".into(),
+                    RootReservation::new(r"C:\SyntheticSource".into(), 7, 11, false).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let matches = |profile, scope, kind, id, path, identity| {
+            source_receipt_matches(&snapshot, profile, scope, kind, id, path, identity)
+        };
+        assert!(matches(
+            profile,
+            &scope,
+            SourceKind::FolderPair,
+            "pair-one",
+            path,
+            identity
+        ));
+        assert!(!matches(
+            foreign_profile,
+            &scope,
+            SourceKind::FolderPair,
+            "pair-one",
+            path,
+            identity
+        ));
+        let foreign_scope = "b".repeat(64);
+        assert!(!matches(
+            profile,
+            &foreign_scope,
+            SourceKind::FolderPair,
+            "pair-one",
+            path,
+            identity
+        ));
+        assert!(!matches(
+            profile,
+            &scope,
+            SourceKind::MediaJob,
+            "pair-one",
+            path,
+            identity
+        ));
+        assert!(!matches(
+            profile,
+            &scope,
+            SourceKind::FolderPair,
+            "pair-other",
+            path,
+            identity
+        ));
+        assert!(!matches(
+            profile,
+            &scope,
+            SourceKind::FolderPair,
+            "pair-one",
+            Path::new(r"C:\Other"),
+            identity
+        ));
+        assert!(!matches(
+            profile,
+            &scope,
+            SourceKind::FolderPair,
+            "pair-one",
+            path,
+            ConfiguredRootIdentity {
+                volume_serial: 8,
+                ..identity
+            }
+        ));
+        assert!(!matches(
+            profile,
+            &scope,
+            SourceKind::FolderPair,
+            "pair-one",
+            path,
+            ConfiguredRootIdentity {
+                file_index: 12,
+                ..identity
+            }
+        ));
+    }
 
     #[test]
     fn folder_pair_rejects_existing_media_source_without_replacing_its_own_job() {

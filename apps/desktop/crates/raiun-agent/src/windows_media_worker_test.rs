@@ -7,10 +7,15 @@ use raiun_core::backend::CloudBackend;
 #[test]
 #[ignore = "requires isolated Windows ordinary-user private storage and loopback synthetic server; no Cloud Files activation, real account, or GUI acceptance"]
 fn ordinary_media_worker_observes_uploads_pauses_and_reads_local_recovery() {
+    use super::super::windows_profile_registry::{
+        Registry, RootReservation, SourceKind, SourceReservation,
+    };
     use raiun_control_windows::{PinnedDirectory, PrivateDirectory};
     use raiun_core::{FolderPair, MediaFilter, MediaImportJob, MediaOrganization, SyncMode};
     use raiun_engine::folder_pairs::AccountScope;
+    use sha2::Digest;
     use std::ffi::OsStr;
+    use std::sync::Mutex;
     use windows_folder_requests::FolderRequest;
     use windows_media_requests::MediaRequest;
     let root = std::env::temp_dir().join(format!(
@@ -42,18 +47,63 @@ fn ordinary_media_worker_observes_uploads_pauses_and_reads_local_recovery() {
         .unwrap()
         .id
         .clone();
+    let profile = "default";
     let scope = AccountScope::new(
-        "default".into(),
+        profile.into(),
         url::Url::parse(&server).unwrap().to_string(),
         "synthetic-client".into(),
         None,
         account_id.clone(),
     )
     .unwrap();
+    let ordinary = root.join("ordinary-disabled");
+    std::fs::create_dir(&ordinary).unwrap();
+    let scope_digest = format!(
+        "{:x}",
+        sha2::Sha256::digest(serde_json::to_vec(&scope).unwrap())
+    );
+    let mut registry = Registry::decode_or_default(None).unwrap();
+    // Both later mutations use exact pre-admitted synthetic sources; neither
+    // the media run nor the disabled ordinary pair gets a fixture bypass.
+    for (kind, id, path) in [
+        (SourceKind::MediaJob, "media-worker", source.as_path()),
+        (
+            SourceKind::FolderPair,
+            "disabled-background-pair",
+            ordinary.as_path(),
+        ),
+    ] {
+        let pin = PinnedDirectory::open(path).unwrap();
+        let identity = pin.identity();
+        pin.verify_path().unwrap();
+        registry = registry
+            .with_reserved_source(
+                profile,
+                SourceReservation::new(
+                    scope_digest.clone(),
+                    kind,
+                    id.into(),
+                    RootReservation::new(
+                        path.to_str().unwrap().into(),
+                        identity.volume_serial,
+                        identity.file_index,
+                        false,
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    let source_admissions = Arc::new(Mutex::new(Arc::new(registry)));
     let generation = 1;
     let manager = ProviderManager::new();
     manager
         .install_folders(windows_folder_sync::Setup {
+            source_admissions: windows_folder_sync::SourceAdmissions::Broker {
+                profile: profile.into(),
+                registry: source_admissions.clone(),
+            },
             generation,
             scope,
             account_id: account_id.clone(),
@@ -67,8 +117,6 @@ fn ordinary_media_worker_observes_uploads_pauses_and_reads_local_recovery() {
         .unwrap();
     let installed_at = std::time::Instant::now();
     assert!(!manager.is_connected());
-    let ordinary = root.join("ordinary-disabled");
-    std::fs::create_dir(&ordinary).unwrap();
     manager
         .folder_request(
             generation,

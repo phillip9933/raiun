@@ -13,6 +13,7 @@ pub enum FolderRequest {
         paused: bool,
     },
     Pairs,
+    Transfers,
     Spaces,
     List {
         space_id: String,
@@ -78,6 +79,7 @@ pub fn decode(request: &Value) -> Result<FolderRequest, String> {
             return super::windows_vault_requests::decode(request).map(FolderRequest::VaultInspect);
         }
         "pairs" => FolderRequest::Pairs,
+        "transfers" => FolderRequest::Transfers,
         "spaces" => FolderRequest::Spaces,
         "list" => {
             let space_id = text(&mut fields, "space_id", 512)?;
@@ -145,6 +147,25 @@ pub fn decode(request: &Value) -> Result<FolderRequest, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn transfers_accepts_only_the_existing_empty_request_envelope() {
+        assert!(matches!(
+            decode(&json!({"action":"transfers","profile_id":"default"})).unwrap(),
+            FolderRequest::Transfers
+        ));
+        for extra in [
+            json!({"limit":500}),
+            json!({"space_id":"s"}),
+            json!({"unexpected":true}),
+        ] {
+            let mut request = json!({"action":"transfers"});
+            request
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            assert_eq!(decode(&request).err().unwrap(), "Invalid folder request");
+        }
+    }
     #[test]
     fn pause_contracts_require_boolean_and_exact_fields() {
         assert!(matches!(

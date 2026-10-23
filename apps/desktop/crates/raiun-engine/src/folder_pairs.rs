@@ -800,4 +800,124 @@ mod tests {
             );
         }
     }
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires isolated ordinary-user Windows private-storage qualification; retains fixture on failure"]
+    fn saved_source_inventory_reads_only_existing_protected_store() {
+        use raiun_control_windows::{PinnedDirectory, PrivateDirectory};
+        use raiun_sqlite_windows::RegisteredRollbackDb;
+        use std::ffi::OsStr;
+
+        // Match the existing one-shot lab admission, without opening any user's
+        // real credential, session, cache or provider directories.
+        assert_eq!(std::env::var("USERNAME").as_deref(), Ok("RaiunLabUser"));
+        let token = std::process::Command::new("powershell.exe")
+            .env_remove("PSModulePath")
+            .args([
+                "-NoProfile", "-NonInteractive", "-Command",
+                "$p=[Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent()); if($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){exit 7}; exit 0",
+            ])
+            .output()
+            .expect("qualify ordinary inherited Windows token");
+        assert!(token.status.success(), "requires ordinary synthetic user");
+        // keep() disables automatic cleanup on every subsequent panic/error.
+        let root = tempfile::Builder::new()
+            .prefix("raiun-source-inventory-native-")
+            .tempdir()
+            .expect("create own synthetic parent")
+            .keep();
+        println!("saved_source_inventory_fixture={}", root.display());
+        let parent = PinnedDirectory::open(&root).expect("pin own synthetic parent");
+        let document = exclusion_document();
+        let scope_bytes = serde_json::to_vec(&scope()).unwrap();
+        let document_bytes = document.encode().unwrap();
+        let digest = format!("{:x}", Sha256::digest(&scope_bytes));
+        let name = format!("folder-sync-{digest}");
+        let create_store = |name: &str| {
+            let private = PrivateDirectory::create_or_open_under(&parent, OsStr::new(name))
+                .expect("create protected synthetic scope");
+            let db = RegisteredRollbackDb::open_engine(private).expect("open fixed test database");
+            let connection = db.borrow_engine_connection();
+            connection
+                .execute_batch(crate::folder_pair_document::SCHEMA)
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO folder_pair_document(id,scope,document) VALUES(1,?1,?2)",
+                    rusqlite::params![scope_bytes.as_slice(), document_bytes.as_slice()],
+                )
+                .unwrap();
+            assert!(db.close().is_ok(), "close test database before inspection");
+        };
+        create_store(&name);
+        let open = |name: &str| {
+            PrivateDirectory::open_under(&parent, OsStr::new(name))
+                .expect("reopen exact protected scope")
+        };
+        let (profile, saved) =
+            SavedSourceExclusions::read_windows_existing(open(&name), &["default"])
+                .unwrap()
+                .expect("existing saved source inventory");
+        assert_eq!(profile, "default");
+        assert_eq!(saved.scope_digest(), digest);
+        assert_eq!(saved.sources().len(), 2);
+        assert!(saved.sources()[0].kind() == SavedSourceKind::FolderPair);
+        assert_eq!(saved.sources()[0].id(), "one");
+        assert_eq!(
+            saved.sources()[0].path(),
+            document.config.pairs[0].local_path
+        );
+        assert!(saved.sources()[1].kind() == SavedSourceKind::MediaJob);
+        assert_eq!(saved.sources()[1].id(), "disabled-media");
+        assert_eq!(
+            saved.sources()[1].path(),
+            document.media_jobs[0].source_root
+        );
+        assert!(matches!(
+            SavedSourceExclusions::read_windows_existing(
+                open(&name),
+                &["profile-11111111111111111111111111111111"],
+            ),
+            Err(DocumentError::ScopeMismatch)
+        ));
+        let mut wrong_digest = digest.clone();
+        wrong_digest.replace_range(..1, if digest.starts_with('0') { "1" } else { "0" });
+        let wrong_name = format!("folder-sync-{wrong_digest}");
+        create_store(&wrong_name);
+        assert!(matches!(
+            SavedSourceExclusions::read_windows_existing(open(&wrong_name), &["default"]),
+            Err(DocumentError::ScopeMismatch)
+        ));
+        let mut absent_scope = scope();
+        absent_scope.subject = "synthetic-absent-database".into();
+        let absent_name = format!(
+            "folder-sync-{:x}",
+            Sha256::digest(serde_json::to_vec(&absent_scope).unwrap())
+        );
+        let absent =
+            PrivateDirectory::create_or_open_under(&parent, OsStr::new(&absent_name)).unwrap();
+        assert!(!absent.path().join("engine.sqlite3").exists());
+        assert!(SavedSourceExclusions::read_windows_existing(absent, &["default"]).is_err());
+        for leaf in ["engine.sqlite3", "engine.sqlite3-journal", "cache.sqlite3"] {
+            assert!(
+                !root.join(&absent_name).join(leaf).exists(),
+                "existing-only refusal created a file"
+            );
+        }
+        let db = RegisteredRollbackDb::open_engine_existing(open(&name)).unwrap();
+        let retained: (Vec<u8>, Vec<u8>) = db
+            .borrow_engine_connection()
+            .query_row(
+                "SELECT scope,document FROM folder_pair_document WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(retained, (scope_bytes, document_bytes));
+        assert!(db.close().is_ok());
+        assert!(!root.join(&name).join("cache.sqlite3").exists());
+        drop(saved);
+        drop(parent);
+        std::fs::remove_dir_all(&root).expect("success-only cleanup of own synthetic fixture");
+    }
 }

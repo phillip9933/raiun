@@ -9,6 +9,7 @@ struct BrokerState {
     runtimes: BTreeMap<String, Arc<WindowsAgent>>,
 }
 pub(super) struct WindowsProfiles {
+    source_admissions: SharedSourceAdmissions,
     storage: DpapiSessionStore,
     state: Mutex<BrokerState>,
     mutation_gate: Mutex<()>,
@@ -53,15 +54,21 @@ impl WindowsProfiles {
         }
         // No runtime/auth refresh starts until every profile's metadata and
         // exclusions have been admitted and the migration is durable.
+        let source_admissions = Arc::new(Mutex::new(Arc::new(registry.clone())));
         let mut runtimes = BTreeMap::new();
         for id in ids {
             let store = DpapiStore::for_profile(&id)?;
             runtimes.insert(
                 id.clone(),
-                Arc::new(WindowsAgent::new_for_profile(&id, store)?),
+                Arc::new(WindowsAgent::new_for_profile_with_sources(
+                    &id,
+                    store,
+                    Some(source_admissions.clone()),
+                )?),
             );
         }
         Ok(Self {
+            source_admissions,
             storage,
             state: Mutex::new(BrokerState { registry, runtimes }),
             mutation_gate: Mutex::new(()),
@@ -87,9 +94,17 @@ impl WindowsProfiles {
     }
 
     fn persist(&self, registry: &Registry) -> Result<(), String> {
+        // Independent snapshot lock only. Workers clone and release it before
+        // any I/O and never acquire broker state/mutation/lifecycle locks.
+        let mut published = self
+            .source_admissions
+            .lock()
+            .map_err(|_| "Source admission is unavailable")?;
         self.storage
             .save_profile_registry(&registry.encode()?)
-            .map_err(|_| "Could not save the account registry".into())
+            .map_err(|_| "Could not save the account registry".to_owned())?;
+        *published = Arc::new(registry.clone());
+        Ok(())
     }
 
     pub(super) fn refresh_all(&self) -> Result<(), String> {
@@ -221,9 +236,10 @@ impl WindowsProfiles {
                 }
                 let id = allocated.ok_or("Could not allocate an account ID")?;
                 let next = state.registry.with_added(&id, label)?;
-                let runtime = Arc::new(WindowsAgent::new_for_profile(
+                let runtime = Arc::new(WindowsAgent::new_for_profile_with_sources(
                     &id,
                     DpapiStore::for_profile(&id)?,
+                    Some(self.source_admissions.clone()),
                 )?);
                 self.persist(&next)?;
                 state.registry = next;
@@ -294,10 +310,50 @@ impl WindowsProfiles {
                 }
                 runtime.handle_request(request)
             }
-            // These mutations must gain full pair/media cross-account source
-            // admission before enabling their existing Windows feature flags.
-            "pair_add" | "pair_exclusions_set" | "media_job_set" => {
-                Err("Cross-account folder and media setup is not enabled yet".into())
+            "pair_add" | "media_job_set" => {
+                if (action == "pair_add" && !WINDOWS_FOLDER_SYNC_ENABLED)
+                    || (action == "media_job_set" && !WINDOWS_MEDIA_METADATA_ENABLED)
+                {
+                    return Err("Cross-account folder and media setup is not enabled yet".into());
+                }
+                let _gate = self
+                    .mutation_gate
+                    .lock()
+                    .map_err(|_| "Account changes are unavailable")?;
+                let (id, runtime) = self.resolve(request)?;
+                if matches!(windows_folder_requests::decode(request)?,
+                    windows_folder_requests::FolderRequest::Media(
+                        windows_media_requests::MediaRequest::Set { job, .. }) if !job.enabled)
+                {
+                    // The worker alone proves an exact existing-job disable
+                    // before skipping its source pin. New/changed disabled jobs
+                    // still require a matching durable receipt and live pin.
+                    return runtime.handle_request(request);
+                }
+                let (reservation, pin) = runtime.prepare_source_reservation(request)?;
+                {
+                    let mut state = self
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?;
+                    let next = state.registry.with_reserved_source(&id, reservation)?;
+                    validate_separation(&next)?;
+                    // Publish the exclusion/worker receipt durably before the
+                    // existing authenticated worker's document CAS or policy.
+                    self.persist(&next)?;
+                    state.registry = next;
+                }
+                let result = runtime.handle_request(request);
+                pin.verify_path()
+                    .map_err(|_| "The source changed; settings and recovery were preserved")?;
+                result
+            }
+            "pair_exclusions_set" => {
+                if !WINDOWS_FOLDER_SYNC_ENABLED {
+                    return Err("Cross-account folder setup is not enabled yet".into());
+                }
+                let (_, runtime) = self.resolve(request)?;
+                runtime.handle_request(request)
             }
             _ => {
                 let (id, runtime) = self.resolve(request)?;
@@ -438,12 +494,17 @@ fn pin_reservation(root: &RootReservation) -> Result<ReservedPin, String> {
 fn validate_separation(registry: &Registry) -> Result<(), String> {
     let mut roots = Vec::new();
     for (id, profile) in registry.profiles() {
-        for root in profile.root_reservations().iter().chain(
-            profile
-                .source_reservations()
-                .iter()
-                .map(SourceReservation::root),
-        ) {
+        for (root, source) in profile
+            .root_reservations()
+            .iter()
+            .map(|root| (root, false))
+            .chain(
+                profile
+                    .source_reservations()
+                    .iter()
+                    .map(|row| (row.root(), true)),
+            )
+        {
             let pin = pin_reservation(root)?;
             let registered = match &pin {
                 ReservedPin::Plain(_) => None,
@@ -452,12 +513,14 @@ fn validate_separation(registry: &Registry) -> Result<(), String> {
             if overlaps_private_state(Path::new(root.path()), registered)? {
                 return Err("A reserved account folder overlaps private application data".into());
             }
-            roots.push((id, root, pin));
+            roots.push((id, root, pin, source));
         }
     }
-    for (index, (left_id, left, left_pin)) in roots.iter().enumerate() {
-        for (right_id, right, right_pin) in roots.iter().skip(index + 1) {
-            if left_id == right_id {
+    for (index, (left_id, left, left_pin, left_source)) in roots.iter().enumerate() {
+        for (right_id, right, right_pin, right_source) in roots.iter().skip(index + 1) {
+            // Same-account cloud/source overlap is also forbidden: choosing a
+            // drive folder must never register over an existing sync source.
+            if left_id == right_id && left_source == right_source {
                 continue;
             }
             let left_path = Path::new(left.path());
@@ -576,6 +639,79 @@ pub(super) fn serve_profiles() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_separation_refuses_cross_profile_and_same_account_drive_overlap() {
+        let mut nonce = [0_u8; 16];
+        getrandom::fill(&mut nonce).unwrap();
+        let nonce = nonce.iter().map(|v| format!("{v:02x}")).collect::<String>();
+        let root = std::env::temp_dir().join(format!("raiun-source-separation-{nonce}"));
+        std::fs::create_dir(&root).unwrap();
+        eprintln!("synthetic_source_separation_fixture={}", root.display());
+        let cloud = root.join("drive");
+        let source = root.join("photos");
+        let child = source.join("child");
+        std::fs::create_dir(&cloud).unwrap();
+        std::fs::create_dir_all(&child).unwrap();
+        let reservation = |path: &Path| {
+            let pin = raiun_control_windows::PinnedDirectory::open(path).unwrap();
+            let identity = pin.identity();
+            RootReservation::new(
+                path.to_str().unwrap().into(),
+                identity.volume_serial,
+                identity.file_index,
+                false,
+            )
+            .unwrap()
+        };
+        let digest = "a".repeat(64);
+        let registry = Registry::decode_or_default(None)
+            .unwrap()
+            .with_reserved_root("default", reservation(&cloud))
+            .unwrap()
+            .with_reserved_source(
+                "default",
+                SourceReservation::new(
+                    digest.clone(),
+                    SourceKind::MediaJob,
+                    "photos".into(),
+                    reservation(&source),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(validate_separation(&registry).is_ok());
+        let same_account_overlap = registry
+            .with_reserved_source(
+                "default",
+                SourceReservation::new(
+                    digest.clone(),
+                    SourceKind::FolderPair,
+                    "drive-as-source".into(),
+                    reservation(&cloud),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(validate_separation(&same_account_overlap).is_err());
+        let other = "profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let cross_account_overlap = registry
+            .with_added(other, "Other")
+            .unwrap()
+            .with_reserved_source(
+                other,
+                SourceReservation::new(
+                    digest,
+                    SourceKind::FolderPair,
+                    "nested".into(),
+                    reservation(&child),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(validate_separation(&cross_account_overlap).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     #[ignore = "one-shot NIC-less lab VM; task-qualified ordinary RaiunLabUser; leaves registry evidence"]

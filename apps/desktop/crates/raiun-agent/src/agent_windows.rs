@@ -161,7 +161,10 @@ struct WindowsRecoveryContext {
     recovery_provider: raiun_cloudfiles_windows::DurableEditRecoveryProvider,
 }
 
+type SharedSourceAdmissions = Arc<Mutex<Arc<windows_profile_registry::Registry>>>;
+
 struct WindowsAgent {
+    source_admissions: Option<SharedSourceAdmissions>,
     profile_scope: String,
     session_store: Arc<dyn SessionStore>,
     state: Arc<Mutex<AccountState>>,
@@ -1240,6 +1243,14 @@ impl WindowsAgent {
         profile: &str,
         session_store: impl SessionStore + 'static,
     ) -> Result<Self, String> {
+        Self::new_for_profile_with_sources(profile, session_store, None)
+    }
+
+    fn new_for_profile_with_sources(
+        profile: &str,
+        session_store: impl SessionStore + 'static,
+        source_admissions: Option<SharedSourceAdmissions>,
+    ) -> Result<Self, String> {
         if !valid_runtime_profile(profile) {
             return Err("Invalid Windows runtime profile".into());
         }
@@ -1250,6 +1261,7 @@ impl WindowsAgent {
             return Err("Windows runtime and session store profiles differ".into());
         }
         let agent = Self {
+            source_admissions,
             profile_scope: profile.into(),
             session_store: Arc::new(session_store),
             state: Arc::new(Mutex::new(AccountState::default())),
@@ -1327,6 +1339,7 @@ impl WindowsAgent {
         match action {
             "status" => Ok((self.status()?, false)),
             "pairs"
+            | "transfers"
             | "spaces"
             | "list"
             | "pair_add"
@@ -1824,6 +1837,132 @@ impl WindowsAgent {
         Ok(recovery_outcome_json(outcome))
     }
 
+    /// Prepare exclusion metadata from the live authenticated account, never
+    /// from the saved document or a request-supplied account identity. The broker
+    /// retains this pin through durable publication and worker admission.
+    fn prepare_source_reservation(
+        &self,
+        request: &Value,
+    ) -> Result<
+        (
+            windows_profile_registry::SourceReservation,
+            raiun_control_windows::PinnedDirectory,
+        ),
+        String,
+    > {
+        use raiun_engine::folder_pairs::AccountScope;
+        use sha2::Digest;
+        use windows_folder_requests::FolderRequest;
+        use windows_media_requests::MediaRequest;
+        use windows_profile_registry::{RootReservation, SourceKind, SourceReservation};
+        if request
+            .get("profile_id")
+            .is_some_and(|value| value.as_str() != Some(self.profile_scope.as_str()))
+        {
+            return Err("Select the current Windows account".into());
+        }
+        let (session, generation) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if !state.online_authenticated
+                || state.logout_pending
+                || state.authenticating
+                || state.refreshing
+                || state.needs_refresh
+                || state.session_cleanup_uncertain
+            {
+                return Err("Connect this account before admitting a source".into());
+            }
+            (
+                state.session.clone().ok_or("Connect this account")?,
+                state.active_generation,
+            )
+        };
+        let client = Arc::new(
+            OpenCloudClient::new_with_proxy(
+                &session.server,
+                session.access_token.clone(),
+                &session.proxy,
+            )
+            .map_err(|_| "Could not verify the source account")?,
+        );
+        let (_, account, _, _, _) = verified_account_roots(&client, &session.server)?;
+        let (kind, id, path) = match windows_folder_requests::decode(request)? {
+            FolderRequest::Add(pair) => (SourceKind::FolderPair, pair.id, pair.local_path),
+            FolderRequest::Media(MediaRequest::Set {
+                job,
+                expected_account_id,
+                ..
+            }) => {
+                if job.account_id != account || expected_account_id != account {
+                    return Err("Media source belongs to another account".into());
+                }
+                (SourceKind::MediaJob, job.id, job.source_root)
+            }
+            _ => return Err("This request does not admit a source".into()),
+        };
+        let issuer = session
+            .expected_issuer
+            .as_ref()
+            .map(|value| url::Url::parse(value).map(|url| url.to_string()))
+            .transpose()
+            .map_err(|_| "The account issuer is invalid")?;
+        let scope = AccountScope::new(
+            self.profile_scope.clone(),
+            url::Url::parse(&session.server)
+                .map_err(|_| "The account server is invalid")?
+                .to_string(),
+            session.client_id.clone(),
+            issuer,
+            account,
+        )
+        .map_err(|_| "The source account scope is invalid")?;
+        let bytes =
+            serde_json::to_vec(&scope).map_err(|_| "The source account scope is invalid")?;
+        let pin = raiun_control_windows::PinnedDirectory::open(&path)
+            .map_err(|_| "The source folder is unavailable or contains a reparse point")?;
+        let identity = pin.identity();
+        let reservation = SourceReservation::new(
+            format!("{:x}", sha2::Sha256::digest(bytes)),
+            kind,
+            id,
+            RootReservation::new(
+                path.to_str().ok_or("The source path is invalid")?.into(),
+                identity.volume_serial,
+                identity.file_index,
+                false,
+            )?,
+        )?;
+        {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if state.active_generation != generation
+                || !state.online_authenticated
+                || state.logout_pending
+                || state.authenticating
+                || state.refreshing
+                || state.needs_refresh
+                || state.session_cleanup_uncertain
+                || state.session.as_ref().is_none_or(|current| {
+                    current.server != session.server
+                        || current.client_id != session.client_id
+                        || current.expected_issuer != session.expected_issuer
+                        || current.access_token != session.access_token
+                        || current.expires_at != session.expires_at
+                })
+            {
+                return Err("The account changed during source admission".into());
+            }
+        }
+        pin.verify_path()
+            .map_err(|_| "The source changed during admission")?;
+        Ok((reservation, pin))
+    }
+
     fn folder_request(&self, request: &Value) -> Result<Value, String> {
         use raiun_control_windows::{PinnedDirectory, PrivateDirectory};
         use raiun_engine::folder_pairs::AccountScope;
@@ -1920,6 +2059,13 @@ impl WindowsAgent {
                 }
             }
             self.provider.install_folders(windows_folder_sync::Setup {
+                source_admissions: windows_folder_sync::SourceAdmissions::Broker {
+                    profile: self.profile_scope.clone(),
+                    registry: self
+                        .source_admissions
+                        .clone()
+                        .ok_or("Broker source admission is unavailable")?,
+                },
                 generation,
                 scope,
                 account_id,
@@ -11199,6 +11345,7 @@ mod tests {
             br#"{"old_user_root":"never_reuse"}"#.to_vec(),
         );
         let agent = Arc::new(WindowsAgent {
+            source_admissions: None,
             profile_scope: "default".into(),
             session_store: store.clone(),
             state: Arc::new(Mutex::new(AccountState::default())),
@@ -11267,6 +11414,7 @@ mod tests {
             br#"{"old_user_root":"never_reuse"}"#.to_vec(),
         );
         let agent = Arc::new(WindowsAgent {
+            source_admissions: None,
             profile_scope: "default".into(),
             session_store: store.clone(),
             state: Arc::new(Mutex::new(AccountState::default())),
@@ -11885,6 +12033,7 @@ mod tests {
         let store = Arc::new(MemoryStore::default());
         *store.fail_saves.lock().unwrap() = true;
         let agent = Arc::new(WindowsAgent {
+            source_admissions: None,
             profile_scope: "default".into(),
             session_store: store,
             state: Arc::new(Mutex::new(AccountState::default())),
@@ -11933,6 +12082,7 @@ mod tests {
         let (server, fixture) = synthetic_oidc_server(false);
         let store = Arc::new(MemoryStore::default());
         let agent = Arc::new(WindowsAgent {
+            source_admissions: None,
             profile_scope: "default".into(),
             session_store: store.clone(),
             state: Arc::new(Mutex::new(AccountState::default())),
@@ -11965,6 +12115,7 @@ mod tests {
             release: Mutex::new(release_rx),
         }));
         let agent = Arc::new(WindowsAgent {
+            source_admissions: None,
             profile_scope: "default".into(),
             session_store: store.clone(),
             state: Arc::new(Mutex::new(AccountState::default())),

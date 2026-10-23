@@ -5,10 +5,15 @@ use raiun_core::backend::CloudBackend;
 #[test]
 #[ignore = "requires isolated Windows test environment, loopback synthetic server and private ordinary folders; no Cloud Files registration or GUI acceptance"]
 fn ordinary_folder_worker_download_upload_exclude_remove_and_reopen() {
+    use super::super::windows_profile_registry::{
+        Registry, RootReservation, SourceKind, SourceReservation,
+    };
     use raiun_control_windows::{PinnedDirectory, PrivateDirectory};
     use raiun_core::{FolderPair, SyncMode};
     use raiun_engine::folder_pairs::AccountScope;
+    use sha2::Digest;
     use std::ffi::OsStr;
+    use std::sync::Mutex;
     use windows_folder_requests::FolderRequest;
 
     let root = std::env::temp_dir().join(format!(
@@ -33,14 +38,44 @@ fn ordinary_folder_worker_download_upload_exclude_remove_and_reopen() {
         .unwrap()
         .id
         .clone();
+    let profile = "default";
     let scope = AccountScope::new(
-        "default".into(),
+        profile.into(),
         url::Url::parse(&server).unwrap().to_string(),
         "synthetic-client".into(),
         None,
         account_id.clone(),
     )
     .unwrap();
+    let scope_digest = format!(
+        "{:x}",
+        sha2::Sha256::digest(serde_json::to_vec(&scope).unwrap())
+    );
+    let registry = {
+        let pin = PinnedDirectory::open(&local).unwrap();
+        let identity = pin.identity();
+        pin.verify_path().unwrap();
+        Registry::decode_or_default(None)
+            .unwrap()
+            .with_reserved_source(
+                profile,
+                SourceReservation::new(
+                    scope_digest,
+                    SourceKind::FolderPair,
+                    "ordinary-project-pair".into(),
+                    RootReservation::new(
+                        local.to_str().unwrap().into(),
+                        identity.volume_serial,
+                        identity.file_index,
+                        false,
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+    };
+    let source_admissions = Arc::new(Mutex::new(Arc::new(registry)));
     let origin = client.server_origin().unwrap();
     let generation = 1;
     let manager = ProviderManager::new();
@@ -50,6 +85,10 @@ fn ordinary_folder_worker_download_upload_exclude_remove_and_reopen() {
     );
     manager
         .install_folders(windows_folder_sync::Setup {
+            source_admissions: windows_folder_sync::SourceAdmissions::Broker {
+                profile: profile.into(),
+                registry: source_admissions.clone(),
+            },
             generation,
             scope: scope.clone(),
             account_id: account_id.clone(),
@@ -221,6 +260,10 @@ fn ordinary_folder_worker_download_upload_exclude_remove_and_reopen() {
     let reopened = ProviderManager::new();
     reopened
         .install_folders(windows_folder_sync::Setup {
+            source_admissions: windows_folder_sync::SourceAdmissions::Broker {
+                profile: profile.into(),
+                registry: source_admissions.clone(),
+            },
             generation,
             scope,
             account_id,
