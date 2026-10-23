@@ -51,6 +51,19 @@ pub struct Engine {
     offline_namespace: Arc<OfflineNamespace>,
 }
 
+/// A one-way cancellation handle that can cross a worker boundary without
+/// transferring the database/VFS owner. Revocation stops subsequent sync steps;
+/// the caller must still drain the worker before replacing account credentials.
+#[derive(Clone)]
+pub struct SyncRevocationHandle {
+    paused: Arc<AtomicBool>,
+}
+impl SyncRevocationHandle {
+    pub fn revoke(&self) {
+        self.paused.store(true, Ordering::Release);
+    }
+}
+
 /// Holds the engine dispatch fence while a caller durably persists an updated
 /// profile policy. The caller publishes this in-memory policy only after the
 /// settings write succeeds; dropping the guard rolls back by doing nothing.
@@ -196,7 +209,7 @@ struct Inner {
     /// Access is serialized by `execution` with every sync dispatch.
     pair_policies: Mutex<BTreeMap<String, Option<Vec<String>>>>,
     metadata_gate: Mutex<()>,
-    sync_paused: AtomicBool,
+    sync_paused: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -544,7 +557,7 @@ impl Engine {
                 execution: Mutex::new(()),
                 pair_policies: Mutex::new(BTreeMap::new()),
                 metadata_gate: Mutex::new(()),
-                sync_paused: AtomicBool::new(false),
+                sync_paused: Arc::new(AtomicBool::new(false)),
             }),
         })
     }
@@ -1054,6 +1067,12 @@ impl Engine {
 
     /// Pause or resume folder-pair reconciliation. An in-flight sync stops at
     /// its next local-entry, remote-entry, or reconciliation boundary.
+    pub fn revocation_handle(&self) -> SyncRevocationHandle {
+        SyncRevocationHandle {
+            paused: Arc::clone(&self.inner.sync_paused),
+        }
+    }
+
     pub fn set_sync_paused(&self, paused: bool) {
         self.inner.sync_paused.store(paused, Ordering::Release);
     }
@@ -4630,12 +4649,12 @@ impl Engine {
         let _metadata = self.metadata_publication()?;
         let cache_mutation = self.begin_cache_mutation(space, &[path])?;
         let id = self.begin_transfer(pair_id, space, path, "upload")?;
-        let upload = match expected_root {
+        let upload = self.check_sync_paused().and_then(|()| match expected_root {
             Some(root) => self
                 .backend
                 .upload_in_root(space, path, source, condition, root),
             None => self.backend.upload(space, path, source, condition),
-        };
+        });
         let result = upload.and_then(|uploaded| {
             let remote_temp = self.unique_temp("verify")?;
             let download = match expected_root {

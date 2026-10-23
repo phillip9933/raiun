@@ -12,6 +12,13 @@ mod windows_cache_status;
 #[path = "windows_offline_jobs.rs"]
 mod windows_offline_jobs;
 
+#[path = "windows_folder_requests.rs"]
+mod windows_folder_requests;
+#[path = "windows_folder_sync.rs"]
+mod windows_folder_sync;
+
+const WINDOWS_FOLDER_SYNC_ENABLED: bool = false;
+
 use clap::{Parser, Subcommand};
 use raiun_cloudfiles_windows::{
     configured_roots_overlap, pin_configured_root, pin_registered_configured_root,
@@ -145,6 +152,7 @@ struct WindowsAgent {
     provider: Arc<ProviderManager>,
     auth_thread: Mutex<Option<JoinHandle<()>>>,
     refresh_thread: Mutex<Option<JoinHandle<()>>>,
+    folder_lifecycle: Mutex<()>,
 }
 
 /// Own the native Cloud Files connection on one dedicated thread. The native
@@ -158,6 +166,9 @@ struct ProviderManager {
     recovery_cursor_nonce: Option<[u8; 32]>,
     offline_jobs: Arc<windows_offline_jobs::OfflineJobs>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    folder_generation: Arc<AtomicU64>,
+    folder_revocation: Arc<Mutex<Option<raiun_engine::SyncRevocationHandle>>>,
+    folder_error: Arc<Mutex<Option<String>>>,
     // Per-instance native-test capability; absent from production binaries and
     // never controlled by environment, IPC, configuration, or another agent.
     #[cfg(all(test, debug_assertions))]
@@ -176,6 +187,15 @@ struct ActiveProviderBinding {
 }
 
 enum ProviderCommand {
+    InstallFolders {
+        setup: Box<windows_folder_sync::Setup>,
+        response: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+    FolderRequest {
+        generation: u64,
+        request: windows_folder_requests::FolderRequest,
+        response: std::sync::mpsc::SyncSender<Result<Value, String>>,
+    },
     PrepareOfflineFolder {
         binding: ActiveProviderBinding,
         response: std::sync::mpsc::SyncSender<Result<Value, String>>,
@@ -307,6 +327,12 @@ impl ProviderManager {
         let worker_initial_save_activation = Arc::clone(&initial_save_activation);
         let offline_jobs = Arc::new(windows_offline_jobs::OfflineJobs::default());
         let worker_jobs = Arc::clone(&offline_jobs);
+        let folder_generation = Arc::new(AtomicU64::new(0));
+        let worker_folder_generation = Arc::clone(&folder_generation);
+        let folder_revocation = Arc::new(Mutex::new(None::<raiun_engine::SyncRevocationHandle>));
+        let worker_folder_revocation = Arc::clone(&folder_revocation);
+        let folder_error = Arc::new(Mutex::new(None));
+        let worker_folder_error = Arc::clone(&folder_error);
         let worker = thread::Builder::new()
             .name("raiun-windows-cloud-files".into())
             .spawn(move || {
@@ -315,6 +341,7 @@ impl ProviderManager {
                 let mut backend: Option<Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>> =
                     None;
                 let mut active_binding: Option<ActiveProviderBinding> = None;
+                let mut folders: Option<windows_folder_sync::Runtime> = None;
                 loop {
                     let command = match receiver.recv_timeout(Duration::from_millis(250)) {
                         Ok(command) => Some(command),
@@ -323,6 +350,42 @@ impl ProviderManager {
                     };
                     if let Some(command) = command {
                     match command {
+                        ProviderCommand::InstallFolders { setup, response } => {
+                            let generation = setup.generation;
+                            let result = (|| {
+                                if worker_generation.load(Ordering::Acquire) != generation { return Err("The account changed before folder setup".into()); }
+                                if folders.as_ref().is_some_and(|runtime| runtime.generation == generation) { return Ok(()); }
+                                let runtime = windows_folder_sync::Runtime::open(*setup, &worker_generation)?;
+                                let mut cancellation = worker_folder_revocation.lock().map_err(|_| "Folder cancellation is unavailable")?;
+                                if worker_generation.load(Ordering::Acquire) != generation { return Err("The account changed during folder setup".into()); }
+                                if let Some(previous) = cancellation.take() { previous.revoke(); }
+                                *cancellation = Some(runtime.revocation_handle());
+                                folders = Some(runtime);
+                                worker_folder_generation.store(generation, Ordering::Release);
+                                Ok(())
+                            })();
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::FolderRequest { generation, request, response } => {
+                            let Some(runtime) = folders.as_mut().filter(|runtime| runtime.generation == generation && worker_generation.load(Ordering::Acquire) == generation) else {
+                                let _ = response.send(Err("The account changed before folder work".into())); continue;
+                            };
+                            if let windows_folder_requests::FolderRequest::Sync { space_id } = request {
+                                match runtime.prepare_sync(space_id.as_deref(), &worker_generation) {
+                                    Ok((revision, pairs)) => {
+                                        // Acceptance is queued work, never a claim of completion.
+                                        let accepted = space_id.as_ref().map_or_else(|| json!({}), |id| json!({"accepted":true,"space_id":id}));
+                                        let _ = response.send(Ok(accepted));
+                                        let result = runtime.run_sync(revision, pairs, &worker_generation);
+                                        if let Ok(mut error) = worker_folder_error.lock() { *error = result.err(); }
+                                    }
+                                    Err(error) => { let _ = response.send(Err(error)); }
+                                }
+                            } else {
+                                let result = runtime.handle(request, &worker_generation);
+                                let _ = response.send(result);
+                            }
+                        }
                         ProviderCommand::ListOfflineFolders { binding, cursor, cancellation, response } => {
                             let mut result = windows_cache_status::inspect_worker_folder_page(
                                 worker_generation.load(Ordering::Acquire), &binding,
@@ -629,6 +692,10 @@ impl ProviderManager {
                             let _ = response.send(result);
                         }
                         ProviderCommand::Disconnect(response) => {
+                            if let Ok(mut handle) = worker_folder_revocation.lock() { if let Some(handle) = handle.take() { handle.revoke(); } }
+                            drop(folders.take());
+                            worker_folder_generation.store(0, Ordering::Release);
+                            if let Ok(mut error) = worker_folder_error.lock() { *error = None; }
                             worker_jobs.cancel_all();
                             let result = disconnect_provider_connection(
                                 &mut connection,
@@ -641,6 +708,10 @@ impl ProviderManager {
                             let _ = response.send(result);
                         }
                         ProviderCommand::Stop(response) => {
+                            if let Ok(mut handle) = worker_folder_revocation.lock() { if let Some(handle) = handle.take() { handle.revoke(); } }
+                            drop(folders.take());
+                            worker_folder_generation.store(0, Ordering::Release);
+                            if let Ok(mut error) = worker_folder_error.lock() { *error = None; }
                             worker_jobs.cancel_all();
                             let result = disconnect_provider_connection(
                                 &mut connection,
@@ -672,6 +743,9 @@ impl ProviderManager {
             commands,
             connected,
             authorized_generation,
+            folder_generation,
+            folder_revocation,
+            folder_error,
             offline_jobs,
             recovery_cursor_nonce: {
                 let mut nonce = [0; 32];
@@ -727,7 +801,46 @@ impl ProviderManager {
             .map_err(|_| "Windows Cloud Files connection manager stopped unexpectedly")?
     }
 
+    fn revoke_folders(&self) {
+        // Serialize cancellation publication with InstallFolders. No database
+        // owner or token lock crosses threads or is held through networking.
+        if let Ok(mut handle) = self.folder_revocation.lock() {
+            if let Some(handle) = handle.take() {
+                handle.revoke();
+            }
+        }
+        self.folder_generation.store(0, Ordering::Release);
+    }
+
+    fn install_folders(&self, setup: windows_folder_sync::Setup) -> Result<(), String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::InstallFolders {
+                setup: Box::new(setup),
+                response,
+            })
+            .map_err(|_| "Windows folder worker is unavailable")?;
+        result.recv().map_err(|_| "Windows folder worker stopped")?
+    }
+
+    fn folder_request(
+        &self,
+        generation: u64,
+        request: windows_folder_requests::FolderRequest,
+    ) -> Result<Value, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::FolderRequest {
+                generation,
+                request,
+                response,
+            })
+            .map_err(|_| "Windows folder worker is unavailable")?;
+        result.recv().map_err(|_| "Windows folder worker stopped")?
+    }
+
     fn disconnect(&self) -> Result<(), String> {
+        self.revoke_folders();
         let (response, result) = std::sync::mpsc::sync_channel(1);
         self.commands
             .send(ProviderCommand::Disconnect(response))
@@ -834,6 +947,16 @@ impl ProviderManager {
     }
 
     fn authorize_generation(&self, generation: u64) {
+        // InstallFolders checks/publishes under this same lock. Revocation and
+        // the generation change must be atomic against that publication.
+        let mut handle = self
+            .folder_revocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(handle) = handle.take() {
+            handle.revoke();
+        }
+        self.folder_generation.store(0, Ordering::Release);
         self.offline_jobs
             .cancel_and_authorize(&self.authorized_generation, generation);
     }
@@ -938,6 +1061,7 @@ fn disconnect_provider_connection(
 
 impl Drop for ProviderManager {
     fn drop(&mut self) {
+        self.revoke_folders();
         let (response, result) = std::sync::mpsc::sync_channel(1);
         let _ = self.commands.send(ProviderCommand::Stop(response));
         let _ = result.recv();
@@ -958,6 +1082,7 @@ impl WindowsAgent {
             provider: Arc::new(ProviderManager::new()),
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
+            folder_lifecycle: Mutex::new(()),
         };
         agent.restore_active_session();
         agent
@@ -1016,6 +1141,20 @@ impl WindowsAgent {
             .ok_or("Control request must include a string action")?;
         match action {
             "status" => Ok((self.status()?, false)),
+            "pairs"
+            | "spaces"
+            | "list"
+            | "pair_add"
+            | "pair_exclusions_set"
+            | "pair_remove"
+            | "space_disconnect"
+            | "space_sync_now"
+            | "sync_now" => {
+                if !WINDOWS_FOLDER_SYNC_ENABLED {
+                    return Err("Windows folder sync is awaiting native acceptance".into());
+                }
+                Ok((self.folder_request(request)?, false))
+            }
             "windows_recovery_retry" => Ok((self.retry_recovered_edit(request)?, false)),
             "windows_file_cache_status" => Ok((self.windows_file_cache_status(request)?, false)),
             "windows_offline_folders" => {
@@ -1111,6 +1250,12 @@ impl WindowsAgent {
         self.maybe_start_refresh()?;
         let mounted = self.provider.is_connected();
         let provider_supported = self.provider.activation_enabled();
+        let folder_error = self
+            .provider
+            .folder_error
+            .lock()
+            .ok()
+            .and_then(|value| value.clone());
         let state = self
             .state
             .lock()
@@ -1132,7 +1277,7 @@ impl WindowsAgent {
                 "registration_state": value.registration_ownership.as_ref().map(|owner| owner.state.as_str()),
                 "recovery_scope_token": self.provider.configuration_recovery_scope_token(value, state.active_generation).ok(),
             })),
-            "error": state.error.as_deref().or_else(|| (!provider_supported).then_some(PROVIDER_UNAVAILABLE)),
+            "error": state.error.as_deref().or(folder_error.as_deref()).or_else(|| (!provider_supported).then_some(PROVIDER_UNAVAILABLE)),
             "autostart": null,
             "recovery_folder": null,
             "encrypted_edit_recovery_available": false,
@@ -1141,7 +1286,7 @@ impl WindowsAgent {
             "profile_label": "This PC",
             "auth_generation": state.active_generation,
             "provider_supported": provider_supported,
-            "folder_sync_supported": false,
+            "folder_sync_supported": WINDOWS_FOLDER_SYNC_ENABLED,
             "media_jobs_supported": false,
             "vaults_supported": false,
             "account_switch_supported": false,
@@ -1479,7 +1624,131 @@ impl WindowsAgent {
         Ok(recovery_outcome_json(outcome))
     }
 
+    fn folder_request(&self, request: &Value) -> Result<Value, String> {
+        use raiun_control_windows::{PinnedDirectory, PrivateDirectory};
+        use raiun_engine::folder_pairs::AccountScope;
+        use sha2::Digest;
+        let _lifecycle = self
+            .folder_lifecycle
+            .lock()
+            .map_err(|_| "Folder setup is unavailable")?;
+        if request
+            .get("profile_id")
+            .is_some_and(|id| id.as_str() != Some("default"))
+        {
+            return Err("The selected account is unavailable".into());
+        }
+        let decoded = windows_folder_requests::decode(request)?;
+        let (session, generation, cloud_root) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if !state.online_authenticated
+                || state.logout_pending
+                || state.authenticating
+                || state.refreshing
+                || state.needs_refresh
+            {
+                return Err("Connect this account before using folder sync".into());
+            }
+            (
+                state
+                    .session
+                    .clone()
+                    .ok_or("Sign in before using folder sync")?,
+                state.active_generation,
+                state.root_configuration.clone(),
+            )
+        };
+        if self.provider.folder_generation.load(Ordering::Acquire) != generation {
+            let client = Arc::new(
+                OpenCloudClient::new_with_proxy(
+                    &session.server,
+                    session.access_token.clone(),
+                    &session.proxy,
+                )
+                .map_err(|_| "Could not prepare the connected account")?,
+            );
+            let (_, account_id, _, spaces, _) = verified_account_roots(&client, &session.server)?;
+            let server = url::Url::parse(&session.server)
+                .map_err(|_| "The account server is invalid")?
+                .to_string();
+            let issuer = session
+                .expected_issuer
+                .as_ref()
+                .map(|issuer| url::Url::parse(issuer).map(|value| value.to_string()))
+                .transpose()
+                .map_err(|_| "The account issuer is invalid")?;
+            let scope = AccountScope::new(
+                "default".into(),
+                server,
+                session.client_id.clone(),
+                issuer,
+                account_id.clone(),
+            )
+            .map_err(|_| "The verified folder account is invalid")?;
+            let identity =
+                serde_json::to_vec(&scope).map_err(|_| "The verified folder account is invalid")?;
+            let name = format!("folder-sync-{:x}", sha2::Sha256::digest(&identity));
+            let store = DpapiSessionStore::current_user()
+                .map_err(|_| "Private Windows storage is unavailable")?;
+            let parent = PinnedDirectory::open(store.local_edit_state_directory())
+                .map_err(|_| "Private Windows storage is unavailable")?;
+            let directory =
+                PrivateDirectory::create_or_open_under(&parent, std::ffi::OsStr::new(&name))
+                    .map_err(|_| "Private account storage could not be admitted")?;
+            let origin = client
+                .server_origin()
+                .ok_or("The connected server origin is invalid")?;
+            {
+                let state = self
+                    .state
+                    .lock()
+                    .map_err(|_| "Account state is unavailable")?;
+                if state.active_generation != generation
+                    || !state.online_authenticated
+                    || state.logout_pending
+                    || state.root_configuration != cloud_root
+                    || state.session.as_ref().is_none_or(|current| {
+                        current.server != session.server
+                            || current.client_id != session.client_id
+                            || current.expected_issuer != session.expected_issuer
+                    })
+                {
+                    return Err("The account changed during folder setup".into());
+                }
+            }
+            self.provider.install_folders(windows_folder_sync::Setup {
+                generation,
+                scope,
+                account_id,
+                origin,
+                client,
+                spaces,
+                directory,
+                cloud_root,
+            })?;
+        }
+        let result = self.provider.folder_request(generation, decoded)?;
+        if self.generation.load(Ordering::Acquire) != generation {
+            return Err("The account changed during folder work".into());
+        }
+        Ok(result)
+    }
+
     fn configure_root(&self, request: &Value) -> Result<Value, String> {
+        let _folder_lifecycle = self
+            .folder_lifecycle
+            .lock()
+            .map_err(|_| "Folder setup is unavailable")?;
+        // Drain ordinary folder work before changing its cloud-root boundary.
+        // Preserve the existing native-only configure path while C04 is gated.
+        if WINDOWS_FOLDER_SYNC_ENABLED
+            || self.provider.folder_generation.load(Ordering::Acquire) != 0
+        {
+            self.provider.disconnect()?;
+        }
         let (session, generation, previous_root) = {
             let state = self
                 .state
@@ -10544,6 +10813,7 @@ mod tests {
             provider: Arc::new(ProviderManager::new()),
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
+            folder_lifecycle: Mutex::new(()),
         });
         let info = agent
             .begin_auth(&json!({"server":server,"client_id":"synthetic-client"}))
@@ -10610,6 +10880,7 @@ mod tests {
             provider: Arc::new(ProviderManager::new()),
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
+            folder_lifecycle: Mutex::new(()),
         });
 
         agent
@@ -10995,6 +11266,7 @@ mod tests {
             provider: Arc::new(ProviderManager::new()),
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
+            folder_lifecycle: Mutex::new(()),
         });
         let (server, fixture) = synthetic_oidc_server(true);
         let info = agent
@@ -11041,6 +11313,7 @@ mod tests {
             provider: Arc::new(ProviderManager::new()),
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
+            folder_lifecycle: Mutex::new(()),
         });
         let _info = agent
             .begin_auth(&json!({"server":server,"client_id":"synthetic-client"}))
@@ -11071,6 +11344,7 @@ mod tests {
             provider: Arc::new(ProviderManager::new()),
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
+            folder_lifecycle: Mutex::new(()),
         });
         let info = agent
             .begin_auth(&json!({"server":server,"client_id":"synthetic-client"}))
