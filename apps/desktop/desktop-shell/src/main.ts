@@ -14,6 +14,7 @@ import { windowsPortabilityLabel } from './windows-compatibility';
 import { loadProviderSyncData, providerAvailable, providerFeatureAvailable } from './provider-capabilities';
 import { eligibleWindowsRecoveryContext, WindowsRecoveryController, windowsRecoveryContextKey } from './windows-recovery-controller';
 import { WINDOWS_RECOVERY_PAGE_LIMIT } from './windows-recovery';
+import { validateWindowsDeviceCacheUsage, type WindowsDeviceCacheUsage } from './windows-device-cache';
 import { WindowsOfflineFileController, windowsOfflineFileContextKey, windowsOfflineJobMessage, type WindowsOfflineFileContext, type WindowsOfflineFileRow } from './windows-offline-file';
 import { WindowsOfflineFolderPanel } from './windows-offline-folder-panel';
 import type { WindowsOfflineFolderContext } from './windows-offline-folder';
@@ -112,6 +113,7 @@ const pendingWritesUi = { authGeneration: null as number | null, accountScope: n
 const encryptedRetryLatestUi = { scopes: [] as { key: string; spaceId: string; rootResourceId: string }[], scopesTruncated: false, discoveryLoading: false, discoveryError: '', statuses: new Map<string, VaultEditLatestResult>(), errors: new Map<string, string>(), loading: new Set<string>(), accountEpoch: -1, generation: 0, timer: 0 as number, running: false };
 const windowsRecoveryController = new WindowsRecoveryController();
 const windowsOfflineFileController = new WindowsOfflineFileController();
+const windowsDeviceCacheUi = { usage: null as WindowsDeviceCacheUsage | null, contextKey: '', sequence: 0, loading: false, error: '' };
 type WindowsOfflineFilesPage = { profile_id: string; auth_generation: number; recovery_scope_token: string; items: WindowsOfflineFileRow[]; next_cursor: string | null; unavailable_rows: number; read_only: true; last_observed: true; atomic_snapshot: false };
 const windowsOfflineFilesUi = { items: [] as WindowsOfflineFileRow[], nextCursor: null as string | null, unavailableRows: 0, loaded: false, loading: false, error: '', selectedKey: '', generation: 0, contextKey: '', pollTimer: 0 as number };
 let windowsOfflineFolderPollTimer = 0;
@@ -215,6 +217,7 @@ function windowsRecoveryBinding() {
   );
 }
 function syncWindowsRecoveryContext() {
+  syncWindowsDeviceCacheContext();
   windowsOfflineFoldersPanel.syncContext();
   const binding = isWindowsAgentStatus(state.status) ? windowsRecoveryBinding() : null;
   windowsRecoveryController.setContext(binding?.context || null);
@@ -292,6 +295,48 @@ function currentWindowsOfflineContext(): WindowsOfflineFileContext | null {
   const { context } = windowsRecoveryBinding();
   if (!isWindowsAgentStatus(state.status) || !context || state.accountSwitching || state.status?.mounted !== true) return null;
   return { ...context, flowGeneration: windowsOfflineFilesUi.generation };
+}
+function syncWindowsDeviceCacheContext(): WindowsOfflineFileContext | null {
+  const context = currentWindowsOfflineContext();
+  const key = context ? JSON.stringify([context.accountEpoch, context.profileId, context.server, context.clientId, context.cloudRoot, context.authGeneration, context.recoveryScopeToken]) : '';
+  if (key !== windowsDeviceCacheUi.contextKey) {
+    windowsDeviceCacheUi.contextKey = key;
+    windowsDeviceCacheUi.sequence++;
+    windowsDeviceCacheUi.usage = null;
+    windowsDeviceCacheUi.loading = false;
+    windowsDeviceCacheUi.error = '';
+  }
+  return context;
+}
+async function refreshWindowsDeviceCacheUsage() {
+  const context = syncWindowsDeviceCacheContext();
+  if (!context || windowsDeviceCacheUi.loading) return;
+  const key = windowsDeviceCacheUi.contextKey;
+  const sequence = ++windowsDeviceCacheUi.sequence;
+  windowsDeviceCacheUi.loading = true;
+  windowsDeviceCacheUi.usage = null;
+  windowsDeviceCacheUi.error = '';
+  render();
+  const current = () => {
+    syncWindowsDeviceCacheContext();
+    return key === windowsDeviceCacheUi.contextKey && sequence === windowsDeviceCacheUi.sequence && isCurrentAccount(context.accountEpoch, context.profileId);
+  };
+  try {
+    const value = await request('windows_device_cache_usage', {
+      profile_id: context.profileId, expected_generation: context.authGeneration,
+      expected_recovery_scope_token: context.recoveryScopeToken
+    });
+    if (current()) windowsDeviceCacheUi.usage = validateWindowsDeviceCacheUsage(value, context);
+  } catch (error) {
+    if (current() && !isStaleAccountRequest(error)) windowsDeviceCacheUi.error = messageOf(error);
+  } finally {
+    if (current()) { windowsDeviceCacheUi.loading = false; render(); }
+  }
+}
+function windowsDeviceCacheCard(): string {
+  if (!syncWindowsDeviceCacheContext()) return '';
+  const usage = windowsDeviceCacheUi.usage;
+  return `<section class="settings-card windows-device-cache-card"><div class="settings-heading"><span class="settings-icon">${svg('download')}</span><div><h2>Device cache (all accounts)</h2><p>Shared by all Raiun accounts on this Windows device. These totals are not limited to the selected account.</p></div></div>${usage ? `<p role="status">Last observed: ${esc(formatBytes(usage.used_bytes))} used of ${esc(formatBytes(usage.quota_bytes))} · ${esc(formatBytes(usage.pinned_bytes))} pinned · ${esc(formatBytes(usage.protected_bytes))} protected.</p>${usage.over_quota ? '<p class="recovery-warning" role="status">The device cache is over its quota.</p>' : ''}` : '<p role="status">Device cache usage has not been checked.</p>'}${windowsDeviceCacheUi.error ? `<p class="recovery-warning" role="alert">${esc(windowsDeviceCacheUi.error)}</p>` : ''}<div class="button-group"><button class="button subtle" data-action="refresh-windows-device-cache" ${windowsDeviceCacheUi.loading ? 'disabled' : ''}>${windowsDeviceCacheUi.loading ? 'Checking…' : usage ? 'Refresh device cache usage' : 'Check device cache usage'}</button><button class="button subtle" data-action="manage-windows-offline-files">Manage offline files in Transfers</button></div></section>`;
 }
 function windowsOfflineContextKey(context: WindowsOfflineFileContext): string {
   return JSON.stringify([context.accountEpoch, context.profileId, context.server, context.clientId, context.cloudRoot, context.authGeneration, context.recoveryScopeToken, context.flowGeneration]);
@@ -698,6 +743,7 @@ function overviewPage() {
     <div class="cloud-root-card"><div class="cloud-root-icon">${svg('cloud')}</div><div class="root-copy"><b>OpenCloud drive</b><span>${reachable && state.status?.cloud_root ? esc(state.status.cloud_root) : 'Your cloud drive location will appear here'}</span></div><span class="root-badge ${reachable && state.status?.mounted ? 'mounted' : ''}">${reachable && state.status?.mounted ? 'Mounted' : !providerEnabled && reachable && state.status?.cloud_root ? 'Configured · disconnected' : 'Not mounted'}</span><button class="icon-button" data-action="open-cloud" ${providerEnabled && reachable && state.status?.mounted && (connected || connection === 'offline_reconnecting') && state.status?.cloud_root ? '' : 'disabled'} aria-label="Open cloud folder">${svg('chevron')}</button></div>${reachable ? `${encryptedAccessCard()}${connected ? offlineAvailabilityCard() : ''}` : ''}`;
 }
 function offlineAvailabilityCard() {
+  if (isWindowsAgentStatus(state.status)) return windowsDeviceCacheCard();
   const cache = state.status?.offline_cache;
   if (!cache) return '';
   const providerEnabled = providerAvailable(state.status?.provider_supported);
@@ -2637,6 +2683,8 @@ async function handleAction(action: string, element?: HTMLElement) {
     case 'refresh-spaces': await loadSpaces(true); break;
     case 'open-add-account': if (!featureAvailable('account_switch_supported')) return; state.addAccountOpen = true; state.addAccountStep = 'details'; state.addAccountLabel = ''; state.addAccountRoot = ''; state.addAccountServer = ''; state.addAccountClientId = ''; state.addAccountAuthMessage = ''; state.addAccountAuthStarted = false; state.addAccountError = ''; state.addAccountCreatedId = ''; state.accountsError = ''; render(); break;
     case 'open-encrypted-access': if (featureAvailable('vaults_supported')) await openEncryptedAccess(); break;
+    case 'refresh-windows-device-cache': await refreshWindowsDeviceCacheUsage(); break;
+    case 'manage-windows-offline-files': if (syncWindowsDeviceCacheContext()) { state.page = 'transfers'; render(); } break;
     case 'open-offline-files': if (providerAvailable(state.status?.provider_supported)) await openOfflineFiles(); break;
     case 'refresh-pending-writes': await loadPendingOfflineWrites(true); break;
     case 'refresh-windows-offline-folders': await windowsOfflineFoldersPanel.load(true); break;

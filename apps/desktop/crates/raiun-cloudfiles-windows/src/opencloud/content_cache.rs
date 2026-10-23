@@ -4,6 +4,22 @@ use raiun_cache::{CacheScope, ContentProtection, ContentVersion, ScopeProtection
 use std::io::{Read, Seek, SeekFrom};
 
 impl OpenCloudPlaceholderBackend {
+    /// Read the existing device-wide cache accounting, never an account total.
+    /// The cache store is shared across profiles; the live backend lease only
+    /// authorizes this observation and does not change its accounting scope.
+    pub fn device_cache_usage(&self) -> Result<raiun_cache::CacheUsage, BackendError> {
+        let _lease = self
+            .lease_gate
+            .read()
+            .map_err(|_| BackendError::Unavailable)?;
+        self.ensure_active()?;
+        self.cache
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?
+            .usage()
+            .map_err(|_| BackendError::Unavailable)
+    }
+
     /// Query existing cache metadata for an exact live file binding. Unknown
     /// identities never acquire a default Recent policy or count as a cache hit.
     /// This performs no network requests, cache initialization, or file reads.

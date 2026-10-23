@@ -249,6 +249,10 @@ enum ProviderCommand {
         row: windows_cache_status::CacheStatusRow,
         response: std::sync::mpsc::SyncSender<Result<Value, String>>,
     },
+    DeviceCacheUsage {
+        binding: ActiveProviderBinding,
+        response: std::sync::mpsc::SyncSender<Result<Value, String>>,
+    },
     FileCacheStatus {
         binding: ActiveProviderBinding,
         row: windows_cache_status::CacheStatusRow,
@@ -518,6 +522,15 @@ impl ProviderManager {
                                         backend.download_file_offline_for_binding(&row.expectation(), cancellation).map(|_| ())
                                     })
                                 });
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::DeviceCacheUsage { binding, response } => {
+                            let mut result = windows_cache_status::inspect_worker_device_cache_usage(
+                                worker_generation.load(Ordering::Acquire), &binding,
+                                active_binding.as_ref(), connection.is_some(), backend.as_deref());
+                            if worker_generation.load(Ordering::Acquire) != binding.generation {
+                                result = Err("The account changed during cache inspection".into());
+                            }
                             let _ = response.send(result);
                         }
                         ProviderCommand::FileCacheStatus { binding, row, response } => {
@@ -1339,6 +1352,7 @@ impl WindowsAgent {
             // Inspection is read-only and grants no session, key or native route.
             "vault_inspect" => Ok((self.folder_request(request)?, false)),
             "windows_recovery_retry" => Ok((self.retry_recovered_edit(request)?, false)),
+            "windows_device_cache_usage" => Ok((self.windows_device_cache_usage(request)?, false)),
             "windows_file_cache_status" => Ok((self.windows_file_cache_status(request)?, false)),
             "windows_offline_folders" => {
                 Ok((self.windows_offline_folder_request(request, "list")?, false))
@@ -6310,6 +6324,34 @@ mod tests {
         let cache_generation = restored.generation.load(Ordering::Acquire);
         let cache_scope_token =
             restored.status().unwrap()["root_configuration"]["recovery_scope_token"].clone();
+        let usage_request = json!({"action":"windows_device_cache_usage", "profile_id":"default",
+            "expected_generation":cache_generation,
+            "expected_recovery_scope_token":cache_scope_token});
+        let (usage, stop) = restored
+            .handle_request(&usage_request)
+            .expect("connected worker exposes explicit shared-device cache accounting");
+        assert!(!stop);
+        assert_eq!(usage["scope"], "device_all_accounts");
+        assert_eq!(usage["read_only"], true);
+        assert_eq!(usage["last_observed"], true);
+        assert_eq!(usage["atomic_snapshot"], false);
+        assert_eq!(usage["profile_id"], "default");
+        assert_eq!(usage["auth_generation"], cache_generation);
+        assert_eq!(usage["recovery_scope_token"], cache_scope_token);
+        assert!(usage["used_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(usage["quota_bytes"], 1_u64 << 30);
+        for (field, value) in [
+            ("profile_id", json!("foreign")),
+            ("expected_generation", json!(cache_generation + 1)),
+            ("expected_recovery_scope_token", json!("0".repeat(64))),
+        ] {
+            let mut stale = usage_request.clone();
+            stale[field] = value;
+            assert!(restored.handle_request(&stale).is_err(), "{field}");
+        }
+        eprintln!(
+            "native_device_cache_usage=shared_device_scope_positive_bytes_stale_scope_refused"
+        );
         let mut admitted_cache_requests = Vec::new();
         for (space, root_id, resource, etag, expected) in [
             (
