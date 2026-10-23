@@ -1723,8 +1723,8 @@ impl ConfiguredRootConnection {
             let saved_usn = completion_usn(file.raw, metadata.local_file.file_index)?;
             #[cfg(feature = "synthetic-agent-integration")]
             eprintln!("synthetic_save_completion_usn_first={saved_usn}");
-            let len =
-                usize::try_from(metadata.content_len).map_err(|_| Error::EditRecoveryUnavailable)?;
+            let len = usize::try_from(metadata.content_len)
+                .map_err(|_| Error::EditRecoveryUnavailable)?;
             let mut bytes = Zeroizing::new(vec![0_u8; len]);
             file.read_complete(&mut bytes)?;
             if crate::recovery_reconcile::digest_hex(&bytes) != metadata.content_sha256
@@ -1747,34 +1747,15 @@ impl ConfiguredRootConnection {
             // never as a fallback/retry after a failed comparison. The two positive
             // USN reads above remain an additional pre-call consistency check.
             observe_completion!("native_in_sync_exclusive");
-            let mut completed_usn = 0_i64;
-            #[cfg(feature = "synthetic-agent-integration")]
-            let diagnostic_input_usn = completed_usn;
             // SAFETY: same opaque exclusive owner, referenced throughout this
-            // closure. Zero input requests only final-USN output; it is not
-            // used as a conditional proof or to refresh an earlier snapshot.
-            let result = unsafe { CfSetInSyncState(file.protected, 1, 0, &mut completed_usn) };
+            // closure. No USN comparison/output is requested: the retained
+            // combined content fence is the authority, not an optional output.
+            // Windows may leave a zero-input USN untouched even on S_OK.
+            let result = unsafe { CfSetInSyncState(file.protected, 1, 0, null_mut()) };
             #[cfg(feature = "synthetic-agent-integration")]
-            eprintln!("synthetic_save_completion_usn_input={diagnostic_input_usn}");
+            eprintln!("synthetic_save_completion_no_usn_comparison hresult={result}");
             if result < 0 {
-                #[cfg(feature = "synthetic-agent-integration")]
-                {
-                    // Output is not acknowledgement authority on a failed call.
-                    eprintln!("synthetic_save_completion_usn_failure input={diagnostic_input_usn} output_untrusted={completed_usn} hresult={result}");
-                    // Diagnostic only: never refresh saved_usn, retry the CAS, or
-                    // feed this read into publication or local acknowledgement.
-                    match completion_usn(file.raw, metadata.local_file.file_index) {
-                        Ok(observed_usn) => eprintln!("synthetic_save_completion_usn_after_failure={observed_usn}"),
-                        Err(_) => eprintln!("synthetic_save_completion_usn_after_failure_unavailable"),
-                    }
-                }
                 return Err(native_error("complete verified edit in-sync", result));
-            }
-            #[cfg(feature = "synthetic-agent-integration")]
-            eprintln!("synthetic_save_completion_usn_success={completed_usn} hresult={result}");
-            observe_completion!("validate_completed_usn");
-            if completed_usn <= 0 {
-                return Err(Error::ConfiguredRootChanged);
             }
             observe_completion!("validate_completed_file_identity");
             if root_snapshot(file.raw)?.identity != opened.identity {

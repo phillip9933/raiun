@@ -69,7 +69,7 @@ hash and two matching positive USN observations. The current candidate holds
 the existing publication/token fence before opening an exclusive protected file
 handle and retains both through proof, OS marking and durable acknowledgement.
 The shared fence also excludes provider payload writes; the protected reference
-excludes ordinary writers. OS marking requests final-USN output without a USN
+excludes ordinary writers. OS marking passes a null optional USN pointer without a USN
 comparison as this design's sole path, never a failure fallback or retry. The fresh callback now carries its actual pinned local
 path and opaque identity, separately from the remote path. The worker joins that
 handoff to a fresh readback proof, native completion, and a protected terminal

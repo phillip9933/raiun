@@ -253,8 +253,8 @@ upload; merely sampling a new USN without rehashing would be insufficient.
 well-sized V2 records with the exact 64-bit file ID. Unsupported/zero USNs and V3
 identities fail closed. The two matching positive USN reads are consistency
 observations. Content exclusion is enforced by the combined publication and
-exclusive-reference boundary described below; the OS call requests final-USN
-output without a USN comparison. This is the sole design path, never a fallback
+exclusive-reference boundary described below; the OS call passes a null optional USN pointer
+without a USN comparison. This is the sole design path, never a fallback
 or retry after comparison failure.
 No dehydration, truncation, path-based deletion or journal retirement occurs.
 If post-completion validation fails, recovery remains even if the OS has already
@@ -312,6 +312,8 @@ pre-existing writable mappings, and the retained reference preserves the borrowe
 handle across the operation. RH/reference alone is not sufficient: provider
 payload writes are independently excluded by the publication permit. Together
 these guards retain the exact verified local content through OS marking and
-journal acknowledgement. The returned positive USN is only an observation.
+journal acknowledgement. The optional OS USN output is not acknowledgement authority. The native
+82ec check observed S_OK with a zero output for zero input, so the call now
+passes NULL explicitly and does not misclassify absent output as root replacement.
 Native writer-exclusion and normal save/lifecycle acceptance remain required;
 source review does not establish those results.
