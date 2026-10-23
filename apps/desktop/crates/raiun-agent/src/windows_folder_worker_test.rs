@@ -1,5 +1,5 @@
-use super::*;
 use super::super::{OpenCloudClient, windows_folder_requests, windows_folder_sync};
+use super::*;
 use raiun_core::backend::CloudBackend;
 
 #[test]
@@ -117,6 +117,67 @@ fn ordinary_folder_worker_download_upload_exclude_remove_and_reopen() {
     }
     assert_eq!(std::fs::read(&document).unwrap(), edited);
     manager
+        .folder_request(generation, FolderRequest::Pause { paused: true })
+        .unwrap();
+    {
+        let snapshot = manager.folder_pause.lock().unwrap();
+        let snapshot = snapshot.as_ref().expect("persisted pause snapshot");
+        assert_eq!(snapshot.generation, generation);
+        assert!(snapshot.paused);
+        assert!(snapshot.paused_space_ids.is_empty());
+    }
+    let resumed_edit = b"closed local edit retained during global pause";
+    std::fs::write(&document, resumed_edit).unwrap();
+    assert!(
+        manager
+            .folder_request(
+                generation,
+                FolderRequest::Sync {
+                    space_id: Some(project.clone())
+                }
+            )
+            .is_err()
+    );
+    manager
+        .folder_request(generation, FolderRequest::Pairs)
+        .unwrap();
+    assert_eq!(std::fs::read(&document).unwrap(), resumed_edit);
+    {
+        let remote = fixture.recovery.lock().unwrap();
+        assert_eq!(remote.put_count, 1);
+        assert_eq!(remote.body, edited);
+    }
+    manager
+        .folder_request(generation, FolderRequest::Pause { paused: false })
+        .unwrap();
+    assert!(
+        !manager
+            .folder_pause
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .paused
+    );
+    manager
+        .folder_request(
+            generation,
+            FolderRequest::Sync {
+                space_id: Some(project.clone()),
+            },
+        )
+        .unwrap();
+    manager
+        .folder_request(generation, FolderRequest::Pairs)
+        .unwrap();
+    assert!(manager.folder_error.lock().unwrap().is_none());
+    assert_eq!(std::fs::read(&document).unwrap(), resumed_edit);
+    {
+        let remote = fixture.recovery.lock().unwrap();
+        assert_eq!(remote.put_count, 2);
+        assert_eq!(remote.body, resumed_edit);
+    }
+    manager
         .folder_request(
             generation,
             FolderRequest::Exclusions {
@@ -140,7 +201,7 @@ fn ordinary_folder_worker_download_upload_exclude_remove_and_reopen() {
         .unwrap();
     assert!(manager.folder_error.lock().unwrap().is_none());
     assert_eq!(std::fs::read(&document).unwrap(), excluded);
-    assert_eq!(fixture.recovery.lock().unwrap().put_count, 1);
+    assert_eq!(fixture.recovery.lock().unwrap().put_count, 2);
     manager
         .folder_request(
             generation,
@@ -149,7 +210,12 @@ fn ordinary_folder_worker_download_upload_exclude_remove_and_reopen() {
             },
         )
         .unwrap();
+    // Persist pause once more after removal, proving reopen loads state even with no pairs.
+    manager
+        .folder_request(generation, FolderRequest::Pause { paused: true })
+        .unwrap();
     manager.disconnect().unwrap();
+    assert!(manager.folder_pause.lock().unwrap().is_none());
     drop(manager);
 
     let reopened = ProviderManager::new();
@@ -165,6 +231,13 @@ fn ordinary_folder_worker_download_upload_exclude_remove_and_reopen() {
             cloud_root: None,
         })
         .unwrap();
+    {
+        let snapshot = reopened.folder_pause.lock().unwrap();
+        let snapshot = snapshot.as_ref().expect("pause restored from scoped store");
+        assert_eq!(snapshot.generation, generation);
+        assert!(snapshot.paused);
+        assert!(snapshot.paused_space_ids.is_empty());
+    }
     assert_eq!(
         reopened
             .folder_request(generation, FolderRequest::Pairs)
@@ -180,8 +253,8 @@ fn ordinary_folder_worker_download_upload_exclude_remove_and_reopen() {
     assert_eq!(std::fs::read(&document).unwrap(), excluded);
     {
         let remote = fixture.recovery.lock().unwrap();
-        assert_eq!(remote.body, edited);
-        assert_eq!(remote.put_count, 1);
+        assert_eq!(remote.body, resumed_edit);
+        assert_eq!(remote.put_count, 2);
     }
     assert_eq!(
         fixture.native_reads.lock().unwrap().mutation_attempt_count,
