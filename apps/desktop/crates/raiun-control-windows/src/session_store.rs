@@ -51,6 +51,7 @@ const ENVELOPE_MAGIC: &[u8] = b"RAIUN-DPAPI-SESSION\0\x01";
 const ACTIVE_POINTER_MAGIC: &[u8] = b"RAIUN-DPAPI-ACTIVE\0\x01";
 const MAX_ACTIVE_POINTER_BYTES: usize = 16 * 1024;
 const MAX_ROOT_CONFIG_BYTES: usize = 16 * 1024;
+const MAX_PROFILE_REGISTRY_BYTES: usize = 1024 * 1024;
 const MAX_EDIT_RECORD_PLAINTEXT_BYTES: usize = 17 * 1024 * 1024;
 const MAX_EDIT_RECORD_CIPHERTEXT_BYTES: usize = 18 * 1024 * 1024;
 const SDDL_REVISION_1: u32 = 1;
@@ -149,6 +150,100 @@ impl DpapiSessionStore {
             root: child.path().to_path_buf(),
             profile_directory: Some(Arc::new(child)),
         })
+    }
+
+    /// Read the fixed non-secret account registry without scanning credentials.
+    /// Only verified absence returns None; malformed content remains the caller's
+    /// responsibility and must never be interpreted as a default migration.
+    pub fn load_profile_registry(&self) -> io::Result<Option<Vec<u8>>> {
+        let directory = self.profile_registry_directory()?;
+        let mut reader =
+            match directory.open_owned_immutable_file(std::ffi::OsStr::new("registry.json")) {
+                Ok(reader) => reader,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error),
+            };
+        if reader.metadata()?.len() > MAX_PROFILE_REGISTRY_BYTES as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Account registry exceeds the storage limit",
+            ));
+        }
+        let mut bytes = Vec::new();
+        reader
+            .by_ref()
+            .take((MAX_PROFILE_REGISTRY_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        reader.verify()?;
+        if bytes.is_empty() || bytes.len() > MAX_PROFILE_REGISTRY_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Account registry has an invalid size",
+            ));
+        }
+        Ok(Some(bytes))
+    }
+
+    /// Atomically replace only the fixed non-secret account registry. The broker
+    /// must validate the document and serialize mutations before this call, and
+    /// publish its in-memory selection only after success. No session is moved.
+    pub fn save_profile_registry(&self, bytes: &[u8]) -> io::Result<()> {
+        if bytes.is_empty() || bytes.len() > MAX_PROFILE_REGISTRY_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Account registry has an invalid size",
+            ));
+        }
+        let directory = self.profile_registry_directory()?;
+        // Validate any existing destination without repairing its ACL. Release
+        // the immutable pin before atomic replacement, retaining directory pins.
+        match directory.open_owned_immutable_file(std::ffi::OsStr::new("registry.json")) {
+            Ok(reader) => reader.verify()?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error),
+        }
+        let destination = directory.path().join("registry.json");
+        let temporary = self.write_temp(&destination, bytes)?;
+        let result = (|| {
+            directory.verify_path()?;
+            let from = wide_path(&temporary)?;
+            let to = wide_path(&destination)?;
+            // SAFETY: both fixed sibling paths are within the retained private
+            // directory. Same atomic write-through replacement as session data;
+            // this renames the entry rather than following a destination link.
+            let moved = unsafe {
+                MoveFileExW(
+                    from.as_ptr(),
+                    to.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            if moved == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            directory.verify_path()
+        })();
+        if result.is_err() {
+            let _ = remove_exact_file(&temporary);
+        }
+        result
+    }
+
+    fn profile_registry_directory(&self) -> io::Result<Arc<crate::PrivateDirectory>> {
+        if self.profile_directory.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Account registry belongs to the base store",
+            ));
+        }
+        self.ensure_private_root()?;
+        let parent = crate::PinnedDirectory::open(&self.root)?;
+        let directory = crate::PrivateDirectory::create_or_open_under(
+            &parent,
+            std::ffi::OsStr::new("profiles"),
+        )?;
+        directory.verify_path()?;
+        Ok(Arc::new(directory))
     }
 
     /// Private per-user application state directory used for protected local
@@ -1075,6 +1170,113 @@ fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires isolated ordinary Windows user and native private-storage ACL support"]
+    fn profile_registry_replaces_reopens_and_preserves_other_storage() {
+        let root = std::env::temp_dir().join(format!(
+            "raiun-profile-registry-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        eprintln!("synthetic_profile_registry_root={}", root.display());
+        // Direct fixture construction, never current_user() or real LOCALAPPDATA.
+        let base = DpapiSessionStore {
+            root: root.join("sessions"),
+            profile_directory: None,
+        };
+        base.ensure_private_root().unwrap();
+        let server = "https://synthetic.invalid";
+        let client = "synthetic-client";
+        let identity = identity_digest(Some("default"), server, client);
+        let session_path = base.session_path(&identity);
+        assert!(!session_path.exists());
+        // Opaque sibling bytes only: exercise preservation without invoking DPAPI
+        // or pretending these bytes constitute a decryptable session envelope.
+        let temporary = base
+            .write_temp(&session_path, b"synthetic opaque session sentinel")
+            .unwrap();
+        std::fs::rename(temporary, &session_path).unwrap();
+        base.set_active_identity("default", server, client).unwrap();
+        base.save_root_config("default", server, client, b"synthetic root metadata")
+            .unwrap();
+        let siblings = [
+            session_path,
+            base.active_pointer_path(),
+            base.root_config_path(&identity),
+        ];
+        let before = siblings
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+        assert!(base.load_profile_registry().unwrap().is_none());
+        let first =
+            br#"{"version":1,"selected":"default","profiles":{"default":{"label":"Default"}}}"#;
+        let second = br#"{"version":1,"selected":"profile-11111111111111111111111111111111","profiles":{"default":{"label":"Default"},"profile-11111111111111111111111111111111":{"label":"Work"}}}"#;
+        base.save_profile_registry(first).unwrap();
+        assert_eq!(
+            base.load_profile_registry().unwrap().as_deref(),
+            Some(first.as_slice())
+        );
+        base.save_profile_registry(second).unwrap();
+        assert_eq!(
+            base.load_profile_registry().unwrap().as_deref(),
+            Some(second.as_slice())
+        );
+        assert!(base.save_profile_registry(b"").is_err());
+        assert!(base.save_profile_registry(&vec![b'x'; 1_048_577]).is_err());
+        assert_eq!(
+            base.load_profile_registry().unwrap().as_deref(),
+            Some(second.as_slice())
+        );
+        let derived = base
+            .for_profile("profile-11111111111111111111111111111111")
+            .unwrap();
+        assert!(derived.load_profile_registry().is_err());
+        assert!(derived.save_profile_registry(first).is_err());
+        assert_eq!(
+            base.load_profile_registry().unwrap().as_deref(),
+            Some(second.as_slice())
+        );
+        drop(derived);
+        let store_root = base.root.clone();
+        drop(base);
+        let reopened = DpapiSessionStore {
+            root: store_root,
+            profile_directory: None,
+        };
+        assert_eq!(
+            reopened.load_profile_registry().unwrap().as_deref(),
+            Some(second.as_slice())
+        );
+        assert_eq!(
+            reopened.active_identity().unwrap(),
+            Some(("default".into(), server.into(), client.into()))
+        );
+        assert_eq!(
+            reopened
+                .load_root_config("default", server, client)
+                .unwrap()
+                .as_deref(),
+            Some(b"synthetic root metadata".as_slice())
+        );
+        let after = siblings
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            before == after,
+            "registry operations must preserve exact sibling bytes"
+        );
+        drop(reopened);
+        // Only this CREATE_NEW fixture root is removed, after every assertion and
+        // after dropping all private pins. Panic leaves the whole fixture intact.
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn profile_stores_preserve_default_and_separate_restore_pointers_and_bytes() {
