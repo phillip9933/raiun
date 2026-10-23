@@ -33,9 +33,18 @@ and download installation, and an immutable source handle through upload and
 readback. Reparse points are rejected. Temporary upload writers are closed while
 cleanup ownership is retained. These guards still need native acceptance.
 
-This is storage and path integration, not a working Windows folder-sync
-capability. Authenticated account/root admission and the worker/RPC path still
-need to be connected. Windows folder sync remains disabled.
+A gated ordinary-folder runtime is now connected to the existing Windows
+command thread, independently of Cloud Files registration. It derives private
+storage from the full verified account identity, keeps its database owner on
+that worker, admits non-overlapping local roots, and supports the existing
+folder settings and explicit sync RPC shapes. Sync acknowledgement means work
+was queued; it does not report successful completion. Account changes revoke
+subsequent sync steps and drain the worker before credential replacement.
+
+Windows folder sync remains disabled pending focused native acceptance. Its
+first workflow is explicit sync; automatic scheduling and durable pause/resume
+are not implemented in this slice. This does not claim packaged GUI acceptance
+or completion of the whole folder-sync category.
 The native save-back correction also awaits access to the isolated Windows VM;
 production provider activation remains off.
 

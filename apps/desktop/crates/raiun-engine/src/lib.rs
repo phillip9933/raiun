@@ -5884,6 +5884,9 @@ fn ensure_media_attempt_destination_root_column(db: &Connection) -> Result<(), C
 
 #[cfg(test)]
 mod tests {
+    mod revocation_handle_test {
+        include!("revocation_handle_test.rs");
+    }
     mod folder_pair_store_tests {
         include!("folder_pair_store_tests.rs");
     }
