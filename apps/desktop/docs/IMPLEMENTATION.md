@@ -10,6 +10,19 @@ below are historical engineering evidence, not semantic release versions or
 claims that each workflow is verified on this beta. Local evidence/output paths
 refer to maintainer archives that are not part of this public source tree.
 
+## Windows cloud-drive candidate — 23 October 2026 JST
+
+The isolated ordinary-user Windows save and conditional lifecycle checks passed
+on the exact 9219 source: ordinary OS saving reached verified remote readback,
+native in-sync marking, all identity postchecks and protected local completion;
+reopen/lifecycle also passed. The non-test candidate now enables the existing
+account-bound provider and verified-save path. Ordinary unit tests remain
+kernel-inactive and ignored native fixtures retain explicit per-instance opt-in.
+Actual non-test package installation, GUI and native file-manager smoke remain
+required before delivery. No new Windows release has been published, and no real
+cloud account or files were used for acceptance. Folder/media, vault and account
+broker capability gates remain independent and disabled.
+
 ## Windows accounts — 23 October 2026 JST
 
 A compiled, gated broker now routes independent profile runtimes, persists
@@ -23,8 +36,9 @@ metadata alone cannot authorize account restoration or native registration.
 
 Native component tests have passed profile/session isolation, foreign-scope
 refusal and registry replacement/reopen. The broker capability remains disabled:
-its lifetime lock, integrated routing/restart, cross-account folder/media source
-admission and sign-in-first account dialog still require focused acceptance.
+its lifetime lock, integrated routing/reopen and sign-in-first account dialog
+still require focused acceptance. Cross-account folder/media source admission
+is required before enabling those separate features; they remain blocked.
 These source changes are unpublished and do not change the installed beta.
 
 ## Windows folder and media integration — 23 October 2026 JST

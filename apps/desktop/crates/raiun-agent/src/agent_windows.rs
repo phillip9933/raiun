@@ -1,7 +1,7 @@
-//! Windows control-plane and gated Cloud Files runtime. The connection manager
-//! is wired for exact-scope synthetic validation, but general provider support
-//! remains disabled until recovery enumeration and the production namespace
-//! identity bridge are complete.
+//! Windows control plane and account-bound Cloud Files runtime. The provider
+//! and verified save path are enabled in the next non-test candidate after
+//! isolated native save/recovery/lifecycle acceptance. Package acceptance and
+//! publication remain separate; other feature gates are independent.
 
 #[path = "auth.rs"]
 mod auth;
@@ -54,17 +54,15 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-const PROVIDER_UNAVAILABLE: &str = "Windows cloud drive support is not enabled yet; Raiun keeps the selected folder disconnected until durable recovery and namespace identity checks are available.";
+const PROVIDER_UNAVAILABLE: &str = "This operation is not available in this Windows beta.";
 const MAX_SESSION_BYTES: usize = 65_536;
 const MAX_ROOT_CONFIG_BYTES: usize = 16 * 1024;
-// Keep ordinary Windows builds disconnected until conditional upload and
-// recovery reconciliation have passed their release gates. Lifecycle hooks
-// below are intentionally wired now so enabling this requires one explicit,
-// reviewed capability change rather than new auth/root plumbing.
-const WINDOWS_PROVIDER_ACTIVATION_ENABLED: bool = false;
-// Initial upload wiring is separate from activation and native acknowledgement.
-// Keep it off until the full save/acknowledgement/restart acceptance passes.
-const WINDOWS_INITIAL_SAVE_DISPATCH_ENABLED: bool = false;
+// The 9219 isolated native save + lifecycle checks passed. Non-test candidates
+// now use the real provider/save path; exact-package acceptance is still required.
+// Ordinary unit tests remain kernel-inactive. Ignored isolated-VM fixtures opt
+// in per instance, exercising the same guarded production operations explicitly.
+const WINDOWS_PROVIDER_ACTIVATION_ENABLED: bool = !cfg!(test);
+const WINDOWS_INITIAL_SAVE_DISPATCH_ENABLED: bool = !cfg!(test);
 
 #[derive(Parser)]
 struct Args {
@@ -2172,9 +2170,9 @@ impl WindowsAgent {
     }
 
     /// Normal lifecycle entry point. It is called after authentication,
-    /// session refresh, and root configuration. The default capability gate
-    /// keeps production disconnected until upload/recovery acceptance is
-    /// complete.
+    /// session refresh, and root configuration. Every connection still requires
+    /// exact account/root ownership and durable recovery preparation. Ordinary
+    /// unit-test instances stay disconnected unless explicitly opted in.
     fn maybe_connect_provider(
         session_store: &Arc<dyn SessionStore>,
         state: &Arc<Mutex<AccountState>>,
