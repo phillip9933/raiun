@@ -3872,6 +3872,7 @@ fn request_timeout(request: &Value) -> Duration {
         "shutdown"
         | "auth_cancel"
         | "logout"
+        | "pause"
         | "space_pause"
         | "vault_lock"
         | "windows_recovery_retry" => Duration::from_secs(300),
