@@ -2520,6 +2520,9 @@ The narrow correction stores the exact pathname rebuilt by the successful
 component walk alongside its existing pinned handles. Verification and child
 operations reuse that spelling. Parent traversal rejection, no-follow opens,
 reparse/type checks, held ancestors and physical identity checks are unchanged;
-saved account/root reservations are not rewritten. Corrected native regression,
-source checks and installed workflow acceptance remain pending. This does not
-establish the cause or resolution of the earlier incomplete-Lock failure.
+saved account/root reservations are not rewritten. The corrected native test
+passed: both spellings opened and verified the same identity. Windows GNU checks,
+strict lint and formatting passed; fresh Linux verification passed 963 tests
+with 14 ignored and strict workspace lint. Installed workflow acceptance remains
+pending. This does not establish the cause or resolution of the earlier
+incomplete-Lock failure.
