@@ -27,3 +27,18 @@ Desktop progress (23 October): the media preview, recurring-backup setup and
 saved backup cards now explain the Include filter, recursive subfolders and
 skipped symbolic links. Types are recognized from contents rather than filename
 extensions. This copy does not change filtering. Android wording remains queued.
+
+## Desktop: optional GitHub release updates
+
+Owner request (24 October 2026):
+
+- Add an optional update checker that checks the official Raiun GitHub releases
+  and offers to download the latest compatible Desktop version for Linux or
+  Windows. Include a manual “Check for updates” action.
+- Show the available version and release notes, distinguish stable and beta
+  releases, and select the correct platform/package asset.
+- Verify downloaded packages against published integrity information. Explain
+  how to install the update and preserve settings, accounts and recovery data;
+  do not install or restart without the user's agreement.
+- Keep this queued outside the current beta completion baseline. Coordinate
+  shared release conventions with the separate Android updater work.
