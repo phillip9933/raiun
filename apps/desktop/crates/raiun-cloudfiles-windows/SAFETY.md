@@ -317,3 +317,13 @@ journal acknowledgement. The optional OS USN output is not acknowledgement autho
 passes NULL explicitly and does not misclassify absent output as root replacement.
 Native writer-exclusion and normal save/lifecycle acceptance remain required;
 source review does not establish those results.
+
+Configured roots request `CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH` at connection
+because fetch admission requires the callback placeholder path. The platform
+only promises that path when the flag is requested; see Microsoft's
+[CF_CONNECT_FLAGS contract](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/ne-cfapi-cf_connect_flags).
+This requests callback metadata only: bounded decoding, no-follow native path
+checks, exact root/file/opaque identity checks and publication fences remain
+mandatory. A missing or invalid path still fails closed. The prior isolated
+Windows case stopped at normalized-path decoding (stage 1002); native acceptance
+of this correction remains pending.

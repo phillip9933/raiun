@@ -40,6 +40,7 @@ use std::{
 use zeroize::Zeroizing;
 
 const CF_REGISTER_FLAG_DISABLE_ON_DEMAND_POPULATION_ON_ROOT: u32 = 0x2;
+const CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH: u32 = 0x4;
 const CALLBACK_INITIALIZING: u8 = 0;
 const CALLBACK_READY: u8 = 1;
 const CALLBACK_CLOSING: u8 = 2;
@@ -2233,7 +2234,9 @@ impl ConfiguredRootConnection {
                 wide_root.as_ptr(),
                 callback_table.as_ptr(),
                 context_key as *const c_void,
-                0,
+                // Admission validates the callback path against pinned native
+                // identities; request the path without relaxing those checks.
+                CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH,
                 &mut connection_key,
             )
         };
