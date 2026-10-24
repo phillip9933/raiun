@@ -1737,7 +1737,7 @@ impl WindowsAgent {
                 Ok((self.folder_request(request)?, false))
             }
             // Inspection is read-only and grants no session, key or native route.
-            "vault_inspect" => Ok((self.folder_request(request)?, false)),
+            "vault_inspect" => Ok((self.inspect_windows_vault(request)?, false)),
             "windows_recovery_retry" => Ok((self.retry_recovered_edit(request)?, false)),
             "windows_device_cache_usage" => Ok((self.windows_device_cache_usage(request)?, false)),
             "windows_file_cache_status" => Ok((self.windows_file_cache_status(request)?, false)),

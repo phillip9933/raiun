@@ -369,6 +369,16 @@ pub(super) fn commit_remember(
         &next,
     )
 }
+/// Bounded presence query only. Existing validation/Zeroizing rows are reused;
+/// no password escapes, and a missing read never creates authority.
+pub(super) fn contains_saved(store: &dyn Store, scope: &Scope) -> Result<bool> {
+    let (_, doc) = existing(store, &scope.profile)?;
+    Ok(doc.is_some_and(|doc| {
+        doc.rows
+            .iter()
+            .any(|row| row.scope == *scope && !row.password.is_empty())
+    }))
+}
 pub(super) fn load(store: &dyn Store, scope: &Scope) -> Result<Option<Zeroizing<Vec<u8>>>> {
     let (_, doc) = existing(store, &scope.profile)?;
     Ok(doc
@@ -450,10 +460,13 @@ mod tests {
         let store = Memory::default();
         let a = scope("a", "root");
         assert!(load(&store, &a).unwrap().is_none());
+        assert!(!contains_saved(&store, &a).unwrap());
         assert!(store.0.lock().unwrap().is_empty());
         let password = "  synthetic-🔒  ".as_bytes();
         commit_remember(&store, begin_remember(&store, a.clone()).unwrap(), password).unwrap();
         assert_eq!(load(&store, &a).unwrap().unwrap().as_slice(), password);
+        assert!(contains_saved(&store, &a).unwrap());
+        assert!(!contains_saved(&store, &scope("b", "root")).unwrap());
         assert!(load(&store, &scope("b", "root")).unwrap().is_none());
         assert!(load(&store, &scope("a", "other-root")).unwrap().is_none());
         let bytes = store.load("default").unwrap().unwrap();

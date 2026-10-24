@@ -247,10 +247,7 @@ pub(super) mod session_requests {
     fn decode_owned(owned: &OwnedRequest) -> Result<VaultSessionRequest, String> {
         let fields = owned.value.as_object().ok_or_else(invalid)?;
         let action = text(fields, "action", 64)?;
-        if !matches!(
-            action,
-            "vault_unlock" | "vault_lock" | "vault_forget_password"
-        ) {
+        if !matches!(action, "vault_unlock" | "vault_lock" | "vault_forget") {
             return Err(invalid());
         }
         let unlock = action == "vault_unlock";
@@ -273,7 +270,13 @@ pub(super) mod session_requests {
             None
         };
         let space_id = text(fields, "space_id", 512)?;
-        let root_path = text(fields, "root_path", 4096)?;
+        // The existing UI forget contract identifies a stable root by ID and
+        // omits a path. This placeholder never participates in forget authority.
+        let root_path = if action == "vault_forget" && !fields.contains_key("root_path") {
+            "/"
+        } else {
+            text(fields, "root_path", 4096)?
+        };
         validate_remote_path(root_path).map_err(|_| invalid())?;
         let root_resource_id = text(fields, "root_resource_id", 512)?;
         // Match VaultSessionScope identifier grammar without normalizing authority.
@@ -326,7 +329,7 @@ pub(super) mod session_requests {
                 VaultSessionRequest::Unlock { target, credential }
             }
             "vault_lock" => VaultSessionRequest::Lock { target },
-            "vault_forget_password" => VaultSessionRequest::ForgetSaved { target },
+            "vault_forget" => VaultSessionRequest::ForgetSaved { target },
             _ => return Err(invalid()),
         })
     }
@@ -384,7 +387,7 @@ pub(super) mod session_requests {
                 v[key] = bad;
                 assert_eq!(decode(v).err().unwrap(), "Invalid vault session request");
             }
-            for action in ["vault_lock", "vault_forget_password"] {
+            for action in ["vault_lock", "vault_forget"] {
                 for key in ["password", "remember", "use_saved"] {
                     let mut v = json!({"action":action,"space_id":"s","root_path":"/","root_resource_id":"r"});
                     v[key] = json!(false);
@@ -420,7 +423,8 @@ pub(super) mod session_requests {
                 bad[key] = value;
                 assert!(decode(bad).is_err());
             }
-            let forget = json!({"action":"vault_forget_password","space_id":"space","root_path":"/Photos.vault","root_resource_id":"root"});
+            let forget =
+                json!({"action":"vault_forget","space_id":"space","root_resource_id":"root"});
             assert!(
                 matches!(decode(forget).unwrap(), VaultSessionRequest::ForgetSaved{target} if target.space_id=="space")
             );

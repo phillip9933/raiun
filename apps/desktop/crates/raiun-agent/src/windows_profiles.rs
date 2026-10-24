@@ -154,12 +154,7 @@ impl WindowsProfiles {
             .value()
             .get("action")
             .and_then(Value::as_str)
-            .is_some_and(|action| {
-                matches!(
-                    action,
-                    "vault_unlock" | "vault_lock" | "vault_forget_password"
-                )
-            });
+            .is_some_and(|action| matches!(action, "vault_unlock" | "vault_lock" | "vault_forget"));
         if !session_action {
             return self.handle(request.value());
         }

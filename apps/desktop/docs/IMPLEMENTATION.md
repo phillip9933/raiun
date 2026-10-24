@@ -2219,3 +2219,12 @@ numeric exit was not retained; recovery validation and all test exits succeeded.
 Windows shut down normally afterward. This proves the stated components, not an
 actual saved-password unlock, lock cleanup, native vault projection or C05/C06
 whole-category completion. Production vault exposure remains disabled.
+
+Remembered-unlock UI contract repairs (local, still disabled): the broker now
+accepts the existing `vault_forget` action with the UI's Space/root-ID-only payload;
+lock and unlock still require a valid root path. Gated inspection can report
+saved-password presence for the freshly inspected vault and verified account,
+while unlock state comes only from the session coordinator. Neither presence nor
+metadata grants a route. Windows compile/lint and the active three model/seven
+decoder checks pass; unchanged Linux evidence is reused. These source repairs do
+not establish native saved-unlock acceptance or enable the feature.

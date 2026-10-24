@@ -24,6 +24,139 @@ impl Drop for PreparedWindowsVaultUnlock {
     }
 }
 impl WindowsAgent {
+    fn inspect_windows_vault(&self, request: &Value) -> Result<Value, String> {
+        // Disabled preparation adds no credential I/O or session observation.
+        if !WINDOWS_VAULT_SESSIONS_ENABLED {
+            return self.folder_request(request);
+        }
+        let _operation = self
+            .vault_credential_operation
+            .lock()
+            .map_err(|_| "Vault credential operation is unavailable")?;
+        let (session, generation) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if !state.online_authenticated
+                || state.authenticating
+                || state.refreshing
+                || state.logout_pending
+                || state.needs_refresh
+                || state.session_cleanup_uncertain
+            {
+                return Err("Connect this account before inspecting a remembered password".into());
+            }
+            (
+                state
+                    .session
+                    .clone()
+                    .ok_or("A verified account is required")?,
+                state.active_generation,
+            )
+        };
+        if generation == 0 || generation != self.generation.load(Ordering::Acquire) {
+            return Err("The vault account changed".into());
+        }
+        // Existing same-worker path performs fresh metadata inspection and exact
+        // selected root/Space joins. No AccountState or secret-file lock is held.
+        let mut inspected = self.folder_request(request)?;
+        let space_id = request
+            .get("space_id")
+            .and_then(Value::as_str)
+            .ok_or("The selected vault is invalid")?;
+        let root_id = inspected
+            .get("root_resource_id")
+            .and_then(Value::as_str)
+            .ok_or("The inspected vault has no stable identity")?;
+        let account = self
+            .provider
+            .bandwidth
+            .scope()?
+            .filter(|scope| {
+                scope.matches(
+                    &self.profile_scope,
+                    &session.server,
+                    &session.client_id,
+                    session.expected_issuer.as_deref(),
+                )
+            })
+            .ok_or("A verified account is required")?;
+        let origin = url::Url::parse(&session.server)
+            .map_err(|_| "The vault account is invalid")?
+            .origin()
+            .ascii_serialization();
+        let vault = raiun_vault::session::VaultSessionScope::new(
+            &self.profile_scope,
+            &origin,
+            space_id,
+            root_id,
+        )
+        .map_err(|_| "The inspected vault scope is invalid")?;
+        let scope = windows_vault_credentials::Scope::from_trusted_account(
+            &self.profile_scope,
+            account.bytes(),
+            &vault,
+        )?;
+        let remembered_status = match windows_vault_credentials::contains_saved(
+            &VaultCredentialStore {
+                store: self.session_store.as_ref(),
+                profile: &self.profile_scope,
+            },
+            &scope,
+        ) {
+            Ok(true) => "known_saved",
+            Ok(false) => "not_saved",
+            Err(_) => "unavailable",
+        };
+        // Presence never establishes unlock authority. Read actual coordinator
+        // state for the exact inspected vault, under the same operation gate.
+        let unlocked = self
+            .vault_sessions
+            .is_unlocked(&vault)
+            .map_err(|_| "Vault session state is unavailable")?;
+        if self
+            .provider
+            .bandwidth
+            .scope()?
+            .is_none_or(|current| current.bytes() != account.bytes())
+        {
+            return Err("The vault account changed during inspection".into());
+        }
+        {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if generation != self.generation.load(Ordering::Acquire)
+                || state.active_generation != generation
+                || !state.online_authenticated
+                || state.authenticating
+                || state.refreshing
+                || state.logout_pending
+                || state.needs_refresh
+                || state.session_cleanup_uncertain
+                || state.session.as_ref().is_none_or(|current| {
+                    current.server != session.server
+                        || current.client_id != session.client_id
+                        || current.expected_issuer != session.expected_issuer
+                        || current.access_token != session.access_token
+                        || current.expires_at != session.expires_at
+                })
+            {
+                return Err(
+                    "The account changed during vault inspection; refresh before continuing".into(),
+                );
+            }
+        }
+        inspected["remembered_status"] = json!(remembered_status);
+        inspected["unlocked"] = json!(unlocked);
+        // Coordinator state does not prove native projection or lock acceptance.
+        inspected["vault_mount_ready"] = json!(false);
+        inspected["vault_mount_writable"] = json!(false);
+        Ok(inspected)
+    }
+
     fn forget_windows_vault_password(
         &self,
         target: &windows_vault_requests::session_requests::VaultTarget,
