@@ -41,7 +41,7 @@ pause controls. Unit-test builds remain inactive. Final source gates and an
 exact installer upgrade/offline GUI check are next; the previously accepted b7
 installer remains installed and closed in the VM. This is not authenticated
 packaged cloud acceptance or whole-category completion. Vault unlock remains
-unimplemented on Windows and its capability stays disabled.
+unavailable in that Windows package and its capability stays disabled.
 
 ## Latest local Windows acceptance — 24 October 2026 JST
 
@@ -74,9 +74,20 @@ separately. These checks do not establish packaged or native mounted-vault use.
 Native hydration now records exact local file ownership before transferring
 plaintext. Disconnect retains revoked routes through local cleanup and refuses
 success when edits, uncertain state or cleanup errors remain. This lifecycle is
-still being integrated and needs a focused complete Windows read/lock check;
-user-facing vault unlock/lock remains disabled. No new installer or public
-release is implied. The installed, closed VM candidate remains the 2704 build.
+joined to typed broker unlock/lock requests behind a disabled production gate.
+Unlock verifies current account/root and fresh vault metadata, persists the
+historical exclusion before route installation, and clears the session on a
+failed preparation. Per-vault lock retains cleanup ownership on failure and
+clears scoped keys even when local cleanup cannot finish. Windows compilation
+and strict linting passed for that request/cleanup batch.
+
+The following source adds a pinned parent-directory population request after
+route installation. It requests a future enumeration; it does not prove an
+immediate Explorer refresh or remove cached children. Nested remote parents are
+currently refused. Native refresh, a complete mounted read/lock workflow,
+cached decrypted-name visibility and restart cleanup coverage remain open.
+User-facing vault unlock/lock stays disabled. No new installer or public release
+is implied. The installed, closed VM candidate remains the 2704 build.
 
 The next-source Media wording now distinguishes a reachable signed-out agent
 from an unavailable agent; 22 focused UI tests and the UI build passed. That

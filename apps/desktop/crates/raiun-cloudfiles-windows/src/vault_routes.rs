@@ -123,6 +123,29 @@ impl VaultRouteRegistry {
 
     /// Disable further admission atomically before taking route ownership.
     /// The caller retains these Arcs across revoke/drain and cleanup failures.
+    /// Remove only this exact target from active projection, retaining its Arc
+    /// for the worker's revoke/drain/cleanup sequence and failed retries.
+    pub(crate) fn retire_one(
+        &self,
+        space: &str,
+        root_id: &str,
+        root_path: &str,
+    ) -> Result<Option<Arc<VerifiedVaultRoute>>, BackendError> {
+        if self.revoked.load(Ordering::Acquire) {
+            return Err(BackendError::Unavailable);
+        }
+        let mut routes = self
+            .routes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let target = routes.iter().position(|route| {
+            route.space_id == space
+                && route.root_resource_id == root_id
+                && route.root_path == normalize(root_path)
+        });
+        Ok(target.map(|index| routes.remove(index)))
+    }
+
     pub(crate) fn retire_all(&self) -> Result<Vec<Arc<VerifiedVaultRoute>>, BackendError> {
         self.revoked.store(true, Ordering::Release);
         // Poison is not authority to resume use, but Rust still owns every Arc.
@@ -211,6 +234,13 @@ impl VaultRouteRegistry {
                 .map_err(|_| BackendError::Unavailable)?;
         }
         Ok(route)
+    }
+
+    pub(crate) fn has_root_id(&self, space: &str, root_id: &str) -> Result<bool, BackendError> {
+        Ok(self
+            .snapshot()?
+            .iter()
+            .any(|route| route.space_id == space && route.root_resource_id == root_id))
     }
 
     pub fn has_space_root(&self, space: &str) -> Result<bool, BackendError> {

@@ -217,6 +217,12 @@ pub enum BackendError {
 /// lease until `begin_publish` returns and the caller finishes native
 /// publication.
 pub trait PreparedEnumeration {
+    /// Files in this complete listing must be projected read-only. Directories
+    /// retain their normal attributes. This hint acquires no authorization lock.
+    fn read_only(&self) -> bool {
+        false
+    }
+
     fn children(&self) -> &[PlaceholderChild];
 
     /// Hold the relevant scope/revocation guard through one native publication.

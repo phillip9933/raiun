@@ -146,6 +146,93 @@ impl WindowsProfiles {
         error.map_or(Ok(()), Err)
     }
 
+    fn handle_owned(
+        &self,
+        request: windows_vault_requests::OwnedControlRequest,
+    ) -> Result<(Value, bool), String> {
+        let session_action = request
+            .value()
+            .get("action")
+            .and_then(Value::as_str)
+            .is_some_and(|action| matches!(action, "vault_unlock" | "vault_lock"));
+        if !session_action {
+            return self.handle(request.value());
+        }
+        let request = request.decode_session()?;
+        if !WINDOWS_VAULT_SESSIONS_ENABLED {
+            return Err("Windows vault sessions are not available yet".into());
+        }
+        let _gate = self
+            .mutation_gate
+            .lock()
+            .map_err(|_| "Vault changes are unavailable")?;
+        match request {
+            windows_vault_requests::session_requests::VaultSessionRequest::Unlock {
+                target,
+                mut password,
+            } => {
+                let (profile, runtime) = {
+                    let state = self
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?;
+                    let profile = target
+                        .profile_id
+                        .as_deref()
+                        .unwrap_or(state.registry.selected())
+                        .to_owned();
+                    let runtime = state
+                        .runtimes
+                        .get(&profile)
+                        .cloned()
+                        .ok_or("Unknown profile_id")?;
+                    (profile, runtime)
+                };
+                let prepared = runtime.prepare_windows_vault_unlock(&target, &mut password)?;
+                {
+                    let mut state = self
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?;
+                    if state
+                        .runtimes
+                        .get(&profile)
+                        .is_none_or(|active| !Arc::ptr_eq(active, &runtime))
+                    {
+                        return Err("The vault account runtime changed".into());
+                    }
+                    runtime.check_vault_preparation(&prepared)?;
+                    // Write the historical encrypted-location exclusion BEFORE
+                    // any live route can expose a native decrypted identity.
+                    let next = state
+                        .registry
+                        .with_reserved_vault(&profile, prepared.reservation.clone())?;
+                    self.persist(&next)?;
+                    state.registry = next;
+                }
+                Ok((runtime.publish_windows_vault_unlock(prepared)?, false))
+            }
+            windows_vault_requests::session_requests::VaultSessionRequest::Lock { target } => {
+                let runtime = {
+                    let state = self
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?;
+                    let profile = target
+                        .profile_id
+                        .as_deref()
+                        .unwrap_or(state.registry.selected());
+                    state
+                        .runtimes
+                        .get(profile)
+                        .cloned()
+                        .ok_or("Unknown profile_id")?
+                };
+                Ok((runtime.lock_windows_vault(&target)?, false))
+            }
+        }
+    }
+
     pub(super) fn handle(&self, request: &Value) -> Result<(Value, bool), String> {
         reject_secret_request(request)?;
         let action = request
@@ -624,7 +711,7 @@ pub(super) fn serve_profiles() -> Result<(), String> {
             };
             let response = read_json_value(&mut stream).and_then(|request| {
                 let request = windows_vault_requests::OwnedControlRequest::new(request);
-                broker.handle(request.value())
+                broker.handle_owned(request)
             });
             let (body, stop) = match response {
                 Ok((body, stop)) => (json!({"ok":true,"data":body}), stop),

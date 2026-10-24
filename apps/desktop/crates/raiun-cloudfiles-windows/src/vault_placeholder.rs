@@ -303,6 +303,9 @@ mod runtime {
         children: Vec<PlaceholderChild>,
     }
     impl PreparedEnumeration for VaultEnumeration {
+        fn read_only(&self) -> bool {
+            true
+        }
         fn children(&self) -> &[PlaceholderChild] {
             &self.children
         }
@@ -465,6 +468,7 @@ mod runtime {
             OpaqueIdentity, OpenCloudPlaceholderBackend, ProviderIdentityBinding,
             ProviderIdentityCatalog, ProviderIdentityCatalogScope,
         };
+        use raiun_core::backend::CloudBackend;
         struct MemoryCatalogue;
         impl ProviderIdentityCatalog for MemoryCatalogue {
             fn load(
@@ -593,6 +597,21 @@ mod runtime {
                 r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:ocrclone="ocrclone">{rows}</d:multistatus>"#
             )
         }
+        fn personal_parent_listing(authority: &str, include_child: bool) -> String {
+            let parent = format!(
+                r#"<d:response><d:href>http://{authority}/dav/personal/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype><d:getcontentlength>0</d:getcontentlength><d:getetag>"space-rev-1"</d:getetag><oc:fileid>space-root-id</oc:fileid><oc:name>Personal</oc:name><oc:permissions>RDNVW</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"#
+            );
+            let child_xml = listing(authority, false, false);
+            let child = if include_child {
+                &child_xml[child_xml.find("<d:response>").unwrap()
+                    ..child_xml.rfind("</d:multistatus>").unwrap()]
+            } else {
+                ""
+            };
+            format!(
+                r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:ocrclone="ocrclone">{parent}{child}</d:multistatus>"#
+            )
+        }
         fn serve(
             mut stream: TcpStream,
             authority: &str,
@@ -647,6 +666,16 @@ mod runtime {
                     );
                     respond(&mut stream, 200, "application/json", graph.as_bytes());
                 }
+                ("PROPFIND", "/dav/personal/") => respond(
+                    &mut stream,
+                    207,
+                    "application/xml",
+                    personal_parent_listing(
+                        authority,
+                        headers.get("depth").map(String::as_str) != Some("0"),
+                    )
+                    .as_bytes(),
+                ),
                 ("PROPFIND", "/dav/personal/Travel.vault/") => respond(
                     &mut stream,
                     207,
@@ -684,6 +713,154 @@ mod runtime {
                     );
                 }
             }
+        }
+
+        #[cfg(feature = "synthetic-agent-integration")]
+        #[test]
+        #[ignore = "requires isolated ordinary-user Windows VM with Cloud Files; preserves owned registered namespace"]
+        fn native_registered_vault_refresh_reads_and_retires_owned_route() {
+            assert!(
+                std::env::var("USERNAME")
+                    .unwrap_or_default()
+                    .eq_ignore_ascii_case("RaiunLabUser")
+            );
+            let fixture_root = std::env::temp_dir().join(format!(
+                "raiun-vault-native-refresh-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&fixture_root).unwrap();
+            println!("VAULT_NATIVE_REFRESH_FIXTURE={}", fixture_root.display());
+            let native_path = fixture_root.join("native-root");
+            std::fs::create_dir(&native_path).unwrap();
+            let lease = crate::pin_configured_root(&native_path).unwrap();
+            let local_root = lease.identity();
+            println!(
+                "VAULT_NATIVE_REFRESH_ROOT_ID={}:{}",
+                local_root.volume_serial, local_root.file_index
+            );
+            let fixture_parent = PinnedDirectory::open(&fixture_root).unwrap();
+            let private = Arc::new(
+                PrivateDirectory::create_or_open_under(
+                    &fixture_parent,
+                    OsStr::new("private-stage"),
+                )
+                .unwrap(),
+            );
+            let fixture = Fixture::start();
+            let client =
+                Arc::new(OpenCloudClient::new(&fixture.origin, "synthetic-token".into()).unwrap());
+            let origin = client.server_origin().unwrap();
+            let account =
+                format!("{origin}\0{SPACE}")
+                    .bytes()
+                    .fold(String::new(), |mut result, byte| {
+                        use std::fmt::Write as _;
+                        write!(result, "{byte:02x}").unwrap();
+                        result
+                    });
+            let trusted = ProviderScope::new(&client, "default".into(), account, origin).unwrap();
+            let recovery = Arc::new(
+                crate::DurableEditRecoveryProvider::current_user(trusted.clone(), local_root)
+                    .unwrap(),
+            );
+            let ordinary = Arc::new(
+                OpenCloudPlaceholderBackend::new_with_identity_catalog(
+                    client.clone(),
+                    trusted.clone(),
+                    local_root,
+                    recovery.identity_catalog(),
+                )
+                .unwrap(),
+            );
+            let composite = ordinary
+                .register_composite_root_for(SPACE, "space-root-id")
+                .unwrap();
+            let runtime = crate::prepare_configured_root_runtime(
+                lease,
+                ordinary.clone(),
+                composite,
+                recovery.clone(),
+            )
+            .unwrap();
+            let mut connection = crate::connect_configured_root(runtime).unwrap();
+            let sessions = Arc::new(VaultSessionCoordinator::new());
+            let scope = VaultSessionScope::new("default", &fixture.origin, SPACE, ROOT_ID).unwrap();
+            let mut password = b"potato".to_vec();
+            sessions
+                .unlock(&scope, &mut password, TOKEN.trim())
+                .unwrap();
+            assert!(password.iter().all(|byte| *byte == 0));
+            let binding = Arc::new(
+                WindowsVaultReadBinding::new_online(
+                    trusted,
+                    client,
+                    sessions.clone(),
+                    scope.clone(),
+                    ROOT_PATH.into(),
+                )
+                .unwrap(),
+            );
+            let vault = Arc::new(
+                WindowsVaultPlaceholderBackend::new(binding.clone(), private.clone(), 131072)
+                    .unwrap(),
+            );
+            ordinary
+                .install_vault_route(vault.clone(), local_root)
+                .unwrap();
+            ordinary
+                .refresh_vault_parent_population(&connection, local_root, SPACE, ROOT_ID, ROOT_PATH)
+                .unwrap();
+            let personal = native_path.join("Personal");
+            let names = std::fs::read_dir(&personal)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>();
+            assert!(names.iter().any(|name| name == "Travel.vault"));
+            let vault_path = personal.join("Travel.vault");
+            let names = std::fs::read_dir(&vault_path)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>();
+            assert_eq!(names, vec![std::ffi::OsString::from("1")]);
+            let bytes = std::fs::read(vault_path.join("1")).unwrap();
+            let expected: Vec<u8> = (0..65537).map(|index| (index * 31 + 7) as u8).collect();
+            assert_eq!(bytes, expected);
+            assert!(
+                (1..=16).contains(&fixture.gets.load(Ordering::Acquire)),
+                "OS hydration must make bounded verified reads"
+            );
+            let retired = ordinary
+                .retire_vault_route(SPACE, ROOT_ID, ROOT_PATH)
+                .unwrap()
+                .unwrap();
+            connection.cleanup_retired_vault_route(&retired).unwrap();
+            assert!(
+                binding
+                    .try_begin_publish(&CancellationToken::new())
+                    .is_err()
+            );
+            assert_eq!(fixture.mutations.load(Ordering::Acquire), 0);
+            sessions.lock(&scope).unwrap();
+            ordinary.revoke();
+            connection.disconnect_in_place().unwrap();
+            drop(connection);
+            drop(retired);
+            drop(vault);
+            drop(binding);
+            drop(ordinary);
+            drop(recovery);
+            drop(sessions);
+            assert_eq!(std::fs::read_dir(private.path()).unwrap().count(), 0);
+            drop(private);
+            drop(fixture_parent);
+            drop(fixture);
+            // Intentionally retain the exact registration and populated namespace,
+            // plus fixture-local recovery evidence, on success and failure.
+            println!("VAULT_NATIVE_REFRESH_PRESERVED=true");
         }
 
         #[test]

@@ -32,6 +32,9 @@ const WINDOWS_ACCOUNTS_ENABLED: bool = !cfg!(test);
 const WINDOWS_FOLDER_SYNC_ENABLED: bool = !cfg!(test);
 // Non-test candidate enables verified worker paths; exact package acceptance is separate.
 const WINDOWS_MEDIA_METADATA_ENABLED: bool = !cfg!(test);
+// Remains off until the complete native unlock/read/lock flow is accepted.
+const WINDOWS_VAULT_SESSIONS_ENABLED: bool = false;
+include!("windows_vault_session_control.rs");
 
 use clap::{Parser, Subcommand};
 use raiun_cloudfiles_windows::{
@@ -262,6 +265,26 @@ enum ProviderCommand {
         row: windows_cache_status::CacheStatusRow,
         response:
             std::sync::mpsc::SyncSender<Result<raiun_cloudfiles_windows::FileCacheStatus, String>>,
+    },
+    RefreshVaultParent {
+        binding: ActiveProviderBinding,
+        space_id: String,
+        root_resource_id: String,
+        root_path: String,
+        response: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+    LockVaultRoute {
+        binding: ActiveProviderBinding,
+        space_id: String,
+        root_resource_id: String,
+        root_path: String,
+        response: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+    InspectVaultBackend {
+        binding: ActiveProviderBinding,
+        response: std::sync::mpsc::SyncSender<
+            Result<Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>, String>,
+        >,
     },
     InspectConnection {
         binding: ActiveProviderBinding,
@@ -545,6 +568,66 @@ impl ProviderManager {
                             if worker_generation.load(Ordering::Acquire) != binding.generation {
                                 result = Err("The account changed during Windows drive inspection".into());
                             }
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::RefreshVaultParent { binding, space_id, root_resource_id, root_path, response } => {
+                            let mut result = (|| {
+                                if binding.generation == 0 || worker_generation.load(Ordering::Acquire) != binding.generation
+                                    || active_binding.as_ref() != Some(&binding) || !retired_vaults.is_empty() {
+                                    return Err("The Windows drive changed before vault enumeration".to_owned());
+                                }
+                                let backend = backend.as_ref().ok_or("The Windows drive is unavailable")?;
+                                let connection = connection.as_ref().ok_or("The Windows drive is unavailable")?;
+                                backend.refresh_vault_parent_population(connection, binding.identity, &space_id, &root_resource_id, &root_path)
+                                    .map_err(|_| "Could not refresh the verified vault parent".to_owned())
+                            })();
+                            if worker_generation.load(Ordering::Acquire) != binding.generation {
+                                result = Err("The account changed during vault enumeration".into());
+                            }
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::LockVaultRoute { binding, space_id, root_resource_id, root_path, response } => {
+                            let result = (|| {
+                                if binding.generation == 0 || worker_generation.load(Ordering::Acquire) != binding.generation
+                                    || active_binding.as_ref() != Some(&binding) || connection.is_none() {
+                                    return Err("The Windows drive changed before vault cleanup".to_owned());
+                                }
+                                let backend = backend.as_ref().ok_or("The Windows drive is unavailable")?;
+                                let pending = retired_vaults.iter().position(|route| route.space_id() == space_id
+                                    && route.root_resource_id() == root_resource_id && route.root_path() == root_path);
+                                let index = match pending {
+                                    Some(index) => index,
+                                    None => {
+                                        let route = backend.retire_vault_route(&space_id, &root_resource_id, &root_path)
+                                            .map_err(|_| "Could not retain this vault for cleanup")?
+                                            .ok_or("This vault has no active route")?;
+                                        retired_vaults.push(route);
+                                        retired_vaults.len() - 1
+                                    }
+                                };
+                                // Retain the Arc BEFORE a fallible revoke or file operation.
+                                let route = &retired_vaults[index];
+                                route.revoke_hydration().map_err(|_| "Vault hydration could not fully drain")?;
+                                connection.as_ref().ok_or("The Windows drive is unavailable")?
+                                    .cleanup_retired_vault_route(route)
+                                    .map_err(|_| "Vault reads stopped, but local cleanup is incomplete; edits and retry state were preserved")?;
+                                retired_vaults.remove(index);
+                                Ok(())
+                            })();
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::InspectVaultBackend { binding, response } => {
+                            let result = if binding.generation == 0
+                                || worker_generation.load(Ordering::Acquire) != binding.generation {
+                                Err("The account changed before Windows drive inspection".to_owned())
+                            } else if connection.is_none() || !retired_vaults.is_empty() {
+                                Err("The Windows drive is not connected".to_owned())
+                            } else if active_binding.as_ref() == Some(&binding) {
+                                backend.as_ref().filter(|backend| !backend.is_revoked())
+                                    .cloned().ok_or_else(|| "The Windows drive is waiting for confirmed disconnect".to_owned())
+                            } else {
+                                Err("A different Windows drive connection is already active".to_owned())
+                            };
                             let _ = response.send(result);
                         }
                         ProviderCommand::InspectConnection { binding, response } => {
@@ -919,6 +1002,63 @@ impl ProviderManager {
                 recovery,
                 response,
             })
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result
+            .recv()
+            .map_err(|_| "Windows Cloud Files connection manager stopped unexpectedly")?
+    }
+
+    fn refresh_vault_parent(
+        &self,
+        binding: ActiveProviderBinding,
+        space_id: String,
+        root_resource_id: String,
+        root_path: String,
+    ) -> Result<(), String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::RefreshVaultParent {
+                binding,
+                space_id,
+                root_resource_id,
+                root_path,
+                response,
+            })
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result
+            .recv()
+            .map_err(|_| "Windows Cloud Files connection manager stopped")?
+    }
+
+    fn lock_vault_route(
+        &self,
+        binding: ActiveProviderBinding,
+        space_id: String,
+        root_resource_id: String,
+        root_path: String,
+    ) -> Result<(), String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::LockVaultRoute {
+                binding,
+                space_id,
+                root_resource_id,
+                root_path,
+                response,
+            })
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result
+            .recv()
+            .map_err(|_| "Windows Cloud Files connection manager stopped")?
+    }
+
+    fn verified_vault_backend(
+        &self,
+        binding: ActiveProviderBinding,
+    ) -> Result<Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::InspectVaultBackend { binding, response })
             .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
         result
             .recv()

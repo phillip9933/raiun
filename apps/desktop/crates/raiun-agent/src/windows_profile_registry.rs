@@ -199,7 +199,6 @@ impl std::fmt::Debug for VaultReservation {
     }
 }
 impl VaultReservation {
-    #[cfg(test)]
     pub fn new(
         scope_digest: String,
         space_id: String,
@@ -415,8 +414,6 @@ impl Registry {
     }
     /// Return an unpublished additive candidate. A moved/replaced vault retains
     /// all old exclusions; removing historical reservations is not implicit.
-    // Production write admission joins the explicit unlock path separately.
-    #[cfg(test)]
     pub fn with_reserved_vault(
         &self,
         profile: &str,

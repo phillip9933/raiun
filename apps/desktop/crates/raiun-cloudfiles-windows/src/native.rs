@@ -83,6 +83,7 @@ const CF_PLACEHOLDER_CREATE_FLAG_MARK_IN_SYNC: u32 = 2;
 const CF_CREATE_FLAG_STOP_ON_ERROR: u32 = 1;
 const CF_UPDATE_FLAG_ENABLE_ON_DEMAND_POPULATION: u32 = 0x8;
 const CF_PLACEHOLDER_INFO_BASIC: u32 = 0;
+const FILE_ATTRIBUTE_READONLY: u32 = 0x1;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 const FILE_ATTRIBUTE_ARCHIVE: u32 = 0x20;
@@ -1632,6 +1633,24 @@ impl OwnedConfiguredRoot {
 
 #[allow(dead_code)]
 impl ConfiguredRootConnection {
+    // Only changes population policy on an already owned directory. The caller
+    // supplies a current backend identity; the path is merely a locator.
+    pub(super) fn refresh_namespace_parent_population(
+        &self,
+        expected_root: crate::ConfiguredRootIdentity,
+        components: &[&str],
+        parent: &crate::PlaceholderChild,
+    ) -> Result<(), Error> {
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        if !self.connected
+            || root.identity.volume_serial != expected_root.volume_serial
+            || root.identity.file_index != expected_root.file_index
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        enable_configured_directory_population_at(root, parent, components)
+    }
+
     // Future route owner must revoke/drain the exact route and prove complete
     // restart coverage before calling. No public lock wrapper exists yet.
     pub(super) fn cleanup_recorded_vault_files(
@@ -2166,12 +2185,22 @@ impl ConfiguredRootConnection {
             root.register(composite_root_identity.as_bytes())?;
         }
 
-        let state = Arc::new(CallbackState::new_for_root(
+        let mut state = CallbackState::new_for_root(
             Arc::clone(&backend),
             root.path.clone(),
             root.identity,
             Some(recovery),
-        ));
+        );
+        // A new process has no complete history of plaintext published through
+        // this retained registration. Empty current rows cannot prove cleanup.
+        if already_registered {
+            state
+                .hydrated_files
+                .get_mut()
+                .map_err(|_| Error::EditRecoveryUnavailable)?
+                .mark_incomplete();
+        }
+        let state = Arc::new(state);
         state.record_reconnect_scan(scan_registered_root(&root.path, root.identity));
         let context_key = Arc::as_ptr(&state) as usize;
         callback_registry()
@@ -4689,7 +4718,7 @@ unsafe extern "system" fn fetch_placeholders_callback(
     if !valid_fetch_placeholders_param_size(param_size) {
         #[cfg(test)]
         eprintln!("synthetic directory callback invalid parameter size={param_size}");
-        execute_transfer_placeholders(info, &[], STATUS_UNSUCCESSFUL);
+        execute_transfer_placeholders(info, &[], STATUS_UNSUCCESSFUL, false);
         return;
     }
     let identity_is_valid = !info.file_identity.is_null()
@@ -4704,7 +4733,7 @@ unsafe extern "system" fn fetch_placeholders_callback(
             info.sync_root_identity_length,
             info.file_id == info.sync_root_file_id
         );
-        execute_transfer_placeholders(info, &[], STATUS_UNSUCCESSFUL);
+        execute_transfer_placeholders(info, &[], STATUS_UNSUCCESSFUL, false);
         return;
     }
     let request_key = info.request_key.internal;
@@ -4714,13 +4743,13 @@ unsafe extern "system" fn fetch_placeholders_callback(
     else {
         #[cfg(test)]
         eprintln!("synthetic directory callback rejected during fetch admission");
-        execute_transfer_placeholders(info, &[], STATUS_UNSUCCESSFUL);
+        execute_transfer_placeholders(info, &[], STATUS_UNSUCCESSFUL, false);
         return;
     };
     let Some(_population_permit) = guard.0.begin_directory_enumeration() else {
         #[cfg(test)]
         eprintln!("synthetic directory callback rejected by enumeration bound");
-        let outcome = execute_transfer_placeholders(info, &[], STATUS_UNSUCCESSFUL);
+        let outcome = execute_transfer_placeholders(info, &[], STATUS_UNSUCCESSFUL, false);
         guard.0.record_failed_hresult(outcome.hresult);
         return;
     };
@@ -4739,7 +4768,7 @@ unsafe extern "system" fn fetch_placeholders_callback(
     if fetch_permit.cancellation.is_cancelled() || fetch_permit.cancellation.is_expired() {
         #[cfg(test)]
         eprintln!("synthetic directory callback cancelled before backend lookup");
-        execute_transfer_placeholders(info, &[], STATUS_CANCELLED);
+        execute_transfer_placeholders(info, &[], STATUS_CANCELLED, false);
         return;
     }
     let result = catch_unwind(AssertUnwindSafe(|| {
@@ -4759,21 +4788,22 @@ unsafe extern "system" fn fetch_placeholders_callback(
             if fetch_permit.cancellation.is_cancelled() || fetch_permit.cancellation.is_expired() {
                 #[cfg(test)]
                 eprintln!("synthetic directory callback cancelled after backend lookup");
-                execute_transfer_placeholders(info, &[], STATUS_CANCELLED);
+                execute_transfer_placeholders(info, &[], STATUS_CANCELLED, false);
                 return;
             }
             if !valid_placeholder_children(prepared.children()) {
-                execute_transfer_placeholders(info, &[], STATUS_UNSUCCESSFUL);
+                execute_transfer_placeholders(info, &[], STATUS_UNSUCCESSFUL, false);
                 return;
             }
+            let read_only = prepared.read_only();
             let publish_permit = match prepared.begin_publish(&fetch_permit.cancellation) {
                 Ok(permit) => permit,
                 Err(BackendError::Cancelled) => {
-                    execute_transfer_placeholders(info, &[], STATUS_CANCELLED);
+                    execute_transfer_placeholders(info, &[], STATUS_CANCELLED, false);
                     return;
                 }
                 Err(_) => {
-                    execute_transfer_placeholders(info, &[], STATUS_UNSUCCESSFUL);
+                    execute_transfer_placeholders(info, &[], STATUS_UNSUCCESSFUL, false);
                     return;
                 }
             };
@@ -4781,24 +4811,24 @@ unsafe extern "system" fn fetch_placeholders_callback(
                 Ok(permit) => permit,
                 Err(BackendError::Cancelled) => {
                     drop(publish_permit);
-                    execute_transfer_placeholders(info, &[], STATUS_CANCELLED);
+                    execute_transfer_placeholders(info, &[], STATUS_CANCELLED, false);
                     return;
                 }
                 Err(_) => {
                     drop(publish_permit);
-                    execute_transfer_placeholders(info, &[], STATUS_UNSUCCESSFUL);
+                    execute_transfer_placeholders(info, &[], STATUS_UNSUCCESSFUL, false);
                     return;
                 }
             };
             if fetch_permit.cancellation.is_cancelled() || fetch_permit.cancellation.is_expired() {
                 drop(request_publish);
                 drop(publish_permit);
-                execute_transfer_placeholders(info, &[], STATUS_CANCELLED);
+                execute_transfer_placeholders(info, &[], STATUS_CANCELLED, false);
                 return;
             }
             let children = prepared.children();
             let count = children.len();
-            let outcome = execute_transfer_placeholders(info, children, STATUS_SUCCESS);
+            let outcome = execute_transfer_placeholders(info, children, STATUS_SUCCESS, read_only);
             #[cfg(test)]
             eprintln!(
                 "synthetic directory CfExecute outcome: hresult={:#x} processed={} expected={} complete={} entry_failure={:?}",
@@ -4828,17 +4858,17 @@ unsafe extern "system" fn fetch_placeholders_callback(
         Err(BackendError::Cancelled) => {
             #[cfg(test)]
             eprintln!("synthetic directory backend cancelled");
-            execute_transfer_placeholders(info, &[], STATUS_CANCELLED);
+            execute_transfer_placeholders(info, &[], STATUS_CANCELLED, false);
         }
         Err(_error) => {
             #[cfg(test)]
             eprintln!("synthetic directory backend failed: {_error:?}");
-            execute_transfer_placeholders(info, &[], STATUS_UNSUCCESSFUL);
+            execute_transfer_placeholders(info, &[], STATUS_UNSUCCESSFUL, false);
         }
         Ok(_) => {
             #[cfg(test)]
             eprintln!("synthetic directory backend exceeded the child bound");
-            execute_transfer_placeholders(info, &[], STATUS_UNSUCCESSFUL);
+            execute_transfer_placeholders(info, &[], STATUS_UNSUCCESSFUL, false);
         }
     }
 }
@@ -4891,6 +4921,7 @@ fn populate_initial_sync_root(
     let prepared = backend
         .prepare_enumeration(root_identity, &cancellation)
         .map_err(|_| Error::ProviderUnavailable)?;
+    let read_only = prepared.read_only();
     let children = prepared.children();
     if children.is_empty() || !valid_placeholder_children(children) {
         return Err(Error::ProviderUnavailable);
@@ -4927,6 +4958,11 @@ fn populate_initial_sync_root(
                         FILE_ATTRIBUTE_DIRECTORY
                     } else {
                         FILE_ATTRIBUTE_ARCHIVE
+                            | if read_only {
+                                FILE_ATTRIBUTE_READONLY
+                            } else {
+                                0
+                            }
                     },
                 },
                 file_size: if child.metadata.is_directory {
@@ -5072,12 +5108,66 @@ fn pin_configured_directory_identity(
     child: &crate::PlaceholderChild,
     access: u32,
 ) -> Result<(RawOwnedHandle, RootSnapshot), Error> {
-    if !child.metadata.is_directory || !valid_component(&child.name) {
+    let (entry, snapshot, _parents) =
+        pin_configured_directory_path(root, child, &[child.name.as_str()], access)?;
+    Ok((entry, snapshot))
+}
+
+type PinnedPopulationDirectory = (
+    RawOwnedHandle,
+    RootSnapshot,
+    Vec<(RawOwnedHandle, RootSnapshot)>,
+);
+
+fn pin_configured_directory_path(
+    root: &OwnedConfiguredRoot,
+    child: &crate::PlaceholderChild,
+    components: &[&str],
+    access: u32,
+) -> Result<PinnedPopulationDirectory, Error> {
+    if !child.metadata.is_directory
+        || components.is_empty()
+        || components.len() > 256
+        || components.last().copied() != Some(child.name.as_str())
+        || components
+            .iter()
+            .any(|component| !valid_component(component))
+    {
         return Err(Error::InvalidConfiguredRoot);
     }
     root.verify_identity(true)?;
     root.verify_registered()?;
-    let path = wide_path(&root.path.join(&child.name))?;
+    let mut path = root.path.clone();
+    let mut parents = Vec::with_capacity(components.len() - 1);
+    for component in &components[..components.len() - 1] {
+        path.push(component);
+        let wide = wide_path(&path)?;
+        let raw = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                null_mut(),
+            )
+        };
+        if raw == INVALID_HANDLE_VALUE || raw.is_null() {
+            return Err(win32_io_error("pin population directory ancestor"));
+        }
+        let held = RawOwnedHandle(raw);
+        let snapshot = root_snapshot(held.0)?;
+        if snapshot.identity.volume_serial != root.identity.volume_serial
+            || snapshot.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+            || !valid_callback_directory_snapshot(snapshot)
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        parents.push((held, snapshot));
+    }
+    path.push(child.name.as_str());
+    let path = wide_path(&path)?;
     // The exact generated child name is one validated component beneath the
     // held root. Open the reparse point itself and omit FILE_SHARE_DELETE so
     // it cannot be replaced while identity and population state are checked.
@@ -5155,17 +5245,64 @@ fn pin_configured_directory_identity(
         return Err(Error::ConfiguredRootChanged);
     }
 
+    verify_population_path(root, child_handle.0, &parents, components)?;
     root.verify_identity(true)?;
     root.verify_registered()?;
-    Ok((child_handle, before))
+    Ok((child_handle, before, parents))
+}
+
+fn verify_population_path(
+    root: &OwnedConfiguredRoot,
+    child: Handle,
+    parents: &[(RawOwnedHandle, RootSnapshot)],
+    components: &[&str],
+) -> Result<(), Error> {
+    let root_final =
+        final_path_for_handle(root.root_handle()?).map_err(|_| Error::ConfiguredRootChanged)?;
+    let child_final = final_path_for_handle(child).map_err(|_| Error::ConfiguredRootChanged)?;
+    let mut expected = root_final.clone();
+    for component in components {
+        expected.push(component);
+    }
+    if !windows_paths_equal(&child_final, &expected)
+        || !windows_path_is_within(&child_final, &root_final)
+    {
+        return Err(Error::ConfiguredRootChanged);
+    }
+    for (handle, before) in parents {
+        let now = root_snapshot(handle.0)?;
+        if now.identity != before.identity
+            || now.file_attributes != before.file_attributes
+            || now.reparse_tag != before.reparse_tag
+            || now.placeholder_state != before.placeholder_state
+            || !valid_callback_directory_snapshot(now)
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+    }
+    Ok(())
 }
 
 fn enable_configured_directory_population(
     root: &OwnedConfiguredRoot,
     child: &crate::PlaceholderChild,
 ) -> Result<(), Error> {
-    let (child_handle, before) =
-        pin_configured_directory_identity(root, child, FILE_READ_ATTRIBUTES | FILE_WRITE_DATA)?;
+    enable_configured_directory_population_at(root, child, &[child.name.as_str()])
+}
+
+fn enable_configured_directory_population_at(
+    root: &OwnedConfiguredRoot,
+    child: &crate::PlaceholderChild,
+    components: &[&str],
+) -> Result<(), Error> {
+    // Retain every no-follow ancestor through the update and final proof.
+    let (child_handle, before, parents) = pin_configured_directory_path(
+        root,
+        child,
+        components,
+        FILE_READ_ATTRIBUTES | FILE_WRITE_DATA,
+    )?;
+    verify_population_path(root, child_handle.0, &parents, components)?;
     let update_result = unsafe {
         CfUpdatePlaceholder(
             child_handle.0,
@@ -5185,6 +5322,7 @@ fn enable_configured_directory_population(
             update_result,
         ));
     }
+    verify_population_path(root, child_handle.0, &parents, components)?;
     let after = root_snapshot(child_handle.0)?;
     if after.identity != before.identity
         || after.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
@@ -5267,6 +5405,7 @@ fn execute_transfer_placeholders(
     info: &CfCallbackInfo,
     children: &[crate::PlaceholderChild],
     completion_status: i32,
+    read_only: bool,
 ) -> PlaceholderExecutionOutcome {
     let names = children
         .iter()
@@ -5291,6 +5430,11 @@ fn execute_transfer_placeholders(
                         FILE_ATTRIBUTE_DIRECTORY
                     } else {
                         FILE_ATTRIBUTE_ARCHIVE
+                            | if read_only {
+                                FILE_ATTRIBUTE_READONLY
+                            } else {
+                                0
+                            }
                     },
                 },
                 file_size: if child.metadata.is_directory {

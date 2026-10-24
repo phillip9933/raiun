@@ -1128,6 +1128,28 @@ impl OpenCloudPlaceholderBackend {
         Ok(())
     }
 
+    /// Snapshot for the trusted agent's vault preparation, never UI authority.
+    #[cfg(windows)]
+    pub fn vault_read_context(
+        &self,
+        expected_root: crate::ConfiguredRootIdentity,
+    ) -> Result<(Arc<OpenCloudClient>, ProviderScope), BackendError> {
+        self.ensure_active()?;
+        if self.local_root_identity != Some(expected_root) {
+            return Err(BackendError::Unavailable);
+        }
+        Ok((self.client.clone(), self.scope.clone()))
+    }
+
+    #[cfg(windows)]
+    pub fn has_vault_root(&self, space: &str, root_id: &str) -> Result<bool, BackendError> {
+        self.ensure_active()?;
+        match &self.vault_routes {
+            Some(routes) => routes.has_root_id(space, root_id),
+            None => Err(BackendError::Unavailable),
+        }
+    }
+
     pub fn scope(&self) -> &ProviderScope {
         &self.scope
     }
@@ -1204,6 +1226,20 @@ impl OpenCloudPlaceholderBackend {
             .restore_exclusions(expected_root, locations)
     }
 
+    #[cfg(windows)]
+    pub fn retire_vault_route(
+        &self,
+        space: &str,
+        root_id: &str,
+        root_path: &str,
+    ) -> Result<Option<Arc<crate::vault_routes::VerifiedVaultRoute>>, BackendError> {
+        self.ensure_active()?;
+        self.vault_routes
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?
+            .retire_one(space, root_id, root_path)
+    }
+
     /// Retain revoked route ownership for native plaintext cleanup on disconnect.
     /// Taking the inventory grants no unlock and blocks further vault admission.
     #[cfg(windows)]
@@ -1214,6 +1250,205 @@ impl OpenCloudPlaceholderBackend {
             Some(routes) => routes.retire_all(),
             None => Ok(Vec::new()),
         }
+    }
+
+    /// Publish a durable encrypted-location exclusion to this live backend
+    /// before fallible unlock-route admission. Retained ordinary leases drain
+    /// first, and known paths stay excluded even if active route setup fails.
+    #[cfg(windows)]
+    pub fn reserve_live_vault_exclusion(
+        &self,
+        expected_root: crate::ConfiguredRootIdentity,
+        space: &str,
+        path: &str,
+    ) -> Result<(), BackendError> {
+        let _drained = self
+            .lease_gate
+            .write()
+            .map_err(|_| BackendError::Unavailable)?;
+        let _publication = self
+            .publish_gate
+            .lock()
+            .map_err(|_| BackendError::Unavailable)?;
+        self.ensure_active()?;
+        self.vault_routes
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?
+            .restore_exclusions(expected_root, &[(space.to_owned(), path.to_owned())])
+    }
+
+    /// Request future parent enumeration, never removal of existing children.
+    /// The live provider fences and exact native identity remain held together.
+    #[cfg(windows)]
+    pub fn refresh_vault_parent_population(
+        &self,
+        connection: &crate::ConfiguredRootConnection,
+        expected_root: crate::ConfiguredRootIdentity,
+        space_id: &str,
+        root_id: &str,
+        root_path: &str,
+    ) -> Result<(), BackendError> {
+        let _lease = self
+            .lease_gate
+            .read()
+            .map_err(|_| BackendError::Unavailable)?;
+        let route = self
+            .vault_routes
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?
+            .exact_root(space_id, root_path, root_id)?
+            .ok_or(BackendError::NotFound)?;
+        if route.local_root() != expected_root {
+            return Err(BackendError::Unavailable);
+        }
+        let (parent, components) =
+            self.vault_parent_population_descriptor(space_id, root_id, root_path)?;
+        let cancellation = CancellationToken::new();
+        let _publication = self.begin_scoped_publish(&cancellation)?;
+        let references = components.iter().map(String::as_str).collect::<Vec<_>>();
+        connection
+            .inner
+            .refresh_namespace_parent_population(expected_root, &references, &parent)
+            .map_err(|_| BackendError::Unavailable)
+    }
+
+    /// Resolve only a currently verified vault route's immediate namespace
+    /// parent. Components are locators; native code must pin and verify the
+    /// returned opaque directory identity before requesting population.
+    #[cfg(windows)]
+    fn vault_parent_population_descriptor(
+        &self,
+        space_id: &str,
+        vault_root_resource_id: &str,
+        vault_root_path: &str,
+    ) -> Result<(PlaceholderChild, Vec<String>), BackendError> {
+        self.ensure_active()?;
+        let routes = self
+            .vault_routes
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?;
+        let route = routes
+            .exact_root(space_id, vault_root_path, vault_root_resource_id)?
+            .ok_or(BackendError::NotFound)?;
+        let path = route.root_path();
+        let state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
+        self.client
+            .with_token_generation(self.token_generation, || {
+                if self.revoked.load(Ordering::Acquire) {
+                    return Err(BackendError::Unavailable);
+                }
+                let mut roots =
+                    state
+                        .namespace_directories
+                        .values()
+                        .filter_map(|entry| match entry {
+                            NamespaceDirectory::Root {
+                                account_id,
+                                personal_space_id,
+                                personal_root_id,
+                            } if account_id == self.scope.account_id() => {
+                                Some((personal_space_id, personal_root_id))
+                            }
+                            _ => None,
+                        });
+                let (personal_space, personal_root) =
+                    roots.next().ok_or(BackendError::Unavailable)?;
+                if roots.next().is_some()
+                    || state
+                        .location_labels
+                        .get(&(personal_space.clone(), personal_root.clone()))
+                        .map(String::as_str)
+                        != Some("Personal")
+                {
+                    // Restored catalogue entries alone do not prove a current label.
+                    return Err(BackendError::Unavailable);
+                }
+                let (identity, name, components) =
+                    if path == "/" {
+                        // An entire Personal location is directly beneath the native
+                        // sync root, which this child-directory API cannot refresh.
+                        if space_id == personal_space {
+                            return Err(BackendError::Unavailable);
+                        }
+                        let mut matches = state.namespace_directories.iter().filter_map(
+                            |(id, entry)| match entry {
+                                NamespaceDirectory::Spaces {
+                                    account_id,
+                                    personal_space_id,
+                                    personal_root_id,
+                                } if account_id == self.scope.account_id()
+                                    && personal_space_id == personal_space
+                                    && personal_root_id == personal_root =>
+                                {
+                                    Some(*id)
+                                }
+                                _ => None,
+                            },
+                        );
+                        let id = matches.next().ok_or(BackendError::Unavailable)?;
+                        if matches.next().is_some() {
+                            return Err(BackendError::Unavailable);
+                        }
+                        (id, "Spaces".to_owned(), vec!["Spaces".to_owned()])
+                    } else {
+                        if direct_child_name("/", path).is_none() {
+                            // Nested directory bindings may have been restored without
+                            // current local label provenance; refuse rather than guess.
+                            return Err(BackendError::Unavailable);
+                        }
+                        let mut matches = state.directories.iter().filter(|(_, entry)| {
+                            entry.space_id == space_id
+                                && entry.path == "/"
+                                && entry.remote_id == entry.root_resource_id
+                        });
+                        let (id, directory) = matches.next().ok_or(BackendError::Unavailable)?;
+                        if matches.next().is_some() {
+                            return Err(BackendError::Unavailable);
+                        }
+                        let label = state
+                            .location_labels
+                            .get(&(
+                                directory.space_id.clone(),
+                                directory.root_resource_id.clone(),
+                            ))
+                            .ok_or(BackendError::Unavailable)?;
+                        let components = if space_id == personal_space
+                            && directory.root_resource_id == *personal_root
+                            && label == "Personal"
+                        {
+                            vec!["Personal".to_owned()]
+                        } else {
+                            let name = label
+                                .strip_prefix("Spaces / ")
+                                .ok_or(BackendError::Unavailable)?;
+                            if !valid_windows_component(name) {
+                                return Err(BackendError::Unavailable);
+                            }
+                            vec!["Spaces".to_owned(), name.to_owned()]
+                        };
+                        let name = components
+                            .last()
+                            .cloned()
+                            .ok_or(BackendError::Unavailable)?;
+                        (*id, name, components)
+                    };
+                if components.iter().any(|part| !valid_windows_component(part)) {
+                    return Err(BackendError::Unavailable);
+                }
+                Ok((
+                    PlaceholderChild {
+                        name,
+                        identity: identity.as_bytes().to_vec(),
+                        metadata: PlaceholderMetadata {
+                            is_directory: true,
+                            length: 0,
+                        },
+                        last_write_time: 0,
+                    },
+                    components,
+                ))
+            })
+            .map_err(|error| self.reject_cached_cloud_error(error))?
     }
 
     /// Admit a verified vault beneath this exact retained native root. This
