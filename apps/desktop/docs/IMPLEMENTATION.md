@@ -2115,3 +2115,21 @@ own retained preferences.
 Source checks and the focused portable service test pass. Native Windows
 preferences persistence, effective aggregate throttling and installed-package
 acceptance are still pending; this source work has not been released.
+
+### Windows proxy settings (local next-release work, 24 October)
+
+The Windows settings page now supports a proxy choice while signed out. Save a
+system, direct or credential-free HTTP(S) proxy route before the next sign-in.
+An existing session keeps its immutable route through token refresh and content
+requests; changing the preference requires signing out first. Drive, folder/media,
+recovery and Personal verification clients now consistently use that session route.
+
+Preferences have a separate protected, revision-checked record. A pending choice
+binds only after verified account metadata. A previous account's bound preference
+is preserved but remains inactive for a new sign-in until an explicit signed-out
+settings change replaces it. This does not import Windows proxy policy beyond the
+existing HTTP client's system-proxy behavior.
+
+Source checks and two focused portable preference tests pass. The Windows agent
+RPC test compiles but has not run natively. Native routing, protected persistence
+and installed-package acceptance remain pending; this work is unpublished.

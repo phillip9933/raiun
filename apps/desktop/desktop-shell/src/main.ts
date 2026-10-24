@@ -27,7 +27,7 @@ import { isVaultPasswordValidationError, shouldAnnounceVaultCloseBlocked, vaultD
 import raiunLogo from '../src-tauri/icons/raiun.svg';
 
 type OfflineCacheSummary = { available: boolean; quota_bytes: number; used_bytes: number; pinned_bytes: number; protected_bytes: number; over_quota: boolean; unavailable_reason?: string | null };
-type Status = { connected: boolean; offline_namespace?: boolean; server?: string | null; client_id?: string | null; paused?: boolean; paused_space_ids?: string[]; mounted?: boolean; cloud_root?: string | null; error?: string | null; autostart?: boolean | null; recovery_folder?: string | null; encrypted_edit_recovery_available?: boolean; offline_cache?: OfflineCacheSummary | null; profile_id?: string | null; profile_label?: string | null; auth_generation?: number; root_configuration?: { valid: boolean; identity_bound: boolean; registration_state: string | null; recovery_scope_token?: unknown } | null; stopped?: boolean; authenticating?: boolean; provider_supported?: boolean; folder_sync_supported?: boolean; media_jobs_supported?: boolean; vaults_supported?: boolean; account_switch_supported?: boolean; account_setup_requires_sign_in?: boolean; pause_supported?: boolean; bandwidth_limits_supported?: boolean; session_cleanup_uncertain?: boolean };
+type Status = { connected: boolean; offline_namespace?: boolean; server?: string | null; client_id?: string | null; paused?: boolean; paused_space_ids?: string[]; mounted?: boolean; cloud_root?: string | null; error?: string | null; autostart?: boolean | null; recovery_folder?: string | null; encrypted_edit_recovery_available?: boolean; offline_cache?: OfflineCacheSummary | null; profile_id?: string | null; profile_label?: string | null; auth_generation?: number; root_configuration?: { valid: boolean; identity_bound: boolean; registration_state: string | null; recovery_scope_token?: unknown } | null; stopped?: boolean; authenticating?: boolean; provider_supported?: boolean; folder_sync_supported?: boolean; media_jobs_supported?: boolean; vaults_supported?: boolean; account_switch_supported?: boolean; account_setup_requires_sign_in?: boolean; pause_supported?: boolean; bandwidth_limits_supported?: boolean; network_proxy_supported?: boolean; proxy_edit_requires_sign_out?: boolean; session_cleanup_uncertain?: boolean };
 type Account = { id: string; label: string; status: Status };
 type AccountsResult = { selected: string | null; items: Account[] };
 type ShellUnlockIntent = { profile_id: string; space_id: string; root_resource_id: string };
@@ -130,7 +130,7 @@ const windowsOfflineFoldersPanel = new WindowsOfflineFolderPanel({
 const vaultOperationsUi = { scopes: new Map<string, VaultOperationsScope>(), lastLoadedAt: 0, generation: 0, loading: false, accountEpoch: -1, rootsTruncated: false };
 const copyVerifyUi = { jobs: new Map<string, CopyVerifyJobUi>(), active: new Set<string>(), generation: 0 };
 const copyProducerUi: CopyProducerUi = { source: null, generation: 0, flowGeneration: 0, context: null, destination: null, jobId: null, status: null, busy: false, admissionUncertain: false, error: '', timer: 0, pollError: '' };
-const proxyUi = { config: { mode: 'system' } as ProxyConfig, revision: 0, accountId: null as string | null, loadedEpoch: -1, loading: false, saving: false, error: '', draftMode: 'system' as ProxyMode, draftUrl: '', generation: 0 };
+const proxyUi = { config: { mode: 'system' } as ProxyConfig, revision: 0, accountId: null as string | null, scopeToken: undefined as string | undefined, loadedEpoch: -1, loading: false, saving: false, error: '', draftMode: 'system' as ProxyMode, draftUrl: '', generation: 0 };
 const bandwidthUi = { upload: '', download: '', revision: 0, accountId: null as string | null, scopeToken: undefined as string | undefined, loadedEpoch: -1, loading: false, saving: false, error: '', generation: 0 };
 type InterruptedCreateRetryUi = { key: string; spaceId: string; rootResourceId: string; writeId: string; revision: number; retryGeneration: number; retryState: 'attempting' | 'recovery_attempting' | 'recovery_retrying'; jobId: string; profileId: string; accountEpoch: number; generation: number; busy: boolean; status: VaultEditReconcileStatus | null; error: string };
 const interruptedCreateRetryUi: { job: InterruptedCreateRetryUi | null; timer: number; generation: number } = { job: null, timer: 0, generation: 0 };
@@ -1774,10 +1774,15 @@ async function pollPendingReconcile(expected: { job_id: string; space_id: string
     if (isCurrentAccount(expected.accountEpoch) && !pendingWritesUi.reconcileJobs.has(expected.space_id)) render();
   }
 }
+function networkProxyAvailable() {
+  return providerAvailable(state.status?.provider_supported) &&
+    (!isWindowsAgentStatus(state.status) || state.status?.network_proxy_supported === true);
+}
+
 async function loadNetworkProxySettings(force = false) {
   if (!state.agentReachable || proxyUi.loading) return;
   const epoch = state.accountEpoch;
-  if (isWindowsAgentStatus(state.status) || !providerAvailable(state.status?.provider_supported)) {
+  if (!networkProxyAvailable()) {
     proxyUi.error = 'Proxy settings are unavailable for this Windows agent.';
     proxyUi.loadedEpoch = epoch;
     render();
@@ -1789,11 +1794,12 @@ async function loadNetworkProxySettings(force = false) {
   proxyUi.error = '';
   render();
   try {
-    const saved = parseProxySettings(await request<unknown>('network_proxy'));
+    const saved = parseProxySettings(await request<unknown>('network_proxy'), isWindowsAgentStatus(state.status));
     if (!isCurrentAccount(epoch) || generation !== proxyUi.generation) return;
     proxyUi.config = saved.proxy;
     proxyUi.revision = saved.revision;
     proxyUi.accountId = saved.account_id;
+    proxyUi.scopeToken = saved.scope_token;
     proxyUi.draftMode = saved.proxy.mode;
     proxyUi.draftUrl = saved.proxy.mode === 'explicit' ? saved.proxy.url : '';
     proxyUi.loadedEpoch = epoch;
@@ -1816,7 +1822,8 @@ async function saveNetworkProxySettings() {
     connected: state.status?.connected === true,
     offlineNamespace: connection === 'offline_reconnecting',
     authenticating: state.status?.authenticating === true,
-    saving: proxyUi.saving || proxyUi.loading
+    saving: proxyUi.saving || proxyUi.loading,
+    requiresSignOut: isWindowsAgentStatus(state.status) && state.status?.proxy_edit_requires_sign_out === true
   }) && state.mutationBusy === 0 && !state.accountSwitching && proxyUi.loadedEpoch === state.accountEpoch;
   if (!canEdit || proxyUi.loadedEpoch !== state.accountEpoch) return;
   const checked = validateProxyDraft(proxyUi.draftMode, proxyUi.draftUrl);
@@ -1835,15 +1842,19 @@ async function saveNetworkProxySettings() {
     const saved = parseProxySettings(await request<unknown>('network_proxy_set', {
       proxy: checked.config,
       expected_revision: proxyUi.revision,
-      expected_account_id: proxyUi.accountId
-    }));
+      expected_account_id: proxyUi.accountId,
+      ...(proxyUi.scopeToken ? { expected_scope_token: proxyUi.scopeToken } : {}),
+    }), isWindowsAgentStatus(state.status));
     if (!isCurrentAccount(epoch) || generation !== proxyUi.generation) return;
     proxyUi.config = saved.proxy;
     proxyUi.revision = saved.revision;
     proxyUi.accountId = saved.account_id;
+    proxyUi.scopeToken = saved.scope_token;
     proxyUi.draftMode = saved.proxy.mode;
     proxyUi.draftUrl = saved.proxy.mode === 'explicit' ? saved.proxy.url : '';
-    state.message = 'Proxy setting saved. Sign in again to apply it; Raiun did not sign you out.';
+    state.message = isWindowsAgentStatus(state.status)
+      ? 'Proxy setting saved. The next sign-in will use this route.'
+      : 'Proxy setting saved. Sign in again to apply it; Raiun did not sign you out.';
   } catch (error) {
     if (isCurrentAccount(epoch) && generation === proxyUi.generation && !isStaleAccountRequest(error)) {
       proxyUi.error = messageOf(error) || 'Proxy settings could not be saved.';
@@ -1970,7 +1981,7 @@ function bandwidthSettingsCard() {
 }
 
 function networkProxySettingsCard(connected: boolean, connection: ReturnType<typeof connectionMode>) {
-  const providerEnabled = !isWindowsAgentStatus(state.status) && providerAvailable(state.status?.provider_supported);
+  const providerEnabled = networkProxyAvailable();
   const active = proxyUi.config.mode === 'system'
     ? 'System proxy'
     : proxyUi.config.mode === 'direct'
@@ -1982,7 +1993,8 @@ function networkProxySettingsCard(connected: boolean, connection: ReturnType<typ
     connected,
     offlineNamespace,
     authenticating: state.status?.authenticating === true,
-    saving: proxyUi.saving || proxyUi.loading
+    saving: proxyUi.saving || proxyUi.loading,
+    requiresSignOut: isWindowsAgentStatus(state.status) && state.status?.proxy_edit_requires_sign_out === true
   }) && state.mutationBusy === 0 && !state.accountSwitching && proxyUi.loadedEpoch === state.accountEpoch;
   const url = proxyUi.draftMode === 'explicit' ? `<label class="field-label" for="network-proxy-url">Proxy address</label><input id="network-proxy-url" class="network-proxy-url" value="${esc(proxyUi.draftUrl)}" placeholder="https://proxy.example.com:8443" autocomplete="off" spellcheck="false" ${canEdit ? '' : 'disabled'}/>` : '';
   const status = proxyUi.loading
@@ -1994,7 +2006,11 @@ function networkProxySettingsCard(connected: boolean, connection: ReturnType<typ
       : proxyUi.loadedEpoch !== state.accountEpoch
         ? '<small>Connect to the Raiun agent to view this account’s proxy setting.</small>'
         : `<small>Current route: ${active}. This setting applies to sign-in, token refresh, and OpenCloud requests.</small>`;
-  const restriction = connected || offlineNamespace
+  const restriction = isWindowsAgentStatus(state.status)
+    ? (state.status?.proxy_edit_requires_sign_out === true
+      ? '<p class="network-proxy-note">Sign out before changing the proxy. Then save the route to use for your next sign-in.</p>'
+      : '<p class="network-proxy-note">Save the route to use for your next sign-in.</p>')
+    : connected || offlineNamespace
     ? '<p class="network-proxy-note">Disconnect this account before changing its proxy. Raiun will not sign you out; save the setting, then reconnect to apply it.</p>'
     : '<p class="network-proxy-note">Saving does not sign you out. The new route is used the next time you connect.</p>';
   return `<section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('cloud')}</span><div><h2>Network proxy</h2><p>Choose the route this account uses for OpenCloud sign-in and file traffic.</p></div></div><div class="settings-row"><div class="network-proxy-form"><label class="field-label" for="network-proxy-mode">Connection route</label><select id="network-proxy-mode" ${canEdit ? '' : 'disabled'}><option value="system" ${proxyUi.draftMode === 'system' ? 'selected' : ''}>Use system proxy settings</option><option value="direct" ${proxyUi.draftMode === 'direct' ? 'selected' : ''}>Connect directly</option><option value="explicit" ${proxyUi.draftMode === 'explicit' ? 'selected' : ''}>Use a proxy address</option></select>${url}${status}${restriction}</div><button class="button primary" data-action="save-network-proxy" ${canEdit && proxyUi.loadedEpoch === state.accountEpoch && state.agentReachable && !proxyUi.loading ? '' : 'disabled'}>${proxyUi.saving ? 'Saving…' : 'Save proxy'}</button></div></section>`;
@@ -2673,7 +2689,7 @@ async function handleAction(action: string, element?: HTMLElement) {
   switch (action) {
     case 'refresh': await refresh(true, true); break;
     case 'load-network-proxy': await loadNetworkProxySettings(true); break;
-    case 'save-network-proxy': if (!isWindowsAgentStatus(state.status) && providerAvailable(state.status?.provider_supported)) await saveNetworkProxySettings(); break;
+    case 'save-network-proxy': if (networkProxyAvailable()) await saveNetworkProxySettings(); break;
     case 'load-bandwidth-limits': await loadBandwidthSettings(true); break;
     case 'save-bandwidth-limits': if (bandwidthLimitsAvailable()) await saveBandwidthLimits(); break;
     case 'show-attention':
@@ -4863,6 +4879,7 @@ function activateAccount(profileId: string) {
   proxyUi.config = { mode: 'system' };
   proxyUi.revision = 0;
   proxyUi.accountId = null;
+  proxyUi.scopeToken = undefined;
   proxyUi.loadedEpoch = -1;
   proxyUi.loading = false;
   proxyUi.saving = false;

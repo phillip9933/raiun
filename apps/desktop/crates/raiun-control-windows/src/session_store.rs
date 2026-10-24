@@ -361,37 +361,63 @@ impl DpapiSessionStore {
         Ok(Arc::new(directory))
     }
 
-    /// Bounded preferences for the caller-validated full account scope. Missing
-    /// data does not create directories; malformed protected data is an error.
     pub fn load_bandwidth_settings(&self, scope: &[u8]) -> io::Result<Option<Vec<u8>>> {
-        let digest = bandwidth_digest(scope)?;
-        let Some(directory) = self.bandwidth_directory(&digest, false)? else {
-            return Ok(None);
-        };
-        read_bandwidth_settings(&directory, &digest)
+        self.load_preferences(PreferenceKind::Bandwidth, scope)
     }
-
-    /// Full-byte CAS under the existing private-file locking policy. The scope
-    /// must be canonical authenticated AccountScope bytes, never request data.
     pub fn compare_exchange_bandwidth_settings(
         &self,
         scope: &[u8],
         expected: Option<&[u8]>,
         next: &[u8],
     ) -> io::Result<()> {
-        let digest = bandwidth_digest(scope)?;
+        self.compare_exchange_preferences(PreferenceKind::Bandwidth, scope, expected, next)
+    }
+    /// Nonsecret reconnect-only proxy policy, separated from account rate limits.
+    /// Caller must validate this exact trusted local profile before invoking it.
+    pub fn load_proxy_settings(&self, profile: &str) -> io::Result<Option<Vec<u8>>> {
+        self.load_preferences(PreferenceKind::Proxy, profile.as_bytes())
+    }
+    pub fn compare_exchange_proxy_settings(
+        &self,
+        profile: &str,
+        expected: Option<&[u8]>,
+        next: &[u8],
+    ) -> io::Result<()> {
+        self.compare_exchange_preferences(PreferenceKind::Proxy, profile.as_bytes(), expected, next)
+    }
+
+    /// Bounded preferences for the caller-validated full account scope. Missing
+    /// data does not create directories; malformed protected data is an error.
+    fn load_preferences(&self, kind: PreferenceKind, scope: &[u8]) -> io::Result<Option<Vec<u8>>> {
+        let digest = preferences_digest(kind, scope)?;
+        let Some(directory) = self.preferences_directory(kind, &digest, false)? else {
+            return Ok(None);
+        };
+        read_preferences(&directory, kind, &digest)
+    }
+
+    /// Full-byte CAS under the existing private-file locking policy. The scope
+    /// must be canonical authenticated AccountScope bytes, never request data.
+    fn compare_exchange_preferences(
+        &self,
+        kind: PreferenceKind,
+        scope: &[u8],
+        expected: Option<&[u8]>,
+        next: &[u8],
+    ) -> io::Result<()> {
+        let digest = preferences_digest(kind, scope)?;
         if next.is_empty()
             || next.len() > 16 * 1024
             || expected.is_some_and(|b| b.is_empty() || b.len() > 16 * 1024)
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Invalid bandwidth preferences size",
+                "Invalid transport preferences size",
             ));
         }
         let directory = self
-            .bandwidth_directory(&digest, true)?
-            .ok_or_else(|| io::Error::other("Private bandwidth directory unavailable"))?;
+            .preferences_directory(kind, &digest, true)?
+            .ok_or_else(|| io::Error::other("Private transport directory unavailable"))?;
         let lock_name = std::ffi::OsStr::new("preferences.lock");
         match directory.create_new_file(lock_name) {
             Ok((file, _)) => drop(file),
@@ -400,19 +426,19 @@ impl DpapiSessionStore {
         }
         let mut lease = directory.open_owned_immutable_file(lock_name)?;
         lease.try_lock_exclusive()?;
-        if read_bandwidth_settings(&directory, &digest)?.as_deref() != expected {
+        if read_preferences(&directory, kind, &digest)?.as_deref() != expected {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Bandwidth preferences changed",
+                "Transport preferences changed",
             ));
         }
         let sealed = protect(next, &digest)?;
         if sealed.is_empty() || sealed.len() > 64 * 1024 {
             return Err(io::Error::other(
-                "Protected bandwidth preferences exceed limit",
+                "Protected transport preferences exceed limit",
             ));
         }
-        let mut envelope = b"RAIUN-BANDWIDTH\0\x01".to_vec();
+        let mut envelope = kind.envelope().to_vec();
         envelope.extend_from_slice(&sealed);
         let destination = directory.path().join("preferences.bin");
         let temporary = self.write_temp(&destination, &envelope)?;
@@ -433,9 +459,9 @@ impl DpapiSessionStore {
                 return Err(io::Error::last_os_error());
             }
             directory.verify_path()?;
-            if read_bandwidth_settings(&directory, &digest)?.as_deref() != Some(next) {
+            if read_preferences(&directory, kind, &digest)?.as_deref() != Some(next) {
                 return Err(io::Error::other(
-                    "Bandwidth preferences publication is uncertain",
+                    "Transport preferences publication is uncertain",
                 ));
             }
             Ok(())
@@ -446,8 +472,9 @@ impl DpapiSessionStore {
         result
     }
 
-    fn bandwidth_directory(
+    fn preferences_directory(
         &self,
+        kind: PreferenceKind,
         digest: &[u8; 32],
         create: bool,
     ) -> io::Result<Option<Arc<crate::PrivateDirectory>>> {
@@ -460,10 +487,10 @@ impl DpapiSessionStore {
         let first = if create {
             crate::PrivateDirectory::create_or_open_under(
                 &parent,
-                std::ffi::OsStr::new("bandwidth"),
+                std::ffi::OsStr::new(kind.directory()),
             )
         } else {
-            crate::PrivateDirectory::open_under(&parent, std::ffi::OsStr::new("bandwidth"))
+            crate::PrivateDirectory::open_under(&parent, std::ffi::OsStr::new(kind.directory()))
         };
         let first = match first {
             Ok(value) => value,
@@ -1198,7 +1225,32 @@ fn remove_exact_file(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn bandwidth_digest(scope: &[u8]) -> io::Result<[u8; 32]> {
+#[derive(Clone, Copy)]
+enum PreferenceKind {
+    Bandwidth,
+    Proxy,
+}
+impl PreferenceKind {
+    fn directory(self) -> &'static str {
+        match self {
+            Self::Bandwidth => "bandwidth",
+            Self::Proxy => "network-proxy",
+        }
+    }
+    fn domain(self) -> &'static [u8] {
+        match self {
+            Self::Bandwidth => b"raiun-bandwidth-preferences-v1\0",
+            Self::Proxy => b"raiun-network-proxy-preferences-v1\0",
+        }
+    }
+    fn envelope(self) -> &'static [u8] {
+        match self {
+            Self::Bandwidth => b"RAIUN-BANDWIDTH\0\x01",
+            Self::Proxy => b"RAIUN-PROXY\0\x01",
+        }
+    }
+}
+fn preferences_digest(kind: PreferenceKind, scope: &[u8]) -> io::Result<[u8; 32]> {
     if scope.is_empty() || scope.len() > 16 * 1024 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -1206,12 +1258,13 @@ fn bandwidth_digest(scope: &[u8]) -> io::Result<[u8; 32]> {
         ));
     }
     let mut hash = Sha256::new();
-    hash.update(b"raiun-bandwidth-preferences-v1\0");
+    hash.update(kind.domain());
     hash.update(scope);
     Ok(hash.finalize().into())
 }
-fn read_bandwidth_settings(
+fn read_preferences(
     directory: &Arc<crate::PrivateDirectory>,
+    kind: PreferenceKind,
     digest: &[u8; 32],
 ) -> io::Result<Option<Vec<u8>>> {
     let mut reader =
@@ -1230,14 +1283,12 @@ fn read_bandwidth_settings(
     reader.by_ref().take(65_601).read_to_end(&mut envelope)?;
     reader.verify()?;
     directory.verify_path()?;
-    let ciphertext = envelope
-        .strip_prefix(b"RAIUN-BANDWIDTH\0\x01")
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Invalid bandwidth preferences envelope",
-            )
-        })?;
+    let ciphertext = envelope.strip_prefix(kind.envelope()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Invalid bandwidth preferences envelope",
+        )
+    })?;
     if ciphertext.is_empty() || ciphertext.len() > 64 * 1024 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

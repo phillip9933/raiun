@@ -6,6 +6,9 @@
 #[path = "auth.rs"]
 mod auth;
 
+#[path = "windows_proxy.rs"]
+mod windows_proxy;
+
 #[path = "windows_bandwidth.rs"]
 mod windows_bandwidth;
 
@@ -134,6 +137,17 @@ trait SessionStore: Send + Sync {
     ) -> Result<(), String> {
         Err("Bandwidth storage is unavailable".into())
     }
+    fn load_proxy_settings(&self, _profile: &str) -> Result<Option<Vec<u8>>, String> {
+        Err("Proxy storage is unavailable".into())
+    }
+    fn compare_exchange_proxy_settings(
+        &self,
+        _profile: &str,
+        _old: Option<&[u8]>,
+        _next: &[u8],
+    ) -> Result<(), String> {
+        Err("Proxy storage is unavailable".into())
+    }
     fn before_publish(&self) {}
 }
 
@@ -155,6 +169,20 @@ impl windows_bandwidth::Store for BandwidthStore<'_> {
             .compare_exchange_bandwidth_settings(self.profile, scope, old, next)
     }
 }
+struct ProxyStore<'a> {
+    store: &'a dyn SessionStore,
+    profile: &'a str,
+}
+impl windows_proxy::Store for ProxyStore<'_> {
+    fn load(&self) -> Result<Option<Vec<u8>>, String> {
+        self.store.load_proxy_settings(self.profile)
+    }
+    fn compare_exchange(&self, old: Option<&[u8]>, next: &[u8]) -> Result<(), String> {
+        self.store
+            .compare_exchange_proxy_settings(self.profile, old, next)
+    }
+}
+
 fn budget_client(
     client: Arc<OpenCloudClient>,
     session: &auth::Session,
@@ -173,6 +201,13 @@ fn budget_client(
         &session.client_id,
         session.expected_issuer.as_deref(),
         account,
+    )?;
+    provider.proxy.bind_verified(
+        profile,
+        scope.bytes(),
+        &session.proxy,
+        generation,
+        &ProxyStore { store, profile },
     )?;
     let budget = provider.bandwidth.bind(
         scope.clone(),
@@ -272,6 +307,7 @@ struct FolderPauseSnapshot {
 /// crosses a Rust thread boundary. All auth/session transitions synchronously
 /// request a revoke-and-disconnect before replacing credentials.
 struct ProviderManager {
+    proxy: windows_proxy::Service,
     bandwidth: windows_bandwidth::Service,
     commands: std::sync::mpsc::SyncSender<ProviderCommand>,
     connected: Arc<AtomicBool>,
@@ -1038,6 +1074,7 @@ impl ProviderManager {
             })
             .expect("start Windows Cloud Files ownership thread");
         Self {
+            proxy: windows_proxy::Service::default(),
             bandwidth: windows_bandwidth::Service::default(),
             commands,
             connected,
@@ -1627,6 +1664,8 @@ impl WindowsAgent {
             .ok_or("Control request must include a string action")?;
         match action {
             "status" => Ok((self.status()?, false)),
+            "network_proxy" => Ok((self.proxy_settings(None)?, false)),
+            "network_proxy_set" => Ok((self.proxy_settings(Some(request))?, false)),
             "bandwidth_limits" => Ok((self.bandwidth_settings(None)?, false)),
             "bandwidth_limits_set" => Ok((self.bandwidth_settings(Some(request))?, false)),
             "pairs"
@@ -1757,6 +1796,87 @@ impl WindowsAgent {
         }
     }
 
+    fn proxy_settings(&self, update: Option<&Value>) -> Result<Value, String> {
+        let (generation, session_exists) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if update.is_some()
+                && (state.session.is_some()
+                    || state.authenticating
+                    || state.refreshing
+                    || state.logout_pending
+                    || state.session_cleanup_uncertain)
+            {
+                return Err("Sign out before changing Windows proxy settings".into());
+            }
+            (state.active_generation, state.session.is_some())
+        };
+        let scope = if session_exists {
+            self.provider.bandwidth.scope()?
+        } else {
+            None
+        };
+        let store = ProxyStore {
+            store: self.session_store.as_ref(),
+            profile: &self.profile_scope,
+        };
+        if let Some(request) = update {
+            if self.provider.connected.load(Ordering::Acquire)
+                || self.provider.folder_generation.load(Ordering::Acquire) != 0
+            {
+                return Err("Stop account work and sign out before changing proxy settings".into());
+            }
+            // Recheck after the snapshot, before durable CAS; no state guard is
+            // held through private storage or provider/worker waits.
+            {
+                let state = self
+                    .state
+                    .lock()
+                    .map_err(|_| "Account state is unavailable")?;
+                if state.active_generation != generation
+                    || state.session.is_some()
+                    || state.authenticating
+                    || state.refreshing
+                    || state.logout_pending
+                    || state.session_cleanup_uncertain
+                {
+                    return Err("Account state changed before proxy settings could be saved".into());
+                }
+            }
+            self.provider
+                .proxy
+                .update(&self.profile_scope, request, &store)?;
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Proxy settings may have been saved; account state is unavailable")?;
+            if state.active_generation != generation
+                || state.session.is_some()
+                || state.authenticating
+                || state.refreshing
+                || state.logout_pending
+                || state.session_cleanup_uncertain
+            {
+                return Err("Account state changed; proxy settings may have been saved for the next sign-in".into());
+            }
+        }
+        let value = self.provider.proxy.value(
+            &self.profile_scope,
+            scope.as_ref().map(windows_bandwidth::Scope::bytes),
+            &store,
+        )?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "Proxy settings may have been saved; account state is unavailable")?;
+        if state.active_generation != generation || state.session.is_some() != session_exists {
+            return Err("Account state changed; proxy settings may have been saved, so refresh before continuing".into());
+        }
+        Ok(value)
+    }
+
     fn bandwidth_settings(&self, update: Option<&Value>) -> Result<Value, String> {
         let (session, generation) = {
             let state = self
@@ -1883,6 +2003,8 @@ impl WindowsAgent {
             "provider_supported": provider_supported,
             "folder_sync_supported": WINDOWS_FOLDER_SYNC_ENABLED,
             "bandwidth_limits_supported": true,
+            "network_proxy_supported": true,
+            "proxy_edit_requires_sign_out": state.session.is_some(),
             "media_jobs_supported": WINDOWS_MEDIA_METADATA_ENABLED,
             "vaults_supported": false,
             "account_switch_supported": false,
@@ -2052,8 +2174,12 @@ impl WindowsAgent {
                 .map_err(root_error_text)?;
 
         let client = Arc::new(
-            OpenCloudClient::new(&session.server, session.access_token.clone())
-                .map_err(|_| "Could not create the connected account client")?,
+            OpenCloudClient::new_with_proxy(
+                &session.server,
+                session.access_token.clone(),
+                &session.proxy,
+            )
+            .map_err(|_| "Could not create the connected account client")?,
         );
         let server_origin = client
             .server_origin()
@@ -2879,8 +3005,12 @@ impl WindowsAgent {
         }
 
         let client = Arc::new(
-            OpenCloudClient::new(&session.server, session.access_token.clone())
-                .map_err(|_| "Could not create an authenticated Windows drive client")?,
+            OpenCloudClient::new_with_proxy(
+                &session.server,
+                session.access_token.clone(),
+                &session.proxy,
+            )
+            .map_err(|_| "Could not create an authenticated Windows drive client")?,
         );
         let server_origin = client
             .server_origin()
@@ -3263,11 +3393,6 @@ impl WindowsAgent {
             .get("client_id")
             .and_then(Value::as_str)
             .unwrap_or("");
-        let flow = auth::AuthFlow::begin(&server, client_id)?;
-        let public_info = flow.public_info();
-        let (expected_server, expected_client_id) = flow.configured_identity();
-        let expected_server = expected_server.to_owned();
-        let expected_client_id = expected_client_id.to_owned();
         let generation = self.next_generation()?;
         {
             let mut state = self
@@ -3280,6 +3405,50 @@ impl WindowsAgent {
             state.authenticating = true;
             state.active_generation = generation;
             state.error = None;
+        }
+        let flow = (|| {
+            let proxy = self.provider.proxy.auth_proxy(
+                &self.profile_scope,
+                generation,
+                &ProxyStore {
+                    store: self.session_store.as_ref(),
+                    profile: &self.profile_scope,
+                },
+            )?;
+            if proxy == raiun_opencloud::ProxyConfig::System {
+                auth::AuthFlow::begin(&server, client_id)
+            } else {
+                auth::AuthFlow::begin_with_proxy(&server, client_id, proxy)
+            }
+        })();
+        let flow = match flow {
+            Ok(flow) => flow,
+            Err(error) => {
+                if let Ok(mut state) = self.state.lock()
+                    && state.active_generation == generation
+                {
+                    state.authenticating = false;
+                    state.error = Some(error.clone());
+                }
+                return Err(error);
+            }
+        };
+        let public_info = flow.public_info();
+        let (expected_server, expected_client_id) = flow.configured_identity();
+        let expected_server = expected_server.to_owned();
+        let expected_client_id = expected_client_id.to_owned();
+        {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if state.active_generation != generation
+                || !state.authenticating
+                || state.session.is_some()
+                || self.generation.load(Ordering::Acquire) != generation
+            {
+                return Err("Sign-in was cancelled while preparing its proxy route".into());
+            }
         }
         let previous_identity = self.session_store.revoke_active();
         let previous_identity = match previous_identity {
@@ -3893,8 +4062,12 @@ fn decode_root_metadata(bytes: &[u8], expected_profile: &str) -> Result<RootConf
 fn verified_personal_root_identity(
     session: &auth::Session,
 ) -> Result<(String, String, String), String> {
-    let client = OpenCloudClient::new(&session.server, session.access_token.clone())
-        .map_err(|_| "Could not verify this account's Personal drive")?;
+    let client = OpenCloudClient::new_with_proxy(
+        &session.server,
+        session.access_token.clone(),
+        &session.proxy,
+    )
+    .map_err(|_| "Could not verify this account's Personal drive")?;
     let token_generation = client.token_generation();
     let context = RangeReadContext {
         deadline: std::time::Instant::now() + Duration::from_secs(30),
@@ -4497,6 +4670,24 @@ impl DpapiStore {
 }
 
 impl SessionStore for DpapiStore {
+    fn load_proxy_settings(&self, profile: &str) -> Result<Option<Vec<u8>>, String> {
+        self.check_scope(profile)?;
+        self.store
+            .load_proxy_settings(profile)
+            .map_err(|_| "Protected proxy settings could not be read".into())
+    }
+    fn compare_exchange_proxy_settings(
+        &self,
+        profile: &str,
+        old: Option<&[u8]>,
+        next: &[u8],
+    ) -> Result<(), String> {
+        self.check_scope(profile)?;
+        self.store
+            .compare_exchange_proxy_settings(profile, old, next)
+            .map_err(|_| "Proxy settings changed or durable publication is uncertain".into())
+    }
+
     fn load_bandwidth_settings(
         &self,
         profile: &str,
@@ -7767,6 +7958,7 @@ mod tests {
         sessions: Mutex<HashMap<(String, String, String), auth::Session>>,
         root_configs: Mutex<HashMap<(String, String, String), Vec<u8>>>,
         bandwidth_settings: Mutex<MemoryBandwidthSettings>,
+        proxy_settings: Mutex<HashMap<String, Vec<u8>>>,
         active_identity: Mutex<Option<(String, String, String)>>,
         fail_saves: Mutex<bool>,
         fail_removes: Mutex<bool>,
@@ -7776,6 +7968,23 @@ mod tests {
     }
 
     impl SessionStore for MemoryStore {
+        fn load_proxy_settings(&self, profile: &str) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.proxy_settings.lock().unwrap().get(profile).cloned())
+        }
+        fn compare_exchange_proxy_settings(
+            &self,
+            profile: &str,
+            old: Option<&[u8]>,
+            next: &[u8],
+        ) -> Result<(), String> {
+            let mut records = self.proxy_settings.lock().unwrap();
+            if records.get(profile).map(Vec::as_slice) != old {
+                return Err("synthetic stale proxy settings".into());
+            }
+            records.insert(profile.into(), next.to_vec());
+            Ok(())
+        }
+
         fn load_bandwidth_settings(
             &self,
             profile: &str,
@@ -7919,6 +8128,19 @@ mod tests {
     }
 
     impl SessionStore for Arc<MemoryStore> {
+        fn load_proxy_settings(&self, profile: &str) -> Result<Option<Vec<u8>>, String> {
+            self.as_ref().load_proxy_settings(profile)
+        }
+        fn compare_exchange_proxy_settings(
+            &self,
+            profile: &str,
+            old: Option<&[u8]>,
+            next: &[u8],
+        ) -> Result<(), String> {
+            self.as_ref()
+                .compare_exchange_proxy_settings(profile, old, next)
+        }
+
         fn load_bandwidth_settings(
             &self,
             profile: &str,
@@ -12257,6 +12479,46 @@ mod tests {
             last_refresh_at: None,
             proxy: raiun_opencloud::ProxyConfig::System,
         }
+    }
+
+    #[test]
+    fn proxy_rpc_is_profile_local_signed_out_only_and_preserves_retained_session() {
+        let store = Arc::new(MemoryStore::default());
+        let a = "profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let b = "profile-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let agent_a = Arc::new(WindowsAgent::new_for_profile(a, store.clone()).unwrap());
+        let agent_b = Arc::new(WindowsAgent::new_for_profile(b, store.clone()).unwrap());
+        let read = json!({"action":"network_proxy","profile_id":a});
+        let initial = agent_a.handle_request(&read).unwrap().0;
+        assert_eq!(initial["revision"], 1);
+        let update = json!({"action":"network_proxy_set","profile_id":a,"proxy":{"mode":"direct"},"expected_account_id":null,"expected_revision":1});
+        let saved = agent_a.handle_request(&update).unwrap().0;
+        assert_eq!(saved["revision"], 2);
+        assert!(agent_a.handle_request(&update).is_err());
+        assert_eq!(
+            agent_b
+                .handle_request(&json!({"action":"network_proxy","profile_id":b}))
+                .unwrap()
+                .0["revision"],
+            1
+        );
+        assert!(agent_b.handle_request(&update).is_err());
+        let before = store.load_proxy_settings(a).unwrap();
+        {
+            let mut state = agent_a.state.lock().unwrap();
+            state.session = Some(synthetic_session(
+                "https://fixture.invalid",
+                "synthetic-client",
+                unix_time_now() + 3600,
+            ));
+        }
+        let mut retained = update.clone();
+        retained["expected_revision"] = json!(2);
+        assert!(agent_a.handle_request(&retained).is_err());
+        assert_eq!(store.load_proxy_settings(a).unwrap(), before);
+        assert!(agent_a.state.lock().unwrap().session.is_some());
+        agent_a.stop_and_join().unwrap();
+        agent_b.stop_and_join().unwrap();
     }
 
     fn seed_active_session(store: &MemoryStore, scope: &str, session: auth::Session) {
