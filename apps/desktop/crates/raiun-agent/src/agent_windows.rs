@@ -47,8 +47,10 @@ const WINDOWS_ACCOUNTS_ENABLED: bool = !cfg!(test);
 const WINDOWS_FOLDER_SYNC_ENABLED: bool = !cfg!(test);
 // Non-test candidate enables verified worker paths; exact package acceptance is separate.
 const WINDOWS_MEDIA_METADATA_ENABLED: bool = !cfg!(test);
-// Remains off until the complete native unlock/read/lock flow is accepted.
-const WINDOWS_VAULT_SESSIONS_ENABLED: bool = false;
+// Candidate unlock/read/lock and normal reconnection passed native acceptance.
+// Test builds keep public capability exposure disabled; direct fixtures cover
+// the same guarded implementation. Installed-package acceptance is separate.
+const WINDOWS_VAULT_SESSIONS_ENABLED: bool = !cfg!(test);
 include!("windows_vault_session_control.rs");
 
 use clap::{Parser, Subcommand};

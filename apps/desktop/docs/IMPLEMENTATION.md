@@ -2438,3 +2438,28 @@ partial or uncertain files retain the dirty/recovery refusal path. No sticky
 failure counters are cleared, and native cleanup still requires its separate
 exclusive protected handle and post-cleanup proof. Dirty-file and broker native
 acceptance must qualify this change before activation.
+
+
+### Windows native vault lifecycle accepted; candidate activation (25 October, r107)
+
+The current two-case native run passed both cases with unchanged source and
+successful MSVC links. The external dirty edit was detected and its exact bytes
+were preserved. The broker verified manual and saved payload reads, explicit
+post-Lock read refusal without another download, manual reopening and a second
+successful Lock. A new Agent/coordinator/native connection reopened the same
+protected profile with no forgotten secret restored, then completed another
+manual read and Lock. Each cleanup proved no remaining on-disk file ranges.
+Normal shutdown and cold evidence are retained in
+`outputs/local-windows-native-20261023-r1/c05-c06-close-metadata-two-actual-r1/`.
+
+This is normal new-Agent reconnection after prior successful cleanup, in the same
+test process. It is not a process/crash restart with resident plaintext. The
+original r105/r106 failures remain preserved. The metadata-first close fix also
+retained the dirty-file refusal in the same run.
+
+The local non-test candidate now enables Windows vault capability and the
+existing `native_read_only` UI mode together. Native encrypted access remains
+read-only, with all guarded account/vault/physical-root checks and protected
+history requirements intact. This is candidate source activation, not package
+acceptance, publication or whole-category C05/C06 completion. The older installed
+unsigned package remains closed and unchanged until the new package is verified.
