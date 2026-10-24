@@ -747,6 +747,18 @@ mod runtime {
         #[test]
         #[ignore = "requires isolated ordinary-user Windows VM with Cloud Files; preserves owned registered namespace"]
         fn native_registered_vault_refresh_reads_and_retires_owned_route() {
+            registered_vault_refresh_and_retirement(false);
+        }
+
+        #[cfg(feature = "synthetic-agent-integration")]
+        #[test]
+        #[ignore = "requires isolated ordinary-user Windows VM with Cloud Files; preserves owned dirty file and registered namespace"]
+        fn native_registered_vault_dirty_file_refuses_cleanup_and_preserves_bytes() {
+            registered_vault_refresh_and_retirement(true);
+        }
+
+        #[cfg(feature = "synthetic-agent-integration")]
+        fn registered_vault_refresh_and_retirement(dirty: bool) {
             assert!(
                 std::env::var("USERNAME")
                     .unwrap_or_default()
@@ -949,6 +961,48 @@ mod runtime {
                 (1..=16).contains(&fixture.gets.load(Ordering::Acquire)),
                 "OS hydration must make bounded verified reads"
             );
+            let dirty_bytes = if dirty {
+                // Fixture-only adversarial local edit of this freshly created
+                // synthetic file. Production never clears READONLY to clean it.
+                let path = vault_path.join("1");
+                let before = connection.close_observation_for_integration();
+                let replacement = expected.iter().map(|byte| byte ^ 0x5a).collect::<Vec<_>>();
+                assert_eq!(replacement.len(), expected.len());
+                assert!(replacement != expected);
+                let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+                assert!(permissions.readonly());
+                // This Windows-only fixture deliberately clears the Windows
+                // READONLY attribute; no Unix permission bits are involved.
+                #[allow(clippy::permissions_set_readonly_false)]
+                permissions.set_readonly(false);
+                std::fs::set_permissions(&path, permissions).unwrap();
+                {
+                    let mut writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+                    writer.write_all(&replacement).unwrap();
+                    writer.sync_all().unwrap();
+                }
+                let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+                permissions.set_readonly(true);
+                std::fs::set_permissions(&path, permissions).unwrap();
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    let observed = connection.close_observation_for_integration();
+                    // Stage 4 is reached only after native MODIFIED ranges are
+                    // nonempty, before this vault's edit binding is refused.
+                    if observed.0 > before.0 && observed.1 > before.1 && observed.4 == 4 {
+                        println!("VAULT_DIRTY_NATIVE_CLOSE={observed:?}");
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "real dirty close was not observed: {observed:?}"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Some(replacement)
+            } else {
+                None
+            };
             println!(
                 "VAULT_REFRESH_PRE_RETIRE_CLOSE={:?}",
                 connection.close_observation_for_integration()
@@ -961,7 +1015,19 @@ mod runtime {
                 "VAULT_REFRESH_PRE_CLEANUP_CLOSE={:?}",
                 connection.close_observation_for_integration()
             );
-            connection.cleanup_retired_vault_route(&retired).unwrap();
+            let cleanup = connection.cleanup_retired_vault_route(&retired);
+            if let Some(expected_dirty) = dirty_bytes.as_ref() {
+                assert!(matches!(
+                    cleanup,
+                    Err(crate::Error::UnresolvedPlaceholderEdits)
+                ));
+                assert!(
+                    std::fs::read(vault_path.join("1")).unwrap() == *expected_dirty,
+                    "dirty bytes must remain intact"
+                );
+            } else {
+                cleanup.unwrap();
+            }
             assert!(
                 std::fs::metadata(vault_path.join("1"))
                     .unwrap()
@@ -978,6 +1044,20 @@ mod runtime {
             sessions.lock(&scope).unwrap();
             ordinary.revoke();
             connection.disconnect_in_place().unwrap();
+            if let Some(expected_dirty) = dirty_bytes.as_ref() {
+                assert!(
+                    std::fs::read(vault_path.join("1")).unwrap() == *expected_dirty,
+                    "dirty bytes must remain intact"
+                );
+                assert!(
+                    std::fs::metadata(vault_path.join("1"))
+                        .unwrap()
+                        .permissions()
+                        .readonly()
+                );
+                assert_eq!(fixture.mutations.load(Ordering::Acquire), 0);
+                println!("VAULT_DIRTY_CLEANUP_REFUSED_BYTES_PRESERVED=true");
+            }
             drop(connection);
             drop(retired);
             drop(vault);

@@ -318,70 +318,85 @@ passes NULL explicitly and does not misclassify absent output as root replacemen
 Native writer-exclusion and normal save/lifecycle acceptance remain required;
 source review does not establish those results.
 
-Configured roots request `CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH` at connection
-because fetch admission requires the callback placeholder path. The platform
-only promises that path when the flag is requested; see Microsoft's
-[CF_CONNECT_FLAGS contract](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/ne-cfapi-cf_connect_flags).
-This requests callback metadata only: bounded decoding, no-follow native path
-checks, exact root/file/opaque identity checks and publication fences remain
-mandatory. A missing or invalid path still fails closed. The prior isolated
-Windows case stopped at normalized-path decoding (stage 1002). The original
-selector now completes a 65,537-byte decrypted read with the expected hash and
-fetch stage 14, but subsequently refuses retired-route cleanup with
-`UnresolvedPlaceholderEdits`. This is read acceptance only, not a successful
-lock or production vault capability.
+## Configured vault callbacks and cleanup
 
-Close processing checks exact native root/file/path custody and modified ranges
-before requesting an account-bound edit lease. A clean read-only vault close
-needs no write authority. A nonempty modified range still requires that lease
-before reading content or publishing recovery; inability to obtain it remains
-unresolved. No counters or cleanup guards are reset. The reordered close path
-passed the focused native close observation: modified/unverifiable counters
-remained zero. Cleanup then failed opening its write-access protected handle
-with `0x80070005`; no successful lock is claimed. Close telemetry in the
-synthetic selector reports only fixed counters/stages.
+Configured roots request `CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH` because fetch
+admission needs the callback path. Microsoft only promises that metadata with
+the [connection flag](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/ne-cfapi-cf_connect_flags).
+Bounded decoding, no-follow path pins, exact root/file/opaque identity and
+publication fences still apply. The original isolated fixture now reads all
+65,537 decrypted bytes with the expected hash (fetch stage 14); this alone does
+not establish Lock or production vault support.
 
-Vault cleanup alone now requests an EXCLUSIVE protected read handle and retains
-its RH oplock/reference through the same root/file/opaque checks, native modified
-ranges, nonzero USN comparison, VERIFY_IN_SYNC update and zero-residency postproof.
-Cleanup preflight and dehydration use that handle mode. Ordinary edit
-completion still requests EXCLUSIVE plus WRITE_ACCESS. Cleanup never clears the
-read-only attribute, changes permissions or retries with weaker sharing. The
-synthetic selector verifies the read-only attribute remains after cleanup.
-[Microsoft documents](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfopenfilewithoplock)
-that omitting WRITE_ACCESS avoids requesting FILE_WRITE_DATA at open.
-[CfUpdatePlaceholder](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfupdateplaceholder)
-still enforces its update authorization independently; these documents do not
-guarantee a read handle can authorize that update. If it refuses, cleanup must
-remain incomplete with its inventory retained. This narrower open requires
-focused native acceptance, not a permission bypass or a lock-success claim.
-The first such native run passed protected-open/preflight and the complete
-decrypted read, but the update itself refused with `0x80070179`
-(ERROR_CLOUD_FILE_NOT_IN_SYNC). The final read-only assertion was not reached.
+Close processing proves native path/file custody and queries modified ranges
+before requesting an account-bound edit lease. Clean read-only closes need no
+write authority. A modified file still requires the lease before any recovery
+read/publication; refusal records modified and unverifiable state. Native clean
+close observations passed. Counters are never reset to admit cleanup.
 
-Cleanup preflight now appends a journal CLOSE record on the same referenced RH
-handle using
-[FSCTL_WRITE_USN_CLOSE_RECORD](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_write_usn_close_record).
-The existing
-[FSCTL_READ_FILE_USN_DATA](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_read_file_usn_data)
-returns the last USN written to the journal and does not promise to publish
-pending reasons. The new barrier requires exactly eight output bytes, a positive
-USN and a matching fresh read for the exact file ID. Full snapshot, opaque
-identity, in-sync state and zero modified ranges are rechecked before retaining
-that baseline. The same referenced handle remains open, and the update still
-receives a nonzero-USN CAS. There is no second flush/rebase after
-refusal, no mark-clean operation and no zero-USN retry. The close-record append
-is journal-only and is not rolled back. Native acceptance is pending; failure
-telemetry reports only fixed comparisons, state checks and error codes.
+The sole cleanup caller revokes and drains the exact vault route before deriving
+its owned opaque identities. Cleanup requires a complete hydration inventory,
+exact registered physical root, pinned no-follow ancestors, exact file/opaque
+identity, clean in-sync/unpinned state, zero native modified ranges and no
+unresolved recovery. One EXCLUSIVE protected read handle and its retained
+reference cover admission through the update and postproof. Read-only attributes
+and permissions are never cleared or changed. Ordinary edit completion retains
+its separate WRITE_ACCESS handle mode.
 
+### Fixed protected-handle byte eviction
 
-The journal-close candidate reached a fresh baseline but still refused the
-update with `0x80070179`. Diagnostics showed the current USN differed after
-refusal while identity, snapshot and modified-range checks remained stable.
-That observation does not prove the cause or authorize rebasing. Cleanup now
-uses one referenced protected RH handle from exact native admission through
-the journal baseline, nonzero-USN update and zero-residency postproof. Its sole
-private caller no longer opens and closes a preliminary protected handle or
-passes a baseline across a reopen. Global unresolved state is checked again
-immediately before the update. This removes an internal custody transition;
-native acceptance remains pending, and any refusal still retains the inventory.
+Earlier candidates passed a nonzero `UpdateUsn` to `CfUpdatePlaceholder`. Native
+runs repeatedly refused with `0x80070179`, including with one continuous
+protected handle and a positive fresh journal CLOSE record. After refusal, the
+queried USN differed while identity, snapshot and modified ranges stayed stable.
+These observations do not prove an OS bug or authorize a retry/rebase.
+
+The current fixed method uses the exclusive handle as its payload writer fence
+and passes NULL `UpdateUsn` on its first and only update. This **does not retain
+the kernel atomic metadata-USN comparison**. A journal baseline remains positive
+and freshly checked immediately before the call; that is a precheck, not a CAS.
+The argument for safe byte eviction is:
+
+- [CfOpenFileWithOplock EXCLUSIVE](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfopenfilewithoplock)
+  obtains share-none access and an RH oplock. Existing data-writer handles and
+  new data-write opens conflict. A successful retained protected-handle
+  [reference](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfreferenceprotectedhandle)
+  prevents automatic closure/acknowledgement during the proof. Generic RH alone
+  is not this guarantee.
+- Existing writable user mappings prevent RH grant under Microsoft's
+  [oplock grant rules](https://learn.microsoft.com/en-us/windows-hardware/drivers/ifs/granting-oplocks),
+  even after their original file handle closes. No native mapping acceptance
+  is claimed without a mapping test.
+- The route is revoked and publication permits drained first. No deferred
+  provider payload can republish while the same handle excludes local writers.
+- Native dirty/recovery checks remain mandatory. The update supplies NULL
+  filesystem metadata and identity, one whole-file range and only
+  VERIFY_IN_SYNC. Windows still checks update authorization and in-sync state.
+  No mark-clean, force, unpin, policy override, permission change or second
+  attempt follows refusal.
+- Admission requires READONLY. After the update, exact identity, size, last-write
+  time, READONLY/directory/reparse attributes, reparse tag, root/opaque identity,
+  in-sync state and zero modified ranges are rechecked. Success additionally
+  requires an empty bounded ONDISK range response. Rows stay in the inventory
+  on both success and failure.
+
+Metadata-only handles may change attributes/USN without payload writes; this
+method does not reject all such changes atomically. NULL filesystem metadata
+leaves those fields intact. The stated custody attributes and last-write time
+must match at postproof; mismatch is incomplete cleanup. Never describe this
+as full atomic metadata continuity or as a successful lock after refusal.
+
+The journal barrier uses
+[FSCTL_WRITE_USN_CLOSE_RECORD](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_write_usn_close_record)
+on that same referenced handle. It requires exactly eight output bytes, a
+positive USN and an exact-file matching
+[fresh read](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_read_file_usn_data),
+followed by snapshot/in-sync/identity/dirty checks. It appends a journal record;
+it neither changes data nor marks clean, and is never used to rebase a refusal.
+
+Acceptance of this method requires the original hydrated positive case, a real
+writable-file writer-exclusion case using cleanup's read handle (including
+writer success after release), and a real dirty-placeholder refusal retaining
+exact local bytes. Injected counters are insufficient. Native results for this
+fixed method are pending; production vault admission remains disabled. The
+separate no-payload broker credential fixture cannot qualify plaintext cleanup.

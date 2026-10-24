@@ -1752,6 +1752,9 @@ impl ConfiguredRootConnection {
         {
             return Err(Error::ConfiguredRootChanged);
         }
+        if opened.file_attributes & FILE_ATTRIBUTE_READONLY == 0 {
+            return Err(Error::EditRecoveryUnavailable);
+        }
         clean_dehydrate_identity(
             file.protected,
             root.identity.file_index,
@@ -1763,7 +1766,7 @@ impl ConfiguredRootConnection {
         }
         // Establish the journal baseline only after this final exact identity
         // and clean-state admission. Keep this same referenced RH handle live
-        // through the CAS and postproof: no internal close/reopen transition.
+        // through the update and postproof: no internal close/reopen transition.
         let expected_usn = journal_cleanup_usn(file.raw, expected_file_index)?;
         if !same_edit_snapshot(opened, root_snapshot(file.raw)?) {
             return Err(Error::ConfiguredRootChanged);
@@ -1788,13 +1791,15 @@ impl ConfiguredRootConnection {
             starting_offset: 0,
             length: -1,
         };
-        let mut usn = expected_usn;
-        // SAFETY: exact referenced protected EXCLUSIVE handle and all ancestor
-        // pins remain live. NULL Overlapped forces synchronous completion.
-        // Windows still enforces update authorization; no write-access retry.
-        // Only VERIFY_IN_SYNC (1): never mark clean, unpin, replace metadata/identity,
-        // clear always-full policy, or force dirty dehydration. Nonzero USN guards
-        // the complete preflight snapshot against intervening local changes.
+        // SAFETY: exact referenced EXCLUSIVE share-none RH handle and all
+        // ancestor pins remain live through this call and the postproof. RH
+        // grant excludes existing writable mappings; share-none excludes data
+        // writer handles. The caller already revoked/drained route publication.
+        // The positive USN equality above is a precheck, NOT an atomic metadata
+        // CAS. This fixed byte-only method passes NULL UpdateUsn, never retries
+        // a failed CAS or replaces metadata/identity. Only VERIFY_IN_SYNC (1):
+        // never mark clean, unpin, clear always-full policy or force dirty data.
+        // Windows still enforces update authorization; NULL Overlapped is sync.
         let hr = unsafe {
             CfUpdatePlaceholder(
                 file.protected,
@@ -1804,15 +1809,14 @@ impl ConfiguredRootConnection {
                 (&range as *const CfFileRange).cast(),
                 1,
                 1,
-                &mut usn,
+                null_mut(),
                 null_mut(),
             )
         };
         if hr < 0 {
             #[cfg(feature = "synthetic-agent-integration")]
             eprintln!(
-                "synthetic cleanup update refusal hr={hr} output_matches_input={} current_matches_input={:?} identity_valid={} snapshot_stable={} modified={:?}",
-                usn == expected_usn,
+                "synthetic cleanup fixed_fence_update refusal hr={hr} current_matches_baseline={:?} identity_valid={} snapshot_stable={} modified={:?}",
                 completion_usn(file.raw, expected_file_index).map(|value| value == expected_usn),
                 clean_dehydrate_identity(
                     file.protected,
@@ -1829,9 +1833,14 @@ impl ConfiguredRootConnection {
         root.verify_identity(true)?;
         root.verify_registered()?;
         let after = root_snapshot(file.raw)?;
+        let custody_attributes =
+            FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT;
         if after.identity != opened.identity
             || after.file_size != opened.file_size
             || after.last_write_time != opened.last_write_time
+            || after.reparse_tag != opened.reparse_tag
+            || after.file_attributes & custody_attributes
+                != opened.file_attributes & custody_attributes
         {
             return Err(Error::ConfiguredRootChanged);
         }
@@ -7153,7 +7162,7 @@ impl CompletionIo {
 }
 
 // Cleanup-only journal freshness barrier. Call once on the final referenced
-// handle; never call again to rebase a failed CAS.
+// handle; never call again to rebase a failed cleanup.
 fn journal_cleanup_usn(handle: Handle, expected_file_id: u64) -> Result<i64, Error> {
     const FSCTL_WRITE_USN_CLOSE_RECORD: u32 = 0x0009_00ef;
     let mut usn = 0_i64;
@@ -7680,6 +7689,16 @@ mod backend_tests {
     #[test]
     #[ignore = "requires isolated native Windows Cloud Files API; ordinary synthetic file only"]
     fn protected_completion_reference_excludes_writer_until_drop() {
+        protected_reference_writer_case(false);
+    }
+
+    #[test]
+    #[ignore = "requires isolated native Windows Cloud Files API; writable synthetic file and cleanup read handle"]
+    fn protected_cleanup_reference_excludes_writer_until_drop() {
+        protected_reference_writer_case(true);
+    }
+
+    fn protected_reference_writer_case(cleanup_read: bool) {
         use std::{fs, fs::OpenOptions, io::Write, sync::mpsc, thread, time::Duration};
 
         let root = super::create_private_test_root().expect("create private synthetic directory");
@@ -7699,8 +7718,13 @@ mod backend_tests {
             file.sync_all().expect("sync initial bytes");
         }
         let wide = super::wide_path(&path).expect("bounded synthetic path");
-        let guard =
-            super::ProtectedCompletionFile::open(&wide).expect("open and reference protected file");
+        let guard = if cleanup_read {
+            super::ProtectedCompletionFile::open_for_cleanup(&wide)
+        } else {
+            super::ProtectedCompletionFile::open(&wide)
+        }
+        .expect("open and reference protected file");
+        eprintln!("protected writer proof cleanup_read_mode={cleanup_read}");
         enum Outcome {
             SharingDenied,
             Completed(Result<(), String>),
