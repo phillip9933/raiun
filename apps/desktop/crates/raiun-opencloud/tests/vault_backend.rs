@@ -797,6 +797,101 @@ fn respond(stream: &mut TcpStream, status: u16, content_type: &str, body: &[u8])
 }
 
 #[test]
+fn online_private_writer_verifies_complete_content_and_refuses_unpublished_failures() {
+    let fixture = Fixture::start();
+    let (backend, sessions, scope) = setup(&fixture);
+    let plaintext: Vec<u8> = (0..65537).map(|index| (index * 31 + 7) as u8).collect();
+    let mut source = NamedTempFile::new().unwrap();
+    source.write_all(&plaintext).unwrap();
+    source.flush().unwrap();
+    let entry = backend
+        .upload(SPACE, "/held.bin", source.path(), WriteCondition::Absent)
+        .unwrap();
+    let staging = tempfile::tempdir().unwrap();
+    let nominal = staging.path().join("unpublished-plaintext");
+    let mut output = Vec::new();
+    let received = backend
+        .download_online_to_private_writer(
+            SPACE,
+            "/held.bin",
+            &entry.etag,
+            staging.path(),
+            &mut output,
+        )
+        .unwrap();
+    assert_eq!(received.id, entry.id);
+    assert_eq!(received.etag, entry.etag);
+    assert_eq!(received.size, plaintext.len() as u64);
+    assert_eq!(output, plaintext);
+    assert!(!nominal.exists());
+    assert_eq!(std::fs::read_dir(staging.path()).unwrap().count(), 0);
+
+    let mut mismatch = Vec::new();
+    assert!(
+        backend
+            .download_online_to_private_writer(
+                SPACE,
+                "/held.bin",
+                "\"stale-revision\"",
+                staging.path(),
+                &mut mismatch
+            )
+            .is_err()
+    );
+    assert!(mismatch.is_empty());
+    fixture.corrupt_download();
+    let mut partial = Vec::new();
+    assert!(
+        backend
+            .download_online_to_private_writer(
+                SPACE,
+                "/held.bin",
+                &entry.etag,
+                staging.path(),
+                &mut partial
+            )
+            .is_err()
+    );
+    assert_eq!(partial, plaintext[..65536]);
+    assert!(!nominal.exists());
+    assert_eq!(std::fs::read_dir(staging.path()).unwrap().count(), 0);
+
+    let cache_state = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(cache_state.path(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+    let cache = Cache::open(cache_state.path(), 16 * 1024 * 1024).unwrap();
+    let adapter = VaultOfflineCache::new(cache, scope.clone(), ROOT_PATH).unwrap();
+    let cached = VaultBackend::new_with_offline_cache(
+        OpenCloudClient::new(&fixture.origin(), "synthetic-token".into()).unwrap(),
+        sessions,
+        scope,
+        ROOT_PATH.into(),
+        adapter,
+    )
+    .unwrap();
+    let requests_before = fixture.requests().len();
+    let mut forbidden = Vec::new();
+    assert!(
+        cached
+            .download_online_to_private_writer(
+                SPACE,
+                "/held.bin",
+                &entry.etag,
+                staging.path(),
+                &mut forbidden
+            )
+            .is_err()
+    );
+    assert!(forbidden.is_empty());
+    assert_eq!(fixture.requests().len(), requests_before);
+    assert!(!nominal.exists());
+}
+
+#[test]
 fn virtual_upload_encrypts_and_uses_absent_precondition() {
     let fixture = Fixture::start();
     let client = OpenCloudClient::new(&fixture.origin(), "synthetic-token".to_owned()).unwrap();

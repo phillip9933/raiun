@@ -7,7 +7,7 @@
 //! bytes are read. Unsafe Win32 calls stay in this adapter crate.
 
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs::File,
     io::{self, Read, Seek, SeekFrom, Write},
     os::windows::{
@@ -17,6 +17,9 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use windows_sys::Win32::{
     Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree},
@@ -551,6 +554,81 @@ impl PrivateDirectory {
         })
     }
 
+    /// Fill a new private file, then admit an immutable reader only after its
+    /// exact identity, length and complete SHA-256 match the sequential writes.
+    /// This closes the write-sharing handoff gap without trusting a pathname.
+    /// The callback must not publish its staging output. Partial files on error
+    /// are removed by exact identity when possible; no secure erasure is claimed.
+    pub fn stage_immutable_file<T>(
+        self: &Arc<Self>,
+        name: &OsStr,
+        maximum_bytes: u64,
+        fill: impl FnOnce(&mut dyn Write) -> io::Result<T>,
+    ) -> io::Result<(OwnedPrivateStagedReader, T)> {
+        let mut writer = Some(self.create_new_pinned_file(name)?);
+        let expected_identity = writer.as_ref().expect("created stage").identity();
+        let result = (|| {
+            let pin = writer.as_mut().expect("held stage");
+            let mut sink = StagedDigestWriter {
+                writer: pin,
+                digest: Sha256::new(),
+                bytes: 0,
+                maximum_bytes,
+            };
+            let value = fill(&mut sink)?;
+            sink.flush()?;
+            let expected_bytes = sink.bytes;
+            let expected_digest = sink.digest.finalize();
+            pin.verify()?;
+            pin.file.sync_all()?;
+            // Immutable sharing cannot coexist with our write handle. Reopen
+            // before publication, then validate the complete pinned contents.
+            drop(writer.take());
+            let mut reader = self.open_owned_immutable_file(name)?;
+            if reader.identity() != expected_identity || reader.metadata()?.len() != expected_bytes
+            {
+                return Err(private_stage_changed());
+            }
+            let mut digest = Sha256::new();
+            let mut buffer = Zeroizing::new(vec![0u8; 1024 * 1024]);
+            let mut bytes = 0u64;
+            loop {
+                let count = reader.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                bytes = bytes
+                    .checked_add(count as u64)
+                    .ok_or_else(private_stage_changed)?;
+                if bytes > expected_bytes {
+                    return Err(private_stage_changed());
+                }
+                digest.update(&buffer[..count]);
+            }
+            if bytes != expected_bytes || digest.finalize() != expected_digest {
+                return Err(private_stage_changed());
+            }
+            reader.seek(SeekFrom::Start(0))?;
+            reader.verify()?;
+            Ok((
+                OwnedPrivateStagedReader {
+                    reader: Some(reader),
+                    directory: Arc::clone(self),
+                    name: name.to_owned(),
+                    identity: expected_identity,
+                },
+                value,
+            ))
+        })();
+        drop(writer);
+        if result.is_err() {
+            if let Ok(file) = self.open_delete_candidate(name, expected_identity) {
+                let _ = file.delete();
+            }
+        }
+        result
+    }
+
     /// Open one validated private child and retain its no-delete-sharing
     /// handle. This pins the file entry against replacement for the handle's
     /// lifetime. It does not make SQLite's own sidecar lifecycle safe; a VFS
@@ -635,6 +713,76 @@ impl PrivateDirectory {
             identity,
             delete_authorized: true,
         })
+    }
+}
+
+fn private_stage_changed() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "Private stage changed before admission",
+    )
+}
+
+struct StagedDigestWriter<'a, 'directory> {
+    writer: &'a mut PinnedPrivateFile<'directory>,
+    digest: Sha256,
+    bytes: u64,
+    maximum_bytes: u64,
+}
+impl Write for StagedDigestWriter<'_, '_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() as u64 > self.maximum_bytes.saturating_sub(self.bytes) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Private stage size limit exceeded",
+            ));
+        }
+        let count = self.writer.write(bytes)?;
+        self.digest.update(&bytes[..count]);
+        self.bytes += count as u64;
+        Ok(count)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+/// An immutable stage that attempts exact-identity cleanup when closed.
+/// It never exposes its path or a writable/raw handle. Cleanup failure retains
+/// a private local file; it never deletes a replacement or any remote resource.
+pub struct OwnedPrivateStagedReader {
+    reader: Option<OwnedPrivateReader>,
+    directory: Arc<PrivateDirectory>,
+    name: OsString,
+    identity: PinnedFileIdentity,
+}
+impl OwnedPrivateStagedReader {
+    pub fn verify(&self) -> io::Result<()> {
+        self.reader.as_ref().expect("open stage").verify()
+    }
+    pub fn metadata(&self) -> io::Result<std::fs::Metadata> {
+        self.reader.as_ref().expect("open stage").metadata()
+    }
+}
+impl Read for OwnedPrivateStagedReader {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        self.reader.as_mut().expect("open stage").read(output)
+    }
+}
+impl Seek for OwnedPrivateStagedReader {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.reader.as_mut().expect("open stage").seek(position)
+    }
+}
+impl Drop for OwnedPrivateStagedReader {
+    fn drop(&mut self) {
+        drop(self.reader.take());
+        if let Ok(file) = self
+            .directory
+            .open_delete_candidate(&self.name, self.identity)
+        {
+            let _ = file.delete();
+        }
     }
 }
 
@@ -1385,6 +1533,74 @@ mod tests {
         let private = PrivateDirectory::create_or_open_under(&parent, OsStr::new(&name))
             .expect("create current-user-only child");
         (parent, private)
+    }
+
+    #[test]
+    #[ignore = "requires isolated ordinary-user Windows synthetic private storage; no credentials, provider registration or GUI"]
+    fn private_staged_reader_admits_complete_bytes_and_cleans_only_owned_stages() {
+        assert!(
+            std::env::var("USERNAME")
+                .unwrap_or_default()
+                .eq_ignore_ascii_case("RaiunLabUser"),
+            "requires the isolated synthetic ordinary-user task"
+        );
+        let root = private_test_directory();
+        println!("PRIVATE_STAGED_READER_FIXTURE={}", root.display());
+        let (parent, private) = private_directory_under(&root);
+        let private = Arc::new(private);
+        let bytes: Vec<u8> = (0..131073).map(|index| (index * 31 + 7) as u8).collect();
+        let path = private.path().join("unpublished-stage");
+        let (mut reader, metadata) = private
+            .stage_immutable_file(
+                OsStr::new("unpublished-stage"),
+                bytes.len() as u64,
+                |writer| {
+                    for chunk in bytes.chunks(8191) {
+                        writer.write_all(chunk)?;
+                    }
+                    Ok((bytes.len(), "complete synthetic callback"))
+                },
+            )
+            .unwrap();
+        assert_eq!(metadata, (bytes.len(), "complete synthetic callback"));
+        reader.verify().unwrap();
+        assert_eq!(reader.metadata().unwrap().len(), bytes.len() as u64);
+        let mut received = Vec::new();
+        reader.read_to_end(&mut received).unwrap();
+        assert_eq!(received, bytes);
+        reader.seek(SeekFrom::Start(65530)).unwrap();
+        let mut middle = [0u8; 17];
+        reader.read_exact(&mut middle).unwrap();
+        assert_eq!(middle.as_slice(), &bytes[65530..65547]);
+        assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
+        assert!(std::fs::remove_file(&path).is_err());
+        reader.verify().unwrap();
+        drop(reader);
+        assert!(!path.exists());
+
+        let failed = private
+            .stage_immutable_file(OsStr::new("callback-error"), 32, |writer| {
+                writer.write_all(b"unpublished prefix")?;
+                Err::<(), _>(io::Error::other("synthetic callback refusal"))
+            })
+            .err()
+            .expect("callback failure must not admit a reader");
+        assert_eq!(failed.to_string(), "synthetic callback refusal");
+        assert!(!private.path().join("callback-error").exists());
+        assert!(
+            private
+                .stage_immutable_file(OsStr::new("over-bound"), 4, |writer| {
+                    writer.write_all(b"abc")?;
+                    writer.write_all(b"de")
+                })
+                .is_err()
+        );
+        assert!(!private.path().join("over-bound").exists());
+        assert_eq!(std::fs::read_dir(private.path()).unwrap().count(), 0);
+        drop(private);
+        drop(parent);
+        // This exclusively owned synthetic root is retained on any earlier panic.
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn replace_dacl(path: &Path, sddl: Option<&str>) {

@@ -18,8 +18,8 @@ mod win32;
 /// A pinned Windows directory handle for safe private-journal operations.
 #[cfg(windows)]
 pub use private_directory::{
-    OwnedPrivateReader, PinnedDirectory, PinnedFileIdentity, PinnedPrivateFile,
-    PinnedPrivateFileAccess, PrivateDirectory,
+    OwnedPrivateReader, OwnedPrivateStagedReader, PinnedDirectory, PinnedFileIdentity,
+    PinnedPrivateFile, PinnedPrivateFileAccess, PrivateDirectory,
 };
 /// DPAPI-protected, current-user-only storage for bounded serialized sessions.
 #[cfg(windows)]

@@ -5975,6 +5975,47 @@ impl VaultBackend {
         Ok(url)
     }
 
+    /// Download and fully authenticate an online file into unpublished private
+    /// staging owned by the caller. No plaintext path is created or published.
+    /// The writer must initially be empty and remain private until success and
+    /// caller-side authorization/identity checks. Errors may leave plaintext;
+    /// the caller owns flushing, cleanup and immutable-reader handoff.
+    ///
+    /// Cache-bound/offline backends are explicitly refused: their pending-edit,
+    /// rename and recovery overlays must not be bypassed by an online read.
+    /// `private_ciphertext_directory` must be a retained, caller-admitted private
+    /// directory, not an untrusted path. This method grants no native route.
+    pub fn download_online_to_private_writer(
+        &self,
+        space: &str,
+        path: &str,
+        expected_etag: &str,
+        private_ciphertext_directory: &Path,
+        output: &mut dyn Write,
+    ) -> Result<RemoteEntry, CloudError> {
+        self.check_space(space)?;
+        if self.offline_only || self.offline_cache.is_some() || self.offline_root.is_some() {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "private staged reads require an online backend without pending-edit cache",
+            ));
+        }
+        let path = normalize_virtual_path(path)?;
+        validate_virtual_path(&path)?;
+        let state = self.revalidate_root()?;
+        // Only the parent directory is used in private-output mode. The nominal
+        // destination is never opened, replaced, or published in this branch.
+        let unpublished = private_ciphertext_directory.join("unpublished-plaintext");
+        self.download_vault_inner_with_private_output(
+            &state,
+            &path,
+            Some(expected_etag),
+            &unpublished,
+            (None, None),
+            Some(output),
+        )
+    }
+
     fn download_vault(
         &self,
         state: &RootState,
@@ -6031,6 +6072,26 @@ impl VaultBackend {
         pin: Option<&CiphertextPinBuild>,
         capture_ciphertext_digest: Option<&mut String>,
     ) -> Result<RemoteEntry, CloudError> {
+        self.download_vault_inner_with_private_output(
+            state,
+            virtual_path,
+            expected_etag,
+            destination,
+            (pin, capture_ciphertext_digest),
+            None,
+        )
+    }
+
+    fn download_vault_inner_with_private_output(
+        &self,
+        state: &RootState,
+        virtual_path: &str,
+        expected_etag: Option<&str>,
+        destination: &Path,
+        cache_output: (Option<&CiphertextPinBuild>, Option<&mut String>),
+        private_output: Option<&mut dyn Write>,
+    ) -> Result<RemoteEntry, CloudError> {
+        let (pin, capture_ciphertext_digest) = cache_output;
         let cache_epoch = pin.map(|build| build.epoch()).or_else(|| {
             self.offline_cache
                 .as_ref()
@@ -6133,20 +6194,35 @@ impl VaultBackend {
         if after.id != before.id || after.etag != before.etag || after.size != before.size {
             return Err(conflict("vault file changed during download"));
         }
-        let placeholder = NamedTempFile::new_in(destination_parent).map_err(io_error)?;
-        let plaintext_path = placeholder.into_temp_path();
-        fs::remove_file(&plaintext_path).map_err(io_error)?;
         let mut input = File::open(&ciphertext_path).map_err(io_error)?;
-        let decrypted_len = self
-            .sessions
-            .decrypt_file_transactional(
-                &self.scope,
-                &mut input,
-                &plaintext_path,
-                MAX_VAULT_PLAINTEXT_BYTES,
-                Some(before.size),
-            )
-            .map_err(vault_error)?;
+        let mut plaintext_path = None;
+        let decrypted_len = if let Some(output) = private_output {
+            self.sessions
+                .decrypt_file_to_private_writer(
+                    &self.scope,
+                    &mut input,
+                    output,
+                    MAX_VAULT_PLAINTEXT_BYTES,
+                    before.size,
+                )
+                .map_err(vault_error)?
+        } else {
+            let placeholder = NamedTempFile::new_in(destination_parent).map_err(io_error)?;
+            let path = placeholder.into_temp_path();
+            fs::remove_file(&path).map_err(io_error)?;
+            let size = self
+                .sessions
+                .decrypt_file_transactional(
+                    &self.scope,
+                    &mut input,
+                    &path,
+                    MAX_VAULT_PLAINTEXT_BYTES,
+                    Some(before.size),
+                )
+                .map_err(vault_error)?;
+            plaintext_path = Some(path);
+            size
+        };
         if decrypted_len != before.size {
             return Err(invalid("vault plaintext length did not match its metadata"));
         }
@@ -6185,14 +6261,16 @@ impl VaultBackend {
                 );
             }
         }
-        let output = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&plaintext_path)
-            .map_err(io_error)?;
-        NamedTempFile::from_parts(output, plaintext_path)
-            .persist(destination)
-            .map_err(|error| io_error(error.error))?;
+        if let Some(plaintext_path) = plaintext_path {
+            let output = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&plaintext_path)
+                .map_err(io_error)?;
+            NamedTempFile::from_parts(output, plaintext_path)
+                .persist(destination)
+                .map_err(|error| io_error(error.error))?;
+        }
         Ok(after)
     }
 

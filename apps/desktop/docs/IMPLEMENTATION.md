@@ -43,6 +43,24 @@ installer remains installed and closed in the VM. This is not authenticated
 packaged cloud acceptance or whole-category completion. Vault unlock remains
 unimplemented on Windows and its capability stays disabled.
 
+## Latest local Windows acceptance — 24 October 2026 JST
+
+The corrected non-test folder/media candidate (`4a60be3c` source archive,
+installer SHA256 `2704c192a8c2718505b0ab92a5925c8c8ef5b3b80652523e8617affdadfdc22a`)
+passed an ordinary-user offline upgrade, exact installed payload/version checks,
+sign-in-required startup, account selection and persistence after reopening.
+Both normal tray quits left zero Raiun processes; the VM shut down normally.
+It remains installed and closed in that isolated VM. This supersedes b7 as the
+latest local installed candidate, with earlier binaries and failure evidence
+preserved. Nothing new is published or installed on the laptop.
+
+The first activated package exposed a signed-out collection refresh error; the
+corrected UI skips authenticated pair queries for disconnected Windows accounts
+while preserving Linux behavior. Signed-out Media secondary wording is still
+confusing and is a nonblocking known limitation. Connected packaged transfers
+were not tested. The six native component passes and full source gates remain
+separate evidence; Windows encrypted native access is still incomplete.
+
 ## Windows cloud-drive candidate — 23 October 2026 JST
 
 The isolated ordinary-user Windows save and conditional lifecycle checks passed

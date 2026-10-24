@@ -8,7 +8,7 @@
 
 use std::{
     collections::HashMap,
-    io::Read,
+    io::{Read, Write},
     path::Path,
     sync::{
         Arc, Mutex, Weak,
@@ -452,6 +452,25 @@ impl VaultSessionRegistry {
         )
     }
 
+    /// Authenticate a local ciphertext spool into unpublished private staging.
+    /// Retains the exact session lock through local crypto only. The caller must
+    /// not expose partial output on error or perform network I/O in either stream.
+    pub fn decrypt_file_to_private_writer<R: Read, W: Write + ?Sized>(
+        &self,
+        scope: &VaultSessionScope,
+        input: &mut R,
+        output: &mut W,
+        maximum_plaintext_bytes: u64,
+        expected_len: u64,
+    ) -> Result<u64, VaultError> {
+        let state = self.lock_state()?;
+        let session = state
+            .sessions
+            .get(scope)
+            .ok_or_else(|| invalid("vault session is locked"))?;
+        session.decrypt_file_to_private_writer(input, output, maximum_plaintext_bytes, expected_len)
+    }
+
     /// Decrypt one complete, metadata-bounded file to a zeroizing memory
     /// buffer. The exact unlocked scope is held only for local crypto.
     pub fn decrypt_file_to_bytes<R: Read>(
@@ -810,6 +829,26 @@ impl VaultSessionCoordinator {
             scope,
             input,
             destination,
+            maximum_plaintext_bytes,
+            expected_len,
+        )
+    }
+
+    /// Authenticate local ciphertext into unpublished private staging through
+    /// the exact unlocked scope. Errors may leave partial plaintext; no output
+    /// publication, flushing or filesystem cleanup is performed by this method.
+    pub fn decrypt_file_to_private_writer<R: Read, W: Write + ?Sized>(
+        &self,
+        scope: &VaultSessionScope,
+        input: &mut R,
+        output: &mut W,
+        maximum_plaintext_bytes: u64,
+        expected_len: u64,
+    ) -> Result<u64, VaultError> {
+        self.registry.decrypt_file_to_private_writer(
+            scope,
+            input,
+            output,
             maximum_plaintext_bytes,
             expected_len,
         )
@@ -1584,6 +1623,90 @@ mod tests {
                 .decrypt_path(&scope, "um9jr7t436jbmsgpub5sfni4qk")
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn private_writer_requires_complete_authentication_and_exact_unlocked_scope() {
+        let coordinator = VaultSessionCoordinator::new();
+        let own = scope("account-one", "vault-one");
+        let foreign = scope("account-two", "vault-one");
+        unlock(&coordinator.registry, &own).unwrap();
+        // Existing web fixture spans two authenticated blocks; no extra KDF.
+        let ciphertext = include_bytes!("../tests/fixtures/web-65537.bin");
+        let expected: Vec<u8> = (0..65537).map(|index| (index * 31 + 7) as u8).collect();
+        let length = expected.len() as u64;
+        let mut output = Vec::new();
+        assert_eq!(
+            coordinator
+                .decrypt_file_to_private_writer(
+                    &own,
+                    &mut std::io::Cursor::new(ciphertext),
+                    &mut output,
+                    length,
+                    length
+                )
+                .unwrap(),
+            length
+        );
+        assert_eq!(output, expected);
+
+        let mut tampered = ciphertext.to_vec();
+        *tampered.last_mut().unwrap() ^= 1;
+        let mut unpublished = Vec::new();
+        assert!(
+            coordinator
+                .decrypt_file_to_private_writer(
+                    &own,
+                    &mut std::io::Cursor::new(tampered),
+                    &mut unpublished,
+                    length,
+                    length
+                )
+                .is_err()
+        );
+        assert_eq!(unpublished, expected[..65536]);
+        // Even a fully written private buffer is not successful when the
+        // trusted expected length disagrees; callers must not publish it.
+        let mut wrong_length = Vec::new();
+        assert!(
+            coordinator
+                .decrypt_file_to_private_writer(
+                    &own,
+                    &mut std::io::Cursor::new(ciphertext),
+                    &mut wrong_length,
+                    length,
+                    length - 1
+                )
+                .is_err()
+        );
+        assert_eq!(wrong_length, expected);
+
+        let mut forbidden = Vec::new();
+        assert!(
+            coordinator
+                .decrypt_file_to_private_writer(
+                    &foreign,
+                    &mut std::io::Cursor::new(ciphertext),
+                    &mut forbidden,
+                    length,
+                    length
+                )
+                .is_err()
+        );
+        assert!(forbidden.is_empty());
+        coordinator.lock(&own).unwrap();
+        assert!(
+            coordinator
+                .decrypt_file_to_private_writer(
+                    &own,
+                    &mut std::io::Cursor::new(ciphertext),
+                    &mut forbidden,
+                    length,
+                    length
+                )
+                .is_err()
+        );
+        assert!(forbidden.is_empty());
     }
 
     #[test]
