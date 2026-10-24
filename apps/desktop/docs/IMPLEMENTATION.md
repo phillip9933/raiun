@@ -2256,9 +2256,18 @@ fixture and pinned directory before opening storage. It never changes the
 global environment or uses a real profile fallback. Existing profiles and the
 installed package remain outside this scope.
 
-Source compile, strict lint and formatting passed in the isolated candidate;
-native broker execution is pending. This fixture does not enumerate or hydrate
-a vault file: its lock inventory is empty. It can qualify credential/KDF,
+The first actual broker execution reached the initial manual remember request,
+then refused its account binding before KDF or credential storage. Preparation
+canonicalized the issuer URL for the account reservation but reconstructed the
+remembered scope from the raw authentication issuer, whose valid origin spelling
+can omit a trailing slash. The fix reuses the exact validated canonical account
+bytes for both reservation and credential scope. Authentication issuer equality
+and strict account/vault validation remain unchanged. A focused regression now
+passes the canonical spelling join, saved-password round-trip and foreign-account
+isolation; Windows-target compile, strict lint and formatting also pass. The
+changed-source native broker rerun is pending, and the original failure is retained.
+
+This fixture does not enumerate or hydrate a vault file: its lock inventory is empty. It can qualify credential/KDF,
 persistence, status and session behavior independently, but it cannot qualify
 plaintext cleanup, restart behavior or full C06 completion. The separate C05
 read-and-cleanup fixture still owns payload cleanup acceptance. Its original
