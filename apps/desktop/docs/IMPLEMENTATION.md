@@ -2145,9 +2145,12 @@ predates the disabled vault changes and does not establish their acceptance.
 The immediate blocker remains encrypted content cleanup (C05). The corrected
 full callback path now permits a verified 65,537-byte encrypted file read in the
 isolated Windows root. The clean-close false blocker and read-only handle open
-failure have been corrected. The latest native run using one protected handle
-still refused cleanup with `ERROR_CLOUD_FILE_NOT_IN_SYNC`; the failure, root and
-normal shutdown evidence are retained. Reading alone does not establish safe
+failure have been corrected. The nonzero-USN version still refused cleanup with
+`ERROR_CLOUD_FILE_NOT_IN_SYNC`; that failure and root are retained. The next
+fixed-fence native run passed writer exclusion and verified the file read, then
+refused with `ConfiguredRootChanged`. Its trace does not yet establish which
+comparison failed or that the update succeeded. Test-only stage diagnostics are
+source-qualified; all cleanup checks remain intact. Reading alone does not establish safe
 Lock or restart custody.
 
 The next source-qualified method holds continuous exclusive protected file
@@ -2160,9 +2163,9 @@ There is no cleanup fallback, force-dehydrate or read-only attribute clearing in
 production. Vault capability exposure remains disabled.
 
 Remembered unlock (C06) now has the disabled source foundation and native
-credential-custody component evidence below. The actual broker lifecycle fixture
-is under acceptance; its empty lock inventory cannot establish payload cleanup
-or full C06 completion. Reuse unchanged evidence and preserve failed roots,
+credential-custody component evidence below. The actual broker lifecycle fixture now passes the
+credential/session flow, including saved unlock and Forget. Its empty lock
+inventory cannot establish payload cleanup or full C06 completion. Reuse unchanged evidence and preserve failed roots,
 recovery and the installed app. No testing-agent permission restriction remains;
 source checks still do not substitute for native or exact-package results.
 
@@ -2265,7 +2268,11 @@ bytes for both reservation and credential scope. Authentication issuer equality
 and strict account/vault validation remain unchanged. A focused regression now
 passes the canonical spelling join, saved-password round-trip and foreign-account
 isolation; Windows-target compile, strict lint and formatting also pass. The
-changed-source native broker rerun is pending, and the original failure is retained.
+changed-source native broker rerun now passes as the isolated ordinary Windows
+user: manual remember, lock, saved unlock, Forget without locking, verification
+that the protected saved record is absent, and final lock. The actual test passed
+in 5.15 seconds, followed by owned-process closure and normal Windows shutdown;
+the original failure remains retained.
 
 This fixture does not enumerate or hydrate a vault file: its lock inventory is empty. It can qualify credential/KDF,
 persistence, status and session behavior independently, but it cannot qualify
