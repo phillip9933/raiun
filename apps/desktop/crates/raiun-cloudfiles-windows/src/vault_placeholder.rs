@@ -55,6 +55,32 @@ impl Catalogue {
         self.versions.insert(version, id);
         Ok(id)
     }
+    #[cfg(windows)]
+    fn restore(
+        entries: Vec<crate::vault_custody::VaultCatalogueEntry>,
+    ) -> Result<Self, BackendError> {
+        if entries.len() > MAX_CATALOGUE {
+            return Err(BackendError::Unavailable);
+        }
+        let mut catalogue = Self::default();
+        for row in entries {
+            let entry = row.metadata;
+            if row.identity == [0; 16]
+                || entry.id.is_empty()
+                || (!entry.directory && entry.etag.is_empty())
+                || (entry.directory && entry.size != 0)
+                || raiun_core::validate_remote_path(&entry.path).is_err()
+                || (entry.path != "/" && !entry.path[1..].split('/').all(valid_windows_component))
+                || catalogue.entries.contains_key(&row.identity)
+                || catalogue.versions.contains_key(&key(&entry))
+            {
+                return Err(BackendError::Unavailable);
+            }
+            catalogue.versions.insert(key(&entry), row.identity);
+            catalogue.entries.insert(row.identity, entry);
+        }
+        Ok(catalogue)
+    }
     fn get(&self, identity: &[u8]) -> Option<RemoteEntry> {
         let id: [u8; 16] = identity.try_into().ok()?;
         self.entries.get(&id).cloned()
@@ -129,12 +155,14 @@ mod runtime {
         maximum_stage_bytes: u64,
         catalogue: Mutex<Catalogue>,
         root: [u8; 16],
+        custody: Arc<dyn crate::vault_custody::VaultPublicationCustody>,
     }
     impl WindowsVaultPlaceholderBackend {
         pub fn new(
             binding: Arc<WindowsVaultReadBinding>,
             private: Arc<PrivateDirectory>,
             maximum_stage_bytes: u64,
+            custody: Arc<dyn crate::vault_custody::VaultPublicationCustody>,
         ) -> Result<Self, BackendError> {
             let root = binding.stat("/").map_err(|_| BackendError::Unavailable)?;
             if !root.directory || root.path != "/" {
@@ -145,8 +173,21 @@ mod runtime {
                 .map_err(|_| BackendError::Unavailable)?;
             let (catalogue, identity) = binding
                 .with_publication(|| {
-                    let mut catalogue = Catalogue::default();
+                    binding
+                        .verify_custody_context(custody.as_ref())
+                        .map_err(|_| refused())?;
+                    let mut catalogue =
+                        Catalogue::restore(custody.catalogue_snapshot().map_err(|_| refused())?)
+                            .map_err(|_| refused())?;
+                    if catalogue
+                        .entries
+                        .values()
+                        .any(|entry| entry.path == "/" && (!entry.directory || entry.id != root.id))
+                    {
+                        return Err(refused());
+                    }
                     let identity = catalogue.insert(root).map_err(|_| refused())?;
+                    persist_catalogue(custody.as_ref(), &catalogue).map_err(|_| refused())?;
                     Ok((catalogue, identity))
                 })
                 .map_err(|_| BackendError::Unavailable)?;
@@ -156,7 +197,11 @@ mod runtime {
                 maximum_stage_bytes,
                 catalogue: Mutex::new(catalogue),
                 root: identity,
+                custody,
             })
+        }
+        pub(crate) fn custody_root_identity(&self) -> crate::ConfiguredRootIdentity {
+            self.custody.root_identity()
         }
         pub(crate) fn binding(&self) -> &Arc<WindowsVaultReadBinding> {
             &self.binding
@@ -220,6 +265,7 @@ mod runtime {
                     let (next, children) = catalogue
                         .stage_listing(&parent, entries)
                         .map_err(|_| refused())?;
+                    persist_catalogue(self.custody.as_ref(), &next).map_err(|_| refused())?;
                     *catalogue = next;
                     Ok(children)
                 })
@@ -293,11 +339,31 @@ mod runtime {
             check(cancellation)?;
             Ok(VaultFetchSession {
                 binding: self.binding.clone(),
+                custody: self.custody.clone(),
+                identity: identity.try_into().map_err(|_| BackendError::Unavailable)?,
                 metadata: metadata(&expected),
                 stage: Mutex::new(stage),
             })
         }
     }
+    fn persist_catalogue(
+        custody: &dyn crate::vault_custody::VaultPublicationCustody,
+        catalogue: &Catalogue,
+    ) -> Result<(), BackendError> {
+        let mut entries = catalogue
+            .entries
+            .iter()
+            .map(
+                |(identity, metadata)| crate::vault_custody::VaultCatalogueEntry {
+                    identity: *identity,
+                    metadata: metadata.clone(),
+                },
+            )
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.identity);
+        custody.persist_catalogue(&entries)
+    }
+
     struct VaultEnumeration {
         binding: Arc<WindowsVaultReadBinding>,
         children: Vec<PlaceholderChild>,
@@ -318,10 +384,25 @@ mod runtime {
     }
     struct VaultFetch {
         binding: Arc<WindowsVaultReadBinding>,
+        custody: Arc<dyn crate::vault_custody::VaultPublicationCustody>,
+        identity: [u8; 16],
         metadata: PlaceholderMetadata,
         bytes: Zeroizing<Vec<u8>>,
     }
     impl PreparedFetch for VaultFetch {
+        fn persist_vault_hydration(
+            &self,
+            intent: &crate::vault_custody::VaultHydrationIntent,
+        ) -> Result<(), BackendError> {
+            if intent.identity != self.identity
+                || intent.length != self.metadata.length
+                || self.metadata.is_directory
+                || intent.root != self.custody.root_identity()
+            {
+                return Err(BackendError::Unavailable);
+            }
+            self.custody.persist_hydration(intent)
+        }
         fn metadata(&self) -> PlaceholderMetadata {
             self.metadata
         }
@@ -337,6 +418,8 @@ mod runtime {
     }
     struct VaultFetchSession {
         binding: Arc<WindowsVaultReadBinding>,
+        custody: Arc<dyn crate::vault_custody::VaultPublicationCustody>,
+        identity: [u8; 16],
         metadata: PlaceholderMetadata,
         stage: Mutex<UnpublishedVaultStage>,
     }
@@ -372,6 +455,8 @@ mod runtime {
             check(cancellation)?;
             Ok(VaultFetch {
                 binding: self.binding.clone(),
+                custody: self.custody.clone(),
+                identity: self.identity,
                 metadata: self.metadata,
                 bytes,
             })
@@ -462,6 +547,146 @@ mod runtime {
     }
     #[cfg(test)]
     mod native_tests {
+        // Test-only in-memory evidence, never a protected durable service or
+        // restart/cleanup authority. Production constructors still require the
+        // broker-supplied protected implementation; there is no fallback.
+        struct FixtureCustody {
+            owner: ProviderScope,
+            vault: raiun_vault::session::VaultSessionScope,
+            remote_root: String,
+            root: crate::ConfiguredRootIdentity,
+            state: Mutex<FixtureCustodyState>,
+        }
+        #[derive(Clone, Default)]
+        struct FixtureCustodyState {
+            catalogue: std::collections::BTreeMap<[u8; 16], RemoteEntry>,
+            hydrations: std::collections::BTreeMap<u64, FixtureHydration>,
+        }
+        #[derive(Clone, PartialEq, Eq)]
+        struct FixtureHydration {
+            identity: [u8; 16],
+            length: u64,
+            components: Vec<String>,
+        }
+        impl FixtureCustody {
+            fn new(
+                owner: ProviderScope,
+                vault: raiun_vault::session::VaultSessionScope,
+                remote_root: &str,
+                root: crate::ConfiguredRootIdentity,
+            ) -> Self {
+                assert_eq!(owner.profile_id(), vault.account_id());
+                assert_eq!(owner.server_origin(), vault.server_origin());
+                assert!(root.volume_serial != 0 && root.file_index != 0);
+                Self {
+                    owner,
+                    vault,
+                    remote_root: remote_root.into(),
+                    root,
+                    state: Mutex::new(FixtureCustodyState::default()),
+                }
+            }
+        }
+        impl crate::vault_custody::VaultPublicationCustody for FixtureCustody {
+            fn root_identity(&self) -> crate::ConfiguredRootIdentity {
+                self.root
+            }
+            fn verify_context(
+                &self,
+                owner: &ProviderScope,
+                vault: &raiun_vault::session::VaultSessionScope,
+                remote_root: &str,
+            ) -> Result<(), BackendError> {
+                if owner != &self.owner || vault != &self.vault || remote_root != self.remote_root {
+                    return Err(BackendError::Unavailable);
+                }
+                Ok(())
+            }
+            fn catalogue_snapshot(
+                &self,
+            ) -> Result<Vec<crate::vault_custody::VaultCatalogueEntry>, BackendError> {
+                let state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
+                Ok(state
+                    .catalogue
+                    .iter()
+                    .map(
+                        |(identity, metadata)| crate::vault_custody::VaultCatalogueEntry {
+                            identity: *identity,
+                            metadata: metadata.clone(),
+                        },
+                    )
+                    .collect())
+            }
+            fn persist_catalogue(
+                &self,
+                entries: &[crate::vault_custody::VaultCatalogueEntry],
+            ) -> Result<(), BackendError> {
+                let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
+                let mut next = state.catalogue.clone();
+                let mut seen = std::collections::BTreeSet::new();
+                for entry in entries {
+                    let m = &entry.metadata;
+                    if entry.identity == [0; 16]
+                        || !seen.insert(entry.identity)
+                        || m.id.is_empty()
+                        || !m.path.starts_with('/')
+                        || m.writable
+                        || (m.path == "/" && (!m.directory || m.id != self.vault.resource_id()))
+                        || next.get(&entry.identity).is_some_and(|old| old != m)
+                    {
+                        return Err(BackendError::Unavailable);
+                    }
+                    next.insert(entry.identity, m.clone());
+                }
+                if next.len() > 1024 {
+                    return Err(BackendError::Unavailable);
+                }
+                state.catalogue = next;
+                Ok(())
+            }
+            fn persist_hydration(
+                &self,
+                intent: &crate::vault_custody::VaultHydrationIntent,
+            ) -> Result<(), BackendError> {
+                let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
+                let entry = state
+                    .catalogue
+                    .get(&intent.identity)
+                    .ok_or(BackendError::Unavailable)?;
+                if intent.root != self.root
+                    || intent.file_index == 0
+                    || entry.directory
+                    || intent.length != entry.size
+                    || intent.components.is_empty()
+                    || intent.components.len() > 256
+                    || intent.components.iter().map(String::len).sum::<usize>() > 32000
+                    || intent
+                        .components
+                        .iter()
+                        .any(|name| !crate::opencloud::valid_windows_component(name))
+                {
+                    return Err(BackendError::Unavailable);
+                }
+                let row = FixtureHydration {
+                    identity: intent.identity,
+                    length: intent.length,
+                    components: intent.components.clone(),
+                };
+                if state.hydrations.iter().any(|(file, old)| {
+                    (*file == intent.file_index || old.identity == intent.identity)
+                        && (*file != intent.file_index || old != &row)
+                }) {
+                    return Err(BackendError::Unavailable);
+                }
+                if state.hydrations.len() >= 4096
+                    && !state.hydrations.contains_key(&intent.file_index)
+                {
+                    return Err(BackendError::Unavailable);
+                }
+                state.hydrations.insert(intent.file_index, row);
+                Ok(())
+            }
+        }
         use super::*;
         use crate::ProviderScope;
         use crate::opencloud::{
@@ -871,6 +1096,12 @@ mod runtime {
                 .unlock(&scope, &mut password, TOKEN.trim())
                 .unwrap();
             assert!(password.iter().all(|byte| *byte == 0));
+            let custody = Arc::new(FixtureCustody::new(
+                trusted.clone(),
+                scope.clone(),
+                ROOT_PATH,
+                local_root,
+            ));
             let binding = Arc::new(
                 WindowsVaultReadBinding::new_online(
                     trusted,
@@ -882,8 +1113,13 @@ mod runtime {
                 .unwrap(),
             );
             let vault = Arc::new(
-                WindowsVaultPlaceholderBackend::new(binding.clone(), private.clone(), 131072)
-                    .unwrap(),
+                WindowsVaultPlaceholderBackend::new(
+                    binding.clone(),
+                    private.clone(),
+                    131072,
+                    custody.clone(),
+                )
+                .unwrap(),
             );
             ordinary
                 .install_vault_route(vault.clone(), local_root)
@@ -1161,15 +1397,26 @@ mod runtime {
                 )
                 .unwrap(),
             );
-            let backend = Arc::new(
-                WindowsVaultPlaceholderBackend::new(binding.clone(), private.clone(), 131072)
-                    .unwrap(),
-            );
             let pinned = parent.identity();
             let local_root = crate::ConfiguredRootIdentity {
                 volume_serial: pinned.volume_serial,
                 file_index: pinned.file_index,
             };
+            let custody = Arc::new(FixtureCustody::new(
+                trusted.clone(),
+                scope.clone(),
+                ROOT_PATH,
+                local_root,
+            ));
+            let backend = Arc::new(
+                WindowsVaultPlaceholderBackend::new(
+                    binding.clone(),
+                    private.clone(),
+                    131072,
+                    custody.clone(),
+                )
+                .unwrap(),
+            );
             let ordinary = OpenCloudPlaceholderBackend::new_with_identity_catalog(
                 client.clone(),
                 trusted,

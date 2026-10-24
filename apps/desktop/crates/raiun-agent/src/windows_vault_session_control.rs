@@ -424,7 +424,9 @@ impl WindowsAgent {
                 .clone()
                 .ok_or("The drive root is unverified")?,
         };
-        let backend = self.provider.verified_vault_backend(active)?;
+        let verified = self.provider.verified_vault_backend(active)?;
+        let backend = verified.backend;
+        let custody = verified.custody;
         let (client, trusted) = backend
             .vault_read_context(identity)
             .map_err(|_| "The connected drive changed")?;
@@ -546,6 +548,7 @@ impl WindowsAgent {
             .map_err(|_| "Could not verify the vault password")?;
         // Every failure after verified insertion must clear this new session.
         let result = (|| {
+            let custody_view = custody.view(&trusted, &scope, &root_path)?;
             let binding = Arc::new(
                 raiun_cloudfiles_windows::vault_read::WindowsVaultReadBinding::new_online(
                     trusted,
@@ -577,6 +580,7 @@ impl WindowsAgent {
                     binding,
                     private,
                     raiun_cloudfiles_windows::MAX_REQUEST_BYTES,
+                    custody_view,
                 )
                 .map_err(|_| "Could not prepare the verified vault adapter")?,
             );

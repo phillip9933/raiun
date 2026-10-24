@@ -6,8 +6,14 @@
 #[path = "auth.rs"]
 mod auth;
 
+#[path = "root_manifest.rs"]
+mod root_manifest;
+#[path = "vault_custody.rs"]
+mod vault_custody;
 #[path = "windows_vault_credentials.rs"]
 mod windows_vault_credentials;
+#[path = "windows_vault_custody.rs"]
+mod windows_vault_custody;
 
 #[path = "windows_proxy.rs"]
 mod windows_proxy;
@@ -164,6 +170,20 @@ trait SessionStore: Send + Sync {
         _next: &[u8],
     ) -> Result<(), String> {
         Err("Protected vault credentials are unavailable".into())
+    }
+    fn load_vault_custody(
+        &self,
+        _scope: &[u8],
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
+        Err("Protected vault history is unavailable".into())
+    }
+    fn compare_exchange_vault_custody(
+        &self,
+        _scope: &[u8],
+        _old: Option<&[u8]>,
+        _next: &[u8],
+    ) -> Result<(), String> {
+        Err("Protected vault history is unavailable".into())
     }
     fn before_publish(&self) {}
 }
@@ -381,6 +401,11 @@ struct ActiveProviderBinding {
     personal_root_resource_id: String,
 }
 
+struct VerifiedVaultBackend {
+    backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
+    custody: Arc<windows_vault_custody::WindowsVaultCustody>,
+}
+
 enum ProviderCommand {
     InstallFolders {
         setup: Box<windows_folder_sync::Setup>,
@@ -443,9 +468,7 @@ enum ProviderCommand {
     },
     InspectVaultBackend {
         binding: ActiveProviderBinding,
-        response: std::sync::mpsc::SyncSender<
-            Result<Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>, String>,
-        >,
+        response: std::sync::mpsc::SyncSender<Result<VerifiedVaultBackend, String>>,
     },
     InspectConnection {
         binding: ActiveProviderBinding,
@@ -460,6 +483,8 @@ enum ProviderCommand {
         personal_root_resource_id: String,
         backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
         recovery: Arc<dyn raiun_cloudfiles_windows::EditRecoveryProvider>,
+        custody_account: Vec<u8>,
+        custody_store: Arc<dyn SessionStore>,
         response: std::sync::mpsc::SyncSender<Result<(), String>>,
     },
     DispatchRecovery {
@@ -565,6 +590,7 @@ impl ProviderManager {
                     None;
                 let mut backend: Option<Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>> =
                     None;
+                let mut vault_custody: Option<Arc<windows_vault_custody::WindowsVaultCustody>> = None;
                 let mut retired_vaults: Vec<Arc<raiun_cloudfiles_windows::vault_routes::VerifiedVaultRoute>> = Vec::new();
                 let mut active_binding: Option<ActiveProviderBinding> = None;
                 let mut folders: Option<windows_folder_sync::Runtime> = None;
@@ -788,6 +814,11 @@ impl ProviderManager {
                             } else if active_binding.as_ref() == Some(&binding) {
                                 backend.as_ref().filter(|backend| !backend.is_revoked())
                                     .cloned().ok_or_else(|| "The Windows drive is waiting for confirmed disconnect".to_owned())
+                                    .and_then(|backend| {
+                                        let custody = vault_custody.as_ref().cloned()
+                                            .ok_or("The retained drive has no verified vault history".to_owned())?;
+                                        Ok(VerifiedVaultBackend { backend, custody })
+                                    })
                             } else {
                                 Err("A different Windows drive connection is already active".to_owned())
                             };
@@ -818,6 +849,8 @@ impl ProviderManager {
                             personal_root_resource_id,
                             backend: next_backend,
                             recovery,
+                            custody_account,
+                            custody_store,
                             response,
                         } => {
                             let candidate_binding = ActiveProviderBinding {
@@ -852,6 +885,16 @@ impl ProviderManager {
                                             &personal_root_resource_id,
                                         )
                                         .map_err(|_| "The verified Personal/Spaces namespace changed before connection".to_owned())?;
+                                    // Missing/corrupt historical metadata must never be initialized
+                                    // as empty. Ordinary drive connectivity remains independent;
+                                    // vault unlock requires a successfully prepared service below.
+                                    let custody = raiun_cloudfiles_windows::prepare_vault_custody_root(
+                                        &lease, next_backend.as_ref(), composite_root_identity,
+                                    ).ok().and_then(|context| {
+                                        windows_vault_custody::WindowsVaultCustody::prepare(
+                                            custody_store, &custody_account, &context,
+                                        ).ok()
+                                    });
                                     let prepared = raiun_cloudfiles_windows::prepare_configured_root_runtime(
                                         lease,
                                         Arc::clone(&next_backend),
@@ -860,19 +903,21 @@ impl ProviderManager {
                                     )
                                     .map_err(|_| "Durable recovery checks failed; the Windows drive was not connected".to_owned())?;
                                     raiun_cloudfiles_windows::connect_configured_root(prepared)
+                                        .map(|active| (active, custody))
                                         .map_err(|_| "Could not connect the Windows Cloud Files drive".to_owned())
                                 });
                                 match lease {
-                                    Ok(active)
+                                    Ok((active, custody))
                                         if worker_generation.load(Ordering::Acquire) == generation =>
                                     {
                                         active_binding = Some(candidate_binding.clone());
+                                        vault_custody = custody;
                                         connection = Some(active);
                                         backend = Some(next_backend);
                                         worker_connected.store(true, Ordering::Release);
                                         Ok(())
                                     }
-                                    Ok(mut active) => {
+                                    Ok((mut active, _custody)) => {
                                         next_backend.revoke();
                                         if active.disconnect_in_place().is_err() {
                                             connection = Some(active);
@@ -1031,6 +1076,7 @@ impl ProviderManager {
                             );
                             if connection.is_none() {
                                 active_binding = None;
+                                vault_custody = None;
                             }
                             let _ = response.send(result);
                         }
@@ -1153,6 +1199,8 @@ impl ProviderManager {
         personal_root_resource_id: String,
         backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
         recovery: Arc<dyn raiun_cloudfiles_windows::EditRecoveryProvider>,
+        custody_account: Vec<u8>,
+        custody_store: Arc<dyn SessionStore>,
     ) -> Result<(), String> {
         let (response, result) = std::sync::mpsc::sync_channel(1);
         self.commands
@@ -1165,6 +1213,8 @@ impl ProviderManager {
                 personal_root_resource_id,
                 backend,
                 recovery,
+                custody_account,
+                custody_store,
                 response,
             })
             .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
@@ -1220,7 +1270,7 @@ impl ProviderManager {
     fn verified_vault_backend(
         &self,
         binding: ActiveProviderBinding,
-    ) -> Result<Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>, String> {
+    ) -> Result<VerifiedVaultBackend, String> {
         let (response, result) = std::sync::mpsc::sync_channel(1);
         self.commands
             .send(ProviderCommand::InspectVaultBackend { binding, response })
@@ -3212,6 +3262,8 @@ impl WindowsAgent {
                 .ok_or("The saved Windows drive has no verified Personal root identity")?,
             Arc::clone(&backend),
             recovery,
+            bandwidth_scope.bytes().to_vec(),
+            Arc::clone(session_store),
         )?;
 
         provider.bandwidth.publish(&bandwidth_scope, generation)?;
@@ -4742,6 +4794,25 @@ impl DpapiStore {
 }
 
 impl SessionStore for DpapiStore {
+    fn load_vault_custody(
+        &self,
+        scope: &[u8],
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
+        self.store
+            .load_vault_custody(scope)
+            .map_err(|_| "Protected vault history is unavailable".into())
+    }
+    fn compare_exchange_vault_custody(
+        &self,
+        scope: &[u8],
+        old: Option<&[u8]>,
+        next: &[u8],
+    ) -> Result<(), String> {
+        self.store
+            .compare_exchange_vault_custody(scope, old, next)
+            .map_err(|_| "Vault history publication is uncertain".into())
+    }
+
     fn load_vault_credentials(
         &self,
         profile: &str,
@@ -9195,6 +9266,17 @@ mod tests {
                     .expect("persisted Personal root identity"),
                 Arc::clone(&first_backend),
                 first_recovery.clone(),
+                super::windows_bandwidth::Scope::new(
+                    &configuration.profile_scope,
+                    &session.server,
+                    &session.client_id,
+                    session.expected_issuer.as_deref(),
+                    &owner.account_id,
+                )
+                .expect("bind exact fixture account history")
+                .bytes()
+                .to_vec(),
+                Arc::clone(&agent.session_store),
             )
             .expect("agent manager holds the exact-scope native connection");
         emit_stage("provider_connected");
@@ -10899,6 +10981,17 @@ mod tests {
                             .to_owned(),
                         backend.clone(),
                         recovery_provider,
+                        super::windows_bandwidth::Scope::new(
+                            &configuration.profile_scope,
+                            &session.server,
+                            &session.client_id,
+                            session.expected_issuer.as_deref(),
+                            &owner.account_id,
+                        )
+                        .expect("bind exact fixture account history")
+                        .bytes()
+                        .to_vec(),
+                        Arc::clone(&agent.session_store),
                     )
                     .expect("agent-owned native lifecycle connects exact synthetic root");
 

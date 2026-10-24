@@ -207,6 +207,15 @@ impl WindowsVaultReadBinding {
         })
     }
 
+    /// Caller holds this binding's existing publication permit. No locks are
+    /// reacquired here; the custody implementation must not reenter the binding.
+    pub(crate) fn verify_custody_context(
+        &self,
+        custody: &dyn crate::vault_custody::VaultPublicationCustody,
+    ) -> Result<(), BackendError> {
+        custody.verify_context(&self.trusted, &self.scope, &self.root_path)
+    }
+
     pub(crate) fn route_location(
         &self,
         owner: &ProviderScope,

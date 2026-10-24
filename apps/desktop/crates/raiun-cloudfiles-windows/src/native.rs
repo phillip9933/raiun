@@ -5,16 +5,16 @@
 //! this first callback bridge to 64-bit Windows, which is the only supported
 //! Windows target for the application today.
 
+#[cfg(test)]
+use crate::PreparedFetchSession;
 use crate::{
     BackendError, BoundedPermit, BoundedPermitPool, CancellationToken, Error, FetchRange,
     LocalFileIdentity, MAX_CONCURRENT_DIRECTORY_ENUMERATIONS, MAX_CONCURRENT_FETCHES,
     MAX_FILE_BYTES, MAX_RANGE_BYTES, MAX_REQUEST_BYTES, MAX_STAGED_CALLBACKS, PlaceholderBackend,
     PlaceholderMetadata, PlatformVersion, PreparedConfiguredRootRuntime, PreparedEditRecovery,
-    RequestPublicationGate, RequestPublicationPermit, SyntheticEntry, checked_fetch_range,
-    next_chunk_len, placeholder_population_completed,
+    PreparedFetch, RequestPublicationGate, RequestPublicationPermit, SyntheticEntry,
+    checked_fetch_range, next_chunk_len, placeholder_population_completed,
 };
-#[cfg(test)]
-use crate::{PreparedFetch, PreparedFetchSession};
 use std::time::Instant;
 use std::{
     collections::{HashMap, HashSet},
@@ -5811,7 +5811,7 @@ unsafe extern "system" fn fetch_data_callback(
         range,
         info.file_size as u64,
         &fetch_permit.cancellation,
-        |offset, slice| {
+        |offset, slice, prepared| {
             observe_fetch!(10);
             let _request_publish =
                 fetch_permit
@@ -5829,6 +5829,27 @@ unsafe extern "system" fn fetch_data_callback(
                         error: BackendError::Unavailable,
                         transfer_refused: false,
                     })?;
+                    prepared
+                        .persist_vault_hydration(&crate::vault_custody::VaultHydrationIntent {
+                            root: crate::ConfiguredRootIdentity {
+                                volume_serial: info.volume_serial_number,
+                                file_index: info.sync_root_file_id as u64,
+                            },
+                            identity: id,
+                            file_index: pinned.snapshot.identity.file_index,
+                            length: info.file_size as u64,
+                            components: components.clone(),
+                        })
+                        .map_err(|error| {
+                            if let Ok(mut inventory) = guard.0.hydrated_files.lock() {
+                                inventory.mark_incomplete();
+                            }
+                            WindowStreamError {
+                                offset,
+                                error,
+                                transfer_refused: false,
+                            }
+                        })?;
                     // The stream's backend publication permit and request
                     // permit are both held here. Store BEFORE CfExecute and
                     // release the inventory mutex before calling Windows. Keep
@@ -5912,7 +5933,7 @@ fn stream_prepared_windows(
     range: FetchRange,
     expected_size: u64,
     cancellation: &CancellationToken,
-    mut publish: impl FnMut(u64, &[u8]) -> Result<(), WindowStreamError>,
+    mut publish: impl FnMut(u64, &[u8], &dyn PreparedFetch) -> Result<(), WindowStreamError>,
 ) -> Result<(), WindowStreamError> {
     let fail = |offset, error| WindowStreamError {
         offset,
@@ -5961,7 +5982,11 @@ fn stream_prepared_windows(
                 .begin_publish(cancellation)
                 .map_err(|error| fail(offset, error))?;
             let count = next_chunk_len((prepared.bytes().len() - copied) as u64);
-            publish(offset, &prepared.bytes()[copied..copied + count])?;
+            publish(
+                offset,
+                &prepared.bytes()[copied..copied + count],
+                prepared.as_ref(),
+            )?;
             copied += count;
             offset += count as u64;
         }
@@ -7416,6 +7441,27 @@ fn configured_sync_root_identity(identity: RootIdentity) -> [u8; 24] {
     root_identity
 }
 
+/// Domain separation only. Native registration verification remains the existing
+/// checked SyncRootIdentity/provider/version proof; composite ownership is checked
+/// separately against the live authenticated backend by the safe context factory.
+pub(super) fn vault_custody_registration_binding(
+    root: crate::ConfiguredRootIdentity,
+    composite: crate::OpaqueIdentity,
+) -> String {
+    use std::fmt::Write;
+    let sync = configured_sync_root_identity(RootIdentity {
+        volume_serial: root.volume_serial,
+        file_index: root.file_index,
+    });
+    let mut binding =
+        String::from("raiun-vault-registration-v1:Raiun Internal Cloud Files Root:0.0.0-internal:");
+    for byte in sync.into_iter().chain(composite.as_bytes().iter().copied()) {
+        // Formatting into a String is infallible.
+        write!(&mut binding, "{byte:02x}").expect("format registration binding");
+    }
+    binding
+}
+
 fn register_root_with_identity(
     path: &Path,
     root_identity: &[u8],
@@ -8841,7 +8887,7 @@ mod backend_tests {
             },
             length,
             cancellation,
-            |offset, bytes| {
+            |offset, bytes, _prepared| {
                 assert!(!bytes.is_empty() && bytes.len() <= MAX_RANGE_BYTES);
                 assert!(
                     bytes

@@ -13,6 +13,8 @@ mod initial_edit_queue;
 mod opencloud;
 mod recovery_provider;
 mod recovery_reconcile;
+#[cfg(windows)]
+pub mod vault_custody;
 #[cfg(any(windows, test))]
 pub mod vault_placeholder;
 #[cfg(windows)]
@@ -230,6 +232,75 @@ pub fn pin_registered_configured_root(
         let _ = (path, expected);
         Err(Error::UnsupportedPlatform)
     }
+}
+
+/// Borrowed proof for preparing protected vault metadata. Construction requires
+/// an actual pinned root and the current authenticated composite backend. This
+/// does not prove complete historical custody or authorize any native cleanup.
+#[cfg(windows)]
+pub struct VaultCustodyRootContext<'a> {
+    lease: &'a ConfiguredRootLease,
+    backend: &'a OpenCloudPlaceholderBackend,
+    composite: OpaqueIdentity,
+    registration: String,
+}
+
+#[cfg(windows)]
+impl VaultCustodyRootContext<'_> {
+    pub fn provider_scope(&self) -> &ProviderScope {
+        self.backend.scope()
+    }
+
+    pub fn root_identity(&self) -> ConfiguredRootIdentity {
+        self.lease.identity()
+    }
+
+    /// Expected registration domain, including the checked native SyncRootIdentity
+    /// and the authenticated backend's composite identity. This does not claim
+    /// native readback of CF_SYNC_REGISTRATION.FileIdentity.
+    pub fn registration_binding(&self) -> &str {
+        &self.registration
+    }
+
+    pub fn is_new_registration(&self) -> bool {
+        !self.lease.registered
+    }
+
+    /// Re-pin rather than relying on the old component handles to prevent every
+    /// rename. Call before and after protected initialization/persistence.
+    pub fn revalidate(&self) -> Result<(), Error> {
+        if !self.backend.owns_composite_root_identity(self.composite) {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        let current = if self.lease.registered {
+            pin_registered_configured_root(&self.lease.path, self.lease.identity())?
+        } else {
+            pin_configured_root(&self.lease.path)?
+        };
+        if current.identity() != self.lease.identity()
+            || !self.backend.owns_composite_root_identity(self.composite)
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        Ok(())
+    }
+}
+
+/// No caller-supplied "fresh" boolean or filesystem identity is accepted here.
+#[cfg(windows)]
+pub fn prepare_vault_custody_root<'a>(
+    lease: &'a ConfiguredRootLease,
+    backend: &'a OpenCloudPlaceholderBackend,
+    composite: OpaqueIdentity,
+) -> Result<VaultCustodyRootContext<'a>, Error> {
+    let context = VaultCustodyRootContext {
+        lease,
+        backend,
+        composite,
+        registration: native::vault_custody_registration_binding(lease.identity(), composite),
+    };
+    context.revalidate()?;
+    Ok(context)
 }
 
 /// Complete, preflighted input for a configured-root connection. The root,

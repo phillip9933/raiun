@@ -2340,3 +2340,22 @@ write-before-hydration integration, restart completeness, full C06 acceptance or
 acceptance of a newer installed package. The original launcher-state mismatch
 was a pre-execution harness failure; it remains preserved alongside the corrected
 run. No additional owner permission was needed.
+
+### Protected write-before-publication join (local, disabled; 25 October)
+
+The Windows broker now prepares an exact-account/root-bound protected history
+service before connecting a new native root. Vault unlock requires that service.
+A missing or corrupt retained manifest leaves ordinary drive connectivity
+independent while refusing vault admission. Stable catalogue IDs are restored
+only behind a fresh verified vault session, and metadata changes are persisted
+before their names are published. Each native file transfer records its pinned
+hydration intent before plaintext publication. Lock and Forget retain history.
+
+Windows GNU Agent and Cloud all-target compilation and strict lint pass, as do
+19 focused portable model/service checks. The actual default Linux workspace
+run passed 959 tests with 14 ignored; strict lint and formatting pass. The initial
+sandbox run could not bind local test sockets and is retained separately from
+the successful authorized host run. Initial combined Windows compilation/lint
+failures were corrected and retained. None of these source checks establish the
+new protected broker path's native acceptance or safe restart reconciliation;
+retained-root vault admission and the production vault capability remain off.

@@ -164,6 +164,7 @@ impl VaultRouteRegistry {
     ) -> Result<Arc<VerifiedVaultRoute>, BackendError> {
         if self.local_root.file_index == 0
             || expected_local_root != self.local_root
+            || backend.custody_root_identity() != self.local_root
             || self.revoked.load(Ordering::Acquire)
         {
             return Err(BackendError::Unavailable);

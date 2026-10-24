@@ -411,5 +411,40 @@ Acceptance of this method requires the original hydrated positive case, a real
 writable-file writer-exclusion case using cleanup's read handle (including
 writer success after release), and a real dirty-placeholder refusal retaining
 exact local bytes. Injected counters are insufficient. Native results for this
-fixed method are pending; production vault admission remains disabled. The
+fixed method now establish writer exclusion and clean-file ONDISK-empty cleanup;
+real dirty-edit refusal remains pending. Production vault admission remains disabled. The
 separate no-payload broker credential fixture cannot qualify plaintext cleanup.
+
+## Protected vault publication history (local, disabled)
+
+Vault adapters require an immutable custody view bound to the exact current
+provider generation, full canonical account/vault scope and physical root. A
+root-wide protected manifest records membership before a per-vault document may
+be created. Missing historical child documents refuse; repeated membership is
+never permission to initialize a missing child. Names and stable opaque IDs are
+persisted as one full-byte CAS before the staged catalogue becomes visible.
+The native data sink records the exact pinned root/file/opaque identity, length
+and physical components before recording volatile hydration or calling native
+TRANSFER_DATA. Any persistence uncertainty denies publication and retains
+history. Protected metadata is separate from saved passwords; Forget does not
+remove it.
+
+The native sink calls its already-prepared fetch's captured view. It must not
+resolve the route again while holding publication permits: recursive route
+read-lock acquisition can deadlock behind a waiting writer. Storage callbacks
+perform no backend, token, session or route-lock reentry.
+
+The borrowed root context is constructed from real component leases and the
+live authenticated composite backend. It re-pins before and after protected
+initialization, distinguishing a proven empty new root from an existing checked
+registration. Its registration domain includes the checked SyncRootIdentity and
+expected authenticated composite identity; it does not claim native readback of
+CF_SYNC_REGISTRATION.FileIdentity. The metadata view confers no unlock, route,
+cleanup or historical-completeness authority. Retained-root admission remains
+blocked until the historical native reconciliation join is qualified.
+
+Source validation includes Windows GNU Agent and Cloud all-target checks and
+strict lint, 19 portable model/service checks, and Linux workspace regression
+checks. Portable service tests use an explicit Cloud type shim; native fixture
+views use explicit memory-only bookkeeping. Neither substitutes for actual
+protected broker publication or restart acceptance.

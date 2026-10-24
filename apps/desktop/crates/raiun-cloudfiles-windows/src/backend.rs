@@ -254,6 +254,17 @@ pub trait PreparedFetch {
     fn metadata(&self) -> PlaceholderMetadata;
     fn bytes(&self) -> &[u8];
 
+    /// Called only for tracked vault data, under this fetch's existing
+    /// publication permit. Implementations must use a captured custody view;
+    /// resolving a route here could recursively acquire the publication lock.
+    #[cfg(windows)]
+    fn persist_vault_hydration(
+        &self,
+        _intent: &crate::vault_custody::VaultHydrationIntent,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
     /// Recheck cancellation, authorization generation, and revocation before
     /// each native transfer slice. The OpenCloud implementation also retains
     /// its revocation lease for the lifetime of this value.
