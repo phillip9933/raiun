@@ -5574,6 +5574,7 @@ function passiveRefreshBlockers() {
     pickerOpen: state.pickerOpen,
     addAccountOpen: state.addAccountOpen,
     vaultDialogOpen: state.vaultDialog !== null,
+    vaultAccessOpen: state.vaultAccessOpen,
     nativeDialogBusy: state.nativeDialogBusy,
     editingControlFocused: editingControlFocused()
   };

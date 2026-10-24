@@ -2555,3 +2555,18 @@ This qualifies the installed read-only encrypted-file sequence, not encrypted
 editing, renderer HTTPS sign-in, crash recovery or an OS-process restart.
 Remembered-key/Forget behavior across an ordinary process restart is the next
 focused check. The published beta is unchanged.
+
+
+### Keep the first encrypted-folder picker stable (25 October)
+
+Passive refresh now remains blocked while the first Unlock account/Space picker
+is open, including when focus moves from the Space select to Browse or Cancel.
+Previously this modal was omitted from the shared refresh blockers, allowing a
+background refresh to replace its controls. A regression exercises the actual
+main blocker mapping and verifies queued and periodic refresh remain blocked
+until the picker closes. All 201 UI tests and the TypeScript/Vite build pass.
+The 179 Rust/Cargo files and all four lock files are byte-identical to the
+qualified `924eaa17…` source, so its Rust gates and native component evidence
+are reused. The refreshed installer and ordinary-process restart acceptance
+remain pending. This fixes a demonstrated policy gap; it does not establish
+that refresh caused the r116 observed Browse activation failure.
