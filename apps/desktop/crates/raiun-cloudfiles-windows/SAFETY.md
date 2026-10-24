@@ -375,7 +375,8 @@ The argument for safe byte eviction is:
   No mark-clean, force, unpin, policy override, permission change or second
   attempt follows refusal.
 - Admission requires READONLY. After the update, exact identity, size, last-write
-  time, READONLY/directory/reparse attributes, reparse tag, root/opaque identity,
+  time, READONLY/directory/reparse attributes, a documented Cloud Files tag,
+  root/opaque identity,
   in-sync state and zero modified ranges are rechecked. Success additionally
   requires an empty bounded ONDISK range response. Rows stay in the inventory
   on both success and failure.
@@ -385,6 +386,18 @@ method does not reject all such changes atomically. NULL filesystem metadata
 leaves those fields intact. The stated custody attributes and last-write time
 must match at postproof; mismatch is incomplete cleanup. Never describe this
 as full atomic metadata continuity or as a successful lock after refusal.
+
+The isolated stage-diagnostic run observed a successful update with the same
+physical identity, size, last-write time and custody attributes, while the tag
+changed from `CLOUD_6` (`0x9000601a`) to `CLOUD_4` (`0x9000401a`). The postcheck
+therefore accepts only the exact sixteen `CLOUD` through `CLOUD_F` tags defined
+in Microsoft's [SDK header](https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/um/winnt.h),
+both before and after the update. It ignores only those four documented variant
+bits (`0xF000`), not the broader historical mask used elsewhere in this crate.
+This is driver-tag classification, not identity authority: physical/opaque/root
+identity, unchanged custody metadata, clean ranges and empty ONDISK remain
+mandatory. Unknown tags, symbolic links and unlisted low tag bits refuse. The
+diagnostic run failed before ONDISK proof; it does not establish cleanup success.
 
 The journal barrier uses
 [FSCTL_WRITE_USN_CLOSE_RECORD](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_write_usn_close_record)

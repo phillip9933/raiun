@@ -7563,9 +7563,83 @@ mod tests {
     }
 
     #[cfg(all(windows, debug_assertions))]
+    fn broker_vault_read_in_child(
+        path: &Path,
+        expected_len: usize,
+        expected_sha: &str,
+    ) -> Result<bool, String> {
+        use std::process::{Command, Stdio};
+
+        assert!(path.is_absolute());
+        assert_eq!(path.file_name().unwrap(), "1");
+        assert_eq!(path.parent().unwrap().file_name().unwrap(), "Travel.vault");
+        assert_eq!(
+            path.parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap(),
+            "Personal"
+        );
+        let mut child = Command::new("powershell.exe")
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                "$ErrorActionPreference='Stop'; try { $b=[System.IO.File]::ReadAllBytes($env:RAIUN_SYNTHETIC_FILE); $h=[System.Security.Cryptography.SHA256]::Create(); try { $s=[BitConverter]::ToString($h.ComputeHash($b)).Replace('-','').ToLowerInvariant(); [Console]::WriteLine(('{0}|{1}' -f $b.Length,$s)) } finally { $h.Dispose() } } catch { $e=$_.Exception; while ($e.InnerException) { $e=$e.InnerException }; [Console]::WriteLine(('ERROR|{0}' -f $e.HResult)); exit 24 }"])
+            .env("RAIUN_SYNTHETIC_FILE", path)
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+            .spawn().map_err(|_| "could not start synthetic vault reader")?;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|_| "could not poll vault reader")?
+            {
+                let output = child
+                    .wait_with_output()
+                    .map_err(|_| "could not collect vault reader")?;
+                let summary =
+                    String::from_utf8(output.stdout).map_err(|_| "invalid vault reader summary")?;
+                let summary = summary.trim();
+                if status.success() && summary == format!("{expected_len}|{expected_sha}") {
+                    println!("C06_VAULT_EXTERNAL_READ_VERIFIED=true");
+                    return Ok(true);
+                }
+                if status.code() == Some(24)
+                    && summary
+                        .strip_prefix("ERROR|")
+                        .and_then(|value| value.parse::<i32>().ok())
+                        .is_some_and(|hr| hr < 0)
+                {
+                    println!("C06_VAULT_EXTERNAL_READ_REJECTED=true");
+                    return Ok(false);
+                }
+                return Err("synthetic vault reader returned unexpected status/content".into());
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("synthetic vault reader timed out; preserve owned fixture".into());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(all(windows, debug_assertions))]
     #[test]
     #[ignore = "requires isolated ordinary RaiunLabUser child with fresh owned LOCALAPPDATA; C05 cleanup acceptance prerequisite"]
     fn native_broker_manual_remember_lock_saved_forget_lifecycle() {
+        broker_remembered_lifecycle_fixture(false);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser child with fresh owned LOCALAPPDATA and qualified C05 payload cleanup"]
+    fn native_broker_saved_payload_forget_and_lock() {
+        broker_remembered_lifecycle_fixture(true);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    fn broker_remembered_lifecycle_fixture(payload: bool) {
         use super::{
             DpapiSessionStore, DpapiStore, VaultCredentialStore, windows_profile_registry,
             windows_profiles, windows_vault_credentials,
@@ -7606,8 +7680,14 @@ mod tests {
         appdata_pin.verify_path().unwrap();
         eprintln!("synthetic_c06_broker_fixture={}", fixture.display());
 
-        let (server, remote) =
-            synthetic_personal_spaces_server_inner_with_vault(|_| {}, false, false, false, true);
+        let (server, remote) = synthetic_personal_spaces_server_inner_with_vault_payload(
+            |_| {},
+            false,
+            false,
+            false,
+            true,
+            payload,
+        );
         let storage = DpapiSessionStore::current_user().unwrap();
         let _registry_owner = storage.lock_profile_registry().unwrap();
         assert!(storage.load_profile_registry().unwrap().is_none());
@@ -7700,6 +7780,33 @@ mod tests {
         let unlocked = broker.handle_isolated_lifecycle_session(saved).unwrap().0;
         assert_eq!(unlocked["remembered_status"], "known_saved");
         assert!(sessions.is_unlocked(&scope).unwrap());
+        if payload {
+            let personal = drive.join("Personal");
+            assert!(
+                child_process_directory_matches(&personal, &["Travel.vault"])
+                    .unwrap()
+                    .matches_expected
+            );
+            assert!(
+                child_process_directory_matches(&personal.join("Travel.vault"), &["1"])
+                    .unwrap()
+                    .matches_expected
+            );
+            use sha2::Digest as _;
+            let expected = (0..65537).map(|i| (i * 31 + 7) as u8).collect::<Vec<_>>();
+            let hash = format!("{:x}", sha2::Sha256::digest(&expected));
+            assert!(
+                broker_vault_read_in_child(&personal.join("Travel.vault/1"), expected.len(), &hash)
+                    .unwrap(),
+                "Saved unlock must serve the verified public fixture bytes"
+            );
+            let gets = remote.native_reads.lock().unwrap().vault_get_count;
+            assert!(
+                (1..=16).contains(&gets),
+                "bounded conditional ciphertext download"
+            );
+            println!("C06_SAVED_PAYLOAD_READ_VERIFIED=true");
+        }
         let forgotten = broker.handle_isolated_lifecycle_session(json!({"action":"vault_forget",
             "profile_id":profile,"space_id":"synthetic-personal-drive","root_resource_id":"synthetic-vault-root"})).unwrap().0;
         assert_eq!(forgotten["forgotten"], true);
@@ -7732,6 +7839,81 @@ mod tests {
             false
         );
         assert!(!sessions.is_unlocked(&scope).unwrap());
+        if payload {
+            let file = drive.join("Personal/Travel.vault/1");
+            let metadata = std::fs::metadata(&file).unwrap();
+            assert_eq!(metadata.len(), 65537);
+            assert!(metadata.permissions().readonly());
+            let gets = remote.native_reads.lock().unwrap().vault_get_count;
+            use sha2::Digest as _;
+            let expected = (0..65537).map(|i| (i * 31 + 7) as u8).collect::<Vec<_>>();
+            let hash = format!("{:x}", sha2::Sha256::digest(&expected));
+            // Successful actual Lock already requires the native ONDISK-empty
+            // postproof. This one ordinary read must fail; it is never an
+            // explicit hydrate/retry, and cannot contact the retired route.
+            assert!(
+                !broker_vault_read_in_child(&file, expected.len(), &hash).unwrap(),
+                "Locked vault must refuse the single external read"
+            );
+            assert_eq!(
+                remote.native_reads.lock().unwrap().vault_get_count,
+                gets,
+                "post-Lock refusal cannot download ciphertext"
+            );
+            println!("C06_PAYLOAD_LOCK_AND_READ_REFUSAL=true");
+            // A new adapter assigns new callback identities. Reopen the same
+            // retained native file through a new exact route, without saving
+            // the public password again after Forget.
+            let mut manual = target();
+            manual["action"] = json!("vault_unlock");
+            manual["password"] = json!("potato"); // public fixture only
+            manual["remember"] = json!(false);
+            let reopened = broker.handle_isolated_lifecycle_session(manual).unwrap().0;
+            assert_eq!(reopened["unlocked"], true);
+            assert_eq!(reopened["remembered_status"], "unknown");
+            assert_eq!(reopened["remembered"], false);
+            assert!(sessions.is_unlocked(&scope).unwrap());
+            let personal = drive.join("Personal");
+            assert!(
+                child_process_directory_matches(&personal, &["Travel.vault"])
+                    .unwrap()
+                    .matches_expected
+            );
+            assert!(
+                child_process_directory_matches(&personal.join("Travel.vault"), &["1"])
+                    .unwrap()
+                    .matches_expected
+            );
+            assert!(
+                broker_vault_read_in_child(&file, expected.len(), &hash).unwrap(),
+                "Manual reopen must serve the same verified public fixture bytes"
+            );
+            let reopened_gets = remote.native_reads.lock().unwrap().vault_get_count;
+            assert!(
+                reopened_gets > gets && reopened_gets <= 32,
+                "new route must perform a bounded ciphertext download"
+            );
+            let mut lock = target();
+            lock["action"] = json!("vault_lock");
+            assert_eq!(
+                broker.handle_isolated_lifecycle_session(lock).unwrap().0["unlocked"],
+                false
+            );
+            assert!(!sessions.is_unlocked(&scope).unwrap());
+            assert!(
+                !windows_vault_credentials::contains_saved(
+                    &VaultCredentialStore {
+                        store: runtime.session_store.as_ref(),
+                        profile: &profile,
+                    },
+                    &remembered
+                )
+                .unwrap(),
+                "Manual reopen cannot restore forgotten credentials"
+            );
+            assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+            println!("C06_PAYLOAD_MANUAL_REOPEN_AND_SECOND_LOCK=true");
+        }
         assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
         broker.stop_all().unwrap();
         drop(broker);
@@ -11718,6 +11900,7 @@ mod tests {
 
     #[derive(Default)]
     struct SyntheticNativeReadFixture {
+        vault_get_count: usize,
         request_count: usize,
         files_enabled: bool,
         personal_depth_one_propfind_count: usize,
@@ -11803,6 +11986,24 @@ mod tests {
         recovery_read_probe_enabled: bool,
         initially_absent: bool,
         initialized_vault: bool,
+    ) -> (String, SyntheticPersonalSpacesFixture) {
+        synthetic_personal_spaces_server_inner_with_vault_payload(
+            emit_stage,
+            native_read_files_enabled,
+            recovery_read_probe_enabled,
+            initially_absent,
+            initialized_vault,
+            false,
+        )
+    }
+
+    fn synthetic_personal_spaces_server_inner_with_vault_payload(
+        emit_stage: impl Fn(&str),
+        native_read_files_enabled: bool,
+        recovery_read_probe_enabled: bool,
+        initially_absent: bool,
+        initialized_vault: bool,
+        vault_payload: bool,
     ) -> (String, SyntheticPersonalSpacesFixture) {
         emit_stage("listener_bind_begin");
         let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|error| {
@@ -11936,6 +12137,26 @@ mod tests {
                     write!(request_stream, "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
                     continue;
                 }
+                let vault_child_path = "/remote.php/dav/personal/synthetic-personal-drive/Travel.vault/9cmn80lns8obm4t3koceogil20";
+                let vault_child = if initialized_vault && vault_payload {
+                    format!(
+                        r#"<d:response><d:href>{worker_server}{vault_child_path}</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>{}</d:getcontentlength><d:getetag>"child-rev-1"</d:getetag><oc:fileid>child-resource-id</oc:fileid><oc:name>9cmn80lns8obm4t3koceogil20</oc:name><oc:permissions>RDNVW</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"#,
+                        include_bytes!("../../raiun-vault/tests/fixtures/web-65537.bin").len()
+                    )
+                } else {
+                    String::new()
+                };
+                if initialized_vault
+                    && vault_payload
+                    && request.starts_with("PROPFIND ")
+                    && request.split_whitespace().nth(1) == Some(vault_child_path)
+                {
+                    let xml = format!(
+                        r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">{vault_child}</d:multistatus>"#
+                    );
+                    write!(request_stream, "HTTP/1.1 207 Multi-Status\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}", xml.len()).unwrap();
+                    continue;
+                }
                 if initialized_vault && request.starts_with("PROPFIND ") {
                     let path = request.split_whitespace().nth(1).unwrap();
                     if path.trim_end_matches('/')
@@ -11948,11 +12169,26 @@ mod tests {
                         let xml = format!(
                             r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:ocrclone="ocrclone"><d:response><d:href>{worker_server}/remote.php/dav/personal/synthetic-personal-drive/Travel.vault/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype><d:getcontentlength>0</d:getcontentlength><d:getetag>"vault-v1"</d:getetag><d:getcontenttype>application/vnd.opencloud.vault</d:getcontenttype><oc:fileid>synthetic-vault-root</oc:fileid><oc:name>Travel.vault</oc:name><oc:size>0</oc:size><oc:permissions>RDNVW</oc:permissions><ocrclone:integrity-id>{token}</ocrclone:integrity-id></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#
                         );
+                        let xml = if vault_payload
+                            && headers
+                                .iter()
+                                .any(|(name, value)| name == "depth" && value == "1")
+                        {
+                            xml.replace(
+                                "</d:multistatus>",
+                                &(vault_child.clone() + "</d:multistatus>"),
+                            )
+                        } else {
+                            xml
+                        };
                         write!(request_stream, "HTTP/1.1 207 Multi-Status\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}", xml.len()).unwrap();
                         continue;
                     }
                 }
                 if initialized_vault && request.starts_with("GET /remote.php/dav/personal/synthetic-personal-drive/Travel.vault/9cmn80lns8obm4t3koceogil20 ") {
+                    if vault_payload {
+                        worker_native_reads.lock().unwrap().vault_get_count += 1;
+                    }
                     let bytes = include_bytes!("../../raiun-vault/tests/fixtures/web-65537.bin");
                     assert!(headers.iter().any(|(name, value)| name == "if-match" && value == "\"child-rev-1\""));
                     write!(request_stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();

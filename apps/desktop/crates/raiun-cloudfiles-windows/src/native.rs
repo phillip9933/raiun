@@ -1748,6 +1748,7 @@ impl ConfiguredRootConnection {
             || !windows_paths_equal(&entry_final, &opened_final)
             || !windows_path_is_within(&opened_final, &root_final)
             || opened.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+            || !cleanup_cloud_reparse_tag(opened.reparse_tag)
             || opened.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC == 0
         {
             return Err(Error::ConfiguredRootChanged);
@@ -1868,7 +1869,9 @@ impl ConfiguredRootConnection {
         if after.identity != opened.identity
             || after.file_size != opened.file_size
             || after.last_write_time != opened.last_write_time
-            || after.reparse_tag != opened.reparse_tag
+            // Cloud Files residency transitions can change the documented
+            // CLOUD_0..F variant; that variant is not a file identity.
+            || !cleanup_cloud_reparse_tag(after.reparse_tag)
             || after.file_attributes & custody_attributes
                 != opened.file_attributes & custody_attributes
         {
@@ -1920,6 +1923,8 @@ impl ConfiguredRootConnection {
         if hr < 0 || returned != 0 {
             return Err(Error::EditRecoveryUnavailable);
         }
+        #[cfg(feature = "synthetic-agent-integration")]
+        eprintln!("synthetic cleanup postcondition on_disk_empty=true");
         Ok(())
     }
 
@@ -7033,6 +7038,12 @@ fn verify_completion_identity(handle: Handle, expected: &[u8; 16]) -> Result<(),
 
 // CF_PLACEHOLDER_BASIC_INFO: PinState/InSyncState DWORDs, two file IDs,
 // identity length DWORD, then bytes. Require the exact root/file/opaque tuple.
+// Exact sixteen tags defined by winnt.h: CLOUD and CLOUD_1 through CLOUD_F.
+// Do not reuse the broader historical mask used by other native predicates.
+fn cleanup_cloud_reparse_tag(tag: u32) -> bool {
+    tag & !0x0000_f000 == IO_REPARSE_TAG_CLOUD
+}
+
 fn clean_dehydrate_identity(
     handle: Handle,
     root_id: u64,
@@ -7731,6 +7742,35 @@ mod backend_tests {
         sync::{Arc, Condvar, Mutex, atomic::Ordering, mpsc},
         thread,
     };
+
+    #[test]
+    fn cleanup_cloud_tags_accept_documented_variants_only() {
+        // SDK's complete CLOUD..CLOUD_F family, including the observed 6 -> 4.
+        for tag in [
+            0x9000_001a,
+            0x9000_101a,
+            0x9000_201a,
+            0x9000_301a,
+            0x9000_401a,
+            0x9000_501a,
+            0x9000_601a,
+            0x9000_701a,
+            0x9000_801a,
+            0x9000_901a,
+            0x9000_a01a,
+            0x9000_b01a,
+            0x9000_c01a,
+            0x9000_d01a,
+            0x9000_e01a,
+            0x9000_f01a,
+        ] {
+            assert!(super::cleanup_cloud_reparse_tag(tag));
+        }
+        // Unknown low variant bits must not inherit the historical broad mask.
+        for tag in [0, 0x9000_011a, 0x9000_081a, 0xa000_000c, 0x9000_001c] {
+            assert!(!super::cleanup_cloud_reparse_tag(tag));
+        }
+    }
 
     #[test]
     #[ignore = "requires isolated native Windows Cloud Files API; ordinary synthetic file only"]
