@@ -963,6 +963,13 @@ mod runtime {
             );
             connection.cleanup_retired_vault_route(&retired).unwrap();
             assert!(
+                std::fs::metadata(vault_path.join("1"))
+                    .unwrap()
+                    .permissions()
+                    .readonly(),
+                "cleanup must preserve the vault file read-only attribute"
+            );
+            assert!(
                 binding
                     .try_begin_publish(&CancellationToken::new())
                     .is_err()

@@ -1706,7 +1706,7 @@ impl ConfiguredRootConnection {
                 pin_callback_path_chain(&path, root.identity, row.file_index(), row.length())
                     .map_err(|_| Error::ConfiguredRootChanged)?;
             let usn = {
-                let file = ProtectedCompletionFile::open(&wide_path(&path)?)?;
+                let file = ProtectedCompletionFile::open_for_cleanup(&wide_path(&path)?)?;
                 clean_dehydrate_identity(
                     file.protected,
                     root.identity.file_index,
@@ -1759,7 +1759,7 @@ impl ConfiguredRootConnection {
         let (root_final, _ancestors, entry, before) =
             pin_callback_path_chain(&path, root.identity, expected_file_index, expected_length)
                 .map_err(|_| Error::ConfiguredRootChanged)?;
-        let file = ProtectedCompletionFile::open(&wide_path(&path)?)?;
+        let file = ProtectedCompletionFile::open_for_cleanup(&wide_path(&path)?)?;
         let opened = root_snapshot(file.raw)?;
         let entry_final =
             final_path_for_handle(entry.0).map_err(|_| Error::ConfiguredRootChanged)?;
@@ -1789,8 +1789,9 @@ impl ConfiguredRootConnection {
             length: -1,
         };
         let mut usn = expected_usn;
-        // SAFETY: exact referenced protected EXCLUSIVE|WRITE_ACCESS handle and all
-        // ancestor pins remain live. NULL Overlapped forces synchronous completion.
+        // SAFETY: exact referenced protected EXCLUSIVE handle and all ancestor
+        // pins remain live. NULL Overlapped forces synchronous completion.
+        // Windows still enforces update authorization; no write-access retry.
         // Only VERIFY_IN_SYNC (1): never mark clean, unpin, replace metadata/identity,
         // clear always-full policy, or force dirty dehydration. Nonzero USN guards
         // the complete preflight snapshot against intervening local changes.
@@ -7010,12 +7011,25 @@ struct ProtectedCompletionFile {
 }
 impl ProtectedCompletionFile {
     fn open(path: &[u16]) -> Result<Self, Error> {
+        Self::open_with_flags(path, 1 | 2, "open protected edit completion")
+    }
+
+    fn open_for_cleanup(path: &[u16]) -> Result<Self, Error> {
+        // Read-only vault placeholders cannot grant FILE_WRITE_DATA. Keep the
+        // same EXCLUSIVE RH oplock/reference; CfUpdatePlaceholder independently
+        // checks its update authorization. Never clear READONLY or retry with
+        // weaker sharing, foreground access, or altered permissions.
+        Self::open_with_flags(path, 1, "open protected vault cleanup")
+    }
+
+    fn open_with_flags(path: &[u16], flags: u32, operation: &'static str) -> Result<Self, Error> {
         let mut protected = null_mut();
-        // SAFETY: NUL-terminated pinned path, owned output; EXCLUSIVE (1) and
-        // WRITE_ACCESS (2), without FOREGROUND or share-all fallback.
-        let hr = unsafe { CfOpenFileWithOplock(path.as_ptr(), 1 | 2, &mut protected) };
+        // SAFETY: NUL-terminated pinned path, owned output; the two private
+        // callers always request EXCLUSIVE (1), optionally WRITE_ACCESS (2).
+        // Neither uses FOREGROUND or a share-all fallback.
+        let hr = unsafe { CfOpenFileWithOplock(path.as_ptr(), flags, &mut protected) };
         if hr < 0 {
-            return Err(native_error("open protected edit completion", hr));
+            return Err(native_error(operation, hr));
         }
         if protected.is_null() || protected == INVALID_HANDLE_VALUE {
             return Err(Error::EditRecoveryUnavailable);

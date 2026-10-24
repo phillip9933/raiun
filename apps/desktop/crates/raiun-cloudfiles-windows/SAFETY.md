@@ -336,5 +336,22 @@ before requesting an account-bound edit lease. A clean read-only vault close
 needs no write authority. A nonempty modified range still requires that lease
 before reading content or publishing recovery; inability to obtain it remains
 unresolved. No counters or cleanup guards are reset. The reordered close path
-requires focused native acceptance; close telemetry in the synthetic selector
-reports only fixed counters/stages, with no credentials or user content.
+passed the focused native close observation: modified/unverifiable counters
+remained zero. Cleanup then failed opening its write-access protected handle
+with `0x80070005`; no successful lock is claimed. Close telemetry in the
+synthetic selector reports only fixed counters/stages.
+
+Vault cleanup alone now requests an EXCLUSIVE protected read handle and retains
+its RH oplock/reference through the same root/file/opaque checks, native modified
+ranges, nonzero USN comparison, VERIFY_IN_SYNC update and zero-residency postproof.
+Both cleanup preflight and actual dehydration use that handle mode. Ordinary edit
+completion still requests EXCLUSIVE plus WRITE_ACCESS. Cleanup never clears the
+read-only attribute, changes permissions or retries with weaker sharing. The
+synthetic selector verifies the read-only attribute remains after cleanup.
+[Microsoft documents](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfopenfilewithoplock)
+that omitting WRITE_ACCESS avoids requesting FILE_WRITE_DATA at open.
+[CfUpdatePlaceholder](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfupdateplaceholder)
+still enforces its update authorization independently; these documents do not
+guarantee a read handle can authorize that update. If it refuses, cleanup must
+remain incomplete with its inventory retained. This narrower open requires
+focused native acceptance, not a permission bypass or a lock-success claim.
