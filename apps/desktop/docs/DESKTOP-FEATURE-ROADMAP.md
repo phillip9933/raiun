@@ -861,3 +861,17 @@ account generation, exact registered-root identity, active binding and scope
 token. It exposes non-atomic last-observed metadata only. Linux host gates pass;
 Windows compilation and four focused Windows-only tests are pending the R124
 source snapshot. It adds no pin/download job, policy mutation or Windows UI.
+
+
+## Owner-requested backlog — GitHub updates (24 October 2026)
+
+- [ ] Add an optional update check against the official GitHub Releases feed,
+  with a manual Check for updates action and an opt-in automatic check.
+- [ ] Show the available version and release notes, choose the correct OS and
+  architecture package, and let the user download it with progress and retry.
+- [ ] Verify trusted release metadata and package integrity before offering
+  installation; preserve account settings and unresolved edits through updates.
+  Installation/restart requires an explicit user action.
+
+This is a backlog item, not implemented functionality or an additional blocker
+for the current Linux/Windows completion checklist. No publication is authorized.

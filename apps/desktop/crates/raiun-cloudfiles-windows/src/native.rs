@@ -4086,20 +4086,6 @@ impl CallbackState {
         // SAFETY: the bounded opaque identity is owned by Cloud Files and is
         // valid throughout this callback. It is never interpreted as a path.
         let identity = unsafe { std::slice::from_raw_parts(info.file_identity.cast::<u8>(), 16) };
-        // This guard binds the recovery copy to the exact authenticated
-        // account/root and blocks logout or token replacement until the
-        // encrypted record has been durably published.
-        let prepared = self
-            .backend
-            .prepare_edit_binding(identity)
-            .map_err(|_| (4, 0, false))?;
-        let binding = prepared.binding();
-        if binding.account_generation == 0
-            || binding.root_resource_id.is_empty()
-            || binding.remote_resource_id.is_empty()
-        {
-            return Err((5, 0, false));
-        }
         let callback_guard = callback_path(
             root_path,
             info.volume_dos_name,
@@ -4205,6 +4191,22 @@ impl CallbackState {
         }
         if count == 0 {
             return Ok(false);
+        }
+        // A clean close needs no write authority. In particular, read-only
+        // vault backends deliberately refuse edit bindings. Acquire the exact
+        // account/root lease only after native modified ranges are confirmed,
+        // before reading any content or publishing encrypted recovery. The
+        // lease blocks logout/token replacement through durable publication.
+        let prepared = self
+            .backend
+            .prepare_edit_binding(identity)
+            .map_err(|_| (4, 0, true))?;
+        let binding = prepared.binding();
+        if binding.account_generation == 0
+            || binding.root_resource_id.is_empty()
+            || binding.remote_resource_id.is_empty()
+        {
+            return Err((5, 0, true));
         }
         // The adversarial integration barrier runs only once a real modified
         // range is confirmed and this exact identity-validated stream handle

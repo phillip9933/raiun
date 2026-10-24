@@ -949,10 +949,18 @@ mod runtime {
                 (1..=16).contains(&fixture.gets.load(Ordering::Acquire)),
                 "OS hydration must make bounded verified reads"
             );
+            println!(
+                "VAULT_REFRESH_PRE_RETIRE_CLOSE={:?}",
+                connection.close_observation_for_integration()
+            );
             let retired = ordinary
                 .retire_vault_route(SPACE, ROOT_ID, ROOT_PATH)
                 .unwrap()
                 .unwrap();
+            println!(
+                "VAULT_REFRESH_PRE_CLEANUP_CLOSE={:?}",
+                connection.close_observation_for_integration()
+            );
             connection.cleanup_retired_vault_route(&retired).unwrap();
             assert!(
                 binding

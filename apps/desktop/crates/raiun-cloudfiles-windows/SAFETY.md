@@ -325,5 +325,16 @@ only promises that path when the flag is requested; see Microsoft's
 This requests callback metadata only: bounded decoding, no-follow native path
 checks, exact root/file/opaque identity checks and publication fences remain
 mandatory. A missing or invalid path still fails closed. The prior isolated
-Windows case stopped at normalized-path decoding (stage 1002); native acceptance
-of this correction remains pending.
+Windows case stopped at normalized-path decoding (stage 1002). The original
+selector now completes a 65,537-byte decrypted read with the expected hash and
+fetch stage 14, but subsequently refuses retired-route cleanup with
+`UnresolvedPlaceholderEdits`. This is read acceptance only, not a successful
+lock or production vault capability.
+
+Close processing checks exact native root/file/path custody and modified ranges
+before requesting an account-bound edit lease. A clean read-only vault close
+needs no write authority. A nonempty modified range still requires that lease
+before reading content or publishing recovery; inability to obtain it remains
+unresolved. No counters or cleanup guards are reset. The reordered close path
+requires focused native acceptance; close telemetry in the synthetic selector
+reports only fixed counters/stages, with no credentials or user content.
