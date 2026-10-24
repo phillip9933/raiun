@@ -2134,29 +2134,37 @@ Source checks and two focused portable preference tests pass. The Windows agent
 RPC test compiles but has not run natively. Native routing, protected persistence
 and installed-package acceptance remain pending; this work is unpublished.
 
-### Windows practical beta acceptance queue (24 October)
+### Windows practical beta acceptance queue (updated 25 October)
 
 The next candidate remains unpublished. Startup control, bandwidth limits and
-signed-out proxy settings have reviewed source implementations; their Windows
-runtime and exact-package acceptance is outstanding. The installed candidate is
-older and does not establish acceptance of these changes.
+signed-out proxy settings have source and focused native component evidence.
+The installed unsigned candidate `2955f944…` passed the signed-out controls/tray
+package checks below and is closed. Startup was never activated. This package
+predates the disabled vault changes and does not establish their acceptance.
 
-The immediate blocker is encrypted content access (C05). An isolated registered
-root can enumerate the vault folder, but its last content read timed out before
-plaintext transfer: the callback path was rejected. Configured connections now
-request the documented full callback path; that correction passes source checks
-and still needs a changed native read/lock test. Vault capability exposure stays
-disabled. A read pass alone will not prove retained-lock cleanup or restart
-custody. Remembered unlock (C06) remains unimplemented on Windows and depends on
-that lifecycle; it must retain explicit per-vault opt-in.
+The immediate blocker remains encrypted content cleanup (C05). The corrected
+full callback path now permits a verified 65,537-byte encrypted file read in the
+isolated Windows root. The clean-close false blocker and read-only handle open
+failure have been corrected. The latest native run using one protected handle
+still refused cleanup with `ERROR_CLOUD_FILE_NOT_IN_SYNC`; the failure, root and
+normal shutdown evidence are retained. Reading alone does not establish safe
+Lock or restart custody.
 
-Resume acceptance in this order: the corrected encrypted read and retained-lock
-case; native protected preferences/RPC and effective bandwidth/proxy behavior;
-then the exact candidate package and ordinary file-manager workflows. Reuse
-unchanged evidence and preserve failed roots, recovery and the installed app.
-Actual startup activation is outside automated tests. Current native testing is
-interrupted by a platform restriction on the testing agent; source checks do
-not substitute for those pending results.
+The next source-qualified method holds continuous exclusive protected file
+access through cleanup and checks dirty ranges, identity, route retirement and
+post-cleanup residency. Its single update omits the optional atomic metadata-USN
+comparison; that limitation is explicit in the Cloud Files crate's `SAFETY.md`.
+It must pass the finite native sequence: writer exclusion, hydrated clean-file
+cleanup, and real dirty-edit refusal with bytes preserved. Stop on any failure.
+There is no cleanup fallback, force-dehydrate or read-only attribute clearing in
+production. Vault capability exposure remains disabled.
+
+Remembered unlock (C06) now has the disabled source foundation and native
+credential-custody component evidence below. The actual broker lifecycle fixture
+is under acceptance; its empty lock inventory cannot establish payload cleanup
+or full C06 completion. Reuse unchanged evidence and preserve failed roots,
+recovery and the installed app. No testing-agent permission restriction remains;
+source checks still do not substitute for native or exact-package results.
 
 Windows controls component acceptance (24 October): five focused tests now pass
 under the isolated ordinary Windows test user. They cover proxy RPC/profile and
@@ -2204,10 +2212,11 @@ forget return an uncertain result rather than reporting success for a new accoun
 
 Windows source compile/lint and Linux workspace gates pass (963 tests, 14 ignored).
 Three custody-model and seven decoder checks passed in their portable candidate
-harnesses. Native credential persistence and integrated saved-unlock lifecycle
-acceptance remain pending. The production vault gate stays disabled, and the
-stopped encrypted-file test has not been retried. This is not a completed C06
-acceptance claim or a published feature.
+harnesses. Native protected persistence component acceptance is recorded below; integrated
+saved-unlock lifecycle acceptance remains pending. The production vault gate
+stays disabled. The corrected encrypted-file read now passes, while safe payload
+cleanup remains unresolved. This is not completed C06 acceptance or a published
+feature.
 
 Windows credential-custody component acceptance (24 October): all eleven focused
 checks now pass as the isolated ordinary Windows user: three custody-model checks,
