@@ -1691,67 +1691,17 @@ impl ConfiguredRootConnection {
             }
             inventory.snapshot(route_owned)
         };
-        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
         for row in rows {
             let components = row
                 .components()
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>();
-            let mut path = root.path.clone();
-            for part in &components {
-                path.push(part);
-            }
-            let (_root_final, _parents, _entry, snapshot) =
-                pin_callback_path_chain(&path, root.identity, row.file_index(), row.length())
-                    .map_err(|_| Error::ConfiguredRootChanged)?;
-            let usn = {
-                let file = ProtectedCompletionFile::open_for_cleanup(&wide_path(&path)?)?;
-                clean_dehydrate_identity(
-                    file.protected,
-                    root.identity.file_index,
-                    row.file_index(),
-                    row.identity(),
-                )?;
-                let before = root_snapshot(file.raw)?;
-                if !same_edit_snapshot(snapshot, before) {
-                    return Err(Error::ConfiguredRootChanged);
-                }
-                if modified_ranges_for_handle(file.raw)
-                    .map_err(|_| Error::EditRecoveryUnavailable)?
-                {
-                    return Err(Error::EditRecoveryUnavailable);
-                }
-                // READ_FILE_USN_DATA reports the last journaled USN. First
-                // materialize pending reasons in a CLOSE record while this
-                // exact referenced RH handle excludes writers. This changes
-                // only the journal; it never marks the placeholder clean.
-                let usn = journal_cleanup_usn(file.raw, row.file_index())?;
-                if !same_edit_snapshot(before, root_snapshot(file.raw)?) {
-                    return Err(Error::ConfiguredRootChanged);
-                }
-                clean_dehydrate_identity(
-                    file.protected,
-                    root.identity.file_index,
-                    row.file_index(),
-                    row.identity(),
-                )?;
-                if modified_ranges_for_handle(file.raw)
-                    .map_err(|_| Error::EditRecoveryUnavailable)?
-                {
-                    return Err(Error::EditRecoveryUnavailable);
-                }
-                usn
-            };
-            if self.state.has_unresolved_placeholder_data() {
-                return Err(Error::UnresolvedPlaceholderEdits);
-            }
             self.dehydrate_clean_vault_placeholder(
                 &components,
                 row.file_index(),
                 row.length(),
                 row.identity(),
-                usn,
             )?;
         }
         // Rows intentionally remain after success, and especially on failure.
@@ -1761,17 +1711,18 @@ impl ConfiguredRootConnection {
     // Internal per-file primitive only. Before calling, the route owner must
     // revoke/drain hydration and exclude dirty/uncertain recovery using its exact
     // hydration inventory. No public wrapper/caller or vault capability exists.
-    pub(super) fn dehydrate_clean_vault_placeholder(
+    fn dehydrate_clean_vault_placeholder(
         &self,
         local_components: &[&str],
         expected_file_index: u64,
         expected_length: u64,
         expected_identity: &[u8; 16],
-        expected_usn: i64,
     ) -> Result<(), Error> {
+        if self.state.has_unresolved_placeholder_data() {
+            return Err(Error::UnresolvedPlaceholderEdits);
+        }
         if !self.connected
             || expected_file_index == 0
-            || expected_usn <= 0
             || local_components.is_empty()
             || local_components.iter().any(|part| !valid_component(part))
         {
@@ -1807,10 +1758,31 @@ impl ConfiguredRootConnection {
             expected_file_index,
             expected_identity,
         )?;
+        if modified_ranges_for_handle(file.raw).map_err(|_| Error::EditRecoveryUnavailable)? {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        // Establish the journal baseline only after this final exact identity
+        // and clean-state admission. Keep this same referenced RH handle live
+        // through the CAS and postproof: no internal close/reopen transition.
+        let expected_usn = journal_cleanup_usn(file.raw, expected_file_index)?;
+        if !same_edit_snapshot(opened, root_snapshot(file.raw)?) {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        clean_dehydrate_identity(
+            file.protected,
+            root.identity.file_index,
+            expected_file_index,
+            expected_identity,
+        )?;
         if modified_ranges_for_handle(file.raw).map_err(|_| Error::EditRecoveryUnavailable)?
             || completion_usn(file.raw, expected_file_index)? != expected_usn
         {
             return Err(Error::EditRecoveryUnavailable);
+        }
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        if self.state.has_unresolved_placeholder_data() {
+            return Err(Error::UnresolvedPlaceholderEdits);
         }
         let range = CfFileRange {
             starting_offset: 0,
@@ -7180,8 +7152,8 @@ impl CompletionIo {
     }
 }
 
-// Cleanup-only journal freshness barrier. Never call this again to rebase a
-// failed final CAS: the preflight baseline must survive the later reopen.
+// Cleanup-only journal freshness barrier. Call once on the final referenced
+// handle; never call again to rebase a failed CAS.
 fn journal_cleanup_usn(handle: Handle, expected_file_id: u64) -> Result<i64, Error> {
     const FSCTL_WRITE_USN_CLOSE_RECORD: u32 = 0x0009_00ef;
     let mut usn = 0_i64;

@@ -344,7 +344,7 @@ synthetic selector reports only fixed counters/stages.
 Vault cleanup alone now requests an EXCLUSIVE protected read handle and retains
 its RH oplock/reference through the same root/file/opaque checks, native modified
 ranges, nonzero USN comparison, VERIFY_IN_SYNC update and zero-residency postproof.
-Both cleanup preflight and actual dehydration use that handle mode. Ordinary edit
+Cleanup preflight and dehydration use that handle mode. Ordinary edit
 completion still requests EXCLUSIVE plus WRITE_ACCESS. Cleanup never clears the
 read-only attribute, changes permissions or retries with weaker sharing. The
 synthetic selector verifies the read-only attribute remains after cleanup.
@@ -368,8 +368,20 @@ returns the last USN written to the journal and does not promise to publish
 pending reasons. The new barrier requires exactly eight output bytes, a positive
 USN and a matching fresh read for the exact file ID. Full snapshot, opaque
 identity, in-sync state and zero modified ranges are rechecked before retaining
-that baseline. The later reopen still must match the same baseline, and the
-update still receives a nonzero-USN CAS. There is no second flush/rebase after
+that baseline. The same referenced handle remains open, and the update still
+receives a nonzero-USN CAS. There is no second flush/rebase after
 refusal, no mark-clean operation and no zero-USN retry. The close-record append
 is journal-only and is not rolled back. Native acceptance is pending; failure
 telemetry reports only fixed comparisons, state checks and error codes.
+
+
+The journal-close candidate reached a fresh baseline but still refused the
+update with `0x80070179`. Diagnostics showed the current USN differed after
+refusal while identity, snapshot and modified-range checks remained stable.
+That observation does not prove the cause or authorize rebasing. Cleanup now
+uses one referenced protected RH handle from exact native admission through
+the journal baseline, nonzero-USN update and zero-residency postproof. Its sole
+private caller no longer opens and closes a preliminary protected handle or
+passes a baseline across a reopen. Global unresolved state is checked again
+immediately before the update. This removes an internal custody transition;
+native acceptance remains pending, and any refusal still retains the inventory.
