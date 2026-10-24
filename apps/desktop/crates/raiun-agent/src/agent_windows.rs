@@ -7564,6 +7564,188 @@ mod tests {
 
     #[cfg(all(windows, debug_assertions))]
     #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser child with fresh owned LOCALAPPDATA; C05 cleanup acceptance prerequisite"]
+    fn native_broker_manual_remember_lock_saved_forget_lifecycle() {
+        use super::{
+            DpapiSessionStore, DpapiStore, VaultCredentialStore, windows_profile_registry,
+            windows_profiles, windows_vault_credentials,
+        };
+        assert_eq!(std::env::var("USERNAME").as_deref(), Ok("RaiunLabUser"));
+        // Operator must supply this only in the child ProcessStartInfo environment.
+        // No process/global environment mutation or real-profile fallback exists.
+        let appdata =
+            PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("isolated child appdata"));
+        let fixture = appdata.parent().expect("owned fixture parent").to_owned();
+        assert_eq!(appdata.file_name().unwrap(), "appdata");
+        assert_eq!(fixture.parent().unwrap(), Path::new(r"C:\RaiunLab"));
+        let name = fixture.file_name().unwrap().to_str().unwrap();
+        let nonce = name
+            .strip_prefix("c06-broker-lifecycle-")
+            .expect("fixed fixture prefix");
+        assert_eq!(nonce.len(), 32);
+        assert!(
+            nonce
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
+        assert_eq!(
+            std::fs::canonicalize(&appdata).unwrap(),
+            PathBuf::from(format!(r"\\?\{}", appdata.display()))
+        );
+        assert_eq!(
+            std::fs::read_dir(&appdata).unwrap().count(),
+            0,
+            "refuse replay before opening storage"
+        );
+        assert_eq!(
+            std::fs::read_dir(&fixture).unwrap().count(),
+            1,
+            "fresh root contains only empty appdata"
+        );
+        let appdata_pin = raiun_control_windows::PinnedDirectory::open(&appdata).unwrap();
+        appdata_pin.verify_path().unwrap();
+        eprintln!("synthetic_c06_broker_fixture={}", fixture.display());
+
+        let (server, remote) =
+            synthetic_personal_spaces_server_inner_with_vault(|_| {}, false, false, false, true);
+        let storage = DpapiSessionStore::current_user().unwrap();
+        let _registry_owner = storage.lock_profile_registry().unwrap();
+        assert!(storage.load_profile_registry().unwrap().is_none());
+        assert!(storage.active_identity().unwrap().is_none());
+        let profile = format!("profile-{nonce}");
+        let registry = windows_profile_registry::Registry::decode_or_default(None)
+            .unwrap()
+            .with_added(&profile, "Synthetic remembered vault")
+            .unwrap()
+            .with_selected(&profile)
+            .unwrap();
+        let admissions = Arc::new(Mutex::new(Arc::new(registry.clone())));
+        let sessions = Arc::new(raiun_vault::session::VaultSessionCoordinator::new());
+        let store = DpapiStore::for_profile(&profile).unwrap();
+        let session = synthetic_session(&server, "synthetic-client", unix_time_now() + 3600);
+        store.save_pending(&profile, &session).unwrap();
+        store.publish_active(&profile, &session).unwrap();
+        let runtime = Arc::new(
+            WindowsAgent::new_for_profile_with_services(
+                &profile,
+                store,
+                Some(admissions),
+                sessions.clone(),
+            )
+            .unwrap(),
+        );
+        let generation = runtime.generation.load(Ordering::Acquire);
+        {
+            let mut state = runtime.state.lock().unwrap();
+            state.active_generation = generation;
+            state.online_authenticated = true;
+            state.needs_refresh = false;
+        }
+        runtime.provider.authorize_generation(generation);
+        let drive = fixture.join("drive");
+        std::fs::create_dir(&drive).unwrap();
+        runtime
+            .configure_root(
+                &json!({"action":"configure_root","profile_id":profile,"cloud_root":drive}),
+            )
+            .unwrap();
+        WindowsAgent::connect_verified_root(
+            &runtime.session_store,
+            &runtime.state,
+            &runtime.provider,
+        )
+        .unwrap();
+        assert!(
+            child_process_directory_matches(&drive, &["Personal", "Spaces"])
+                .unwrap()
+                .matches_expected
+        );
+        let broker = windows_profiles::WindowsProfiles::for_isolated_lifecycle_fixture(
+            storage.clone(),
+            registry,
+            runtime.clone(),
+        )
+        .unwrap();
+        let scope = raiun_vault::session::VaultSessionScope::new(
+            &profile,
+            &server,
+            "synthetic-personal-drive",
+            "synthetic-vault-root",
+        )
+        .unwrap();
+        let target = || {
+            json!({"profile_id":profile,"space_id":"synthetic-personal-drive",
+            "root_path":"/Travel.vault","root_resource_id":"synthetic-vault-root"})
+        };
+        let mut manual = target();
+        manual["action"] = json!("vault_unlock");
+        manual["password"] = json!("potato"); // public fixture password, never owner credentials
+        manual["remember"] = json!(true);
+        let unlocked = broker.handle_isolated_lifecycle_session(manual).unwrap().0;
+        assert_eq!(unlocked["unlocked"], true);
+        assert_eq!(unlocked["remembered_status"], "known_saved");
+        assert_eq!(unlocked["root_resource_id"], "synthetic-vault-root");
+        assert_eq!(unlocked["vault_mount_ready"], false);
+        assert!(sessions.is_unlocked(&scope).unwrap());
+        let mut lock = target();
+        lock["action"] = json!("vault_lock");
+        assert_eq!(
+            broker.handle_isolated_lifecycle_session(lock).unwrap().0["unlocked"],
+            false
+        );
+        assert!(!sessions.is_unlocked(&scope).unwrap());
+        let mut saved = target();
+        saved["action"] = json!("vault_unlock");
+        saved["use_saved"] = json!(true);
+        let unlocked = broker.handle_isolated_lifecycle_session(saved).unwrap().0;
+        assert_eq!(unlocked["remembered_status"], "known_saved");
+        assert!(sessions.is_unlocked(&scope).unwrap());
+        let forgotten = broker.handle_isolated_lifecycle_session(json!({"action":"vault_forget",
+            "profile_id":profile,"space_id":"synthetic-personal-drive","root_resource_id":"synthetic-vault-root"})).unwrap().0;
+        assert_eq!(forgotten["forgotten"], true);
+        assert_eq!(forgotten["remembered_status"], "not_saved");
+        assert!(
+            sessions.is_unlocked(&scope).unwrap(),
+            "Forget does not lock"
+        );
+        let account = runtime.provider.bandwidth.scope().unwrap().unwrap();
+        let remembered = windows_vault_credentials::Scope::from_trusted_account(
+            &profile,
+            account.bytes(),
+            &scope,
+        )
+        .unwrap();
+        assert!(
+            !windows_vault_credentials::contains_saved(
+                &VaultCredentialStore {
+                    store: runtime.session_store.as_ref(),
+                    profile: &profile,
+                },
+                &remembered
+            )
+            .unwrap()
+        );
+        let mut lock = target();
+        lock["action"] = json!("vault_lock");
+        assert_eq!(
+            broker.handle_isolated_lifecycle_session(lock).unwrap().0["unlocked"],
+            false
+        );
+        assert!(!sessions.is_unlocked(&scope).unwrap());
+        assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+        broker.stop_all().unwrap();
+        drop(broker);
+        drop(runtime);
+        drop(sessions);
+        remote.join().unwrap();
+        appdata_pin.verify_path().unwrap();
+        // Registered native namespace and private fixture evidence deliberately
+        // remain owned here after normal disconnect; no force/unregister/delete.
+        eprintln!("synthetic_c06_broker_lifecycle=passed;fixture_retained=true");
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
     #[ignore = "requires disposable Windows VM with Cloud Files and current-user DPAPI"]
     fn native_recovery_gui_pipe_fixture_preserves_journal_until_graceful_quit() {
         use raiun_cloudfiles_windows::EditRecoveryProvider as _;
@@ -11606,6 +11788,22 @@ mod tests {
         recovery_read_probe_enabled: bool,
         initially_absent: bool,
     ) -> (String, SyntheticPersonalSpacesFixture) {
+        synthetic_personal_spaces_server_inner_with_vault(
+            emit_stage,
+            native_read_files_enabled,
+            recovery_read_probe_enabled,
+            initially_absent,
+            false,
+        )
+    }
+
+    fn synthetic_personal_spaces_server_inner_with_vault(
+        emit_stage: impl Fn(&str),
+        native_read_files_enabled: bool,
+        recovery_read_probe_enabled: bool,
+        initially_absent: bool,
+        initialized_vault: bool,
+    ) -> (String, SyntheticPersonalSpacesFixture) {
         emit_stage("listener_bind_begin");
         let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|error| {
             emit_stage(&format!("listener_bind_error_kind_{:?}", error.kind()));
@@ -11701,6 +11899,12 @@ mod tests {
                     write!(request_stream, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{counters}", counters.len()).unwrap();
                     continue;
                 }
+                if initialized_vault {
+                    assert!(
+                        request.starts_with("GET ") || request.starts_with("PROPFIND "),
+                        "initialized vault fixture permits no remote mutation"
+                    );
+                }
                 if request.starts_with("POST /token ") {
                     let form: HashMap<String, String> =
                         url::form_urlencoded::parse(&body).into_owned().collect();
@@ -11730,6 +11934,29 @@ mod tests {
                     .map(|(_, value)| value.as_str());
                 if authorization != Some(expected_access) {
                     write!(request_stream, "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                    continue;
+                }
+                if initialized_vault && request.starts_with("PROPFIND ") {
+                    let path = request.split_whitespace().nth(1).unwrap();
+                    if path.trim_end_matches('/')
+                        == "/remote.php/dav/personal/synthetic-personal-drive/Travel.vault"
+                    {
+                        let token = include_str!(
+                            "../../raiun-vault/tests/fixtures/web-integrity-token.b64"
+                        )
+                        .trim();
+                        let xml = format!(
+                            r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:ocrclone="ocrclone"><d:response><d:href>{worker_server}/remote.php/dav/personal/synthetic-personal-drive/Travel.vault/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype><d:getcontentlength>0</d:getcontentlength><d:getetag>"vault-v1"</d:getetag><d:getcontenttype>application/vnd.opencloud.vault</d:getcontenttype><oc:fileid>synthetic-vault-root</oc:fileid><oc:name>Travel.vault</oc:name><oc:size>0</oc:size><oc:permissions>RDNVW</oc:permissions><ocrclone:integrity-id>{token}</ocrclone:integrity-id></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#
+                        );
+                        write!(request_stream, "HTTP/1.1 207 Multi-Status\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}", xml.len()).unwrap();
+                        continue;
+                    }
+                }
+                if initialized_vault && request.starts_with("GET /remote.php/dav/personal/synthetic-personal-drive/Travel.vault/9cmn80lns8obm4t3koceogil20 ") {
+                    let bytes = include_bytes!("../../raiun-vault/tests/fixtures/web-65537.bin");
+                    assert!(headers.iter().any(|(name, value)| name == "if-match" && value == "\"child-rev-1\""));
+                    write!(request_stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
+                    request_stream.write_all(bytes).unwrap();
                     continue;
                 }
                 if request.starts_with("GET /graph/v1.0/me/drives") {
@@ -11871,6 +12098,15 @@ mod tests {
                             b"synthetic Personal native read bytes".len(),
                         ));
                     }
+                    if initialized_vault && depth_one
+                        && normalized == "/remote.php/dav/personal/synthetic-personal-drive"
+                    {
+                        entries.push((
+                            format!("{normalized}/Travel.vault/"),
+                            "synthetic-vault-root".into(), "Travel.vault".into(), true,
+                            "\"vault-v1\"".into(), 0,
+                        ));
+                    }
                     let response_xml = entries
                         .into_iter()
                         .map(|(href, id, name, is_directory, etag, size)| {
@@ -11879,8 +12115,12 @@ mod tests {
                             } else {
                                 "<d:resourcetype/>"
                             };
+                            let vault_props = if initialized_vault && id == "synthetic-vault-root" {
+                                format!(r#"<d:getcontenttype>application/vnd.opencloud.vault</d:getcontenttype><ocrclone:integrity-id xmlns:ocrclone="ocrclone">{}</ocrclone:integrity-id>"#,
+                                    include_str!("../../raiun-vault/tests/fixtures/web-integrity-token.b64").trim())
+                            } else { String::new() };
                             format!(
-                                "<d:response><d:href>{worker_server}{href}</d:href><d:propstat><d:prop>{resource_kind}<d:getcontentlength>{size}</d:getcontentlength><d:getetag>{etag}</d:getetag><oc:fileid>{id}</oc:fileid><oc:name>{name}</oc:name><oc:permissions>RDNVW</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
+                                "<d:response><d:href>{worker_server}{href}</d:href><d:propstat><d:prop>{resource_kind}{vault_props}<d:getcontentlength>{size}</d:getcontentlength><d:getetag>{etag}</d:getetag><oc:fileid>{id}</oc:fileid><oc:name>{name}</oc:name><oc:permissions>RDNVW</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
                             )
                         })
                         .collect::<String>();

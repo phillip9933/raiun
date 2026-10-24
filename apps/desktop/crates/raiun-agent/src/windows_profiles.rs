@@ -81,6 +81,44 @@ impl WindowsProfiles {
         })
     }
 
+    #[cfg(test)]
+    pub(super) fn for_isolated_lifecycle_fixture(
+        storage: DpapiSessionStore,
+        registry: Registry,
+        runtime: Arc<WindowsAgent>,
+    ) -> Result<Self, String> {
+        if registry.selected() != runtime.profile_scope {
+            return Err("Fixture profile mismatch".into());
+        }
+        let source_admissions = runtime
+            .source_admissions
+            .clone()
+            .ok_or("Fixture admissions missing")?;
+        storage
+            .save_profile_registry(&registry.encode()?)
+            .map_err(|_| "Fixture registry persistence failed")?;
+        let mut runtimes = BTreeMap::new();
+        runtimes.insert(runtime.profile_scope.clone(), runtime.clone());
+        Ok(Self {
+            source_admissions,
+            vault_sessions: runtime.vault_sessions.clone(),
+            storage,
+            state: Mutex::new(BrokerState { registry, runtimes }),
+            mutation_gate: Mutex::new(()),
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn handle_isolated_lifecycle_session(
+        &self,
+        request: Value,
+    ) -> Result<(Value, bool), String> {
+        // Private component seam; public handle_owned keeps its false gate.
+        self.dispatch_vault_session(
+            windows_vault_requests::OwnedControlRequest::new(request).decode_session()?,
+        )
+    }
+
     fn resolve(&self, request: &Value) -> Result<(String, Arc<WindowsAgent>), String> {
         let state = self
             .state
@@ -162,6 +200,16 @@ impl WindowsProfiles {
         if !WINDOWS_VAULT_SESSIONS_ENABLED {
             return Err("Windows vault sessions are not available yet".into());
         }
+        self.dispatch_vault_session(request)
+    }
+
+    // The public action gate is deliberately outside this shared implementation.
+    // Isolated component fixtures can call this private seam without enabling
+    // production RPC acceptance or replacing any authority checks below.
+    fn dispatch_vault_session(
+        &self,
+        request: windows_vault_requests::session_requests::VaultSessionRequest,
+    ) -> Result<(Value, bool), String> {
         let _gate = self
             .mutation_gate
             .lock()

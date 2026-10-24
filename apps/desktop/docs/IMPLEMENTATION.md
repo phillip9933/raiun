@@ -2228,3 +2228,29 @@ while unlock state comes only from the session coordinator. Neither presence nor
 metadata grants a route. Windows compile/lint and the active three model/seven
 decoder checks pass; unchanged Linux evidence is reused. These source repairs do
 not establish native saved-unlock acceptance or enable the feature.
+
+
+### Windows remembered-unlock broker fixture (25 October 2026)
+
+A single ignored native fixture now exercises the actual private broker dispatch
+for manual unlock with explicit remember, lock, saved unlock, and canonical
+pathless Forget. It uses Windows DPAPI, fresh verified synthetic account/vault
+metadata and the public encryption fixture. Production RPC admission remains
+disabled. The shared implementation retains its existing account, operation,
+reservation and publication fences; only the private test entry skips the
+production capability gate.
+
+The native child must receive a fresh, explicitly owned `LOCALAPPDATA` path under
+`C:\RaiunLab\c06-broker-lifecycle-<32 lowercase hex>\appdata` in its own process
+environment. The test checks the exact synthetic user, canonical path, empty
+fixture and pinned directory before opening storage. It never changes the
+global environment or uses a real profile fallback. Existing profiles and the
+installed package remain outside this scope.
+
+Source compile, strict lint and formatting passed in the isolated candidate;
+native broker execution is pending. This fixture does not enumerate or hydrate
+a vault file: its lock inventory is empty. It can qualify credential/KDF,
+persistence, status and session behavior independently, but it cannot qualify
+plaintext cleanup, restart behavior or full C06 completion. The separate C05
+read-and-cleanup fixture still owns payload cleanup acceptance. Its original
+ignore-label dependency is superseded for this narrower component acceptance.
