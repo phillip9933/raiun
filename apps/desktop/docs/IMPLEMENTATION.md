@@ -2189,11 +2189,11 @@ predates the disabled vault changes and does not establish their acceptance.
 Encrypted cleanup (C05) now has an actual Windows writer-exclusion pass and
 clean-file cleanup pass. The native fixture read and verified 65,537 bytes,
 retired the route, and proved the file had no remaining on-disk ranges. Earlier
-USN/tag-check failures and their roots remain preserved. The dirty-edit fixture
-then failed before reaching its cleanup assertion: its provider-process write
-did not produce the required additional close notification. A focused external
-client write replaces that fixture step; its source checks pass, but its native
-result remains pending. No production dirty check or cleanup guard was relaxed.
+USN/tag-check failures and their roots remain preserved. The original dirty-edit
+fixture failed before its cleanup assertion because its provider-process write
+did not produce the required close notification. Its external-client replacement
+now passes natively (r105), with real modified-file detection and exact bytes
+preserved. No production dirty check or cleanup guard was relaxed.
 
 The cleanup method holds continuous exclusive protected file access and checks
 identity, dirty ranges, route retirement and post-cleanup residency. Its single
@@ -2201,16 +2201,19 @@ update omits the optional atomic metadata-USN comparison; that limitation remain
 explicit in the Cloud Files crate's `SAFETY.md`. There is no production fallback
 or force-dehydrate. Vault capability exposure remains disabled.
 
-Normal app restart remains a separate implementation gap: retained roots must
-restore authenticated historical catalogue and hydration records before vault
-admission can become safe. Protected storage and isolated metadata models are
-available; the publication and restart joins are still in progress. The existing
-incomplete-history refusal stays in place.
+Retained-root catalogue and hydration-history restoration is now implemented
+and source-qualified; protected storage also passed native tests. The normal
+new-Agent reconnection fixture remains unaccepted because r105 stopped earlier
+at the post-Lock read timeout. Missing or incomplete history still refuses vault
+admission. A full process/crash restart with resident plaintext is not claimed.
 
 Remembered unlock (C06) now has the disabled source foundation and native
 credential-custody component evidence below. The actual broker lifecycle fixture now passes the
 credential/session flow, including saved unlock and Forget. Its empty lock
-inventory cannot establish payload cleanup or full C06 completion. Reuse unchanged evidence and preserve failed roots,
+inventory cannot establish payload cleanup or full C06 completion. The current
+payload run verified manual/saved reads and the first Lock cleanup, then timed
+out on the locked read; a zero-length native error-response defect was corrected
+locally for a focused rerun. Reuse unchanged evidence and preserve failed roots,
 recovery and the installed app. No testing-agent permission restriction remains;
 source checks still do not substitute for native or exact-package results.
 
@@ -2413,3 +2416,25 @@ the current bound native route and accepted pinned-parent refresh; it does not
 assert that every child has already materialized. These source checks do not
 replace the pending native broker workflow or exact-package acceptance. The
 public Windows vault capability remains disabled.
+
+
+### Locked-read failure response and later close check (25 October, r106)
+
+The corrected failed-fetch response built and ran natively. A locked ordinary
+read now fails promptly with no ciphertext download; the native failure response
+covered all 65,537 bytes and returned success. Manual unlock then read and
+verified the same file again. The next Lock refused cleanup before the journal
+stage, preserving the file and retry state. Normal reconnection was not reached.
+The failure and normal shutdown/cold evidence remain retained in
+`outputs/local-windows-native-20261023-r1/c06-fetch-failure-agent-actual-r1/`.
+
+Source investigation found that close verification opened the data stream before
+querying modified ranges, potentially demanding hydration from a deliberately
+locked route. The exact r106 close refusal stage was not captured, so it is not
+claimed as proven. The local correction queries modified ranges through the
+already pinned metadata handle first. Only a successful empty-range query with
+an unchanged post-snapshot can return clean without opening data. Modified,
+partial or uncertain files retain the dirty/recovery refusal path. No sticky
+failure counters are cleared, and native cleanup still requires its separate
+exclusive protected handle and post-cleanup proof. Dirty-file and broker native
+acceptance must qualify this change before activation.

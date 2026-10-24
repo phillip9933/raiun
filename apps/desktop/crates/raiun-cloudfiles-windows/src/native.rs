@@ -4292,6 +4292,10 @@ impl CallbackState {
                     .fetch_add(1, Ordering::AcqRel);
             }
             Err((stage, hresult, modified)) => {
+                #[cfg(feature = "synthetic-agent-integration")]
+                eprintln!(
+                    "synthetic close validation refused stage={stage} hresult={hresult:#010x} modified={modified}"
+                );
                 self.last_close_validation_stage
                     .store(stage, Ordering::Release);
                 self.last_close_validation_hresult
@@ -4346,11 +4350,66 @@ impl CallbackState {
             || snapshot.reparse_tag & IO_REPARSE_TAG_CLOUD_MASK
                 != (IO_REPARSE_TAG_CLOUD & IO_REPARSE_TAG_CLOUD_MASK)
             || snapshot.placeholder_state & CF_PLACEHOLDER_STATE_PLACEHOLDER == 0
-            || snapshot.placeholder_state & CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK != 0
             || snapshot.file_size != info.file_size as u64
             || snapshot.file_size > MAX_REQUEST_BYTES
         {
             return Err((9, 0, false));
+        }
+        // This query needs READ_ATTRIBUTES only. Use the already pinned
+        // no-follow metadata handle before any normal data-stream open: checking
+        // a clean, dehydrated locked file must not itself request hydration.
+        // Dirty or uncertain results still enter/refuse the existing recovery
+        // path; this is no cleanup or publication authorization.
+        let mut ranges = [CfFileRange {
+            starting_offset: 0,
+            length: 0,
+        }; 64];
+        let mut returned = 0_u32;
+        let hr = unsafe {
+            CfGetPlaceholderRangeInfo(
+                callback_guard.entry.0,
+                CF_PLACEHOLDER_RANGE_INFO_MODIFIED,
+                0,
+                -1,
+                ranges.as_mut_ptr().cast(),
+                size_of::<CfFileRange>()
+                    .checked_mul(ranges.len())
+                    .ok_or((10, 0, false))? as u32,
+                &mut returned,
+            )
+        };
+        if hr < 0 {
+            return Err((11, hr, false));
+        }
+        if returned as usize > std::mem::size_of_val(&ranges) {
+            return Err((12, 0, false));
+        }
+        let returned = returned as usize;
+        if returned.checked_rem(size_of::<CfFileRange>()) != Some(0) {
+            return Err((13, 0, false));
+        }
+        let count = returned / size_of::<CfFileRange>();
+        for range in ranges.iter().take(count) {
+            if range.starting_offset < 0
+                || range.length <= 0
+                || range.starting_offset.checked_add(range.length).is_none()
+            {
+                return Err((14, 0, false));
+            }
+        }
+        if count == 0 {
+            let after = root_snapshot(callback_guard.entry.0).map_err(|_| (22, 0, false))?;
+            if !same_edit_snapshot(snapshot, after) {
+                return Err((23, 0, false));
+            }
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!("synthetic close metadata clean without data open=true");
+            return Ok(false);
+        }
+        // A partial file with modified bytes cannot be captured as a complete
+        // recovery body. Preserve that known dirty state without hydrating it.
+        if snapshot.placeholder_state & CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK != 0 {
+            return Err((9, 0, true));
         }
         let len = usize::try_from(snapshot.file_size).map_err(|_| (15, 0, true))?;
         // Keep the no-follow entry guard open without FILE_SHARE_DELETE, then
@@ -4388,49 +4447,6 @@ impl CallbackState {
             || !windows_path_is_within(&pinned_entry_final, &callback_guard.root_final_path)
         {
             return Err((23, 0, true));
-        }
-        // Query modified ranges through the ordinary data-stream handle. The
-        // separate no-follow entry handle remains open without FILE_SHARE_DELETE
-        // and pins the exact reparse-point identity while this handle is used.
-        let mut ranges = [CfFileRange {
-            starting_offset: 0,
-            length: 0,
-        }; 64];
-        let mut returned = 0_u32;
-        let hr = unsafe {
-            CfGetPlaceholderRangeInfo(
-                content_handle.0,
-                CF_PLACEHOLDER_RANGE_INFO_MODIFIED,
-                0,
-                -1,
-                ranges.as_mut_ptr().cast(),
-                size_of::<CfFileRange>()
-                    .checked_mul(ranges.len())
-                    .ok_or((10, 0, false))? as u32,
-                &mut returned,
-            )
-        };
-        if hr < 0 {
-            return Err((11, hr, false));
-        }
-        if returned as usize > std::mem::size_of_val(&ranges) {
-            return Err((12, 0, false));
-        }
-        let returned = returned as usize;
-        if returned.checked_rem(size_of::<CfFileRange>()) != Some(0) {
-            return Err((13, 0, false));
-        }
-        let count = returned / size_of::<CfFileRange>();
-        for range in ranges.iter().take(count) {
-            if range.starting_offset < 0
-                || range.length <= 0
-                || range.starting_offset.checked_add(range.length).is_none()
-            {
-                return Err((14, 0, false));
-            }
-        }
-        if count == 0 {
-            return Ok(false);
         }
         // A clean close needs no write authority. In particular, read-only
         // vault backends deliberately refuse edit bindings. Acquire the exact
