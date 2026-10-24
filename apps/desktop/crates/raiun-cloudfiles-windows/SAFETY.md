@@ -355,3 +355,21 @@ still enforces its update authorization independently; these documents do not
 guarantee a read handle can authorize that update. If it refuses, cleanup must
 remain incomplete with its inventory retained. This narrower open requires
 focused native acceptance, not a permission bypass or a lock-success claim.
+The first such native run passed protected-open/preflight and the complete
+decrypted read, but the update itself refused with `0x80070179`
+(ERROR_CLOUD_FILE_NOT_IN_SYNC). The final read-only assertion was not reached.
+
+Cleanup preflight now appends a journal CLOSE record on the same referenced RH
+handle using
+[FSCTL_WRITE_USN_CLOSE_RECORD](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_write_usn_close_record).
+The existing
+[FSCTL_READ_FILE_USN_DATA](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_read_file_usn_data)
+returns the last USN written to the journal and does not promise to publish
+pending reasons. The new barrier requires exactly eight output bytes, a positive
+USN and a matching fresh read for the exact file ID. Full snapshot, opaque
+identity, in-sync state and zero modified ranges are rechecked before retaining
+that baseline. The later reopen still must match the same baseline, and the
+update still receives a nonzero-USN CAS. There is no second flush/rebase after
+refusal, no mark-clean operation and no zero-USN retry. The close-record append
+is journal-only and is not rolled back. Native acceptance is pending; failure
+telemetry reports only fixed comparisons, state checks and error codes.

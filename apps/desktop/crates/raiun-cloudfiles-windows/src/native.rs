@@ -1702,7 +1702,7 @@ impl ConfiguredRootConnection {
             for part in &components {
                 path.push(part);
             }
-            let (_root_final, _parents, _entry, _snapshot) =
+            let (_root_final, _parents, _entry, snapshot) =
                 pin_callback_path_chain(&path, root.identity, row.file_index(), row.length())
                     .map_err(|_| Error::ConfiguredRootChanged)?;
             let usn = {
@@ -1713,7 +1713,35 @@ impl ConfiguredRootConnection {
                     row.file_index(),
                     row.identity(),
                 )?;
-                completion_usn(file.raw, row.file_index())?
+                let before = root_snapshot(file.raw)?;
+                if !same_edit_snapshot(snapshot, before) {
+                    return Err(Error::ConfiguredRootChanged);
+                }
+                if modified_ranges_for_handle(file.raw)
+                    .map_err(|_| Error::EditRecoveryUnavailable)?
+                {
+                    return Err(Error::EditRecoveryUnavailable);
+                }
+                // READ_FILE_USN_DATA reports the last journaled USN. First
+                // materialize pending reasons in a CLOSE record while this
+                // exact referenced RH handle excludes writers. This changes
+                // only the journal; it never marks the placeholder clean.
+                let usn = journal_cleanup_usn(file.raw, row.file_index())?;
+                if !same_edit_snapshot(before, root_snapshot(file.raw)?) {
+                    return Err(Error::ConfiguredRootChanged);
+                }
+                clean_dehydrate_identity(
+                    file.protected,
+                    root.identity.file_index,
+                    row.file_index(),
+                    row.identity(),
+                )?;
+                if modified_ranges_for_handle(file.raw)
+                    .map_err(|_| Error::EditRecoveryUnavailable)?
+                {
+                    return Err(Error::EditRecoveryUnavailable);
+                }
+                usn
             };
             if self.state.has_unresolved_placeholder_data() {
                 return Err(Error::UnresolvedPlaceholderEdits);
@@ -1809,6 +1837,21 @@ impl ConfiguredRootConnection {
             )
         };
         if hr < 0 {
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!(
+                "synthetic cleanup update refusal hr={hr} output_matches_input={} current_matches_input={:?} identity_valid={} snapshot_stable={} modified={:?}",
+                usn == expected_usn,
+                completion_usn(file.raw, expected_file_index).map(|value| value == expected_usn),
+                clean_dehydrate_identity(
+                    file.protected,
+                    root.identity.file_index,
+                    expected_file_index,
+                    expected_identity
+                )
+                .is_ok(),
+                root_snapshot(file.raw).is_ok_and(|value| same_edit_snapshot(opened, value)),
+                modified_ranges_for_handle(file.raw),
+            );
             return Err(native_error("dehydrate clean vault file", hr));
         }
         root.verify_identity(true)?;
@@ -7135,6 +7178,38 @@ impl CompletionIo {
         }
         Ok(returned)
     }
+}
+
+// Cleanup-only journal freshness barrier. Never call this again to rebase a
+// failed final CAS: the preflight baseline must survive the later reopen.
+fn journal_cleanup_usn(handle: Handle, expected_file_id: u64) -> Result<i64, Error> {
+    const FSCTL_WRITE_USN_CLOSE_RECORD: u32 = 0x0009_00ef;
+    let mut usn = 0_i64;
+    let mut io = CompletionIo::new()?;
+    // SAFETY: same referenced RH handle, aligned fixed 8-byte output and owned
+    // OVERLAPPED/event remain live until definitive I/O completion. This FSCTL
+    // appends a journal close record, without changing file data or permissions.
+    let result = unsafe {
+        DeviceIoControl(
+            handle,
+            FSCTL_WRITE_USN_CLOSE_RECORD,
+            null(),
+            0,
+            (&mut usn as *mut i64).cast(),
+            size_of::<i64>() as u32,
+            null_mut(),
+            (&mut io.overlapped as *mut CompletionOverlapped).cast(),
+        )
+    };
+    if io.finish(handle, result)? != size_of::<i64>() as u32
+        || usn <= 0
+        || completion_usn(handle, expected_file_id)? != usn
+    {
+        return Err(Error::EditRecoveryUnavailable);
+    }
+    #[cfg(feature = "synthetic-agent-integration")]
+    eprintln!("synthetic cleanup journal close positive_and_fresh=true");
+    Ok(usn)
 }
 
 fn completion_usn(handle: Handle, expected_file_id: u64) -> Result<i64, Error> {
