@@ -361,6 +361,132 @@ impl DpapiSessionStore {
         Ok(Arc::new(directory))
     }
 
+    /// Bounded preferences for the caller-validated full account scope. Missing
+    /// data does not create directories; malformed protected data is an error.
+    pub fn load_bandwidth_settings(&self, scope: &[u8]) -> io::Result<Option<Vec<u8>>> {
+        let digest = bandwidth_digest(scope)?;
+        let Some(directory) = self.bandwidth_directory(&digest, false)? else {
+            return Ok(None);
+        };
+        read_bandwidth_settings(&directory, &digest)
+    }
+
+    /// Full-byte CAS under the existing private-file locking policy. The scope
+    /// must be canonical authenticated AccountScope bytes, never request data.
+    pub fn compare_exchange_bandwidth_settings(
+        &self,
+        scope: &[u8],
+        expected: Option<&[u8]>,
+        next: &[u8],
+    ) -> io::Result<()> {
+        let digest = bandwidth_digest(scope)?;
+        if next.is_empty()
+            || next.len() > 16 * 1024
+            || expected.is_some_and(|b| b.is_empty() || b.len() > 16 * 1024)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid bandwidth preferences size",
+            ));
+        }
+        let directory = self
+            .bandwidth_directory(&digest, true)?
+            .ok_or_else(|| io::Error::other("Private bandwidth directory unavailable"))?;
+        let lock_name = std::ffi::OsStr::new("preferences.lock");
+        match directory.create_new_file(lock_name) {
+            Ok((file, _)) => drop(file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+            Err(error) => return Err(error),
+        }
+        let mut lease = directory.open_owned_immutable_file(lock_name)?;
+        lease.try_lock_exclusive()?;
+        if read_bandwidth_settings(&directory, &digest)?.as_deref() != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Bandwidth preferences changed",
+            ));
+        }
+        let sealed = protect(next, &digest)?;
+        if sealed.is_empty() || sealed.len() > 64 * 1024 {
+            return Err(io::Error::other(
+                "Protected bandwidth preferences exceed limit",
+            ));
+        }
+        let mut envelope = b"RAIUN-BANDWIDTH\0\x01".to_vec();
+        envelope.extend_from_slice(&sealed);
+        let destination = directory.path().join("preferences.bin");
+        let temporary = self.write_temp(&destination, &envelope)?;
+        let result = (|| {
+            directory.verify_path()?;
+            let from = wide_path(&temporary)?;
+            let to = wide_path(&destination)?;
+            // SAFETY: fixed sibling entries below the retained private scope
+            // directory; exact CAS lease held; rename replaces without traversal.
+            if unsafe {
+                MoveFileExW(
+                    from.as_ptr(),
+                    to.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            directory.verify_path()?;
+            if read_bandwidth_settings(&directory, &digest)?.as_deref() != Some(next) {
+                return Err(io::Error::other(
+                    "Bandwidth preferences publication is uncertain",
+                ));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = remove_exact_file(&temporary);
+        }
+        result
+    }
+
+    fn bandwidth_directory(
+        &self,
+        digest: &[u8; 32],
+        create: bool,
+    ) -> io::Result<Option<Arc<crate::PrivateDirectory>>> {
+        if create {
+            self.ensure_private_root()?;
+        } else if !self.ensure_existing_private_root()? {
+            return Ok(None);
+        }
+        let parent = crate::PinnedDirectory::open(&self.root)?;
+        let first = if create {
+            crate::PrivateDirectory::create_or_open_under(
+                &parent,
+                std::ffi::OsStr::new("bandwidth"),
+            )
+        } else {
+            crate::PrivateDirectory::open_under(&parent, std::ffi::OsStr::new("bandwidth"))
+        };
+        let first = match first {
+            Ok(value) => value,
+            Err(error) if !create && error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let pinned = crate::PinnedDirectory::open(first.path())?;
+        let name = hex(digest);
+        let directory = if create {
+            crate::PrivateDirectory::create_or_open_under(&pinned, std::ffi::OsStr::new(&name))
+        } else {
+            crate::PrivateDirectory::open_under(&pinned, std::ffi::OsStr::new(&name))
+        };
+        let directory = match directory {
+            Ok(value) => value,
+            Err(error) if !create && error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        first.verify_path()?;
+        directory.verify_path()?;
+        Ok(Some(Arc::new(directory)))
+    }
+
     /// Private per-user application state directory used for protected local
     /// recovery records. The returned path is trusted local state, never IPC.
     pub fn local_edit_state_directory(&self) -> &Path {
@@ -1070,6 +1196,62 @@ fn remove_exact_file(path: &Path) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+fn bandwidth_digest(scope: &[u8]) -> io::Result<[u8; 32]> {
+    if scope.is_empty() || scope.len() > 16 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid bandwidth scope",
+        ));
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"raiun-bandwidth-preferences-v1\0");
+    hash.update(scope);
+    Ok(hash.finalize().into())
+}
+fn read_bandwidth_settings(
+    directory: &Arc<crate::PrivateDirectory>,
+    digest: &[u8; 32],
+) -> io::Result<Option<Vec<u8>>> {
+    let mut reader =
+        match directory.open_owned_immutable_file(std::ffi::OsStr::new("preferences.bin")) {
+            Ok(reader) => reader,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+    if reader.metadata()?.len() > 65_600 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Protected bandwidth preferences exceed limit",
+        ));
+    }
+    let mut envelope = Vec::new();
+    reader.by_ref().take(65_601).read_to_end(&mut envelope)?;
+    reader.verify()?;
+    directory.verify_path()?;
+    let ciphertext = envelope
+        .strip_prefix(b"RAIUN-BANDWIDTH\0\x01")
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid bandwidth preferences envelope",
+            )
+        })?;
+    if ciphertext.is_empty() || ciphertext.len() > 64 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Invalid bandwidth preferences envelope",
+        ));
+    }
+    let plaintext = unprotect(ciphertext, digest)?;
+    if plaintext.is_empty() || plaintext.len() > 16 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Invalid bandwidth preferences size",
+        ));
+    }
+    Ok(Some(plaintext.to_vec()))
 }
 
 fn protect(plaintext: &[u8], entropy: &[u8; 32]) -> io::Result<Vec<u8>> {

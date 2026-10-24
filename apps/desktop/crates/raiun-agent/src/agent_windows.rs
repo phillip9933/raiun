@@ -6,6 +6,9 @@
 #[path = "auth.rs"]
 mod auth;
 
+#[path = "windows_bandwidth.rs"]
+mod windows_bandwidth;
+
 #[path = "windows_cache_status.rs"]
 mod windows_cache_status;
 
@@ -115,7 +118,76 @@ trait SessionStore: Send + Sync {
         client_id: &str,
     ) -> Result<Option<Vec<u8>>, String>;
     fn remove_root_config(&self, scope: &str, server: &str, client_id: &str) -> Result<(), String>;
+    fn load_bandwidth_settings(
+        &self,
+        _profile: &str,
+        _scope: &[u8],
+    ) -> Result<Option<Vec<u8>>, String> {
+        Err("Bandwidth storage is unavailable".into())
+    }
+    fn compare_exchange_bandwidth_settings(
+        &self,
+        _profile: &str,
+        _scope: &[u8],
+        _old: Option<&[u8]>,
+        _next: &[u8],
+    ) -> Result<(), String> {
+        Err("Bandwidth storage is unavailable".into())
+    }
     fn before_publish(&self) {}
+}
+
+struct BandwidthStore<'a> {
+    store: &'a dyn SessionStore,
+    profile: &'a str,
+}
+impl windows_bandwidth::Store for BandwidthStore<'_> {
+    fn load(&self, scope: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        self.store.load_bandwidth_settings(self.profile, scope)
+    }
+    fn compare_exchange(
+        &self,
+        scope: &[u8],
+        old: Option<&[u8]>,
+        next: &[u8],
+    ) -> Result<(), String> {
+        self.store
+            .compare_exchange_bandwidth_settings(self.profile, scope, old, next)
+    }
+}
+fn budget_client(
+    client: Arc<OpenCloudClient>,
+    session: &auth::Session,
+    profile: &str,
+    account: &str,
+    generation: u64,
+    provider: &ProviderManager,
+    store: &dyn SessionStore,
+) -> Result<(Arc<OpenCloudClient>, windows_bandwidth::Scope), String> {
+    if generation == 0 || provider.authorized_generation.load(Ordering::Acquire) != generation {
+        return Err("The account changed before bandwidth admission".into());
+    }
+    let scope = windows_bandwidth::Scope::new(
+        profile,
+        &session.server,
+        &session.client_id,
+        session.expected_issuer.as_deref(),
+        account,
+    )?;
+    let budget = provider.bandwidth.bind(
+        scope.clone(),
+        generation,
+        &BandwidthStore { store, profile },
+    )?;
+    if provider.authorized_generation.load(Ordering::Acquire) != generation {
+        // authorize_generation already cancels the retired generation; a stale
+        // completion must not pause a newer controller.
+        return Err("The account changed during bandwidth admission".into());
+    }
+    let client = Arc::try_unwrap(client)
+        .map_err(|_| "The account client was already published")?
+        .with_transfer_budget(budget);
+    Ok((Arc::new(client), scope))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -200,6 +272,7 @@ struct FolderPauseSnapshot {
 /// crosses a Rust thread boundary. All auth/session transitions synchronously
 /// request a revoke-and-disconnect before replacing credentials.
 struct ProviderManager {
+    bandwidth: windows_bandwidth::Service,
     commands: std::sync::mpsc::SyncSender<ProviderCommand>,
     connected: Arc<AtomicBool>,
     authorized_generation: Arc<AtomicU64>,
@@ -965,6 +1038,7 @@ impl ProviderManager {
             })
             .expect("start Windows Cloud Files ownership thread");
         Self {
+            bandwidth: windows_bandwidth::Service::default(),
             commands,
             connected,
             authorized_generation,
@@ -1141,6 +1215,7 @@ impl ProviderManager {
     }
 
     fn disconnect(&self) -> Result<(), String> {
+        self.bandwidth.suspend();
         self.revoke_folders();
         let (response, result) = std::sync::mpsc::sync_channel(1);
         self.commands
@@ -1259,6 +1334,7 @@ impl ProviderManager {
     }
 
     fn authorize_generation(&self, generation: u64) {
+        self.bandwidth.authorize_generation(generation);
         // InstallFolders checks/publishes under this same lock. Revocation and
         // the generation change must be atomic against that publication.
         let mut handle = self
@@ -1405,6 +1481,7 @@ fn disconnect_provider_connection(
 
 impl Drop for ProviderManager {
     fn drop(&mut self) {
+        self.bandwidth.suspend();
         self.revoke_folders();
         let (response, result) = std::sync::mpsc::sync_channel(1);
         let sent = self.commands.send(ProviderCommand::Stop(response)).is_ok();
@@ -1550,6 +1627,8 @@ impl WindowsAgent {
             .ok_or("Control request must include a string action")?;
         match action {
             "status" => Ok((self.status()?, false)),
+            "bandwidth_limits" => Ok((self.bandwidth_settings(None)?, false)),
+            "bandwidth_limits_set" => Ok((self.bandwidth_settings(Some(request))?, false)),
             "pairs"
             | "transfers"
             | "spaces"
@@ -1678,6 +1757,80 @@ impl WindowsAgent {
         }
     }
 
+    fn bandwidth_settings(&self, update: Option<&Value>) -> Result<Value, String> {
+        let (session, generation) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if state.logout_pending
+                || state.authenticating
+                || state.refreshing
+                || state.session_cleanup_uncertain
+            {
+                return Err(
+                    "Wait for the current account transition before changing bandwidth settings"
+                        .into(),
+                );
+            }
+            (state.session.clone(), state.active_generation)
+        };
+        let Some(session) = session else {
+            if update.is_some() {
+                return Err("A trusted account is required for bandwidth settings".into());
+            }
+            return self.provider.bandwidth.value(None, generation);
+        };
+        let scope = self.provider.bandwidth.scope()?.filter(|scope| {
+            scope.matches(
+                &self.profile_scope,
+                &session.server,
+                &session.client_id,
+                session.expected_issuer.as_deref(),
+            )
+        });
+        // A saved root's account ID is an exclusion/registration record, not
+        // proof that newly replaced credentials belong to the same subject.
+        // Offline edits use only this runtime's already-verified exact owner.
+        let check_current = || -> Result<(), String> {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if state.active_generation != generation
+                || state.logout_pending
+                || state.authenticating
+                || state.refreshing
+                || state.session_cleanup_uncertain
+                || state.session.as_ref().is_none_or(|current| {
+                    current.server != session.server
+                        || current.client_id != session.client_id
+                        || current.expected_issuer != session.expected_issuer
+                        || current.access_token != session.access_token
+                })
+            {
+                return Err("The account changed; bandwidth settings may have been saved for the previous scope".into());
+            }
+            Ok(())
+        };
+        check_current()?;
+        if let Some(request) = update {
+            let scope = scope
+                .as_ref()
+                .ok_or("A verified account is required for bandwidth settings")?;
+            self.provider.bandwidth.update(
+                scope,
+                request,
+                &BandwidthStore {
+                    store: self.session_store.as_ref(),
+                    profile: &self.profile_scope,
+                },
+            )?;
+        }
+        check_current()?;
+        self.provider.bandwidth.value(scope.as_ref(), generation)
+    }
+
     fn status(&self) -> Result<Value, String> {
         self.maybe_start_refresh()?;
         let mounted = self.provider.is_connected();
@@ -1729,6 +1882,7 @@ impl WindowsAgent {
             "auth_generation": state.active_generation,
             "provider_supported": provider_supported,
             "folder_sync_supported": WINDOWS_FOLDER_SYNC_ENABLED,
+            "bandwidth_limits_supported": true,
             "media_jobs_supported": WINDOWS_MEDIA_METADATA_ENABLED,
             "vaults_supported": false,
             "account_switch_supported": false,
@@ -1915,6 +2069,15 @@ impl WindowsAgent {
         {
             return Err("The verified account no longer matches this drive folder".into());
         }
+        let (client, _) = budget_client(
+            client,
+            &session,
+            &self.profile_scope,
+            &account_id,
+            agent_generation,
+            &self.provider,
+            self.session_store.as_ref(),
+        )?;
         let provider_scope = raiun_cloudfiles_windows::ProviderScope::new(
             client.as_ref(),
             configuration.profile_scope.clone(),
@@ -2266,6 +2429,15 @@ impl WindowsAgent {
             let directory =
                 PrivateDirectory::create_or_open_under(&parent, std::ffi::OsStr::new(&name))
                     .map_err(|_| "Private account storage could not be admitted")?;
+            let (client, bandwidth_scope) = budget_client(
+                client,
+                &session,
+                &self.profile_scope,
+                &account_id,
+                generation,
+                &self.provider,
+                self.session_store.as_ref(),
+            )?;
             let origin = client
                 .server_origin()
                 .ok_or("The connected server origin is invalid")?;
@@ -2304,6 +2476,9 @@ impl WindowsAgent {
                 directory,
                 cloud_root,
             })?;
+            self.provider
+                .bandwidth
+                .publish(&bandwidth_scope, generation)?;
         }
         let result = self.provider.folder_request(generation, decoded)?;
         if self.generation.load(Ordering::Acquire) != generation {
@@ -2710,6 +2885,15 @@ impl WindowsAgent {
         let server_origin = client
             .server_origin()
             .ok_or("The authenticated server origin is invalid")?;
+        let (client, bandwidth_scope) = budget_client(
+            client,
+            &session,
+            &configuration.profile_scope,
+            &account_id,
+            generation,
+            provider,
+            session_store.as_ref(),
+        )?;
         let scope = raiun_cloudfiles_windows::ProviderScope::new(
             &client,
             configuration.profile_scope.clone(),
@@ -2855,6 +3039,8 @@ impl WindowsAgent {
             Arc::clone(&backend),
             recovery,
         )?;
+
+        provider.bandwidth.publish(&bandwidth_scope, generation)?;
 
         let persist_result = (|| -> Result<(), String> {
             let mut updated = configuration.clone();
@@ -3060,6 +3246,9 @@ impl WindowsAgent {
             }
         }
         self.join_finished_auth()?;
+        // A failed refresh may have cleared credentials without explicit logout.
+        // New sign-in must never inherit the prior subject's preferences owner.
+        self.provider.bandwidth.clear();
         let raw = request
             .get("server")
             .and_then(Value::as_str)
@@ -3291,6 +3480,7 @@ impl WindowsAgent {
     }
 
     fn logout(&self) -> Result<Value, String> {
+        self.provider.bandwidth.clear();
         {
             let mut state = self
                 .state
@@ -4307,6 +4497,31 @@ impl DpapiStore {
 }
 
 impl SessionStore for DpapiStore {
+    fn load_bandwidth_settings(
+        &self,
+        profile: &str,
+        scope: &[u8],
+    ) -> Result<Option<Vec<u8>>, String> {
+        self.check_scope(profile)?;
+        self.store
+            .load_bandwidth_settings(scope)
+            .map_err(|_| "Protected bandwidth settings could not be read".into())
+    }
+    fn compare_exchange_bandwidth_settings(
+        &self,
+        profile: &str,
+        scope: &[u8],
+        old: Option<&[u8]>,
+        next: &[u8],
+    ) -> Result<(), String> {
+        self.check_scope(profile)?;
+        self.store
+            .compare_exchange_bandwidth_settings(scope, old, next)
+            .map_err(|_| {
+                "Bandwidth settings changed or their durable publication is uncertain".into()
+            })
+    }
+
     fn bound_profile(&self) -> Option<&str> {
         Some(&self.profile_scope)
     }
@@ -7545,10 +7760,13 @@ mod tests {
         release: Mutex<mpsc::Receiver<()>>,
     }
 
+    type MemoryBandwidthSettings = HashMap<(String, Vec<u8>), Vec<u8>>;
+
     #[derive(Default)]
     struct MemoryStore {
         sessions: Mutex<HashMap<(String, String, String), auth::Session>>,
         root_configs: Mutex<HashMap<(String, String, String), Vec<u8>>>,
+        bandwidth_settings: Mutex<MemoryBandwidthSettings>,
         active_identity: Mutex<Option<(String, String, String)>>,
         fail_saves: Mutex<bool>,
         fail_removes: Mutex<bool>,
@@ -7558,6 +7776,34 @@ mod tests {
     }
 
     impl SessionStore for MemoryStore {
+        fn load_bandwidth_settings(
+            &self,
+            profile: &str,
+            scope: &[u8],
+        ) -> Result<Option<Vec<u8>>, String> {
+            Ok(self
+                .bandwidth_settings
+                .lock()
+                .unwrap()
+                .get(&(profile.into(), scope.to_vec()))
+                .cloned())
+        }
+        fn compare_exchange_bandwidth_settings(
+            &self,
+            profile: &str,
+            scope: &[u8],
+            old: Option<&[u8]>,
+            next: &[u8],
+        ) -> Result<(), String> {
+            let mut settings = self.bandwidth_settings.lock().unwrap();
+            let key = (profile.into(), scope.to_vec());
+            if settings.get(&key).map(Vec::as_slice) != old {
+                return Err("synthetic stale settings".into());
+            }
+            settings.insert(key, next.to_vec());
+            Ok(())
+        }
+
         fn save_pending(&self, scope: &str, session: &auth::Session) -> Result<(), String> {
             if *self.fail_saves.lock().unwrap() {
                 return Err("synthetic protected storage failure".into());
@@ -7673,6 +7919,24 @@ mod tests {
     }
 
     impl SessionStore for Arc<MemoryStore> {
+        fn load_bandwidth_settings(
+            &self,
+            profile: &str,
+            scope: &[u8],
+        ) -> Result<Option<Vec<u8>>, String> {
+            self.as_ref().load_bandwidth_settings(profile, scope)
+        }
+        fn compare_exchange_bandwidth_settings(
+            &self,
+            profile: &str,
+            scope: &[u8],
+            old: Option<&[u8]>,
+            next: &[u8],
+        ) -> Result<(), String> {
+            self.as_ref()
+                .compare_exchange_bandwidth_settings(profile, scope, old, next)
+        }
+
         fn save_pending(&self, scope: &str, session: &auth::Session) -> Result<(), String> {
             self.as_ref().save_pending(scope, session)
         }

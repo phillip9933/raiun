@@ -2101,3 +2101,17 @@ No whole completion-checklist category is promoted by these results.
 ### 21 October 2026, 08:50 UTC — laptop test candidate R200
 
 The exact R200 archive (`bd7df5c8c1e0a5f58e50748b65ed4401ba2164f150052ee685739f8670b5d6f4`) is now installed on the laptop after source gates, isolated exact-package installer qualification and bounded native VM checks. Installed app, agent, CLI, icon and manifest hashes match the approved archive. Previous R180 binaries, icon, manifest and desktop entry are preserved under `outputs/install-candidates/r200/20261021T085000Z/previous-R180/`. The app was not launched; no matching product process was observed before or after installation. Six same-UID executable links were unreadable, so the process-image scan was not exhaustive. No accounts, credentials, cache contents or cloud files were changed by this installation. This is an installed test candidate, not a claim of complete beta or C01–C10 acceptance. Receipt: `outputs/install-candidates/r200/20261021T085000Z/installed-state.json`.
+
+### Windows bandwidth controls (local next-release work, 24 October)
+
+Windows now implements the existing upload/download limits editor and account-bound
+control requests. Content clients for the drive, folder/media work and recovery
+share one transfer budget; sign-in and metadata requests remain outside that
+budget. Preferences use a separate protected record with exact account-scope and
+revision checks. A newly signed-out or not-yet-verified account shows unlimited
+defaults and cannot save limits. Already verified offline accounts may edit their
+own retained preferences.
+
+Source checks and the focused portable service test pass. Native Windows
+preferences persistence, effective aggregate throttling and installed-package
+acceptance are still pending; this source work has not been released.

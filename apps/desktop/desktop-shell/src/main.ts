@@ -27,7 +27,7 @@ import { isVaultPasswordValidationError, shouldAnnounceVaultCloseBlocked, vaultD
 import raiunLogo from '../src-tauri/icons/raiun.svg';
 
 type OfflineCacheSummary = { available: boolean; quota_bytes: number; used_bytes: number; pinned_bytes: number; protected_bytes: number; over_quota: boolean; unavailable_reason?: string | null };
-type Status = { connected: boolean; offline_namespace?: boolean; server?: string | null; client_id?: string | null; paused?: boolean; paused_space_ids?: string[]; mounted?: boolean; cloud_root?: string | null; error?: string | null; autostart?: boolean | null; recovery_folder?: string | null; encrypted_edit_recovery_available?: boolean; offline_cache?: OfflineCacheSummary | null; profile_id?: string | null; profile_label?: string | null; auth_generation?: number; root_configuration?: { valid: boolean; identity_bound: boolean; registration_state: string | null; recovery_scope_token?: unknown } | null; stopped?: boolean; authenticating?: boolean; provider_supported?: boolean; folder_sync_supported?: boolean; media_jobs_supported?: boolean; vaults_supported?: boolean; account_switch_supported?: boolean; account_setup_requires_sign_in?: boolean; pause_supported?: boolean; session_cleanup_uncertain?: boolean };
+type Status = { connected: boolean; offline_namespace?: boolean; server?: string | null; client_id?: string | null; paused?: boolean; paused_space_ids?: string[]; mounted?: boolean; cloud_root?: string | null; error?: string | null; autostart?: boolean | null; recovery_folder?: string | null; encrypted_edit_recovery_available?: boolean; offline_cache?: OfflineCacheSummary | null; profile_id?: string | null; profile_label?: string | null; auth_generation?: number; root_configuration?: { valid: boolean; identity_bound: boolean; registration_state: string | null; recovery_scope_token?: unknown } | null; stopped?: boolean; authenticating?: boolean; provider_supported?: boolean; folder_sync_supported?: boolean; media_jobs_supported?: boolean; vaults_supported?: boolean; account_switch_supported?: boolean; account_setup_requires_sign_in?: boolean; pause_supported?: boolean; bandwidth_limits_supported?: boolean; session_cleanup_uncertain?: boolean };
 type Account = { id: string; label: string; status: Status };
 type AccountsResult = { selected: string | null; items: Account[] };
 type ShellUnlockIntent = { profile_id: string; space_id: string; root_resource_id: string };
@@ -131,7 +131,7 @@ const vaultOperationsUi = { scopes: new Map<string, VaultOperationsScope>(), las
 const copyVerifyUi = { jobs: new Map<string, CopyVerifyJobUi>(), active: new Set<string>(), generation: 0 };
 const copyProducerUi: CopyProducerUi = { source: null, generation: 0, flowGeneration: 0, context: null, destination: null, jobId: null, status: null, busy: false, admissionUncertain: false, error: '', timer: 0, pollError: '' };
 const proxyUi = { config: { mode: 'system' } as ProxyConfig, revision: 0, accountId: null as string | null, loadedEpoch: -1, loading: false, saving: false, error: '', draftMode: 'system' as ProxyMode, draftUrl: '', generation: 0 };
-const bandwidthUi = { upload: '', download: '', revision: 0, accountId: null as string | null, loadedEpoch: -1, loading: false, saving: false, error: '', generation: 0 };
+const bandwidthUi = { upload: '', download: '', revision: 0, accountId: null as string | null, scopeToken: undefined as string | undefined, loadedEpoch: -1, loading: false, saving: false, error: '', generation: 0 };
 type InterruptedCreateRetryUi = { key: string; spaceId: string; rootResourceId: string; writeId: string; revision: number; retryGeneration: number; retryState: 'attempting' | 'recovery_attempting' | 'recovery_retrying'; jobId: string; profileId: string; accountEpoch: number; generation: number; busy: boolean; status: VaultEditReconcileStatus | null; error: string };
 const interruptedCreateRetryUi: { job: InterruptedCreateRetryUi | null; timer: number; generation: number } = { job: null, timer: 0, generation: 0 };
 const cachedVaultRootsUi = { roots: [] as CachedVaultRoot[], nextAfter: null as CachedVaultRootsPage['next_after'], truncated: false, loading: false, error: '', selected: '', generation: 0, accountEpoch: -1 };
@@ -1860,10 +1860,15 @@ async function saveNetworkProxySettings() {
   }
 }
 
+function bandwidthLimitsAvailable() {
+  return providerAvailable(state.status?.provider_supported) &&
+    (!isWindowsAgentStatus(state.status) || state.status?.bandwidth_limits_supported === true);
+}
+
 async function loadBandwidthSettings(force = false) {
   if (!state.agentReachable || bandwidthUi.loading) return;
   const epoch = state.accountEpoch;
-  if (isWindowsAgentStatus(state.status) || !providerAvailable(state.status?.provider_supported)) {
+  if (!bandwidthLimitsAvailable()) {
     bandwidthUi.error = 'Transfer limits are unavailable for this Windows agent.';
     bandwidthUi.loadedEpoch = epoch;
     render();
@@ -1875,12 +1880,13 @@ async function loadBandwidthSettings(force = false) {
   bandwidthUi.error = '';
   render();
   try {
-    const saved = parseTransferLimitsReply(await request<unknown>('bandwidth_limits'));
+    const saved = parseTransferLimitsReply(await request<unknown>('bandwidth_limits'), isWindowsAgentStatus(state.status));
     if (!isCurrentAccount(epoch) || generation !== bandwidthUi.generation) return;
     bandwidthUi.upload = formatTransferRate(saved.limits.upload_bytes_per_second);
     bandwidthUi.download = formatTransferRate(saved.limits.download_bytes_per_second);
     bandwidthUi.revision = saved.revision;
     bandwidthUi.accountId = saved.account_id;
+    bandwidthUi.scopeToken = saved.scope_token;
     bandwidthUi.loadedEpoch = epoch;
   } catch (error) {
     if (isCurrentAccount(epoch) && generation === bandwidthUi.generation && !isStaleAccountRequest(error)) {
@@ -1919,12 +1925,14 @@ async function saveBandwidthLimits() {
       },
       expected_revision: bandwidthUi.revision,
       expected_account_id: bandwidthUi.accountId,
-    }));
+      ...(bandwidthUi.scopeToken ? { expected_scope_token: bandwidthUi.scopeToken } : {}),
+    }), isWindowsAgentStatus(state.status));
     if (!isCurrentAccount(epoch) || generation !== bandwidthUi.generation) return;
     bandwidthUi.upload = formatTransferRate(saved.limits.upload_bytes_per_second);
     bandwidthUi.download = formatTransferRate(saved.limits.download_bytes_per_second);
     bandwidthUi.revision = saved.revision;
     bandwidthUi.accountId = saved.account_id;
+    bandwidthUi.scopeToken = saved.scope_token;
     bandwidthUi.loadedEpoch = epoch;
     state.message = saved.apply_immediately
       ? 'Transfer limits saved and applied to this account’s active content transfers.'
@@ -1944,7 +1952,7 @@ async function saveBandwidthLimits() {
 }
 
 function bandwidthSettingsCard() {
-  const providerEnabled = !isWindowsAgentStatus(state.status) && providerAvailable(state.status?.provider_supported);
+  const providerEnabled = bandwidthLimitsAvailable();
   const canEdit = providerEnabled && state.agentReachable && !state.accountSwitching && state.mutationBusy === 0 &&
     !state.status?.authenticating && bandwidthUi.loadedEpoch === state.accountEpoch && Boolean(bandwidthUi.accountId) && !bandwidthUi.loading && !bandwidthUi.saving;
   const status = bandwidthUi.loading
@@ -2667,7 +2675,7 @@ async function handleAction(action: string, element?: HTMLElement) {
     case 'load-network-proxy': await loadNetworkProxySettings(true); break;
     case 'save-network-proxy': if (!isWindowsAgentStatus(state.status) && providerAvailable(state.status?.provider_supported)) await saveNetworkProxySettings(); break;
     case 'load-bandwidth-limits': await loadBandwidthSettings(true); break;
-    case 'save-bandwidth-limits': if (!isWindowsAgentStatus(state.status) && providerAvailable(state.status?.provider_supported)) await saveBandwidthLimits(); break;
+    case 'save-bandwidth-limits': if (bandwidthLimitsAvailable()) await saveBandwidthLimits(); break;
     case 'show-attention':
       if (state.status?.error) state.page = 'settings';
       else { state.page = 'transfers'; state.transferFilter = 'attention'; }
@@ -4866,6 +4874,7 @@ function activateAccount(profileId: string) {
   bandwidthUi.download = '';
   bandwidthUi.revision = 0;
   bandwidthUi.accountId = null;
+  bandwidthUi.scopeToken = undefined;
   bandwidthUi.loadedEpoch = -1;
   bandwidthUi.loading = false;
   bandwidthUi.saving = false;
