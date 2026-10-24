@@ -2177,3 +2177,13 @@ enabled; Windows shut down normally and the prior candidate remains preserved fo
 rollback. This candidate is installed and closed only in the isolated VM. No
 publication, laptop installation, connected transfer or encrypted-file acceptance
 is implied.
+
+Windows transport component acceptance (24 October): four existing tests now pass
+under the isolated ordinary Windows user. Synthetic loopback requests verify the
+explicit proxy route for WebFinger/OIDC/code exchange/refresh, Graph/DAV, and an
+asynchronous seven-byte content body. Two shared-budget consumers complete the
+existing aggregate-bucket test in 2.01 seconds against its 1.7-second lower bound.
+This verifies the budget algorithm rather than measured multi-socket throughput.
+The Agent test executable was reused, only the OpenCloud test executable was
+linked, and Windows shut down normally. The installed candidate stayed closed and
+unchanged; packaged account networking and encrypted access remain separate.
