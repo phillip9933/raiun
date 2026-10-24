@@ -520,6 +520,7 @@ mod runtime {
             stop: Arc<AtomicBool>,
             gets: Arc<AtomicUsize>,
             mutations: Arc<AtomicUsize>,
+            requests: Arc<Mutex<BTreeMap<&'static str, usize>>>,
             worker: Option<JoinHandle<()>>,
         }
         impl Fixture {
@@ -531,6 +532,8 @@ mod runtime {
                 let gets = Arc::new(AtomicUsize::new(0));
                 let mutations = Arc::new(AtomicUsize::new(0));
                 let (end, content, writes) = (stop.clone(), gets.clone(), mutations.clone());
+                let requests_seen = Arc::new(Mutex::new(BTreeMap::new()));
+                let requests_worker = requests_seen.clone();
                 let server_authority = authority.clone();
                 let worker = thread::spawn(move || {
                     let mut requests = 0;
@@ -539,7 +542,13 @@ mod runtime {
                             Ok((stream, _)) => {
                                 requests += 1;
                                 assert!(requests <= 256, "bounded synthetic read requests");
-                                serve(stream, &server_authority, &content, &writes);
+                                serve(
+                                    stream,
+                                    &server_authority,
+                                    &content,
+                                    &writes,
+                                    &requests_worker,
+                                );
                             }
                             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                                 thread::sleep(Duration::from_millis(2))
@@ -553,6 +562,7 @@ mod runtime {
                     stop,
                     gets,
                     mutations,
+                    requests: requests_seen,
                     worker: Some(worker),
                 }
             }
@@ -617,6 +627,7 @@ mod runtime {
             authority: &str,
             gets: &AtomicUsize,
             mutations: &AtomicUsize,
+            requests: &Mutex<BTreeMap<&'static str, usize>>,
         ) {
             stream.set_nonblocking(false).unwrap();
             stream
@@ -659,6 +670,23 @@ mod runtime {
                 return;
             }
             let child = format!("/dav/personal/Travel.vault/{NAME}");
+            let route_label = match (method, target) {
+                ("GET", "/graph/v1.0/me/drives") => "GET_GRAPH",
+                ("PROPFIND", "/dav/personal/")
+                    if headers.get("depth").map(String::as_str) == Some("0") =>
+                {
+                    "PROPFIND_PARENT_DEPTH0"
+                }
+                ("PROPFIND", "/dav/personal/") => "PROPFIND_PARENT_DEPTH1",
+                ("PROPFIND", "/dav/personal") => "PROPFIND_PARENT_NO_TRAILING_SLASH",
+                ("PROPFIND", "/dav/personal/Travel.vault") => "PROPFIND_VAULT_NO_TRAILING_SLASH",
+                ("PROPFIND", "/dav/personal/Travel.vault/") => "PROPFIND_VAULT",
+                ("PROPFIND", path) if path == child => "PROPFIND_FILE",
+                ("GET", path) if path == child => "GET_CIPHERTEXT",
+                _ => "OTHER",
+            };
+            *requests.lock().unwrap().entry(route_label).or_insert(0) += 1;
+
             match (method, target) {
                 ("GET", "/graph/v1.0/me/drives") => {
                     let graph = format!(
@@ -811,23 +839,111 @@ mod runtime {
             ordinary
                 .install_vault_route(vault.clone(), local_root)
                 .unwrap();
+            // Prove the exact ordinary provider parent listing independently
+            // before asking the OS; drop all prepared leases before native work.
+            let parent_id = ordinary
+                .register_directory(SPACE, "space-root-id", "/")
+                .unwrap();
+            let cancellation = CancellationToken::new();
+            let provider_listing = ordinary
+                .prepare_enumeration(parent_id.as_bytes(), &cancellation)
+                .unwrap_or_else(|error| {
+                    println!(
+                        "VAULT_REFRESH_REQUEST_COUNTS={:?}",
+                        fixture.requests.lock().unwrap()
+                    );
+                    panic!("provider parent listing refused: {error:?}");
+                });
+            let provider_names = provider_listing
+                .children()
+                .iter()
+                .map(|child| child.name.clone())
+                .collect::<Vec<_>>();
+            println!(
+                "VAULT_REFRESH_PROVIDER_NAMES={:?}",
+                &provider_names[..provider_names.len().min(16)]
+            );
+            assert!(provider_names.iter().any(|name| name == "Travel.vault"));
+            drop(provider_listing);
+            println!(
+                "VAULT_REFRESH_BEFORE={:?}",
+                connection.directory_observation()
+            );
             ordinary
                 .refresh_vault_parent_population(&connection, local_root, SPACE, ROOT_ID, ROOT_PATH)
                 .unwrap();
+            println!(
+                "VAULT_REFRESH_AFTER={:?}",
+                connection.directory_observation()
+            );
             let personal = native_path.join("Personal");
+            let external_parent = crate::tests::query_owned_fixture_directory_in_child(&personal);
+            println!(
+                "VAULT_REFRESH_AFTER_EXTERNAL_PARENT={:?}",
+                connection.directory_observation()
+            );
+            println!(
+                "VAULT_REFRESH_REQUEST_COUNTS={:?}",
+                fixture.requests.lock().unwrap()
+            );
+            assert!(
+                external_parent,
+                "external Personal enumeration did not return its one fixture child"
+            );
             let names = std::fs::read_dir(&personal)
                 .unwrap()
                 .map(|entry| entry.unwrap().file_name())
                 .collect::<Vec<_>>();
+            println!("VAULT_REFRESH_OS_NAMES={:?}", &names[..names.len().min(16)]);
+            println!(
+                "VAULT_REFRESH_AFTER_QUERY={:?}",
+                connection.directory_observation()
+            );
+            println!(
+                "VAULT_REFRESH_REQUEST_COUNTS={:?}",
+                fixture.requests.lock().unwrap()
+            );
             assert!(names.iter().any(|name| name == "Travel.vault"));
             let vault_path = personal.join("Travel.vault");
+            let external_vault = crate::tests::query_owned_fixture_directory_in_child(&vault_path);
+            println!(
+                "VAULT_REFRESH_AFTER_EXTERNAL_VAULT={:?}",
+                connection.directory_observation()
+            );
+            assert!(
+                external_vault,
+                "external vault enumeration did not return its one fixture child"
+            );
             let names = std::fs::read_dir(&vault_path)
                 .unwrap()
                 .map(|entry| entry.unwrap().file_name())
                 .collect::<Vec<_>>();
             assert_eq!(names, vec![std::ffi::OsString::from("1")]);
-            let bytes = std::fs::read(vault_path.join("1")).unwrap();
             let expected: Vec<u8> = (0..65537).map(|index| (index * 31 + 7) as u8).collect();
+            use sha2::{Digest, Sha256};
+            let expected_sha = format!("{:x}", Sha256::digest(&expected));
+            let external_read = crate::tests::query_owned_fixture_file_in_child(
+                &vault_path.join("1"),
+                expected.len(),
+                &expected_sha,
+            );
+            println!(
+                "VAULT_REFRESH_AFTER_EXTERNAL_READ={:?}",
+                connection.fetch_observation()
+            );
+            println!(
+                "VAULT_REFRESH_FETCH_VALIDATION_STAGE={}",
+                connection.fetch_validation_stage()
+            );
+            println!(
+                "VAULT_REFRESH_REQUEST_COUNTS={:?}",
+                fixture.requests.lock().unwrap()
+            );
+            assert!(
+                external_read,
+                "external decrypted read length/hash mismatch"
+            );
+            let bytes = std::fs::read(vault_path.join("1")).unwrap();
             assert_eq!(bytes, expected);
             assert!(
                 (1..=16).contains(&fixture.gets.load(Ordering::Acquire)),

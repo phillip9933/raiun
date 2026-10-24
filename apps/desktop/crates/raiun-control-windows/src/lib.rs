@@ -5,6 +5,9 @@
 //! Remote pipe clients are rejected by the kernel. JSON framing and limits
 //! remain implemented in `raiun-control`.
 
+#[cfg(any(windows, test))]
+pub mod autostart;
+
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod private_directory;

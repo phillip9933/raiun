@@ -2030,6 +2030,11 @@ impl ConfiguredRootConnection {
     }
 
     #[cfg(feature = "synthetic-agent-integration")]
+    pub(super) fn fetch_validation_stage(&self) -> usize {
+        self.state.fetch_validation_stage.load(Ordering::Relaxed)
+    }
+
+    #[cfg(feature = "synthetic-agent-integration")]
     pub(super) fn fetch_observation(&self) -> (usize, usize, usize, i32) {
         (
             self.state.fetch_callbacks.load(Ordering::Relaxed),
@@ -3850,6 +3855,8 @@ mod hydration_inventory {
 }
 
 struct CallbackState {
+    #[cfg(feature = "synthetic-agent-integration")]
+    fetch_validation_stage: AtomicUsize,
     hydrated_files: Mutex<hydration_inventory::HydratedFileInventory>,
     readiness: std::sync::atomic::AtomicU8,
     readiness_fetch_rejections: AtomicUsize,
@@ -3929,6 +3936,8 @@ impl CallbackState {
             CALLBACK_READY
         };
         Self {
+            #[cfg(feature = "synthetic-agent-integration")]
+            fetch_validation_stage: AtomicUsize::new(0),
             hydrated_files: Mutex::new(hydration_inventory::HydratedFileInventory::new()),
             readiness: std::sync::atomic::AtomicU8::new(readiness),
             readiness_fetch_rejections: AtomicUsize::new(0),
@@ -5556,6 +5565,16 @@ unsafe extern "system" fn fetch_data_callback(
     let parameters = unsafe { &*parameters };
     let param_size = parameters.param_size as usize;
     guard.0.record_fetch_callback(param_size);
+    macro_rules! observe_fetch {
+        ($stage:expr) => {{
+            #[cfg(feature = "synthetic-agent-integration")]
+            guard
+                .0
+                .fetch_validation_stage
+                .store($stage, Ordering::Relaxed);
+        }};
+    }
+    observe_fetch!(1);
     if !valid_fetch_data_param_size(param_size) {
         execute_transfer(info, 0, None, STATUS_UNSUCCESSFUL);
         return;
@@ -5615,10 +5634,12 @@ unsafe extern "system" fn fetch_data_callback(
     // Only verified vault identities require this path admission. Ordinary
     // callbacks keep their existing behavior. Keep all no-follow pins alive
     // through the final native publication; never reopen names per data slice.
+    observe_fetch!(2);
     let tracked_path = match guard.0.backend.requires_hydration_inventory(identity) {
         Ok(false) => None,
         Ok(true) => {
             let admitted = (|| {
+                observe_fetch!(3);
                 let root = guard.0.root_identity?;
                 if identity.len() != 16
                     || info.volume_serial_number != root.volume_serial
@@ -5627,7 +5648,8 @@ unsafe extern "system" fn fetch_data_callback(
                 {
                     return None;
                 }
-                let pinned = callback_path(
+                observe_fetch!(4);
+                let pinned = match callback_path(
                     guard.0.root_path.as_deref()?,
                     info.volume_dos_name,
                     info.normalized_path,
@@ -5635,10 +5657,19 @@ unsafe extern "system" fn fetch_data_callback(
                     info.file_id as u64,
                     info.file_size as u64,
                     &guard.0.last_close_path_common_prefix_bytes,
-                )
-                .ok()?;
+                ) {
+                    Ok(pinned) => pinned,
+                    Err(stage) => {
+                        let _ = stage;
+                        observe_fetch!(1000 + usize::from(stage));
+                        return None;
+                    }
+                };
+                observe_fetch!(5);
                 let opaque: [u8; 16] = identity.try_into().ok()?;
+                observe_fetch!(6);
                 verify_completion_identity(pinned.entry.0, &opaque).ok()?;
+                observe_fetch!(7);
                 let final_path = final_path_for_handle(pinned.entry.0).ok()?;
                 if !windows_path_is_within(&final_path, &pinned.root_final_path) {
                     return None;
@@ -5675,6 +5706,7 @@ unsafe extern "system" fn fetch_data_callback(
             return;
         }
     };
+    observe_fetch!(8);
     let mut tracked = false;
     // The deadline starts before waiting for one of the two callback-wide
     // staging permits, so backpressure is part of the same bounded request.
@@ -5691,6 +5723,7 @@ unsafe extern "system" fn fetch_data_callback(
         execute_transfer(info, range.offset, None, status);
         return;
     };
+    observe_fetch!(9);
     let result = stream_prepared_windows(
         guard.0.backend.as_ref(),
         identity,
@@ -5698,6 +5731,7 @@ unsafe extern "system" fn fetch_data_callback(
         info.file_size as u64,
         &fetch_permit.cancellation,
         |offset, slice| {
+            observe_fetch!(10);
             let _request_publish =
                 fetch_permit
                     .begin_publish()
@@ -5706,6 +5740,7 @@ unsafe extern "system" fn fetch_data_callback(
                         error,
                         transfer_refused: false,
                     })?;
+            observe_fetch!(11);
             if !tracked {
                 if let Some((pinned, components)) = tracked_path.as_ref() {
                     let id: [u8; 16] = identity.try_into().map_err(|_| WindowStreamError {
@@ -5740,7 +5775,9 @@ unsafe extern "system" fn fetch_data_callback(
                 }
                 tracked = true;
             }
+            observe_fetch!(12);
             let execute_result = execute_transfer(info, offset, Some(slice), STATUS_SUCCESS);
+            observe_fetch!(13);
             guard.0.record_failed_hresult(execute_result);
             guard
                 .0
@@ -5758,6 +5795,11 @@ unsafe extern "system" fn fetch_data_callback(
             Ok(())
         },
     );
+    if result.is_ok() {
+        observe_fetch!(14);
+    }
+    #[cfg(feature = "synthetic-agent-integration")]
+    eprintln!("synthetic fetch stream result_ok={}", result.is_ok());
     guard
         .0
         .record_staged_duration(staged_fetch_started.elapsed());

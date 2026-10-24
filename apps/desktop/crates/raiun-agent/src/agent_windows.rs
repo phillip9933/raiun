@@ -58,6 +58,15 @@ use std::{
 use zeroize::Zeroizing;
 
 const PROVIDER_UNAVAILABLE: &str = "This operation is not available in this Windows beta.";
+
+fn windows_startup_executable() -> Result<PathBuf, String> {
+    std::env::current_exe()
+        .map_err(|_| "The installed app path is unavailable".to_owned())?
+        .parent()
+        .map(|directory| directory.join("raiun-desktop-shell.exe"))
+        .ok_or_else(|| "The installed app path is unavailable".to_owned())
+}
+
 const MAX_SESSION_BYTES: usize = 65_536;
 const MAX_ROOT_CONFIG_BYTES: usize = 16 * 1024;
 // The 9219 isolated native save + lifecycle checks passed. Non-test candidates
@@ -1610,6 +1619,16 @@ impl WindowsAgent {
                 Ok((self.windows_offline_file_request(request, "cancel")?, false))
             }
             "windows_recovery_list" => Ok((self.list_recovered_edits(request)?, false)),
+            "set_autostart" => {
+                let enabled = request
+                    .get("enabled")
+                    .and_then(Value::as_bool)
+                    .ok_or("Choose whether to start Raiun at login")?;
+                let executable = windows_startup_executable()?;
+                raiun_control_windows::autostart::configure_autostart(&executable, enabled)
+                    .map_err(|_| "Could not confirm Windows startup settings; check the setting before trying again")?;
+                Ok((json!({"enabled":enabled}), false))
+            }
             "diagnostics" => {
                 let mounted = self.provider.is_connected();
                 let state = self
@@ -1669,6 +1688,13 @@ impl WindowsAgent {
             .lock()
             .ok()
             .and_then(|value| value.clone());
+        // Startup is a per-user app preference, independent of account secrets.
+        // Query before taking account state; status never writes an entry.
+        let autostart = windows_startup_executable().ok().and_then(|executable| {
+            raiun_control_windows::autostart::autostart_status(&executable)
+                .ok()
+                .flatten()
+        });
         let state = self
             .state
             .lock()
@@ -1694,7 +1720,7 @@ impl WindowsAgent {
                 "recovery_scope_token": self.provider.configuration_recovery_scope_token(value, state.active_generation).ok(),
             })),
             "error": state.error.as_deref().or(folder_error.as_deref()).or_else(|| (!provider_supported).then_some(PROVIDER_UNAVAILABLE)),
-            "autostart": null,
+            "autostart": autostart,
             "recovery_folder": null,
             "encrypted_edit_recovery_available": false,
             "offline_cache": null,

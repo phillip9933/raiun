@@ -98,6 +98,23 @@ The next-source Media wording now distinguishes a reachable signed-out agent
 from an unavailable agent; 22 focused UI tests and the UI build passed. That
 wording correction is not yet part of the installed candidate above.
 
+## Local Windows startup control — 24 October 2026 JST
+
+The next source connects the existing Start at login control to an explicit
+current-user opt-in. Status only reads the setting; installation, startup and
+these tests never enable it. The command targets the actual packaged
+`raiun-desktop-shell.exe`, is fully quoted, and respects the Windows Run command
+length limit. Unknown or foreign entries are not overwritten or removed.
+Concurrent changes can make the outcome uncertain; an error does not promise
+that every attempted change was rolled back.
+
+Four pure policy/format tests and Windows compilation/linting pass. The combined
+Linux workspace gates pass with 963 tests and 14 ignored. Actual Windows startup
+activation and packaged GUI acceptance remain unverified; the installed 2704
+candidate is unchanged. The encrypted-folder native diagnostic now observes
+successful directory population, but its external content read still fails;
+read and lock-cleanup acceptance are not complete.
+
 ## Windows cloud-drive candidate — 23 October 2026 JST
 
 The isolated ordinary-user Windows save and conditional lifecycle checks passed

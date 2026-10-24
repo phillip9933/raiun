@@ -359,6 +359,12 @@ impl ConfiguredRootConnection {
         self.inner.directory_observation()
     }
 
+    /// Fixed admission-stage number only; no paths or account data.
+    #[cfg(feature = "synthetic-agent-integration")]
+    pub fn fetch_validation_stage(&self) -> usize {
+        self.inner.fetch_validation_stage()
+    }
+
     /// Bounded hydration callback telemetry for the synthetic agent test.
     #[cfg(feature = "synthetic-agent-integration")]
     pub fn fetch_observation(&self) -> (usize, usize, usize, i32) {
@@ -982,7 +988,7 @@ mod tests {
     /// Run only in the isolated Windows test VM. It registers an internally
     /// created empty temp directory and immediately unregisters it.
     #[cfg(windows)]
-    fn query_owned_fixture_directory_in_child(path: &std::path::Path) -> bool {
+    pub(crate) fn query_owned_fixture_directory_in_child(path: &std::path::Path) -> bool {
         use std::{
             process::{Command, Stdio},
             thread,
@@ -1013,6 +1019,49 @@ mod tests {
                 Some(status) => break status.success(),
                 None if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
                 None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// Same bounded external-client pattern; emits only length and SHA256.
+    #[cfg(windows)]
+    pub(crate) fn query_owned_fixture_file_in_child(
+        path: &std::path::Path,
+        expected_len: usize,
+        expected_sha: &str,
+    ) -> bool {
+        use std::{
+            process::{Command, Stdio},
+            thread,
+            time::{Duration, Instant},
+        };
+        assert!(path.is_absolute(), "fixture path must be absolute");
+        let mut child = Command::new("powershell.exe")
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                "$ErrorActionPreference='Stop'; try { $b=[System.IO.File]::ReadAllBytes($env:RAIUN_SYNTHETIC_FILE); $h=[System.Security.Cryptography.SHA256]::Create(); try { $s=[BitConverter]::ToString($h.ComputeHash($b)).Replace('-','').ToLowerInvariant(); [Console]::WriteLine(('{0}|{1}' -f $b.Length,$s)) } finally { $h.Dispose() } } catch { $e=$_.Exception; while ($e.InnerException) { $e=$e.InnerException }; [Console]::WriteLine(('ERROR|{0}' -f $e.HResult)); exit 24 }"])
+            .env("RAIUN_SYNTHETIC_FILE", path).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+            .spawn().expect("start bounded synthetic file-read process");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            match child.try_wait().expect("poll synthetic file-read process") {
+                Some(status) => {
+                    let output = child
+                        .wait_with_output()
+                        .expect("collect synthetic file-read result");
+                    let summary =
+                        String::from_utf8(output.stdout).expect("ASCII file-read summary");
+                    println!("VAULT_REFRESH_EXTERNAL_FILE={}", summary.trim());
+                    println!("VAULT_REFRESH_EXTERNAL_FILE_STATUS={status}");
+                    return status.success()
+                        && summary.trim() == format!("{expected_len}|{expected_sha}");
+                }
+                None if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+                None => {
+                    println!("VAULT_REFRESH_EXTERNAL_FILE_TIMEOUT=true");
                     let _ = child.kill();
                     let _ = child.wait();
                     return false;
