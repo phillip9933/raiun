@@ -2184,7 +2184,7 @@ The next candidate remains unpublished. Startup control, bandwidth limits and
 signed-out proxy settings have source and focused native component evidence.
 The installed unsigned candidate `2955f944…` passed the signed-out controls/tray
 package checks below and is closed. Startup was never activated. This package
-predates the disabled vault changes and does not establish their acceptance.
+predates the current vault changes and does not establish their package acceptance.
 
 Encrypted cleanup (C05) now has an actual Windows writer-exclusion pass and
 clean-file cleanup pass. The native fixture read and verified 65,537 bytes,
@@ -2199,21 +2199,24 @@ The cleanup method holds continuous exclusive protected file access and checks
 identity, dirty ranges, route retirement and post-cleanup residency. Its single
 update omits the optional atomic metadata-USN comparison; that limitation remains
 explicit in the Cloud Files crate's `SAFETY.md`. There is no production fallback
-or force-dehydrate. Vault capability exposure remains disabled.
+or force-dehydrate. After r107 native acceptance, the local non-test candidate
+enables read-only native vault capability; the new exact package is still under
+verification. The older installed candidate remains closed.
 
 Retained-root catalogue and hydration-history restoration is now implemented
-and source-qualified; protected storage also passed native tests. The normal
-new-Agent reconnection fixture remains unaccepted because r105 stopped earlier
-at the post-Lock read timeout. Missing or incomplete history still refuses vault
-admission. A full process/crash restart with resident plaintext is not claimed.
+and source-qualified; protected storage also passed native tests. The r107
+broker fixture passed normal new-Agent reconnection after completed Lock, with
+no forgotten secret restored and a new verified read/Lock. Missing or incomplete
+history still refuses vault admission. A process/crash restart with resident
+plaintext is not claimed.
 
 Remembered unlock (C06) now has the disabled source foundation and native
 credential-custody component evidence below. The actual broker lifecycle fixture now passes the
 credential/session flow, including saved unlock and Forget. Its empty lock
 inventory cannot establish payload cleanup or full C06 completion. The current
-payload run verified manual/saved reads and the first Lock cleanup, then timed
-out on the locked read; a zero-length native error-response defect was corrected
-locally for a focused rerun. Reuse unchanged evidence and preserve failed roots,
+r107 payload run now passes manual/saved reads, explicit locked-read refusal,
+manual reopening/second Lock and normal new-Agent reconnection/read/Lock.
+Earlier locked-read and later-close failures remain preserved with their fixes. Reuse unchanged evidence and preserve failed roots,
 recovery and the installed app. No testing-agent permission restriction remains;
 source checks still do not substitute for native or exact-package results.
 
