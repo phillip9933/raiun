@@ -29,11 +29,19 @@ reported as an overall successful test run. Direct AppImage FUSE/file-manager
 integration was not exercised. These packages are local candidates, with no
 publication or new laptop installation.
 
-Later source changes are separate from these frozen packages. Windows folder
-admission now also rejects overlap with saved same-account media sources,
-including disabled jobs and restored pairs. Windows compilation/lint passed;
-its focused native regression and cross-profile source admission remain pending.
-Folder/media feature flags stay disabled until that admission is integrated.
+Later source changes are separate from these frozen packages. Six focused
+ordinary-user native checks now pass for protected existing-store inventory,
+SQLite reopen, exact source receipts, account/source separation, folder sync and
+media worker operations. The first test's wrapper parser failure is preserved
+separately from its verified native pass; it was not rerun. The VM shut down
+normally. Source exclusions include disabled media jobs and restored pairs.
+
+The non-test candidate now enables folder sync, media backup and their existing
+pause controls. Unit-test builds remain inactive. Final source gates and an
+exact installer upgrade/offline GUI check are next; the previously accepted b7
+installer remains installed and closed in the VM. This is not authenticated
+packaged cloud acceptance or whole-category completion. Vault unlock remains
+unimplemented on Windows and its capability stays disabled.
 
 ## Windows cloud-drive candidate — 23 October 2026 JST
 
@@ -45,8 +53,7 @@ account-bound provider and verified-save path. Ordinary unit tests remain
 kernel-inactive and ignored native fixtures retain explicit per-instance opt-in.
 Actual non-test package installation and offline GUI checks passed as described
 above; authenticated native file-manager package acceptance remains unclaimed. No new Windows release has been published, and no real
-cloud account or files were used for acceptance. Folder/media and vault
-capability gates remain independent and disabled.
+cloud account or files were used for acceptance. Folder/media candidate activation is described above. Vault capability remains disabled.
 
 ## Windows accounts — 23 October 2026 JST
 
@@ -65,8 +72,8 @@ logged-out root inventory, lifetime owner exclusion, issuer-bound metadata decod
 and integrated broker routing/persistence/reopen. Account switching is now exposed
 only by the non-test broker; ordinary unit builds remain inactive. The exact
 non-test installer and sign-in-first account dialog passed focused offline
-package acceptance; authenticated live-account acceptance remains unclaimed. Cross-account folder/media source admission
-is required before enabling those separate features; they remain blocked.
+package acceptance; authenticated live-account acceptance remains unclaimed. Cross-account folder/media source admission now has focused native acceptance;
+exact candidate package acceptance remains pending.
 These source changes are unpublished and do not change the installed beta.
 
 ## Windows folder and media integration — 23 October 2026 JST
@@ -81,7 +88,7 @@ The existing Windows command worker owns ordinary-folder operations independentl
 of Cloud Files registration. One focused ordinary-user native workflow passed
 initial download, conditional edit upload, pause/resume, exclusion, removal and
 runtime reopen while preserving local data. This is component acceptance;
-production capability flags remain off and packaged GUI acceptance is pending.
+non-test candidate capability flags are enabled and packaged GUI acceptance is pending.
 Account transitions revoke subsequent writes and drain the worker before
 credential replacement. Source and destination handles reject reparse points;
 immutable source handles span upload and verified readback.
@@ -107,14 +114,13 @@ Early Windows compilation now covers idle scheduling. Two ordinary-user MSVC
 engine cases passed normal media import/verified updates and collision/lost-response
 recovery across engine reopen. The actual ordinary-user worker-control case also passed stability waiting,
 verified upload, pause and account-scoped recovery checks. This is not GUI or
-packaged acceptance. Media execution and its UI capability
-remain disabled, and no new public release is claimed.
+packaged acceptance. Media execution and its UI capability are enabled in the non-test candidate;
+exact package acceptance is pending and no new public release is claimed.
 
 Windows also has a read-only vault-inspection path using existing authenticated
 Graph/DAV metadata. It grants no unlocked session, remembered password, verified
 cryptographic state or decrypted native route; the vault UI capability stays off.
-Installing the account worker for inspection cannot start background transfers
-while the corresponding folder/media feature flags are disabled.
+Inspection does not unlock a vault or authorize encrypted transfers.
 
 ## Next-release Windows save-back work — 23 October 2026 JST
 

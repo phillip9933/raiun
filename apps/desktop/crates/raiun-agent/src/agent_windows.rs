@@ -27,11 +27,11 @@ mod windows_profile_registry;
 mod windows_profiles;
 
 // Focused native broker acceptance passed. Enable candidate account routing;
-// pair/media admission remains independently disabled below.
+// Folder/media source receipts bind the exact authenticated scope and source identity.
 const WINDOWS_ACCOUNTS_ENABLED: bool = !cfg!(test);
-const WINDOWS_FOLDER_SYNC_ENABLED: bool = false;
-// Media controls remain gated pending worker and package acceptance.
-const WINDOWS_MEDIA_METADATA_ENABLED: bool = false;
+const WINDOWS_FOLDER_SYNC_ENABLED: bool = !cfg!(test);
+// Non-test candidate enables verified worker paths; exact package acceptance is separate.
+const WINDOWS_MEDIA_METADATA_ENABLED: bool = !cfg!(test);
 
 use clap::{Parser, Subcommand};
 use raiun_cloudfiles_windows::{
@@ -1500,10 +1500,10 @@ impl WindowsAgent {
             "auth_generation": state.active_generation,
             "provider_supported": provider_supported,
             "folder_sync_supported": WINDOWS_FOLDER_SYNC_ENABLED,
-            "media_jobs_supported": false,
+            "media_jobs_supported": WINDOWS_MEDIA_METADATA_ENABLED,
             "vaults_supported": false,
             "account_switch_supported": false,
-            "pause_supported": false,
+            "pause_supported": WINDOWS_FOLDER_SYNC_ENABLED,
             "authenticating": state.authenticating,
             "refreshing": state.refreshing,
             "session_expires_at": session.map(|value| value.expires_at),

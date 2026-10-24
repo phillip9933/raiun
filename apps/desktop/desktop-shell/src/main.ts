@@ -5339,6 +5339,7 @@ async function refresh(showError = true, forceSpacesRefresh = false) {
       state.status.connected,
       action => request(action),
       state.status.folder_sync_supported,
+      !isWindowsAgentStatus(state.status),
     );
     state.pairs = syncData.pairs;
     state.transfers = syncData.transfers;

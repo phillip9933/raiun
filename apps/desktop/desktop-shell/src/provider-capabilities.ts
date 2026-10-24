@@ -13,8 +13,11 @@ export async function loadProviderSyncData<TPair, TTransfer>(
   connected: boolean,
   request: (action: string) => Promise<unknown>,
   folderSyncSupported?: boolean,
+  readDisconnectedPairs = true,
 ): Promise<{ pairs: TPair[]; transfers: TTransfer[] }> {
   if (!providerFeatureAvailable(providerSupported, folderSyncSupported)) return { pairs: [], transfers: [] };
+
+  if (!connected && !readDisconnectedPairs) return { pairs: [], transfers: [] };
 
   const pairsPromise = request('pairs') as Promise<TPair[]>;
   if (!connected) return { pairs: await pairsPromise, transfers: [] };
