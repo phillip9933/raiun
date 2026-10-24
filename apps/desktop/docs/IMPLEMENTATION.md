@@ -2488,3 +2488,21 @@ the cause. Next work adds bounded, value-free support diagnostics and makes
 incomplete Lock explicit and retryable, retaining all dirty/history and
 exclusive-cleanup safeguards. Native component r107 evidence remains valid
 within its narrower scope, but does not supersede this installed failure.
+
+### Follow-up installed Windows run (25 October, r109)
+
+The candidate with incomplete-Lock status and bounded cleanup diagnostics built,
+upgraded, and connected through the same public synthetic AuthFlow. All three
+installed payloads matched the manifest. Drive configuration then refused with
+`Reserved folder changed`; the new profile remained without a root. Unlock,
+file reading, Forget, Lock, and cleanup diagnostics were therefore not exercised.
+Normal fixture stop, application quit, zero owned processes, OS shutdown, and
+cold evidence were recorded. The prior configured root and rollback payloads
+remain preserved. This is a partial failure, not package acceptance.
+
+A test-helper argument-quoting defect was subsequently found: it doubles JSON
+backslashes before passing requests to the Windows process. The saved public
+root projection contains doubled separators. Whether this explains the native
+reservation refusal is being checked using harmless argument roundtrips and
+fresh temporary directories. No existing reservation is discarded or rebound,
+and no native identity or cleanup guard has been relaxed.
