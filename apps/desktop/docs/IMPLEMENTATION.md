@@ -2186,25 +2186,26 @@ The installed unsigned candidate `2955f944…` passed the signed-out controls/tr
 package checks below and is closed. Startup was never activated. This package
 predates the disabled vault changes and does not establish their acceptance.
 
-The immediate blocker remains encrypted content cleanup (C05). The corrected
-full callback path now permits a verified 65,537-byte encrypted file read in the
-isolated Windows root. The clean-close false blocker and read-only handle open
-failure have been corrected. The nonzero-USN version still refused cleanup with
-`ERROR_CLOUD_FILE_NOT_IN_SYNC`; that failure and root are retained. The next
-fixed-fence native run passed writer exclusion and verified the file read, then
-refused with `ConfiguredRootChanged`. Its trace does not yet establish which
-comparison failed or that the update succeeded. Test-only stage diagnostics are
-source-qualified; all cleanup checks remain intact. Reading alone does not establish safe
-Lock or restart custody.
+Encrypted cleanup (C05) now has an actual Windows writer-exclusion pass and
+clean-file cleanup pass. The native fixture read and verified 65,537 bytes,
+retired the route, and proved the file had no remaining on-disk ranges. Earlier
+USN/tag-check failures and their roots remain preserved. The dirty-edit fixture
+then failed before reaching its cleanup assertion: its provider-process write
+did not produce the required additional close notification. A focused external
+client write replaces that fixture step; its source checks pass, but its native
+result remains pending. No production dirty check or cleanup guard was relaxed.
 
-The next source-qualified method holds continuous exclusive protected file
-access through cleanup and checks dirty ranges, identity, route retirement and
-post-cleanup residency. Its single update omits the optional atomic metadata-USN
-comparison; that limitation is explicit in the Cloud Files crate's `SAFETY.md`.
-It must pass the finite native sequence: writer exclusion, hydrated clean-file
-cleanup, and real dirty-edit refusal with bytes preserved. Stop on any failure.
-There is no cleanup fallback, force-dehydrate or read-only attribute clearing in
-production. Vault capability exposure remains disabled.
+The cleanup method holds continuous exclusive protected file access and checks
+identity, dirty ranges, route retirement and post-cleanup residency. Its single
+update omits the optional atomic metadata-USN comparison; that limitation remains
+explicit in the Cloud Files crate's `SAFETY.md`. There is no production fallback
+or force-dehydrate. Vault capability exposure remains disabled.
+
+Normal app restart remains a separate implementation gap: retained roots must
+restore authenticated historical catalogue and hydration records before vault
+admission can become safe. Protected storage and isolated metadata models are
+available; the publication and restart joins are still in progress. The existing
+incomplete-history refusal stays in place.
 
 Remembered unlock (C06) now has the disabled source foundation and native
 credential-custody component evidence below. The actual broker lifecycle fixture now passes the
@@ -2323,3 +2324,19 @@ persistence, status and session behavior independently, but it cannot qualify
 plaintext cleanup, restart behavior or full C06 completion. The separate C05
 read-and-cleanup fixture still owns payload cleanup acceptance. Its original
 ignore-label dependency is superseded for this narrower component acceptance.
+
+### Windows protected history storage acceptance (25 October 2026)
+
+Two focused native tests passed as the isolated ordinary Windows user: existing
+credential document compatibility/CAS/reopen/profile isolation, and separate
+protected custody history CAS/reopen/credential-domain isolation. The original
+successful MSVC artifact was reused without another build. Both tests returned
+zero; the owned processes exited, and guest shutdown and cold preservation were
+confirmed. Evidence is retained outside Git in
+`outputs/local-windows-native-20261023-r1/c06-custody-store-two-continuation-actual-r1/`.
+
+This establishes the protected storage primitive only. It does not establish
+write-before-hydration integration, restart completeness, full C06 acceptance or
+acceptance of a newer installed package. The original launcher-state mismatch
+was a pre-execution harness failure; it remains preserved alongside the corrected
+run. No additional owner permission was needed.
