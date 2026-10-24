@@ -15,14 +15,21 @@ refer to maintainer archives that are not part of this public source tree.
 Windows vault access remains disabled in production. The isolated native broker
 has passed manual remember, lock, saved unlock, pathless Forget while staying
 unlocked, and final lock. That component run used no encrypted file payload;
-full native payload cleanup and ordinary lock/reopen acceptance remain pending.
-The prior native cleanup diagnostic confirmed a successful dehydration request
-followed by a legitimate Cloud Files reparse-tag variant change. The source
-now accepts only the documented Cloud tag family while retaining file identity,
-clean-state, custody and empty-on-disk-range checks. It is not yet an accepted
-cleanup pass. The latest four-case continuation stopped before test execution
-on a stale exported drive-letter check; that harness failure is retained and a
-volume-identity-bound correction is being reviewed.
+broker payload and ordinary lock/reopen acceptance remain pending. The native
+registered-vault component now passes external enumeration, a verified 65,537-byte
+decrypted read, route retirement and cleanup with the final on-disk range query
+empty. Its exclusive cleanup-handle writer exclusion check also passes. The
+source accepts only the documented Cloud tag family while retaining file
+identity, clean-state and custody checks.
+
+The same run stopped at the dirty negative fixture: its provider-process write
+produced no additional observed close notification. The cleanup-refusal and dirty
+byte-preservation assertions were not reached, and the Agent payload case did
+not run. A fixture-only correction now performs the real edit in a bounded
+external client; native verification is pending. The prior empty-environment and
+stale drive-letter harness failures are retained separately. The successful run
+verified original executable hashes, ordinary-user context, zero owned processes
+at closure and normal guest shutdown; no package or restart pass is inferred.
 
 A normal process restart is a concrete remaining activation blocker. Retained
 registrations deliberately start with incomplete hydration history, and vault
