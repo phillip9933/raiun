@@ -401,6 +401,15 @@ struct ActiveProviderBinding {
     personal_root_resource_id: String,
 }
 
+// Pure admission check used before any native parent-population operation.
+fn vault_worker_binding_current(
+    generation: u64,
+    requested: &ActiveProviderBinding,
+    active: Option<&ActiveProviderBinding>,
+) -> bool {
+    requested.generation != 0 && generation == requested.generation && active == Some(requested)
+}
+
 struct VerifiedVaultBackend {
     backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
     custody: Arc<windows_vault_custody::WindowsVaultCustody>,
@@ -759,8 +768,10 @@ impl ProviderManager {
                         }
                         ProviderCommand::RefreshVaultParent { binding, space_id, root_resource_id, root_path, response } => {
                             let mut result = (|| {
-                                if binding.generation == 0 || worker_generation.load(Ordering::Acquire) != binding.generation
-                                    || active_binding.as_ref() != Some(&binding) || !retired_vaults.is_empty() {
+                                if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref())
+                                    || !retired_vaults.is_empty() || vault_custody.is_none()
+                                    || !connection.as_ref().is_some_and(|connection| connection.can_admit_vault_session())
+                                    || backend.as_ref().is_none_or(|backend| backend.is_revoked()) {
                                     return Err("The Windows drive changed before vault enumeration".to_owned());
                                 }
                                 let backend = backend.as_ref().ok_or("The Windows drive is unavailable")?;
@@ -2075,7 +2086,7 @@ impl WindowsAgent {
         let pause = self
             .provider
             .pause_snapshot(state.active_generation, state.online_authenticated);
-        Ok(json!({
+        let mut status = json!({
             "connected": session.is_some() && state.online_authenticated,
             "offline": session.is_some() && !state.online_authenticated,
             "server": session.map(|value| value.server.as_str()),
@@ -2105,14 +2116,18 @@ impl WindowsAgent {
             "network_proxy_supported": true,
             "proxy_edit_requires_sign_out": state.session.is_some(),
             "media_jobs_supported": WINDOWS_MEDIA_METADATA_ENABLED,
-            "vaults_supported": false,
+            "vaults_supported": WINDOWS_VAULT_SESSIONS_ENABLED,
             "account_switch_supported": false,
             "pause_supported": WINDOWS_FOLDER_SYNC_ENABLED,
             "authenticating": state.authenticating,
             "refreshing": state.refreshing,
             "session_expires_at": session.map(|value| value.expires_at),
             "session_cleanup_uncertain": state.session_cleanup_uncertain,
-        }))
+        });
+        if WINDOWS_VAULT_SESSIONS_ENABLED {
+            status["vault_access_mode"] = json!("native_read_only");
+        }
+        Ok(status)
     }
 
     /// Authenticated read-only discovery. No upload approval, dispatch or
@@ -7715,6 +7730,31 @@ mod tests {
     }
 
     #[cfg(all(windows, debug_assertions))]
+    #[test]
+    fn vault_readiness_binding_refuses_stale_missing_or_foreign_root() {
+        use super::vault_worker_binding_current;
+        let binding = ActiveProviderBinding {
+            generation: 7,
+            path: PathBuf::from(r"C:\SyntheticRoot"),
+            identity: raiun_cloudfiles_windows::ConfiguredRootIdentity {
+                volume_serial: 9,
+                file_index: 42,
+            },
+            personal_space_id: "space".into(),
+            personal_root_resource_id: "root".into(),
+        };
+        assert!(vault_worker_binding_current(7, &binding, Some(&binding)));
+        assert!(!vault_worker_binding_current(8, &binding, Some(&binding)));
+        assert!(!vault_worker_binding_current(7, &binding, None));
+        let mut foreign = binding.clone();
+        foreign.identity.file_index += 1;
+        assert!(!vault_worker_binding_current(7, &binding, Some(&foreign)));
+        foreign = binding.clone();
+        foreign.generation = 0;
+        assert!(!vault_worker_binding_current(0, &foreign, Some(&foreign)));
+    }
+
+    #[cfg(all(windows, debug_assertions))]
     fn broker_remembered_lifecycle_fixture(payload: bool) {
         use super::{
             DpapiSessionStore, DpapiStore, VaultCredentialStore, windows_profile_registry,
@@ -7841,7 +7881,7 @@ mod tests {
         assert_eq!(unlocked["unlocked"], true);
         assert_eq!(unlocked["remembered_status"], "known_saved");
         assert_eq!(unlocked["root_resource_id"], "synthetic-vault-root");
-        assert_eq!(unlocked["vault_mount_ready"], false);
+        assert_eq!(unlocked["vault_mount_ready"], true);
         assert!(sessions.is_unlocked(&scope).unwrap());
         let mut lock = target();
         lock["action"] = json!("vault_lock");
@@ -7850,6 +7890,11 @@ mod tests {
             false
         );
         assert!(!sessions.is_unlocked(&scope).unwrap());
+        assert!(
+            runtime
+                .confirm_windows_vault_readiness(&scope, "/Travel.vault")
+                .is_err()
+        );
         let mut saved = target();
         saved["action"] = json!("vault_unlock");
         saved["use_saved"] = json!(true);
@@ -7891,6 +7936,10 @@ mod tests {
             sessions.is_unlocked(&scope).unwrap(),
             "Forget does not lock"
         );
+        let readiness_path = "/Travel.vault";
+        runtime
+            .confirm_windows_vault_readiness(&scope, readiness_path)
+            .unwrap();
         let account = runtime.provider.bandwidth.scope().unwrap().unwrap();
         let remembered = windows_vault_credentials::Scope::from_trusted_account(
             &profile,
@@ -7915,6 +7964,11 @@ mod tests {
             false
         );
         assert!(!sessions.is_unlocked(&scope).unwrap());
+        assert!(
+            runtime
+                .confirm_windows_vault_readiness(&scope, "/Travel.vault")
+                .is_err()
+        );
         if payload {
             let file = drive.join("Personal/Travel.vault/1");
             let metadata = std::fs::metadata(&file).unwrap();
@@ -7977,6 +8031,11 @@ mod tests {
             );
             assert!(!sessions.is_unlocked(&scope).unwrap());
             assert!(
+                runtime
+                    .confirm_windows_vault_readiness(&scope, "/Travel.vault")
+                    .is_err()
+            );
+            assert!(
                 !windows_vault_credentials::contains_saved(
                     &VaultCredentialStore {
                         store: runtime.session_store.as_ref(),
@@ -8030,6 +8089,11 @@ mod tests {
             )
             .unwrap();
             assert!(!restarted_sessions.is_unlocked(&scope).unwrap());
+            assert!(
+                restarted
+                    .confirm_windows_vault_readiness(&scope, "/Travel.vault")
+                    .is_err()
+            );
             let account = restarted.provider.bandwidth.scope().unwrap().unwrap();
             let remembered = windows_vault_credentials::Scope::from_trusted_account(
                 &profile,
@@ -8106,6 +8170,11 @@ mod tests {
                 false
             );
             assert!(!restarted_sessions.is_unlocked(&scope).unwrap());
+            assert!(
+                restarted
+                    .confirm_windows_vault_readiness(&scope, "/Travel.vault")
+                    .is_err()
+            );
             assert!(
                 !windows_vault_credentials::contains_saved(
                     &VaultCredentialStore {

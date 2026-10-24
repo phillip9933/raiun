@@ -5807,6 +5807,24 @@ unsafe extern "system" fn fetch_data_callback(
     // duration. Their ABI layouts are checked above and no pointer fields other
     // than the opaque file-identity bytes are dereferenced.
     let info = unsafe { &*info };
+    // Failed transfers must cover the waiting I/O range too. A zero-length
+    // error completion leaves the reader pending, even when CfExecute accepts
+    // it. Keep the native result visible without retrying publication.
+    let fail_fetch = |range: FetchRange, status| {
+        let result = execute_transfer(info, range, None, status);
+        guard.0.record_failed_hresult(result);
+        #[cfg(feature = "synthetic-agent-integration")]
+        eprintln!(
+            "synthetic fetch failure offset={} length={} hresult={result:#010x}",
+            range.offset,
+            range.len()
+        );
+    };
+    // Before the callback range is validated, fail only the known file extent.
+    let full_file = FetchRange {
+        offset: 0,
+        end: info.file_size.max(0) as u64,
+    };
     let parameters = unsafe { &*parameters };
     let param_size = parameters.param_size as usize;
     guard.0.record_fetch_callback(param_size);
@@ -5821,7 +5839,7 @@ unsafe extern "system" fn fetch_data_callback(
     }
     observe_fetch!(1);
     if !valid_fetch_data_param_size(param_size) {
-        execute_transfer(info, 0, None, STATUS_UNSUCCESSFUL);
+        fail_fetch(full_file, STATUS_UNSUCCESSFUL);
         return;
     }
     // SAFETY: FETCH_DATA callbacks provide the FetchData union arm, and the
@@ -5831,7 +5849,7 @@ unsafe extern "system" fn fetch_data_callback(
         && info.file_identity_length <= 256
         && !info.file_identity.is_null();
     if !identity_matches || info.file_size < 0 {
-        execute_transfer(info, 0, None, STATUS_UNSUCCESSFUL);
+        fail_fetch(full_file, STATUS_UNSUCCESSFUL);
         return;
     }
     let range = match checked_fetch_range(
@@ -5841,13 +5859,13 @@ unsafe extern "system" fn fetch_data_callback(
     ) {
         Ok(range) => range,
         Err(_) => {
-            execute_transfer(info, 0, None, STATUS_UNSUCCESSFUL);
+            fail_fetch(full_file, STATUS_UNSUCCESSFUL);
             return;
         }
     };
     guard.0.record_request(range);
     let Some(fetch_permit) = guard.0.begin_fetch(info.request_key.internal, range) else {
-        execute_transfer(info, range.offset, None, STATUS_UNSUCCESSFUL);
+        fail_fetch(range, STATUS_UNSUCCESSFUL);
         return;
     };
     // SAFETY: the bounded identity pointer is supplied by Cloud Files and is
@@ -5867,11 +5885,11 @@ unsafe extern "system" fn fetch_data_callback(
             Ok(Some(metadata))
                 if !metadata.is_directory && metadata.length == info.file_size as u64 => {}
             Err(BackendError::Cancelled) => {
-                execute_transfer(info, 0, None, STATUS_CANCELLED);
+                fail_fetch(range, STATUS_CANCELLED);
                 return;
             }
             _ => {
-                execute_transfer(info, range.offset, None, STATUS_UNSUCCESSFUL);
+                fail_fetch(range, STATUS_UNSUCCESSFUL);
             }
         }
         return;
@@ -5941,13 +5959,13 @@ unsafe extern "system" fn fetch_data_callback(
                     if let Ok(mut inventory) = guard.0.hydrated_files.lock() {
                         inventory.mark_incomplete();
                     }
-                    execute_transfer(info, range.offset, None, STATUS_UNSUCCESSFUL);
+                    fail_fetch(range, STATUS_UNSUCCESSFUL);
                     return;
                 }
             }
         }
         Err(_) => {
-            execute_transfer(info, range.offset, None, STATUS_UNSUCCESSFUL);
+            fail_fetch(range, STATUS_UNSUCCESSFUL);
             return;
         }
     };
@@ -5965,7 +5983,7 @@ unsafe extern "system" fn fetch_data_callback(
         } else {
             STATUS_UNSUCCESSFUL
         };
-        execute_transfer(info, range.offset, None, status);
+        fail_fetch(range, status);
         return;
     };
     observe_fetch!(9);
@@ -6042,7 +6060,15 @@ unsafe extern "system" fn fetch_data_callback(
                 tracked = true;
             }
             observe_fetch!(12);
-            let execute_result = execute_transfer(info, offset, Some(slice), STATUS_SUCCESS);
+            let execute_result = execute_transfer(
+                info,
+                FetchRange {
+                    offset,
+                    end: offset + slice.len() as u64,
+                },
+                Some(slice),
+                STATUS_SUCCESS,
+            );
             observe_fetch!(13);
             guard.0.record_failed_hresult(execute_result);
             guard
@@ -6076,7 +6102,13 @@ unsafe extern "system" fn fetch_data_callback(
             } else {
                 STATUS_UNSUCCESSFUL
             };
-            execute_transfer(info, error.offset, None, status);
+            fail_fetch(
+                FetchRange {
+                    offset: error.offset,
+                    end: range.end,
+                },
+                status,
+            );
         }
     }
 }
@@ -6195,7 +6227,7 @@ fn checked_cancel_range(offset: i64, length: i64) -> Option<FetchRange> {
 
 fn execute_transfer(
     info: &CfCallbackInfo,
-    offset: u64,
+    range: FetchRange,
     payload: Option<&[u8]>,
     completion_status: i32,
 ) -> HResult {
@@ -6208,17 +6240,7 @@ fn execute_transfer(
         sync_status: null(),
         request_key: info.request_key,
     };
-    let transfer = CfTransferDataParameters {
-        flags: CF_OPERATION_TRANSFER_DATA_FLAG_NONE,
-        completion_status,
-        buffer: if let Some(payload) = payload {
-            payload.as_ptr().cast()
-        } else {
-            null()
-        },
-        offset: offset as i64,
-        length: payload.map_or(0, |payload| payload.len() as i64),
-    };
+    let transfer = transfer_data_parameters(range, payload, completion_status);
     let mut parameters = CfOperationParameters {
         param_size: (std::mem::offset_of!(CfOperationParameters, data)
             + size_of::<CfTransferDataParameters>()) as u32,
@@ -6229,6 +6251,22 @@ fn execute_transfer(
     // SAFETY: operation info is copied from this live callback. The bounded
     // payload remains borrowed until CfExecute returns; sizes follow the SDK.
     unsafe { CfExecute(&operation_info, &mut parameters) }
+}
+
+// Both successful and failed operations describe their actual range. Buffer is
+// ignored by Windows on failure; Length still determines which pending I/O fails.
+fn transfer_data_parameters(
+    range: FetchRange,
+    payload: Option<&[u8]>,
+    completion_status: i32,
+) -> CfTransferDataParameters {
+    CfTransferDataParameters {
+        flags: CF_OPERATION_TRANSFER_DATA_FLAG_NONE,
+        completion_status,
+        buffer: payload.map_or(null(), |bytes| bytes.as_ptr().cast()),
+        offset: range.offset as i64,
+        length: range.len() as i64,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7930,6 +7968,45 @@ fn io_error(operation: &'static str, error: std::io::Error) -> Error {
 
 #[cfg(test)]
 mod backend_tests {
+    #[test]
+    fn failed_transfer_covers_waiting_range_without_a_payload() {
+        // The broker payload is deliberately not page-aligned at EOF.
+        let first = super::transfer_data_parameters(
+            FetchRange {
+                offset: 0,
+                end: 65_537,
+            },
+            None,
+            super::STATUS_UNSUCCESSFUL,
+        );
+        assert!(first.buffer.is_null());
+        assert_eq!((first.offset, first.length), (0, 65_537));
+        assert_eq!(first.completion_status, super::STATUS_UNSUCCESSFUL);
+        // A later window failure must retain only the remaining checked range.
+        let later = super::transfer_data_parameters(
+            FetchRange {
+                offset: 65_536,
+                end: 131_073,
+            },
+            None,
+            super::STATUS_CANCELLED,
+        );
+        assert!(later.buffer.is_null());
+        assert_eq!((later.offset, later.length), (65_536, 65_537));
+        assert_eq!(later.completion_status, super::STATUS_CANCELLED);
+        let bytes = [1u8; 4096];
+        let success = super::transfer_data_parameters(
+            FetchRange {
+                offset: 4096,
+                end: 8192,
+            },
+            Some(&bytes),
+            super::STATUS_SUCCESS,
+        );
+        assert_eq!(success.buffer, bytes.as_ptr().cast());
+        assert_eq!((success.offset, success.length), (4096, 4096));
+    }
+
     use super::{
         CF_FETCH_DATA_PARAM_SIZE_ALIGNED, CF_FETCH_DATA_PARAM_SIZE_DOCUMENTED,
         CF_PLACEHOLDER_STATE_PARTIAL, CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK,

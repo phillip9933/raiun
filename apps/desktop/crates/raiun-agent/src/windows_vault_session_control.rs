@@ -115,6 +115,17 @@ impl WindowsAgent {
             .vault_sessions
             .is_unlocked(&vault)
             .map_err(|_| "Vault session state is unavailable")?;
+        // Coordinator keys alone never prove a live native route. The pin is
+        // retained through the final account/configuration postcheck.
+        let readiness = if unlocked {
+            let path = inspected
+                .get("root_path")
+                .and_then(Value::as_str)
+                .ok_or("The inspected vault has no current root path")?;
+            Some(self.confirm_windows_vault_readiness(&vault, path)?)
+        } else {
+            None
+        };
         if self
             .provider
             .bandwidth
@@ -130,6 +141,9 @@ impl WindowsAgent {
                 .map_err(|_| "Account state is unavailable")?;
             if generation != self.generation.load(Ordering::Acquire)
                 || state.active_generation != generation
+                || readiness.as_ref().is_some_and(|(configuration, _)| {
+                    state.root_configuration.as_ref() != Some(configuration)
+                })
                 || !state.online_authenticated
                 || state.authenticating
                 || state.refreshing
@@ -151,10 +165,137 @@ impl WindowsAgent {
         }
         inspected["remembered_status"] = json!(remembered_status);
         inspected["unlocked"] = json!(unlocked);
-        // Coordinator state does not prove native projection or lock acceptance.
-        inspected["vault_mount_ready"] = json!(false);
+        inspected["vault_mount_ready"] = json!(readiness.is_some());
         inspected["vault_mount_writable"] = json!(false);
         Ok(inspected)
+    }
+
+    /// Confirms only a current exact route and accepted pinned-parent population
+    /// request, not that every native child has already materialized.
+    fn confirm_windows_vault_readiness(
+        &self,
+        scope: &raiun_vault::session::VaultSessionScope,
+        root_path: &str,
+    ) -> Result<
+        (
+            RootConfiguration,
+            raiun_cloudfiles_windows::ConfiguredRootLease,
+        ),
+        String,
+    > {
+        if !self
+            .vault_sessions
+            .is_unlocked(scope)
+            .map_err(|_| "Vault session state is unavailable")?
+        {
+            return Err("The vault is locked".into());
+        }
+        let (session, generation, configuration) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if !state.online_authenticated
+                || state.authenticating
+                || state.refreshing
+                || state.logout_pending
+                || state.needs_refresh
+                || state.session_cleanup_uncertain
+            {
+                return Err("The account is not ready for native vault access".into());
+            }
+            (
+                state.session.clone().ok_or("Connect this account")?,
+                state.active_generation,
+                state
+                    .root_configuration
+                    .clone()
+                    .ok_or("Connect the Windows drive first")?,
+            )
+        };
+        let owner = configuration
+            .registration_ownership
+            .as_ref()
+            .ok_or("The drive has no verified owner")?;
+        if generation == 0
+            || generation != self.generation.load(Ordering::Acquire)
+            || !configuration.valid
+            || configuration.profile_scope != self.profile_scope
+            || configuration.server != session.server
+            || configuration.client_id != session.client_id
+            || owner.state != "registered"
+            || scope.account_id() != self.profile_scope
+            || url::Url::parse(&session.server)
+                .map_err(|_| "The vault account is invalid")?
+                .origin()
+                .ascii_serialization()
+                != scope.server_origin()
+        {
+            return Err("The Windows drive changed before native vault access".into());
+        }
+        let identity = raiun_cloudfiles_windows::ConfiguredRootIdentity {
+            volume_serial: configuration.volume_serial,
+            file_index: configuration.file_index,
+        };
+        let lease = pin_registered_configured_root(Path::new(&configuration.path), identity)
+            .map_err(root_error_text)?;
+        let active = ActiveProviderBinding {
+            generation,
+            path: PathBuf::from(&configuration.path),
+            identity,
+            personal_space_id: owner.personal_drive_id.clone(),
+            personal_root_resource_id: owner
+                .personal_root_resource_id
+                .clone()
+                .ok_or("The drive root is unverified")?,
+        };
+        let verified = self.provider.verified_vault_backend(active.clone())?;
+        let (_, trusted) = verified
+            .backend
+            .vault_read_context(identity)
+            .map_err(|_| "The connected drive changed")?;
+        if trusted.profile_id() != self.profile_scope || trusted.account_id() != owner.account_id {
+            return Err("The connected drive belongs to another account".into());
+        }
+        self.provider.refresh_vault_parent(
+            active,
+            scope.space_id().into(),
+            scope.resource_id().into(),
+            root_path.into(),
+        )?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?;
+        if generation != self.generation.load(Ordering::Acquire)
+            || state.active_generation != generation
+            || !state.online_authenticated
+            || state.authenticating
+            || state.refreshing
+            || state.logout_pending
+            || state.needs_refresh
+            || state.session_cleanup_uncertain
+            || state.root_configuration.as_ref() != Some(&configuration)
+            || verified.backend.is_revoked()
+            || state.session.as_ref().is_none_or(|current| {
+                current.server != session.server
+                    || current.client_id != session.client_id
+                    || current.expected_issuer != session.expected_issuer
+                    || current.access_token != session.access_token
+                    || current.expires_at != session.expires_at
+            })
+        {
+            return Err("The account changed during native vault inspection".into());
+        }
+        drop(state);
+        if !self
+            .vault_sessions
+            .is_unlocked(scope)
+            .map_err(|_| "Vault session state is unavailable")?
+        {
+            return Err("The vault was locked during native inspection".into());
+        }
+        Ok((configuration, lease))
     }
 
     fn forget_windows_vault_password(
@@ -701,9 +842,9 @@ impl WindowsAgent {
         }
         prepared.published = true;
         Ok(json!({"unlocked":true,"root_path":prepared.root_path,
-            "root_resource_id":prepared.scope.resource_id(),"vault_mount_ready":false,
+            "root_resource_id":prepared.scope.resource_id(),"vault_mount_ready":true,
             "vault_mount_writable":false,"vault_mount_existing_file_overwrite":false,
-            "vault_mount_write_unavailable_reason":"route_not_installed",
+            "vault_mount_write_unavailable_reason":"route_read_only",
             "remembered":remembered,"remembered_status":remembered_status}))
     }
 }

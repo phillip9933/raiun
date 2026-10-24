@@ -2378,6 +2378,38 @@ evidence is reused. The payload fixture now also opens a new Agent/coordinator/
 native connection with the same protected profile, checks locked read refusal
 and continued absence of forgotten credentials, then verifies a new manual read
 and Lock. That normal reconnection follows an already successful Lock; it does
-not establish a full process/crash restart with resident plaintext. Current-source
-native execution and exact-package acceptance remain pending; the public vault
+not establish a full process/crash restart with resident plaintext. Current-source native execution reached the broker lock workflow, as recorded
+below; reconnection and exact-package acceptance remain pending. The public vault
 capability is still disabled.
+
+
+### Current Windows payload acceptance (25 October, r105)
+
+Both current-source MSVC test artifacts built successfully with all 1,193 source
+files unchanged. The external dirty-file case passed: cleanup refused the real
+modified placeholder and preserved its exact bytes. This supersedes the earlier
+fixture failure without discarding that evidence.
+
+The broker payload case verified the ordinary external read and saved-unlock
+read of 65,537 bytes, then successfully removed the hydrated data during Lock.
+The following locked read timed out. Manual reopening and normal reconnection
+were not reached, so this is partial acceptance only. The owned test images
+exited, actual guest shutdown was captured, and cold evidence was preserved in
+`outputs/local-windows-native-20261023-r1/c05-c06-restart-two-actual-r1/`.
+
+Source investigation found that failed fetch completions supplied a zero-length
+range. Windows fails pending reads only where the error response overlaps their
+range. The local correction supplies the checked remaining range and records the
+native completion result, while retaining the existing read deadline and
+fail-closed access rules. Source checks and a focused native broker rerun must
+qualify the correction before capability activation or package acceptance.
+
+
+The combined local correction and native readiness/status join pass Windows GNU
+Cloud/Agent all-target checks, strict lint and formatting. The focused extracted
+transfer-parameter regression passes. The Linux workspace passed 963 tests with
+14 ignored, with strict lint and formatting passing. Readiness now derives from
+the current bound native route and accepted pinned-parent refresh; it does not
+assert that every child has already materialized. These source checks do not
+replace the pending native broker workflow or exact-package acceptance. The
+public Windows vault capability remains disabled.
