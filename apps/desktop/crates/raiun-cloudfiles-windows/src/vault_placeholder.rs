@@ -758,6 +758,43 @@ mod runtime {
         }
 
         #[cfg(feature = "synthetic-agent-integration")]
+        fn write_owned_dirty_fixture_in_child(path: &std::path::Path) -> bool {
+            use std::process::{Command, Stdio};
+            assert!(path.is_absolute());
+            assert_eq!(path.file_name(), Some(std::ffi::OsStr::new("1")));
+            // External ordinary client, matching real editor I/O. Provider-process
+            // fixture writes did not produce a Cloud Files close notification.
+            // Only this freshly-created guest fixture path is supplied, through
+            // a child-local environment entry; payload bytes are public constants.
+            let Ok(mut child) = Command::new("powershell.exe")
+                .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                    "$ErrorActionPreference='Stop'; try { $b=New-Object byte[] 65537; for($i=0;$i -lt $b.Length;$i++){ $b[$i]=[byte](((($i*31+7) -band 255) -bxor 90)) }; $f=[System.IO.File]::Open($env:RAIUN_SYNTHETIC_DIRTY_FILE,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Write,[System.IO.FileShare]::Read); try { if($f.Length -ne $b.Length){exit 35}; $f.Write($b,0,$b.Length); $f.Flush($true) } finally { $f.Dispose() }; [Console]::WriteLine('SYNTHETIC_DIRTY_WRITE_COMPLETE=true') } catch { exit 24 }"])
+                .env("RAIUN_SYNTHETIC_DIRTY_FILE", path)
+                .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+                .spawn() else { return false; };
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        let Ok(output) = child.wait_with_output() else {
+                            return false;
+                        };
+                        return status.success()
+                            && output.stdout == b"SYNTHETIC_DIRTY_WRITE_COMPLETE=true\r\n";
+                    }
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        thread::sleep(Duration::from_millis(20))
+                    }
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return false;
+                    }
+                }
+            }
+        }
+
+        #[cfg(feature = "synthetic-agent-integration")]
         fn registered_vault_refresh_and_retirement(dirty: bool) {
             assert!(
                 std::env::var("USERNAME")
@@ -976,14 +1013,14 @@ mod runtime {
                 #[allow(clippy::permissions_set_readonly_false)]
                 permissions.set_readonly(false);
                 std::fs::set_permissions(&path, permissions).unwrap();
-                {
-                    let mut writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-                    writer.write_all(&replacement).unwrap();
-                    writer.sync_all().unwrap();
-                }
+                let external_write = write_owned_dirty_fixture_in_child(&path);
                 let mut permissions = std::fs::metadata(&path).unwrap().permissions();
                 permissions.set_readonly(true);
                 std::fs::set_permissions(&path, permissions).unwrap();
+                assert!(
+                    external_write,
+                    "bounded external synthetic edit did not finish"
+                );
                 let deadline = std::time::Instant::now() + Duration::from_secs(5);
                 loop {
                     let observed = connection.close_observation_for_integration();
