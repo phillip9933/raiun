@@ -2133,3 +2133,27 @@ existing HTTP client's system-proxy behavior.
 Source checks and two focused portable preference tests pass. The Windows agent
 RPC test compiles but has not run natively. Native routing, protected persistence
 and installed-package acceptance remain pending; this work is unpublished.
+
+### Windows practical beta acceptance queue (24 October)
+
+The next candidate remains unpublished. Startup control, bandwidth limits and
+signed-out proxy settings have reviewed source implementations; their Windows
+runtime and exact-package acceptance is outstanding. The installed candidate is
+older and does not establish acceptance of these changes.
+
+The immediate blocker is encrypted content access (C05). An isolated registered
+root can enumerate the vault folder, but its last content read timed out before
+plaintext transfer: the callback path was rejected. Configured connections now
+request the documented full callback path; that correction passes source checks
+and still needs a changed native read/lock test. Vault capability exposure stays
+disabled. A read pass alone will not prove retained-lock cleanup or restart
+custody. Remembered unlock (C06) remains unimplemented on Windows and depends on
+that lifecycle; it must retain explicit per-vault opt-in.
+
+Resume acceptance in this order: the corrected encrypted read and retained-lock
+case; native protected preferences/RPC and effective bandwidth/proxy behavior;
+then the exact candidate package and ordinary file-manager workflows. Reuse
+unchanged evidence and preserve failed roots, recovery and the installed app.
+Actual startup activation is outside automated tests. Current native testing is
+interrupted by a platform restriction on the testing agent; source checks do
+not substitute for those pending results.
