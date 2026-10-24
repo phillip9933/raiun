@@ -1715,6 +1715,93 @@ mod tests {
 
     #[test]
     #[ignore = "requires isolated ordinary RaiunLabUser and native DPAPI/private-storage ACL support; synthetic temp-root only"]
+    fn protected_vault_credential_document_cas_reopen_and_profile_isolation() {
+        assert_eq!(std::env::var("USERNAME").as_deref(), Ok("RaiunLabUser"));
+        let root = std::env::temp_dir().join(format!(
+            "raiun-synthetic-credential-document-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        eprintln!("synthetic_credential_document_root={}", root.display());
+        // Only this owned temporary fixture: no current_user, LOCALAPPDATA,
+        // session access, vault unlock, native root, network, or startup action.
+        let base = DpapiSessionStore {
+            root: root.join("sessions"),
+            profile_directory: None,
+        };
+        let profile = "default";
+        let foreign_profile = "profile-11111111111111111111111111111111";
+        assert!(base.load_vault_credentials(profile).unwrap().is_none());
+        assert!(!base.root.exists(), "missing read must not create storage");
+        // These opaque placeholder documents are explicitly nonsecret and are
+        // NOT valid passwords, sessions, or account/vault authority records.
+        let first = Zeroizing::new(b"nonsecret synthetic document\0revision-one".to_vec());
+        let second = Zeroizing::new(b"nonsecret synthetic document\0revision-two".to_vec());
+        base.compare_exchange_vault_credentials(profile, None, &first)
+            .unwrap();
+        base.compare_exchange_vault_credentials(profile, Some(&first), &second)
+            .unwrap();
+        let path = base
+            .root
+            .join("vault-credentials")
+            .join(hex(&vault_credentials_digest(profile).unwrap()))
+            .join("credentials.bin");
+        let protected_before = std::fs::read(&path).unwrap();
+        assert!(protected_before.starts_with(VAULT_CREDENTIALS_ENVELOPE));
+        assert!(
+            base.compare_exchange_vault_credentials(profile, Some(&first), &first)
+                .is_err()
+        );
+        let oversize = Zeroizing::new(vec![0; VAULT_CREDENTIALS_MAX_PLAIN + 1]);
+        assert!(
+            base.compare_exchange_vault_credentials(profile, Some(&second), &oversize)
+                .is_err()
+        );
+        assert!(
+            base.compare_exchange_vault_credentials(profile, Some(&second), b"")
+                .is_err()
+        );
+        assert!(std::fs::read(&path).unwrap() == protected_before);
+        assert!(
+            base.load_vault_credentials(foreign_profile)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !base
+                .root
+                .join("vault-credentials")
+                .join(hex(&vault_credentials_digest(foreign_profile).unwrap()))
+                .exists()
+        );
+        let store_root = base.root.clone();
+        drop(base);
+        let reopened = DpapiSessionStore {
+            root: store_root,
+            profile_directory: None,
+        };
+        let loaded: Zeroizing<Vec<u8>> = reopened.load_vault_credentials(profile).unwrap().unwrap();
+        assert!(loaded.as_slice() == second.as_slice());
+        assert!(
+            reopened
+                .load_vault_credentials(foreign_profile)
+                .unwrap()
+                .is_none()
+        );
+        assert!(std::fs::read(&path).unwrap() == protected_before);
+        drop(loaded);
+        drop(reopened);
+        // Any panic retains the printed fixture; only complete success removes
+        // this exact owned root after all store/file/directory pins are dropped.
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser and native DPAPI/private-storage ACL support; synthetic temp-root only"]
     fn protected_transport_preferences_cas_reopen_and_preserve_domains() {
         assert_eq!(std::env::var("USERNAME").as_deref(), Ok("RaiunLabUser"));
         let root = std::env::temp_dir().join(format!(

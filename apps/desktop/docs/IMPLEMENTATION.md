@@ -2208,3 +2208,14 @@ harnesses. Native credential persistence and integrated saved-unlock lifecycle
 acceptance remain pending. The production vault gate stays disabled, and the
 stopped encrypted-file test has not been retried. This is not a completed C06
 acceptance claim or a published feature.
+
+Windows credential-custody component acceptance (24 October): all eleven focused
+checks now pass as the isolated ordinary Windows user: three custody-model checks,
+seven typed request checks, and one synthetic protected-document CAS/reopen/profile
+isolation test. A full output disk interrupted artifact export before any test ran;
+the failure was preserved, a larger output disk was supplied, and the same compiled
+executables were validated and reused without rebuilding. The original compiler
+numeric exit was not retained; recovery validation and all test exits succeeded.
+Windows shut down normally afterward. This proves the stated components, not an
+actual saved-password unlock, lock cleanup, native vault projection or C05/C06
+whole-category completion. Production vault exposure remains disabled.
