@@ -61,6 +61,17 @@ function Get-NsisShellMetadata {
 # END NSIS shell pin helper
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+# BEGIN package Cargo target normalization
+# Resolve a supplied relative target once, before payload and Tauri change cwd.
+# The absent setting keeps each build's existing default target directory.
+if (-not [string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
+    $env:CARGO_TARGET_DIR = if ([System.IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
+        [System.IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+    } else {
+        [System.IO.Path]::GetFullPath((Join-Path $repoRoot $env:CARGO_TARGET_DIR))
+    }
+}
+# END package Cargo target normalization
 & (Join-Path $PSScriptRoot 'prepare-windows-payload.ps1')
 
 $versionOverlayPath = $null

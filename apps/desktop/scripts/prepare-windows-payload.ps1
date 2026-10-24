@@ -20,10 +20,20 @@ try {
         throw 'Run from a Visual Studio Developer PowerShell with the MSVC compiler and linker available.'
     }
 
+    # BEGIN payload Cargo target resolver
+    $payloadTargetDir = if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
+        Join-Path $repoRoot 'target'
+    } elseif ([System.IO.Path]::IsPathRooted($env:CARGO_TARGET_DIR)) {
+        [System.IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+    } else {
+        [System.IO.Path]::GetFullPath((Join-Path $repoRoot $env:CARGO_TARGET_DIR))
+    }
+    # END payload Cargo target resolver
+
     $oldErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        & $cargo.Source build --locked --release --target x86_64-pc-windows-msvc --target-dir (Join-Path $repoRoot 'target') -p raiun-agent -p raiun-cli 2>&1
+        & $cargo.Source build --locked --release --target x86_64-pc-windows-msvc --target-dir $payloadTargetDir -p raiun-agent -p raiun-cli 2>&1
         $buildExitCode = $LASTEXITCODE
     } finally {
         $ErrorActionPreference = $oldErrorActionPreference
@@ -32,7 +42,7 @@ try {
         throw "Building the Windows agent and CLI failed (exit code $buildExitCode)."
     }
 
-    $sourceDir = Join-Path $repoRoot 'target\x86_64-pc-windows-msvc\release'
+    $sourceDir = Join-Path $payloadTargetDir 'x86_64-pc-windows-msvc\release'
     $stageDir = Join-Path $repoRoot 'target\windows-package-resources'
     $tempDir = Join-Path $repoRoot ("target\windows-package-resources.tmp-{0}" -f [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
