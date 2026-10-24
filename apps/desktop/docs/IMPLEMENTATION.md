@@ -10,6 +10,43 @@ below are historical engineering evidence, not semantic release versions or
 claims that each workflow is verified on this beta. Local evidence/output paths
 refer to maintainer archives that are not part of this public source tree.
 
+## Latest local source work — 25 October 2026 JST
+
+Windows vault access remains disabled in production. The isolated native broker
+has passed manual remember, lock, saved unlock, pathless Forget while staying
+unlocked, and final lock. That component run used no encrypted file payload;
+full native payload cleanup and ordinary lock/reopen acceptance remain pending.
+The prior native cleanup diagnostic confirmed a successful dehydration request
+followed by a legitimate Cloud Files reparse-tag variant change. The source
+now accepts only the documented Cloud tag family while retaining file identity,
+clean-state, custody and empty-on-disk-range checks. It is not yet an accepted
+cleanup pass. The latest four-case continuation stopped before test execution
+on a stale exported drive-letter check; that harness failure is retained and a
+volume-identity-bound correction is being reviewed.
+
+A normal process restart is a concrete remaining activation blocker. Retained
+registrations deliberately start with incomplete hydration history, and vault
+opaque callback identities are currently held only in memory. The existing
+reconnect scan cannot establish ownership or complete custody. Protected,
+account/vault/physical-root-bound write-ahead records and validated restore
+integration are required; the incomplete-history guard stays in place.
+
+The local source now contains a native-read-only Windows vault interface,
+including manual/saved unlock, Forget, Lock and a guarded existing drive opener.
+Unsupported in-app browsing, encrypted offline copies and edit/copy actions are
+suppressed only for the explicit native mode; Linux behavior is unchanged.
+TypeScript, the 195-case UI candidate suite and UI build pass. The optional mode
+is not advertised by the disabled production backend. A separate bounded DPAPI
+custody document primitive also compiles and passes strict GNU linting; native
+storage execution and its write-ahead/restore integration remain pending.
+
+The latest isolated installed Windows candidate is installer SHA256
+`2955f944e48af9a982d5f33a11948dc095c3488a1e3e76b7ebe7451c864786f1`.
+Its offline Media wording, proxy persistence and normal tray Quit checks passed;
+the app is installed and closed. These later source changes are not installed,
+and no new laptop installation or publication is implied. Earlier dated entries
+below describe their own frozen candidates and do not supersede this status.
+
 ## Local next-release packages — 23 October 2026 JST
 
 The frozen `4fb6b43` candidate now has an unsigned Windows installer built from
