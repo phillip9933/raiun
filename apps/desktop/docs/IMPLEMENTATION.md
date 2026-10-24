@@ -2526,3 +2526,32 @@ strict lint and formatting passed; fresh Linux verification passed 963 tests
 with 14 ignored and strict workspace lint. Installed workflow acceptance remains
 pending. This does not establish the cause or resolution of the earlier
 incomplete-Lock failure.
+
+
+### Installed encrypted-file workflow passes (25 October, r115)
+
+The exact unsigned candidate built from frozen source `924eaa17…` passed the
+ordinary per-user upgrade in r114. The same installed package then passed the
+focused r115 workflow without rebuilding or reinstalling: fresh public RPC
+AuthFlow, exact requested root mounted with normal separators, explicit GUI
+account selection, Personal/Travel.vault browsing, manual unlock with explicit
+Remember opt-in, and an ordinary external read of all 65,537 bytes. The SHA-256
+matched the fixture. Forget removed the saved key while leaving the current
+session unlocked.
+
+With Explorer still open, the first Lock reported confirmed local cleanup. A
+fresh bounded reader then refused access, without a retry or process termination.
+The scoped cleanup snapshot reported complete inventory, no modified or
+unverifiable closes, no pool refusals/deleted closes, and no cleanup error. The
+finite server stopped explicitly with one ciphertext fetch and zero cloud
+mutations; normal application quit, zero owned processes, guest shutdown and
+cold preservation were verified. Prior malformed roots and failed evidence
+remain preserved; they were not reset or silently rebound.
+
+Maintainer evidence: `installed-ui1800-actual-r1/handoff.json` under
+`outputs/local-windows-native-20261023-r1/` (SHA-256
+`2ab802d4a6eacf59e6455699c2c9d3728e7158e18b60627dccea3c599280adc4`).
+This qualifies the installed read-only encrypted-file sequence, not encrypted
+editing, renderer HTTPS sign-in, crash recovery or an OS-process restart.
+Remembered-key/Forget behavior across an ordinary process restart is the next
+focused check. The published beta is unchanged.
