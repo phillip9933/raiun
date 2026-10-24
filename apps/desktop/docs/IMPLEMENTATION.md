@@ -2466,3 +2466,25 @@ read-only, with all guarded account/vault/physical-root checks and protected
 history requirements intact. This is candidate source activation, not package
 acceptance, publication or whole-category C05/C06 completion. The older installed
 unsigned package remains closed and unchanged until the new package is verified.
+
+
+### Installed Windows workflow caught incomplete Lock (25 October, r108)
+
+The enabled candidate built and upgraded successfully in the isolated Windows
+VM, with all three installed payload hashes matching its manifest. Normal public
+RPC AuthFlow with the finite synthetic loopback server connected the account;
+this does not qualify renderer HTTPS sign-in. The installed UI unlocked the
+public vault with explicit remembered-password opt-in, opened the drive, read
+and verified the full 65,537-byte file, and forgot the saved password while
+keeping the session unlocked.
+
+With Explorer still open, Lock returned incomplete cleanup. The UI nevertheless
+showed Locked, and a fresh ordinary file read succeeded. This candidate is not
+accepted. The failed workflow and public root are preserved; no cleanup retry,
+forced dehydration or real cloud mutation was performed. The exact refusal
+cause is unproven: shipping diagnostics did not expose native cleanup errors
+or close-validation counters. Directory navigation alone is not established as
+the cause. Next work adds bounded, value-free support diagnostics and makes
+incomplete Lock explicit and retryable, retaining all dirty/history and
+exclusive-cleanup safeguards. Native component r107 evidence remains valid
+within its narrower scope, but does not supersede this installed failure.

@@ -1,5 +1,5 @@
-// Trusted broker preparation for Windows vault sessions. The production action
-// gate stays disabled until native projection and complete lock are accepted.
+// Trusted broker preparation for Windows vault sessions. Key revocation and
+// native cleanup completion remain separate, exactly scoped observations.
 struct PreparedWindowsVaultUnlock {
     backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
     adapter: Arc<raiun_cloudfiles_windows::vault_placeholder::WindowsVaultPlaceholderBackend>,
@@ -33,7 +33,7 @@ impl WindowsAgent {
             .vault_credential_operation
             .lock()
             .map_err(|_| "Vault credential operation is unavailable")?;
-        let (session, generation) = {
+        let (session, generation, configuration) = {
             let state = self
                 .state
                 .lock()
@@ -53,6 +53,7 @@ impl WindowsAgent {
                     .clone()
                     .ok_or("A verified account is required")?,
                 state.active_generation,
+                state.root_configuration.clone(),
             )
         };
         if generation == 0 || generation != self.generation.load(Ordering::Acquire) {
@@ -115,6 +116,37 @@ impl WindowsAgent {
             .vault_sessions
             .is_unlocked(&vault)
             .map_err(|_| "Vault session state is unavailable")?;
+        // Key revocation is not proof that resident plaintext was removed.
+        // Ask the exact live worker for retained cleanup ownership; absence or
+        // an unavailable observation is deliberately unknown, never complete.
+        let cleanup_incomplete = configuration.as_ref().and_then(|configuration| {
+            let owner = configuration.registration_ownership.as_ref()?;
+            if !configuration.valid
+                || configuration.profile_scope != self.profile_scope
+                || configuration.server != session.server
+                || configuration.client_id != session.client_id
+                || owner.state != "registered"
+            {
+                return None;
+            }
+            let path = inspected.get("root_path")?.as_str()?;
+            let path = if path == "/" { "/" } else { path.trim_end_matches('/') };
+            self.provider.vault_lock_cleanup_status(
+                ActiveProviderBinding {
+                    generation,
+                    path: PathBuf::from(&configuration.path),
+                    identity: raiun_cloudfiles_windows::ConfiguredRootIdentity {
+                        volume_serial: configuration.volume_serial,
+                        file_index: configuration.file_index,
+                    },
+                    personal_space_id: owner.personal_drive_id.clone(),
+                    personal_root_resource_id: owner.personal_root_resource_id.clone()?,
+                },
+                space_id.to_owned(),
+                root_id.to_owned(),
+                path.to_owned(),
+            ).ok()
+        });
         // Coordinator keys alone never prove a live native route. The pin is
         // retained through the final account/configuration postcheck.
         let readiness = if unlocked {
@@ -141,6 +173,7 @@ impl WindowsAgent {
                 .map_err(|_| "Account state is unavailable")?;
             if generation != self.generation.load(Ordering::Acquire)
                 || state.active_generation != generation
+                || state.root_configuration != configuration
                 || readiness.as_ref().is_some_and(|(configuration, _)| {
                     state.root_configuration.as_ref() != Some(configuration)
                 })
@@ -165,6 +198,11 @@ impl WindowsAgent {
         }
         inspected["remembered_status"] = json!(remembered_status);
         inspected["unlocked"] = json!(unlocked);
+        inspected["vault_lock_cleanup_status"] = json!(if cleanup_incomplete == Some(true) {
+            "incomplete"
+        } else {
+            "unknown"
+        });
         inspected["vault_mount_ready"] = json!(readiness.is_some());
         inspected["vault_mount_writable"] = json!(false);
         Ok(inspected)
@@ -468,7 +506,7 @@ impl WindowsAgent {
         cleanup?;
         keys?;
         Ok(
-            json!({"unlocked":false,"vault_mount_ready":false,"vault_mount_writable":false,
+            json!({"unlocked":false,"vault_lock_cleanup_status":"complete","vault_mount_ready":false,"vault_mount_writable":false,
             "vault_mount_existing_file_overwrite":false,"vault_mount_write_unavailable_reason":"route_not_installed"}),
         )
     }

@@ -1646,6 +1646,46 @@ impl ConfiguredRootConnection {
                 .is_ok_and(|inventory| inventory.is_complete())
     }
 
+    pub(super) fn vault_cleanup_diagnostics(&self) -> crate::VaultCleanupDiagnostics {
+        crate::VaultCleanupDiagnostics {
+            modified_closes: self
+                .state
+                .modified_placeholder_closes
+                .load(Ordering::Acquire),
+            unverifiable_closes: self
+                .state
+                .unverifiable_placeholder_closes
+                .load(Ordering::Acquire),
+            journaled_closes: self
+                .state
+                .journaled_placeholder_closes
+                .load(Ordering::Acquire),
+            close_callbacks: self
+                .state
+                .close_completion_callbacks
+                .load(Ordering::Relaxed),
+            close_pool_refusals: self.state.close_pool_refusals.load(Ordering::Relaxed),
+            deleted_closes: self
+                .state
+                .deleted_placeholder_closes
+                .load(Ordering::Relaxed),
+            last_close_stage: self
+                .state
+                .last_close_validation_stage
+                .load(Ordering::Relaxed),
+            last_close_hresult: self
+                .state
+                .last_close_validation_hresult
+                .load(Ordering::Relaxed),
+            inventory_complete: self
+                .state
+                .hydrated_files
+                .try_lock()
+                .ok()
+                .map(|value| value.is_complete()),
+        }
+    }
+
     // Only changes population policy on an already owned directory. The caller
     // supplies a current backend identity; the path is merely a locator.
     pub(super) fn refresh_namespace_parent_population(
@@ -4120,6 +4160,8 @@ struct CallbackState {
     last_close_validation_hresult: std::sync::atomic::AtomicI32,
     last_close_path_common_prefix_bytes: AtomicUsize,
     close_check_pool: Arc<BoundedPermitPool>,
+    close_pool_refusals: AtomicUsize,
+    deleted_placeholder_closes: AtomicUsize,
     directory_enumeration_pool: Arc<BoundedPermitPool>,
     fetch_callbacks: AtomicUsize,
     last_fetch_param_size: AtomicUsize,
@@ -4206,6 +4248,8 @@ impl CallbackState {
             last_close_validation_hresult: std::sync::atomic::AtomicI32::new(0),
             last_close_path_common_prefix_bytes: AtomicUsize::new(0),
             close_check_pool: BoundedPermitPool::new(2),
+            close_pool_refusals: AtomicUsize::new(0),
+            deleted_placeholder_closes: AtomicUsize::new(0),
             directory_enumeration_pool: BoundedPermitPool::new(
                 MAX_CONCURRENT_DIRECTORY_ENUMERATIONS,
             ),
@@ -4273,11 +4317,14 @@ impl CallbackState {
         self.last_close_file_id
             .store(info.file_id as u64, Ordering::Release);
         let Some(_permit) = self.close_check_pool.try_acquire() else {
+            self.close_pool_refusals.fetch_add(1, Ordering::Relaxed);
             self.unverifiable_placeholder_closes
                 .fetch_add(1, Ordering::AcqRel);
             return;
         };
         if flags & CF_CALLBACK_CLOSE_COMPLETION_FLAG_DELETED != 0 {
+            self.deleted_placeholder_closes
+                .fetch_add(1, Ordering::Relaxed);
             self.unverifiable_placeholder_closes
                 .fetch_add(1, Ordering::AcqRel);
             return;

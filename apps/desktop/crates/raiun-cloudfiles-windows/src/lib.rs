@@ -71,6 +71,21 @@ pub struct PlatformVersion {
     pub integration: u32,
 }
 
+/// Read-only support evidence; no file names, identities or content are included.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VaultCleanupDiagnostics {
+    pub modified_closes: usize,
+    pub unverifiable_closes: usize,
+    pub journaled_closes: usize,
+    pub close_callbacks: usize,
+    pub close_pool_refusals: usize,
+    pub deleted_closes: usize,
+    pub last_close_stage: usize,
+    pub last_close_hresult: i32,
+    /// None means the short inventory lock was unavailable, not complete.
+    pub inventory_complete: Option<bool>,
+}
+
 /// Safe, non-path-bearing error from the Cloud Files adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -407,6 +422,11 @@ impl ConfiguredRootConnection {
     /// existing plaintext or prove complete filesystem cleanup.
     pub fn can_admit_vault_session(&self) -> bool {
         self.inner.can_admit_vault_session()
+    }
+
+    /// Fixed support counters only; this does not authorize cleanup or admission.
+    pub fn vault_cleanup_diagnostics(&self) -> VaultCleanupDiagnostics {
+        self.inner.vault_cleanup_diagnostics()
     }
 
     /// Revoke/drain this retained route before cleaning recorded plaintext.

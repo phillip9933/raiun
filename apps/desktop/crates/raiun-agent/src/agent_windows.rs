@@ -481,6 +481,17 @@ enum ProviderCommand {
         binding: ActiveProviderBinding,
         response: std::sync::mpsc::SyncSender<Result<VerifiedVaultBackend, String>>,
     },
+    VaultCleanupDiagnostics {
+        binding: ActiveProviderBinding,
+        response: std::sync::mpsc::SyncSender<Result<Value, String>>,
+    },
+    VaultLockCleanupStatus {
+        binding: ActiveProviderBinding,
+        space_id: String,
+        root_resource_id: String,
+        root_path: String,
+        response: std::sync::mpsc::SyncSender<Result<bool, String>>,
+    },
     InspectConnection {
         binding: ActiveProviderBinding,
         response: std::sync::mpsc::SyncSender<Result<bool, String>>,
@@ -604,6 +615,7 @@ impl ProviderManager {
                 let mut vault_custody: Option<Arc<windows_vault_custody::WindowsVaultCustody>> = None;
                 let mut retired_vaults: Vec<Arc<raiun_cloudfiles_windows::vault_routes::VerifiedVaultRoute>> = Vec::new();
                 let mut active_binding: Option<ActiveProviderBinding> = None;
+                let mut last_vault_cleanup_error: Option<raiun_cloudfiles_windows::Error> = None;
                 let mut folders: Option<windows_folder_sync::Runtime> = None;
                 let mut pending_command = None;
                 loop {
@@ -810,7 +822,10 @@ impl ProviderManager {
                                 route.revoke_hydration().map_err(|_| "Vault hydration could not fully drain")?;
                                 connection.as_ref().ok_or("The Windows drive is unavailable")?
                                     .cleanup_retired_vault_route(route)
-                                    .map_err(|_| "Vault reads stopped, but local cleanup is incomplete; edits and retry state were preserved")?;
+                                    .map_err(|error| {
+                                        last_vault_cleanup_error = Some(error);
+                                        "Vault reads stopped, but local cleanup is incomplete; edits and retry state were preserved"
+                                    })?;
                                 retired_vaults.remove(index);
                                 Ok(())
                             })();
@@ -835,6 +850,39 @@ impl ProviderManager {
                             } else {
                                 Err("A different Windows drive connection is already active".to_owned())
                             };
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::VaultCleanupDiagnostics { binding, response } => {
+                            let result = if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) {
+                                Err("The Windows drive changed before support inspection".to_owned())
+                            } else if let Some(active) = connection.as_ref() {
+                                let observation = active.vault_cleanup_diagnostics();
+                                Ok(json!({
+                                    "modified_closes": observation.modified_closes,
+                                    "unverifiable_closes": observation.unverifiable_closes,
+                                    "journaled_closes": observation.journaled_closes,
+                                    "close_callbacks": observation.close_callbacks,
+                                    "close_pool_refusals": observation.close_pool_refusals,
+                                    "deleted_closes": observation.deleted_closes,
+                                    "last_close_stage": observation.last_close_stage,
+                                    "last_close_hresult": observation.last_close_hresult,
+                                    "inventory_complete": observation.inventory_complete,
+                                    "last_cleanup_error": last_vault_cleanup_error.map(|error| format!("{error:?}")),
+                                }))
+                            } else { Err("The Windows drive is not connected".to_owned()) };
+                            let result = if worker_generation.load(Ordering::Acquire) == binding.generation { result }
+                                else { Err("The Windows drive changed during support inspection".to_owned()) };
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::VaultLockCleanupStatus { binding, space_id, root_resource_id, root_path, response } => {
+                            let result = if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) || connection.is_none() {
+                                Err("The Windows drive changed before cleanup inspection".to_owned())
+                            } else {
+                                // Absence is unknown, never proof of complete cleanup.
+                                Ok(retired_vaults.iter().any(|route| route.space_id() == space_id && route.root_resource_id() == root_resource_id && route.root_path() == root_path))
+                            };
+                            let result = if worker_generation.load(Ordering::Acquire) == binding.generation { result }
+                                else { Err("The Windows drive changed during cleanup inspection".to_owned()) };
                             let _ = response.send(result);
                         }
                         ProviderCommand::InspectConnection { binding, response } => {
@@ -928,6 +976,7 @@ impl ProviderManager {
                                     Ok((active, custody))
                                         if worker_generation.load(Ordering::Acquire) == generation =>
                                     {
+                                        last_vault_cleanup_error = None;
                                         active_binding = Some(candidate_binding.clone());
                                         vault_custody = custody;
                                         connection = Some(active);
@@ -1296,6 +1345,39 @@ impl ProviderManager {
         result
             .recv()
             .map_err(|_| "Windows Cloud Files connection manager stopped unexpectedly")?
+    }
+
+    fn vault_cleanup_diagnostics(&self, binding: ActiveProviderBinding) -> Result<Value, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .try_send(ProviderCommand::VaultCleanupDiagnostics { binding, response })
+            .map_err(|_| "Windows support inspection is unavailable")?;
+        result
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Windows support inspection was unavailable within its bound".to_owned())?
+    }
+
+    // true = exact pending cleanup; false = unknown, never complete.
+    fn vault_lock_cleanup_status(
+        &self,
+        binding: ActiveProviderBinding,
+        space_id: String,
+        root_resource_id: String,
+        root_path: String,
+    ) -> Result<bool, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .try_send(ProviderCommand::VaultLockCleanupStatus {
+                binding,
+                space_id,
+                root_resource_id,
+                root_path,
+                response,
+            })
+            .map_err(|_| "Windows cleanup inspection is unavailable")?;
+        result
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Windows cleanup inspection was unavailable within its bound".to_owned())?
     }
 
     fn connection_matches(&self, binding: ActiveProviderBinding) -> Result<bool, String> {
@@ -1865,28 +1947,55 @@ impl WindowsAgent {
                     .state
                     .lock()
                     .map_err(|_| "Account state is unavailable")?;
-                Ok((
-                    json!({
-                        "schema_version": 1,
-                        "app_version": env!("CARGO_PKG_VERSION"),
-                        "target_os": std::env::consts::OS,
-                        "target_arch": std::env::consts::ARCH,
-                        "profile_scope": "selected_profile",
-                        "profile_count": 1,
-                        "profile_config": {
-                            "parse_valid": null,
-                            "folder_pair_count": null,
-                            "mode_counts": null,
-                            "vault_pair_count": null,
+                let generation = state.active_generation;
+                let configuration = state.root_configuration.clone();
+                let binding = configuration.as_ref().and_then(|configuration| {
+                    let owner = configuration.registration_ownership.as_ref()?;
+                    Some(ActiveProviderBinding {
+                        generation,
+                        path: PathBuf::from(&configuration.path),
+                        identity: raiun_cloudfiles_windows::ConfiguredRootIdentity {
+                            volume_serial: configuration.volume_serial,
+                            file_index: configuration.file_index,
                         },
-                        "runtime": {
-                            "connected": state.session.is_some() && state.online_authenticated,
-                            "mounted": mounted,
-                            "sync_paused": self.provider.pause_snapshot(state.active_generation, state.online_authenticated).map(|snapshot| snapshot.paused),
-                        },
-                    }),
-                    false,
-                ))
+                        personal_space_id: owner.personal_drive_id.clone(),
+                        personal_root_resource_id: owner.personal_root_resource_id.clone()?,
+                    })
+                });
+                let mut value = json!({
+                    "schema_version": 1,
+                    "app_version": env!("CARGO_PKG_VERSION"),
+                    "target_os": std::env::consts::OS,
+                    "target_arch": std::env::consts::ARCH,
+                    "profile_scope": "selected_profile",
+                    "profile_count": 1,
+                    "profile_config": {
+                        "parse_valid": null,
+                        "folder_pair_count": null,
+                        "mode_counts": null,
+                        "vault_pair_count": null,
+                    },
+                    "runtime": {
+                        "connected": state.session.is_some() && state.online_authenticated,
+                        "mounted": mounted,
+                        "sync_paused": self.provider.pause_snapshot(state.active_generation, state.online_authenticated).map(|snapshot| snapshot.paused),
+                    },
+                });
+                drop(state);
+                let mut cleanup = binding
+                    .and_then(|binding| self.provider.vault_cleanup_diagnostics(binding).ok());
+                let state = self
+                    .state
+                    .lock()
+                    .map_err(|_| "Account state is unavailable")?;
+                if state.active_generation != generation
+                    || self.generation.load(Ordering::Acquire) != generation
+                    || state.root_configuration != configuration
+                {
+                    cleanup = None;
+                }
+                value["runtime"]["vault_cleanup"] = cleanup.unwrap_or(Value::Null);
+                Ok((value, false))
             }
             "accounts" => {
                 let status = self.status()?;
@@ -7751,6 +7860,16 @@ mod tests {
         let mut foreign = binding.clone();
         foreign.identity.file_index += 1;
         assert!(!vault_worker_binding_current(7, &binding, Some(&foreign)));
+        for changed in 0..4 {
+            foreign = binding.clone();
+            match changed {
+                0 => foreign.identity.volume_serial += 1,
+                1 => foreign.path = PathBuf::from(r"C:\ForeignRoot"),
+                2 => foreign.personal_space_id = "foreign-space".into(),
+                _ => foreign.personal_root_resource_id = "foreign-root".into(),
+            }
+            assert!(!vault_worker_binding_current(7, &binding, Some(&foreign)));
+        }
         foreign = binding.clone();
         foreign.generation = 0;
         assert!(!vault_worker_binding_current(0, &foreign, Some(&foreign)));
