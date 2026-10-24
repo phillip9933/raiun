@@ -1768,7 +1768,21 @@ impl ConfiguredRootConnection {
         // and clean-state admission. Keep this same referenced RH handle live
         // through the update and postproof: no internal close/reopen transition.
         let expected_usn = journal_cleanup_usn(file.raw, expected_file_index)?;
-        if !same_edit_snapshot(opened, root_snapshot(file.raw)?) {
+        let journal_snapshot = root_snapshot(file.raw)?;
+        if !same_edit_snapshot(opened, journal_snapshot) {
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!(
+                "synthetic cleanup refusal stage=post_journal_snapshot identity_equal={} size_equal={} lastwrite_equal={} before_tag={:#x} after_tag={:#x} before_attributes={:#x} after_attributes={:#x} before_state={:#x} after_state={:#x}",
+                opened.identity == journal_snapshot.identity,
+                opened.file_size == journal_snapshot.file_size,
+                opened.last_write_time == journal_snapshot.last_write_time,
+                opened.reparse_tag,
+                journal_snapshot.reparse_tag,
+                opened.file_attributes,
+                journal_snapshot.file_attributes,
+                opened.placeholder_state,
+                journal_snapshot.placeholder_state,
+            );
             return Err(Error::ConfiguredRootChanged);
         }
         clean_dehydrate_identity(
@@ -1782,11 +1796,19 @@ impl ConfiguredRootConnection {
         {
             return Err(Error::EditRecoveryUnavailable);
         }
-        root.verify_identity(true)?;
-        root.verify_registered()?;
+        root.verify_identity(true).inspect_err(|_| {
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!("synthetic cleanup refusal stage=preupdate_root_identity");
+        })?;
+        root.verify_registered().inspect_err(|_| {
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!("synthetic cleanup refusal stage=preupdate_registration");
+        })?;
         if self.state.has_unresolved_placeholder_data() {
             return Err(Error::UnresolvedPlaceholderEdits);
         }
+        #[cfg(feature = "synthetic-agent-integration")]
+        eprintln!("synthetic cleanup fixed_fence_update admitted=true");
         let range = CfFileRange {
             starting_offset: 0,
             length: -1,
@@ -1830,8 +1852,16 @@ impl ConfiguredRootConnection {
             );
             return Err(native_error("dehydrate clean vault file", hr));
         }
-        root.verify_identity(true)?;
-        root.verify_registered()?;
+        #[cfg(feature = "synthetic-agent-integration")]
+        eprintln!("synthetic cleanup fixed_fence_update completed=true");
+        root.verify_identity(true).inspect_err(|_| {
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!("synthetic cleanup refusal stage=postupdate_root_identity");
+        })?;
+        root.verify_registered().inspect_err(|_| {
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!("synthetic cleanup refusal stage=postupdate_registration");
+        })?;
         let after = root_snapshot(file.raw)?;
         let custody_attributes =
             FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT;
@@ -1842,6 +1872,22 @@ impl ConfiguredRootConnection {
             || after.file_attributes & custody_attributes
                 != opened.file_attributes & custody_attributes
         {
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!(
+                "synthetic cleanup refusal stage=postupdate_file_snapshot identity_equal={} size_equal={} lastwrite_equal={} reparse_equal={} custody_attributes_equal={} before_tag={:#x} after_tag={:#x} before_attributes={:#x} after_attributes={:#x} before_state={:#x} after_state={:#x}",
+                after.identity == opened.identity,
+                after.file_size == opened.file_size,
+                after.last_write_time == opened.last_write_time,
+                after.reparse_tag == opened.reparse_tag,
+                after.file_attributes & custody_attributes
+                    == opened.file_attributes & custody_attributes,
+                opened.reparse_tag,
+                after.reparse_tag,
+                opened.file_attributes,
+                after.file_attributes,
+                opened.placeholder_state,
+                after.placeholder_state,
+            );
             return Err(Error::ConfiguredRootChanged);
         }
         clean_dehydrate_identity(
