@@ -68,7 +68,7 @@ pub struct PinnedDirectory {
 
 impl PinnedDirectory {
     pub fn open(path: &Path) -> io::Result<Self> {
-        let handles = open_directory_chain(path)?;
+        let (walked_path, handles) = open_directory_chain(path)?;
         let identity = identity(handles.last().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -76,7 +76,9 @@ impl PinnedDirectory {
             )
         })?)?;
         Ok(Self {
-            path: path.to_owned(),
+            // Reuse the exact component-walk spelling used for the held final
+            // handle; do not reinterpret the caller's original separators.
+            path: walked_path,
             _handles: handles,
             identity,
         })
@@ -1244,7 +1246,7 @@ fn open_directory_handle(path: &Path) -> io::Result<File> {
     checked_handle(raw, true)
 }
 
-fn open_directory_chain(path: &Path) -> io::Result<Vec<File>> {
+fn open_directory_chain(path: &Path) -> io::Result<(PathBuf, Vec<File>)> {
     use std::path::Component;
 
     let mut current = PathBuf::new();
@@ -1275,7 +1277,7 @@ fn open_directory_chain(path: &Path) -> io::Result<Vec<File>> {
             "Journal directory path is not rooted",
         ));
     }
-    Ok(handles)
+    Ok((current, handles))
 }
 
 fn open_file_handle(path: &Path, access: u32, disposition: u32) -> io::Result<File> {
@@ -1533,6 +1535,97 @@ mod tests {
         let private = PrivateDirectory::create_or_open_under(&parent, OsStr::new(&name))
             .expect("create current-user-only child");
         (parent, private)
+    }
+
+    #[test]
+    #[ignore = "isolated ordinary lab Windows only; RAIUN_PINNED_PATH_PROBE=public-temp-only; fresh temp directories only"]
+    fn pinned_directory_normal_and_doubled_separator_probe() {
+        assert_eq!(
+            std::env::var("RAIUN_PINNED_PATH_PROBE").as_deref(),
+            Ok("public-temp-only"),
+            "explicit public sandbox opt-in required"
+        );
+        assert_eq!(std::env::var("USERNAME").as_deref(), Ok("RaiunLabUser"));
+        let token = std::process::Command::new("powershell.exe")
+            .env_remove("PSModulePath")
+            .args(["-NoProfile", "-NonInteractive", "-Command",
+                "$i=[Security.Principal.WindowsIdentity]::GetCurrent();$p=[Security.Principal.WindowsPrincipal]::new($i);if($i.User.Value-cne'S-1-5-21-1397333782-1256641849-3475801233-1001'-or$p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){exit 7};exit 0"])
+            .output().expect("read inherited token");
+        assert!(token.status.success(), "exact ordinary lab token required");
+        assert_eq!(
+            std::env::temp_dir(),
+            PathBuf::from(r"C:\Users\RaiunLabUser\AppData\Local\Temp"),
+            "fixed public temporary sandbox required"
+        );
+        let root = private_test_directory();
+        let path = root.join("plain-child");
+        std::fs::create_dir(&path).expect("create fresh owned public child");
+        let normal = PinnedDirectory::open(&path);
+        eprintln!(
+            "PINNED_PATH_NORMAL open={} kind={:?} raw={:?}",
+            normal.is_ok(),
+            normal.as_ref().err().map(io::Error::kind),
+            normal.as_ref().err().and_then(io::Error::raw_os_error)
+        );
+        let normal = normal.expect("normal public path must open");
+        let normal_verify = normal.verify_path();
+        eprintln!(
+            "PINNED_PATH_NORMAL verify={} kind={:?} raw={:?}",
+            normal_verify.is_ok(),
+            normal_verify.as_ref().err().map(io::Error::kind),
+            normal_verify
+                .as_ref()
+                .err()
+                .and_then(io::Error::raw_os_error)
+        );
+        assert!(normal_verify.is_ok(), "normal public path must verify");
+        // Change spelling only, preserving the drive-absolute prefix. No
+        // filesystem object, registration, ACL or application store is changed.
+        let spelling = path
+            .to_str()
+            .expect("synthetic path UTF8")
+            .replace('\\', "\\\\");
+        let doubled = PinnedDirectory::open(Path::new(&spelling));
+        eprintln!(
+            "PINNED_PATH_DOUBLED open={} kind={:?} raw={:?}",
+            doubled.is_ok(),
+            doubled.as_ref().err().map(io::Error::kind),
+            doubled.as_ref().err().and_then(io::Error::raw_os_error)
+        );
+        assert!(
+            doubled.is_ok(),
+            "walked doubled-separator public path must open"
+        );
+        let mut both_verified = false;
+        if let Ok(held) = &doubled {
+            let equal = held.identity() == normal.identity();
+            eprintln!("PINNED_PATH_DOUBLED identity_equal={equal}");
+            assert!(equal, "same public object must retain exact identity");
+            let verified = held.verify_path();
+            eprintln!(
+                "PINNED_PATH_DOUBLED verify={} kind={:?} raw={:?}",
+                verified.is_ok(),
+                verified.as_ref().err().map(io::Error::kind),
+                verified.as_ref().err().and_then(io::Error::raw_os_error)
+            );
+            both_verified = verified.is_ok();
+        }
+        assert!(
+            both_verified,
+            "walked doubled-separator public path must verify"
+        );
+        drop(doubled);
+        drop(normal);
+        // Preserve the small, wholly owned namespace on any diagnostic refusal.
+        // The operator can locate it by the existing synthetic temp prefix.
+        if both_verified {
+            std::fs::remove_dir(&path).expect("remove only owned empty child");
+            std::fs::remove_dir(&root).expect("remove only owned empty root");
+        }
+        eprintln!(
+            "PINNED_PATH_PROBE_COMPLETE=true both_verified={both_verified} retained={}",
+            !both_verified
+        );
     }
 
     #[test]

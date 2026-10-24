@@ -2506,3 +2506,20 @@ root projection contains doubled separators. Whether this explains the native
 reservation refusal is being checked using harmless argument roundtrips and
 fresh temporary directories. No existing reservation is discarded or rebound,
 and no native identity or cleanup guard has been relaxed.
+
+
+The harmless Windows argument roundtrip subsequently passed all six corrected
+cases and reproduced the old helper's corruption. An isolated native directory
+test then opened the same physical directory through both spellings: normal
+spelling verified, while doubled separators failed verification with Win32
+error 123 (`InvalidFilename`). The test passed as an observation of that defect;
+it was not a corrected-behavior pass. Both failures and normal shutdown/cold
+records are preserved.
+
+The narrow correction stores the exact pathname rebuilt by the successful
+component walk alongside its existing pinned handles. Verification and child
+operations reuse that spelling. Parent traversal rejection, no-follow opens,
+reparse/type checks, held ancestors and physical identity checks are unchanged;
+saved account/root reservations are not rewritten. Corrected native regression,
+source checks and installed workflow acceptance remain pending. This does not
+establish the cause or resolution of the earlier incomplete-Lock failure.
