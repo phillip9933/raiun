@@ -30,6 +30,7 @@ pub(super) struct Scope {
     key: Vec<u8>,
 }
 impl Scope {
+    #[cfg(test)]
     pub(super) fn new(
         profile: &str,
         server: &str,
@@ -454,6 +455,63 @@ mod tests {
             &VaultSessionScope::new("default", "https://cloud.example", "space", root).unwrap(),
         )
         .unwrap()
+    }
+    #[test]
+    fn canonical_runtime_account_bytes_bind_issuer_and_saved_credential_scope() {
+        use super::super::windows_bandwidth;
+
+        // OIDC retains this valid issuer spelling verbatim in Session. The
+        // trusted runtime canonicalizes its AccountScope, including root '/'.
+        let runtime = windows_bandwidth::Scope::new(
+            "default",
+            "https://cloud.example",
+            "client",
+            Some("https://issuer.example"),
+            "a",
+        )
+        .unwrap();
+        let canonical = windows_bandwidth::Scope::new(
+            "default",
+            "https://cloud.example/",
+            "client",
+            Some("https://issuer.example/"),
+            "a",
+        )
+        .unwrap();
+        assert!(runtime.bytes() == canonical.bytes());
+        let vault =
+            VaultSessionScope::new("default", "https://cloud.example", "space", "root").unwrap();
+        let remembered = Scope::from_trusted_account("default", runtime.bytes(), &vault).unwrap();
+        assert!(remembered == scope("a", "root"));
+        let store = Memory::default();
+        commit_remember(
+            &store,
+            begin_remember(&store, remembered).unwrap(),
+            b"synthetic issuer regression",
+        )
+        .unwrap();
+        let reopened = Scope::from_trusted_account("default", canonical.bytes(), &vault).unwrap();
+        assert!(
+            load(&store, &reopened).unwrap().unwrap().as_slice() == b"synthetic issuer regression"
+        );
+        let foreign = windows_bandwidth::Scope::new(
+            "default",
+            "https://cloud.example",
+            "client",
+            Some("https://issuer.example"),
+            "b",
+        )
+        .unwrap();
+        let foreign = Scope::from_trusted_account("default", foreign.bytes(), &vault).unwrap();
+        assert!(load(&store, &foreign).unwrap().is_none());
+        assert!(
+            Scope::from_trusted_account(
+                "profile-11111111111111111111111111111111",
+                runtime.bytes(),
+                &vault,
+            )
+            .is_err()
+        );
     }
     #[test]
     fn exact_scope_roundtrip_and_missing_reads_do_not_create_authority() {

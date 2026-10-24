@@ -481,13 +481,9 @@ impl WindowsAgent {
             trusted.account_id().to_owned(),
         )
         .map_err(|_| "Could not bind the account scope")?;
-        let digest = format!(
-            "{:x}",
-            sha2::Sha256::digest(
-                serde_json::to_vec(&account_scope)
-                    .map_err(|_| "Could not bind the account scope")?
-            )
-        );
+        let account_bytes =
+            serde_json::to_vec(&account_scope).map_err(|_| "Could not bind the account scope")?;
+        let digest = format!("{:x}", sha2::Sha256::digest(&account_bytes));
         let reservation = windows_profile_registry::VaultReservation::new(
             digest.clone(),
             listing.space_id.clone(),
@@ -498,12 +494,12 @@ impl WindowsAgent {
             .integrity_token
             .as_deref()
             .ok_or("The selected vault is not initialized")?;
-        let remembered_scope = windows_vault_credentials::Scope::new(
+        // Reuse the exact canonical account identity used for the reservation.
+        // Reconstructing from raw session URLs can disagree on an origin's
+        // optional slash, even though the authenticated identity is unchanged.
+        let remembered_scope = windows_vault_credentials::Scope::from_trusted_account(
             &self.profile_scope,
-            &account_scope_server(&session)?,
-            &session.client_id,
-            session.expected_issuer.as_deref(),
-            trusted.account_id(),
+            &account_bytes,
             &scope,
         )?;
         let store = VaultCredentialStore {
@@ -706,10 +702,4 @@ impl WindowsAgent {
             "vault_mount_write_unavailable_reason":"route_not_installed",
             "remembered":remembered,"remembered_status":remembered_status}))
     }
-}
-
-fn account_scope_server(session: &auth::Session) -> Result<String, String> {
-    url::Url::parse(&session.server)
-        .map(|value| value.to_string())
-        .map_err(|_| "The account server is invalid".into())
 }
