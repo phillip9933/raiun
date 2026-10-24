@@ -311,6 +311,13 @@ pub struct ConfiguredRootConnection {
 #[cfg(windows)]
 #[allow(dead_code)]
 impl ConfiguredRootConnection {
+    /// Conservative admission fence for new vault sessions. Unknown historical
+    /// custody (including reconnects) refuses activation; this does not hide
+    /// existing plaintext or prove complete filesystem cleanup.
+    pub fn can_admit_vault_session(&self) -> bool {
+        self.inner.can_admit_vault_session()
+    }
+
     /// Revoke/drain this retained route before cleaning recorded plaintext.
     /// Dirty/uncertain state or failed postproof returns incomplete cleanup;
     /// the owner must retain the route for retry and never report fully locked.

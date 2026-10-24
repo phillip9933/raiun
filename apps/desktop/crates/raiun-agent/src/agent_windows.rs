@@ -622,6 +622,8 @@ impl ProviderManager {
                                 Err("The account changed before Windows drive inspection".to_owned())
                             } else if connection.is_none() || !retired_vaults.is_empty() {
                                 Err("The Windows drive is not connected".to_owned())
+                            } else if !connection.as_ref().is_some_and(|connection| connection.can_admit_vault_session()) {
+                                Err("The retained drive needs verified vault cleanup before unlock".to_owned())
                             } else if active_binding.as_ref() == Some(&binding) {
                                 backend.as_ref().filter(|backend| !backend.is_revoked())
                                     .cloned().ok_or_else(|| "The Windows drive is waiting for confirmed disconnect".to_owned())

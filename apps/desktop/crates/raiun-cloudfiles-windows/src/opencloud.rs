@@ -1391,15 +1391,24 @@ impl OpenCloudPlaceholderBackend {
                         }
                         (id, "Spaces".to_owned(), vec!["Spaces".to_owned()])
                     } else {
-                        if direct_child_name("/", path).is_none() {
-                            // Nested directory bindings may have been restored without
-                            // current local label provenance; refuse rather than guess.
+                        // No normalization/trimming: the exact verified route must
+                        // already use canonical remote components representable on Windows.
+                        let remote = path.strip_prefix('/').ok_or(BackendError::Unavailable)?;
+                        let segments = remote.split('/').collect::<Vec<_>>();
+                        if path.len() > 32_000
+                            || segments.len() > 256
+                            || segments.iter().any(|part| !valid_windows_component(part))
+                        {
                             return Err(BackendError::Unavailable);
                         }
+                        let (prefix, _) = path.rsplit_once('/').ok_or(BackendError::Unavailable)?;
+                        let parent_path = if prefix.is_empty() { "/" } else { prefix };
                         let mut matches = state.directories.iter().filter(|(_, entry)| {
                             entry.space_id == space_id
-                                && entry.path == "/"
-                                && entry.remote_id == entry.root_resource_id
+                                && entry.path == parent_path
+                                && valid_remote_id(&entry.root_resource_id)
+                                && valid_remote_id(&entry.remote_id)
+                                && (parent_path != "/" || entry.remote_id == entry.root_resource_id)
                         });
                         let (id, directory) = matches.next().ok_or(BackendError::Unavailable)?;
                         if matches.next().is_some() {
@@ -1412,7 +1421,7 @@ impl OpenCloudPlaceholderBackend {
                                 directory.root_resource_id.clone(),
                             ))
                             .ok_or(BackendError::Unavailable)?;
-                        let components = if space_id == personal_space
+                        let mut components = if space_id == personal_space
                             && directory.root_resource_id == *personal_root
                             && label == "Personal"
                         {
@@ -1426,6 +1435,22 @@ impl OpenCloudPlaceholderBackend {
                             }
                             vec!["Spaces".to_owned(), name.to_owned()]
                         };
+                        // Existing directory bindings can be restored. They locate an
+                        // exact opaque parent, not fresh remote metadata or read authority.
+                        // Native pins that identity; later enumeration revalidates the server.
+                        if parent_path != "/" {
+                            components.extend(parent_path[1..].split('/').map(str::to_owned));
+                        }
+                        if components.len() > 256
+                            || components
+                                .iter()
+                                .map(String::len)
+                                .sum::<usize>()
+                                .saturating_add(components.len())
+                                > 32_000
+                        {
+                            return Err(BackendError::Unavailable);
+                        }
                         let name = components
                             .last()
                             .cloned()

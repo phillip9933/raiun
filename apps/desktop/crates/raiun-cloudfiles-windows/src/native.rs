@@ -1633,6 +1633,18 @@ impl OwnedConfiguredRoot {
 
 #[allow(dead_code)]
 impl ConfiguredRootConnection {
+    // Admission only: this is not a proof that all filesystem names/content
+    // are absent. Reconnected roots deliberately have unknown prior custody.
+    pub(super) fn can_admit_vault_session(&self) -> bool {
+        self.connected
+            && self.root.is_some()
+            && self
+                .state
+                .hydrated_files
+                .lock()
+                .is_ok_and(|inventory| inventory.is_complete())
+    }
+
     // Only changes population policy on an already owned directory. The caller
     // supplies a current backend identity; the path is merely a locator.
     pub(super) fn refresh_namespace_parent_population(

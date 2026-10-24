@@ -83,9 +83,14 @@ and strict linting passed for that request/cleanup batch.
 
 The following source adds a pinned parent-directory population request after
 route installation. It requests a future enumeration; it does not prove an
-immediate Explorer refresh or remove cached children. Nested remote parents are
-currently refused. Native refresh, a complete mounted read/lock workflow,
+immediate Explorer refresh or remove cached children. The next source also resolves nested remote parents only through an exact
+catalogue identity and current root label; native identity and fresh server
+revalidation remain required. Native refresh, a complete mounted read/lock workflow,
 cached decrypted-name visibility and restart cleanup coverage remain open.
+A retained registration starts with unknown historical hydration custody, and
+new vault activation is refused before password verification in that state.
+This conservative guard prevents falsely certifying empty cleanup; it does not
+remove or hide old plaintext/names. Durable historical custody is still pending.
 User-facing vault unlock/lock stays disabled. No new installer or public release
 is implied. The installed, closed VM candidate remains the 2704 build.
 
