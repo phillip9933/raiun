@@ -2157,3 +2157,12 @@ unchanged evidence and preserve failed roots, recovery and the installed app.
 Actual startup activation is outside automated tests. Current native testing is
 interrupted by a platform restriction on the testing agent; source checks do
 not substitute for those pending results.
+
+Windows controls component acceptance (24 October): five focused tests now pass
+under the isolated ordinary Windows test user. They cover proxy RPC/profile and
+revision checks, pending proxy ownership/validation, shared bandwidth-controller
+updates/cancellation, and synthetic protected-preferences DPAPI CAS/reopen/domain
+isolation. The VM shut down normally afterward. This advances the runtime evidence
+above; it does not prove measured network throughput, on-wire proxy routing,
+startup activation or installed-package behavior. The encrypted-access test remains
+separate and stopped.

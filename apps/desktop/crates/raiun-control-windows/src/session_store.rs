@@ -1520,6 +1520,127 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser and native DPAPI/private-storage ACL support; synthetic temp-root only"]
+    fn protected_transport_preferences_cas_reopen_and_preserve_domains() {
+        assert_eq!(std::env::var("USERNAME").as_deref(), Ok("RaiunLabUser"));
+        let root = std::env::temp_dir().join(format!(
+            "raiun-transport-preferences-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        eprintln!("synthetic_transport_preferences_root={}", root.display());
+        // Own fixture construction: never resolve current_user/LOCALAPPDATA,
+        // create an account, decrypt a session, or touch a real profile.
+        let base = DpapiSessionStore {
+            root: root.join("sessions"),
+            profile_directory: None,
+        };
+        let scope_a = br#"{"profile":"default","server":"https://synthetic.invalid/","client":"synthetic-client","issuer":null,"subject":"synthetic-a"}"#;
+        let scope_b = br#"{"profile":"default","server":"https://synthetic.invalid/","client":"synthetic-client","issuer":null,"subject":"synthetic-b"}"#;
+        assert!(base.load_bandwidth_settings(scope_a).unwrap().is_none());
+        assert!(base.load_proxy_settings("default").unwrap().is_none());
+        assert!(!base.root.join("bandwidth").exists());
+        assert!(!base.root.join("network-proxy").exists());
+        base.ensure_private_root().unwrap();
+        let sentinel = base.root.join("unrelated-synthetic.bin");
+        let temporary = base
+            .write_temp(&sentinel, b"unrelated synthetic bytes")
+            .unwrap();
+        std::fs::rename(temporary, &sentinel).unwrap();
+        let before = std::fs::read(&sentinel).unwrap();
+        // The storage adapter intentionally treats validated preference records
+        // as opaque bytes; their schema/scope rules are exercised by Agent tests.
+        let first = br#"{"version":1,"revision":2,"synthetic":"first"}"#;
+        let second = br#"{"version":1,"revision":3,"synthetic":"second"}"#;
+        base.compare_exchange_bandwidth_settings(scope_a, None, first)
+            .unwrap();
+        base.compare_exchange_proxy_settings("default", None, first)
+            .unwrap();
+        base.compare_exchange_bandwidth_settings(scope_a, Some(first), second)
+            .unwrap();
+        base.compare_exchange_proxy_settings("default", Some(first), second)
+            .unwrap();
+        assert!(
+            base.compare_exchange_bandwidth_settings(scope_a, None, first)
+                .is_err()
+        );
+        assert!(
+            base.compare_exchange_proxy_settings("default", Some(first), first)
+                .is_err()
+        );
+        assert!(
+            base.compare_exchange_bandwidth_settings(scope_a, Some(second), b"")
+                .is_err()
+        );
+        assert!(
+            base.compare_exchange_proxy_settings(
+                "default",
+                Some(second),
+                &vec![b'x'; 16 * 1024 + 1]
+            )
+            .is_err()
+        );
+        assert!(base.load_bandwidth_settings(scope_b).unwrap().is_none());
+        base.compare_exchange_bandwidth_settings(scope_b, None, first)
+            .unwrap();
+        let bandwidth_path = base
+            .root
+            .join("bandwidth")
+            .join(hex(
+                &preferences_digest(PreferenceKind::Bandwidth, scope_a).unwrap()
+            ))
+            .join("preferences.bin");
+        let proxy_path = base
+            .root
+            .join("network-proxy")
+            .join(hex(
+                &preferences_digest(PreferenceKind::Proxy, b"default").unwrap()
+            ))
+            .join("preferences.bin");
+        assert_ne!(bandwidth_path, proxy_path);
+        let bandwidth_sealed = std::fs::read(&bandwidth_path).unwrap();
+        let proxy_sealed = std::fs::read(&proxy_path).unwrap();
+        assert!(bandwidth_sealed.starts_with(b"RAIUN-BANDWIDTH\0\x01"));
+        assert!(proxy_sealed.starts_with(b"RAIUN-PROXY\0\x01"));
+        assert_ne!(bandwidth_sealed, proxy_sealed);
+        let store_root = base.root.clone();
+        drop(base);
+        let reopened = DpapiSessionStore {
+            root: store_root,
+            profile_directory: None,
+        };
+        assert_eq!(
+            reopened
+                .load_bandwidth_settings(scope_a)
+                .unwrap()
+                .as_deref(),
+            Some(second.as_slice())
+        );
+        assert_eq!(
+            reopened.load_proxy_settings("default").unwrap().as_deref(),
+            Some(second.as_slice())
+        );
+        assert_eq!(
+            reopened
+                .load_bandwidth_settings(scope_b)
+                .unwrap()
+                .as_deref(),
+            Some(first.as_slice())
+        );
+        assert_eq!(std::fs::read(&bandwidth_path).unwrap(), bandwidth_sealed);
+        assert_eq!(std::fs::read(&proxy_path).unwrap(), proxy_sealed);
+        assert_eq!(std::fs::read(&sentinel).unwrap(), before);
+        drop(reopened);
+        // Preserve the owned fixture on any panic. Cleanup occurs only after
+        // every assertion passes and all store/directory/file pins are dropped.
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     #[ignore = "requires isolated ordinary Windows user and native private-storage ACL support"]
     fn registry_broker_lock_excludes_a_second_owner_until_release() {
         let root = std::env::temp_dir().join(format!(
