@@ -361,41 +361,79 @@ impl DpapiSessionStore {
         Ok(Arc::new(directory))
     }
 
-    /// Secret-only, exact trusted local-profile storage. Missing reads do not
-    /// create authority or directories. Caller validates the embedded full
-    /// account/vault scope; stored bytes do not authorize an unlocked session.
+    /// Opt-in secret document, separated from durable sensitive vault custody.
     pub fn load_vault_credentials(&self, profile: &str) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
-        let digest = vault_credentials_digest(profile)?;
-        let Some(directory) = self.vault_credentials_directory(&digest, false)? else {
-            return Ok(None);
-        };
-        read_vault_credentials(&directory, &digest)
+        self.load_vault_document(VaultDocumentKind::Credentials, profile.as_bytes())
     }
-
-    /// Durable full-byte secret CAS. The private lease spans read/decrypt,
-    /// comparison, sealing and write-through publication. No user callback is
-    /// invoked while it is held. A failed postcheck can mean publication was
-    /// completed; callers must not claim the old state was preserved.
     pub fn compare_exchange_vault_credentials(
         &self,
         profile: &str,
         expected: Option<&[u8]>,
         next: &[u8],
     ) -> io::Result<()> {
-        let digest = vault_credentials_digest(profile)?;
+        self.compare_exchange_vault_document(
+            VaultDocumentKind::Credentials,
+            profile.as_bytes(),
+            expected,
+            next,
+        )
+    }
+    /// Protected sensitive metadata only: never a password, key, or unlock grant.
+    /// Caller supplies and validates the canonical full account/vault/root scope.
+    /// A missing read creates no directory and must not be treated as clean history.
+    pub fn load_vault_custody(&self, scope: &[u8]) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+        self.load_vault_document(VaultDocumentKind::Custody, scope)
+    }
+    /// Durable full-byte CAS; failure may mean publication is uncertain. Custody
+    /// survives Forget saved key and is never stored in the credential document.
+    pub fn compare_exchange_vault_custody(
+        &self,
+        scope: &[u8],
+        expected: Option<&[u8]>,
+        next: &[u8],
+    ) -> io::Result<()> {
+        self.compare_exchange_vault_document(VaultDocumentKind::Custody, scope, expected, next)
+    }
+
+    /// Private protected document read. The caller validates embedded authority;
+    /// these bytes alone never authorize a session, history, or native cleanup.
+    fn load_vault_document(
+        &self,
+        kind: VaultDocumentKind,
+        scope: &[u8],
+    ) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+        let digest = kind.digest(scope)?;
+        let Some(directory) = self.vault_document_directory(kind, &digest, false)? else {
+            return Ok(None);
+        };
+        read_vault_document(&directory, kind, &digest)
+    }
+
+    /// Durable full-byte protected document CAS. The private lease spans read/decrypt,
+    /// comparison, sealing and write-through publication. No user callback is
+    /// invoked while it is held. A failed postcheck can mean publication was
+    /// completed; callers must not claim the old state was preserved.
+    fn compare_exchange_vault_document(
+        &self,
+        kind: VaultDocumentKind,
+        scope: &[u8],
+        expected: Option<&[u8]>,
+        next: &[u8],
+    ) -> io::Result<()> {
+        let digest = kind.digest(scope)?;
         if next.is_empty()
-            || next.len() > VAULT_CREDENTIALS_MAX_PLAIN
-            || expected.is_some_and(|v| v.is_empty() || v.len() > VAULT_CREDENTIALS_MAX_PLAIN)
+            || next.len() > VAULT_DOCUMENT_MAX_PLAIN
+            || expected.is_some_and(|v| v.is_empty() || v.len() > VAULT_DOCUMENT_MAX_PLAIN)
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Invalid vault credential size",
+                "Invalid protected vault document size",
             ));
         }
         let directory = self
-            .vault_credentials_directory(&digest, true)?
-            .ok_or_else(|| io::Error::other("Private vault credential storage unavailable"))?;
-        let lock_name = std::ffi::OsStr::new("credentials.lock");
+            .vault_document_directory(kind, &digest, true)?
+            .ok_or_else(|| io::Error::other("Protected vault document storage unavailable"))?;
+        let lock_name = std::ffi::OsStr::new(kind.lock_name());
         match directory.create_new_file(lock_name) {
             Ok((file, _)) => drop(file),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
@@ -403,18 +441,18 @@ impl DpapiSessionStore {
         }
         let mut lease = directory.open_owned_immutable_file(lock_name)?;
         lease.try_lock_exclusive()?;
-        let current = read_vault_credentials(&directory, &digest)?;
+        let current = read_vault_document(&directory, kind, &digest)?;
         if current.as_ref().map(|v| v.as_slice()) != expected {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "Vault credentials changed",
+                "Protected vault document changed",
             ));
         }
-        let sealed = protect_bounded(next, &digest, VAULT_CREDENTIALS_MAX_CIPHER)?;
-        let mut envelope = Vec::with_capacity(VAULT_CREDENTIALS_ENVELOPE.len() + sealed.len());
-        envelope.extend_from_slice(VAULT_CREDENTIALS_ENVELOPE);
+        let sealed = protect_bounded(next, &digest, VAULT_DOCUMENT_MAX_CIPHER)?;
+        let mut envelope = Vec::with_capacity(kind.envelope().len() + sealed.len());
+        envelope.extend_from_slice(kind.envelope());
         envelope.extend_from_slice(&sealed);
-        let destination = directory.path().join("credentials.bin");
+        let destination = directory.path().join(kind.file_name());
         let temporary = self.write_temp(&destination, &envelope)?;
         let result = (|| {
             directory.verify_path()?;
@@ -433,10 +471,10 @@ impl DpapiSessionStore {
                 return Err(io::Error::last_os_error());
             }
             directory.verify_path()?;
-            let published = read_vault_credentials(&directory, &digest)?;
+            let published = read_vault_document(&directory, kind, &digest)?;
             if published.as_ref().map(|v| v.as_slice()) != Some(next) {
                 return Err(io::Error::other(
-                    "Vault credential publication is uncertain",
+                    "Protected vault document publication is uncertain",
                 ));
             }
             Ok(())
@@ -447,8 +485,9 @@ impl DpapiSessionStore {
         result
     }
 
-    fn vault_credentials_directory(
+    fn vault_document_directory(
         &self,
+        kind: VaultDocumentKind,
         digest: &[u8; 32],
         create: bool,
     ) -> io::Result<Option<Arc<crate::PrivateDirectory>>> {
@@ -458,7 +497,7 @@ impl DpapiSessionStore {
             return Ok(None);
         }
         let parent = crate::PinnedDirectory::open(&self.root)?;
-        let name = std::ffi::OsStr::new("vault-credentials");
+        let name = std::ffi::OsStr::new(kind.directory());
         let first = if create {
             crate::PrivateDirectory::create_or_open_under(&parent, name)
         } else {
@@ -1350,9 +1389,61 @@ fn remove_exact_file(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-const VAULT_CREDENTIALS_MAX_PLAIN: usize = 1024 * 1024;
-const VAULT_CREDENTIALS_MAX_CIPHER: usize = VAULT_CREDENTIALS_MAX_PLAIN + 64 * 1024;
+const VAULT_DOCUMENT_MAX_PLAIN: usize = 1024 * 1024;
+const VAULT_DOCUMENT_MAX_CIPHER: usize = VAULT_DOCUMENT_MAX_PLAIN + 64 * 1024;
 const VAULT_CREDENTIALS_ENVELOPE: &[u8] = b"RAIUN-VAULT-CREDENTIALS-DPAPI\0\x01";
+#[derive(Clone, Copy)]
+enum VaultDocumentKind {
+    Credentials,
+    Custody,
+}
+impl VaultDocumentKind {
+    fn directory(self) -> &'static str {
+        match self {
+            Self::Credentials => "vault-credentials",
+            Self::Custody => "vault-custody",
+        }
+    }
+    fn file_name(self) -> &'static str {
+        match self {
+            Self::Credentials => "credentials.bin",
+            Self::Custody => "custody.bin",
+        }
+    }
+    fn lock_name(self) -> &'static str {
+        match self {
+            Self::Credentials => "credentials.lock",
+            Self::Custody => "custody.lock",
+        }
+    }
+    fn envelope(self) -> &'static [u8] {
+        match self {
+            Self::Credentials => VAULT_CREDENTIALS_ENVELOPE,
+            Self::Custody => b"RAIUN-VAULT-CUSTODY-DPAPI\0\x01",
+        }
+    }
+    fn digest(self, scope: &[u8]) -> io::Result<[u8; 32]> {
+        match self {
+            Self::Credentials => vault_credentials_digest(
+                std::str::from_utf8(scope)
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid profile"))?,
+            ),
+            Self::Custody => {
+                if scope.is_empty() || scope.len() > 32 * 1024 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Invalid custody scope",
+                    ));
+                }
+                let mut hash = Sha256::new();
+                hash.update(b"raiun-vault-custody-dpapi-v1\0");
+                hash.update(scope);
+                Ok(hash.finalize().into())
+            }
+        }
+    }
+}
+
 fn vault_credentials_digest(profile: &str) -> io::Result<[u8; 32]> {
     if profile != "default"
         && !(profile.len() == 40
@@ -1371,21 +1462,22 @@ fn vault_credentials_digest(profile: &str) -> io::Result<[u8; 32]> {
     hash.update(profile.as_bytes());
     Ok(hash.finalize().into())
 }
-fn read_vault_credentials(
+fn read_vault_document(
     directory: &Arc<crate::PrivateDirectory>,
+    kind: VaultDocumentKind,
     digest: &[u8; 32],
 ) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
     let mut reader =
-        match directory.open_owned_immutable_file(std::ffi::OsStr::new("credentials.bin")) {
+        match directory.open_owned_immutable_file(std::ffi::OsStr::new(kind.file_name())) {
             Ok(v) => v,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
-    let max = VAULT_CREDENTIALS_ENVELOPE.len() + VAULT_CREDENTIALS_MAX_CIPHER;
+    let max = kind.envelope().len() + VAULT_DOCUMENT_MAX_CIPHER;
     if reader.metadata()?.len() > max as u64 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "Protected vault credentials exceed limit",
+            "Protected protected vault documents exceed limit",
         ));
     }
     // This buffer contains ciphertext only; plaintext is returned zeroized by DPAPI helper.
@@ -1399,22 +1491,20 @@ fn read_vault_credentials(
     if envelope.len() > max {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "Protected vault credentials exceed limit",
+            "Protected protected vault documents exceed limit",
         ));
     }
-    let ciphertext = envelope
-        .strip_prefix(VAULT_CREDENTIALS_ENVELOPE)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Invalid vault credential envelope",
-            )
-        })?;
+    let ciphertext = envelope.strip_prefix(kind.envelope()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Invalid protected vault document envelope",
+        )
+    })?;
     let plaintext = unprotect_bounded(
         ciphertext,
         digest,
-        VAULT_CREDENTIALS_MAX_CIPHER,
-        VAULT_CREDENTIALS_MAX_PLAIN,
+        VAULT_DOCUMENT_MAX_CIPHER,
+        VAULT_DOCUMENT_MAX_PLAIN,
     )?;
     Ok(Some(plaintext))
 }
@@ -1756,7 +1846,7 @@ mod tests {
             base.compare_exchange_vault_credentials(profile, Some(&first), &first)
                 .is_err()
         );
-        let oversize = Zeroizing::new(vec![0; VAULT_CREDENTIALS_MAX_PLAIN + 1]);
+        let oversize = Zeroizing::new(vec![0; VAULT_DOCUMENT_MAX_PLAIN + 1]);
         assert!(
             base.compare_exchange_vault_credentials(profile, Some(&second), &oversize)
                 .is_err()
@@ -1797,6 +1887,128 @@ mod tests {
         drop(reopened);
         // Any panic retains the printed fixture; only complete success removes
         // this exact owned root after all store/file/directory pins are dropped.
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser and native DPAPI/private-storage ACL support; synthetic temp-root only"]
+    fn protected_vault_custody_cas_reopen_and_credential_separation() {
+        assert_eq!(std::env::var("USERNAME").as_deref(), Ok("RaiunLabUser"));
+        let root = std::env::temp_dir().join(format!(
+            "raiun-synthetic-custody-document-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        eprintln!("synthetic_custody_document_root={}", root.display());
+        // Exact owned fixture only, no current_user, session, real vault,
+        // LOCALAPPDATA change, startup, network or registered root access.
+        let base = DpapiSessionStore {
+            root: root.join("sessions"),
+            profile_directory: None,
+        };
+        let scope = b"nonsecret synthetic exact-account-vault-root-scope";
+        let foreign = b"nonsecret synthetic different-account-vault-root-scope";
+        assert!(base.load_vault_custody(scope).unwrap().is_none());
+        assert!(!base.root.exists());
+        assert!(base.load_vault_custody(b"").is_err());
+        let first = Zeroizing::new(b"nonsecret synthetic pending-custody revision one".to_vec());
+        let second = Zeroizing::new(b"nonsecret synthetic pending-custody revision two".to_vec());
+        base.compare_exchange_vault_custody(scope, None, &first)
+            .unwrap();
+        base.compare_exchange_vault_custody(scope, Some(&first), &second)
+            .unwrap();
+        let path = base
+            .root
+            .join("vault-custody")
+            .join(hex(&VaultDocumentKind::Custody.digest(scope).unwrap()))
+            .join("custody.bin");
+        let protected = std::fs::read(&path).unwrap();
+        assert!(protected.starts_with(VaultDocumentKind::Custody.envelope()));
+        assert!(
+            base.compare_exchange_vault_custody(scope, Some(&first), &first)
+                .is_err()
+        );
+        assert!(
+            base.compare_exchange_vault_custody(scope, Some(&second), b"")
+                .is_err()
+        );
+        assert!(
+            base.compare_exchange_vault_custody(
+                scope,
+                Some(&second),
+                &vec![0; VAULT_DOCUMENT_MAX_PLAIN + 1]
+            )
+            .is_err()
+        );
+        assert!(base.load_vault_custody(foreign).unwrap().is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), protected);
+        let credential = b"nonsecret synthetic credential-shaped document";
+        base.compare_exchange_vault_credentials("default", None, credential)
+            .unwrap();
+        base.compare_exchange_vault_credentials(
+            "default",
+            Some(credential),
+            b"nonsecret synthetic forgotten credentials",
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            protected,
+            "credential edits must not alter custody"
+        );
+        let store_root = base.root.clone();
+        drop(base);
+        let reopened = DpapiSessionStore {
+            root: store_root,
+            profile_directory: None,
+        };
+        assert_eq!(
+            reopened
+                .load_vault_custody(scope)
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            second.as_slice()
+        );
+        // A copied valid ciphertext cannot cross exact scope or credential domain.
+        reopened
+            .compare_exchange_vault_custody(foreign, None, &first)
+            .unwrap();
+        let foreign_path = reopened
+            .root
+            .join("vault-custody")
+            .join(hex(&VaultDocumentKind::Custody.digest(foreign).unwrap()))
+            .join("custody.bin");
+        std::fs::write(&foreign_path, &protected).unwrap();
+        assert!(reopened.load_vault_custody(foreign).is_err());
+        let credential_path = reopened
+            .root
+            .join("vault-credentials")
+            .join(hex(&vault_credentials_digest("default").unwrap()))
+            .join("credentials.bin");
+        let mut transplanted = VAULT_CREDENTIALS_ENVELOPE.to_vec();
+        transplanted.extend_from_slice(
+            protected
+                .strip_prefix(VaultDocumentKind::Custody.envelope())
+                .unwrap(),
+        );
+        std::fs::write(&credential_path, &transplanted).unwrap();
+        assert!(reopened.load_vault_credentials("default").is_err());
+        let mut corrupt = protected.clone();
+        *corrupt.last_mut().unwrap() ^= 1;
+        std::fs::write(&path, &corrupt).unwrap();
+        assert!(reopened.load_vault_custody(scope).is_err());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            corrupt,
+            "refusal must retain corrupt evidence"
+        );
+        drop(reopened);
+        // Panic retains fixture; success removes only this exact owned directory.
         std::fs::remove_dir_all(root).unwrap();
     }
 
