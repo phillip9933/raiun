@@ -22,6 +22,7 @@ type RecoveryPanel = {
 type Context = {
   key(): string; connected(): boolean; reachable(): boolean; blocked(): boolean;
   supportsVerifyUpload?(): boolean;
+  loadWhileDisconnected?(): boolean;
   supported(): boolean; spaces(): { id: string; name: string; writable: boolean; encrypted: boolean }[];
   request<T>(action: string, args?: Record<string, unknown>): Promise<T>;
   chooseSource(): Promise<string | null>; confirm(message: string): Promise<boolean>; busy(value: boolean): void; render(): void;
@@ -44,7 +45,16 @@ export class MediaJobsView {
   private emptyDraft() { return { source: '', space: '', destination: '', filter: 'photos' as MediaJob['filter'], organization: 'preserve_relative_path' as MediaJob['organization'], interval: '3600' }; }
   reset() { this.revision++; this.recoveryRequestToken++; this.recovery = null; this.rows = []; this.loading = false; this.loaded = false; this.error = ''; this.loadError = ''; this.message = ''; this.draft = this.emptyDraft(); }
   async refresh() {
-    if (this.loading || this.saving || !this.context.reachable() || !this.context.supported()) return;
+    if (this.saving) return;
+    if (!this.context.connected() && this.context.loadWhileDisconnected?.() === false) {
+      // Windows listing requires a live account. Discard old responses instead
+      // of showing its folder-auth error as a media/agent availability problem.
+      this.revision++; this.recoveryRequestToken++; this.recovery = null;
+      this.rows = []; this.loaded = false; this.loading = false; this.loadError = '';
+      this.context.render();
+      return;
+    }
+    if (this.loading || !this.context.reachable() || !this.context.supported()) return;
     const key = this.context.key(); const revision = this.revision;
     this.loading = true;
     try {

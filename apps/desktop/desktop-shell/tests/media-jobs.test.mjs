@@ -252,3 +252,29 @@ test('media empty state distinguishes reachable signed-out agent from unavailabl
   reachable = true; connected = true;
   assert.match(view.html(), /Refresh to load media backups/);
 });
+
+
+test('Windows signed-out media refresh skips authenticated listing and discards an older load error; legacy disconnected reads remain', async () => {
+  let connected = false; let reachable = true; let calls = 0; let reject;
+  const context = {key:()=> 'A', connected:()=>connected, reachable:()=>reachable, supported:()=>true, blocked:()=>false, spaces:()=>[], request:async()=>{calls++;return new Promise((_resolve, fail)=>{reject=fail;});}, chooseSource:async()=>null, confirm:async()=>true, busy:()=>{}, render:()=>{}};
+  const view = new MediaJobsView({...context, loadWhileDisconnected:()=>false});
+  await view.refresh();
+  assert.equal(calls, 0);
+  assert.match(view.html(), /Sign in to your OpenCloud account to load and manage media backups/);
+  assert.doesNotMatch(view.html(), /folder sync|background agent|media-warning/);
+  connected = true;
+  const pending = view.refresh();
+  assert.equal(calls, 1, 'connected Windows still loads jobs');
+  connected = false;
+  await view.refresh();
+  reject(new Error('Sign in before using folder sync'));
+  await pending;
+  assert.doesNotMatch(view.html(), /folder sync|media-warning/);
+  assert.match(view.html(), /Sign in to your OpenCloud account/);
+  reachable = false;
+  assert.match(view.html(), /Start the Raiun background agent to load media backups/);
+  const legacy = new MediaJobsView({...context, request:async()=>{calls++;return {jobs:[]};}});
+  reachable = true;
+  await legacy.refresh();
+  assert.equal(calls, 2, 'omitting the policy retains Linux disconnected listing');
+});
