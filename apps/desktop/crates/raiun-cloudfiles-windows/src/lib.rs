@@ -313,6 +313,7 @@ pub struct PreparedConfiguredRootRuntime {
     backend: std::sync::Arc<OpenCloudPlaceholderBackend>,
     composite_root_identity: OpaqueIdentity,
     recovery: std::sync::Arc<dyn PreparedEditRecovery>,
+    vault_history: Option<std::sync::Arc<dyn vault_custody::VaultPublishedHistorySource>>,
 }
 
 /// Prepare all required identity and recovery capabilities before native root
@@ -335,7 +336,26 @@ pub fn prepare_configured_root_runtime(
         backend,
         composite_root_identity,
         recovery,
+        vault_history: None,
     })
+}
+
+/// Attach only the trusted protected-history service. The native owner invokes
+/// it after CfConnectSyncRoot establishes the sole root connection, while data
+/// callbacks remain fenced. Merely attaching it cannot admit vault sessions.
+#[cfg(windows)]
+pub fn attach_vault_published_history(
+    mut runtime: PreparedConfiguredRootRuntime,
+    history: std::sync::Arc<dyn vault_custody::VaultPublishedHistorySource>,
+) -> Result<PreparedConfiguredRootRuntime, Error> {
+    prepare_vault_custody_root(
+        &runtime.root,
+        runtime.backend.as_ref(),
+        runtime.composite_root_identity,
+    )?
+    .revalidate()?;
+    runtime.vault_history = Some(history);
+    Ok(runtime)
 }
 
 #[cfg(any(windows, test))]

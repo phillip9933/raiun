@@ -440,11 +440,46 @@ initialization, distinguishing a proven empty new root from an existing checked
 registration. Its registration domain includes the checked SyncRootIdentity and
 expected authenticated composite identity; it does not claim native readback of
 CF_SYNC_REGISTRATION.FileIdentity. The metadata view confers no unlock, route,
-cleanup or historical-completeness authority. Retained-root admission remains
-blocked until the historical native reconciliation join is qualified.
+cleanup or historical-completeness authority. The historical native consumer
+is now joined in source; its native acceptance remains pending and the
+production vault capability remains disabled.
 
 Source validation includes Windows GNU Agent and Cloud all-target checks and
 strict lint, 19 portable model/service checks, and Linux workspace regression
 checks. Portable service tests use an explicit Cloud type shim; native fixture
 views use explicit memory-only bookkeeping. Neither substitutes for actual
 protected broker publication or restart acceptance.
+
+### Retained provider-publication lineage
+
+The protected root manifest starts only with a pinned empty new root. Membership,
+child document, catalogue and native hydration intent must be durably published
+in that order before provider plaintext can be transferred. A legacy retained
+root cannot initialize this lineage, missing children are never healed, and rows
+are never removed. This establishes history for bytes this provider published;
+it is not anti-rollback protection against same-user restoration of an older
+valid protected document, or ownership of arbitrary user-created copies. Such
+files are never adopted, removed or declared clean by this protocol.
+
+For a retained connection, the native owner reads the entire protected manifest
+and every child only after CfConnectSyncRoot has established the sole root
+connection, while callbacks remain Initializing. A snapshot taken while another
+provider could still publish would be insufficient. Before Ready, every retained
+intent must pass the unchanged exact native root/file/opaque/path/length, dirty,
+exclusive-reference and ONDISK-empty cleanup proof. Failure retains history and
+uncertain data, blocks vault admission and leaves ordinary connectivity separate.
+Only the resulting private native proof can satisfy the new connection's initial
+unknown-history fence; it can never clear a sticky runtime-incomplete flag.
+
+The generic unknown-namespace scan is retained for legacy/failing paths and
+destructive unregister. Protected-lineage admission concerns provider-published
+payload only and confers no permission to delete or unregister unknown objects.
+No root-wide filesystem census, force-dehydrate, arbitrary-path cleanup or
+public history-reset operation was added.
+
+The focused reconnect fixture creates a new Agent, vault coordinator and native
+connection for the same protected profile/root, checks that Forget remains in
+effect and locked reads fail without downloads, then performs a fresh manual
+read and Lock. It follows a successful prior Lock; it is not an OS-process crash
+or a proof of cleanup after unclean shutdown with resident data. Those native
+acceptance limits remain explicit.

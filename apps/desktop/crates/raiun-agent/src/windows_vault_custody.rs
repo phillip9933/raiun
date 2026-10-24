@@ -7,7 +7,7 @@ use super::{
     vault_custody::{self, Custody, Entry, Scope},
 };
 use raiun_cloudfiles_windows::vault_custody::{
-    VaultCatalogueEntry, VaultHydrationIntent, VaultPublicationCustody,
+    VaultCatalogueEntry, VaultHydrationIntent, VaultPublicationCustody, VaultPublishedHistorySource,
 };
 use raiun_cloudfiles_windows::{
     BackendError, ConfiguredRootIdentity, ProviderScope, VaultCustodyRootContext,
@@ -275,6 +275,107 @@ impl WindowsVaultCustody {
         }))
     }
 }
+/// Called only after exclusive CfConnect and before Ready or fresh view exposure.
+/// Reopening every document closes the previous-provider snapshot race. The
+/// resulting retained intents are evidence, not native identity/range authority.
+impl VaultPublishedHistorySource for WindowsVaultCustody {
+    fn snapshot(
+        &self,
+        owner: &ProviderScope,
+        root: ConfiguredRootIdentity,
+        registration: &str,
+    ) -> std::result::Result<Vec<VaultHydrationIntent>, BackendError> {
+        if *owner != self.owner || root != self.root || registration != self.registration {
+            return Err(BackendError::Unavailable);
+        }
+        let mut state = self.state.lock().map_err(|_| {
+            self.failed
+                .store(true, std::sync::atomic::Ordering::Release);
+            BackendError::Unavailable
+        })?;
+        if state.failed || self.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(BackendError::Unavailable);
+        }
+        let result = (|| -> Result<_> {
+            if state
+                .children
+                .values()
+                .any(|child| child.failed.load(std::sync::atomic::Ordering::Acquire))
+            {
+                return Err(refused());
+            }
+            let binding = RootBinding::new(
+                &self.account,
+                root.volume_serial,
+                root.file_index,
+                registration,
+            )
+            .map_err(|_| refused())?;
+            let mut manifest =
+                RootManifest::reopen(&self.store, &binding).map_err(|_| refused())?;
+            let mut children = BTreeMap::new();
+            let mut intents: Vec<VaultHydrationIntent> = Vec::new();
+            let mut identities = std::collections::BTreeSet::new();
+            let mut files = std::collections::BTreeSet::new();
+            let mut paths = std::collections::BTreeSet::new();
+            for scope in manifest
+                .scopes_for_reconciliation()
+                .map_err(|_| refused())?
+            {
+                let child = Custody::reopen(&self.store, scope).map_err(|_| refused())?;
+                for row in child.publication_history().map_err(|_| refused())? {
+                    if intents.len() == 100_000
+                        || !identities.insert(row.opaque())
+                        || !files.insert(row.file_index())
+                        || !paths.insert(
+                            row.components()
+                                .iter()
+                                .map(|c| c.to_lowercase())
+                                .collect::<Vec<_>>(),
+                        )
+                    {
+                        return Err(refused());
+                    }
+                    intents.push(VaultHydrationIntent {
+                        root,
+                        identity: row.opaque(),
+                        file_index: row.file_index(),
+                        length: row.length(),
+                        components: row.components().to_vec(),
+                    });
+                }
+                children.insert(
+                    scope
+                        .authenticated_store_binding()
+                        .map_err(|_| refused())?
+                        .to_vec(),
+                    Arc::new(Child {
+                        custody: Mutex::new(child),
+                        failed: std::sync::atomic::AtomicBool::new(false),
+                    }),
+                );
+            }
+            manifest
+                .verify_current(&self.store)
+                .map_err(|_| refused())?;
+            Ok((manifest, children, intents))
+        })();
+        match result {
+            Ok((manifest, children, intents)) => {
+                state.manifest = manifest;
+                state.children = children;
+                Ok(intents)
+            }
+            Err(_) => {
+                state.failed = true;
+                self.failed
+                    .store(true, std::sync::atomic::Ordering::Release);
+                Err(BackendError::Unavailable)
+            }
+        }
+    }
+}
+
 struct View {
     root_failed: Arc<std::sync::atomic::AtomicBool>,
     account: Zeroizing<Vec<u8>>,
@@ -686,5 +787,90 @@ mod tests {
         )
         .unwrap();
         assert!(service.view(&other, &vault, "/Travel.vault").is_err());
+    }
+    #[test]
+    fn history_reopens_post_connect_bytes_and_refuses_missing_or_failed_proof() {
+        let (store, service, owner, vault) = fixture();
+        let view = service.view(&owner, &vault, "/Travel.vault").unwrap();
+        view.persist_catalogue(&[entry(1)]).unwrap();
+        // A fresh protected reader must see a publication made after preparation.
+        view.persist_hydration(&intent(&service)).unwrap();
+        let rows = service
+            .snapshot(&owner, service.root, "registration")
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].identity, [1; 16]);
+        assert_eq!(rows[0].file_index, 99);
+        assert_eq!(rows[0].length, 65537);
+        assert_eq!(rows[0].components, intent(&service).components);
+        assert!(service.snapshot(&owner, service.root, "foreign").is_err());
+        assert_eq!(
+            service
+                .snapshot(&owner, service.root, "registration")
+                .unwrap()
+                .len(),
+            1
+        );
+        let scope = Scope::new(
+            &service.account,
+            &vault,
+            "/Travel.vault",
+            7,
+            42,
+            "registration",
+        )
+        .unwrap();
+        store
+            .bytes
+            .lock()
+            .unwrap()
+            .remove(&child_key(&scope).unwrap());
+        assert!(
+            service
+                .snapshot(&owner, service.root, "registration")
+                .is_err()
+        );
+        assert!(
+            view.verify_context(&owner, &vault, "/Travel.vault")
+                .is_err()
+        );
+        assert!(service.view(&owner, &vault, "/Travel.vault").is_err());
+    }
+
+    #[test]
+    fn history_global_conflict_and_final_cas_failure_never_replace_cache() {
+        let (store, service, owner, vault) = fixture();
+        let view = service.view(&owner, &vault, "/Travel.vault").unwrap();
+        view.persist_catalogue(&[entry(1)]).unwrap();
+        view.persist_hydration(&intent(&service)).unwrap();
+        let other =
+            VaultSessionScope::new("default", "https://example.test", "space", "other-root")
+                .unwrap();
+        let second = service.view(&owner, &other, "/Other.vault").unwrap();
+        second.persist_catalogue(&[entry(1)]).unwrap();
+        second.persist_hydration(&intent(&service)).unwrap();
+        assert!(
+            service
+                .snapshot(&owner, service.root, "registration")
+                .is_err()
+        );
+        assert!(
+            view.verify_context(&owner, &vault, "/Travel.vault")
+                .is_err()
+        );
+        assert!(!store.bytes.lock().unwrap().is_empty());
+        let (store, service, owner, _) = fixture();
+        store.fail.store(true, Ordering::SeqCst);
+        assert!(
+            service
+                .snapshot(&owner, service.root, "registration")
+                .is_err()
+        );
+        store.fail.store(false, Ordering::SeqCst);
+        assert!(
+            service
+                .snapshot(&owner, service.root, "registration")
+                .is_err()
+        );
     }
 }

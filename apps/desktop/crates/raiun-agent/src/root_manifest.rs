@@ -198,6 +198,21 @@ impl RootManifest {
         Ok(!already)
     }
 
+    /// Full-byte currentness proof only; uncertainty remains sticky.
+    pub fn verify_current(&mut self, store: &impl Store) -> Result<()> {
+        if self.uncertain {
+            return Err(Error::Incomplete);
+        }
+        if store
+            .compare_exchange(&self.key, Some(&self.raw), &self.raw)
+            .is_err()
+        {
+            self.uncertain = true;
+            return Err(Error::Persistence);
+        }
+        Ok(())
+    }
+
     pub fn scopes_for_reconciliation(&self) -> Result<&[Scope]> {
         if self.uncertain {
             return Err(Error::Incomplete);

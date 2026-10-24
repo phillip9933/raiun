@@ -902,6 +902,11 @@ impl ProviderManager {
                                         recovery,
                                     )
                                     .map_err(|_| "Durable recovery checks failed; the Windows drive was not connected".to_owned())?;
+                                    let prepared = if let Some(history) = custody.as_ref() {
+                                        raiun_cloudfiles_windows::attach_vault_published_history(
+                                            prepared, Arc::clone(history) as Arc<dyn raiun_cloudfiles_windows::vault_custody::VaultPublishedHistorySource>,
+                                        ).map_err(|_| "Could not bind protected vault history".to_owned())?
+                                    } else { prepared };
                                     raiun_cloudfiles_windows::connect_configured_root(prepared)
                                         .map(|active| (active, custody))
                                         .map_err(|_| "Could not connect the Windows Cloud Files drive".to_owned())
@@ -7990,6 +7995,134 @@ mod tests {
         drop(broker);
         drop(runtime);
         drop(sessions);
+        if payload {
+            // New Agent/coordinator/native connection, same protected profile and
+            // retained root. This is not an OS-process restart or crash test.
+            let registry_bytes = storage.load_profile_registry().unwrap();
+            assert!(registry_bytes.is_some());
+            let restored_registry =
+                windows_profile_registry::Registry::decode_or_default(registry_bytes.as_deref())
+                    .unwrap();
+            let admissions = Arc::new(Mutex::new(Arc::new(restored_registry.clone())));
+            let restarted_sessions = Arc::new(raiun_vault::session::VaultSessionCoordinator::new());
+            let restarted = Arc::new(
+                WindowsAgent::new_for_profile_with_services(
+                    &profile,
+                    DpapiStore::for_profile(&profile).unwrap(),
+                    Some(admissions),
+                    restarted_sessions.clone(),
+                )
+                .unwrap(),
+            );
+            let generation = restarted.generation.load(Ordering::Acquire);
+            {
+                let mut state = restarted.state.lock().unwrap();
+                state.active_generation = generation;
+                state.online_authenticated = true;
+                state.needs_refresh = false;
+            }
+            restarted.provider.authorize_generation(generation);
+            WindowsAgent::connect_verified_root_with_exclusions(
+                &restarted.session_store,
+                &restarted.state,
+                &restarted.provider,
+                restarted.source_admissions.as_ref(),
+            )
+            .unwrap();
+            assert!(!restarted_sessions.is_unlocked(&scope).unwrap());
+            let account = restarted.provider.bandwidth.scope().unwrap().unwrap();
+            let remembered = windows_vault_credentials::Scope::from_trusted_account(
+                &profile,
+                account.bytes(),
+                &scope,
+            )
+            .unwrap();
+            assert!(
+                !windows_vault_credentials::contains_saved(
+                    &VaultCredentialStore {
+                        store: restarted.session_store.as_ref(),
+                        profile: &profile
+                    },
+                    &remembered,
+                )
+                .unwrap()
+            );
+            let file = drive.join("Personal/Travel.vault/1");
+            use sha2::Digest as _;
+            let expected = (0..65537).map(|i| (i * 31 + 7) as u8).collect::<Vec<_>>();
+            let hash = format!("{:x}", sha2::Sha256::digest(&expected));
+            let gets = remote.native_reads.lock().unwrap().vault_get_count;
+            assert!(
+                !broker_vault_read_in_child(&file, expected.len(), &hash).unwrap(),
+                "New locked coordinator must refuse the retained file read"
+            );
+            assert_eq!(remote.native_reads.lock().unwrap().vault_get_count, gets);
+            println!("C06_PAYLOAD_RECONNECT_NO_SECRET_RESTORE=true");
+            let restarted_broker =
+                windows_profiles::WindowsProfiles::for_isolated_lifecycle_fixture(
+                    storage.clone(),
+                    restored_registry,
+                    restarted.clone(),
+                )
+                .unwrap();
+            let mut manual = target();
+            manual["action"] = json!("vault_unlock");
+            manual["password"] = json!("potato"); // public fixture only
+            manual["remember"] = json!(false);
+            let unlocked = restarted_broker
+                .handle_isolated_lifecycle_session(manual)
+                .unwrap()
+                .0;
+            assert_eq!(unlocked["unlocked"], true);
+            assert_eq!(unlocked["remembered_status"], "unknown");
+            assert_eq!(unlocked["remembered"], false);
+            assert!(restarted_sessions.is_unlocked(&scope).unwrap());
+            assert!(
+                child_process_directory_matches(&drive.join("Personal"), &["Travel.vault"])
+                    .unwrap()
+                    .matches_expected
+            );
+            assert!(
+                child_process_directory_matches(&drive.join("Personal/Travel.vault"), &["1"])
+                    .unwrap()
+                    .matches_expected
+            );
+            assert!(
+                broker_vault_read_in_child(&file, expected.len(), &hash).unwrap(),
+                "Reconnected route must serve verified public fixture bytes"
+            );
+            let reopened_gets = remote.native_reads.lock().unwrap().vault_get_count;
+            assert!(
+                reopened_gets > gets && reopened_gets <= gets + 16,
+                "Reconnected route performs bounded ciphertext downloads"
+            );
+            let mut lock = target();
+            lock["action"] = json!("vault_lock");
+            assert_eq!(
+                restarted_broker
+                    .handle_isolated_lifecycle_session(lock)
+                    .unwrap()
+                    .0["unlocked"],
+                false
+            );
+            assert!(!restarted_sessions.is_unlocked(&scope).unwrap());
+            assert!(
+                !windows_vault_credentials::contains_saved(
+                    &VaultCredentialStore {
+                        store: restarted.session_store.as_ref(),
+                        profile: &profile
+                    },
+                    &remembered,
+                )
+                .unwrap()
+            );
+            assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+            println!("C06_PAYLOAD_RECONNECT_READ_AND_LOCK=true");
+            restarted_broker.stop_all().unwrap();
+            drop(restarted_broker);
+            drop(restarted);
+            drop(restarted_sessions);
+        }
         remote.join().unwrap();
         appdata_pin.verify_path().unwrap();
         // Registered native namespace and private fixture evidence deliberately

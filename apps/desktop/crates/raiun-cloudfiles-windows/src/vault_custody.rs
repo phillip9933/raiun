@@ -43,3 +43,19 @@ pub trait VaultPublicationCustody: Send + Sync {
     /// Retain this intent even if the subsequent native transfer fails/crashes.
     fn persist_hydration(&self, intent: &VaultHydrationIntent) -> Result<(), BackendError>;
 }
+
+/// Trusted broker source of authenticated, append-only provider publication
+/// history, initialized only from a proven new empty root. This is evidence,
+/// not a native cleanup permit. Called AFTER exclusive native connection and
+/// BEFORE Ready, so an old provider cannot publish unrecorded bytes meanwhile.
+/// Reopen every manifest child; no adoption, healing, row removal or rollback
+/// protection is implied. Arbitrary same-user copies/restored old documents
+/// are outside this provider-publication lineage.
+pub trait VaultPublishedHistorySource: Send + Sync {
+    fn snapshot(
+        &self,
+        owner: &ProviderScope,
+        root: ConfiguredRootIdentity,
+        registration: &str,
+    ) -> Result<Vec<VaultHydrationIntent>, BackendError>;
+}

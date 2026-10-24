@@ -2259,11 +2259,15 @@ impl ConfiguredRootConnection {
             backend,
             composite_root_identity,
             recovery,
+            vault_history,
         } = runtime;
         let path = configured_root.path;
         let identity = configured_root.identity;
         let registered = configured_root.registered;
         let lease = configured_root._native;
+        let history_owner = backend.scope().clone();
+        let history_registration =
+            vault_custody_registration_binding(identity, composite_root_identity);
         let backend: Arc<dyn PlaceholderBackend> = backend;
         if identity != lease.identity {
             return Err(Error::InvalidConfiguredRoot);
@@ -2292,10 +2296,15 @@ impl ConfiguredRootConnection {
                 .hydrated_files
                 .get_mut()
                 .map_err(|_| Error::EditRecoveryUnavailable)?
-                .mark_incomplete();
+                .require_historical_custody();
         }
         let state = Arc::new(state);
-        state.record_reconnect_scan(scan_registered_root(&root.path, root.identity));
+        // Legacy roots keep the old conservative scan. A protected lineage is
+        // reconciled below after exclusive connect, using every recorded native
+        // intent; arbitrary namespace objects are never adopted or removed.
+        if !already_registered || vault_history.is_none() {
+            state.record_reconnect_scan(scan_registered_root(&root.path, root.identity));
+        }
         let context_key = Arc::as_ptr(&state) as usize;
         callback_registry()
             .lock()
@@ -2362,6 +2371,30 @@ impl ConfiguredRootConnection {
             connection_key,
             connected: true,
         };
+        if already_registered {
+            if let Some(history) = vault_history {
+                if connection
+                    .restore_published_vault_history(
+                        history.as_ref(),
+                        &history_owner,
+                        &history_registration,
+                    )
+                    .is_err()
+                {
+                    // Keep ordinary drive operation independent. This is a
+                    // new connection's failed native proof, never a reset of
+                    // a sticky runtime failure or permission to unlock.
+                    if let Ok(mut inventory) = connection.state.hydrated_files.lock() {
+                        inventory.mark_incomplete();
+                    }
+                    if let Some(root) = connection.root.as_ref() {
+                        connection
+                            .state
+                            .record_reconnect_scan(scan_registered_root(&root.path, root.identity));
+                    }
+                }
+            }
+        }
         let initialized = (|| {
             let root = connection
                 .root
@@ -2395,6 +2428,77 @@ impl ConfiguredRootConnection {
             return Err(error);
         }
         Ok(connection)
+    }
+
+    /// Historical ownership comes from the protected publication lineage, not
+    /// a new unlocked route. This method runs only before Ready on a newly
+    /// exclusive connection; every intent still needs the unchanged native
+    /// identity/dirty/reference/ONDISK proof before admission is sealed.
+    fn restore_published_vault_history(
+        &self,
+        history: &dyn crate::vault_custody::VaultPublishedHistorySource,
+        owner: &crate::ProviderScope,
+        registration: &str,
+    ) -> Result<(), Error> {
+        if self.state.readiness.load(Ordering::Acquire) != CALLBACK_INITIALIZING {
+            return Err(Error::ConnectionStateInvalid);
+        }
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        let expected = crate::ConfiguredRootIdentity {
+            volume_serial: root.identity.volume_serial,
+            file_index: root.identity.file_index,
+        };
+        let rows = history
+            .snapshot(owner, expected, registration)
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
+        if rows.len() > 100_000 {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        let mut identities = std::collections::BTreeSet::new();
+        let mut files = std::collections::BTreeSet::new();
+        let mut paths = std::collections::BTreeSet::new();
+        for row in &rows {
+            if row.root != expected
+                || row.identity == [0; 16]
+                || row.file_index == 0
+                || row.length > MAX_FILE_BYTES
+                || row.components.is_empty()
+                || row.components.len() > 256
+                || row.components.iter().any(|part| !valid_component(part))
+                || !identities.insert(row.identity)
+                || !files.insert(row.file_index)
+                || !paths.insert(row.components.clone())
+            {
+                return Err(Error::EditRecoveryUnavailable);
+            }
+        }
+        for row in &rows {
+            let components = row
+                .components
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            self.dehydrate_clean_vault_placeholder(
+                &components,
+                row.file_index,
+                row.length,
+                &row.identity,
+            )?;
+        }
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        if self.state.has_unresolved_placeholder_data() {
+            return Err(Error::UnresolvedPlaceholderEdits);
+        }
+        let proof = HistoricalVaultCleanupProof { rows };
+        self.state
+            .hydrated_files
+            .lock()
+            .map_err(|_| Error::EditRecoveryUnavailable)?
+            .admit_historical_custody(proof)
+            .map_err(|_| Error::EditRecoveryUnavailable)
     }
 
     pub(super) fn disconnect(&mut self) -> Result<(), Error> {
@@ -3806,6 +3910,12 @@ impl Drop for SyntheticConnection {
     }
 }
 
+// Constructed only after this connection's exact native cleanup/postproof for
+// every protected intent. No broker/model/public caller can fabricate this seal.
+struct HistoricalVaultCleanupProof {
+    rows: Vec<crate::vault_custody::VaultHydrationIntent>,
+}
+
 mod hydration_inventory {
     use std::collections::{BTreeMap, BTreeSet};
     const MAX_ROWS: usize = 100_000;
@@ -3841,6 +3951,7 @@ mod hydration_inventory {
     pub struct HydratedFileInventory {
         rows: BTreeMap<([u8; 16], u64), HydratedFileRow>,
         incomplete: bool,
+        historical_custody_unknown: bool,
     }
     impl HydratedFileInventory {
         pub fn new() -> Self {
@@ -3886,7 +3997,25 @@ mod hydration_inventory {
             self.incomplete = true;
         }
         pub fn is_complete(&self) -> bool {
-            !self.incomplete
+            !self.incomplete && !self.historical_custody_unknown
+        }
+        /// Used only before the callback state is registered. Runtime failure
+        /// remains a distinct sticky bit and is never cleared by restoration.
+        pub(super) fn require_historical_custody(&mut self) {
+            self.historical_custody_unknown = true;
+        }
+        pub(super) fn admit_historical_custody(
+            &mut self,
+            proof: super::HistoricalVaultCleanupProof,
+        ) -> Result<(), InventoryError> {
+            if self.incomplete || !self.historical_custody_unknown || !self.rows.is_empty() {
+                return Err(InventoryError::Conflict);
+            }
+            for row in proof.rows {
+                self.record(row.identity, row.file_index, row.length, row.components)?;
+            }
+            self.historical_custody_unknown = false;
+            Ok(())
         }
         /// The caller supplies an independently authenticated route-owned set.
         /// Filtering does not establish that set's authority. No rows are removed,
@@ -3902,6 +4031,41 @@ mod hydration_inventory {
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        fn retained_empty_inventory_requires_native_history_seal_once() {
+            let mut inventory = HydratedFileInventory::new();
+            inventory.require_historical_custody();
+            assert!(!inventory.is_complete());
+            inventory
+                .admit_historical_custody(super::super::HistoricalVaultCleanupProof {
+                    rows: Vec::new(),
+                })
+                .unwrap_or_else(|_| panic!("native empty-history seal must admit initial history"));
+            assert!(inventory.is_complete());
+            assert!(
+                inventory
+                    .admit_historical_custody(super::super::HistoricalVaultCleanupProof {
+                        rows: Vec::new(),
+                    })
+                    .is_err()
+            );
+            assert!(inventory.is_complete());
+        }
+        #[test]
+        fn native_history_seal_cannot_clear_runtime_incomplete() {
+            let mut inventory = HydratedFileInventory::new();
+            inventory.require_historical_custody();
+            inventory.mark_incomplete();
+            assert!(
+                inventory
+                    .admit_historical_custody(super::super::HistoricalVaultCleanupProof {
+                        rows: Vec::new(),
+                    })
+                    .is_err()
+            );
+            assert!(!inventory.is_complete());
+        }
+
         #[test]
         fn record_repeat_and_conflict_preserve_prior_bookkeeping() {
             let mut inventory = HydratedFileInventory::new();

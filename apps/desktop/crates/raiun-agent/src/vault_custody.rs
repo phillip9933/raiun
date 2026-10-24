@@ -279,19 +279,15 @@ pub struct Hydration {
     components: Vec<String>,
 }
 impl Hydration {
-    #[cfg(test)]
     pub fn opaque(&self) -> [u8; 16] {
         self.opaque
     }
-    #[cfg(test)]
     pub fn file_index(&self) -> u64 {
         self.file_index
     }
-    #[cfg(test)]
     pub fn length(&self) -> u64 {
         self.length
     }
-    #[cfg(test)]
     pub fn components(&self) -> &[String] {
         &self.components
     }
@@ -539,6 +535,13 @@ impl Custody {
     #[cfg(test)]
     pub fn hydrations_for_reconciliation(&self) -> &[Hydration] {
         &self.document.pending
+    }
+    /// Complete app-published history evidence, never native cleanup authority.
+    pub fn publication_history(&self) -> Result<&[Hydration]> {
+        if self.failed || self.document.incomplete {
+            return Err(Error::Incomplete);
+        }
+        Ok(&self.document.pending)
     }
     /// Write-ahead intent retained whether CfExecute succeeds, fails or crashes.
     /// Ok is only a persistence acknowledgement, never a publication ticket.

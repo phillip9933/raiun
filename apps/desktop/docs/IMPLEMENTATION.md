@@ -2359,3 +2359,25 @@ the successful authorized host run. Initial combined Windows compilation/lint
 failures were corrected and retained. None of these source checks establish the
 new protected broker path's native acceptance or safe restart reconciliation;
 retained-root vault admission and the production vault capability remain off.
+
+### Retained vault history reconciliation source (local, disabled; 25 October)
+
+The native connection now consumes authenticated provider-publication history
+after obtaining the exclusive root connection and before becoming ready. It
+validates and cleans every recorded file through the existing protected native
+primitive. Its private proof can satisfy initial unknown history while preserving
+all sticky runtime failures. A missing, corrupt, dirty or mismatched history keeps
+vault admission blocked without preventing independent ordinary drive operation.
+Unknown user copies are preserved; this is not arbitrary-namespace cleanup or
+same-user protected-document anti-rollback protection.
+
+The new source passes combined Windows GNU Cloud/Agent all-target compilation,
+strict lint and formatting. Twenty-one portable model/service tests and three
+actual extracted inventory-state tests pass. The unchanged Linux regression
+evidence is reused. The payload fixture now also opens a new Agent/coordinator/
+native connection with the same protected profile, checks locked read refusal
+and continued absence of forgotten credentials, then verifies a new manual read
+and Lock. That normal reconnection follows an already successful Lock; it does
+not establish a full process/crash restart with resident plaintext. Current-source
+native execution and exact-package acceptance remain pending; the public vault
+capability is still disabled.
