@@ -181,19 +181,41 @@ pub(super) mod session_requests {
     pub enum VaultSessionRequest {
         Unlock {
             target: VaultTarget,
-            password: VaultPassword,
+            credential: VaultUnlockCredential,
         },
         Lock {
             target: VaultTarget,
         },
+        ForgetSaved {
+            target: VaultTarget,
+        },
+    }
+    /// Owned input only; no Debug, Clone, or serialization implementation.
+    pub enum VaultUnlockCredential {
+        Manual {
+            password: VaultPassword,
+            remember: bool,
+        },
+        Saved,
     }
     // Private ownership prevents a borrowed decoder from silently leaving its input
     // secret behind. Ordinary return, validation error, and unwinding all run Drop.
-    struct OwnedRequest(Value);
+    struct OwnedRequest {
+        value: Value,
+        #[cfg(test)]
+        wipe_observed: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    }
     impl Drop for OwnedRequest {
         fn drop(&mut self) {
-            if let Some(Value::String(password)) = self.0.get_mut("password") {
+            if let Some(Value::String(password)) = self.value.get_mut("password") {
                 password.zeroize();
+            }
+            #[cfg(test)]
+            if let Some(observed) = &self.wipe_observed {
+                observed.store(
+                    self.value.get("password").and_then(Value::as_str) == Some(""),
+                    std::sync::atomic::Ordering::Release,
+                );
             }
         }
     }
@@ -207,20 +229,31 @@ pub(super) mod session_requests {
             .filter(|v| !v.trim().is_empty() && v.len() <= max && !v.chars().any(char::is_control))
             .ok_or_else(invalid)
     }
-    fn false_or_absent(fields: &Map<String, Value>, key: &str) -> bool {
-        matches!(fields.get(key), None | Some(Value::Bool(false)))
+    fn flag(fields: &Map<String, Value>, key: &str) -> Result<bool, String> {
+        match fields.get(key) {
+            None => Ok(false),
+            Some(Value::Bool(value)) => Ok(*value),
+            _ => Err(invalid()),
+        }
     }
     pub fn decode(value: Value) -> Result<VaultSessionRequest, String> {
-        let owned = OwnedRequest(value);
+        let owned = OwnedRequest {
+            value,
+            #[cfg(test)]
+            wipe_observed: None,
+        };
         decode_owned(&owned)
     }
     fn decode_owned(owned: &OwnedRequest) -> Result<VaultSessionRequest, String> {
-        let fields = owned.0.as_object().ok_or_else(invalid)?;
-        let unlock = match text(fields, "action", 64)? {
-            "vault_unlock" => true,
-            "vault_lock" => false,
-            _ => return Err(invalid()),
-        };
+        let fields = owned.value.as_object().ok_or_else(invalid)?;
+        let action = text(fields, "action", 64)?;
+        if !matches!(
+            action,
+            "vault_unlock" | "vault_lock" | "vault_forget_password"
+        ) {
+            return Err(invalid());
+        }
+        let unlock = action == "vault_unlock";
         if fields.keys().any(|key| {
             !matches!(
                 key.as_str(),
@@ -247,10 +280,20 @@ pub(super) mod session_requests {
         if space_id.trim() != space_id || root_resource_id.trim() != root_resource_id {
             return Err(invalid());
         }
-        let password = if unlock {
-            if !false_or_absent(fields, "remember") || !false_or_absent(fields, "use_saved") {
+        // Validate both flags before copying any secret. Saved requests carry
+        // no password or remember field, even when their values would be false.
+        let saved = unlock && flag(fields, "use_saved")?;
+        let remember = if saved {
+            if fields.contains_key("password") || fields.contains_key("remember") {
                 return Err(invalid());
             }
+            false
+        } else if unlock {
+            flag(fields, "remember")?
+        } else {
+            false
+        };
+        let password = if unlock && !saved {
             Some(
                 fields
                     .get("password")
@@ -267,12 +310,24 @@ pub(super) mod session_requests {
             root_path: root_path.to_owned(),
             root_resource_id: root_resource_id.to_owned(),
         };
-        Ok(match password {
-            Some(p) => VaultSessionRequest::Unlock {
-                target,
-                password: VaultPassword(Zeroizing::new(p.as_bytes().to_vec())),
-            },
-            None => VaultSessionRequest::Lock { target },
+        Ok(match action {
+            "vault_unlock" => {
+                let credential = match password {
+                    Some(password) => {
+                        let mut bytes = Zeroizing::new(Vec::with_capacity(password.len()));
+                        bytes.extend_from_slice(password.as_bytes());
+                        VaultUnlockCredential::Manual {
+                            password: VaultPassword(bytes),
+                            remember,
+                        }
+                    }
+                    None => VaultUnlockCredential::Saved,
+                };
+                VaultSessionRequest::Unlock { target, credential }
+            }
+            "vault_lock" => VaultSessionRequest::Lock { target },
+            "vault_forget_password" => VaultSessionRequest::ForgetSaved { target },
+            _ => return Err(invalid()),
         })
     }
     #[cfg(test)]
@@ -291,7 +346,11 @@ pub(super) mod session_requests {
             value["use_saved"] = json!(false);
             if let VaultSessionRequest::Unlock {
                 target,
-                mut password,
+                credential:
+                    VaultUnlockCredential::Manual {
+                        mut password,
+                        remember,
+                    },
             } = decode(value).unwrap()
             {
                 assert_eq!(target.profile_id.as_deref(), Some("default"));
@@ -299,6 +358,7 @@ pub(super) mod session_requests {
                 assert_eq!(target.root_path, "/Photos.vault");
                 assert_eq!(target.root_resource_id, "root");
                 assert_eq!(password.as_mut_bytes(), b"synthetic secret");
+                assert!(!remember);
             } else {
                 panic!("wrong variant");
             }
@@ -307,14 +367,14 @@ pub(super) mod session_requests {
             );
         }
         #[test]
-        fn foreign_shape_unknown_secrets_and_remembered_modes_fail_opaquely() {
+        fn foreign_shape_unknown_secrets_and_incompatible_modes_fail_opaquely() {
             for (key, bad) in [
                 ("profile_id", json!("foreign")),
                 ("root_path", json!("/../private")),
                 ("root_resource_id", json!("")),
                 ("root_resource_id", json!(" root ")),
                 ("token", json!("sentinel")),
-                ("remember", json!(true)),
+                ("remember", json!("true")),
                 ("use_saved", json!(true)),
                 ("remember", Value::Null),
                 ("space_id", json!(7)),
@@ -324,10 +384,62 @@ pub(super) mod session_requests {
                 v[key] = bad;
                 assert_eq!(decode(v).err().unwrap(), "Invalid vault session request");
             }
-            for key in ["password", "remember", "use_saved"] {
-                let mut v = json!({"action":"vault_lock","space_id":"s","root_path":"/","root_resource_id":"r"});
-                v[key] = json!(false);
-                assert!(decode(v).is_err());
+            for action in ["vault_lock", "vault_forget_password"] {
+                for key in ["password", "remember", "use_saved"] {
+                    let mut v = json!({"action":action,"space_id":"s","root_path":"/","root_resource_id":"r"});
+                    v[key] = json!(false);
+                    assert!(decode(v).is_err());
+                }
+            }
+        }
+        #[test]
+        fn explicit_remember_saved_and_forget_shapes_preserve_owned_wiping() {
+            let mut manual = unlock();
+            manual["remember"] = json!(true);
+            assert!(matches!(
+                decode(manual).unwrap(),
+                VaultSessionRequest::Unlock {
+                    credential: VaultUnlockCredential::Manual { remember: true, .. },
+                    ..
+                }
+            ));
+            let saved = json!({"action":"vault_unlock","space_id":"space","root_path":"/Photos.vault","root_resource_id":"root","use_saved":true});
+            assert!(matches!(
+                decode(saved.clone()).unwrap(),
+                VaultSessionRequest::Unlock {
+                    credential: VaultUnlockCredential::Saved,
+                    ..
+                }
+            ));
+            for (key, value) in [
+                ("remember", json!(false)),
+                ("password", Value::Null),
+                ("use_saved", json!("true")),
+            ] {
+                let mut bad = saved.clone();
+                bad[key] = value;
+                assert!(decode(bad).is_err());
+            }
+            let forget = json!({"action":"vault_forget_password","space_id":"space","root_path":"/Photos.vault","root_resource_id":"root"});
+            assert!(
+                matches!(decode(forget).unwrap(), VaultSessionRequest::ForgetSaved{target} if target.space_id=="space")
+            );
+            // Observe the real ownership guard AFTER decoder success or rejection,
+            // without reading deallocated memory or retaining the input password.
+            for reject in [false, true] {
+                let observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let mut value = unlock();
+                if reject {
+                    value["use_saved"] = json!(true);
+                }
+                {
+                    let owned = OwnedRequest {
+                        value,
+                        wipe_observed: Some(observed.clone()),
+                    };
+                    assert_eq!(decode_owned(&owned).is_err(), reject);
+                }
+                assert!(observed.load(std::sync::atomic::Ordering::Acquire));
             }
         }
         #[test]

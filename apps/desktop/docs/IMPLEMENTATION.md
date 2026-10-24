@@ -2187,3 +2187,24 @@ This verifies the budget algorithm rather than measured multi-socket throughput.
 The Agent test executable was reused, only the OpenCloud test executable was
 linked, and Windows shut down normally. The installed candidate stayed closed and
 unchanged; packaged account networking and encrypted access remain separate.
+
+### Windows remembered-unlock foundation (local, disabled; 24 October)
+
+Windows now has a gated credential-custody implementation for explicit per-vault
+remembering. The protected record binds the full account identity and exact vault
+identity. Forget and profile revocation invalidate captured save tickets through
+atomic authority changes; lock preserves the remembered choice. Password buffers
+are zeroized and never serialized as JSON strings.
+
+The gated manual/saved/forget request paths use a separate operation fence through
+fresh metadata and password verification, session publication and credential
+changes. A saved password is only verification input, never unlock authority.
+Rejected sign-in requests do not revoke credentials, and account changes during
+forget return an uncertain result rather than reporting success for a new account.
+
+Windows source compile/lint and Linux workspace gates pass (963 tests, 14 ignored).
+Three custody-model and seven decoder checks passed in their portable candidate
+harnesses. Native credential persistence and integrated saved-unlock lifecycle
+acceptance remain pending. The production vault gate stays disabled, and the
+stopped encrypted-file test has not been retried. This is not a completed C06
+acceptance claim or a published feature.

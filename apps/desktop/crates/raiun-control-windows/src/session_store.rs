@@ -361,6 +361,131 @@ impl DpapiSessionStore {
         Ok(Arc::new(directory))
     }
 
+    /// Secret-only, exact trusted local-profile storage. Missing reads do not
+    /// create authority or directories. Caller validates the embedded full
+    /// account/vault scope; stored bytes do not authorize an unlocked session.
+    pub fn load_vault_credentials(&self, profile: &str) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+        let digest = vault_credentials_digest(profile)?;
+        let Some(directory) = self.vault_credentials_directory(&digest, false)? else {
+            return Ok(None);
+        };
+        read_vault_credentials(&directory, &digest)
+    }
+
+    /// Durable full-byte secret CAS. The private lease spans read/decrypt,
+    /// comparison, sealing and write-through publication. No user callback is
+    /// invoked while it is held. A failed postcheck can mean publication was
+    /// completed; callers must not claim the old state was preserved.
+    pub fn compare_exchange_vault_credentials(
+        &self,
+        profile: &str,
+        expected: Option<&[u8]>,
+        next: &[u8],
+    ) -> io::Result<()> {
+        let digest = vault_credentials_digest(profile)?;
+        if next.is_empty()
+            || next.len() > VAULT_CREDENTIALS_MAX_PLAIN
+            || expected.is_some_and(|v| v.is_empty() || v.len() > VAULT_CREDENTIALS_MAX_PLAIN)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid vault credential size",
+            ));
+        }
+        let directory = self
+            .vault_credentials_directory(&digest, true)?
+            .ok_or_else(|| io::Error::other("Private vault credential storage unavailable"))?;
+        let lock_name = std::ffi::OsStr::new("credentials.lock");
+        match directory.create_new_file(lock_name) {
+            Ok((file, _)) => drop(file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+            Err(error) => return Err(error),
+        }
+        let mut lease = directory.open_owned_immutable_file(lock_name)?;
+        lease.try_lock_exclusive()?;
+        let current = read_vault_credentials(&directory, &digest)?;
+        if current.as_ref().map(|v| v.as_slice()) != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Vault credentials changed",
+            ));
+        }
+        let sealed = protect_bounded(next, &digest, VAULT_CREDENTIALS_MAX_CIPHER)?;
+        let mut envelope = Vec::with_capacity(VAULT_CREDENTIALS_ENVELOPE.len() + sealed.len());
+        envelope.extend_from_slice(VAULT_CREDENTIALS_ENVELOPE);
+        envelope.extend_from_slice(&sealed);
+        let destination = directory.path().join("credentials.bin");
+        let temporary = self.write_temp(&destination, &envelope)?;
+        let result = (|| {
+            directory.verify_path()?;
+            let from = wide_path(&temporary)?;
+            let to = wide_path(&destination)?;
+            // SAFETY: same fixed private directory retained throughout CAS;
+            // temporary is created by write_temp and destination never traversed.
+            if unsafe {
+                MoveFileExW(
+                    from.as_ptr(),
+                    to.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            directory.verify_path()?;
+            let published = read_vault_credentials(&directory, &digest)?;
+            if published.as_ref().map(|v| v.as_slice()) != Some(next) {
+                return Err(io::Error::other(
+                    "Vault credential publication is uncertain",
+                ));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = remove_exact_file(&temporary);
+        }
+        result
+    }
+
+    fn vault_credentials_directory(
+        &self,
+        digest: &[u8; 32],
+        create: bool,
+    ) -> io::Result<Option<Arc<crate::PrivateDirectory>>> {
+        if create {
+            self.ensure_private_root()?;
+        } else if !self.ensure_existing_private_root()? {
+            return Ok(None);
+        }
+        let parent = crate::PinnedDirectory::open(&self.root)?;
+        let name = std::ffi::OsStr::new("vault-credentials");
+        let first = if create {
+            crate::PrivateDirectory::create_or_open_under(&parent, name)
+        } else {
+            crate::PrivateDirectory::open_under(&parent, name)
+        };
+        let first = match first {
+            Ok(v) => v,
+            Err(e) if !create && e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let pinned = crate::PinnedDirectory::open(first.path())?;
+        let name = hex(digest);
+        let directory = if create {
+            crate::PrivateDirectory::create_or_open_under(&pinned, std::ffi::OsStr::new(&name))
+        } else {
+            crate::PrivateDirectory::open_under(&pinned, std::ffi::OsStr::new(&name))
+        };
+        let directory = match directory {
+            Ok(v) => v,
+            Err(e) if !create && e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        first.verify_path()?;
+        directory.verify_path()?;
+        Ok(Some(Arc::new(directory)))
+    }
+
     pub fn load_bandwidth_settings(&self, scope: &[u8]) -> io::Result<Option<Vec<u8>>> {
         self.load_preferences(PreferenceKind::Bandwidth, scope)
     }
@@ -1223,6 +1348,75 @@ fn remove_exact_file(path: &Path) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+const VAULT_CREDENTIALS_MAX_PLAIN: usize = 1024 * 1024;
+const VAULT_CREDENTIALS_MAX_CIPHER: usize = VAULT_CREDENTIALS_MAX_PLAIN + 64 * 1024;
+const VAULT_CREDENTIALS_ENVELOPE: &[u8] = b"RAIUN-VAULT-CREDENTIALS-DPAPI\0\x01";
+fn vault_credentials_digest(profile: &str) -> io::Result<[u8; 32]> {
+    if profile != "default"
+        && !(profile.len() == 40
+            && profile.starts_with("profile-")
+            && profile[8..]
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid vault credential profile",
+        ));
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"raiun-vault-credentials-dpapi-v1\0");
+    hash.update(profile.as_bytes());
+    Ok(hash.finalize().into())
+}
+fn read_vault_credentials(
+    directory: &Arc<crate::PrivateDirectory>,
+    digest: &[u8; 32],
+) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+    let mut reader =
+        match directory.open_owned_immutable_file(std::ffi::OsStr::new("credentials.bin")) {
+            Ok(v) => v,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+    let max = VAULT_CREDENTIALS_ENVELOPE.len() + VAULT_CREDENTIALS_MAX_CIPHER;
+    if reader.metadata()?.len() > max as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Protected vault credentials exceed limit",
+        ));
+    }
+    // This buffer contains ciphertext only; plaintext is returned zeroized by DPAPI helper.
+    let mut envelope = Vec::new();
+    reader
+        .by_ref()
+        .take((max + 1) as u64)
+        .read_to_end(&mut envelope)?;
+    reader.verify()?;
+    directory.verify_path()?;
+    if envelope.len() > max {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Protected vault credentials exceed limit",
+        ));
+    }
+    let ciphertext = envelope
+        .strip_prefix(VAULT_CREDENTIALS_ENVELOPE)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Invalid vault credential envelope",
+            )
+        })?;
+    let plaintext = unprotect_bounded(
+        ciphertext,
+        digest,
+        VAULT_CREDENTIALS_MAX_CIPHER,
+        VAULT_CREDENTIALS_MAX_PLAIN,
+    )?;
+    Ok(Some(plaintext))
 }
 
 #[derive(Clone, Copy)]

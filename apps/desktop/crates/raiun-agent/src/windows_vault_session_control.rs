@@ -12,6 +12,9 @@ struct PreparedWindowsVaultUnlock {
     root_path: String,
     _root_lease: raiun_cloudfiles_windows::ConfiguredRootLease,
     published: bool,
+    remembered_scope: windows_vault_credentials::Scope,
+    remember_password: Option<zeroize::Zeroizing<Vec<u8>>>,
+    used_saved_password: bool,
 }
 impl Drop for PreparedWindowsVaultUnlock {
     fn drop(&mut self) {
@@ -21,6 +24,97 @@ impl Drop for PreparedWindowsVaultUnlock {
     }
 }
 impl WindowsAgent {
+    fn forget_windows_vault_password(
+        &self,
+        target: &windows_vault_requests::session_requests::VaultTarget,
+    ) -> Result<Value, String> {
+        if target
+            .profile_id
+            .as_ref()
+            .is_some_and(|p| p != &self.profile_scope)
+        {
+            return Err("Select the current Windows account".into());
+        }
+        let (session, generation) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if state.authenticating
+                || state.refreshing
+                || state.logout_pending
+                || state.session_cleanup_uncertain
+            {
+                return Err("Wait for the account transition before forgetting a password".into());
+            }
+            (
+                state
+                    .session
+                    .clone()
+                    .ok_or("A verified account is required")?,
+                state.active_generation,
+            )
+        };
+        let account = self
+            .provider
+            .bandwidth
+            .scope()?
+            .filter(|scope| {
+                scope.matches(
+                    &self.profile_scope,
+                    &session.server,
+                    &session.client_id,
+                    session.expected_issuer.as_deref(),
+                )
+            })
+            .ok_or("A verified account is required")?;
+        if generation == 0 || generation != self.generation.load(Ordering::Acquire) {
+            return Err("The vault account changed".into());
+        }
+        let origin = url::Url::parse(&session.server)
+            .map_err(|_| "The vault account is invalid")?
+            .origin()
+            .ascii_serialization();
+        let vault = raiun_vault::session::VaultSessionScope::new(
+            &self.profile_scope,
+            &origin,
+            &target.space_id,
+            &target.root_resource_id,
+        )
+        .map_err(|_| "The vault scope is invalid")?;
+        let scope = windows_vault_credentials::Scope::from_trusted_account(
+            &self.profile_scope,
+            account.bytes(),
+            &vault,
+        )?;
+        windows_vault_credentials::forget(
+            &VaultCredentialStore {
+                store: self.session_store.as_ref(),
+                profile: &self.profile_scope,
+            },
+            &scope,
+        )?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "The password may have been forgotten; account state is unavailable")?;
+        if generation != self.generation.load(Ordering::Acquire)
+            || state.active_generation != generation
+            || state.authenticating
+            || state.refreshing
+            || state.logout_pending
+            || state.session_cleanup_uncertain
+            || state.session.as_ref().is_none_or(|current| {
+                current.server != session.server
+                    || current.client_id != session.client_id
+                    || current.expected_issuer != session.expected_issuer
+                    || current.access_token != session.access_token
+            })
+        {
+            return Err("The account changed; the password may have been forgotten, so refresh before continuing".into());
+        }
+        Ok(json!({"remembered":false,"remembered_status":"not_saved","forgotten":true}))
+    }
     fn lock_windows_vault(
         &self,
         target: &windows_vault_requests::session_requests::VaultTarget,
@@ -133,7 +227,7 @@ impl WindowsAgent {
     fn prepare_windows_vault_unlock(
         &self,
         target: &windows_vault_requests::session_requests::VaultTarget,
-        password: &mut windows_vault_requests::session_requests::VaultPassword,
+        credential: &mut windows_vault_requests::session_requests::VaultUnlockCredential,
     ) -> Result<PreparedWindowsVaultUnlock, String> {
         use raiun_opencloud::vault::VaultMetadataClient;
         use sha2::Digest;
@@ -271,8 +365,55 @@ impl WindowsAgent {
             .integrity_token
             .as_deref()
             .ok_or("The selected vault is not initialized")?;
+        let remembered_scope = windows_vault_credentials::Scope::new(
+            &self.profile_scope,
+            &account_scope_server(&session)?,
+            &session.client_id,
+            session.expected_issuer.as_deref(),
+            trusted.account_id(),
+            &scope,
+        )?;
+        let store = VaultCredentialStore {
+            store: self.session_store.as_ref(),
+            profile: &self.profile_scope,
+        };
+        let mut saved_password = if matches!(
+            credential,
+            windows_vault_requests::session_requests::VaultUnlockCredential::Saved
+        ) {
+            Some(
+                windows_vault_credentials::load(&store, &remembered_scope)?
+                    .ok_or("No remembered password is available for this exact vault")?,
+            )
+        } else {
+            None
+        };
+        let used_saved_password = saved_password.is_some();
+        let mut remember_password = None;
+        let material = match credential {
+            windows_vault_requests::session_requests::VaultUnlockCredential::Manual {
+                password,
+                remember,
+            } => {
+                if *remember {
+                    // The owned input is bounded by the decoder. Allocate once;
+                    // this extra zeroized copy survives the KDF's input wipe.
+                    let bytes = password.as_mut_bytes();
+                    let mut copy = zeroize::Zeroizing::new(Vec::with_capacity(bytes.len()));
+                    copy.extend_from_slice(bytes);
+                    remember_password = Some(copy);
+                }
+                password.as_mut_bytes()
+            }
+            windows_vault_requests::session_requests::VaultUnlockCredential::Saved => {
+                saved_password
+                    .as_mut()
+                    .ok_or("The remembered password changed")?
+                    .as_mut_slice()
+            }
+        };
         self.vault_sessions
-            .unlock(&scope, password.as_mut_bytes(), token)
+            .unlock(&scope, material, token)
             .map_err(|_| "Could not verify the vault password")?;
         // Every failure after verified insertion must clear this new session.
         let result = (|| {
@@ -331,6 +472,9 @@ impl WindowsAgent {
             root_path,
             _root_lease: root_lease,
             published: false,
+            remembered_scope,
+            remember_password,
+            used_saved_password,
         };
         self.check_vault_preparation(&prepared)?;
         Ok(prepared)
@@ -393,11 +537,46 @@ impl WindowsAgent {
             let _ = self.provider.disconnect();
             return Err(error);
         }
+        // The per-runtime operation fence spans load/proof/publication and
+        // serializes forget/logout. Stored bytes never authorize a route.
+        let (remembered, remembered_status) =
+            if let Some(password) = prepared.remember_password.as_ref() {
+                let store = VaultCredentialStore {
+                    store: self.session_store.as_ref(),
+                    profile: &self.profile_scope,
+                };
+                let saved = windows_vault_credentials::begin_remember(
+                    &store,
+                    prepared.remembered_scope.clone(),
+                )
+                .and_then(|ticket| {
+                    windows_vault_credentials::commit_remember(&store, ticket, password)
+                });
+                if saved.is_ok() {
+                    (true, "known_saved")
+                } else {
+                    (false, "unavailable")
+                }
+            } else if prepared.used_saved_password {
+                (true, "known_saved")
+            } else {
+                (false, "unknown")
+            };
+        if let Err(error) = self.check_vault_preparation(&prepared) {
+            let _ = self.provider.disconnect();
+            return Err(error);
+        }
         prepared.published = true;
         Ok(json!({"unlocked":true,"root_path":prepared.root_path,
             "root_resource_id":prepared.scope.resource_id(),"vault_mount_ready":false,
             "vault_mount_writable":false,"vault_mount_existing_file_overwrite":false,
             "vault_mount_write_unavailable_reason":"route_not_installed",
-            "remembered":false,"remembered_status":"not_saved"}))
+            "remembered":remembered,"remembered_status":remembered_status}))
     }
+}
+
+fn account_scope_server(session: &auth::Session) -> Result<String, String> {
+    url::Url::parse(&session.server)
+        .map(|value| value.to_string())
+        .map_err(|_| "The account server is invalid".into())
 }

@@ -154,7 +154,12 @@ impl WindowsProfiles {
             .value()
             .get("action")
             .and_then(Value::as_str)
-            .is_some_and(|action| matches!(action, "vault_unlock" | "vault_lock"));
+            .is_some_and(|action| {
+                matches!(
+                    action,
+                    "vault_unlock" | "vault_lock" | "vault_forget_password"
+                )
+            });
         if !session_action {
             return self.handle(request.value());
         }
@@ -169,7 +174,7 @@ impl WindowsProfiles {
         match request {
             windows_vault_requests::session_requests::VaultSessionRequest::Unlock {
                 target,
-                mut password,
+                mut credential,
             } => {
                 let (profile, runtime) = {
                     let state = self
@@ -188,7 +193,11 @@ impl WindowsProfiles {
                         .ok_or("Unknown profile_id")?;
                     (profile, runtime)
                 };
-                let prepared = runtime.prepare_windows_vault_unlock(&target, &mut password)?;
+                let _credential_operation = runtime
+                    .vault_credential_operation
+                    .lock()
+                    .map_err(|_| "Vault credential changes are unavailable")?;
+                let prepared = runtime.prepare_windows_vault_unlock(&target, &mut credential)?;
                 {
                     let mut state = self
                         .state
@@ -212,6 +221,30 @@ impl WindowsProfiles {
                 }
                 Ok((runtime.publish_windows_vault_unlock(prepared)?, false))
             }
+            windows_vault_requests::session_requests::VaultSessionRequest::ForgetSaved {
+                target,
+            } => {
+                let runtime = {
+                    let state = self
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?;
+                    let profile = target
+                        .profile_id
+                        .as_deref()
+                        .unwrap_or(state.registry.selected());
+                    state
+                        .runtimes
+                        .get(profile)
+                        .cloned()
+                        .ok_or("Unknown profile_id")?
+                };
+                let _credential_operation = runtime
+                    .vault_credential_operation
+                    .lock()
+                    .map_err(|_| "Vault credential changes are unavailable")?;
+                Ok((runtime.forget_windows_vault_password(&target)?, false))
+            }
             windows_vault_requests::session_requests::VaultSessionRequest::Lock { target } => {
                 let runtime = {
                     let state = self
@@ -228,6 +261,10 @@ impl WindowsProfiles {
                         .cloned()
                         .ok_or("Unknown profile_id")?
                 };
+                let _credential_operation = runtime
+                    .vault_credential_operation
+                    .lock()
+                    .map_err(|_| "Vault credential changes are unavailable")?;
                 Ok((runtime.lock_windows_vault(&target)?, false))
             }
         }

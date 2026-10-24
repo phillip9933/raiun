@@ -6,6 +6,9 @@
 #[path = "auth.rs"]
 mod auth;
 
+#[path = "windows_vault_credentials.rs"]
+mod windows_vault_credentials;
+
 #[path = "windows_proxy.rs"]
 mod windows_proxy;
 
@@ -148,6 +151,20 @@ trait SessionStore: Send + Sync {
     ) -> Result<(), String> {
         Err("Proxy storage is unavailable".into())
     }
+    fn load_vault_credentials(
+        &self,
+        _profile: &str,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
+        Err("Protected vault credentials are unavailable".into())
+    }
+    fn compare_exchange_vault_credentials(
+        &self,
+        _profile: &str,
+        _old: Option<&[u8]>,
+        _next: &[u8],
+    ) -> Result<(), String> {
+        Err("Protected vault credentials are unavailable".into())
+    }
     fn before_publish(&self) {}
 }
 
@@ -169,6 +186,31 @@ impl windows_bandwidth::Store for BandwidthStore<'_> {
             .compare_exchange_bandwidth_settings(self.profile, scope, old, next)
     }
 }
+struct VaultCredentialStore<'a> {
+    store: &'a dyn SessionStore,
+    profile: &'a str,
+}
+impl windows_vault_credentials::Store for VaultCredentialStore<'_> {
+    fn load(&self, profile: &str) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
+        if profile != self.profile {
+            return Err("Vault credential profile changed".into());
+        }
+        self.store.load_vault_credentials(profile)
+    }
+    fn compare_exchange(
+        &self,
+        profile: &str,
+        old: Option<&[u8]>,
+        next: &[u8],
+    ) -> Result<(), String> {
+        if profile != self.profile {
+            return Err("Vault credential profile changed".into());
+        }
+        self.store
+            .compare_exchange_vault_credentials(profile, old, next)
+    }
+}
+
 struct ProxyStore<'a> {
     store: &'a dyn SessionStore,
     profile: &'a str,
@@ -293,6 +335,7 @@ struct WindowsAgent {
     auth_thread: Mutex<Option<JoinHandle<()>>>,
     refresh_thread: Mutex<Option<JoinHandle<()>>>,
     folder_lifecycle: Mutex<()>,
+    vault_credential_operation: Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -1596,6 +1639,7 @@ impl WindowsAgent {
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
+            vault_credential_operation: Mutex::new(()),
         };
         agent.restore_active_session();
         Ok(agent)
@@ -3359,6 +3403,11 @@ impl WindowsAgent {
     }
 
     fn begin_auth(self: &Arc<Self>, request: &Value) -> Result<Value, String> {
+        let _credential_operation = self
+            .vault_credential_operation
+            .lock()
+            .map_err(|_| "Vault credential changes are unavailable")?;
+
         self.provider.disconnect()?;
         {
             let state = self
@@ -3407,6 +3456,15 @@ impl WindowsAgent {
             state.error = None;
         }
         let flow = (|| {
+            if WINDOWS_VAULT_SESSIONS_ENABLED {
+                windows_vault_credentials::revoke_profile(
+                    &VaultCredentialStore {
+                        store: self.session_store.as_ref(),
+                        profile: &self.profile_scope,
+                    },
+                    &self.profile_scope,
+                )?;
+            }
             let proxy = self.provider.proxy.auth_proxy(
                 &self.profile_scope,
                 generation,
@@ -3649,6 +3707,20 @@ impl WindowsAgent {
     }
 
     fn logout(&self) -> Result<Value, String> {
+        let _credential_operation = self
+            .vault_credential_operation
+            .lock()
+            .map_err(|_| "Vault credential changes are unavailable")?;
+        if WINDOWS_VAULT_SESSIONS_ENABLED {
+            windows_vault_credentials::revoke_profile(
+                &VaultCredentialStore {
+                    store: self.session_store.as_ref(),
+                    profile: &self.profile_scope,
+                },
+                &self.profile_scope,
+            )?;
+        }
+
         self.provider.bandwidth.clear();
         {
             let mut state = self
@@ -4670,6 +4742,27 @@ impl DpapiStore {
 }
 
 impl SessionStore for DpapiStore {
+    fn load_vault_credentials(
+        &self,
+        profile: &str,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
+        self.check_scope(profile)?;
+        self.store
+            .load_vault_credentials(profile)
+            .map_err(|_| "Protected vault credentials are unavailable".into())
+    }
+    fn compare_exchange_vault_credentials(
+        &self,
+        profile: &str,
+        old: Option<&[u8]>,
+        next: &[u8],
+    ) -> Result<(), String> {
+        self.check_scope(profile)?;
+        self.store
+            .compare_exchange_vault_credentials(profile, old, next)
+            .map_err(|_| "Vault credential publication is uncertain".into())
+    }
+
     fn load_proxy_settings(&self, profile: &str) -> Result<Option<Vec<u8>>, String> {
         self.check_scope(profile)?;
         self.store
@@ -12129,6 +12222,7 @@ mod tests {
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
+            vault_credential_operation: Mutex::new(()),
         });
         let info = agent
             .begin_auth(&json!({"server":server,"client_id":"synthetic-client"}))
@@ -12199,6 +12293,7 @@ mod tests {
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
+            vault_credential_operation: Mutex::new(()),
         });
 
         agent
@@ -12859,6 +12954,7 @@ mod tests {
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
+            vault_credential_operation: Mutex::new(()),
         });
         let (server, fixture) = synthetic_oidc_server(true);
         let info = agent
@@ -12909,6 +13005,7 @@ mod tests {
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
+            vault_credential_operation: Mutex::new(()),
         });
         let _info = agent
             .begin_auth(&json!({"server":server,"client_id":"synthetic-client"}))
@@ -12943,6 +13040,7 @@ mod tests {
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
+            vault_credential_operation: Mutex::new(()),
         });
         let info = agent
             .begin_auth(&json!({"server":server,"client_id":"synthetic-client"}))
