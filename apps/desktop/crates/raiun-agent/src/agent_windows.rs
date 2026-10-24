@@ -165,6 +165,7 @@ type SharedSourceAdmissions = Arc<Mutex<Arc<windows_profile_registry::Registry>>
 
 struct WindowsAgent {
     source_admissions: Option<SharedSourceAdmissions>,
+    vault_sessions: Arc<raiun_vault::session::VaultSessionCoordinator>,
     profile_scope: String,
     session_store: Arc<dyn SessionStore>,
     state: Arc<Mutex<AccountState>>,
@@ -380,6 +381,7 @@ impl ProviderManager {
                     None;
                 let mut backend: Option<Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>> =
                     None;
+                let mut retired_vaults: Vec<Arc<raiun_cloudfiles_windows::vault_routes::VerifiedVaultRoute>> = Vec::new();
                 let mut active_binding: Option<ActiveProviderBinding> = None;
                 let mut folders: Option<windows_folder_sync::Runtime> = None;
                 let mut pending_command = None;
@@ -776,6 +778,7 @@ impl ProviderManager {
                             if let Ok(mut error) = worker_folder_error.lock() { *error = None; }
                             worker_jobs.cancel_all();
                             let result = disconnect_provider_connection(
+                                &mut retired_vaults,
                                 &mut connection,
                                 &mut backend,
                                 &worker_connected,
@@ -793,12 +796,14 @@ impl ProviderManager {
                             if let Ok(mut error) = worker_folder_error.lock() { *error = None; }
                             worker_jobs.cancel_all();
                             let result = disconnect_provider_connection(
+                                &mut retired_vaults,
                                 &mut connection,
                                 &mut backend,
                                 &worker_connected,
                             );
+                            let stopped = result.is_ok();
                             let _ = response.send(result);
-                            break;
+                            if stopped { break; }
                         }
                     }
                     }
@@ -849,11 +854,20 @@ impl ProviderManager {
                     }
                 }
                 worker_jobs.cancel_all();
-                let _ = disconnect_provider_connection(
+                if disconnect_provider_connection(
+                    &mut retired_vaults,
                     &mut connection,
                     &mut backend,
                     &worker_connected,
-                );
+                ).is_err() {
+                    // The command owner is gone, so no retry can be serviced.
+                    // Preserve native callback/root ownership until process exit
+                    // rather than dropping it after failed cleanup. Bindings
+                    // have been revoked; this never reports a successful lock.
+                    if let Some(active) = connection.take() { std::mem::forget(active); }
+                    if let Some(active) = backend.take() { std::mem::forget(active); }
+                    std::mem::forget(retired_vaults);
+                }
             })
             .expect("start Windows Cloud Files ownership thread");
         Self {
@@ -1180,12 +1194,41 @@ impl ProviderManager {
 }
 
 fn disconnect_provider_connection(
+    retired_vaults: &mut Vec<Arc<raiun_cloudfiles_windows::vault_routes::VerifiedVaultRoute>>,
     connection: &mut Option<raiun_cloudfiles_windows::ConfiguredRootConnection>,
     backend: &mut Option<Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>>,
     connected: &AtomicBool,
 ) -> Result<(), String> {
     if let Some(active_backend) = backend.as_ref() {
+        // Retain every route before revocation can fail. Native cleanup must
+        // never lose the catalogue that owns previously published plaintext.
+        retired_vaults.extend(
+            active_backend
+                .retire_vault_routes()
+                .map_err(|_| "Could not retain vault cleanup state")?,
+        );
         active_backend.revoke();
+    }
+    if !retired_vaults.is_empty() {
+        // Revoke ALL routes before any fallible cleanup. A failure in the first
+        // file must not leave another route's prepared objects able to publish.
+        let mut revoke_failed = false;
+        for route in retired_vaults.iter() {
+            revoke_failed |= route.revoke_hydration().is_err();
+        }
+        if revoke_failed {
+            return Err(
+                "Vault hydration was revoked incompletely; retry state was preserved".into(),
+            );
+        }
+        let active = connection
+            .as_ref()
+            .ok_or("Vault cleanup needs its retained Windows drive")?;
+        for route in retired_vaults.iter() {
+            active.cleanup_retired_vault_route(route)
+                .map_err(|_| "Vault hydration was revoked, but local cleanup is incomplete; edits and retry state were preserved")?;
+        }
+        retired_vaults.clear();
     }
     let Some(active_connection) = connection.as_mut() else {
         connected.store(false, Ordering::Release);
@@ -1213,10 +1256,13 @@ impl Drop for ProviderManager {
     fn drop(&mut self) {
         self.revoke_folders();
         let (response, result) = std::sync::mpsc::sync_channel(1);
-        let _ = self.commands.send(ProviderCommand::Stop(response));
-        let _ = result.recv();
+        let sent = self.commands.send(ProviderCommand::Stop(response)).is_ok();
+        let stopped = sent && matches!(result.recv(), Ok(Ok(())));
+        // Taking the handle still detaches on refusal; dropping commands next
+        // closes the channel so the worker preserves failed cleanup ownership.
         if let Ok(mut worker) = self.worker.lock()
             && let Some(worker) = worker.take()
+            && stopped
         {
             let _ = worker.join();
         }
@@ -1251,6 +1297,20 @@ impl WindowsAgent {
         session_store: impl SessionStore + 'static,
         source_admissions: Option<SharedSourceAdmissions>,
     ) -> Result<Self, String> {
+        Self::new_for_profile_with_services(
+            profile,
+            session_store,
+            source_admissions,
+            Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
+        )
+    }
+
+    fn new_for_profile_with_services(
+        profile: &str,
+        session_store: impl SessionStore + 'static,
+        source_admissions: Option<SharedSourceAdmissions>,
+        vault_sessions: Arc<raiun_vault::session::VaultSessionCoordinator>,
+    ) -> Result<Self, String> {
         if !valid_runtime_profile(profile) {
             return Err("Invalid Windows runtime profile".into());
         }
@@ -1262,6 +1322,7 @@ impl WindowsAgent {
         }
         let agent = Self {
             source_admissions,
+            vault_sessions,
             profile_scope: profile.into(),
             session_store: Arc::new(session_store),
             state: Arc::new(Mutex::new(AccountState::default())),
@@ -2294,7 +2355,12 @@ impl WindowsAgent {
         // above, then release the guard before entering that hook.
         drop(state);
         drop(root_lease);
-        Self::maybe_connect_provider(&self.session_store, &self.state, &self.provider)?;
+        Self::maybe_connect_provider_with_exclusions(
+            &self.session_store,
+            &self.state,
+            &self.provider,
+            self.source_admissions.as_ref(),
+        )?;
         let state = self
             .state
             .lock()
@@ -2333,10 +2399,20 @@ impl WindowsAgent {
     /// session refresh, and root configuration. Every connection still requires
     /// exact account/root ownership and durable recovery preparation. Ordinary
     /// unit-test instances stay disconnected unless explicitly opted in.
+    #[cfg(test)]
     fn maybe_connect_provider(
         session_store: &Arc<dyn SessionStore>,
         state: &Arc<Mutex<AccountState>>,
         provider: &Arc<ProviderManager>,
+    ) -> Result<(), String> {
+        Self::maybe_connect_provider_with_exclusions(session_store, state, provider, None)
+    }
+
+    fn maybe_connect_provider_with_exclusions(
+        session_store: &Arc<dyn SessionStore>,
+        state: &Arc<Mutex<AccountState>>,
+        provider: &Arc<ProviderManager>,
+        admissions: Option<&SharedSourceAdmissions>,
     ) -> Result<(), String> {
         if provider.activation_enabled() {
             let has_ready_root = state.lock().is_ok_and(|state| {
@@ -2349,7 +2425,7 @@ impl WindowsAgent {
             if !has_ready_root {
                 return Ok(());
             }
-            Self::connect_verified_root(session_store, state, provider)
+            Self::connect_verified_root_with_exclusions(session_store, state, provider, admissions)
         } else {
             Ok(())
         }
@@ -2358,10 +2434,20 @@ impl WindowsAgent {
     /// Establish a provider connection only from a freshly verified session,
     /// the exact persisted Personal-drive ownership record, a repinned local
     /// directory identity, and a current-user DPAPI recovery provider.
+    #[cfg(test)]
     fn connect_verified_root(
+        session_store: &Arc<dyn SessionStore>,
+        state: &Arc<Mutex<AccountState>>,
+        provider: &Arc<ProviderManager>,
+    ) -> Result<(), String> {
+        Self::connect_verified_root_with_exclusions(session_store, state, provider, None)
+    }
+
+    fn connect_verified_root_with_exclusions(
         session_store: &Arc<dyn SessionStore>,
         state_mutex: &Arc<Mutex<AccountState>>,
         provider: &Arc<ProviderManager>,
+        admissions: Option<&SharedSourceAdmissions>,
     ) -> Result<(), String> {
         let (session, generation, configuration) = {
             let state = state_mutex
@@ -2496,6 +2582,26 @@ impl WindowsAgent {
         // The exact Personal Space/root identity is checked again by runtime
         // preparation before it becomes the native sync-root FileIdentity.
 
+        if let Some(admissions) = admissions {
+            // Clone and release the broker snapshot before provider/route locks.
+            // Historical scopes are exclusions, never current unlock authority.
+            let snapshot = admissions
+                .lock()
+                .map_err(|_| "Vault exclusions are unavailable")?
+                .clone();
+            let record = snapshot
+                .profiles()
+                .get(&configuration.profile_scope)
+                .ok_or("Vault exclusion profile is unavailable")?;
+            let locations = record
+                .vault_reservations()
+                .iter()
+                .map(|row| (row.space_id().to_owned(), row.root_path().to_owned()))
+                .collect::<Vec<_>>();
+            backend
+                .restore_vault_exclusions(identity, &locations)
+                .map_err(|_| "Could not restore encrypted-location exclusions")?;
+        }
         {
             let state = state_mutex
                 .lock()
@@ -2666,6 +2772,7 @@ impl WindowsAgent {
         let store = Arc::clone(&self.session_store);
         let profile_scope = self.profile_scope.clone();
         let provider = Arc::clone(&self.provider);
+        let admissions = self.source_admissions.clone();
         let worker = thread::spawn(move || {
             let mut refreshed = session.clone();
             let result = refreshed.refresh_classified();
@@ -2714,9 +2821,12 @@ impl WindowsAgent {
                         if let Ok(mut state) = state.lock() {
                             state.session_cleanup_uncertain = uncertain;
                         }
-                    } else if let Err(error) =
-                        WindowsAgent::maybe_connect_provider(&store, &state, &provider)
-                    {
+                    } else if let Err(error) = WindowsAgent::maybe_connect_provider_with_exclusions(
+                        &store,
+                        &state,
+                        &provider,
+                        admissions.as_ref(),
+                    ) {
                         if let Ok(mut state) = state.lock()
                             && state.active_generation == generation
                         {
@@ -2857,6 +2967,7 @@ impl WindowsAgent {
         let store = Arc::clone(&self.session_store);
         let profile_scope = self.profile_scope.clone();
         let provider = Arc::clone(&self.provider);
+        let admissions = self.source_admissions.clone();
         let thread = thread::spawn(move || {
             let result = flow
                 .wait_with_cancel(|| current_generation.load(Ordering::Acquire) != generation)
@@ -2919,9 +3030,12 @@ impl WindowsAgent {
                     };
                     if !installed {
                         record_cleanup_failure(&state, &store, &profile_scope, &session);
-                    } else if let Err(error) =
-                        WindowsAgent::maybe_connect_provider(&store, &state, &provider)
-                    {
+                    } else if let Err(error) = WindowsAgent::maybe_connect_provider_with_exclusions(
+                        &store,
+                        &state,
+                        &provider,
+                        admissions.as_ref(),
+                    ) {
                         if let Ok(mut state) = state.lock()
                             && state.active_generation == generation
                         {
@@ -3103,6 +3217,9 @@ impl WindowsAgent {
             ) {
                 Ok(_) => {
                     self.provider.authorize_generation(next);
+                    self.vault_sessions
+                        .logout_account(&self.profile_scope)
+                        .map_err(|_| "Could not revoke the account vault sessions")?;
                     return Ok(next);
                 }
                 Err(actual) => current = actual,
@@ -4181,7 +4298,10 @@ fn disconnected_pipe_client(error: &std::io::Error) -> bool {
 }
 
 fn serve_control_connection<S: Read + Write>(agent: &Arc<WindowsAgent>, stream: &mut S) -> bool {
-    let result = read_json_value(stream).and_then(|request| agent.handle_request(&request));
+    let result = read_json_value(stream).and_then(|request| {
+        let request = windows_vault_requests::OwnedControlRequest::new(request);
+        agent.handle_request(request.value())
+    });
     let (response, should_stop) = match result {
         Ok((data, should_stop)) => (json!({"ok":true,"data":data}), should_stop),
         Err(error) => (json!({"ok":false,"error":error}), false),
@@ -11346,6 +11466,7 @@ mod tests {
         );
         let agent = Arc::new(WindowsAgent {
             source_admissions: None,
+            vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
             profile_scope: "default".into(),
             session_store: store.clone(),
             state: Arc::new(Mutex::new(AccountState::default())),
@@ -11415,6 +11536,7 @@ mod tests {
         );
         let agent = Arc::new(WindowsAgent {
             source_admissions: None,
+            vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
             profile_scope: "default".into(),
             session_store: store.clone(),
             state: Arc::new(Mutex::new(AccountState::default())),
@@ -12034,6 +12156,7 @@ mod tests {
         *store.fail_saves.lock().unwrap() = true;
         let agent = Arc::new(WindowsAgent {
             source_admissions: None,
+            vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
             profile_scope: "default".into(),
             session_store: store,
             state: Arc::new(Mutex::new(AccountState::default())),
@@ -12083,6 +12206,7 @@ mod tests {
         let store = Arc::new(MemoryStore::default());
         let agent = Arc::new(WindowsAgent {
             source_admissions: None,
+            vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
             profile_scope: "default".into(),
             session_store: store.clone(),
             state: Arc::new(Mutex::new(AccountState::default())),
@@ -12116,6 +12240,7 @@ mod tests {
         }));
         let agent = Arc::new(WindowsAgent {
             source_admissions: None,
+            vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
             profile_scope: "default".into(),
             session_store: store.clone(),
             state: Arc::new(Mutex::new(AccountState::default())),

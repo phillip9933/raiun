@@ -241,3 +241,14 @@ test('unsupported upload verification stays hidden and refuses stale or programm
   assert.match(view.html(),/Retained copy present/);
   assert.doesNotMatch(view.html(),/uploaded copy matches/);
 });
+
+test('media empty state distinguishes reachable signed-out agent from unavailable agent', () => {
+  let connected = false; let reachable = true;
+  const view = new MediaJobsView({key:()=> 'A', connected:()=>connected, reachable:()=>reachable, supported:()=>true, blocked:()=>false, spaces:()=>[], request:async()=>{throw new Error('No requests expected');}, chooseSource:async()=>null, confirm:async()=>true, busy:()=>{}, render:()=>{}});
+  assert.match(view.html(), /Sign in to your OpenCloud account to load and manage media backups/);
+  assert.doesNotMatch(view.html(), /Start the Raiun background agent/);
+  reachable = false;
+  assert.match(view.html(), /Start the Raiun background agent to load media backups/);
+  reachable = true; connected = true;
+  assert.match(view.html(), /Refresh to load media backups/);
+});

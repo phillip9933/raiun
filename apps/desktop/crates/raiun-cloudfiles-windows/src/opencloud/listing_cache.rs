@@ -28,6 +28,9 @@ impl OpenCloudPlaceholderBackend {
     ) -> Result<Vec<(String, raiun_core::backend::RemoteEntry)>, BackendError> {
         check_cancel(cancellation)?;
         self.ensure_active()?;
+        self.ensure_ordinary_location(&directory.space_id, &directory.path)?;
+        let uncached_parent = self.vault_parent_uncached(&directory.space_id, &directory.path)?;
+        let vault_entry_seen = std::cell::Cell::new(false);
         let online = (|| -> Result<_, raiun_core::backend::CloudError> {
             let context = RangeReadContext {
                 deadline: cancellation
@@ -75,8 +78,24 @@ impl OpenCloudPlaceholderBackend {
                                 "directory listing contains an invalid child path",
                             )
                         })?;
+                    if entry.encrypted {
+                        if !self
+                            .accepted_encrypted_root(&directory.space_id, &entry)
+                            .map_err(|_| {
+                                raiun_core::backend::CloudError::new(
+                                    ErrorKind::Forbidden,
+                                    "Encrypted root is not admitted",
+                                )
+                            })?
+                        {
+                            return Err(raiun_core::backend::CloudError::new(
+                                ErrorKind::Forbidden,
+                                "Encrypted root is not admitted",
+                            ));
+                        }
+                        vault_entry_seen.set(true);
+                    }
                     if !valid_windows_component(name)
-                        || entry.encrypted
                         || !valid_remote_id(&entry.id)
                         || !names.insert(name.to_owned())
                         || !ids.insert(entry.id.clone())
@@ -114,6 +133,11 @@ impl OpenCloudPlaceholderBackend {
         })();
         check_cancel(cancellation)?;
         self.ensure_active()?;
+        // A route-bearing parent is fresh-only in BOTH directions. Route IDs
+        // and decrypted children must never enter an ordinary plaintext cache.
+        if uncached_parent || vault_entry_seen.get() {
+            return online.map_err(map_cloud_error);
+        }
         let Some(cache) = &self.cache else {
             return online.map_err(map_cloud_error);
         };
@@ -133,6 +157,12 @@ impl OpenCloudPlaceholderBackend {
                     .map_err(|_| BackendError::Unavailable)?;
                 check_cancel(cancellation)?;
                 self.ensure_active()?;
+                self.ensure_ordinary_location(&directory.space_id, &directory.path)?;
+                // Route admission uses this same publication fence. Recheck
+                // after network I/O, including marker-less roots admitted then.
+                if self.vault_parent_uncached(&directory.space_id, &directory.path)? {
+                    return Ok(entries);
+                }
                 let rows = entries
                     .iter()
                     .map(|(_, entry)| CachedEntry {
@@ -159,6 +189,15 @@ impl OpenCloudPlaceholderBackend {
                     .map_err(map_cloud_error)?
             }
             Err(error) if allow_cached && error.kind == ErrorKind::Offline => {
+                let _publication = self
+                    .publish_gate
+                    .lock()
+                    .map_err(|_| BackendError::Unavailable)?;
+                self.ensure_active()?;
+                self.ensure_ordinary_location(&directory.space_id, &directory.path)?;
+                if self.vault_parent_uncached(&directory.space_id, &directory.path)? {
+                    return Err(BackendError::Unavailable);
+                }
                 let listing = cache
                     .listing(&scope, &directory.remote_id)
                     .map_err(|_| BackendError::Unavailable)?;

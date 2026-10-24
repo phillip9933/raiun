@@ -10,6 +10,7 @@ struct BrokerState {
 }
 pub(super) struct WindowsProfiles {
     source_admissions: SharedSourceAdmissions,
+    vault_sessions: Arc<raiun_vault::session::VaultSessionCoordinator>,
     storage: DpapiSessionStore,
     state: Mutex<BrokerState>,
     mutation_gate: Mutex<()>,
@@ -55,20 +56,25 @@ impl WindowsProfiles {
         // No runtime/auth refresh starts until every profile's metadata and
         // exclusions have been admitted and the migration is durable.
         let source_admissions = Arc::new(Mutex::new(Arc::new(registry.clone())));
+        // One application-wide owner enforces the global unlocked-session cap
+        // and KDF permit across every account, including newly added profiles.
+        let vault_sessions = Arc::new(raiun_vault::session::VaultSessionCoordinator::new());
         let mut runtimes = BTreeMap::new();
         for id in ids {
             let store = DpapiStore::for_profile(&id)?;
             runtimes.insert(
                 id.clone(),
-                Arc::new(WindowsAgent::new_for_profile_with_sources(
+                Arc::new(WindowsAgent::new_for_profile_with_services(
                     &id,
                     store,
                     Some(source_admissions.clone()),
+                    vault_sessions.clone(),
                 )?),
             );
         }
         Ok(Self {
             source_admissions,
+            vault_sessions,
             storage,
             state: Mutex::new(BrokerState { registry, runtimes }),
             mutation_gate: Mutex::new(()),
@@ -236,10 +242,11 @@ impl WindowsProfiles {
                 }
                 let id = allocated.ok_or("Could not allocate an account ID")?;
                 let next = state.registry.with_added(&id, label)?;
-                let runtime = Arc::new(WindowsAgent::new_for_profile_with_sources(
+                let runtime = Arc::new(WindowsAgent::new_for_profile_with_services(
                     &id,
                     DpapiStore::for_profile(&id)?,
                     Some(self.source_admissions.clone()),
+                    self.vault_sessions.clone(),
                 )?);
                 self.persist(&next)?;
                 state.registry = next;
@@ -615,7 +622,10 @@ pub(super) fn serve_profiles() -> Result<(), String> {
                 }
                 Err(_) => return Err("Could not accept an account control request".into()),
             };
-            let response = read_json_value(&mut stream).and_then(|request| broker.handle(&request));
+            let response = read_json_value(&mut stream).and_then(|request| {
+                let request = windows_vault_requests::OwnedControlRequest::new(request);
+                broker.handle(request.value())
+            });
             let (body, stop) = match response {
                 Ok((body, stop)) => (json!({"ok":true,"data":body}), stop),
                 Err(error) => (json!({"ok":false,"error":error}), false),

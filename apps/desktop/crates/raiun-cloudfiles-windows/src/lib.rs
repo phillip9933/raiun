@@ -13,6 +13,12 @@ mod initial_edit_queue;
 mod opencloud;
 mod recovery_provider;
 mod recovery_reconcile;
+#[cfg(any(windows, test))]
+pub mod vault_placeholder;
+#[cfg(windows)]
+pub mod vault_read;
+#[cfg(windows)]
+pub mod vault_routes;
 #[cfg(windows)]
 pub(crate) use backend::placeholder_population_completed;
 pub use backend::{
@@ -305,6 +311,20 @@ pub struct ConfiguredRootConnection {
 #[cfg(windows)]
 #[allow(dead_code)]
 impl ConfiguredRootConnection {
+    /// Revoke/drain this retained route before cleaning recorded plaintext.
+    /// Dirty/uncertain state or failed postproof returns incomplete cleanup;
+    /// the owner must retain the route for retry and never report fully locked.
+    pub fn cleanup_retired_vault_route(
+        &self,
+        route: &vault_routes::VerifiedVaultRoute,
+    ) -> Result<(), Error> {
+        let owned = route
+            .revoke_and_cleanup_identities()
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
+        self.inner
+            .cleanup_recorded_vault_files(route.local_root(), &owned)
+    }
+
     /// Complete one freshly verified existing file under its exact live
     /// backend session. Local components must come from the native handoff,
     /// not a guessed remote path. This never retires the journal. Failure

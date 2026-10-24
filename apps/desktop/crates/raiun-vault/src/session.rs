@@ -11,7 +11,7 @@ use std::{
     io::{Read, Write},
     path::Path,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, MutexGuard, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -147,6 +147,21 @@ impl Drop for PendingVaultCreation<'_> {
     }
 }
 
+/// Opaque identity of one verified unlock. Lock and re-unlock invalidates it.
+/// Contains no key or password material.
+#[derive(Clone)]
+pub struct VaultSessionEpoch {
+    scope: VaultSessionScope,
+    generation: u64,
+    registry_identity: Weak<()>,
+}
+
+/// Retained local-publication lease. It holds no independently usable key and
+/// exposes no registry or session references. Drop releases the session lock.
+pub struct VaultSessionEpochLease<'a> {
+    _state: MutexGuard<'a, RegistryState>,
+}
+
 /// Registry of at most 16 verified vault sessions. It owns all session keys;
 /// callers can request scoped metadata decoding but cannot clone or extract a
 /// session. No automatic expiry or persistence is provided.
@@ -159,6 +174,7 @@ pub struct VaultSessionRegistry {
 struct RegistryState {
     next_generation: u64,
     sessions: HashMap<VaultSessionScope, VerifiedVaultSession>,
+    session_epochs: HashMap<VaultSessionScope, u64>,
     pending: HashMap<VaultSessionScope, u64>,
 }
 
@@ -221,6 +237,9 @@ impl VaultSessionRegistry {
         }
         // Replacing a session drops the old verified codec and zeroizes its
         // retained key bundle when the returned old value leaves this scope.
+        state
+            .session_epochs
+            .insert(ticket.scope.clone(), ticket.generation);
         state.sessions.insert(ticket.scope, session);
         Ok(())
     }
@@ -258,6 +277,7 @@ impl VaultSessionRegistry {
         let removed = {
             let mut state = self.lock_state()?;
             state.pending.remove(scope);
+            state.session_epochs.remove(scope);
             state.sessions.remove(scope)
         };
         drop(removed);
@@ -271,6 +291,7 @@ impl VaultSessionRegistry {
         let removed = {
             let mut state = self.lock_state()?;
             state.pending.clear();
+            state.session_epochs.clear();
             std::mem::take(&mut state.sessions)
         };
         drop(removed);
@@ -290,7 +311,69 @@ impl VaultSessionRegistry {
         state
             .pending
             .retain(|scope, _| scope.account_id != account_id);
+        state
+            .session_epochs
+            .retain(|scope, _| scope.account_id != account_id);
         Ok(())
+    }
+
+    fn capture_session_epoch(
+        &self,
+        scope: &VaultSessionScope,
+    ) -> Result<VaultSessionEpoch, VaultError> {
+        let state = self.lock_state()?;
+        let generation = state
+            .session_epochs
+            .get(scope)
+            .filter(|_| state.sessions.contains_key(scope))
+            .ok_or_else(|| invalid("vault session is locked"))?;
+        Ok(VaultSessionEpoch {
+            scope: scope.clone(),
+            generation: *generation,
+            registry_identity: Arc::downgrade(&self.identity),
+        })
+    }
+
+    fn try_lock_session_epoch(
+        &self,
+        scope: &VaultSessionScope,
+        epoch: &VaultSessionEpoch,
+    ) -> Result<Option<VaultSessionEpochLease<'_>>, VaultError> {
+        let state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(invalid("vault session state unavailable"));
+            }
+        };
+        if scope != &epoch.scope
+            || !Weak::ptr_eq(&epoch.registry_identity, &Arc::downgrade(&self.identity))
+            || state.session_epochs.get(scope) != Some(&epoch.generation)
+            || !state.sessions.contains_key(scope)
+        {
+            return Err(invalid("vault session epoch is no longer current"));
+        }
+        Ok(Some(VaultSessionEpochLease { _state: state }))
+    }
+
+    fn with_session_epoch<T>(
+        &self,
+        scope: &VaultSessionScope,
+        epoch: &VaultSessionEpoch,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T, VaultError> {
+        let state = self.lock_state()?;
+        if scope != &epoch.scope
+            || !Weak::ptr_eq(&epoch.registry_identity, &Arc::downgrade(&self.identity))
+            || state.session_epochs.get(scope) != Some(&epoch.generation)
+            || !state.sessions.contains_key(scope)
+        {
+            return Err(invalid("vault session epoch is no longer current"));
+        }
+        // Keep the lock through local use, including a concurrent lock/logout.
+        let result = operation();
+        drop(state);
+        Ok(result)
     }
 
     /// Decode one name using only the session for the complete supplied scope.
@@ -766,6 +849,39 @@ impl VaultSessionCoordinator {
             .get(scope)
             .ok_or_else(|| invalid("vault session is locked"))?;
         Ok(use_session(session))
+    }
+
+    /// Capture the exact verified unlock for local publication checks.
+    /// This grants neither filesystem nor remote authorization.
+    pub fn capture_session_epoch(
+        &self,
+        scope: &VaultSessionScope,
+    ) -> Result<VaultSessionEpoch, VaultError> {
+        self.registry.capture_session_epoch(scope)
+    }
+
+    /// Try to retain an exact-unlock publication lease without waiting past a
+    /// native callback deadline. Acquire auth leases first; while held, do not
+    /// re-enter this coordinator, perform network I/O, or acquire auth locks.
+    pub fn try_lock_session_epoch(
+        &self,
+        scope: &VaultSessionScope,
+        epoch: &VaultSessionEpoch,
+    ) -> Result<Option<VaultSessionEpochLease<'_>>, VaultError> {
+        self.registry.try_lock_session_epoch(scope, epoch)
+    }
+
+    /// Run a short local operation only for this exact verified unlock.
+    /// Old epochs stay invalid after lock/logout/re-unlock. The closure must
+    /// not do network I/O, re-enter the coordinator, or acquire an auth lock;
+    /// acquire a token-generation lease before calling this method.
+    pub fn with_session_epoch<T>(
+        &self,
+        scope: &VaultSessionScope,
+        epoch: &VaultSessionEpoch,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T, VaultError> {
+        self.registry.with_session_epoch(scope, epoch, operation)
     }
 
     /// Check a freshly-read root token against the session for this exact scope.
@@ -1623,6 +1739,66 @@ mod tests {
                 .decrypt_path(&scope, "um9jr7t436jbmsgpub5sfni4qk")
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn exact_session_epoch_refuses_reunlock_foreign_registry_and_logout() {
+        let coordinator = VaultSessionCoordinator::new();
+        let own = scope("account-one", "vault-one");
+        let foreign = scope("account-one", "vault-two");
+        unlock(&coordinator.registry, &own).unwrap();
+        unlock(&coordinator.registry, &foreign).unwrap();
+        let first = coordinator.capture_session_epoch(&own).unwrap();
+        let mut publications = 0;
+        assert_eq!(
+            coordinator
+                .with_session_epoch(&own, &first, || {
+                    // The short local publication step retains the exact registry lock.
+                    assert!(coordinator.registry.state.try_lock().is_err());
+                    publications += 1;
+                    "local publication"
+                })
+                .unwrap(),
+            "local publication"
+        );
+        assert_eq!(publications, 1);
+
+        coordinator.lock(&own).unwrap();
+        unlock(&coordinator.registry, &own).unwrap();
+        assert!(
+            coordinator
+                .with_session_epoch(&own, &first, || publications += 1)
+                .is_err()
+        );
+        assert_eq!(publications, 1);
+        let current = coordinator.capture_session_epoch(&own).unwrap();
+        coordinator
+            .with_session_epoch(&own, &current, || publications += 1)
+            .unwrap();
+        assert_eq!(publications, 2);
+        // Foreign scope is itself unlocked, so refusal proves exact scope join.
+        assert!(
+            coordinator
+                .with_session_epoch(&foreign, &current, || publications += 1)
+                .is_err()
+        );
+        let other = VaultSessionCoordinator::new();
+        unlock(&other.registry, &own).unwrap();
+        // Same scope and initial generation in another live registry is not authority.
+        assert!(
+            other
+                .with_session_epoch(&own, &first, || publications += 1)
+                .is_err()
+        );
+        assert_eq!(publications, 2);
+
+        coordinator.logout_account(own.account_id()).unwrap();
+        assert!(
+            coordinator
+                .with_session_epoch(&own, &current, || publications += 1)
+                .is_err()
+        );
+        assert_eq!(publications, 2);
     }
 
     #[test]

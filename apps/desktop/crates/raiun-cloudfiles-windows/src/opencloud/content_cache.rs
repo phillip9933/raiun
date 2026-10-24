@@ -83,6 +83,7 @@ impl OpenCloudPlaceholderBackend {
         expected: &super::FileCacheBindingExpectation<'_>,
         cancellation: &CancellationToken,
     ) -> Result<(super::OpaqueIdentity, FileBinding), BackendError> {
+        self.ensure_ordinary_location(expected.space_id, expected.path)?;
         super::check_cancel(cancellation)?;
         self.catalog_scope_snapshot()?
             .ok_or(BackendError::Unavailable)?;
@@ -318,6 +319,7 @@ impl OpenCloudPlaceholderBackend {
         &self,
         binding: &FileBinding,
     ) -> Result<(CacheScope, ContentVersion), BackendError> {
+        self.ensure_ordinary_location(&binding.space_id, &binding.path)?;
         let scope = CacheScope::new(
             self.scope.server_origin(),
             self.scope.account_id(),

@@ -680,7 +680,14 @@ function selectionDirection(element: HTMLInputElement | HTMLTextAreaElement): 'f
 }
 
 function pageMarkup(): string {
-  if (state.page === 'media') return `${featureAvailable('media_jobs_supported') ? mediaJobs.html() : '<p class="notice-card">Recurring media backups are unavailable for this agent.</p>'}${mediaPreviewPage()}`;
+  if (state.page === 'media') {
+    const unavailable = !state.agentReachable
+      ? 'Start the Raiun background agent to load media backups.'
+      : !state.status?.connected
+        ? 'Sign in to your OpenCloud account to load and manage media backups.'
+        : 'Recurring media backups are unavailable for this agent.';
+    return `${featureAvailable('media_jobs_supported') ? mediaJobs.html() : `<p class="notice-card">${unavailable}</p>`}${mediaPreviewPage()}`;
+  }
   if (!state.status) return `<div class="loading-panel"><div class="spinner"></div><p>Checking Raiun agent…</p></div>`;
   if (state.page === 'overview') return overviewPage();
   if (state.page === 'folders') return foldersPage();

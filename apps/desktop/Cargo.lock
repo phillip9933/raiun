@@ -1344,6 +1344,7 @@ dependencies = [
  "raiun-control-windows",
  "raiun-core",
  "raiun-opencloud",
+ "raiun-vault",
  "serde",
  "serde_json",
  "sha2",

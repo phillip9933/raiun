@@ -61,6 +61,27 @@ confusing and is a nonblocking known limitation. Connected packaged transfers
 were not tested. The six native component passes and full source gates remain
 separate evidence; Windows encrypted native access is still incomplete.
 
+## Local Windows encryption work — 24 October 2026 JST
+
+The next source batch connects verified vault reads to the existing single drive
+backend, keeps historical encrypted locations out of the ordinary identity
+catalogue, and shares one vault-session coordinator across account profiles.
+Focused Windows component checks passed for verified reading and catalogue
+exclusions. The hydration source also passed formatting, full workspace linting
+and 959 Linux tests (14 ignored), with Windows cross-compilation tracked
+separately. These checks do not establish packaged or native mounted-vault use.
+
+Native hydration now records exact local file ownership before transferring
+plaintext. Disconnect retains revoked routes through local cleanup and refuses
+success when edits, uncertain state or cleanup errors remain. This lifecycle is
+still being integrated and needs a focused complete Windows read/lock check;
+user-facing vault unlock/lock remains disabled. No new installer or public
+release is implied. The installed, closed VM candidate remains the 2704 build.
+
+The next-source Media wording now distinguishes a reachable signed-out agent
+from an unavailable agent; 22 focused UI tests and the UI build passed. That
+wording correction is not yet part of the installed candidate above.
+
 ## Windows cloud-drive candidate — 23 October 2026 JST
 
 The isolated ordinary-user Windows save and conditional lifecycle checks passed

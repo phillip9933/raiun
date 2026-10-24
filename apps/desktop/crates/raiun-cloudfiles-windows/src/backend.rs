@@ -502,6 +502,12 @@ pub trait PreparedFetchSession {
 /// expensive work. The callback bridge caps each staging window at
 /// [`MAX_REQUEST_BYTES`] and transfers data in [`MAX_RANGE_BYTES`] slices.
 pub trait PlaceholderBackend: Send + Sync + 'static {
+    /// Native bookkeeping is mandatory before publishing decrypted vault bytes.
+    /// This classifies an already owned opaque identity; it grants no unlock.
+    fn requires_hydration_inventory(&self, _identity: &[u8]) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
     fn lookup(&self, identity: &[u8]) -> Result<Option<PlaceholderMetadata>, BackendError>;
 
     /// Prepare an exact account-bound baseline for a user-edited placeholder.

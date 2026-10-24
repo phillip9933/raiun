@@ -2,6 +2,39 @@
 use raiun_core::validate_remote_path;
 use serde_json::{Map, Value};
 
+/// Own the decoded request across every handler error; no secret copies escape.
+pub(super) struct OwnedControlRequest {
+    value: Value,
+    #[cfg(test)]
+    wipe_observed: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+impl OwnedControlRequest {
+    pub(super) fn new(value: Value) -> Self {
+        Self {
+            value,
+            #[cfg(test)]
+            wipe_observed: None,
+        }
+    }
+    pub(super) fn value(&self) -> &Value {
+        &self.value
+    }
+}
+impl Drop for OwnedControlRequest {
+    fn drop(&mut self) {
+        if let Some(Value::String(password)) = self.value.get_mut("password") {
+            zeroize::Zeroize::zeroize(password);
+        }
+        #[cfg(test)]
+        if let Some(observed) = &self.wipe_observed {
+            observed.store(
+                self.value.get("password").and_then(Value::as_str) == Some(""),
+                std::sync::atomic::Ordering::Release,
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultInspectRequest {
     pub space_id: String,
@@ -58,6 +91,27 @@ pub fn decode(value: &Value) -> Result<VaultInspectRequest, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn rejected_request_owner_wipes_password_before_release() {
+        let observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let rejected = (|| -> Result<(), String> {
+            let mut request = OwnedControlRequest::new(
+                json!({"action":"vault_unlock","password":"synthetic-test-password"}),
+            );
+            request.wipe_observed = Some(observed.clone());
+            assert!(
+                request
+                    .value()
+                    .get("password")
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.is_empty())
+            );
+            decode(request.value()).map(|_| ())?;
+            Ok(())
+        })();
+        assert!(rejected.is_err());
+        assert!(observed.load(std::sync::atomic::Ordering::Acquire));
+    }
     #[test]
     fn accepts_exact_folder_or_whole_space_inspection() {
         for root in ["/", "/Photos.vault"] {

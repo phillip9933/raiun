@@ -10,6 +10,7 @@ const MAX_REGISTRY_BYTES: usize = 1_048_576;
 const MAX_PROFILES: usize = 16;
 const MAX_LABEL_BYTES: usize = 256;
 const MAX_SOURCE_RESERVATIONS: usize = 128;
+const MAX_VAULT_RESERVATIONS: usize = 128;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -19,6 +20,8 @@ pub struct ProfileRecord {
     root_reservations: Vec<RootReservation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     source_reservations: Vec<SourceReservation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    vault_reservations: Vec<VaultReservation>,
 }
 impl ProfileRecord {
     pub fn root_reservations(&self) -> &[RootReservation] {
@@ -26,6 +29,9 @@ impl ProfileRecord {
     }
     pub fn source_reservations(&self) -> &[SourceReservation] {
         &self.source_reservations
+    }
+    pub fn vault_reservations(&self) -> &[VaultReservation] {
+        &self.vault_reservations
     }
     pub fn label(&self) -> &str {
         &self.label
@@ -175,6 +181,82 @@ impl SourceReservation {
     }
 }
 
+/// Durable encrypted-location exclusion only. Never an unlock, credential,
+/// authenticated identity, or native registration authority. The broker must
+/// persist it before projecting a verified vault and restore matching exclusions
+/// before ordinary catalogue/cache access. Reservations survive lock/logout.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VaultReservation {
+    scope_digest: String,
+    space_id: String,
+    root_resource_id: String,
+    root_path: String,
+}
+impl std::fmt::Debug for VaultReservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultReservation").finish_non_exhaustive()
+    }
+}
+impl VaultReservation {
+    #[cfg(test)]
+    pub fn new(
+        scope_digest: String,
+        space_id: String,
+        root_resource_id: String,
+        root_path: String,
+    ) -> Result<Self, String> {
+        let row = Self {
+            scope_digest,
+            space_id,
+            root_resource_id,
+            root_path,
+        };
+        row.validate()?;
+        Ok(row)
+    }
+    pub fn space_id(&self) -> &str {
+        &self.space_id
+    }
+    pub fn root_path(&self) -> &str {
+        &self.root_path
+    }
+    fn key(&self) -> (&str, &str, &str, &str) {
+        (
+            &self.scope_digest,
+            &self.space_id,
+            &self.root_resource_id,
+            &self.root_path,
+        )
+    }
+    fn validate(&self) -> Result<(), String> {
+        let identifier = |value: &str| {
+            !value.trim().is_empty() && value.len() <= 4096 && !value.chars().any(char::is_control)
+        };
+        let canonical_path = self.root_path == "/"
+            || (self.root_path.starts_with('/')
+                && !self.root_path.ends_with('/')
+                && self.root_path[1..]
+                    .split('/')
+                    .all(|part| !part.is_empty() && part != "." && part != ".."));
+        if self.scope_digest.len() != 64
+            || !self
+                .scope_digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || !identifier(&self.space_id)
+            || !identifier(&self.root_resource_id)
+            || self.root_path.len() > 32_000
+            || self.root_path.contains('\\')
+            || self.root_path.chars().any(char::is_control)
+            || !canonical_path
+        {
+            return Err("Invalid vault reservation".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Registry {
@@ -225,6 +307,7 @@ impl Registry {
                         label: "Default".into(),
                         root_reservations: Vec::new(),
                         source_reservations: Vec::new(),
+                        vault_reservations: Vec::new(),
                     },
                 )]),
             });
@@ -268,6 +351,7 @@ impl Registry {
                 label: label.trim().into(),
                 root_reservations: Vec::new(),
                 source_reservations: Vec::new(),
+                vault_reservations: Vec::new(),
             },
         );
         validate_registry(&next)?;
@@ -329,6 +413,28 @@ impl Registry {
         next.encode()?;
         Ok(next)
     }
+    /// Return an unpublished additive candidate. A moved/replaced vault retains
+    /// all old exclusions; removing historical reservations is not implicit.
+    // Production write admission joins the explicit unlock path separately.
+    #[cfg(test)]
+    pub fn with_reserved_vault(
+        &self,
+        profile: &str,
+        row: VaultReservation,
+    ) -> Result<Self, String> {
+        validate_registry(self)?;
+        row.validate()?;
+        let mut next = self.clone();
+        let record = next.profiles.get_mut(profile).ok_or("Unknown profile_id")?;
+        if !record.vault_reservations.contains(&row) {
+            if record.vault_reservations.len() >= MAX_VAULT_RESERVATIONS {
+                return Err("Vault reservation limit reached".into());
+            }
+            record.vault_reservations.push(row);
+        }
+        next.encode()?;
+        Ok(next)
+    }
     pub fn with_selected(&self, id: &str) -> Result<Self, String> {
         validate_registry(self)?;
         if !self.profiles.contains_key(id) {
@@ -362,6 +468,16 @@ fn validate_registry(registry: &Registry) -> Result<(), String> {
         }
         for reservation in &record.root_reservations {
             reservation.validate()?;
+        }
+        if record.vault_reservations.len() > MAX_VAULT_RESERVATIONS {
+            return Err("Vault reservation limit reached".into());
+        }
+        let mut vault_keys = BTreeSet::new();
+        for vault in &record.vault_reservations {
+            vault.validate()?;
+            if !vault_keys.insert(vault.key()) {
+                return Err("Duplicate vault reservation".into());
+            }
         }
         if record.source_reservations.len() > MAX_SOURCE_RESERVATIONS {
             return Err("Source reservation limit reached".into());
@@ -629,5 +745,74 @@ mod tests {
         let mut volume = source(r"C:\Safe", 1, SourceKind::MediaJob);
         volume.root.may_be_registered = true;
         assert!(volume.validate().is_err());
+    }
+    #[test]
+    fn vault_exclusions_survive_legacy_roundtrip_move_and_replacement() {
+        let legacy =
+            br#"{"version":1,"selected":"default","profiles":{"default":{"label":"Default"}}}"#;
+        let original = Registry::decode_or_default(Some(legacy))
+            .unwrap()
+            .with_added(ID, "Work")
+            .unwrap();
+        assert!(
+            original.profiles()["default"]
+                .vault_reservations()
+                .is_empty()
+        );
+        let row = |scope: &str, resource: &str, path: &str| {
+            VaultReservation::new(
+                scope.repeat(64),
+                "space".into(),
+                resource.into(),
+                path.into(),
+            )
+            .unwrap()
+        };
+        let first = row("a", "root", "/Vault");
+        let saved = original
+            .with_reserved_vault("default", first.clone())
+            .unwrap();
+        let repeated = saved.with_reserved_vault("default", first.clone()).unwrap();
+        assert_eq!(saved.encode().unwrap(), repeated.encode().unwrap());
+        let next = repeated
+            .with_reserved_vault(ID, first)
+            .unwrap()
+            .with_reserved_vault("default", row("b", "root", "/Vault"))
+            .unwrap()
+            .with_reserved_vault("default", row("a", "root", "/Moved"))
+            .unwrap()
+            .with_reserved_vault("default", row("a", "replacement", "/Vault"))
+            .unwrap();
+        let bytes = next.encode().unwrap();
+        let restored = Registry::decode_or_default(Some(&bytes)).unwrap();
+        assert_eq!(restored.profiles()["default"].vault_reservations().len(), 4);
+        assert_eq!(restored.profiles()[ID].vault_reservations().len(), 1);
+        assert_eq!(
+            restored.profiles()["default"].vault_reservations()[0].root_path(),
+            "/Vault"
+        );
+        assert!(
+            restored
+                .with_reserved_vault("unknown", row("a", "root", "/Vault"))
+                .is_err()
+        );
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for (field, invalid) in [
+            ("root_path", serde_json::json!("/Vault/../escape")),
+            ("extra", serde_json::json!(true)),
+        ] {
+            let mut altered = value.clone();
+            altered["profiles"]["default"]["vault_reservations"][0][field] = invalid;
+            assert!(
+                Registry::decode_or_default(Some(&serde_json::to_vec(&altered).unwrap())).is_err()
+            );
+        }
+        let mut duplicate = value;
+        duplicate["profiles"]["default"]["vault_reservations"][1] =
+            duplicate["profiles"]["default"]["vault_reservations"][0].clone();
+        assert!(
+            Registry::decode_or_default(Some(&serde_json::to_vec(&duplicate).unwrap())).is_err()
+        );
+        assert_eq!(restored.encode().unwrap(), bytes);
     }
 }

@@ -1632,6 +1632,194 @@ impl OwnedConfiguredRoot {
 
 #[allow(dead_code)]
 impl ConfiguredRootConnection {
+    // Future route owner must revoke/drain the exact route and prove complete
+    // restart coverage before calling. No public lock wrapper exists yet.
+    pub(super) fn cleanup_recorded_vault_files(
+        &self,
+        expected_root: crate::ConfiguredRootIdentity,
+        route_owned: &std::collections::BTreeSet<[u8; 16]>,
+    ) -> Result<(), Error> {
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        if root.identity.volume_serial != expected_root.volume_serial
+            || root.identity.file_index != expected_root.file_index
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        if self.state.has_unresolved_placeholder_data() {
+            return Err(Error::UnresolvedPlaceholderEdits);
+        }
+        let rows = {
+            let inventory = self
+                .state
+                .hydrated_files
+                .lock()
+                .map_err(|_| Error::EditRecoveryUnavailable)?;
+            if !inventory.is_complete() {
+                return Err(Error::EditRecoveryUnavailable);
+            }
+            inventory.snapshot(route_owned)
+        };
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        for row in rows {
+            let components = row
+                .components()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let mut path = root.path.clone();
+            for part in &components {
+                path.push(part);
+            }
+            let (_root_final, _parents, _entry, _snapshot) =
+                pin_callback_path_chain(&path, root.identity, row.file_index(), row.length())
+                    .map_err(|_| Error::ConfiguredRootChanged)?;
+            let usn = {
+                let file = ProtectedCompletionFile::open(&wide_path(&path)?)?;
+                clean_dehydrate_identity(
+                    file.protected,
+                    root.identity.file_index,
+                    row.file_index(),
+                    row.identity(),
+                )?;
+                completion_usn(file.raw, row.file_index())?
+            };
+            if self.state.has_unresolved_placeholder_data() {
+                return Err(Error::UnresolvedPlaceholderEdits);
+            }
+            self.dehydrate_clean_vault_placeholder(
+                &components,
+                row.file_index(),
+                row.length(),
+                row.identity(),
+                usn,
+            )?;
+        }
+        // Rows intentionally remain after success, and especially on failure.
+        Ok(())
+    }
+
+    // Internal per-file primitive only. Before calling, the route owner must
+    // revoke/drain hydration and exclude dirty/uncertain recovery using its exact
+    // hydration inventory. No public wrapper/caller or vault capability exists.
+    pub(super) fn dehydrate_clean_vault_placeholder(
+        &self,
+        local_components: &[&str],
+        expected_file_index: u64,
+        expected_length: u64,
+        expected_identity: &[u8; 16],
+        expected_usn: i64,
+    ) -> Result<(), Error> {
+        if !self.connected
+            || expected_file_index == 0
+            || expected_usn <= 0
+            || local_components.is_empty()
+            || local_components.iter().any(|part| !valid_component(part))
+        {
+            return Err(Error::ConnectionStateInvalid);
+        }
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        let mut path = root.path.clone();
+        for part in local_components {
+            path.push(part);
+        }
+        let (root_final, _ancestors, entry, before) =
+            pin_callback_path_chain(&path, root.identity, expected_file_index, expected_length)
+                .map_err(|_| Error::ConfiguredRootChanged)?;
+        let file = ProtectedCompletionFile::open(&wide_path(&path)?)?;
+        let opened = root_snapshot(file.raw)?;
+        let entry_final =
+            final_path_for_handle(entry.0).map_err(|_| Error::ConfiguredRootChanged)?;
+        let opened_final =
+            final_path_for_handle(file.raw).map_err(|_| Error::ConfiguredRootChanged)?;
+        if !same_edit_snapshot(before, opened)
+            || !windows_paths_equal(&entry_final, &opened_final)
+            || !windows_path_is_within(&opened_final, &root_final)
+            || opened.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+            || opened.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC == 0
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        clean_dehydrate_identity(
+            file.protected,
+            root.identity.file_index,
+            expected_file_index,
+            expected_identity,
+        )?;
+        if modified_ranges_for_handle(file.raw).map_err(|_| Error::EditRecoveryUnavailable)?
+            || completion_usn(file.raw, expected_file_index)? != expected_usn
+        {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        let range = CfFileRange {
+            starting_offset: 0,
+            length: -1,
+        };
+        let mut usn = expected_usn;
+        // SAFETY: exact referenced protected EXCLUSIVE|WRITE_ACCESS handle and all
+        // ancestor pins remain live. NULL Overlapped forces synchronous completion.
+        // Only VERIFY_IN_SYNC (1): never mark clean, unpin, replace metadata/identity,
+        // clear always-full policy, or force dirty dehydration. Nonzero USN guards
+        // the complete preflight snapshot against intervening local changes.
+        let hr = unsafe {
+            CfUpdatePlaceholder(
+                file.protected,
+                null(),
+                null(),
+                0,
+                (&range as *const CfFileRange).cast(),
+                1,
+                1,
+                &mut usn,
+                null_mut(),
+            )
+        };
+        if hr < 0 {
+            return Err(native_error("dehydrate clean vault file", hr));
+        }
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        let after = root_snapshot(file.raw)?;
+        if after.identity != opened.identity
+            || after.file_size != opened.file_size
+            || after.last_write_time != opened.last_write_time
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        clean_dehydrate_identity(
+            file.protected,
+            root.identity.file_index,
+            expected_file_index,
+            expected_identity,
+        )?;
+        if modified_ranges_for_handle(file.raw).map_err(|_| Error::EditRecoveryUnavailable)? {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        // A bounded empty ONDISK response is the postcondition. More-data, malformed
+        // lengths, or any resident range are cleanup-incomplete, never locked.
+        let mut ranges = [CfFileRange {
+            starting_offset: 0,
+            length: 0,
+        }; 64];
+        let mut returned = 0;
+        let hr = unsafe {
+            CfGetPlaceholderRangeInfo(
+                file.raw,
+                1,
+                0,
+                -1,
+                ranges.as_mut_ptr().cast(),
+                size_of_val(&ranges) as u32,
+                &mut returned,
+            )
+        };
+        if hr < 0 || returned != 0 {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        Ok(())
+    }
+
     pub(super) fn acknowledge_verified_edit(
         &self,
         local_components: &[&str],
@@ -3493,7 +3681,135 @@ impl Drop for SyntheticConnection {
     }
 }
 
+mod hydration_inventory {
+    use std::collections::{BTreeMap, BTreeSet};
+    const MAX_ROWS: usize = 100_000;
+
+    #[derive(Clone)]
+    pub struct HydratedFileRow {
+        identity: [u8; 16],
+        file_index: u64,
+        length: u64,
+        components: Vec<String>,
+    }
+    impl HydratedFileRow {
+        pub fn identity(&self) -> &[u8; 16] {
+            &self.identity
+        }
+        pub fn file_index(&self) -> u64 {
+            self.file_index
+        }
+        pub fn length(&self) -> u64 {
+            self.length
+        }
+        pub fn components(&self) -> &[String] {
+            &self.components
+        }
+    }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum InventoryError {
+        InvalidFileIndex,
+        Conflict,
+        Capacity,
+    }
+    #[derive(Default)]
+    pub struct HydratedFileInventory {
+        rows: BTreeMap<([u8; 16], u64), HydratedFileRow>,
+        incomplete: bool,
+    }
+    impl HydratedFileInventory {
+        pub fn new() -> Self {
+            Self::default()
+        }
+        /// Components must already be validated and root-relative by the native
+        /// caller. No filesystem lookup, normalization, or authority is added here.
+        pub fn record(
+            &mut self,
+            identity: [u8; 16],
+            file_index: u64,
+            length: u64,
+            components: Vec<String>,
+        ) -> Result<(), InventoryError> {
+            if file_index == 0 {
+                self.incomplete = true;
+                return Err(InventoryError::InvalidFileIndex);
+            }
+            let key = (identity, file_index);
+            if let Some(old) = self.rows.get(&key) {
+                if old.length != length || old.components != components {
+                    self.incomplete = true;
+                    return Err(InventoryError::Conflict);
+                }
+                return Ok(());
+            }
+            if self.rows.len() >= MAX_ROWS {
+                self.incomplete = true;
+                return Err(InventoryError::Capacity);
+            }
+            self.rows.insert(
+                key,
+                HydratedFileRow {
+                    identity,
+                    file_index,
+                    length,
+                    components,
+                },
+            );
+            Ok(())
+        }
+        pub fn mark_incomplete(&mut self) {
+            self.incomplete = true;
+        }
+        pub fn is_complete(&self) -> bool {
+            !self.incomplete
+        }
+        /// The caller supplies an independently authenticated route-owned set.
+        /// Filtering does not establish that set's authority. No rows are removed,
+        /// including after failed cleanup; incompleteness remains permanently sticky.
+        pub fn snapshot(&self, route_owned: &BTreeSet<[u8; 16]>) -> Vec<HydratedFileRow> {
+            self.rows
+                .values()
+                .filter(|row| route_owned.contains(&row.identity))
+                .cloned()
+                .collect()
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn record_repeat_and_conflict_preserve_prior_bookkeeping() {
+            let mut inventory = HydratedFileInventory::new();
+            let id = [7; 16];
+            let owned = BTreeSet::from([id]);
+            let path = vec!["Vault".into(), "photo.jpg".into()];
+            assert!(inventory.record(id, 19, 42, path.clone()).is_ok());
+            assert!(inventory.record(id, 19, 42, path.clone()).is_ok());
+            assert!(inventory.is_complete());
+            assert_eq!(inventory.snapshot(&owned).len(), 1);
+            assert!(inventory.snapshot(&BTreeSet::from([[8; 16]])).is_empty());
+            assert!(matches!(
+                inventory.record(id, 19, 43, path.clone()),
+                Err(InventoryError::Conflict)
+            ));
+            assert!(matches!(
+                inventory.record(id, 19, 42, vec!["replacement.jpg".into()]),
+                Err(InventoryError::Conflict)
+            ));
+            assert!(!inventory.is_complete());
+            let retained = inventory.snapshot(&owned);
+            assert_eq!(retained[0].identity(), &id);
+            assert_eq!(retained[0].file_index(), 19);
+            assert_eq!(retained[0].length(), 42);
+            assert_eq!(retained[0].components(), path);
+            assert!(inventory.record(id, 19, 42, path).is_ok());
+            assert!(!inventory.is_complete());
+        }
+    }
+}
+
 struct CallbackState {
+    hydrated_files: Mutex<hydration_inventory::HydratedFileInventory>,
     readiness: std::sync::atomic::AtomicU8,
     readiness_fetch_rejections: AtomicUsize,
     activity: Mutex<CallbackActivity>,
@@ -3572,6 +3888,7 @@ impl CallbackState {
             CALLBACK_READY
         };
         Self {
+            hydrated_files: Mutex::new(hydration_inventory::HydratedFileInventory::new()),
             readiness: std::sync::atomic::AtomicU8::new(readiness),
             readiness_fetch_rejections: AtomicUsize::new(0),
             activity: Mutex::new(CallbackActivity {
@@ -5139,6 +5456,70 @@ unsafe extern "system" fn fetch_data_callback(
         }
         return;
     }
+    // Only verified vault identities require this path admission. Ordinary
+    // callbacks keep their existing behavior. Keep all no-follow pins alive
+    // through the final native publication; never reopen names per data slice.
+    let tracked_path = match guard.0.backend.requires_hydration_inventory(identity) {
+        Ok(false) => None,
+        Ok(true) => {
+            let admitted = (|| {
+                let root = guard.0.root_identity?;
+                if identity.len() != 16
+                    || info.volume_serial_number != root.volume_serial
+                    || info.sync_root_file_id as u64 != root.file_index
+                    || info.file_id == 0
+                {
+                    return None;
+                }
+                let pinned = callback_path(
+                    guard.0.root_path.as_deref()?,
+                    info.volume_dos_name,
+                    info.normalized_path,
+                    root,
+                    info.file_id as u64,
+                    info.file_size as u64,
+                    &guard.0.last_close_path_common_prefix_bytes,
+                )
+                .ok()?;
+                let opaque: [u8; 16] = identity.try_into().ok()?;
+                verify_completion_identity(pinned.entry.0, &opaque).ok()?;
+                let final_path = final_path_for_handle(pinned.entry.0).ok()?;
+                if !windows_path_is_within(&final_path, &pinned.root_final_path) {
+                    return None;
+                }
+                let components = final_path
+                    .components()
+                    .skip(pinned.root_final_path.components().count())
+                    .map(|part| match part {
+                        std::path::Component::Normal(name) => name
+                            .to_str()
+                            .filter(|name| valid_component(name))
+                            .map(str::to_owned),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                if components.is_empty() {
+                    return None;
+                }
+                Some((pinned, components))
+            })();
+            match admitted {
+                Some(path) => Some(path),
+                None => {
+                    if let Ok(mut inventory) = guard.0.hydrated_files.lock() {
+                        inventory.mark_incomplete();
+                    }
+                    execute_transfer(info, range.offset, None, STATUS_UNSUCCESSFUL);
+                    return;
+                }
+            }
+        }
+        Err(_) => {
+            execute_transfer(info, range.offset, None, STATUS_UNSUCCESSFUL);
+            return;
+        }
+    };
+    let mut tracked = false;
     // The deadline starts before waiting for one of the two callback-wide
     // staging permits, so backpressure is part of the same bounded request.
     let staged_fetch_started = Instant::now();
@@ -5169,6 +5550,40 @@ unsafe extern "system" fn fetch_data_callback(
                         error,
                         transfer_refused: false,
                     })?;
+            if !tracked {
+                if let Some((pinned, components)) = tracked_path.as_ref() {
+                    let id: [u8; 16] = identity.try_into().map_err(|_| WindowStreamError {
+                        offset,
+                        error: BackendError::Unavailable,
+                        transfer_refused: false,
+                    })?;
+                    // The stream's backend publication permit and request
+                    // permit are both held here. Store BEFORE CfExecute and
+                    // release the inventory mutex before calling Windows. Keep
+                    // the row even if that call fails or transfers only a range.
+                    guard
+                        .0
+                        .hydrated_files
+                        .lock()
+                        .map_err(|_| WindowStreamError {
+                            offset,
+                            error: BackendError::Unavailable,
+                            transfer_refused: false,
+                        })?
+                        .record(
+                            id,
+                            pinned.snapshot.identity.file_index,
+                            info.file_size as u64,
+                            components.clone(),
+                        )
+                        .map_err(|_| WindowStreamError {
+                            offset,
+                            error: BackendError::Unavailable,
+                            transfer_refused: false,
+                        })?;
+                }
+                tracked = true;
+            }
             let execute_result = execute_transfer(info, offset, Some(slice), STATUS_SUCCESS);
             guard.0.record_failed_hresult(execute_result);
             guard
@@ -6338,6 +6753,48 @@ fn verify_completion_identity(handle: Handle, expected: &[u8; 16]) -> Result<(),
     );
     if length != 16 || bytes[IDENTITY_OFFSET..IDENTITY_OFFSET + 16] != *expected {
         return Err(Error::ConfiguredRootChanged);
+    }
+    Ok(())
+}
+
+// CF_PLACEHOLDER_BASIC_INFO: PinState/InSyncState DWORDs, two file IDs,
+// identity length DWORD, then bytes. Require the exact root/file/opaque tuple.
+fn clean_dehydrate_identity(
+    handle: Handle,
+    root_id: u64,
+    file_id: u64,
+    identity: &[u8; 16],
+) -> Result<(), Error> {
+    let mut storage = [0_u64; 8];
+    let mut returned = 0;
+    let hr = unsafe {
+        CfGetPlaceholderInfo(
+            handle,
+            CF_PLACEHOLDER_INFO_BASIC,
+            storage.as_mut_ptr().cast(),
+            size_of_val(&storage) as u32,
+            &mut returned,
+        )
+    };
+    if hr < 0 {
+        return Err(native_error("inspect vault cleanup identity", hr));
+    }
+    if !(44..=size_of_val(&storage)).contains(&(returned as usize)) {
+        return Err(Error::ConfiguredRootChanged);
+    }
+    let bytes =
+        unsafe { std::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), returned as usize) };
+    let u32_at = |i| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+    let u64_at = |i| u64::from_le_bytes(bytes[i..i + 8].try_into().unwrap());
+    // Unknown, PINNED, EXCLUDED and unresolved INHERIT states all refuse.
+    if !matches!(u32_at(0), 0 | 2)
+        || u32_at(4) != 1
+        || u64_at(8) != file_id
+        || u64_at(16) != root_id
+        || u32_at(24) != 16
+        || bytes[28..44] != *identity
+    {
+        return Err(Error::EditRecoveryUnavailable);
     }
     Ok(())
 }
