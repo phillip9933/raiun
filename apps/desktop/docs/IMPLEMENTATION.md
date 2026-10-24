@@ -2166,3 +2166,14 @@ isolation. The VM shut down normally afterward. This advances the runtime eviden
 above; it does not prove measured network throughput, on-wire proxy routing,
 startup activation or installed-package behavior. The encrypted-access test remains
 separate and stopped.
+
+Windows offline package acceptance (24 October): the local unsigned candidate
+built from source `f4b1b24` installed successfully over the prior isolated-VM
+candidate. Exact installed payloads were verified. Synthetic profiles and selection
+survived, Media showed correct signed-out guidance, proxy System-to-Direct save
+survived one reopen, and unbound bandwidth remained unlimited with saving disabled.
+Both normal tray quits left zero application processes. Neither startup entry was
+enabled; Windows shut down normally and the prior candidate remains preserved for
+rollback. This candidate is installed and closed only in the isolated VM. No
+publication, laptop installation, connected transfer or encrypted-file acceptance
+is implied.
