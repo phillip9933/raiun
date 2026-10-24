@@ -13,7 +13,7 @@ const { isVaultPasswordValidationError } = await import(
   `data:text/javascript;base64,${Buffer.from(accessibilityCompiled).toString('base64')}`
 );
 const sourceFile = ts.createSourceFile('main.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-const wanted = new Set(['confirmAccountAction', 'forgetSavedVault', 'lockVault', 'unlockVault']);
+const wanted = new Set(['confirmAccountAction', 'forgetSavedVault', 'lockVault', 'unlockVault', 'nativeVaultAccess']);
 const functions = new Map();
 for (const statement of sourceFile.statements) {
   if (ts.isFunctionDeclaration(statement) && statement.name && wanted.has(statement.name.text)) {
@@ -22,10 +22,11 @@ for (const statement of sourceFile.statements) {
 }
 assert.equal(functions.size, wanted.size, 'the exercised production functions must remain directly extractable');
 
-function makeHarness({ requestImpl = async () => ({}), unlockImpl = async () => ({ unlocked: true, remembered: false, remembered_status: 'not_saved' }) } = {}) {
+function makeHarness({ nativeMode = false, requestImpl = async () => ({}), unlockImpl = async () => ({ unlocked: true, remembered: false, remembered_status: 'not_saved' }) } = {}) {
   const input = { value: 'synthetic password' };
   const calls = [];
   const state = {
+    status: nativeMode ? { vault_access_mode: 'native_read_only' } : {},
     accountEpoch: 7,
     selectedAccount: 'profile-a',
     nativeDialogBusy: false,
@@ -43,6 +44,7 @@ function makeHarness({ requestImpl = async () => ({}), unlockImpl = async () => 
   };
   const context = {
     state,
+    vaultAppFeaturesAvailable: () => !nativeMode,
     app: { querySelector: selector => selector === '#vault-password' ? input : null },
     confirmDialog: async () => true,
     render() {},
@@ -181,4 +183,32 @@ test('transport failure stays a general alert without marking the password inval
   assert.equal(harness.input.value, '');
   assert.equal(harness.state.vaultDialog.error, 'connection reset by peer');
   assert.equal(harness.state.vaultDialog.passwordError, '');
+});
+
+test('native read-only manual/saved/forget/lock workflow never starts app browsing or offline work', async () => {
+  const harness = makeHarness({nativeMode:true,
+    requestImpl:async action => action === 'vault_forget' ? {remembered:false, remembered_status:'not_saved'} : {vault_mount_ready:false,vault_mount_writable:false},
+    unlockImpl:async () => ({unlocked:true,remembered:true,remembered_status:'known_saved',vault_mount_ready:true,vault_mount_writable:false})});
+  harness.state.vaultDialog.unlocked=false;
+  await harness.unlockVault(false);
+  await harness.lockVault();
+  await harness.unlockVault(true);
+  await harness.forgetSavedVault();
+  assert.equal(harness.state.vaultDialog.unlocked,true,'forget keeps the session open');
+  await harness.lockVault();
+  assert.deepEqual(harness.calls.map(c=>c.action),['vault_unlock','vault_lock','vault_unlock','vault_forget','vault_lock']);
+  assert.equal(harness.calls[2].payload.use_saved,true);
+  assert.equal(harness.state.vaultDialog.unlocked,false);
+  assert.equal(harness.state.vaultDialog.rememberedStatus,'not_saved');
+});
+
+test('native mode refuses an unconfirmed unlock without enabling session or drive readiness', async()=>{
+  for(const response of [{unlocked:false,vault_mount_ready:true},{vault_mount_ready:true}]){
+    const h=makeHarness({nativeMode:true,unlockImpl:async()=>response});h.state.vaultDialog.unlocked=false;
+    await h.unlockVault(false);
+    assert.equal(h.state.vaultDialog.unlocked,false);assert.equal(h.state.vaultDialog.vaultMountReady,false);
+    assert.equal(h.state.vaultDialog.statusUnknown,true);assert.equal(h.state.vaultDialog.vaultMountWritable,false);
+    assert.equal(h.input.value,'');assert.match(h.state.vaultDialog.error,/did not confirm/);
+    assert.deepEqual(h.calls.map(c=>c.action),['vault_unlock']);
+  }
 });
