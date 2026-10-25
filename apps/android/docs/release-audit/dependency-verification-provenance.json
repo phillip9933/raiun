@@ -1,11 +1,11 @@
 {
-  "time_utc": "2026-10-25T14:20:44.017110+00:00",
+  "time_utc": "2026-10-25T14:32:29.665899+00:00",
   "candidate": "gradle/verification-metadata.xml",
-  "candidate_sha256": "44bd44460ae257a7bad65c5b51e1645e5a686e28d4d19ff15ffae15e523d6601",
-  "components": 897,
-  "artifacts": 1603,
+  "candidate_sha256": "13462f9543c2a3fcb3faf4b2420f7482fb41e6dc7d2e30d510fa9a7b1cdea71d",
+  "components": 899,
+  "artifacts": 1605,
   "counts": {
-    "verified": 1603
+    "verified": 1605
   },
   "results": [
     {
@@ -9455,6 +9455,24 @@
     {
       "group": "com.google.guava",
       "name": "guava-parent",
+      "version": "33.2.1-jre",
+      "artifacts": [
+        {
+          "artifact": "guava-parent-33.2.1-jre.pom",
+          "expected": "9095f6d8ee3765950207510785830cc2280e781067915fa99cfe1740d4865c14",
+          "status": "verified",
+          "actual": "9095f6d8ee3765950207510785830cc2280e781067915fa99cfe1740d4865c14",
+          "method": "publisher artifact bytes and SHA-1 sidecar",
+          "evidence": "https://repo.maven.apache.org/maven2/com/google/guava/guava-parent/33.2.1-jre/guava-parent-33.2.1-jre.pom",
+          "checksum_evidence": "https://repo.maven.apache.org/maven2/com/google/guava/guava-parent/33.2.1-jre/guava-parent-33.2.1-jre.pom.sha1",
+          "bytes": 19431,
+          "publisher_sha1": "fc55955fab23e86fad230acc81bf570deb5660bd"
+        }
+      ]
+    },
+    {
+      "group": "com.google.guava",
+      "name": "guava-parent",
       "version": "33.3.1-jre",
       "artifacts": [
         {
@@ -9483,6 +9501,24 @@
           "method": "publisher artifact bytes",
           "evidence": "https://repo.maven.apache.org/maven2/com/google/guava/guava-parent/33.4.0-android/guava-parent-33.4.0-android.pom",
           "bytes": 21526
+        }
+      ]
+    },
+    {
+      "group": "com.google.guava",
+      "name": "guava-parent",
+      "version": "33.4.8-jre",
+      "artifacts": [
+        {
+          "artifact": "guava-parent-33.4.8-jre.pom",
+          "expected": "a03c5199a1be14443df7fd40ba8673b1c6aae04deef6688ce7d573ea489e3a20",
+          "status": "verified",
+          "actual": "a03c5199a1be14443df7fd40ba8673b1c6aae04deef6688ce7d573ea489e3a20",
+          "method": "publisher artifact bytes and SHA-1 sidecar",
+          "evidence": "https://repo.maven.apache.org/maven2/com/google/guava/guava-parent/33.4.8-jre/guava-parent-33.4.8-jre.pom",
+          "checksum_evidence": "https://repo.maven.apache.org/maven2/com/google/guava/guava-parent/33.4.8-jre/guava-parent-33.4.8-jre.pom.sha1",
+          "bytes": 24597,
+          "publisher_sha1": "59c58a0aeeae9d89b4ab534645dbffe7038843bf"
         }
       ]
     },
