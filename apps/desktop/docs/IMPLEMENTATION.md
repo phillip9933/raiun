@@ -2570,3 +2570,33 @@ qualified `924eaa17…` source, so its Rust gates and native component evidence
 are reused. The refreshed installer and ordinary-process restart acceptance
 remain pending. This fixes a demonstrated policy gap; it does not establish
 that refresh caused the r116 observed Browse activation failure.
+
+
+### Installed remembered-key and Forget process restarts pass (25 October, r117)
+
+Frozen UI successor `e7fa52c1…` built and upgraded successfully as an unsigned
+Windows candidate. The first Browse activation advanced to the encrypted-folder
+picker. Manual Unlock with explicit Remember was followed by normal Quit without
+a payload read. A newly created broker, bound to the same installed image, user,
+account, origin and exact root, reported `unlocked=false` and
+`remembered_status=known_saved`. The app required explicit saved-key unlock.
+
+That unlock passed a full 65,537-byte SHA-256 read. Forget left the current
+session unlocked; the first Lock confirmed cleanup and a fresh bounded reader
+refused access. After another normal Quit and new broker, metadata and UI
+reported `unlocked=false` and `remembered_status=not_saved`. No password, unlock
+or read followed that second restart. Cleanup metadata after each restart stayed
+`unknown`; this is not proof of completed cleanup after restart.
+
+The final fixture stopped explicitly with one ciphertext fetch, two refreshes
+and zero cloud mutations. Normal Quit, zero owned processes, actual guest
+shutdown and cold preservation were verified. The candidate remains installed
+in the isolated VM and is not running; rollback and earlier failures remain
+preserved. Parent and independent review verified the saved evidence.
+
+Evidence: `frontdoor-installed-restart-actual-r1/handoff.json` under
+`outputs/local-windows-native-20261023-r1/`, SHA-256
+`65d196be7e5bfbc18caa04932b389fcec99c2a45a77eaa039097d47460ba7f90`.
+This qualifies normal app-process restart and the read-only encrypted workflow,
+not OS reboot, crash recovery, encrypted editing, renderer HTTPS sign-in or
+whole-category completion. The published beta is unchanged.
