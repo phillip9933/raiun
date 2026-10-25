@@ -2626,3 +2626,30 @@ Evidence: `windows-vault-edit-protected-r2/handoff.json` under
 This is a storage prerequisite. The native save callback and conditional
 encrypted upload are not connected; Windows vault access remains read-only.
 Neither crash/reboot recovery nor installed writable-app acceptance is claimed.
+
+
+### Index-first vault capture retention (25 October)
+
+Capture retention now commits a bounded discovery reference in the exact
+protected vault child before publishing its body. The reference binds the
+existing catalogue/hydration entry and complete encoded-frame digest and length.
+Only an acknowledged new CAS and exact readback creates a single-use enrollment
+ticket. Existing or recovered references can reopen matching bytes; a missing
+body is refused and never filled automatically. Failed or uncertain writes leave
+the reference pending and discoverable. Pending captures cannot supply complete
+publication history or readiness, even when their bodies exist.
+
+Read-only reopening preserves existing v1 bytes. First capture enrollment
+explicitly writes strict v2 history; missing/null/empty/foreign capture metadata
+is refused. Older readers fail closed on that new history.
+
+Formatting, strict workspace lint and all 983 workspace tests pass (14 ignored).
+Six focused service tests exercise ordering, interrupted/uncertain publication,
+missing-body refusal, context/frame conflicts, schema compatibility and bounds.
+Fresh Windows Agent compilation passes with actual current-source compiler
+evidence; the unchanged protected-store native proof is reused. Evidence is
+`windows-vault-capture-index-r1/handoff.json` under
+`outputs/desktop-next-20261021/`, source `999a6321…`.
+This models interruption safely; it is not an actual crash/reboot qualification.
+The native callback and encrypted upload remain disconnected, and writable vault
+access remains disabled.

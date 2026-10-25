@@ -5,3 +5,7 @@ mod vault_custody;
 #[allow(dead_code)]
 #[path = "../src/vault_edit_capture.rs"]
 mod vault_edit_capture;
+
+#[allow(dead_code)]
+#[path = "../src/vault_edit_retention.rs"]
+mod vault_edit_retention;

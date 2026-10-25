@@ -80,17 +80,8 @@ impl Baseline {
         Ok(baseline)
     }
     fn validate(&self) -> Result<()> {
-        let etag = self.strong_etag.as_bytes();
         if self.opaque_file == [0; 16]
-            || etag.len() < 2
-            || etag.len() > 4096
-            || etag.first() != Some(&b'"')
-            || etag.last() != Some(&b'"')
-            // RFC entity-tag opaque bytes; no weak prefix, embedded quote,
-            // whitespace/control, DEL or multibyte UTF-8 ambiguity.
-            || !etag[1..etag.len() - 1]
-                .iter()
-                .all(|b| *b == 0x21 || (0x23..=0x7e).contains(b))
+            || !strong_etag(&self.strong_etag)
             || self.unlock_epoch == 0
             || self.token_generation == 0
             || self.native_volume == 0
@@ -100,6 +91,16 @@ impl Baseline {
         }
         Ok(())
     }
+}
+pub(crate) fn strong_etag(value: &str) -> bool {
+    let etag = value.as_bytes();
+    etag.len() >= 2
+        && etag.len() <= 4096
+        && etag.first() == Some(&b'"')
+        && etag.last() == Some(&b'"')
+        && etag[1..etag.len() - 1]
+            .iter()
+            .all(|b| *b == 0x21 || (0x23..=0x7e).contains(b))
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -272,6 +273,7 @@ fn decode(raw: Zeroizing<Vec<u8>>, scope: &Scope, id: &CaptureId) -> Result<Reta
 /// Trusted caller must already hold all live capture leases; this inert model
 /// cannot establish them. Success acknowledges retained bytes only. Plaintext
 /// ownership is moved in and zeroized on every success/error path.
+#[cfg(test)]
 pub fn retain(
     store: &impl Store,
     scope: &Scope,
@@ -303,6 +305,96 @@ pub fn reopen_for_recovery(
         .map_err(|_| Error::Persistence)?
         .ok_or(Error::Missing)?;
     decode(raw, scope, id)
+}
+
+/// Digest/length of the complete immutable encoded frame, including scope,
+/// baseline, native identity, epoch labels and body. Not an upload permit.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EncodedFrameRef {
+    length: usize,
+    sha256: [u8; 32],
+}
+impl EncodedFrameRef {
+    pub(crate) fn validate(&self) -> Result<()> {
+        if self.length <= MAGIC.len() + 4
+            || self.length > MAX_RECORD_BYTES
+            || self.sha256 == [0; 32]
+        {
+            return Err(Error::Invalid);
+        }
+        Ok(())
+    }
+}
+impl RetainedEdit {
+    pub(crate) fn encoded_frame_ref(&self) -> EncodedFrameRef {
+        EncodedFrameRef {
+            length: self.raw.len(),
+            sha256: Sha256::digest(self.raw.as_slice()).into(),
+        }
+    }
+}
+/// Encode once before index enrollment. No mutable frame, Debug, Clone or
+/// deserialization API; dropping this object zeroizes its owned plaintext frame.
+pub(crate) struct PreparedCapture {
+    edit: RetainedEdit,
+}
+impl PreparedCapture {
+    pub(crate) fn new(
+        scope: &Scope,
+        id: &CaptureId,
+        baseline: Baseline,
+        body: Zeroizing<Vec<u8>>,
+    ) -> Result<Self> {
+        let _validated_scope_binding = binding(scope, id)?;
+        let raw = encode(scope, id, baseline, &body)?;
+        Ok(Self {
+            edit: decode(raw, scope, id)?,
+        })
+    }
+    pub(crate) fn scope(&self) -> &Scope {
+        &self.edit.metadata.scope
+    }
+    pub(crate) fn id(&self) -> &str {
+        &self.edit.metadata.capture_id
+    }
+    pub(crate) fn existing_file_binding(&self) -> ([u8; 16], &str, u32, u64) {
+        let b = &self.edit.metadata.baseline;
+        (
+            b.opaque_file,
+            &b.strong_etag,
+            b.native_volume,
+            b.native_file,
+        )
+    }
+    pub(crate) fn encoded_frame_ref(&self) -> EncodedFrameRef {
+        self.edit.encoded_frame_ref()
+    }
+}
+/// Persistence requires an acknowledged, newly enrolled index ticket. A
+/// recovered/existing reference cannot mint this consumed, non-cloneable ticket.
+/// AlreadyExists is a collision here, never adoption of a previous body.
+pub(crate) fn persist_prepared_new(
+    store: &impl Store,
+    prepared: PreparedCapture,
+    ticket: super::vault_custody::FreshEnrollmentTicket,
+) -> Result<RetainedEdit> {
+    ticket.consume(&prepared).map_err(|_| Error::Foreign)?;
+    let scope = prepared.scope();
+    let id = CaptureId::new(prepared.id())?;
+    let key = binding(scope, &id)?;
+    match store
+        .put_new(DOMAIN, &key, &prepared.edit.raw)
+        .map_err(|_| Error::Persistence)?
+    {
+        PutNew::Created => {}
+        PutNew::AlreadyExists => return Err(Error::Conflict),
+    }
+    let retained = reopen_for_recovery(store, scope, &id)?;
+    if retained.raw.as_slice() != prepared.edit.raw.as_slice() {
+        return Err(Error::Conflict);
+    }
+    Ok(retained)
 }
 
 #[cfg(test)]

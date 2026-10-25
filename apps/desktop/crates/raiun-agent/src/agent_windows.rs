@@ -14,6 +14,9 @@ mod vault_custody;
 #[allow(dead_code)]
 #[path = "vault_edit_capture.rs"]
 mod vault_edit_capture;
+#[allow(dead_code)]
+#[path = "vault_edit_retention.rs"]
+mod vault_edit_retention;
 #[path = "windows_vault_credentials.rs"]
 mod windows_vault_credentials;
 #[path = "windows_vault_custody.rs"]

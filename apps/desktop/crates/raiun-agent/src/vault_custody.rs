@@ -2,6 +2,7 @@
 //! The Store MUST authenticate the whole payload/domain and bind its trusted
 //! scope independently. JSON alone has no integrity. No file/route/session or
 //! restore authority is conferred by decoding rows or a persistence acknowledgement.
+use super::vault_edit_capture::{CaptureId, EncodedFrameRef, PreparedCapture};
 use raiun_engine::folder_pairs::AccountScope;
 use raiun_vault::session::VaultSessionScope;
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,8 @@ pub const MAX_BYTES: usize = 1024 * 1024;
 pub const MAX_CATALOGUE: usize = 1024;
 pub const MAX_HYDRATIONS: usize = 4096;
 const VERSION: u32 = 1;
+const CAPTURE_VERSION: u32 = 2;
+pub(crate) const MAX_CAPTURE_REFS: usize = 128;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Error {
@@ -292,6 +295,54 @@ impl Hydration {
         &self.components
     }
 }
+/// Historical discovery reference, not a session, upload or cleanup permit.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CaptureRef {
+    capture_id: String,
+    entry: Entry,
+    frame: EncodedFrameRef,
+}
+impl CaptureRef {
+    pub(crate) fn id(&self) -> &str {
+        &self.capture_id
+    }
+    pub(crate) fn frame(&self) -> EncodedFrameRef {
+        self.frame
+    }
+    fn matches(&self, prepared: &PreparedCapture) -> bool {
+        let (opaque, etag, _, _) = prepared.existing_file_binding();
+        self.capture_id == prepared.id()
+            && self.entry.opaque == opaque
+            && self.entry.etag == etag
+            && self.frame == prepared.encoded_frame_ref()
+    }
+}
+/// Fresh in-memory enrollment acknowledgement only. No Clone, serialization,
+/// Debug or public constructor; recovery can never reconstruct this ticket.
+pub(crate) struct FreshEnrollmentTicket {
+    scope: Scope,
+    reference: CaptureRef,
+}
+impl FreshEnrollmentTicket {
+    pub(crate) fn consume(self, prepared: &PreparedCapture) -> Result<()> {
+        if self.scope != *prepared.scope() || !self.reference.matches(prepared) {
+            return Err(Error::Foreign);
+        }
+        Ok(())
+    }
+}
+pub(crate) enum CaptureEnrollment {
+    New(FreshEnrollmentTicket),
+    Existing(CaptureRef),
+}
+// Missing is permitted only for v1. Explicit null is always malformed, rather
+// than silently becoming an absent/empty capture history.
+fn decode_capture_refs<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<CaptureRef>>, D::Error> {
+    Vec::<CaptureRef>::deserialize(deserializer).map(Some)
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Document {
@@ -301,6 +352,12 @@ struct Document {
     incomplete: bool,
     catalogue: Vec<Entry>,
     pending: Vec<Hydration>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "decode_capture_refs"
+    )]
+    capture_refs: Option<Vec<CaptureRef>>,
 }
 impl Document {
     fn validate(&self, scope: &Scope) -> Result<()> {
@@ -308,7 +365,16 @@ impl Document {
         if &self.scope != scope {
             return Err(Error::Foreign);
         }
-        if self.version != VERSION || self.revision == 0 {
+        if self.revision == 0
+            || !matches!(
+                (self.version, &self.capture_refs),
+                (VERSION, None) | (CAPTURE_VERSION, Some(_))
+            )
+            || self
+                .capture_refs
+                .as_ref()
+                .is_some_and(|refs| refs.is_empty() || refs.len() > MAX_CAPTURE_REFS)
+        {
             return Err(Error::Invalid);
         }
         if self.catalogue.len() > MAX_CATALOGUE || self.pending.len() > MAX_HYDRATIONS {
@@ -325,6 +391,23 @@ impl Document {
             }
             // VaultBackend entries are canonical DECRYPTED root-relative paths
             // ("/", "/1"), independent of the encrypted remote root locator.
+        }
+        let mut capture_ids = BTreeSet::new();
+        for capture in self.capture_refs.iter().flatten() {
+            CaptureId::new(&capture.capture_id).map_err(|_| Error::Invalid)?;
+            capture.frame.validate().map_err(|_| Error::Invalid)?;
+            capture.entry.validate_in_scope(scope)?;
+            if capture.entry.directory
+                || !super::vault_edit_capture::strong_etag(&capture.entry.etag)
+                || !capture_ids.insert(&capture.capture_id)
+                || !self.catalogue.iter().any(|entry| entry == &capture.entry)
+                || !self
+                    .pending
+                    .iter()
+                    .any(|row| row.opaque == capture.entry.opaque)
+            {
+                return Err(Error::Conflict);
+            }
         }
         let mut files = BTreeSet::new();
         let mut hydrated_ids = BTreeSet::new();
@@ -413,6 +496,7 @@ impl Custody {
             incomplete: false,
             catalogue: vec![],
             pending: vec![],
+            capture_refs: None,
         };
         let raw = encode(&document)?;
         store
@@ -441,7 +525,10 @@ impl Custody {
     /// document is NOT filesystem coverage or permission to clear native unknown history.
     #[cfg(test)]
     pub fn needs_reconciliation(&self) -> bool {
-        self.failed || self.document.incomplete || !self.document.pending.is_empty()
+        self.failed
+            || self.document.incomplete
+            || !self.document.pending.is_empty()
+            || self.document.capture_refs.is_some()
     }
     #[cfg(test)]
     pub fn pending_count(&self) -> usize {
@@ -538,10 +625,94 @@ impl Custody {
     }
     /// Complete app-published history evidence, never native cleanup authority.
     pub fn publication_history(&self) -> Result<&[Hydration]> {
-        if self.failed || self.document.incomplete {
+        if self.failed || self.document.incomplete || self.document.capture_refs.is_some() {
             return Err(Error::Incomplete);
         }
         Ok(&self.document.pending)
+    }
+    /// Bounded historical references only; pending captures never become clean.
+    pub(crate) fn captures_for_reconciliation(&self) -> &[CaptureRef] {
+        self.document.capture_refs.as_deref().unwrap_or(&[])
+    }
+    /// Enroll the exact prepared frame before its body can be persisted. Existing
+    /// rows yield no fresh ticket, even when their protected body is missing.
+    pub(crate) fn enroll_capture(
+        &mut self,
+        store: &impl Store,
+        prepared: &PreparedCapture,
+        native_components: &[String],
+    ) -> Result<CaptureEnrollment> {
+        if self.failed || self.document.incomplete {
+            return Err(Error::Incomplete);
+        }
+        if prepared.scope() != &self.document.scope {
+            return Err(Error::Foreign);
+        }
+        let (opaque, etag, volume, file) = prepared.existing_file_binding();
+        let entry = self
+            .document
+            .catalogue
+            .iter()
+            .find(|entry| entry.opaque == opaque)
+            .ok_or(Error::Foreign)?;
+        let hydration = self
+            .document
+            .pending
+            .iter()
+            .find(|row| row.opaque == opaque)
+            .ok_or(Error::Foreign)?;
+        if entry.directory
+            || entry.etag != etag
+            || volume != self.document.scope.volume
+            || file != hydration.file_index
+            || native_components != hydration.components
+            || !components(native_components)
+        {
+            return Err(Error::Foreign);
+        }
+        let reference = CaptureRef {
+            capture_id: prepared.id().into(),
+            entry: entry.clone(),
+            frame: prepared.encoded_frame_ref(),
+        };
+        if let Some(existing) = self
+            .captures_for_reconciliation()
+            .iter()
+            .find(|existing| existing.capture_id == reference.capture_id)
+        {
+            return if existing == &reference {
+                Ok(CaptureEnrollment::Existing(existing.clone()))
+            } else {
+                Err(Error::Conflict)
+            };
+        }
+        if self.captures_for_reconciliation().len() == MAX_CAPTURE_REFS {
+            self.refuse_conflict(store, Error::Capacity)?;
+            return Err(Error::Capacity);
+        }
+        let mut next = self.document.clone();
+        next.version = CAPTURE_VERSION;
+        next.capture_refs
+            .get_or_insert_with(Vec::new)
+            .push(reference.clone());
+        self.commit(store, next)?;
+        // A ticket requires exact fresh readback, not just an in-memory row or
+        // a successful load of some old generation after uncertain publication.
+        let fresh = Self::reopen(store, &self.document.scope).and_then(|fresh| {
+            if fresh.raw != self.raw {
+                Err(Error::Persistence)
+            } else {
+                Ok(())
+            }
+        });
+        if fresh.is_err() {
+            self.failed = true;
+            return Err(Error::Persistence);
+        }
+        Ok(CaptureEnrollment::New(FreshEnrollmentTicket {
+            scope: self.document.scope.clone(),
+            reference,
+        }))
     }
     /// Write-ahead intent retained whether CfExecute succeeds, fails or crashes.
     /// Ok is only a persistence acknowledgement, never a publication ticket.
