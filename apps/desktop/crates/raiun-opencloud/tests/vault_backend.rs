@@ -25,7 +25,7 @@ use std::{
     num::NonZeroU64,
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
     time::Duration,
@@ -61,6 +61,7 @@ struct State {
     reject_put: bool,
     lose_put_response: bool,
     replacement_put_body: Option<Vec<u8>>,
+    preserve_put_etag: bool,
     lose_move_response: bool,
     lose_delete_response: bool,
     lose_mkcol_response: bool,
@@ -686,7 +687,9 @@ fn serve(mut stream: TcpStream, authority: &str, state: &Arc<Mutex<State>>) {
             let stored_body = snapshot.replacement_put_body.take().unwrap_or(body);
             snapshot.child = Some((encrypted_name, stored_body));
             snapshot.child_directory = false;
-            snapshot.etag_version = snapshot.etag_version.saturating_add(1);
+            if !snapshot.preserve_put_etag {
+                snapshot.etag_version = snapshot.etag_version.saturating_add(1);
+            }
             let lose_response = snapshot.lose_put_response;
             drop(snapshot);
             if lose_response {
@@ -6686,5 +6689,507 @@ fn encrypted_directory_create_rejects_parent_etag_and_root_token_changes() {
             .unwrap()
             .state,
         CiphertextWriteState::Conflict
+    );
+}
+
+// Guarded overwrite uses the existing finite DAV fixture; no Windows provider,
+// capture-store retirement or writable mount is activated by these tests.
+struct GuardedExistingFixture {
+    fixture: Fixture,
+    client: OpenCloudClient,
+    sessions: Arc<VaultSessionCoordinator>,
+    scope: VaultSessionScope,
+    backend: Arc<VaultBackend>,
+    entry: raiun_core::backend::RemoteEntry,
+    target: String,
+}
+fn guarded_existing_fixture() -> GuardedExistingFixture {
+    let fixture = Fixture::start();
+    let client = OpenCloudClient::new(&fixture.origin(), "synthetic-token".into()).unwrap();
+    let sessions = Arc::new(VaultSessionCoordinator::new());
+    let scope =
+        VaultSessionScope::new("guarded-account", &fixture.origin(), SPACE, ROOT_ID).unwrap();
+    let mut password = b"potato".to_vec();
+    sessions
+        .unlock(
+            &scope,
+            &mut password,
+            include_str!("../../raiun-vault/tests/fixtures/web-integrity-token.b64").trim(),
+        )
+        .unwrap();
+    let backend = Arc::new(
+        VaultBackend::new(
+            client.clone(),
+            sessions.clone(),
+            scope.clone(),
+            ROOT_PATH.to_owned(),
+        )
+        .unwrap(),
+    );
+    let create = backend
+        .prepare_write_target("/guarded.bin", &WriteCondition::Absent)
+        .unwrap();
+    let entry = backend
+        .upload_prepared_reader(
+            &create,
+            &mut Cursor::new(b"base"),
+            4,
+            WriteCondition::Absent,
+        )
+        .unwrap();
+    let target = backend
+        .prepare_write_target(&entry.path, &WriteCondition::Match(entry.etag.clone()))
+        .unwrap();
+    fixture.state.lock().unwrap().requests.clear();
+    GuardedExistingFixture {
+        fixture,
+        client,
+        sessions,
+        scope,
+        backend,
+        entry,
+        target,
+    }
+}
+fn guarded_existing_request<'a>(
+    client: &OpenCloudClient,
+    scope: &'a VaultSessionScope,
+    epoch: &'a raiun_vault::session::VaultSessionEpoch,
+    entry: &'a raiun_core::backend::RemoteEntry,
+    target: &'a str,
+    provider: Arc<AtomicU64>,
+    cancelled: &'a dyn Fn() -> bool,
+) -> raiun_opencloud::vault_backend::VaultExistingOverwriteRequest<'a> {
+    raiun_opencloud::vault_backend::VaultExistingOverwriteRequest {
+        scope,
+        epoch,
+        vault_root_path: ROOT_PATH,
+        logical_path: &entry.path,
+        original_resource_id: &entry.id,
+        original_etag: &entry.etag,
+        encoded_target: target,
+        expected_token_generation: client.token_generation(),
+        provider_generation: provider,
+        expected_provider_generation: 7,
+        cancelled,
+    }
+}
+fn guarded_put_count(fixture: &Fixture) -> usize {
+    fixture
+        .requests()
+        .iter()
+        .filter(|r| r.method == "PUT")
+        .count()
+}
+#[test]
+fn guarded_existing_overwrite_changes_length_and_authenticates_exact_readback() {
+    use raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome;
+    let f = guarded_existing_fixture();
+    let epoch = f.sessions.capture_session_epoch(&f.scope).unwrap();
+    let request = guarded_existing_request(
+        &f.client,
+        &f.scope,
+        &epoch,
+        &f.entry,
+        &f.target,
+        Arc::new(AtomicU64::new(7)),
+        &|| false,
+    );
+    let bytes = vec![0x5a; 65553];
+    let mut source = Cursor::new(bytes.clone());
+    let private = tempfile::tempdir().unwrap();
+    let result = f
+        .backend
+        .overwrite_existing_reader_guarded(
+            &request,
+            &mut source,
+            bytes.len() as u64,
+            private.path(),
+        )
+        .unwrap();
+    let VaultExistingOverwriteOutcome::Verified(proof) = result else {
+        panic!("expected authenticated remote byte proof")
+    };
+    assert_eq!(proof.entry().id, f.entry.id);
+    assert_eq!(proof.entry().size, bytes.len() as u64);
+    assert_eq!(
+        proof.plaintext_sha256(),
+        <[u8; 32]>::from(Sha256::digest(&bytes))
+    );
+    assert_eq!(source.into_inner(), bytes);
+    let requests = f.fixture.requests();
+    let puts = requests
+        .iter()
+        .filter(|r| r.method == "PUT")
+        .collect::<Vec<_>>();
+    assert_eq!(puts.len(), 1);
+    assert_eq!(puts[0].headers.get("if-match"), Some(&f.entry.etag));
+    assert_ne!(puts[0].body, bytes);
+    let gets = requests
+        .iter()
+        .filter(|r| r.method == "GET" && r.target.starts_with("/dav/"))
+        .collect::<Vec<_>>();
+    assert_eq!(gets.len(), 1);
+    assert_eq!(gets[0].headers.get("if-match"), Some(&proof.entry().etag));
+    assert!(
+        !private
+            .path()
+            .join("unpublished-overwrite-readback")
+            .exists()
+    );
+    assert_eq!(std::fs::read_dir(private.path()).unwrap().count(), 0);
+}
+#[test]
+fn guarded_existing_overwrite_refuses_original_identity_version_and_foreign_scope_before_put() {
+    let f = guarded_existing_fixture();
+    let epoch = f.sessions.capture_session_epoch(&f.scope).unwrap();
+    let private = tempfile::tempdir().unwrap();
+    for field in ["id", "etag", "scope", "encoded"] {
+        let mut original = f.entry.clone();
+        if field == "id" {
+            original.id = "foreign-resource".into();
+        }
+        if field == "etag" {
+            original.etag = "\"foreign-version\"".into();
+        }
+        let foreign =
+            VaultSessionScope::new("foreign-account", &f.fixture.origin(), SPACE, ROOT_ID).unwrap();
+        let scope = if field == "scope" { &foreign } else { &f.scope };
+        let encoded = f.sessions.encrypt_path(&f.scope, "other.bin").unwrap();
+        let target = if field == "encoded" {
+            &encoded
+        } else {
+            &f.target
+        };
+        let request = guarded_existing_request(
+            &f.client,
+            scope,
+            &epoch,
+            &original,
+            target,
+            Arc::new(AtomicU64::new(7)),
+            &|| false,
+        );
+        assert!(
+            f.backend
+                .overwrite_existing_reader_guarded(
+                    &request,
+                    &mut Cursor::new(b"edited"),
+                    6,
+                    private.path()
+                )
+                .is_err()
+        );
+        assert_eq!(guarded_put_count(&f.fixture), 0);
+    }
+}
+#[test]
+fn guarded_existing_overwrite_rejects_stale_epoch_and_revoked_admission_before_put() {
+    let f = guarded_existing_fixture();
+    let epoch = f.sessions.capture_session_epoch(&f.scope).unwrap();
+    let private = tempfile::tempdir().unwrap();
+    f.sessions.lock(&f.scope).unwrap();
+    let mut password = b"potato".to_vec();
+    f.sessions
+        .unlock(
+            &f.scope,
+            &mut password,
+            include_str!("../../raiun-vault/tests/fixtures/web-integrity-token.b64").trim(),
+        )
+        .unwrap();
+    assert!(f.sessions.is_unlocked(&f.scope).unwrap());
+    let old = guarded_existing_request(
+        &f.client,
+        &f.scope,
+        &epoch,
+        &f.entry,
+        &f.target,
+        Arc::new(AtomicU64::new(7)),
+        &|| false,
+    );
+    assert!(
+        f.backend
+            .overwrite_existing_reader_guarded(&old, &mut Cursor::new(b"edited"), 6, private.path())
+            .is_err()
+    );
+    let current = f.sessions.capture_session_epoch(&f.scope).unwrap();
+    let provider = Arc::new(AtomicU64::new(8));
+    let request = guarded_existing_request(
+        &f.client,
+        &f.scope,
+        &current,
+        &f.entry,
+        &f.target,
+        provider,
+        &|| false,
+    );
+    assert!(
+        f.backend
+            .overwrite_existing_reader_guarded(
+                &request,
+                &mut Cursor::new(b"edited"),
+                6,
+                private.path()
+            )
+            .is_err()
+    );
+    let request = guarded_existing_request(
+        &f.client,
+        &f.scope,
+        &current,
+        &f.entry,
+        &f.target,
+        Arc::new(AtomicU64::new(7)),
+        &|| true,
+    );
+    assert!(
+        f.backend
+            .overwrite_existing_reader_guarded(
+                &request,
+                &mut Cursor::new(b"edited"),
+                6,
+                private.path()
+            )
+            .is_err()
+    );
+    assert_eq!(guarded_put_count(&f.fixture), 0);
+}
+#[test]
+fn guarded_existing_overwrite_refuses_source_length_and_capacity_without_truncation_or_put() {
+    use raiun_opencloud::vault_backend::MAX_GUARDED_VAULT_OVERWRITE_BYTES;
+    let f = guarded_existing_fixture();
+    let epoch = f.sessions.capture_session_epoch(&f.scope).unwrap();
+    let private = tempfile::tempdir().unwrap();
+    let request = guarded_existing_request(
+        &f.client,
+        &f.scope,
+        &epoch,
+        &f.entry,
+        &f.target,
+        Arc::new(AtomicU64::new(7)),
+        &|| false,
+    );
+    for len in [2, MAX_GUARDED_VAULT_OVERWRITE_BYTES + 1] {
+        let mut source = Cursor::new(b"extra".to_vec());
+        assert!(
+            f.backend
+                .overwrite_existing_reader_guarded(&request, &mut source, len, private.path())
+                .is_err()
+        );
+        assert_eq!(source.into_inner(), b"extra");
+    }
+    assert_eq!(guarded_put_count(&f.fixture), 0);
+}
+#[test]
+fn guarded_existing_overwrite_lock_during_put_cancels_without_holding_registry_over_network() {
+    use raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome;
+    let f = guarded_existing_fixture();
+    let epoch = f.sessions.capture_session_epoch(&f.scope).unwrap();
+    let gate = f.fixture.pause_next_copy_put_body();
+    let backend = f.backend.clone();
+    let client = f.client.clone();
+    let scope = f.scope.clone();
+    let entry = f.entry.clone();
+    let target = f.target.clone();
+    let worker = thread::spawn(move || {
+        let request = guarded_existing_request(
+            &client,
+            &scope,
+            &epoch,
+            &entry,
+            &target,
+            Arc::new(AtomicU64::new(7)),
+            &|| false,
+        );
+        let mut source = Cursor::new(vec![0x33; 131089]);
+        let private = tempfile::tempdir().unwrap();
+        let result = backend.overwrite_existing_reader_guarded(
+            &request,
+            &mut source,
+            131089,
+            private.path(),
+        );
+        (result, source.into_inner())
+    });
+    assert!(
+        gate.wait_for_body_prefix(&worker),
+        "PUT must reach the existing fixture gate"
+    );
+    f.sessions.lock(&f.scope).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !worker.is_finished() && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let cancelled = worker.is_finished();
+    gate.release();
+    let (result, source) = worker.join().unwrap();
+    assert!(
+        cancelled,
+        "epoch revocation must stop the pending network operation"
+    );
+    assert!(matches!(
+        result,
+        Ok(VaultExistingOverwriteOutcome::NeedsReconciliation { .. })
+    ));
+    assert_eq!(source, vec![0x33; 131089]);
+}
+#[test]
+fn guarded_existing_overwrite_valid_ciphertext_with_wrong_plaintext_is_not_verified() {
+    use raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome;
+    let f = guarded_existing_fixture();
+    let epoch = f.sessions.capture_session_epoch(&f.scope).unwrap();
+    let staging = tempfile::tempdir().unwrap();
+    let cipher = staging.path().join("replacement-cipher.bin");
+    f.sessions
+        .encrypt_file_transactional(&f.scope, &mut Cursor::new(b"wrong!"), &cipher, 6, 6)
+        .unwrap();
+    f.fixture
+        .replace_next_put_body(std::fs::read(cipher).unwrap());
+    let request = guarded_existing_request(
+        &f.client,
+        &f.scope,
+        &epoch,
+        &f.entry,
+        &f.target,
+        Arc::new(AtomicU64::new(7)),
+        &|| false,
+    );
+    let private = tempfile::tempdir().unwrap();
+    let mut source = Cursor::new(b"edited".to_vec());
+    assert!(matches!(
+        f.backend
+            .overwrite_existing_reader_guarded(&request, &mut source, 6, private.path()),
+        Ok(VaultExistingOverwriteOutcome::NeedsReconciliation { .. })
+    ));
+    assert_eq!(source.into_inner(), b"edited");
+    assert_eq!(guarded_put_count(&f.fixture), 1);
+    assert_eq!(
+        f.fixture
+            .requests()
+            .iter()
+            .filter(|r| r.method == "GET" && r.target.starts_with("/dav/"))
+            .count(),
+        1
+    );
+}
+#[test]
+fn guarded_existing_overwrite_token_change_during_get_is_retained_uncertainty() {
+    use raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome;
+    let f = guarded_existing_fixture();
+    let epoch = f.sessions.capture_session_epoch(&f.scope).unwrap();
+    f.fixture.state.lock().unwrap().get_delay_ms = 3000;
+    let backend = f.backend.clone();
+    let client = f.client.clone();
+    let scope = f.scope.clone();
+    let entry = f.entry.clone();
+    let target = f.target.clone();
+    let worker = thread::spawn(move || {
+        let request = guarded_existing_request(
+            &client,
+            &scope,
+            &epoch,
+            &entry,
+            &target,
+            Arc::new(AtomicU64::new(7)),
+            &|| false,
+        );
+        let mut source = Cursor::new(b"edited".to_vec());
+        let private = tempfile::tempdir().unwrap();
+        let result =
+            backend.overwrite_existing_reader_guarded(&request, &mut source, 6, private.path());
+        (result, source.into_inner())
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !f
+        .fixture
+        .requests()
+        .iter()
+        .any(|r| r.method == "GET" && r.target.starts_with("/dav/"))
+        && !worker.is_finished()
+        && std::time::Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        f.fixture
+            .requests()
+            .iter()
+            .any(|r| r.method == "GET" && r.target.starts_with("/dav/")),
+        "authenticated readback must start"
+    );
+    f.client.set_bearer_token("synthetic-token".into()).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !worker.is_finished() && std::time::Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let cancelled = worker.is_finished();
+    let (result, source) = worker.join().unwrap();
+    assert!(cancelled, "generation change must stop an in-progress GET");
+    assert!(matches!(
+        result,
+        Ok(VaultExistingOverwriteOutcome::NeedsReconciliation { .. })
+    ));
+    assert_eq!(source, b"edited");
+    assert_eq!(guarded_put_count(&f.fixture), 1);
+}
+#[test]
+fn guarded_existing_overwrite_lost_put_response_does_not_replay_or_claim_success() {
+    use raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome;
+    let f = guarded_existing_fixture();
+    let epoch = f.sessions.capture_session_epoch(&f.scope).unwrap();
+    f.fixture.lose_put_response();
+    let request = guarded_existing_request(
+        &f.client,
+        &f.scope,
+        &epoch,
+        &f.entry,
+        &f.target,
+        Arc::new(AtomicU64::new(7)),
+        &|| false,
+    );
+    let private = tempfile::tempdir().unwrap();
+    let mut source = Cursor::new(b"edited".to_vec());
+    assert!(matches!(
+        f.backend
+            .overwrite_existing_reader_guarded(&request, &mut source, 6, private.path()),
+        Ok(VaultExistingOverwriteOutcome::NeedsReconciliation { .. })
+    ));
+    assert_eq!(source.into_inner(), b"edited");
+    assert_eq!(guarded_put_count(&f.fixture), 1);
+}
+
+#[test]
+fn guarded_existing_overwrite_unchanged_strong_etag_is_retained_uncertainty() {
+    use raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome;
+    let f = guarded_existing_fixture();
+    f.fixture.state.lock().unwrap().preserve_put_etag = true;
+    let epoch = f.sessions.capture_session_epoch(&f.scope).unwrap();
+    let provider = Arc::new(AtomicU64::new(7));
+    let request = guarded_existing_request(
+        &f.client,
+        &f.scope,
+        &epoch,
+        &f.entry,
+        &f.target,
+        provider,
+        &|| false,
+    );
+    let private = tempfile::tempdir().unwrap();
+    let mut source = std::io::Cursor::new(b"edited".to_vec());
+    let outcome = f
+        .backend
+        .overwrite_existing_reader_guarded(&request, &mut source, 6, private.path())
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        VaultExistingOverwriteOutcome::NeedsReconciliation { .. }
+    ));
+    assert_eq!(source.into_inner(), b"edited");
+    assert_eq!(guarded_put_count(&f.fixture), 1);
+    assert!(
+        !f.fixture
+            .requests()
+            .iter()
+            .any(|request| request.method == "GET" && request.target.starts_with("/dav/"))
     );
 }

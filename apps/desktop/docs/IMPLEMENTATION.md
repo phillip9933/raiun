@@ -2689,3 +2689,46 @@ size mismatch remain preserved as r3/r4 evidence. The 512 KiB capture bound rema
 zero-length capture, crash/reboot recovery, conditional upload, native disposition
 and installed writable-app acceptance are not established by this test. The r117
 installed candidate is unchanged and closed; no package or release was produced.
+
+
+### Guarded explicit Windows vault upload (25 October)
+
+An internal hot-route worker now authenticates the exact protected capture and
+full canonical current account (including OAuth client, issuer and subject),
+retains the registered native-root pin, and durably claims one upload attempt
+before dispatch. Strict custody v3 stores bounded attempt subrecords through the
+existing whole-child protected CAS. Read-only v1/v2 bytes remain unchanged;
+interrupted or uncertain attempts cannot silently replay. Immutable capture
+references and bodies remain available for recovery.
+
+The live bridge releases all provider/custody/auth/session publication guards
+before HTTP. It uses the binding-owned opaque unlock epoch and current token and
+provider generations. It preserves the original resource ID, logical path and
+strong If-Match validator, prepares the ciphertext locator at fresh admission,
+encrypts bounded immutable input, then authenticates full remote byte readback.
+Only a new strong version matching the same resource and exact bytes can produce
+historical verification. Cancellation or uncertainty after possible dispatch
+requires reconciliation. No saved numeric label or persisted readback record
+confers live upload, retry or native-cleanup authority.
+
+The exact combined source passes formatting, strict Linux workspace lint and
+1,040 workspace tests (14 ignored). Fresh Windows GNU Agent binary/test checks
+and Cloud Files all-target strict lint pass with no warnings and actual compiler
+invocation evidence. The exact MSVC Agent fixture passed under the isolated
+ordinary user: a captured 65,553-byte edit caused one conditional ciphertext PUT,
+one authenticated readback GET, and an exact protected verification record. A
+second explicit invocation refused without another PUT. The original frame,
+local bytes and catalogue baseline remained preserved; ordinary PUT/journal
+counts stayed zero. Native and wrapper exits were zero, followed by actual normal
+guest shutdown and cold preservation. Initial missing-import and nested-test-path
+compile failures remain preserved with the narrow fixes.
+
+Evidence: `windows-vault-explicit-upload-r1/` under
+`outputs/desktop-next-20261021/`; exact native evidence is
+`outputs/local-windows-native-20261023-r1/agent-vault-explicit-upload-native-r6/`.
+Source archive: `38ba031c…`. Public upload RPC is compiled but remains disabled;
+normal writable publication, automatic dispatch, native acknowledgement, baseline
+promotion and clean Lock are not established by this explicit fixture. The
+512 KiB bound and separate post-lock/restart reconciliation gap remain. No product
+package, host installation or publication was performed; r117 remains installed
+and closed only in the isolated VM.

@@ -60,7 +60,9 @@ pub use recovery_reconcile::{
     RecoveryRemoteVersion, VerifiedEditReadback, verify_edit_readback,
 };
 #[cfg(windows)]
-pub use vault_custody::{ExistingVaultEditBaseline, ExistingVaultEditPayload};
+pub use vault_custody::{
+    ExistingVaultEditBaseline, ExistingVaultEditPayload, ExistingVaultUploadTarget,
+};
 
 #[cfg(windows)]
 #[allow(unsafe_code)]

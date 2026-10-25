@@ -200,6 +200,62 @@ mod runtime {
                 custody,
             })
         }
+        pub(crate) fn upload_existing_capture<R: std::io::Read + std::io::Seek>(
+            &self,
+            target: &crate::ExistingVaultUploadTarget,
+            source: &mut R,
+            edited_len: u64,
+            cancellation: &crate::vault_custody::VaultUploadCancellation<'_>,
+        ) -> Result<raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome, CloudError>
+        {
+            use raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome;
+            if cancellation.is_cancelled()
+                || edited_len > crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64
+            {
+                return Err(refused());
+            }
+            let saved = self.saved(target.identity()).map_err(|_| refused())?;
+            self.binding.with_publication(|| {
+                // Local protected validation only; no source body reads, HTTP,
+                // auth/coordinator reentry or authority escaping this callback.
+                self.binding.validate_upload_target(target)?;
+                self.binding
+                    .verify_custody_context(self.custody.as_ref())
+                    .map_err(|_| refused())?;
+                if self.custody.root_identity() != target.root() || !target.matches_original(&saved)
+                {
+                    return Err(refused());
+                }
+                let catalogue = self.custody.catalogue_snapshot().map_err(|_| refused())?;
+                let mut matching = catalogue
+                    .iter()
+                    .filter(|row| &row.identity == target.identity());
+                let original = matching.next().ok_or_else(refused)?;
+                if matching.next().is_some() || !target.matches_original(&original.metadata) {
+                    return Err(refused());
+                }
+                Ok(())
+            })?; // Every route/token/epoch/custody/catalogue guard is dropped.
+            self.private.verify_path().map_err(|_| refused())?;
+            let result = self.binding.upload_existing_capture(
+                target,
+                source,
+                edited_len,
+                &self.private,
+                cancellation,
+            );
+            match result {
+                Ok(VaultExistingOverwriteOutcome::Verified(_))
+                    if self.private.verify_path().is_err() || cancellation.is_cancelled() =>
+                {
+                    Ok(VaultExistingOverwriteOutcome::NeedsReconciliation {
+                        reason: raiun_core::backend::ErrorKind::Forbidden,
+                    })
+                }
+                other => other,
+            }
+        }
+
         pub(crate) fn custody_root_identity(&self) -> crate::ConfiguredRootIdentity {
             self.custody.root_identity()
         }

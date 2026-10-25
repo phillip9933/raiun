@@ -9,3 +9,11 @@ mod vault_edit_capture;
 #[allow(dead_code)]
 #[path = "../src/vault_edit_retention.rs"]
 mod vault_edit_retention;
+
+#[allow(dead_code)]
+#[path = "../src/vault_edit_upload.rs"]
+mod vault_edit_upload;
+
+#[allow(dead_code)]
+#[path = "../src/root_manifest.rs"]
+mod root_manifest;

@@ -12,6 +12,104 @@ pub struct VaultCatalogueEntry {
     pub metadata: RemoteEntry,
 }
 
+/// Trusted broker input for one already-live vault route. Construction validates
+/// structure only: the broker must first authenticate the full protected account/
+/// custody/index/frame and retain its real configured-root pin and attempt lease.
+/// Original resource/path/ETag/length are immutable; no historical labels grant
+/// current session authority. Deliberately no Debug/Clone/deserialization.
+pub struct ExistingVaultUploadTarget {
+    current_owner: ProviderScope,
+    vault: VaultSessionScope,
+    remote_root: String,
+    configured_root: ConfiguredRootIdentity,
+    opaque: [u8; 16],
+    original: RemoteEntry,
+}
+impl ExistingVaultUploadTarget {
+    pub fn new(
+        current_owner: ProviderScope,
+        vault: VaultSessionScope,
+        remote_root: String,
+        configured_root: ConfiguredRootIdentity,
+        opaque: [u8; 16],
+        original: RemoteEntry,
+    ) -> Result<Self, BackendError> {
+        let etag = original.etag.as_bytes();
+        if opaque == [0; 16]
+            || original.directory
+            || original.id.trim().is_empty()
+            || original.id.len() > 4096
+            || original.id.chars().any(char::is_control)
+            || original.path == "/"
+            || raiun_core::validate_remote_path(&original.path).is_err()
+            || etag.len() < 2
+            || etag.len() > 4096
+            || etag.first() != Some(&b'"')
+            || etag.last() != Some(&b'"')
+            || !etag[1..etag.len() - 1]
+                .iter()
+                .all(|b| *b == 0x21 || (0x23..=0x7e).contains(b))
+            || remote_root.len() > 4096
+            || raiun_core::validate_remote_path(&remote_root).is_err()
+            || (remote_root != "/" && remote_root.ends_with('/'))
+            || current_owner.profile_id() != vault.account_id()
+            || current_owner.server_origin() != vault.server_origin()
+            || current_owner.token_generation() == 0
+            || configured_root.volume_serial == 0
+            || configured_root.file_index == 0
+        {
+            return Err(BackendError::Unavailable);
+        }
+        Ok(Self {
+            current_owner,
+            vault,
+            remote_root,
+            configured_root,
+            opaque,
+            original,
+        })
+    }
+    pub(crate) fn owner(&self) -> &ProviderScope {
+        &self.current_owner
+    }
+    pub(crate) fn vault(&self) -> &VaultSessionScope {
+        &self.vault
+    }
+    pub(crate) fn remote_root(&self) -> &str {
+        &self.remote_root
+    }
+    pub(crate) fn root(&self) -> ConfiguredRootIdentity {
+        self.configured_root
+    }
+    pub(crate) fn identity(&self) -> &[u8; 16] {
+        &self.opaque
+    }
+    pub(crate) fn original(&self) -> &RemoteEntry {
+        &self.original
+    }
+    pub(crate) fn matches_original(&self, other: &RemoteEntry) -> bool {
+        !other.directory
+            && self.original.id == other.id
+            && self.original.path == other.path
+            && self.original.etag == other.etag
+            && self.original.size == other.size
+        // encrypted/writable are presentation flags, never custody authority.
+    }
+}
+
+pub(crate) struct VaultUploadCancellation<'a> {
+    pub generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    pub expected: u64,
+    pub cancelled: &'a dyn Fn() -> bool,
+}
+impl VaultUploadCancellation<'_> {
+    pub fn is_cancelled(&self) -> bool {
+        self.expected == 0
+            || self.generation.load(std::sync::atomic::Ordering::Acquire) != self.expected
+            || (self.cancelled)()
+    }
+}
+
 /// Native caller must independently pin the exact root/file/opaque identity
 /// and validate these components before invoking the durable publication hook.
 /// Physical components are discovered at fetch, not guessed from remote names.
@@ -161,4 +259,110 @@ pub trait VaultPublishedHistorySource: Send + Sync {
         root: ConfiguredRootIdentity,
         registration: &str,
     ) -> Result<Vec<VaultHydrationIntent>, BackendError>;
+}
+
+#[cfg(test)]
+mod upload_target_tests {
+    use super::*;
+    fn target() -> ExistingVaultUploadTarget {
+        let client = raiun_opencloud::OpenCloudClient::new(
+            "https://synthetic.invalid",
+            "synthetic-token".into(),
+        )
+        .unwrap();
+        let owner = ProviderScope::new(
+            &client,
+            "profile".into(),
+            "subject".into(),
+            "https://synthetic.invalid".into(),
+        )
+        .unwrap();
+        ExistingVaultUploadTarget::new(
+            owner,
+            VaultSessionScope::new("profile", "https://synthetic.invalid", "space", "vault")
+                .unwrap(),
+            "/Travel.vault".into(),
+            ConfiguredRootIdentity {
+                volume_serial: 7,
+                file_index: 9,
+            },
+            [3; 16],
+            RemoteEntry {
+                id: "existing".into(),
+                path: "/original.bin".into(),
+                etag: "\"original\"".into(),
+                size: 123,
+                directory: false,
+                encrypted: false,
+                writable: false,
+                modified_unix: 0,
+            },
+        )
+        .unwrap()
+    }
+    #[test]
+    fn original_version_is_never_rebased_and_presentation_flags_are_not_authority() {
+        let target = target();
+        let mut other = target.original().clone();
+        other.encrypted = true;
+        other.writable = true;
+        assert!(target.matches_original(&other));
+        for field in ["id", "path", "etag", "size", "directory"] {
+            let mut other = target.original().clone();
+            match field {
+                "id" => other.id = "replacement".into(),
+                "path" => other.path = "/replacement.bin".into(),
+                "etag" => other.etag = "\"replacement\"".into(),
+                "size" => other.size += 1,
+                "directory" => other.directory = true,
+                _ => unreachable!(),
+            }
+            assert!(!target.matches_original(&other));
+        }
+    }
+    #[test]
+    fn foreign_or_malformed_target_context_cannot_construct_upload_target() {
+        let t = target();
+        for field in ["vault", "root", "opaque", "etag"] {
+            let vault = if field == "vault" {
+                VaultSessionScope::new(
+                    "foreign-profile",
+                    "https://synthetic.invalid",
+                    "space",
+                    "vault",
+                )
+                .unwrap()
+            } else {
+                t.vault().clone()
+            };
+            let root = if field == "root" {
+                ConfiguredRootIdentity {
+                    volume_serial: 0,
+                    file_index: 9,
+                }
+            } else {
+                t.root()
+            };
+            let opaque = if field == "opaque" {
+                [0; 16]
+            } else {
+                *t.identity()
+            };
+            let mut original = t.original().clone();
+            if field == "etag" {
+                original.etag = "W/\"original\"".into();
+            }
+            assert!(
+                ExistingVaultUploadTarget::new(
+                    t.owner().clone(),
+                    vault,
+                    t.remote_root().into(),
+                    root,
+                    opaque,
+                    original
+                )
+                .is_err()
+            );
+        }
+    }
 }

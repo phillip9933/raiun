@@ -7,6 +7,7 @@
 //! never runs while the coordinator holds its session lock.
 
 use std::{
+    cell::Cell,
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::Path,
@@ -25,7 +26,7 @@ use raiun_core::backend::{
 };
 use raiun_vault::{
     sealed_cache::SealedVaultSnapshot,
-    session::{VaultSessionCoordinator, VaultSessionScope},
+    session::{VaultSessionCoordinator, VaultSessionEpoch, VaultSessionScope},
 };
 use reqwest::{
     Method, StatusCode,
@@ -34,6 +35,7 @@ use reqwest::{
 use sha2::{Digest, Sha256};
 use tempfile::{NamedTempFile, tempdir};
 use url::Url;
+use zeroize::Zeroizing;
 
 use crate::transfer_budget::TransferDirection;
 use crate::{
@@ -117,6 +119,119 @@ pub enum VaultDirectoryCreateOutcome {
         revision: u64,
         uncertain: bool,
     },
+}
+
+/// Bound for this online existing-file primitive, not general mounted writes.
+pub const MAX_GUARDED_VAULT_OVERWRITE_BYTES: u64 = 512 * 1024;
+
+/// Trusted live admission context. The encoded target is prepared at fresh
+/// upload admission, NOT a capture-time ciphertext locator. Original ID/ETag/
+/// logical path/root must never be rebased. Historical capture labels do not
+/// construct `epoch`. Caller retains its physical root/account pin independently.
+/// Cancellation must be a cheap local check; no registry/publication/auth lease
+/// may be held while calling this network operation.
+pub struct VaultExistingOverwriteRequest<'a> {
+    pub scope: &'a VaultSessionScope,
+    pub epoch: &'a VaultSessionEpoch,
+    pub vault_root_path: &'a str,
+    pub logical_path: &'a str,
+    pub original_resource_id: &'a str,
+    pub original_etag: &'a str,
+    pub encoded_target: &'a str,
+    pub expected_token_generation: u64,
+    pub provider_generation: Arc<AtomicU64>,
+    pub expected_provider_generation: u64,
+    pub cancelled: &'a dyn Fn() -> bool,
+}
+/// Constructed only after full authenticated plaintext readback. This is a
+/// historical remote byte proof, never local in-sync, cleanup or retry authority.
+pub struct VaultVerifiedOverwrite {
+    entry: RemoteEntry,
+    plaintext_sha256: [u8; 32],
+}
+impl VaultVerifiedOverwrite {
+    pub fn entry(&self) -> &RemoteEntry {
+        &self.entry
+    }
+    pub fn plaintext_sha256(&self) -> [u8; 32] {
+        self.plaintext_sha256
+    }
+}
+pub enum VaultExistingOverwriteOutcome {
+    Verified(VaultVerifiedOverwrite),
+    /// PUT may have reached the server. Preserve immutable source/index and
+    /// reconcile explicitly; never infer rollback or automatically replay it.
+    NeedsReconciliation {
+        reason: ErrorKind,
+    },
+}
+struct ExistingOverwriteGuard<'a> {
+    request: &'a VaultExistingOverwriteRequest<'a>,
+    plaintext_len: u64,
+    private_ciphertext_directory: &'a Path,
+    dispatched: Cell<bool>,
+}
+impl ExistingOverwriteGuard<'_> {
+    fn check(&self, backend: &VaultBackend) -> Result<(), CloudError> {
+        let request = self.request;
+        if (request.cancelled)() {
+            return Err(CloudError::new(
+                ErrorKind::Forbidden,
+                "encrypted overwrite was cancelled",
+            ));
+        }
+        if backend.client.token_generation() != request.expected_token_generation
+            || request.provider_generation.load(Ordering::Acquire)
+                != request.expected_provider_generation
+        {
+            return Err(CloudError::new(
+                ErrorKind::Unauthorized,
+                "encrypted overwrite generation changed",
+            ));
+        }
+        // A busy registry is fail-closed, not an excuse to block a network
+        // watchdog on local crypto. The short opaque lease is dropped here.
+        backend
+            .sessions
+            .try_lock_session_epoch(request.scope, request.epoch)
+            .map_err(vault_error)?
+            .ok_or_else(|| conflict("encrypted overwrite epoch is unavailable"))?;
+        Ok(())
+    }
+    fn check_original(&self, entry: &RemoteEntry) -> Result<(), CloudError> {
+        if entry.directory
+            || entry.id != self.request.original_resource_id
+            || entry.etag != self.request.original_etag
+            || entry.path != self.request.logical_path
+        {
+            return Err(conflict("original encrypted overwrite target changed"));
+        }
+        Ok(())
+    }
+}
+struct VaultPutOptions<'a, 'g> {
+    expectation: VaultPutExpectation<'a>,
+    guarded: Option<&'g ExistingOverwriteGuard<'g>>,
+}
+struct VaultDownloadOptions<'p, 'd, 'o, 'g> {
+    pin: Option<&'p CiphertextPinBuild>,
+    ciphertext_digest: Option<&'d mut String>,
+    output: Option<&'o mut dyn Write>,
+    guarded: Option<&'g ExistingOverwriteGuard<'g>>,
+}
+fn validate_existing_overwrite_etag(etag: &str) -> Result<(), CloudError> {
+    let bytes = etag.as_bytes();
+    if bytes.len() < 2
+        || bytes.len() > 4096
+        || bytes[0] != b'"'
+        || bytes[bytes.len() - 1] != b'"'
+        || !bytes[1..bytes.len() - 1]
+            .iter()
+            .all(|byte| *byte == 0x21 || (0x23..=0x7e).contains(byte))
+    {
+        return Err(invalid("encrypted overwrite requires a strong ETag"));
+    }
+    Ok(())
 }
 
 struct VaultPutExpectation<'a> {
@@ -5047,6 +5162,149 @@ impl VaultBackend {
         )
     }
 
+    /// One guarded online existing-file overwrite. Snapshot local input once,
+    /// use original If-Match without rebasing, then authenticate and byte-compare
+    /// the full returned version. No offline queue/create/retry/retirement exists
+    /// here. `private_ciphertext_directory` must remain caller-admitted, pinned
+    /// and private for this call, matching the existing private-reader contract.
+    pub fn overwrite_existing_reader_guarded<R: Read + Seek>(
+        &self,
+        request: &VaultExistingOverwriteRequest<'_>,
+        source: &mut R,
+        plaintext_len: u64,
+        private_ciphertext_directory: &Path,
+    ) -> Result<VaultExistingOverwriteOutcome, CloudError> {
+        if self.offline_only || self.offline_cache.is_some() || self.offline_root.is_some() {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "guarded overwrite requires an online cache-free backend",
+            ));
+        }
+        if request.scope != &self.scope
+            || request.vault_root_path != self.root_path
+            || request.logical_path == "/"
+            || normalize_virtual_path(request.logical_path)? != request.logical_path
+            || request.original_resource_id.trim().is_empty()
+            || request.original_resource_id.len() > 4096
+            || request.original_resource_id.chars().any(char::is_control)
+            || request.expected_token_generation == 0
+            || request.expected_provider_generation == 0
+            || plaintext_len > MAX_GUARDED_VAULT_OVERWRITE_BYTES
+        {
+            return Err(invalid("invalid guarded encrypted overwrite context"));
+        }
+        validate_virtual_path(request.logical_path)?;
+        validate_existing_overwrite_etag(request.original_etag)?;
+        let directory = fs::symlink_metadata(private_ciphertext_directory).map_err(io_error)?;
+        if !directory.is_dir() || directory.file_type().is_symlink() {
+            return Err(invalid(
+                "encrypted overwrite private staging is unavailable",
+            ));
+        }
+        let guard = ExistingOverwriteGuard {
+            request,
+            plaintext_len,
+            private_ciphertext_directory,
+            dispatched: Cell::new(false),
+        };
+        let result = (|| {
+            guard.check(self)?;
+            let decoded = self
+                .sessions
+                .decrypt_path_at_epoch(request.scope, request.epoch, request.encoded_target)
+                .map_err(vault_error)?;
+            if format!("/{}", decoded.components().collect::<Vec<_>>().join("/"))
+                != request.logical_path
+            {
+                return Err(conflict(
+                    "encrypted overwrite encoded target does not match its original path",
+                ));
+            }
+            let mut body = Zeroizing::new(vec![0u8; plaintext_len as usize]);
+            source.seek(SeekFrom::Start(0)).map_err(io_error)?;
+            source.read_exact(&mut body).map_err(io_error)?;
+            let mut extra = Zeroizing::new([0u8; 1]);
+            if source.read(&mut *extra).map_err(io_error)? != 0 {
+                return Err(invalid("encrypted overwrite source length changed"));
+            }
+            guard.check(self)?;
+            let condition = WriteCondition::Match(request.original_etag.to_owned());
+            let admitted = self.prepare_write_target(request.logical_path, &condition)?;
+            if admitted != request.encoded_target {
+                return Err(conflict("encrypted overwrite admission target changed"));
+            }
+            guard.check(self)?;
+            let state = self.revalidate_root()?;
+            guard.check(self)?;
+            guard.check_original(&self.stat_raw(&state, request.logical_path)?)?;
+            guard.check(self)?;
+            let mut immutable = io::Cursor::new(body.as_slice());
+            let cancelled = || guard.check(self).is_err();
+            let uploaded = self.put_vault_reader_inner(
+                &state,
+                request.logical_path,
+                &mut immutable,
+                plaintext_len,
+                condition,
+                VaultPutOptions {
+                    expectation: VaultPutExpectation {
+                        encoded_target: Some(request.encoded_target),
+                        parent_binding: None,
+                        expected_token_generation: Some(request.expected_token_generation),
+                        external_token_generation: Some((
+                            Arc::clone(&request.provider_generation),
+                            request.expected_provider_generation,
+                        )),
+                        caller_cancelled: Some(&cancelled),
+                    },
+                    guarded: Some(&guard),
+                },
+            )?;
+            validate_existing_overwrite_etag(&uploaded.etag)?;
+            if uploaded.etag == request.original_etag {
+                return Err(conflict("encrypted overwrite returned its original ETag"));
+            }
+            guard.check(self)?;
+            let fresh = self.revalidate_root()?;
+            guard.check(self)?;
+            let mut readback = Zeroizing::new(Vec::new());
+            let nominal = private_ciphertext_directory.join("unpublished-overwrite-readback");
+            let verified = self.download_vault_inner_with_options(
+                &fresh,
+                request.logical_path,
+                Some(&uploaded.etag),
+                &nominal,
+                VaultDownloadOptions {
+                    pin: None,
+                    ciphertext_digest: None,
+                    output: Some(&mut *readback),
+                    guarded: Some(&guard),
+                },
+            )?;
+            guard.check(self)?;
+            if verified.id != request.original_resource_id
+                || verified.etag != uploaded.etag
+                || verified.size != plaintext_len
+                || readback.as_slice() != body.as_slice()
+            {
+                return Err(conflict(
+                    "encrypted overwrite authenticated readback did not match",
+                ));
+            }
+            Ok(VaultVerifiedOverwrite {
+                entry: verified,
+                plaintext_sha256: Sha256::digest(body.as_slice()).into(),
+            })
+        })();
+        match result {
+            Ok(verified) => Ok(VaultExistingOverwriteOutcome::Verified(verified)),
+            Err(error) if guard.dispatched.get() => {
+                Ok(VaultExistingOverwriteOutcome::NeedsReconciliation { reason: error.kind })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Build a copy-on-write encrypted offline snapshot. Each file is
     /// downloaded and authenticated in bounded streams; only ciphertext and
     /// sealed directory metadata enter the cache. Decrypted verification
@@ -5698,6 +5956,35 @@ impl VaultBackend {
         condition: WriteCondition,
         expectation: VaultPutExpectation<'_>,
     ) -> Result<RemoteEntry, CloudError> {
+        self.put_vault_reader_inner(
+            state,
+            virtual_path,
+            source,
+            plaintext_size,
+            condition,
+            VaultPutOptions {
+                expectation,
+                guarded: None,
+            },
+        )
+    }
+
+    fn put_vault_reader_inner<R: Read>(
+        &self,
+        state: &RootState,
+        virtual_path: &str,
+        source: &mut R,
+        plaintext_size: u64,
+        condition: WriteCondition,
+        options: VaultPutOptions<'_, '_>,
+    ) -> Result<RemoteEntry, CloudError> {
+        let VaultPutOptions {
+            expectation,
+            guarded,
+        } = options;
+        if let Some(guard) = guarded {
+            guard.check(self)?;
+        }
         if expectation
             .caller_cancelled
             .is_some_and(|cancelled| cancelled())
@@ -5720,7 +6007,16 @@ impl VaultBackend {
             WriteCondition::Absent => None,
             WriteCondition::Match(_) => Some(self.stat_raw(state, virtual_path)?.id),
         };
+        if let Some(guard) = guarded {
+            if expected_resource_id.as_deref() != Some(guard.request.original_resource_id) {
+                return Err(conflict("original encrypted overwrite resource changed"));
+            }
+            guard.check(self)?;
+        }
         let encoded_path = self.encoded_file_target(state, virtual_path, &condition)?;
+        if let Some(guard) = guarded {
+            guard.check(self)?;
+        }
         if expectation
             .encoded_target
             .is_some_and(|expected| expected != encoded_path)
@@ -5740,17 +6036,36 @@ impl VaultBackend {
         let physical = format!("{}/{encoded_path}", self.root_path.trim_end_matches('/'));
         let url = self.url_for_physical(state, &physical)?;
 
-        let temp = tempdir().map_err(io_error)?;
+        let temp = match guarded {
+            Some(guard) => {
+                tempfile::tempdir_in(guard.private_ciphertext_directory).map_err(io_error)?
+            }
+            None => tempdir().map_err(io_error)?,
+        };
         let ciphertext_path = temp.path().join("ciphertext.bin");
-        self.sessions
-            .encrypt_file_transactional(
-                &self.scope,
-                source,
-                &ciphertext_path,
-                plaintext_size,
-                MAX_VAULT_PLAINTEXT_BYTES,
-            )
-            .map_err(vault_error)?;
+        if let Some(guard) = guarded {
+            self.sessions
+                .encrypt_file_transactional_at_epoch(
+                    &self.scope,
+                    guard.request.epoch,
+                    source,
+                    &ciphertext_path,
+                    plaintext_size,
+                    MAX_GUARDED_VAULT_OVERWRITE_BYTES,
+                )
+                .map_err(vault_error)?;
+            guard.check(self)?;
+        } else {
+            self.sessions
+                .encrypt_file_transactional(
+                    &self.scope,
+                    source,
+                    &ciphertext_path,
+                    plaintext_size,
+                    MAX_VAULT_PLAINTEXT_BYTES,
+                )
+                .map_err(vault_error)?;
+        }
         let ciphertext = File::open(&ciphertext_path).map_err(io_error)?;
         let ciphertext_size = ciphertext.metadata().map_err(io_error)?.len();
         let transfer_budget = self.client.transfer_budget();
@@ -5765,6 +6080,11 @@ impl VaultBackend {
             ));
         }
         let fresh_state = self.revalidate_root()?;
+        if let Some(guard) = guarded {
+            guard.check(self)?;
+            guard.check_original(&self.stat_raw(&fresh_state, virtual_path)?)?;
+            guard.check(self)?;
+        }
         if expectation
             .external_token_generation
             .as_ref()
@@ -5852,7 +6172,8 @@ impl VaultBackend {
             self.client.body_idle_timeout(),
             total_timeout,
             || {
-                caller_cancelled.is_some_and(|cancelled| cancelled())
+                guarded.is_some_and(|guard| guard.check(self).is_err())
+                    || caller_cancelled.is_some_and(|cancelled| cancelled())
                     || watchdog_cancellation.is_cancelled()
                     || expected_token_generation.is_some_and(|expected| {
                         token_generation.load(Ordering::Acquire) != expected
@@ -5879,6 +6200,10 @@ impl VaultBackend {
                     },
                     progress,
                 );
+                if let Some(guard) = guarded {
+                    guard.check(self)?;
+                    guard.dispatched.set(true);
+                }
                 let response = request
                     .timeout(total_timeout)
                     .body(reqwest::Body::wrap_stream(body))
@@ -5915,6 +6240,9 @@ impl VaultBackend {
                 "source provider generation changed during upload",
             ));
         }
+        if let Some(guard) = guarded {
+            guard.check(self)?;
+        }
         trace_vault_upload_stage("put_response_accepted", None);
         let fresh_state = match self.revalidate_root() {
             Ok(state) => state,
@@ -5923,6 +6251,9 @@ impl VaultBackend {
                 return Err(error);
             }
         };
+        if let Some(guard) = guarded {
+            guard.check(self)?;
+        }
         trace_vault_upload_stage("post_put_root_revalidated", None);
         let entry = match self.stat_raw(&fresh_state, virtual_path) {
             Ok(entry) => entry,
@@ -5958,6 +6289,9 @@ impl VaultBackend {
             return Err(invalid(
                 "uploaded vault content failed identity or plaintext-size verification",
             ));
+        }
+        if let Some(guard) = guarded {
+            guard.check(self)?;
         }
         trace_vault_upload_stage("post_put_metadata_verified", None);
         Ok(entry)
@@ -6091,7 +6425,37 @@ impl VaultBackend {
         cache_output: (Option<&CiphertextPinBuild>, Option<&mut String>),
         private_output: Option<&mut dyn Write>,
     ) -> Result<RemoteEntry, CloudError> {
-        let (pin, capture_ciphertext_digest) = cache_output;
+        self.download_vault_inner_with_options(
+            state,
+            virtual_path,
+            expected_etag,
+            destination,
+            VaultDownloadOptions {
+                pin: cache_output.0,
+                ciphertext_digest: cache_output.1,
+                output: private_output,
+                guarded: None,
+            },
+        )
+    }
+
+    fn download_vault_inner_with_options(
+        &self,
+        state: &RootState,
+        virtual_path: &str,
+        expected_etag: Option<&str>,
+        destination: &Path,
+        options: VaultDownloadOptions<'_, '_, '_, '_>,
+    ) -> Result<RemoteEntry, CloudError> {
+        let VaultDownloadOptions {
+            pin,
+            ciphertext_digest: capture_ciphertext_digest,
+            output: private_output,
+            guarded,
+        } = options;
+        if let Some(guard) = guarded {
+            guard.check(self)?;
+        }
         let cache_epoch = pin.map(|build| build.epoch()).or_else(|| {
             self.offline_cache
                 .as_ref()
@@ -6113,6 +6477,15 @@ impl VaultBackend {
         if expected_etag.is_some_and(|etag| etag != before.etag) {
             return Err(conflict("vault file changed before download"));
         }
+        if let Some(guard) = guarded {
+            guard.check(self)?;
+            if before.id != guard.request.original_resource_id || before.size != guard.plaintext_len
+            {
+                return Err(conflict(
+                    "encrypted overwrite readback identity or size changed",
+                ));
+            }
+        }
         let ciphertext_len = ciphertext_len_from_plaintext(before.size)?;
         if ciphertext_len > ciphertext_len_from_plaintext(MAX_VAULT_PLAINTEXT_BYTES)? {
             return Err(invalid("vault ciphertext exceeds its transfer size limit"));
@@ -6131,7 +6504,6 @@ impl VaultBackend {
         let ciphertext_path = temp.path().join("ciphertext.bin");
         let mut ciphertext = NamedTempFile::new_in(temp.path()).map_err(io_error)?;
         let output = ciphertext.as_file().try_clone().map_err(io_error)?;
-        let (request, token) = self.client.request_async(Method::GET, &url)?;
         let budget = self.client.transfer_budget();
         let cancellation = budget.cancellation();
         let watchdog_cancellation = cancellation.clone();
@@ -6140,11 +6512,21 @@ impl VaultBackend {
             TransferDirection::Download,
             ciphertext_len,
         );
+        let request_context = guarded.map(|guard| RangeReadContext {
+            deadline: Instant::now() + total_timeout,
+            token_generation: guard.request.expected_token_generation,
+        });
+        let (request, token) =
+            self.client
+                .request_async_with_context(Method::GET, &url, request_context)?;
         let expected_etag = before.etag.clone();
         let copied = crate::async_body::run_body_operation_cancellable(
             self.client.body_idle_timeout(),
             total_timeout,
-            || watchdog_cancellation.is_cancelled(),
+            || {
+                watchdog_cancellation.is_cancelled()
+                    || guarded.is_some_and(|guard| guard.check(self).is_err())
+            },
             move |progress| async move {
                 let response = request
                     .header(IF_MATCH, expected_etag.as_str())
@@ -6162,7 +6544,10 @@ impl VaultBackend {
                     &mut output,
                     ciphertext_len,
                     &budget,
-                    || cancellation.is_cancelled(),
+                    || {
+                        cancellation.is_cancelled()
+                            || guarded.is_some_and(|guard| guard.check(self).is_err())
+                    },
                     &progress,
                 )
                 .await?;
@@ -6172,6 +6557,9 @@ impl VaultBackend {
                 Ok(copied)
             },
         )?;
+        if let Some(guard) = guarded {
+            guard.check(self)?;
+        }
         if copied != ciphertext_len {
             return Err(invalid(
                 "vault ciphertext length did not match its metadata",
@@ -6190,6 +6578,9 @@ impl VaultBackend {
         };
 
         let fresh_state = self.revalidate_root()?;
+        if let Some(guard) = guarded {
+            guard.check(self)?;
+        }
         let after = self.stat_raw(&fresh_state, virtual_path)?;
         if after.id != before.id || after.etag != before.etag || after.size != before.size {
             return Err(conflict("vault file changed during download"));
@@ -6197,15 +6588,28 @@ impl VaultBackend {
         let mut input = File::open(&ciphertext_path).map_err(io_error)?;
         let mut plaintext_path = None;
         let decrypted_len = if let Some(output) = private_output {
-            self.sessions
-                .decrypt_file_to_private_writer(
-                    &self.scope,
-                    &mut input,
-                    output,
-                    MAX_VAULT_PLAINTEXT_BYTES,
-                    before.size,
-                )
-                .map_err(vault_error)?
+            if let Some(guard) = guarded {
+                self.sessions
+                    .decrypt_file_to_private_writer_at_epoch(
+                        &self.scope,
+                        guard.request.epoch,
+                        &mut input,
+                        output,
+                        MAX_GUARDED_VAULT_OVERWRITE_BYTES,
+                        before.size,
+                    )
+                    .map_err(vault_error)?
+            } else {
+                self.sessions
+                    .decrypt_file_to_private_writer(
+                        &self.scope,
+                        &mut input,
+                        output,
+                        MAX_VAULT_PLAINTEXT_BYTES,
+                        before.size,
+                    )
+                    .map_err(vault_error)?
+            }
         } else {
             let placeholder = NamedTempFile::new_in(destination_parent).map_err(io_error)?;
             let path = placeholder.into_temp_path();
@@ -6223,6 +6627,9 @@ impl VaultBackend {
             plaintext_path = Some(path);
             size
         };
+        if let Some(guard) = guarded {
+            guard.check(self)?;
+        }
         if decrypted_len != before.size {
             return Err(invalid("vault plaintext length did not match its metadata"));
         }

@@ -384,6 +384,28 @@ impl VaultSessionRegistry {
         Ok(result)
     }
 
+    // Private typed local-crypto seam: epoch validation and codec use share
+    // one registry lock. No session/key escapes and no network runs here.
+    fn with_exact_epoch_crypto<T>(
+        &self,
+        scope: &VaultSessionScope,
+        epoch: &VaultSessionEpoch,
+        operation: impl FnOnce(&VerifiedVaultSession) -> Result<T, VaultError>,
+    ) -> Result<T, VaultError> {
+        let state = self.lock_state()?;
+        if scope != &epoch.scope
+            || !Weak::ptr_eq(&epoch.registry_identity, &Arc::downgrade(&self.identity))
+            || state.session_epochs.get(scope) != Some(&epoch.generation)
+        {
+            return Err(invalid("vault session epoch is no longer current"));
+        }
+        let session = state
+            .sessions
+            .get(scope)
+            .ok_or_else(|| invalid("vault session is locked"))?;
+        operation(session)
+    }
+
     /// Decode one name using only the session for the complete supplied scope.
     pub fn decrypt_name(
         &self,
@@ -936,6 +958,59 @@ impl VaultSessionCoordinator {
             expected_len,
             maximum_plaintext_bytes,
         )
+    }
+
+    /// Encrypt a bounded LOCAL reader under this exact opaque unlock. The
+    /// registry lease covers local crypto only; callers must release it before HTTP.
+    pub fn encrypt_file_transactional_at_epoch<R: Read>(
+        &self,
+        scope: &VaultSessionScope,
+        epoch: &VaultSessionEpoch,
+        input: &mut R,
+        destination: &Path,
+        expected_len: u64,
+        maximum_plaintext_bytes: u64,
+    ) -> Result<u64, VaultError> {
+        self.registry
+            .with_exact_epoch_crypto(scope, epoch, |session| {
+                session.encrypt_file_transactional(
+                    input,
+                    destination,
+                    expected_len,
+                    maximum_plaintext_bytes,
+                )
+            })
+    }
+    /// Decode local path metadata under the exact unlock, never a numeric label.
+    pub fn decrypt_path_at_epoch(
+        &self,
+        scope: &VaultSessionScope,
+        epoch: &VaultSessionEpoch,
+        encoded: &str,
+    ) -> Result<PortableVaultPath, VaultError> {
+        self.registry
+            .with_exact_epoch_crypto(scope, epoch, |session| session.decrypt_path(encoded))
+    }
+    /// Authenticate an already-local bounded ciphertext spool into private
+    /// unpublished output. No network reader, callback or session handle escapes.
+    pub fn decrypt_file_to_private_writer_at_epoch<R: Read, W: Write + ?Sized>(
+        &self,
+        scope: &VaultSessionScope,
+        epoch: &VaultSessionEpoch,
+        input: &mut R,
+        output: &mut W,
+        maximum_plaintext_bytes: u64,
+        expected_len: u64,
+    ) -> Result<u64, VaultError> {
+        self.registry
+            .with_exact_epoch_crypto(scope, epoch, |session| {
+                session.decrypt_file_to_private_writer(
+                    input,
+                    output,
+                    maximum_plaintext_bytes,
+                    expected_len,
+                )
+            })
     }
 
     /// Decrypt an already-local ciphertext spool through the exact scoped

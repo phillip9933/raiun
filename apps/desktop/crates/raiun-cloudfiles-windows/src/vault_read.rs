@@ -134,6 +134,79 @@ impl WindowsVaultReadBinding {
         binding.check_current()?;
         Ok(binding)
     }
+    /// Pure immutable comparison; caller already holds publication fences.
+    pub(crate) fn validate_upload_target(
+        &self,
+        target: &crate::ExistingVaultUploadTarget,
+    ) -> Result<(), CloudError> {
+        if target.owner() != &self.trusted
+            || target.vault() != &self.scope
+            || target.remote_root() != self.root_path
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn upload_existing_capture<R: Read + Seek>(
+        &self,
+        target: &crate::ExistingVaultUploadTarget,
+        source: &mut R,
+        edited_len: u64,
+        private: &raiun_control_windows::PrivateDirectory,
+        cancellation: &crate::vault_custody::VaultUploadCancellation<'_>,
+    ) -> Result<raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome, CloudError> {
+        use raiun_core::backend::WriteCondition;
+        use raiun_opencloud::vault_backend::{
+            VaultExistingOverwriteOutcome, VaultExistingOverwriteRequest,
+        };
+        self.validate_upload_target(target)?;
+        self.check_current()?;
+        if cancellation.is_cancelled() {
+            return Err(refused());
+        }
+        private.verify_path().map_err(|_| refused())?;
+        // No registry/auth/publication lease is retained over either HTTP call.
+        // This is a fresh-admission ciphertext locator, never a captured one.
+        let original = target.original();
+        let encoded = self.backend.prepare_write_target(
+            &original.path,
+            &WriteCondition::Match(original.etag.clone()),
+        )?;
+        self.check_current()?;
+        let stop = || self.revoked.load(Ordering::Acquire) || cancellation.is_cancelled();
+        let request = VaultExistingOverwriteRequest {
+            scope: &self.scope,
+            epoch: &self.epoch,
+            vault_root_path: &self.root_path,
+            logical_path: &original.path,
+            original_resource_id: &original.id,
+            original_etag: &original.etag,
+            encoded_target: &encoded,
+            expected_token_generation: self.trusted.token_generation(),
+            provider_generation: Arc::clone(&cancellation.generation),
+            expected_provider_generation: cancellation.expected,
+            cancelled: &stop,
+        };
+        let result = self.backend.overwrite_existing_reader_guarded(
+            &request,
+            source,
+            edited_len,
+            private.path(),
+        );
+        match result {
+            Ok(VaultExistingOverwriteOutcome::Verified(_))
+                if stop() || self.check_current().is_err() || private.verify_path().is_err() =>
+            {
+                Ok(VaultExistingOverwriteOutcome::NeedsReconciliation {
+                    reason: ErrorKind::Forbidden,
+                })
+            }
+            other => other,
+        }
+    }
+
     /// Complete a verified online read into an admitted private immutable file.
     /// The result stays opaque/unpublished until parent integration obtains the
     /// required provider/root/session publication lease and lock lifecycle.

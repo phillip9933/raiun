@@ -17,6 +17,8 @@ mod vault_edit_capture;
 #[allow(dead_code)]
 #[path = "vault_edit_retention.rs"]
 mod vault_edit_retention;
+#[path = "vault_edit_upload.rs"]
+mod vault_edit_upload;
 #[path = "windows_vault_credentials.rs"]
 mod windows_vault_credentials;
 #[path = "windows_vault_custody.rs"]
@@ -59,6 +61,7 @@ const WINDOWS_MEDIA_METADATA_ENABLED: bool = !cfg!(test);
 // the same guarded implementation. Installed-package acceptance is separate.
 const WINDOWS_VAULT_SESSIONS_ENABLED: bool = !cfg!(test);
 include!("windows_vault_session_control.rs");
+include!("windows_vault_edit_upload.rs");
 
 use clap::{Parser, Subcommand};
 use raiun_cloudfiles_windows::{
@@ -1908,6 +1911,15 @@ impl WindowsAgent {
             }
             // Inspection is read-only and grants no session, key or native route.
             "vault_inspect" => Ok((self.inspect_windows_vault(request)?, false)),
+            "vault_upload_capture" => {
+                if !WINDOWS_VAULT_EDIT_UPLOAD_ENABLED {
+                    return Err(
+                        "Vault edit upload is awaiting native acceptance and local disposition"
+                            .into(),
+                    );
+                }
+                Ok((self.upload_windows_vault_capture_request(request)?, false))
+            }
             "windows_recovery_retry" => Ok((self.retry_recovered_edit(request)?, false)),
             "windows_device_cache_usage" => Ok((self.windows_device_cache_usage(request)?, false)),
             "windows_file_cache_status" => Ok((self.windows_file_cache_status(request)?, false)),
@@ -5271,7 +5283,8 @@ fn request_timeout(request: &Value) -> Duration {
         | "pause"
         | "space_pause"
         | "vault_lock"
-        | "windows_recovery_retry" => Duration::from_secs(300),
+        | "windows_recovery_retry"
+        | "vault_upload_capture" => Duration::from_secs(300),
         _ => Duration::from_secs(30),
     }
 }
@@ -7886,6 +7899,13 @@ mod tests {
 
     #[cfg(all(windows, debug_assertions))]
     #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser with fresh child-only LOCALAPPDATA; explicit synthetic encrypted upload retains dirty namespace"]
+    fn native_broker_vault_captured_edit_explicit_upload_verifies_ciphertext() {
+        broker_remembered_lifecycle_fixture_with_upload(true, true, true);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
     fn vault_readiness_binding_refuses_stale_missing_or_foreign_root() {
         use super::vault_worker_binding_current;
         let binding = ActiveProviderBinding {
@@ -7926,6 +7946,16 @@ mod tests {
 
     #[cfg(all(windows, debug_assertions))]
     fn broker_remembered_lifecycle_fixture_mode(payload: bool, capture_edit: bool) {
+        broker_remembered_lifecycle_fixture_with_upload(payload, capture_edit, false);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    fn broker_remembered_lifecycle_fixture_with_upload(
+        payload: bool,
+        capture_edit: bool,
+        upload_edit: bool,
+    ) {
+        assert!(!upload_edit || capture_edit);
         assert!(!capture_edit || payload);
         use super::{
             DpapiSessionStore, DpapiStore, VaultCredentialStore, windows_profile_registry,
@@ -7967,13 +7997,14 @@ mod tests {
         appdata_pin.verify_path().unwrap();
         eprintln!("synthetic_c06_broker_fixture={}", fixture.display());
 
-        let (server, remote) = synthetic_personal_spaces_server_inner_with_vault_payload(
+        let (server, remote) = synthetic_personal_spaces_server_inner_with_vault_upload(
             |_| {},
             false,
             false,
             false,
             true,
             payload,
+            upload_edit,
         );
         let storage = DpapiSessionStore::current_user().unwrap();
         let _registry_owner = storage.lock_profile_registry().unwrap();
@@ -8239,6 +8270,100 @@ mod tests {
                 std::fs::metadata(&file).unwrap().file_attributes() & 0x400,
                 attributes & 0x400
             );
+            if upload_edit {
+                let capture_ids = verified
+                    .custody
+                    .retained_capture_ids(&trusted, &scope, "/Travel.vault")
+                    .unwrap();
+                assert_eq!(capture_ids.len(), 1);
+                let capture_id = &capture_ids[0];
+                let original_frame = retained.encoded_frame_ref();
+                let vault_remote = remote
+                    .vault_upload
+                    .as_ref()
+                    .expect("explicit opt-in remote state");
+                {
+                    let mut state = vault_remote.lock().unwrap();
+                    assert!(!state.enabled);
+                    assert_eq!(state.put_count, 0);
+                    assert_eq!(state.body_get_count, 0);
+                    assert_eq!(state.etag, original.etag());
+                    state.enabled = true;
+                }
+                let result = runtime
+                    .upload_windows_vault_capture(&scope, "/Travel.vault", capture_id)
+                    .expect("explicit broker worker must verify encrypted remote readback");
+                assert_eq!(result["state"], "remote_verified_pending_local");
+                {
+                    let state = vault_remote.lock().unwrap();
+                    assert_eq!(state.put_attempt_count, 1);
+                    assert_eq!(state.put_count, 1);
+                    assert_eq!(state.last_put_if_match.as_deref(), Some(original.etag()));
+                    assert_eq!(state.resource_id, original.remote_id());
+                    assert_eq!(state.etag, "\"child-rev-2\"");
+                    assert_eq!(state.body_get_count, 1);
+                    assert_eq!(
+                        state.last_read_if_match.as_deref(),
+                        Some(state.etag.as_str())
+                    );
+                    assert_ne!(state.ciphertext.as_slice(), edited.as_slice());
+                    assert_ne!(
+                        state.ciphertext.as_slice(),
+                        include_bytes!("../../raiun-vault/tests/fixtures/web-65537.bin")
+                    );
+                    assert!(state.ciphertext.len() <= 1024 * 1024);
+                }
+                use sha2::Digest as _;
+                let ledger = verified
+                    .custody
+                    .upload_ledger(&trusted, &scope, "/Travel.vault", capture_id)
+                    .unwrap();
+                let attempt = ledger.reopen_attempt().unwrap();
+                let proof = attempt
+                    .readback_evidence()
+                    .unwrap()
+                    .expect("persisted authenticated remote readback");
+                assert_eq!(proof.resource_id(), original.remote_id());
+                assert_eq!(proof.etag(), "\"child-rev-2\"");
+                assert_eq!(proof.body_len(), edited.len());
+                assert_eq!(
+                    proof.body_sha256(),
+                    <[u8; 32]>::from(sha2::Sha256::digest(&edited))
+                );
+                assert!(
+                    runtime
+                        .upload_windows_vault_capture(&scope, "/Travel.vault", capture_id)
+                        .is_err(),
+                    "persisted attempt must refuse a second dispatch"
+                );
+                {
+                    let state = vault_remote.lock().unwrap();
+                    assert_eq!(state.put_attempt_count, 1, "no conditional PUT replay");
+                    assert_eq!(state.put_count, 1);
+                    assert_eq!(state.body_get_count, 1);
+                }
+                let after_upload = verified
+                    .custody
+                    .inspect_capture_for_test(&scope, "/Travel.vault")
+                    .unwrap();
+                assert_eq!(after_upload.captures.len(), 1);
+                assert!(
+                    after_upload.captures[0].0.encoded_frame_ref() == original_frame,
+                    "immutable capture frame must remain unchanged"
+                );
+                assert_eq!(
+                    after_upload.captures[0].0.bytes_for_recovery(),
+                    edited.as_slice()
+                );
+                assert!(after_upload.captures[0].1 == original);
+                assert_eq!(std::fs::read(&file).unwrap(), edited);
+                assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
+                assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+                assert_eq!(runtime.provider.close_observation().unwrap().7, 0);
+                println!(
+                    "C06_VAULT_EXPLICIT_CAPTURE_UPLOAD_VERIFIED=true;vaultPUT=1;authenticatedBodyGET=1;noReplay=true;capture_pending=true;cleanup=incomplete"
+                );
+            }
             let mut lock = target();
             lock["action"] = json!("vault_lock");
             assert!(
@@ -8263,7 +8388,10 @@ mod tests {
             assert_eq!(std::fs::read(&file).unwrap(), edited);
             assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
             assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
-            assert_eq!(remote.native_reads.lock().unwrap().vault_get_count, gets);
+            assert_eq!(
+                remote.native_reads.lock().unwrap().vault_get_count,
+                gets + usize::from(upload_edit)
+            );
             let retained_after_lock = verified
                 .custody
                 .inspect_capture_for_test(&scope, "/Travel.vault")
@@ -8284,9 +8412,15 @@ mod tests {
             drop(sessions);
             remote.join().unwrap();
             appdata_pin.verify_path().unwrap();
-            println!(
-                "C06_VAULT_MODIFIED_CLOSE_INDEXED_CAPTURE_VERIFIED=true;ordinary_journal=0;PUT=0;cleanup=incomplete;dirty_fixture_retained=true"
-            );
+            if upload_edit {
+                println!(
+                    "C06_VAULT_EXPLICIT_UPLOAD_DIRTY_FIXTURE_RETAINED=true;ordinaryPUT=0;cleanup=incomplete"
+                );
+            } else {
+                println!(
+                    "C06_VAULT_MODIFIED_CLOSE_INDEXED_CAPTURE_VERIFIED=true;ordinary_journal=0;PUT=0;cleanup=incomplete;dirty_fixture_retained=true"
+                );
+            }
             return;
         }
         let forgotten = broker.handle_isolated_lifecycle_session(json!({"action":"vault_forget",
@@ -12547,11 +12681,24 @@ mod tests {
         last_read_if_match: Option<String>,
     }
 
+    struct SyntheticVaultUploadFixture {
+        enabled: bool,
+        ciphertext: Vec<u8>,
+        etag: String,
+        resource_id: &'static str,
+        put_attempt_count: usize,
+        put_count: usize,
+        body_get_count: usize,
+        last_put_if_match: Option<String>,
+        last_read_if_match: Option<String>,
+    }
+
     struct SyntheticPersonalSpacesFixture {
         stop: std::sync::mpsc::Sender<()>,
         worker: thread::JoinHandle<()>,
         recovery: Arc<Mutex<SyntheticRecoveryFile>>,
         native_reads: Arc<Mutex<SyntheticNativeReadFixture>>,
+        vault_upload: Option<Arc<Mutex<SyntheticVaultUploadFixture>>>,
     }
 
     #[derive(Default)]
@@ -12661,6 +12808,27 @@ mod tests {
         initialized_vault: bool,
         vault_payload: bool,
     ) -> (String, SyntheticPersonalSpacesFixture) {
+        synthetic_personal_spaces_server_inner_with_vault_upload(
+            emit_stage,
+            native_read_files_enabled,
+            recovery_read_probe_enabled,
+            initially_absent,
+            initialized_vault,
+            vault_payload,
+            false,
+        )
+    }
+
+    fn synthetic_personal_spaces_server_inner_with_vault_upload(
+        emit_stage: impl Fn(&str),
+        native_read_files_enabled: bool,
+        recovery_read_probe_enabled: bool,
+        initially_absent: bool,
+        initialized_vault: bool,
+        vault_payload: bool,
+        allow_vault_upload: bool,
+    ) -> (String, SyntheticPersonalSpacesFixture) {
+        assert!(!allow_vault_upload || (initialized_vault && vault_payload));
         emit_stage("listener_bind_begin");
         let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|error| {
             emit_stage(&format!("listener_bind_error_kind_{:?}", error.kind()));
@@ -12702,6 +12870,21 @@ mod tests {
             ..SyntheticNativeReadFixture::default()
         }));
         let worker_native_reads = Arc::clone(&native_reads);
+        let vault_upload = allow_vault_upload.then(|| {
+            Arc::new(Mutex::new(SyntheticVaultUploadFixture {
+                enabled: false,
+                ciphertext: include_bytes!("../../raiun-vault/tests/fixtures/web-65537.bin")
+                    .to_vec(),
+                etag: "\"child-rev-1\"".into(),
+                resource_id: "child-resource-id",
+                put_attempt_count: 0,
+                put_count: 0,
+                body_get_count: 0,
+                last_put_if_match: None,
+                last_read_if_match: None,
+            }))
+        });
+        let worker_vault_upload = vault_upload.as_ref().map(Arc::clone);
         listener.set_nonblocking(true).unwrap_or_else(|error| {
             emit_stage("listener_nonblocking_error");
             panic!(
@@ -12756,9 +12939,17 @@ mod tests {
                     write!(request_stream, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{counters}", counters.len()).unwrap();
                     continue;
                 }
+                let vault_child_path = "/remote.php/dav/personal/synthetic-personal-drive/Travel.vault/9cmn80lns8obm4t3koceogil20";
                 if initialized_vault {
+                    let exact_opt_in_put = request.starts_with("PUT ")
+                        && request.split_whitespace().nth(1) == Some(vault_child_path)
+                        && worker_vault_upload
+                            .as_ref()
+                            .is_some_and(|state| state.lock().unwrap().enabled);
                     assert!(
-                        request.starts_with("GET ") || request.starts_with("PROPFIND "),
+                        request.starts_with("GET ")
+                            || request.starts_with("PROPFIND ")
+                            || exact_opt_in_put,
                         "initialized vault fixture permits no remote mutation"
                     );
                 }
@@ -12793,8 +12984,46 @@ mod tests {
                     write!(request_stream, "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
                     continue;
                 }
-                let vault_child_path = "/remote.php/dav/personal/synthetic-personal-drive/Travel.vault/9cmn80lns8obm4t3koceogil20";
-                let vault_child = if initialized_vault && vault_payload {
+                // Common bearer-auth gate above must precede every opt-in mutation.
+                if request.starts_with("PUT ")
+                    && request.split_whitespace().nth(1) == Some(vault_child_path)
+                    && let Some(remote) = worker_vault_upload.as_ref()
+                {
+                    let mut remote = remote.lock().unwrap();
+                    assert!(remote.enabled);
+                    remote.put_attempt_count += 1;
+                    let condition = headers
+                        .iter()
+                        .find(|(name, _)| name == "if-match")
+                        .map(|(_, value)| value.as_str());
+                    if condition != Some(remote.etag.as_str())
+                        || remote.etag != "\"child-rev-1\""
+                        || headers.iter().any(|(name, _)| name == "if-none-match")
+                        || body.is_empty()
+                        || body.len() > 1024 * 1024
+                    {
+                        write!(request_stream, "HTTP/1.1 412 Precondition Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                        continue;
+                    }
+                    remote.last_put_if_match = condition.map(str::to_owned);
+                    remote.put_count += 1;
+                    remote.ciphertext = body;
+                    remote.etag = "\"child-rev-2\"".into();
+                    write!(request_stream, "HTTP/1.1 204 No Content\r\nETag: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", remote.etag).unwrap();
+                    continue;
+                }
+                let vault_child = if initialized_vault
+                    && vault_payload
+                    && let Some(remote) = worker_vault_upload.as_ref()
+                {
+                    let remote = remote.lock().unwrap();
+                    format!(
+                        r#"<d:response><d:href>{worker_server}{vault_child_path}</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>{}</d:getcontentlength><d:getetag>{}</d:getetag><oc:fileid>{}</oc:fileid><oc:name>9cmn80lns8obm4t3koceogil20</oc:name><oc:permissions>RDNVW</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"#,
+                        remote.ciphertext.len(),
+                        remote.etag,
+                        remote.resource_id
+                    )
+                } else if initialized_vault && vault_payload {
                     format!(
                         r#"<d:response><d:href>{worker_server}{vault_child_path}</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>{}</d:getcontentlength><d:getetag>"child-rev-1"</d:getetag><oc:fileid>child-resource-id</oc:fileid><oc:name>9cmn80lns8obm4t3koceogil20</oc:name><oc:permissions>RDNVW</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"#,
                         include_bytes!("../../raiun-vault/tests/fixtures/web-65537.bin").len()
@@ -12842,6 +13071,22 @@ mod tests {
                     }
                 }
                 if initialized_vault && request.starts_with("GET /remote.php/dav/personal/synthetic-personal-drive/Travel.vault/9cmn80lns8obm4t3koceogil20 ") {
+                    if let Some(remote) = worker_vault_upload.as_ref() {
+                        let mut remote = remote.lock().unwrap();
+                        let condition = headers.iter().find(|(name,_)| name == "if-match").map(|(_,value)| value.as_str());
+                        if condition != Some(remote.etag.as_str()) {
+                            write!(request_stream, "HTTP/1.1 412 Precondition Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                            continue;
+                        }
+                        worker_native_reads.lock().unwrap().vault_get_count += 1;
+                        if remote.put_count != 0 {
+                            remote.body_get_count += 1;
+                            remote.last_read_if_match = condition.map(str::to_owned);
+                        }
+                        write!(request_stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: {}\r\nConnection: close\r\n\r\n", remote.ciphertext.len(), remote.etag).unwrap();
+                        request_stream.write_all(&remote.ciphertext).unwrap();
+                        continue;
+                    }
                     if vault_payload {
                         worker_native_reads.lock().unwrap().vault_get_count += 1;
                     }
@@ -13156,6 +13401,7 @@ mod tests {
                 worker,
                 recovery,
                 native_reads,
+                vault_upload,
             },
         )
     }

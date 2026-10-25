@@ -5,7 +5,7 @@ use super::{
     SessionStore,
     root_manifest::{RootBinding, RootManifest},
     vault_custody::{self, Custody, Entry, Scope},
-    vault_edit_capture as capture, vault_edit_retention,
+    vault_edit_capture as capture, vault_edit_retention, vault_edit_upload as upload,
 };
 use raiun_cloudfiles_windows::vault_custody::{
     ExistingVaultEditBaseline, ExistingVaultEditPayload, VaultCatalogueEntry, VaultHydrationIntent,
@@ -247,6 +247,113 @@ impl WindowsVaultCustody {
             }),
         }))
     }
+    /// Bounded historical IDs only, with no body or live authority creation.
+    #[cfg(test)]
+    pub(super) fn retained_capture_ids(
+        &self,
+        owner: &ProviderScope,
+        vault: &VaultSessionScope,
+        remote_root: &str,
+    ) -> Result<Vec<String>> {
+        if *owner != self.owner || self.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(refused());
+        }
+        let scope = Scope::new(
+            &self.account,
+            vault,
+            remote_root,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(|_| refused())?;
+        let key = scope.authenticated_store_binding().map_err(|_| refused())?;
+        let child = {
+            let state = self.state.lock().map_err(|_| refused())?;
+            if state.failed {
+                return Err(refused());
+            }
+            Arc::clone(state.children.get(key.as_slice()).ok_or_else(refused)?)
+        };
+        let _guard = child.custody.lock().map_err(|_| refused())?;
+        if child.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(refused());
+        }
+        let binding = RootBinding::new(
+            &self.account,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(|_| refused())?;
+        let references = upload::load_capture_references(&self.store, &binding, &scope)
+            .map_err(|_| refused())?;
+        if self.failed.load(std::sync::atomic::Ordering::Acquire)
+            || child.failed.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(refused());
+        }
+        Ok(references
+            .iter()
+            .map(|reference| reference.id().to_owned())
+            .collect())
+    }
+    /// Discover only an existing protected capture under this admitted exact
+    /// account/provider/root. No root membership or child is created here.
+    /// Returned object owns no mutex guard; future HTTP must run outside it.
+    pub(super) fn upload_ledger(
+        &self,
+        owner: &ProviderScope,
+        vault: &VaultSessionScope,
+        remote_root: &str,
+        capture_id: &str,
+    ) -> Result<UploadLedger> {
+        if *owner != self.owner || self.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(refused());
+        }
+        let scope = Scope::new(
+            &self.account,
+            vault,
+            remote_root,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(|_| refused())?;
+        let key = scope.authenticated_store_binding().map_err(|_| refused())?;
+        let child = {
+            let state = self.state.lock().map_err(|_| {
+                self.failed
+                    .store(true, std::sync::atomic::Ordering::Release);
+                refused()
+            })?;
+            if state.failed {
+                return Err(refused());
+            }
+            Arc::clone(state.children.get(key.as_slice()).ok_or_else(refused)?)
+        };
+        if child.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(refused());
+        }
+        let root_binding = RootBinding::new(
+            &self.account,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(|_| refused())?;
+        let reference =
+            upload::load_capture_reference(&self.store, &root_binding, &scope, capture_id)
+                .map_err(|_| refused())?;
+        Ok(UploadLedger {
+            root_binding,
+            scope,
+            reference,
+            store: ProtectedStore(Arc::clone(&self.store.0)),
+            root_failed: Arc::clone(&self.failed),
+            child,
+        })
+    }
     pub(super) fn view(
         &self,
         owner: &ProviderScope,
@@ -486,6 +593,129 @@ impl VaultPublishedHistorySource for WindowsVaultCustody {
                 Err(BackendError::Unavailable)
             }
         }
+    }
+}
+
+/// Trusted local ledger/body seam for a future separately fenced broker worker.
+/// No current-user/profile lookup, session/network callback or lock guard escapes.
+pub(super) struct UploadLedger {
+    root_binding: RootBinding,
+    scope: Scope,
+    reference: vault_custody::CaptureRef,
+    store: ProtectedStore,
+    root_failed: Arc<std::sync::atomic::AtomicBool>,
+    child: Arc<Child>,
+}
+impl UploadLedger {
+    fn check(&self) -> std::result::Result<(), upload::Error> {
+        if self.root_failed.load(std::sync::atomic::Ordering::Acquire)
+            || self.child.failed.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(upload::Error::Persistence);
+        }
+        Ok(())
+    }
+    fn with_ledger<T>(
+        &self,
+        operation: impl FnOnce(
+            &upload::CustodyLedger<'_, ProtectedStore>,
+        ) -> std::result::Result<T, upload::Error>,
+    ) -> std::result::Result<T, upload::Error> {
+        let result = (|| {
+            self.check()?;
+            let mut cached = self
+                .child
+                .custody
+                .lock()
+                .map_err(|_| upload::Error::Persistence)?;
+            self.check()?;
+            let ledger = upload::CustodyLedger::admit(
+                &self.store,
+                &self.root_binding,
+                &self.scope,
+                &self.reference,
+            )?;
+            let result = operation(&ledger)?;
+            let fresh = Custody::reopen(&self.store, &self.scope)
+                .map_err(|_| upload::Error::Persistence)?;
+            fresh
+                .load_upload_attempt(&self.reference)
+                .map_err(|_| upload::Error::Persistence)?;
+            self.check()?;
+            *cached = fresh;
+            Ok(result)
+        })();
+        if result.is_err() {
+            self.child
+                .failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
+    }
+    /// Fresh local protected-context check only; all mutexes are released
+    /// before return. Physical root/account/session leases belong to the worker.
+    pub(super) fn verify_current(&self) -> std::result::Result<(), upload::Error> {
+        self.with_ledger(|_| Ok(()))
+    }
+    pub(super) fn scope(&self) -> &Scope {
+        &self.scope
+    }
+    pub(super) fn reference(&self) -> &vault_custody::CaptureRef {
+        &self.reference
+    }
+    pub(super) fn initialize_attempt(
+        &self,
+    ) -> std::result::Result<upload::UploadAttempt, upload::Error> {
+        upload::UploadAttempt::initialize(
+            self,
+            &CaptureStore(Arc::clone(&self.store.0)),
+            &self.scope,
+            &self.reference,
+            self.reference.entry(),
+        )
+    }
+    pub(super) fn reopen_attempt(
+        &self,
+    ) -> std::result::Result<upload::UploadAttempt, upload::Error> {
+        upload::UploadAttempt::reopen(
+            self,
+            &CaptureStore(Arc::clone(&self.store.0)),
+            &self.scope,
+            &self.reference,
+            self.reference.entry(),
+        )
+    }
+    pub(super) fn read_body(&self) -> std::result::Result<capture::RetainedEdit, upload::Error> {
+        self.with_ledger(|ledger| {
+            let key = upload::locator(&self.scope, &self.reference)?;
+            upload::Store::load(ledger, &key)?;
+            let id =
+                capture::CaptureId::new(self.reference.id()).map_err(|_| upload::Error::Invalid)?;
+            let retained = capture::reopen_for_recovery(
+                &CaptureStore(Arc::clone(&self.store.0)),
+                &self.scope,
+                &id,
+            )
+            .map_err(|_| upload::Error::Persistence)?;
+            if retained.encoded_frame_ref() != self.reference.frame() {
+                return Err(upload::Error::Foreign);
+            }
+            upload::Store::load(ledger, &key)?;
+            Ok(retained)
+        })
+    }
+}
+impl upload::Store for UploadLedger {
+    fn load(&self, key: &[u8]) -> std::result::Result<Option<Zeroizing<Vec<u8>>>, upload::Error> {
+        self.with_ledger(|ledger| upload::Store::load(ledger, key))
+    }
+    fn compare_exchange(
+        &self,
+        key: &[u8],
+        old: Option<&[u8]>,
+        next: &[u8],
+    ) -> std::result::Result<(), upload::Error> {
+        self.with_ledger(|ledger| upload::Store::compare_exchange(ledger, key, old, next))
     }
 }
 

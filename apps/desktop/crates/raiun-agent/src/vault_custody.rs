@@ -15,6 +15,7 @@ pub const MAX_CATALOGUE: usize = 1024;
 pub const MAX_HYDRATIONS: usize = 4096;
 const VERSION: u32 = 1;
 const CAPTURE_VERSION: u32 = 2;
+const UPLOAD_VERSION: u32 = 3;
 pub(crate) const MAX_CAPTURE_REFS: usize = 128;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -115,6 +116,12 @@ impl Scope {
         serde_json::to_vec(self)
             .map(Zeroizing::new)
             .map_err(|_| Error::Invalid)
+    }
+    /// Compare with canonical bytes freshly serialized from the runtime's
+    /// authenticated AccountScope, including OAuth client, issuer and subject.
+    /// This is a local equality check, not authentication or a session permit.
+    pub(crate) fn matches_canonical_account(&self, account: &[u8]) -> bool {
+        self.validate().is_ok() && self.account.as_slice() == account
     }
     /// Parse only authenticated parent/store bytes; validation is structural,
     /// never proof of a live account, registration or completeness.
@@ -310,7 +317,6 @@ impl CaptureRef {
     pub(crate) fn frame(&self) -> EncodedFrameRef {
         self.frame
     }
-    #[cfg(test)]
     pub(crate) fn entry(&self) -> &Entry {
         &self.entry
     }
@@ -347,6 +353,58 @@ fn decode_capture_refs<'de, D: serde::Deserializer<'de>>(
 ) -> std::result::Result<Option<Vec<CaptureRef>>, D::Error> {
     Vec::<CaptureRef>::deserialize(deserializer).map(Some)
 }
+/// Mutable attempt bytes stay outside immutable CaptureRef equality/frame.
+#[derive(Clone)]
+struct AttemptBytes(Zeroizing<Vec<u8>>);
+impl Serialize for AttemptBytes {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        self.0.as_slice().serialize(serializer)
+    }
+}
+impl<'de> Deserialize<'de> for AttemptBytes {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = AttemptBytes;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a bounded nonempty attempt byte sequence")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> std::result::Result<Self::Value, A::Error> {
+                let mut bytes = Zeroizing::new(Vec::new());
+                while let Some(byte) = sequence.next_element::<u8>()? {
+                    if bytes.len() == super::vault_edit_upload::MAX_RECORD_BYTES {
+                        return Err(serde::de::Error::custom("attempt bytes exceed limit"));
+                    }
+                    bytes.push(byte);
+                }
+                if bytes.is_empty() {
+                    return Err(serde::de::Error::custom("empty attempt bytes"));
+                }
+                Ok(AttemptBytes(bytes))
+            }
+        }
+        deserializer.deserialize_seq(Visitor)
+    }
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UploadAttemptRow {
+    capture_id: String,
+    record: AttemptBytes,
+}
+fn decode_upload_attempts<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Vec<UploadAttemptRow>>, D::Error> {
+    Vec::<UploadAttemptRow>::deserialize(deserializer).map(Some)
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Document {
@@ -362,6 +420,12 @@ struct Document {
         deserialize_with = "decode_capture_refs"
     )]
     capture_refs: Option<Vec<CaptureRef>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "decode_upload_attempts"
+    )]
+    upload_attempts: Option<Vec<UploadAttemptRow>>,
 }
 impl Document {
     fn validate(&self, scope: &Scope) -> Result<()> {
@@ -371,8 +435,10 @@ impl Document {
         }
         if self.revision == 0
             || !matches!(
-                (self.version, &self.capture_refs),
-                (VERSION, None) | (CAPTURE_VERSION, Some(_))
+                (self.version, &self.capture_refs, &self.upload_attempts),
+                (VERSION, None, None)
+                    | (CAPTURE_VERSION, Some(_), None)
+                    | (UPLOAD_VERSION, Some(_), Some(_))
             )
             || self
                 .capture_refs
@@ -412,6 +478,27 @@ impl Document {
             {
                 return Err(Error::Conflict);
             }
+        }
+        let mut attempt_ids = BTreeSet::new();
+        if self
+            .upload_attempts
+            .as_ref()
+            .is_some_and(|rows| rows.is_empty() || rows.len() > MAX_CAPTURE_REFS)
+        {
+            return Err(Error::Invalid);
+        }
+        for row in self.upload_attempts.iter().flatten() {
+            if !attempt_ids.insert(&row.capture_id) {
+                return Err(Error::Conflict);
+            }
+            let reference = self
+                .capture_refs
+                .iter()
+                .flatten()
+                .find(|reference| reference.id() == row.capture_id)
+                .ok_or(Error::Foreign)?;
+            super::vault_edit_upload::validate_bound_record(&row.record.0, scope, reference)
+                .map_err(|_| Error::Invalid)?;
         }
         let mut files = BTreeSet::new();
         let mut hydrated_ids = BTreeSet::new();
@@ -501,6 +588,7 @@ impl Custody {
             catalogue: vec![],
             pending: vec![],
             capture_refs: None,
+            upload_attempts: None,
         };
         let raw = encode(&document)?;
         store
@@ -695,7 +783,7 @@ impl Custody {
             return Err(Error::Capacity);
         }
         let mut next = self.document.clone();
-        next.version = CAPTURE_VERSION;
+        next.version = next.version.max(CAPTURE_VERSION);
         next.capture_refs
             .get_or_insert_with(Vec::new)
             .push(reference.clone());
@@ -718,6 +806,70 @@ impl Custody {
             reference,
         }))
     }
+    pub(crate) fn capture_references_for_lookup(&self) -> Result<&[CaptureRef]> {
+        if self.failed || self.document.incomplete {
+            return Err(Error::Incomplete);
+        }
+        Ok(self.captures_for_reconciliation())
+    }
+    fn require_capture(&self, reference: &CaptureRef) -> Result<()> {
+        if self.failed || self.document.incomplete {
+            return Err(Error::Incomplete);
+        }
+        if !self.captures_for_reconciliation().contains(reference)
+            || !self.document.catalogue.contains(reference.entry())
+        {
+            return Err(Error::Foreign);
+        }
+        Ok(())
+    }
+    /// Read-only logical subrecord lookup; never upgrades or creates history.
+    pub(crate) fn load_upload_attempt(
+        &self,
+        reference: &CaptureRef,
+    ) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        self.require_capture(reference)?;
+        Ok(self
+            .document
+            .upload_attempts
+            .iter()
+            .flatten()
+            .find(|row| row.capture_id == reference.id())
+            .map(|row| row.record.0.clone()))
+    }
+    /// Full old subrecord byte comparison plus the existing whole-child CAS.
+    /// Only absent-to-NeverAttempted initialization upgrades v2 to strict v3.
+    /// Every later transition is checked independently; no reset/adoption path.
+    pub(crate) fn compare_exchange_upload_attempt(
+        &mut self,
+        store: &impl Store,
+        reference: &CaptureRef,
+        old: Option<&[u8]>,
+        next: &[u8],
+    ) -> Result<()> {
+        let current = self.load_upload_attempt(reference)?;
+        if current.as_ref().map(|raw| raw.as_slice()) != old {
+            return Err(Error::Conflict);
+        }
+        super::vault_edit_upload::validate_transition(old, next, &self.document.scope, reference)
+            .map_err(|_| Error::Invalid)?;
+        let mut document = self.document.clone();
+        document.version = UPLOAD_VERSION;
+        let rows = document.upload_attempts.get_or_insert_with(Vec::new);
+        if let Some(row) = rows.iter_mut().find(|row| row.capture_id == reference.id()) {
+            row.record = AttemptBytes(Zeroizing::new(next.to_vec()));
+        } else {
+            if rows.len() == MAX_CAPTURE_REFS {
+                return self.refuse_conflict(store, Error::Capacity);
+            }
+            rows.push(UploadAttemptRow {
+                capture_id: reference.id().into(),
+                record: AttemptBytes(Zeroizing::new(next.to_vec())),
+            });
+        }
+        self.commit(store, document)
+    }
+
     /// Write-ahead intent retained whether CfExecute succeeds, fails or crashes.
     /// Ok is only a persistence acknowledgement, never a publication ticket.
     /// Caller still needs all current root/route/request/session fences AND a
@@ -835,6 +987,30 @@ mod tests {
     }
     fn native_components() -> Vec<String> {
         vec!["Personal".into(), "Travel.vault".into(), "1".into()]
+    }
+    #[test]
+    fn current_account_comparison_keeps_client_issuer_and_subject_bound() {
+        let retained = scope("subject");
+        assert!(retained.matches_canonical_account(&retained.account));
+        for (client, issuer, subject) in [
+            ("other-client", Some("https://issuer.test/"), "subject"),
+            ("client", Some("https://other-issuer.test/"), "subject"),
+            ("client", None, "subject"),
+            ("client", Some("https://issuer.test/"), "other-subject"),
+        ] {
+            let current = AccountScope::new(
+                "default".into(),
+                "https://example.test/".into(),
+                client.into(),
+                issuer.map(str::to_owned),
+                subject.into(),
+            )
+            .unwrap();
+            assert!(!retained.matches_canonical_account(&serde_json::to_vec(&current).unwrap()));
+        }
+        let mut malformed = retained.clone();
+        malformed.account = b"{}".to_vec();
+        assert!(!malformed.matches_canonical_account(b"{}"));
     }
     fn entry(id: u8) -> Entry {
         Entry::new([id; 16], "remote-file", "/1", "etag", false, 65537).unwrap()
