@@ -12,6 +12,28 @@ use std::{
 
 const CAPACITY: usize = 32;
 
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy)]
+pub(super) enum FreshCloseCompletionPolicy {
+    RemoteOnly,
+    #[cfg(all(test, debug_assertions))]
+    WritableBytes,
+}
+#[cfg(any(windows, test))]
+impl FreshCloseCompletionPolicy {
+    pub(super) fn writable_bytes(self) -> bool {
+        match self {
+            Self::RemoteOnly => false,
+            #[cfg(all(test, debug_assertions))]
+            Self::WritableBytes => true,
+        }
+    }
+    pub(super) fn permits_mode(self, complete_local: bool, writable_bytes: bool) -> bool {
+        let requested = self.writable_bytes();
+        complete_local == requested && writable_bytes == requested
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FreshVaultClosePublishError {
     Full,
@@ -39,6 +61,7 @@ impl<T> Source<T> {
     fn cancel(&self) {
         self.active.store(false, Ordering::Release);
     }
+    #[cfg(test)]
     fn active_marker(&self, generation: u64) -> Option<Arc<AtomicBool>> {
         (generation != 0
             && self.active.load(Ordering::Acquire)
@@ -94,7 +117,7 @@ impl<T: Send + 'static> Worker<T> {
         owner: Weak<O>,
         generation: Arc<AtomicU64>,
         job_generation: fn(&T) -> u64,
-        consume: impl Fn(&O, T) + Send + 'static,
+        consume: impl Fn(&O, T, Arc<AtomicBool>) + Send + 'static,
     ) -> Result<Self, String> {
         let (source, receiver) = channel(generation, job_generation);
         let active = Arc::clone(&source.active);
@@ -127,7 +150,7 @@ impl<T: Send + 'static> Worker<T> {
                         // No queue, provider, custody, or Agent mutex is held.
                         // The actual entry rechecks origin/route/stamp before
                         // ledger admission and its single guarded HTTP attempt.
-                        consume(&owner, job);
+                        consume(&owner, job, Arc::clone(&active));
                     }
                 }
                 active.store(false, Ordering::Release);
@@ -230,6 +253,7 @@ mod agent {
         pub(in crate::agent_windows) failed: usize,
         pub(in crate::agent_windows) remote_verified: bool,
         pub(in crate::agent_windows) native_confirmation: Option<bool>,
+        pub(in crate::agent_windows) local_completed: bool,
         pub(in crate::agent_windows) thread: Option<thread::ThreadId>,
     }
     pub(in crate::agent_windows) struct FreshCloseWorker {
@@ -242,6 +266,20 @@ mod agent {
             owner: Weak<WindowsAgent>,
             generation: Arc<AtomicU64>,
         ) -> Result<Self, String> {
+            Self::start_with_policy(owner, generation, FreshCloseCompletionPolicy::RemoteOnly)
+        }
+        #[cfg(all(test, debug_assertions))]
+        pub(in crate::agent_windows) fn start_with_writable_completion_for_test(
+            owner: Weak<WindowsAgent>,
+            generation: Arc<AtomicU64>,
+        ) -> Result<Self, String> {
+            Self::start_with_policy(owner, generation, FreshCloseCompletionPolicy::WritableBytes)
+        }
+        fn start_with_policy(
+            owner: Weak<WindowsAgent>,
+            generation: Arc<AtomicU64>,
+            policy: FreshCloseCompletionPolicy,
+        ) -> Result<Self, String> {
             #[cfg(all(test, debug_assertions))]
             let observation = Arc::new(std::sync::Mutex::new(FreshCloseObservation::default()));
             #[cfg(all(test, debug_assertions))]
@@ -250,21 +288,27 @@ mod agent {
                 owner,
                 generation,
                 |job: &FreshVaultCloseJob| job.expected_generation,
-                move |agent, job| {
+                move |agent, job, active| {
                     #[cfg(all(test, debug_assertions))]
                     if let Ok(mut value) = observed.lock() {
                         value.attempted += 1;
                         value.thread = Some(thread::current().id());
                     }
-                    // No retry, recovery scan, local completion or dirty clear.
-                    let _result = agent.upload_from_fresh_close(job);
+                    // The ORIGINAL worker cancellation identity is forwarded;
+                    // no Agent lookup can replace it with a newer worker's Arc.
+                    // The policy was fixed before thread start. No replay/retry.
+                    let _result = agent.upload_from_fresh_close(job, active, policy);
                     #[cfg(all(test, debug_assertions))]
                     if let Ok(mut value) = observed.lock() {
                         value.completed += 1;
                         value.failed += usize::from(_result.is_err());
-                        value.remote_verified = _result
+                        value.remote_verified = _result.as_ref().is_ok_and(|result| {
+                            result["state"] == "remote_verified_pending_local"
+                                || result["state"] == "local_completed"
+                        });
+                        value.local_completed = _result
                             .as_ref()
-                            .is_ok_and(|result| result["state"] == "remote_verified_pending_local");
+                            .is_ok_and(|result| result["state"] == "local_completed");
                         value.native_confirmation = _result
                             .as_ref()
                             .ok()
@@ -280,12 +324,6 @@ mod agent {
         }
         pub(in crate::agent_windows) fn source(&self) -> VaultClosePublisherSource {
             VaultClosePublisherSource(self.worker.source.clone())
-        }
-        pub(in crate::agent_windows) fn active_marker(
-            &self,
-            expected_generation: u64,
-        ) -> Option<Arc<AtomicBool>> {
-            self.worker.source.active_marker(expected_generation)
         }
         pub(in crate::agent_windows) fn stop(self) -> Result<(), String> {
             self.worker.stop()
@@ -315,6 +353,19 @@ mod tests {
     fn generation(job: &Job) -> u64 {
         job.0
     }
+    #[test]
+    fn default_mode_cannot_admit_local_or_readonly_completion() {
+        assert!(FreshCloseCompletionPolicy::RemoteOnly.permits_mode(false, false));
+        assert!(!FreshCloseCompletionPolicy::RemoteOnly.permits_mode(true, false));
+        assert!(!FreshCloseCompletionPolicy::RemoteOnly.permits_mode(true, true));
+        #[cfg(debug_assertions)]
+        {
+            assert!(FreshCloseCompletionPolicy::WritableBytes.permits_mode(true, true));
+            assert!(!FreshCloseCompletionPolicy::WritableBytes.permits_mode(true, false));
+            assert!(!FreshCloseCompletionPolicy::WritableBytes.permits_mode(false, false));
+        }
+    }
+
     #[test]
     fn bounded_full_stale_cancelled_and_disconnected_notifications_drop_only() {
         let current = Arc::new(AtomicU64::new(1));
@@ -374,7 +425,7 @@ mod tests {
             Arc::downgrade(&owner),
             Arc::clone(&current),
             |job: &PendingJob| job.generation,
-            move |owner, _| {
+            move |owner, _, _| {
                 started.send(thread::current().id()).unwrap();
                 e.wait();
                 r.wait();
@@ -418,50 +469,56 @@ mod tests {
         let (entered, started) = mpsc::sync_channel(1);
         let (observed, cancellation) = mpsc::sync_channel(1);
         let (release, allowed_to_finish) = mpsc::sync_channel(1);
-        let marker_slot = Arc::new(Mutex::new(None::<Arc<AtomicBool>>));
-        let marker_for_consumer = Arc::clone(&marker_slot);
-        let worker = Worker::start(Arc::downgrade(&owner), current, generation, move |_, _| {
-            let active = marker_for_consumer
-                .lock()
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .clone();
-            entered.send(()).unwrap();
-            let deadline = std::time::Instant::now() + Duration::from_secs(2);
-            while active.load(Ordering::Acquire) {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "consumer did not observe cancellation"
-                );
-                thread::yield_now();
-            }
-            observed.send(()).unwrap();
-            // Keep the actual consumer alive until the test has observed the
-            // cancellation and verified that stop is still waiting for it.
-            allowed_to_finish
-                .recv_timeout(Duration::from_secs(2))
-                .unwrap();
-        })
+        let worker = Worker::start(
+            Arc::downgrade(&owner),
+            current,
+            generation,
+            move |_, _, active| {
+                entered.send(Arc::clone(&active)).unwrap();
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                while active.load(Ordering::Acquire) {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "consumer did not observe cancellation"
+                    );
+                    thread::yield_now();
+                }
+                observed.send(()).unwrap();
+                // Keep the actual consumer alive until the test has observed the
+                // cancellation and verified that stop is still waiting for it.
+                allowed_to_finish
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap();
+            },
+        )
         .unwrap();
         assert!(worker.source.active_marker(0).is_none());
         assert!(worker.source.active_marker(2).is_none());
         let active = worker.source.active_marker(1).unwrap();
         assert!(Arc::ptr_eq(&active, &worker.source.active));
-        *marker_slot.lock().unwrap() = Some(active);
+        // The consumer receives this exact Arc directly from its worker.
+        assert!(active.load(Ordering::Acquire));
         worker
             .source
             .publisher(1)
             .unwrap()
             .try_send(Job(1))
             .unwrap();
-        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        let forwarded = started.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(Arc::ptr_eq(&forwarded, &active));
+        // Even a replacement channel with the SAME generation has a distinct
+        // marker; the running consumer must retain and observe its original.
+        let (replacement, _replacement_receiver) = channel(Arc::new(AtomicU64::new(1)), generation);
+        let replacement_active = replacement.active_marker(1).unwrap();
+        assert!(!Arc::ptr_eq(&forwarded, &replacement_active));
         let (joined, completed) = mpsc::sync_channel(1);
         let stopper = thread::spawn(move || {
             worker.stop().unwrap();
             joined.send(()).unwrap();
         });
         cancellation.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(!forwarded.load(Ordering::Acquire));
+        assert!(replacement_active.load(Ordering::Acquire));
         assert!(matches!(
             completed.try_recv(),
             Err(mpsc::TryRecvError::Empty)
@@ -478,7 +535,7 @@ mod tests {
             Arc::downgrade(&owner),
             Arc::new(AtomicU64::new(1)),
             generation,
-            |_, _| panic!("no job"),
+            |_, _, _| panic!("no job"),
         )
         .unwrap();
         let source = worker.source.clone();
@@ -513,7 +570,7 @@ mod tests {
             Arc::downgrade(&owner),
             Arc::new(AtomicU64::new(1)),
             generation,
-            move |_, _| {
+            move |_, _, _| {
                 e.wait();
                 r.wait();
             },

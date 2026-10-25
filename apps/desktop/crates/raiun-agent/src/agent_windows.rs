@@ -2094,6 +2094,37 @@ impl WindowsAgent {
         Ok(())
     }
 
+    // Not present in normal production activation or IPC/configuration. Call
+    // after authenticating the fixture's generation and before provider install.
+    #[cfg(all(test, debug_assertions))]
+    fn start_fresh_close_worker_with_writable_completion_for_test(
+        self: &Arc<Self>,
+    ) -> Result<(), String> {
+        let mut slot = self
+            .fresh_close_worker
+            .lock()
+            .map_err(|_| "Fresh vault close worker ownership is unavailable")?;
+        if slot.is_some() {
+            return Err("Fresh vault close worker is already owned".into());
+        }
+        let mut source = self
+            .provider
+            .fresh_close_source
+            .lock()
+            .map_err(|_| "Fresh vault close publication is unavailable")?;
+        if source.is_some() || self.provider.connected.load(Ordering::Acquire) {
+            return Err("Start fresh vault close publication before provider installation".into());
+        }
+        let worker =
+            windows_vault_close_worker::FreshCloseWorker::start_with_writable_completion_for_test(
+                Arc::downgrade(self),
+                Arc::clone(&self.provider.authorized_generation),
+            )?;
+        *source = Some(worker.source());
+        *slot = Some(worker);
+        Ok(())
+    }
+
     #[cfg(all(test, debug_assertions))]
     fn fresh_close_observation_for_test(
         &self,
@@ -2104,18 +2135,6 @@ impl WindowsAgent {
             .as_ref()
             .ok_or("Fresh close worker is absent")?
             .observation()
-    }
-
-    fn fresh_close_active_marker(
-        &self,
-        expected_generation: u64,
-    ) -> Result<Arc<AtomicBool>, String> {
-        self.fresh_close_worker
-            .lock()
-            .map_err(|_| "Fresh close worker is unavailable")?
-            .as_ref()
-            .and_then(|worker| worker.active_marker(expected_generation))
-            .ok_or_else(|| "The fresh close worker generation is no longer active".into())
     }
 
     fn stop_fresh_close_worker(&self) -> Result<(), String> {
@@ -8611,6 +8630,21 @@ mod tests {
 
     #[cfg(all(windows, debug_assertions))]
     #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser/fresh child appdata; one fresh close automatically completes writable bytes then clean Lock without manual upload"]
+    fn native_broker_vault_fresh_close_automatically_completes_writable_bytes_and_locks() {
+        broker_remembered_lifecycle_fixture_with_modes(
+            true,
+            true,
+            true,
+            true,
+            false,
+            true,
+            WritableCleanupFixtureMode::FreshNative,
+        );
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
     fn vault_readiness_binding_refuses_stale_missing_or_foreign_root() {
         use super::vault_worker_binding_current;
         let binding = ActiveProviderBinding {
@@ -8726,6 +8760,7 @@ mod tests {
         Disabled,
         MissingReceipt,
         NormalCleanup,
+        FreshNative,
     }
 
     #[cfg(all(windows, debug_assertions))]
@@ -8739,9 +8774,17 @@ mod tests {
         writable_mode: WritableCleanupFixtureMode,
     ) {
         let writable_bytes = !matches!(writable_mode, WritableCleanupFixtureMode::Disabled);
-        let writable_cleanup = matches!(writable_mode, WritableCleanupFixtureMode::NormalCleanup);
-        assert!(!writable_bytes || (complete_local && !automatic && !inject_writer_probe));
-        assert!(!automatic || (upload_edit && !complete_local));
+        let fresh_native = matches!(writable_mode, WritableCleanupFixtureMode::FreshNative);
+        let writable_cleanup = matches!(
+            writable_mode,
+            WritableCleanupFixtureMode::NormalCleanup | WritableCleanupFixtureMode::FreshNative
+        );
+        assert!(!fresh_native || automatic);
+        assert!(
+            !writable_bytes
+                || (complete_local && (!automatic || fresh_native) && !inject_writer_probe)
+        );
+        assert!(!automatic || (upload_edit && (!complete_local || fresh_native)));
         assert!(!complete_local || upload_edit);
         assert!(!upload_edit || capture_edit);
         assert!(!capture_edit || payload);
@@ -8839,7 +8882,13 @@ mod tests {
             )
             .unwrap();
         if automatic {
-            runtime.start_fresh_close_worker_for_test().unwrap();
+            if fresh_native {
+                runtime
+                    .start_fresh_close_worker_with_writable_completion_for_test()
+                    .unwrap();
+            } else {
+                runtime.start_fresh_close_worker_for_test().unwrap();
+            }
             assert_eq!(
                 runtime
                     .fresh_close_observation_for_test()
@@ -9062,7 +9111,8 @@ mod tests {
                 assert_eq!(completed.completed, 1);
                 assert_eq!(completed.failed, 0);
                 assert!(completed.remote_verified);
-                assert_eq!(completed.native_confirmation, Some(false));
+                assert_eq!(completed.native_confirmation, Some(fresh_native));
+                assert_eq!(completed.local_completed, fresh_native);
                 let provider_thread = runtime
                     .provider
                     .worker
@@ -9282,7 +9332,7 @@ mod tests {
                             .is_err(),
                         "persisted attempt must refuse a second dispatch"
                     );
-                } else {
+                } else if !fresh_native {
                     // Reopening protected references cannot mint a fresh job.
                     let reopened = verified
                         .custody
@@ -9356,6 +9406,28 @@ mod tests {
                     );
                     assert_eq!(observed.completed, 1);
                 }
+                if fresh_native {
+                    let reopened = verified
+                        .custody
+                        .retained_capture_ids(&trusted, &scope, "/Travel.vault")
+                        .unwrap();
+                    assert_eq!(reopened, capture_ids);
+                    let _reopened_attempt = verified
+                        .custody
+                        .upload_ledger(&trusted, &scope, "/Travel.vault", capture_id)
+                        .unwrap()
+                        .reopen_attempt()
+                        .unwrap();
+                    let completed = runtime.fresh_close_observation_for_test().unwrap();
+                    assert_eq!(
+                        completed.attempted, 1,
+                        "reopened references cannot enqueue or replay work"
+                    );
+                    assert_eq!(completed.completed, 1);
+                    assert_eq!(completed.failed, 0);
+                    assert!(completed.local_completed);
+                    assert_eq!(completed.native_confirmation, Some(true));
+                }
                 {
                     let state = vault_remote.lock().unwrap();
                     assert_eq!(state.put_attempt_count, 1, "no conditional PUT replay");
@@ -9399,7 +9471,7 @@ mod tests {
                 assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
                 assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
                 assert_eq!(runtime.provider.close_observation().unwrap().7, 0);
-                if automatic {
+                if automatic && !fresh_native {
                     println!(
                         "C06_VAULT_FRESH_CLOSE_AUTO_UPLOAD_VERIFIED=true;vaultPUT=1;authenticatedBodyGET=1;off_provider_thread=true;noReplay=true;native_confirmation=false;capture_pending=true;cleanup=incomplete"
                     );
@@ -9534,6 +9606,47 @@ mod tests {
                         println!(
                             "C06_VAULT_WRITABLE_CLEANUP_LOCK_VERIFIED=true;keys_locked=true;on_disk_empty=true;locked_read_refused=true;readonly=false;protected_body_retained=true;DELETE=0"
                         );
+                        if fresh_native {
+                            let completed = runtime.fresh_close_observation_for_test().unwrap();
+                            assert_eq!(completed.attempted, 1);
+                            assert_eq!(completed.completed, 1);
+                            assert_eq!(completed.failed, 0);
+                            assert!(completed.remote_verified && completed.local_completed);
+                            assert_eq!(completed.native_confirmation, Some(true));
+                            assert!(
+                                !runtime
+                                    .provider
+                                    .vault_file_pending_for_test(original.opaque())
+                                    .unwrap()
+                            );
+                            assert!(
+                                runtime.provider.close_observation().unwrap().0 >= observation.0,
+                                "automatic completion never resets historical modified telemetry"
+                            );
+                            assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
+                            assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+                            {
+                                let state = remote.vault_upload.as_ref().unwrap().lock().unwrap();
+                                assert_eq!(state.put_attempt_count, 1);
+                                assert_eq!(state.put_count, 1);
+                                assert_eq!(state.body_get_count, 1);
+                                assert_eq!(state.forbidden_mutation_count, 0);
+                            }
+                            broker.stop_all().expect(
+                                "automatically completed same-live capture stops after clean Lock",
+                            );
+                            drop(root_pin);
+                            drop(verified);
+                            drop(broker);
+                            drop(runtime);
+                            drop(sessions);
+                            remote.join().unwrap();
+                            appdata_pin.verify_path().unwrap();
+                            println!(
+                                "C06_VAULT_FRESH_CLOSE_AUTO_NATIVE_LOCK_VERIFIED=true;vaultPUT=1;authenticatedBodyGET=1;off_provider_thread=true;noReplay=true;native_confirmation=true;native_completed=true;dirty_resolved=true;keys_locked=true;on_disk_empty=true;locked_read_refused=true;protected_frame_retained=true;readonly=false;manual_upload=false;late_probe=false;DELETE=0;no_product_activation=true"
+                            );
+                            return;
+                        }
                         // The held-reference proof ends at Lock. This one ordinary
                         // existing-file write measures later activity, never permanent
                         // exclusion. No permission/metadata mutation or hydration read.

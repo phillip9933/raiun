@@ -1,6 +1,6 @@
 // Guarded hot-route capture upload, shared with private fresh-close dispatch.
-// Normal activation, cleanup, history retirement and writable publication
-// remain disabled. Explicit native byte-completion candidates are private.
+// Normal activation and writable publication remain disabled. The default
+// automatic policy stays remote-only; joined native completion is private.
 
 const WINDOWS_VAULT_EDIT_UPLOAD_ENABLED: bool = false;
 
@@ -9,6 +9,7 @@ struct FreshVaultUploadExpectation {
     expected_generation: u64,
     dispatch: raiun_cloudfiles_windows::FreshVaultCaptureDispatch,
     active: Arc<std::sync::atomic::AtomicBool>,
+    policy: windows_vault_close_worker::FreshCloseCompletionPolicy,
 }
 
 impl WindowsAgent {
@@ -17,10 +18,12 @@ impl WindowsAgent {
     fn upload_from_fresh_close(
         &self,
         job: windows_vault_close_worker::FreshVaultCloseJob,
+        active: Arc<AtomicBool>,
+        policy: windows_vault_close_worker::FreshCloseCompletionPolicy,
     ) -> Result<Value, String> {
-        // Snapshot this worker's cancellation identity once. No worker mutex
-        // may be reacquired by the network cancellation predicate or join path.
-        let active = self.fresh_close_active_marker(job.expected_generation)?;
+        // Only the originating consumer supplies this cancellation identity.
+        // Never consult a current/replacement worker or hold its ownership lock.
+        let writable_bytes = policy.writable_bytes();
         let windows_vault_close_worker::FreshVaultCloseJob {
             origin,
             vault,
@@ -33,21 +36,24 @@ impl WindowsAgent {
             &vault,
             &remote_root,
             &capture_id,
-            false,
-            false,
+            writable_bytes,
+            writable_bytes,
             Some(FreshVaultUploadExpectation {
                 origin,
                 expected_generation,
                 dispatch,
                 active,
+                policy,
             }),
         )?;
-        // Remote verification never authorizes native acknowledgement, dirty
-        // history removal or Lock cleanup. Keep that boundary explicit.
-        result
+        let native_completed = writable_bytes && result["state"] == "local_completed";
+        let value = result
             .as_object_mut()
-            .ok_or("The fresh upload result is unavailable")?
-            .insert("native_confirmation".into(), Value::Bool(false));
+            .ok_or("The fresh upload result is unavailable")?;
+        value.insert("native_confirmation".into(), Value::Bool(native_completed));
+        if writable_bytes {
+            value.insert("read_only_restored".into(), Value::Bool(false));
+        }
         Ok(result)
     }
 
@@ -156,9 +162,14 @@ impl WindowsAgent {
         use sha2::{Digest, Sha256};
         use std::time::Instant;
 
-        // Fresh automatic notifications remain remote-only. Their worker cancel
-        // identity is borrowed for HTTP and is not an owned native continuation.
-        if (fresh.is_some() && complete_local) || (writable_bytes && !complete_local) {
+        // The default is remote-only. Fresh local completion is permitted only
+        // by the immutable private WritableBytes worker policy, never readonly
+        // metadata completion or a caller's mismatched mode booleans.
+        if (writable_bytes && !complete_local)
+            || fresh
+                .as_ref()
+                .is_some_and(|fresh| !fresh.policy.permits_mode(complete_local, writable_bytes))
+        {
             return Err("The requested vault completion mode is unavailable".into());
         }
         let (fresh_origin, fresh_generation, dispatch, fresh_active) = match fresh {
@@ -420,12 +431,21 @@ impl WindowsAgent {
         let outcome = if complete_local {
             // CancellationToken owns its fixed deadline; the cap carries it
             // through local completion, independently of this borrowed closure.
-            let control = VaultUploadControl::new(
-                Arc::clone(&self.provider.authorized_generation),
-                generation,
-                cancellation.clone(),
-                deadline,
-            )
+            let control = match &fresh_active {
+                Some(active) => VaultUploadControl::new_for_fresh_worker(
+                    Arc::clone(&self.provider.authorized_generation),
+                    generation,
+                    cancellation.clone(),
+                    deadline,
+                    Arc::clone(active),
+                ),
+                None => VaultUploadControl::new(
+                    Arc::clone(&self.provider.authorized_generation),
+                    generation,
+                    cancellation.clone(),
+                    deadline,
+                ),
+            }
             .map_err(|_| "The retained edit upload context changed")?;
             verified
                 .backend

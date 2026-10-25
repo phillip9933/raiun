@@ -2923,6 +2923,7 @@ impl ConfiguredRootConnection {
                 store
                     .before_completion_guard_release_for_test()
                     .map_err(|_| Error::EditRecoveryUnavailable)?;
+                upload.check_current()?;
                 if let Some(ticket) = cleanup_reservation {
                     self.state
                         .writable_cleanup

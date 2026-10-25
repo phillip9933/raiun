@@ -2857,3 +2857,41 @@ reported above. Normal automatic dispatch, writable publication and public
 upload RPC remain disabled; shipping workflow and exact-package acceptance
 remain pending. No new package, installation or publication occurred. The r117
 beta remains installed and closed; the test VM is shut down and cold.
+
+
+### Automatic fresh-close native save and Lock (26 October)
+
+The private fresh-close worker now joins the accepted encrypted upload and
+writable native completion paths. Its policy is fixed before the worker starts;
+the default remains remote-only. The original worker cancellation identity
+travels directly from the consumer through HTTP into the owned native
+continuation. A replacement worker cannot renew it. Existing account, root,
+origin, dispatch stamp, token, opaque unlock epoch and durable-attempt checks
+remain mandatory. Native completion checks the live continuation again before
+publishing its ephemeral cleanup receipt, after final work and the end hook.
+Observed cancellation or uncertainty before completion leaves work retained
+without cleanup rights.
+
+The exact source passes formatting, strict Linux workspace lint and 1,098 tests
+(14 ignored), current GNU Windows binary/test and Cloud Files strict checks
+without warnings, six focused worker tests and two focused control tests.
+Ordinary-user MSVC/native R29 passed: an actual modified close automatically
+queued one encrypted conditional PUT and authenticated readback off the provider
+and caller threads, durably completed NativeCompleted and promoted the baseline,
+resolved the exact dirty observation, then completed Lock with keys locked,
+empty ONDISK ranges and ordinary read refusal without another GET. The original
+protected capture frame remained available. No manual upload or repeated
+late-write probe ran. Native/wrapper exits and owned counts were zero, followed
+by normal guest shutdown and cold preservation.
+
+Evidence: `windows-vault-fresh-native-r1/combined-r1/` and `gnu-r1/` under
+`outputs/desktop-next-20261021/`; native evidence is
+`outputs/local-windows-native-20261023-r1/agent-vault-fresh-native-r29/`.
+Source archive: `f509a00e…`. This qualifies one private automatic save and Lock;
+it does not qualify repeated saves, recovered/restarted adoption or a shipping
+package. Normal worker startup, writable placeholder publication, capability/UI
+exposure and public upload RPC remain disabled. The next normal workflow needs
+explicit per-file publication eligibility and generation-bound worker rearming,
+without rewriting protected metadata or broadening unsupported operations. No
+new package, host installation or publication occurred; r117 remains installed
+and closed, with the test VM shut down and cold.

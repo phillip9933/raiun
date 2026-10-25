@@ -9,7 +9,7 @@ use raiun_opencloud::vault_backend::VaultVerifiedOverwrite;
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Instant,
 };
@@ -20,6 +20,7 @@ pub struct VaultUploadControl {
     expected: u64,
     cancellation: CancellationToken,
     deadline: Instant,
+    fresh_worker_active: Option<Arc<AtomicBool>>,
 }
 impl VaultUploadControl {
     pub fn new(
@@ -33,6 +34,29 @@ impl VaultUploadControl {
             expected,
             cancellation,
             deadline,
+            fresh_worker_active: None,
+        };
+        if control.is_cancelled() {
+            return Err(BackendError::Unavailable);
+        }
+        Ok(control)
+    }
+    /// Retain this dispatching worker's original cancellation identity through
+    /// the owned HTTP-to-native continuation. A replacement worker cannot renew
+    /// it, and no callback needs to reacquire the Agent's worker mutex.
+    pub fn new_for_fresh_worker(
+        generation: Arc<AtomicU64>,
+        expected: u64,
+        cancellation: CancellationToken,
+        deadline: Instant,
+        active: Arc<AtomicBool>,
+    ) -> Result<Self, BackendError> {
+        let control = Self {
+            generation,
+            expected,
+            cancellation,
+            deadline,
+            fresh_worker_active: Some(active),
         };
         if control.is_cancelled() {
             return Err(BackendError::Unavailable);
@@ -45,6 +69,10 @@ impl VaultUploadControl {
             || self.cancellation.is_cancelled()
             || self.cancellation.is_expired()
             || Instant::now() >= self.deadline
+            || self
+                .fresh_worker_active
+                .as_ref()
+                .is_some_and(|active| !active.load(Ordering::Acquire))
     }
     pub(crate) fn generation(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.generation)
@@ -235,6 +263,54 @@ proof_accessors!(VaultNativeCompletionProof);
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fresh_worker_cancellation_stays_bound_to_original_identity() {
+        let generation = Arc::new(AtomicU64::new(7));
+        let original = Arc::new(AtomicBool::new(true));
+        let control = VaultUploadControl::new_for_fresh_worker(
+            Arc::clone(&generation),
+            7,
+            CancellationToken::for_offline_job(),
+            Instant::now() + std::time::Duration::from_secs(300),
+            Arc::clone(&original),
+        )
+        .unwrap();
+        assert!(!control.is_cancelled());
+        original.store(false, Ordering::Release);
+        let replacement = Arc::new(AtomicBool::new(true));
+        assert!(!Arc::ptr_eq(&original, &replacement));
+        assert!(control.is_cancelled());
+        assert!(replacement.load(Ordering::Acquire));
+    }
+    #[test]
+    fn fresh_worker_cancellation_refuses_admission_and_keeps_existing_guards() {
+        let generation = Arc::new(AtomicU64::new(7));
+        assert!(
+            VaultUploadControl::new_for_fresh_worker(
+                Arc::clone(&generation),
+                7,
+                CancellationToken::for_offline_job(),
+                Instant::now() + std::time::Duration::from_secs(300),
+                Arc::new(AtomicBool::new(false)),
+            )
+            .is_err()
+        );
+        let cancellation = CancellationToken::for_offline_job();
+        let control = VaultUploadControl::new_for_fresh_worker(
+            Arc::clone(&generation),
+            7,
+            cancellation.clone(),
+            Instant::now() + std::time::Duration::from_secs(300),
+            Arc::new(AtomicBool::new(true)),
+        )
+        .unwrap();
+        generation.store(8, Ordering::Release);
+        assert!(control.is_cancelled());
+        generation.store(7, Ordering::Release);
+        assert!(!control.is_cancelled());
+        cancellation.cancel();
+        assert!(control.is_cancelled());
+    }
     #[test]
     fn fresh_continuation_is_send_and_owned_deadline_cannot_extend_token() {
         fn assert_send<T: Send>() {}
