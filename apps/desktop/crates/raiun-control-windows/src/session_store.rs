@@ -395,6 +395,30 @@ impl DpapiSessionStore {
         self.compare_exchange_vault_document(VaultDocumentKind::Custody, scope, expected, next)
     }
 
+    /// Protected immutable existing-edit capture bytes. The caller supplies and
+    /// validates the exact opaque account/vault/root/capture scope and document;
+    /// a stored capture alone never authorizes upload, recovery or cleanup.
+    /// A missing read creates no directory.
+    pub fn load_vault_existing_edit_capture(
+        &self,
+        scope: &[u8],
+    ) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+        self.load_vault_document(VaultDocumentKind::ExistingEditCapture, scope)
+    }
+
+    /// Publish a new capture only if its exact scope has no document. There is
+    /// deliberately no replacement or deletion API, including for equal bytes.
+    /// An error after publication may leave the capture stored and must never be
+    /// interpreted as success or proof that no capture exists.
+    pub fn put_new_vault_existing_edit_capture(&self, scope: &[u8], next: &[u8]) -> io::Result<()> {
+        self.compare_exchange_vault_document(
+            VaultDocumentKind::ExistingEditCapture,
+            scope,
+            None,
+            next,
+        )
+    }
+
     /// Private protected document read. The caller validates embedded authority;
     /// these bytes alone never authorize a session, history, or native cleanup.
     fn load_vault_document(
@@ -1396,30 +1420,35 @@ const VAULT_CREDENTIALS_ENVELOPE: &[u8] = b"RAIUN-VAULT-CREDENTIALS-DPAPI\0\x01"
 enum VaultDocumentKind {
     Credentials,
     Custody,
+    ExistingEditCapture,
 }
 impl VaultDocumentKind {
     fn directory(self) -> &'static str {
         match self {
             Self::Credentials => "vault-credentials",
             Self::Custody => "vault-custody",
+            Self::ExistingEditCapture => "vault-existing-edit-captures",
         }
     }
     fn file_name(self) -> &'static str {
         match self {
             Self::Credentials => "credentials.bin",
             Self::Custody => "custody.bin",
+            Self::ExistingEditCapture => "existing-edit-capture.bin",
         }
     }
     fn lock_name(self) -> &'static str {
         match self {
             Self::Credentials => "credentials.lock",
             Self::Custody => "custody.lock",
+            Self::ExistingEditCapture => "existing-edit-capture.lock",
         }
     }
     fn envelope(self) -> &'static [u8] {
         match self {
             Self::Credentials => VAULT_CREDENTIALS_ENVELOPE,
             Self::Custody => b"RAIUN-VAULT-CUSTODY-DPAPI\0\x01",
+            Self::ExistingEditCapture => b"RAIUN-VAULT-EXISTING-EDIT-CAPTURE-DPAPI\0\x01",
         }
     }
     fn digest(self, scope: &[u8]) -> io::Result<[u8; 32]> {
@@ -1437,6 +1466,18 @@ impl VaultDocumentKind {
                 }
                 let mut hash = Sha256::new();
                 hash.update(b"raiun-vault-custody-dpapi-v1\0");
+                hash.update(scope);
+                Ok(hash.finalize().into())
+            }
+            Self::ExistingEditCapture => {
+                if scope.is_empty() || scope.len() > 32 * 1024 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Invalid existing-edit capture scope",
+                    ));
+                }
+                let mut hash = Sha256::new();
+                hash.update(b"raiun-vault-existing-edit-capture-dpapi-v1\0");
                 hash.update(scope);
                 Ok(hash.finalize().into())
             }
@@ -2009,6 +2050,166 @@ mod tests {
         );
         drop(reopened);
         // Panic retains fixture; success removes only this exact owned directory.
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser and native DPAPI/private-storage ACL support; synthetic temp-root only"]
+    fn protected_vault_existing_edit_capture_put_new_reopen_and_binding() {
+        assert_eq!(std::env::var("USERNAME").as_deref(), Ok("RaiunLabUser"));
+        let root = std::env::temp_dir().join(format!(
+            "raiun-synthetic-existing-edit-capture-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        eprintln!("synthetic_existing_edit_capture_root={}", root.display());
+        // Only this self-created fixture: no current_user, profile/session load,
+        // registered root, real vault or environment mutation.
+        let base = DpapiSessionStore {
+            root: root.join("sessions"),
+            profile_directory: None,
+        };
+        let scope = b"synthetic-account-vault-root-capture\0\xff";
+        let foreign = b"synthetic-account-vault-root-capture\0\xfe";
+        let first = Zeroizing::new(b"synthetic exact capture bytes\0\xff".to_vec());
+        assert!(
+            base.load_vault_existing_edit_capture(scope)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!base.root.exists());
+        for invalid_scope in [b"".as_slice(), &vec![0; 32 * 1024 + 1]] {
+            assert!(
+                base.load_vault_existing_edit_capture(invalid_scope)
+                    .is_err()
+            );
+            assert!(
+                base.put_new_vault_existing_edit_capture(invalid_scope, &first)
+                    .is_err()
+            );
+        }
+        assert!(
+            base.put_new_vault_existing_edit_capture(scope, b"")
+                .is_err()
+        );
+        assert!(
+            base.put_new_vault_existing_edit_capture(scope, &vec![0; VAULT_DOCUMENT_MAX_PLAIN + 1])
+                .is_err()
+        );
+        assert!(!base.root.exists(), "invalid input must not create storage");
+        base.put_new_vault_existing_edit_capture(scope, &first)
+            .unwrap();
+        let path = base
+            .root
+            .join(VaultDocumentKind::ExistingEditCapture.directory())
+            .join(hex(&VaultDocumentKind::ExistingEditCapture
+                .digest(scope)
+                .unwrap()))
+            .join(VaultDocumentKind::ExistingEditCapture.file_name());
+        let protected = std::fs::read(&path).unwrap();
+        assert!(protected.starts_with(VaultDocumentKind::ExistingEditCapture.envelope()));
+        assert!(
+            base.put_new_vault_existing_edit_capture(scope, &first)
+                .is_err()
+        );
+        assert!(
+            base.put_new_vault_existing_edit_capture(scope, b"different capture")
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), protected);
+        let store_root = base.root.clone();
+        drop(base);
+        let reopened = DpapiSessionStore {
+            root: store_root,
+            profile_directory: None,
+        };
+        assert_eq!(
+            reopened
+                .load_vault_existing_edit_capture(scope)
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            first.as_slice()
+        );
+        assert!(
+            reopened
+                .load_vault_existing_edit_capture(foreign)
+                .unwrap()
+                .is_none()
+        );
+        reopened
+            .put_new_vault_existing_edit_capture(foreign, &first)
+            .unwrap();
+        let foreign_path = reopened
+            .root
+            .join(VaultDocumentKind::ExistingEditCapture.directory())
+            .join(hex(&VaultDocumentKind::ExistingEditCapture
+                .digest(foreign)
+                .unwrap()))
+            .join(VaultDocumentKind::ExistingEditCapture.file_name());
+        std::fs::write(&foreign_path, &protected).unwrap();
+        assert!(reopened.load_vault_existing_edit_capture(foreign).is_err());
+        assert!(
+            reopened
+                .put_new_vault_existing_edit_capture(foreign, &first)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&foreign_path).unwrap(), protected);
+        // Rewrap valid ciphertext for the destination envelope: the DPAPI
+        // entropy must still prevent crossing custody and credential domains.
+        reopened
+            .put_new_vault_existing_edit_capture(b"default", &first)
+            .unwrap();
+        let domain_path = reopened
+            .root
+            .join(VaultDocumentKind::ExistingEditCapture.directory())
+            .join(hex(&VaultDocumentKind::ExistingEditCapture
+                .digest(b"default")
+                .unwrap()))
+            .join(VaultDocumentKind::ExistingEditCapture.file_name());
+        let domain_protected = std::fs::read(&domain_path).unwrap();
+        let cipher = domain_protected
+            .strip_prefix(VaultDocumentKind::ExistingEditCapture.envelope())
+            .unwrap();
+        for kind in [VaultDocumentKind::Custody, VaultDocumentKind::Credentials] {
+            let digest = kind.digest(b"default").unwrap();
+            assert_ne!(
+                digest,
+                VaultDocumentKind::ExistingEditCapture
+                    .digest(b"default")
+                    .unwrap()
+            );
+            let directory = reopened
+                .vault_document_directory(kind, &digest, true)
+                .unwrap()
+                .unwrap();
+            let destination = directory.path().join(kind.file_name());
+            let mut transplanted = kind.envelope().to_vec();
+            transplanted.extend_from_slice(cipher);
+            std::fs::write(&destination, &transplanted).unwrap();
+            assert!(reopened.load_vault_document(kind, b"default").is_err());
+            assert_eq!(std::fs::read(&destination).unwrap(), transplanted);
+        }
+        let mut corrupt = protected.clone();
+        *corrupt.last_mut().unwrap() ^= 1;
+        std::fs::write(&path, &corrupt).unwrap();
+        assert!(reopened.load_vault_existing_edit_capture(scope).is_err());
+        assert!(
+            reopened
+                .put_new_vault_existing_edit_capture(scope, &first)
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            corrupt,
+            "refusal must retain corrupt evidence"
+        );
+        drop(reopened);
+        // Panic retains evidence; success removes only the self-created root.
         std::fs::remove_dir_all(root).unwrap();
     }
 

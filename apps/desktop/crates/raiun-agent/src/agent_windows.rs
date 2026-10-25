@@ -10,6 +10,10 @@ mod auth;
 mod root_manifest;
 #[path = "vault_custody.rs"]
 mod vault_custody;
+// Inert persistence contract only; no native writer or production store adapter.
+#[allow(dead_code)]
+#[path = "vault_edit_capture.rs"]
+mod vault_edit_capture;
 #[path = "windows_vault_credentials.rs"]
 mod windows_vault_credentials;
 #[path = "windows_vault_custody.rs"]

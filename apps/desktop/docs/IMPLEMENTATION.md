@@ -2600,3 +2600,29 @@ Evidence: `frontdoor-installed-restart-actual-r1/handoff.json` under
 This qualifies normal app-process restart and the read-only encrypted workflow,
 not OS reboot, crash recovery, encrypted editing, renderer HTTPS sign-in or
 whole-category completion. The published beta is unchanged.
+
+
+### Windows immutable protected edit-capture storage (25 October)
+
+A new existing-file capture component binds immutable retained bytes to the
+validated account/vault/root scope, opaque file, strong baseline, native identity
+and historical unlock/token labels. The body is zeroized in memory and stored
+through a distinct DPAPI/private-directory document domain. Put-new never
+overwrites an existing capture; uncertain publication remains an error, while
+historical bytes remain available for explicit recovery. Captures carry no
+upload, live-session or cleanup authority. The current body limit is 512 KiB.
+
+Formatting, strict workspace lint and the full Linux workspace suite pass
+(977 passed, 14 ignored). Fresh Windows GNU Agent compilation and Control test
+lint pass with actual current-source compiler evidence. One exact native MSVC
+Control test passed under the isolated ordinary user, covering exact-byte reopen,
+duplicate preservation, bounds, foreign binding/domain separation and tamper
+refusal. Normal shutdown and cold preservation followed. Initial restricted
+loopback failures and cached-only GNU observations remain preserved separately.
+
+Evidence: `windows-vault-edit-protected-r2/handoff.json` under
+`outputs/desktop-next-20261021/`; native evidence is
+`outputs/local-windows-native-20261023-r1/existing-edit-capture-native-r1/`.
+This is a storage prerequisite. The native save callback and conditional
+encrypted upload are not connected; Windows vault access remains read-only.
+Neither crash/reboot recovery nor installed writable-app acceptance is claimed.
