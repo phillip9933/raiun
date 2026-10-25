@@ -1,11 +1,11 @@
 {
-  "time_utc": "2026-10-25T14:32:29.665899+00:00",
+  "time_utc": "2026-10-25T14:42:53.523419+00:00",
   "candidate": "gradle/verification-metadata.xml",
-  "candidate_sha256": "13462f9543c2a3fcb3faf4b2420f7482fb41e6dc7d2e30d510fa9a7b1cdea71d",
+  "candidate_sha256": "5c0907e80a79f42526354d7ce0212e657e096972330d56d82012712e9e80cd7b",
   "components": 899,
-  "artifacts": 1605,
+  "artifacts": 1606,
   "counts": {
-    "verified": 1605
+    "verified": 1606
   },
   "results": [
     {
@@ -18857,6 +18857,16 @@
       "name": "junit-bom",
       "version": "5.9.2",
       "artifacts": [
+        {
+          "artifact": "junit-bom-5.9.2.module",
+          "expected": "ab137ba5a8e32c9b066bf9126a1c76dd5614b724ba5c0b02549772b5e9f4cf1f",
+          "status": "verified",
+          "actual": "ab137ba5a8e32c9b066bf9126a1c76dd5614b724ba5c0b02549772b5e9f4cf1f",
+          "method": "publisher SHA-256 sidecar and artifact bytes",
+          "evidence": "https://repo.maven.apache.org/maven2/org/junit/junit-bom/5.9.2/junit-bom-5.9.2.module",
+          "checksum_evidence": "https://repo.maven.apache.org/maven2/org/junit/junit-bom/5.9.2/junit-bom-5.9.2.module.sha256",
+          "bytes": 6956
+        },
         {
           "artifact": "junit-bom-5.9.2.pom",
           "expected": "2ed07d65845131f5336a86476c9a4056b59d0b58b9815ab3679bb0f36f35f705",
