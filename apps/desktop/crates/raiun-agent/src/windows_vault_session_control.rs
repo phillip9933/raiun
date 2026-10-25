@@ -130,22 +130,28 @@ impl WindowsAgent {
                 return None;
             }
             let path = inspected.get("root_path")?.as_str()?;
-            let path = if path == "/" { "/" } else { path.trim_end_matches('/') };
-            self.provider.vault_lock_cleanup_status(
-                ActiveProviderBinding {
-                    generation,
-                    path: PathBuf::from(&configuration.path),
-                    identity: raiun_cloudfiles_windows::ConfiguredRootIdentity {
-                        volume_serial: configuration.volume_serial,
-                        file_index: configuration.file_index,
+            let path = if path == "/" {
+                "/"
+            } else {
+                path.trim_end_matches('/')
+            };
+            self.provider
+                .vault_lock_cleanup_status(
+                    ActiveProviderBinding {
+                        generation,
+                        path: PathBuf::from(&configuration.path),
+                        identity: raiun_cloudfiles_windows::ConfiguredRootIdentity {
+                            volume_serial: configuration.volume_serial,
+                            file_index: configuration.file_index,
+                        },
+                        personal_space_id: owner.personal_drive_id.clone(),
+                        personal_root_resource_id: owner.personal_root_resource_id.clone()?,
                     },
-                    personal_space_id: owner.personal_drive_id.clone(),
-                    personal_root_resource_id: owner.personal_root_resource_id.clone()?,
-                },
-                space_id.to_owned(),
-                root_id.to_owned(),
-                path.to_owned(),
-            ).ok()
+                    space_id.to_owned(),
+                    root_id.to_owned(),
+                    path.to_owned(),
+                )
+                .ok()
         });
         // Coordinator keys alone never prove a live native route. The pin is
         // retained through the final account/configuration postcheck.
@@ -491,8 +497,8 @@ impl WindowsAgent {
             target.root_path.trim_end_matches('/')
         }
         .to_owned();
-        let cleanup = self.provider.lock_vault_route(
-            binding,
+        let cleanup = self.provider.begin_lock_vault_route(
+            binding.clone(),
             target.space_id.clone(),
             target.root_resource_id.clone(),
             root_path,
@@ -503,8 +509,16 @@ impl WindowsAgent {
             .vault_sessions
             .lock(&scope)
             .map_err(|_| "Could not clear the vault session");
-        cleanup?;
-        keys?;
+        let ticket = cleanup?;
+        if let Err(error) = keys {
+            // No complete result if key revocation failed. The owner thread
+            // releases this hold as incomplete, including on caller loss.
+            let _ = self.provider.abort_lock_vault_route(binding, ticket);
+            return Err(error.to_owned());
+        }
+        // The native hold spans coordinator key revocation. Final native/global
+        // proof commits the cleanup boundary before its file references drop.
+        self.provider.finish_lock_vault_route(binding, ticket)?;
         Ok(
             json!({"unlocked":false,"vault_lock_cleanup_status":"complete","vault_mount_ready":false,"vault_mount_writable":false,
             "vault_mount_existing_file_overwrite":false,"vault_mount_write_unavailable_reason":"route_not_installed"}),

@@ -726,3 +726,67 @@ therefore keep Lock/stop cleanup incomplete even after byte completion. Other
 files, unknown history and the monotonic global telemetry remain untouched.
 Normal writable publication, fresh-worker activation and public RPC stay
 disabled. Exact native acceptance remains pending the combined source gates.
+
+### Two-phase same-connection writable cache eviction (source only)
+
+Writable completion reserves one of at most 1024 volatile connection receipts
+before Prepared. Only successful NativeCompleted CAS/readback, exact final native
+proof, dirty-sequence resolution and the test end hook permit publishing that
+receipt under the same live fences/reference. It contains the existing Weak
+binding marker and exact root/file/opaque/components/length/SHA, no keys/body or
+serialized authority. A checked model generation prevents stale reserve or
+cleanup commits. Reservations, capacity/poison failures and later invalidation
+remain incomplete; no entry is silently evicted. Modified or uncertain closes
+invalidate before deferred publication; global dirty/unknown sources never reset.
+
+`begin_cleanup_retired_vault_route` first revokes/drains the exact retained route.
+A pure Weak binding comparison works after retirement without auth/epoch lookup.
+Only matching ready receipts enter the NEW writable primitive. Missing receipts
+still face the unchanged readonly helper; invalid/foreign/reserved receipts
+refuse. The old readonly per-file primitive is byte-identical. Current complete
+hydration inventory, physical root/file/opaque/path, resident/in-sync full body
+SHA, empty MODIFIED ranges and coherent positive CURRENT USN/basic/snapshot
+brackets are independently checked. The receipt cannot substitute for those
+current proofs or adopt a replacement connection/binding.
+
+The new path uses the existing byte-only eviction shape: NULL metadata/identity,
+one whole-file range, VERIFY_IN_SYNC only and NULL optional UpdateUsn. This is
+not removal of a metadata CAS from a write: no metadata/identity overwrite,
+READONLY restore, force, mark, unpin, permission change, cloud deletion or capture
+retirement occurs. There is one operation, with no retry/rebase after refusal.
+The same successful EXCLUSIVE RH reference and no-follow root/ancestor/file pins
+span the complete body admission, eviction and native root/file/opaque/in-sync,
+empty MODIFIED and bounded empty ONDISK postproof. Current last-write time and
+custody attributes are preserved using the existing byte-eviction postconditions;
+platform cache-state effects are not described as explicit attribute writes.
+
+The opaque non-Send `VaultCleanupFence` retains EVERY writable reference/pin
+through all route rows and the owner's coordinator key-clear step. Finish must
+run on the same connected CallbackState/root, with the same retained binding,
+unchanged exact inventory, current empty ranges/native proof and global clean
+sources; only then does the model atomically confirm all tickets before releasing
+references. Dropping/aborting a fence preserves EvictedUnconfirmed history and
+releases native resources without success. A fresh begin for that same live
+receipt may prove CURRENT empty state with no hydration or second eviction API;
+invalidated/uncertain eviction cannot resume. Agent owner-thread hold management
+supplies the separately reviewed finite 30-second/caller-loss boundary and aborts
+holds before disconnect/drain; native handles never cross threads.
+
+Confirmed tombstones remain for late activity. Status drops receipt locks before
+sampling dirty/recovery/global sources, then rechecks current receipt state;
+errors/late invalidation remain incomplete even after retired-route removal.
+Lock order stays publication/token/epoch -> native exclusive -> dirty -> receipt
+for completion/capture. Cleanup drains publication before native/receipt work;
+no receipt lock is held while acquiring dirty/recovery/auth locks. This avoids
+self-deadlock in the existing unresolved-data predicate. Final held-reference
+proof after keys are locked is an operation linearization point, NOT permanent
+write protection: new external writes after release are new activity and make
+current cleanup status incomplete. No DACL or indefinite RH fence is added.
+
+Synthetic helpers only query ONDISK through exact current root/path/file pins,
+binding the fixed components to the complete native hydration inventory's file
+ID while permitting a changed CURRENT size; they never hydrate. The separate
+forget helper deletes only a matching volatile receipt so history-alone denial
+can be tested. It grants no cleanup capability. Normal writable publication,
+public upload RPC and automatic fresh-worker activation remain disabled. Source
+checks do not qualify actual Windows cache eviction or the final key boundary.

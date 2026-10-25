@@ -156,6 +156,16 @@ impl WindowsVaultReadBinding {
 
     /// Local capture already owns the publication/token/opaque-epoch fences.
     /// Copy only this immutable binding's weak identity, never its key or lease.
+    /// Pure original-binding identity match for retired-route cleanup. This
+    /// grants no session, upload or cleanup permission and deliberately does
+    /// not reacquire a revoked key/epoch lease.
+    pub(crate) fn matches_cleanup_dispatch(
+        &self,
+        dispatch: &crate::FreshVaultCaptureDispatch,
+    ) -> bool {
+        dispatch.matches_binding(&self.identity)
+    }
+
     pub(crate) fn capture_dispatch_stamp(&self) -> crate::FreshVaultCaptureDispatch {
         crate::FreshVaultCaptureDispatch::from_binding(&self.identity)
     }

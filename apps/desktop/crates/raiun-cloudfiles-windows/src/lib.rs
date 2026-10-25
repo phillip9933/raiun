@@ -21,6 +21,8 @@ pub use vault_capture_dispatch::FreshVaultCaptureDispatch;
 mod vault_completion;
 #[cfg(any(windows, test))]
 mod vault_dirty;
+#[cfg(any(windows, test))]
+mod writable_cleanup_receipts;
 #[cfg(windows)]
 pub use vault_completion::{
     FreshVaultUpload, VaultLiveUploadOutcome, VaultLocalCompletionStore,
@@ -428,6 +430,13 @@ pub fn connect_configured_root(
     })
 }
 
+/// Owner-thread-only held writable eviction proof. Dropping it releases native
+/// references but never confirms cleanup or reconstructs authority from history.
+#[cfg(windows)]
+pub struct VaultCleanupFence {
+    inner: native::VaultCleanupFence,
+}
+
 /// Internal connection lease for one fully prepared configured root.
 #[cfg(windows)]
 #[allow(dead_code)]
@@ -457,11 +466,51 @@ impl ConfiguredRootConnection {
         &self,
         route: &vault_routes::VerifiedVaultRoute,
     ) -> Result<(), Error> {
+        let fence = self.begin_cleanup_retired_vault_route(route)?;
+        self.finish_vault_cleanup(fence)
+    }
+
+    /// Revoke/drain and retain every writable eviction reference until finish.
+    /// The provider keeps this opaque span on its owner thread across key clear.
+    pub fn begin_cleanup_retired_vault_route(
+        &self,
+        route: &vault_routes::VerifiedVaultRoute,
+    ) -> Result<VaultCleanupFence, Error> {
         let owned = route
             .revoke_and_cleanup_identities()
             .map_err(|_| Error::EditRecoveryUnavailable)?;
         self.inner
-            .cleanup_recorded_vault_files(route.local_root(), &owned)
+            .begin_cleanup_recorded_vault_files(route, &owned)
+            .map(|inner| VaultCleanupFence { inner })
+    }
+
+    /// Final current proof on the same native connection, after owner key clear.
+    pub fn finish_vault_cleanup(&self, fence: VaultCleanupFence) -> Result<(), Error> {
+        self.inner.finish_vault_cleanup(fence.inner)
+    }
+
+    /// Conservative current connection footprint; absence is not Lock authority.
+    pub fn writable_vault_cleanup_incomplete(&self) -> Result<bool, Error> {
+        self.inner.writable_vault_cleanup_incomplete()
+    }
+
+    #[cfg(feature = "synthetic-agent-integration")]
+    pub fn placeholder_on_disk_empty_for_integration(
+        &self,
+        relative_components: &[&str],
+    ) -> Result<bool, Error> {
+        self.inner
+            .placeholder_on_disk_empty_for_integration(relative_components)
+    }
+
+    /// Denial-only fixture helper: deletes only this connection's volatile receipt.
+    #[cfg(feature = "synthetic-agent-integration")]
+    pub fn forget_writable_cleanup_receipt_for_integration(
+        &self,
+        identity: [u8; 16],
+    ) -> Result<(), Error> {
+        self.inner
+            .forget_writable_cleanup_receipt_for_integration(identity)
     }
 
     /// Native owner-thread continuation of one fresh live vault upload. No

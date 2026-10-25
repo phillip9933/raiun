@@ -2810,3 +2810,50 @@ public upload RPC remain disabled. This is native byte-completion acceptance,
 not a complete writable-vault or clean-Lock workflow. No new package,
 installation or publication occurred; r117 remains installed and closed in the
 isolated VM.
+
+
+### Writable-save Lock and cache eviction (26 October)
+
+A separate writable cleanup path now uses bounded, process-local completion
+receipts minted only after the exact live native save completes. Historical
+NativeCompleted records do not recreate cleanup authority. Fresh native file,
+root, opaque identity, body hash, in-sync state and modified-range checks precede
+byte-only cache eviction. This removes cached plaintext, never the cloud file
+or protected recovery frame. Existing readonly metadata and eviction guards
+remain unchanged.
+
+Lock retires and drains the route, holds all writable native file references
+through coordinator key revocation, then verifies current empty ONDISK ranges
+and unresolved-activity state before completing. Holds expire or release on
+caller loss, failure and teardown. Dirty or uncertain activity invalidates
+receipts; aborted and uncertain operations retain incomplete status. The proof
+covers that operation boundary. Later external activity can change status; it
+does not promise permanent write exclusion. Missing volatile receipts after a
+restart conservatively refuse writable cleanup rather than trusting history.
+
+The exact source passes formatting, strict Linux workspace lint and 1,098 tests
+(14 ignored), plus current GNU Windows binary/test and Cloud Files strict
+checks without warnings. Ordinary-user MSVC/native R28 passed one encrypted
+save followed by clean Lock: keys locked, native cache empty, a new ordinary
+read refused without GET, original protected frame retained, and stop complete.
+The single late-write probe returned cloud-file error 389 with unchanged
+metadata and no observed mutation. Only the clean-close counter increased;
+modified/unverifiable counters and pending status stayed unchanged. The final
+fixture verified one conditional encrypted PUT and one authenticated readback,
+without replay. This does not exercise a successful late external mutation.
+Native/wrapper exits and owned process counts were zero; normal guest shutdown
+and cold preservation completed.
+
+Earlier GNU R1 and native R26/R27 failures remain preserved. The GNU correction
+converted a key-clear error to String. Native fixture corrections recognized the
+actual cloud-file error and stopped treating clean callback telemetry as dirty
+activity; production guards and remaining native postconditions were unchanged.
+
+Evidence: `windows-vault-writable-cleanup-r1/combined-r4/` and `gnu-r4/` under
+`outputs/desktop-next-20261021/`; native evidence is
+`outputs/local-windows-native-20261023-r1/agent-vault-writable-cleanup-native-r28/`.
+Source archive: `0a4bbd9c…`. This closes the private writable-save cleanup gap
+reported above. Normal automatic dispatch, writable publication and public
+upload RPC remain disabled; shipping workflow and exact-package acceptance
+remain pending. No new package, installation or publication occurred. The r117
+beta remains installed and closed; the test VM is shut down and cold.

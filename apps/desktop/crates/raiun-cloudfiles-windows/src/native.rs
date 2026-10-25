@@ -835,6 +835,73 @@ pub(super) struct SyntheticConnection {
 /// Connection and registration ownership for one explicitly validated root.
 /// This remains an internal foundation; no application path enables it yet.
 #[allow(dead_code)]
+// No Send/Clone/serialization: these handles remain on the connection owner thread.
+pub(super) struct VaultCleanupFence {
+    state: Arc<CallbackState>,
+    binding: std::sync::Weak<crate::vault_read::WindowsVaultReadBinding>,
+    root: crate::ConfiguredRootIdentity,
+    rows: Vec<hydration_inventory::HydratedFileRow>,
+    owned: std::collections::BTreeSet<[u8; 16]>,
+    held: Vec<HeldWritableEviction>,
+}
+struct HeldWritableEviction {
+    file: ProtectedCompletionFile,
+    _ancestors: Vec<RawOwnedHandle>,
+    _entry: RawOwnedHandle,
+    root_final: PathBuf,
+    receipt: Arc<WritableCleanupReceipt>,
+    ticket: Option<crate::writable_cleanup_receipts::Ticket>,
+    baseline: RootSnapshot,
+}
+struct WritableCleanupReceipt {
+    dispatch: crate::FreshVaultCaptureDispatch,
+    root: crate::ConfiguredRootIdentity,
+    identity: [u8; 16],
+    file: LocalFileIdentity,
+    components: Vec<String>,
+    length: u64,
+    sha256: [u8; 32],
+}
+impl WritableCleanupReceipt {
+    fn matches_row(&self, root: RootIdentity, row: &hydration_inventory::HydratedFileRow) -> bool {
+        self.root.volume_serial == root.volume_serial
+            && self.root.file_index == root.file_index
+            && self.file.volume_serial == root.volume_serial
+            && self.file.file_index == row.file_index()
+            && &self.identity == row.identity()
+            && self.length == row.length()
+            && self.components == row.components()
+    }
+}
+fn placeholder_on_disk_empty(handle: Handle) -> Result<bool, Error> {
+    let mut ranges = [CfFileRange {
+        starting_offset: 0,
+        length: 0,
+    }; 64];
+    let mut returned = 0;
+    // SAFETY: fixed bounded output, same pinned nofollow file, metadata/ranges
+    // only. No hydration or body read is requested by this ONDISK query.
+    let hr = unsafe {
+        CfGetPlaceholderRangeInfo(
+            handle,
+            1,
+            0,
+            -1,
+            ranges.as_mut_ptr().cast(),
+            size_of_val(&ranges) as u32,
+            &mut returned,
+        )
+    };
+    if hr < 0 {
+        return Err(native_error("inspect current vault ONDISK ranges", hr));
+    }
+    if returned as usize > size_of_val(&ranges) || returned as usize % size_of::<CfFileRange>() != 0
+    {
+        return Err(Error::EditRecoveryUnavailable);
+    }
+    Ok(returned == 0)
+}
+
 pub(super) struct ConfiguredRootConnection {
     root: Option<Box<OwnedConfiguredRoot>>,
     state: Arc<CallbackState>,
@@ -1711,6 +1778,458 @@ impl ConfiguredRootConnection {
 
     // Future route owner must revoke/drain the exact route and prove complete
     // restart coverage before calling. No public lock wrapper exists yet.
+    pub(super) fn begin_cleanup_recorded_vault_files(
+        &self,
+        route: &crate::vault_routes::VerifiedVaultRoute,
+        route_owned: &std::collections::BTreeSet<[u8; 16]>,
+    ) -> Result<VaultCleanupFence, Error> {
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        if !self.connected
+            || route.local_root().volume_serial != root.identity.volume_serial
+            || route.local_root().file_index != root.identity.file_index
+            || self.state.has_unresolved_placeholder_data()
+        {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        let rows = {
+            let inventory = self
+                .state
+                .hydrated_files
+                .lock()
+                .map_err(|_| Error::EditRecoveryUnavailable)?;
+            if !inventory.is_complete() {
+                return Err(Error::EditRecoveryUnavailable);
+            }
+            inventory.snapshot(route_owned)
+        };
+        let mut fence = VaultCleanupFence {
+            state: Arc::clone(&self.state),
+            binding: Arc::downgrade(route.backend().binding()),
+            root: route.local_root(),
+            rows: rows.clone(),
+            owned: route_owned.clone(),
+            held: Vec::new(),
+        };
+        for row in rows {
+            let components = row
+                .components()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let admitted = self
+                .state
+                .writable_cleanup
+                .lock()
+                .map_err(|_| Error::EditRecoveryUnavailable)?
+                .admitted(row.identity(), |receipt| {
+                    receipt.matches_row(root.identity, &row)
+                        && route
+                            .backend()
+                            .binding()
+                            .matches_cleanup_dispatch(&receipt.dispatch)
+                });
+            match admitted {
+                Ok((ticket, receipt, already_empty)) => {
+                    let held =
+                        self.begin_writable_eviction(root, ticket, receipt, already_empty)?;
+                    fence.held.push(held);
+                }
+                Err(()) => {
+                    if self
+                        .state
+                        .writable_cleanup
+                        .lock()
+                        .map_err(|_| Error::EditRecoveryUnavailable)?
+                        .contains(row.identity())
+                    {
+                        return Err(Error::EditRecoveryUnavailable);
+                    }
+                    // A missing receipt never bypasses the old READONLY guard.
+                    self.dehydrate_clean_vault_placeholder(
+                        &components,
+                        row.file_index(),
+                        row.length(),
+                        row.identity(),
+                    )?;
+                }
+            }
+        }
+        self.verify_cleanup_fence(&fence)?;
+        Ok(fence)
+    }
+
+    fn begin_writable_eviction(
+        &self,
+        root: &OwnedConfiguredRoot,
+        ticket: crate::writable_cleanup_receipts::Ticket,
+        receipt: Arc<WritableCleanupReceipt>,
+        already_empty: bool,
+    ) -> Result<HeldWritableEviction, Error> {
+        let result = (|| {
+            root.verify_identity(true)?;
+            root.verify_registered()?;
+            let mut path = root.path.clone();
+            for part in &receipt.components {
+                if !valid_component(part) {
+                    return Err(Error::InvalidSyntheticPath);
+                }
+                path.push(part);
+            }
+            let (root_final, ancestors, entry, before) = pin_callback_path_chain(
+                &path,
+                root.identity,
+                receipt.file.file_index,
+                CallbackSizePolicy::Exact(receipt.length),
+            )
+            .map_err(|_| Error::ConfiguredRootChanged)?;
+            let file = ProtectedCompletionFile::open_for_cleanup(&wide_path(&path)?)?;
+            let opened = root_snapshot(file.raw)?;
+            let final_path =
+                final_path_for_handle(file.raw).map_err(|_| Error::ConfiguredRootChanged)?;
+            if !same_edit_snapshot(before, opened)
+                || !windows_paths_equal(
+                    &final_path_for_handle(entry.0).map_err(|_| Error::ConfiguredRootChanged)?,
+                    &final_path,
+                )
+                || !windows_path_is_within(&final_path, &root_final)
+                || opened.identity.volume_serial != receipt.file.volume_serial
+                || !cleanup_cloud_reparse_tag(opened.reparse_tag)
+                || opened.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+                || opened.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC == 0
+            {
+                return Err(Error::ConfiguredRootChanged);
+            }
+            clean_dehydrate_identity(
+                file.protected,
+                root.identity.file_index,
+                receipt.file.file_index,
+                &receipt.identity,
+            )?;
+            let usn = completion_usn(file.raw, receipt.file.file_index)?;
+            let basic = completion_basic_info(file.raw)?;
+            if already_empty {
+                if !placeholder_on_disk_empty(file.raw)? {
+                    return Err(Error::EditRecoveryUnavailable);
+                }
+            } else {
+                if receipt.length > crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64
+                    || opened.placeholder_state & CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK != 0
+                {
+                    return Err(Error::EditRecoveryUnavailable);
+                }
+                let mut bytes = Zeroizing::new(vec![0u8; receipt.length as usize]);
+                file.read_complete(&mut bytes)?;
+                if <[u8; 32]>::from(Sha256::digest(&bytes)) != receipt.sha256 {
+                    return Err(Error::EditRecoveryUnavailable);
+                }
+            }
+            if !same_edit_snapshot(opened, root_snapshot(file.raw)?)
+                || completion_basic_info(file.raw)? != basic
+                || completion_usn(file.raw, receipt.file.file_index)? != usn
+                || modified_ranges_for_handle(file.raw)
+                    .map_err(|_| Error::EditRecoveryUnavailable)?
+                || self.state.has_unresolved_placeholder_data()
+            {
+                return Err(Error::EditRecoveryUnavailable);
+            }
+            root.verify_identity(true)?;
+            root.verify_registered()?;
+            if !already_empty {
+                let range = CfFileRange {
+                    starting_offset: 0,
+                    length: -1,
+                };
+                // SAFETY: same referenced EXCLUSIVE RH handle and all nofollow
+                // pins span full CURRENT body/USN proof, byte-only eviction and
+                // finish after key clear. No metadata/identity write, mark, force,
+                // unpin or CAS fallback. NULL USN is this byte-only API contract.
+                let hr = unsafe {
+                    CfUpdatePlaceholder(
+                        file.protected,
+                        null(),
+                        null(),
+                        0,
+                        (&range as *const CfFileRange).cast(),
+                        1,
+                        1,
+                        null_mut(),
+                        null_mut(),
+                    )
+                };
+                if hr < 0 {
+                    return Err(native_error("evict completed writable vault bytes", hr));
+                }
+            }
+            let held = HeldWritableEviction {
+                file,
+                _ancestors: ancestors,
+                _entry: entry,
+                root_final,
+                receipt: Arc::clone(&receipt),
+                ticket: None,
+                baseline: opened,
+            };
+            self.verify_writable_evicted(root, &held)?;
+            Ok(held)
+        })();
+        match result {
+            Ok(mut held) => {
+                self.state
+                    .writable_cleanup
+                    .lock()
+                    .map_err(|_| Error::EditRecoveryUnavailable)?
+                    .evicted_unconfirmed(&ticket)
+                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                held.ticket = Some(ticket);
+                Ok(held)
+            }
+            Err(error) => {
+                if let Ok(mut receipts) = self.state.writable_cleanup.lock() {
+                    receipts.invalidate(&receipt.identity);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn verify_writable_evicted(
+        &self,
+        root: &OwnedConfiguredRoot,
+        held: &HeldWritableEviction,
+    ) -> Result<(), Error> {
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        let file = &held.file;
+        let r = &held.receipt;
+        let usn = completion_usn(file.raw, r.file.file_index)?;
+        let before = root_snapshot(file.raw)?;
+        let custody =
+            FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT;
+        if before.identity != held.baseline.identity
+            || before.file_size != r.length
+            || before.last_write_time != held.baseline.last_write_time
+            || before.file_attributes & custody != held.baseline.file_attributes & custody
+            || !cleanup_cloud_reparse_tag(before.reparse_tag)
+            || before.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC == 0
+            || !windows_path_is_within(
+                &final_path_for_handle(file.raw).map_err(|_| Error::ConfiguredRootChanged)?,
+                &held.root_final,
+            )
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        clean_dehydrate_identity(
+            file.protected,
+            root.identity.file_index,
+            r.file.file_index,
+            &r.identity,
+        )?;
+        if modified_ranges_for_handle(file.raw).map_err(|_| Error::EditRecoveryUnavailable)?
+            || !placeholder_on_disk_empty(file.raw)?
+            || !same_edit_snapshot(before, root_snapshot(file.raw)?)
+            || completion_usn(file.raw, r.file.file_index)? != usn
+        {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        Ok(())
+    }
+
+    fn verify_cleanup_fence(&self, fence: &VaultCleanupFence) -> Result<(), Error> {
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        if !self.connected
+            || !Arc::ptr_eq(&self.state, &fence.state)
+            || root.identity.volume_serial != fence.root.volume_serial
+            || root.identity.file_index != fence.root.file_index
+            || self.state.has_unresolved_placeholder_data()
+        {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        {
+            let inventory = self
+                .state
+                .hydrated_files
+                .lock()
+                .map_err(|_| Error::EditRecoveryUnavailable)?;
+            if !inventory.is_complete() {
+                return Err(Error::EditRecoveryUnavailable);
+            }
+            let current = inventory.snapshot(&fence.owned);
+            if current.len() != fence.rows.len()
+                || current.iter().zip(&fence.rows).any(|(a, b)| {
+                    a.identity() != b.identity()
+                        || a.file_index() != b.file_index()
+                        || a.length() != b.length()
+                        || a.components() != b.components()
+                })
+            {
+                return Err(Error::ConfiguredRootChanged);
+            }
+        }
+        let binding = fence
+            .binding
+            .upgrade()
+            .ok_or(Error::EditRecoveryUnavailable)?;
+        for held in &fence.held {
+            if !binding.matches_cleanup_dispatch(&held.receipt.dispatch) {
+                return Err(Error::EditRecoveryUnavailable);
+            }
+            self.verify_writable_evicted(root, held)?;
+        }
+        drop(binding);
+        for row in &fence.rows {
+            if fence
+                .held
+                .iter()
+                .any(|held| &held.receipt.identity == row.identity())
+            {
+                continue;
+            }
+            let mut path = root.path.clone();
+            for part in row.components() {
+                path.push(part);
+            }
+            let (_root_final, _pins, entry, observed) = pin_callback_path_chain(
+                &path,
+                root.identity,
+                row.file_index(),
+                CallbackSizePolicy::Exact(row.length()),
+            )
+            .map_err(|_| Error::ConfiguredRootChanged)?;
+            if observed.file_attributes & FILE_ATTRIBUTE_READONLY == 0
+                || !cleanup_cloud_reparse_tag(observed.reparse_tag)
+            {
+                return Err(Error::EditRecoveryUnavailable);
+            }
+            clean_dehydrate_identity(
+                entry.0,
+                root.identity.file_index,
+                row.file_index(),
+                row.identity(),
+            )?;
+            if modified_ranges_for_handle(entry.0).map_err(|_| Error::EditRecoveryUnavailable)?
+                || !placeholder_on_disk_empty(entry.0)?
+                || !same_edit_snapshot(observed, root_snapshot(entry.0)?)
+            {
+                return Err(Error::EditRecoveryUnavailable);
+            }
+        }
+        if self.state.has_unresolved_placeholder_data() {
+            return Err(Error::UnresolvedPlaceholderEdits);
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish_vault_cleanup(&self, fence: VaultCleanupFence) -> Result<(), Error> {
+        if let Err(error) = self.verify_cleanup_fence(&fence) {
+            if let Ok(mut receipts) = self.state.writable_cleanup.lock() {
+                for held in &fence.held {
+                    receipts.invalidate(&held.receipt.identity);
+                }
+            }
+            return Err(error);
+        }
+        let tickets = fence
+            .held
+            .iter()
+            .map(|h| h.ticket.as_ref().ok_or(Error::EditRecoveryUnavailable))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.state
+            .writable_cleanup
+            .lock()
+            .map_err(|_| Error::EditRecoveryUnavailable)?
+            .confirm(&tickets)
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
+        // All references release only after this held-reference final proof.
+        Ok(())
+    }
+
+    pub(super) fn writable_vault_cleanup_incomplete(&self) -> Result<bool, Error> {
+        // Drop receipt lock BEFORE global dirty/recovery locks.
+        let (footprint, incomplete) = {
+            let receipts = self
+                .state
+                .writable_cleanup
+                .lock()
+                .map_err(|_| Error::EditRecoveryUnavailable)?;
+            (receipts.footprint(), receipts.incomplete())
+        };
+        if !footprint {
+            return Ok(false);
+        }
+        let global = self.state.has_unresolved_placeholder_data();
+        let current_incomplete = self
+            .state
+            .writable_cleanup
+            .lock()
+            .map_err(|_| Error::EditRecoveryUnavailable)?
+            .incomplete();
+        Ok(incomplete || global || current_incomplete)
+    }
+
+    #[cfg(feature = "synthetic-agent-integration")]
+    pub(super) fn forget_writable_cleanup_receipt_for_integration(
+        &self,
+        identity: [u8; 16],
+    ) -> Result<(), Error> {
+        self.state
+            .writable_cleanup
+            .lock()
+            .map_err(|_| Error::EditRecoveryUnavailable)?
+            .forget(&identity);
+        Ok(())
+    }
+
+    #[cfg(feature = "synthetic-agent-integration")]
+    pub(super) fn placeholder_on_disk_empty_for_integration(
+        &self,
+        components: &[&str],
+    ) -> Result<bool, Error> {
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        if !self.connected
+            || components.is_empty()
+            || components.iter().any(|c| !valid_component(c))
+        {
+            return Err(Error::InvalidSyntheticPath);
+        }
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        let mut path = root.path.clone();
+        for part in components {
+            path.push(part);
+        }
+        let expected_file = self
+            .state
+            .hydrated_files
+            .lock()
+            .map_err(|_| Error::EditRecoveryUnavailable)?
+            .file_for_components(components)
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
+        let observed = entry_snapshot(&path, false)?;
+        if observed.identity.file_index != expected_file
+            || observed.identity.volume_serial != root.identity.volume_serial
+            || !cleanup_cloud_reparse_tag(observed.reparse_tag)
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        let (_root_final, _pins, exact, after) = pin_callback_path_chain(
+            &path,
+            root.identity,
+            observed.identity.file_index,
+            CallbackSizePolicy::Exact(observed.file_size),
+        )
+        .map_err(|_| Error::ConfiguredRootChanged)?;
+        if !same_edit_snapshot(observed, after) {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        let empty = placeholder_on_disk_empty(exact.0)?;
+        if !same_edit_snapshot(after, root_snapshot(exact.0)?) {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        Ok(empty)
+    }
+
     pub(super) fn cleanup_recorded_vault_files(
         &self,
         expected_root: crate::ConfiguredRootIdentity,
@@ -2130,6 +2649,18 @@ impl ConfiguredRootConnection {
                 {
                     return Err(Error::EditRecoveryUnavailable);
                 }
+                let cleanup_reservation = if restore_readonly {
+                    None
+                } else {
+                    Some(
+                        self.state
+                            .writable_cleanup
+                            .lock()
+                            .map_err(|_| Error::EditRecoveryUnavailable)?
+                            .reserve(upload.identity())
+                            .map_err(|_| Error::EditRecoveryUnavailable)?,
+                    )
+                };
                 let basic_before = completion_basic_info(file.raw)?;
                 // Bounded observed metadata contract: R/H/S/ARCHIVE are the
                 // standard settable bits. REPARSE is intrinsic, not requested.
@@ -2392,6 +2923,25 @@ impl ConfiguredRootConnection {
                 store
                     .before_completion_guard_release_for_test()
                     .map_err(|_| Error::EditRecoveryUnavailable)?;
+                if let Some(ticket) = cleanup_reservation {
+                    self.state
+                        .writable_cleanup
+                        .lock()
+                        .map_err(|_| Error::EditRecoveryUnavailable)?
+                        .publish(
+                            ticket,
+                            WritableCleanupReceipt {
+                                dispatch: binding.capture_dispatch_stamp(),
+                                root: upload.root(),
+                                identity: upload.identity(),
+                                file: target.local_file(),
+                                components: target.components().to_vec(),
+                                length,
+                                sha256: sha,
+                            },
+                        )
+                        .map_err(|_| Error::EditRecoveryUnavailable)?;
+                }
                 Ok(())
             })();
             if result.is_err() && attempted_prepare {
@@ -4525,6 +5075,26 @@ mod hydration_inventory {
             row.length = new_length;
             Ok(())
         }
+        #[cfg(feature = "synthetic-agent-integration")]
+        pub(super) fn file_for_components(
+            &self,
+            components: &[&str],
+        ) -> Result<u64, InventoryError> {
+            if !self.is_complete() {
+                return Err(InventoryError::Conflict);
+            }
+            let mut rows = self.rows.values().filter(|row| {
+                row.components
+                    .iter()
+                    .map(String::as_str)
+                    .eq(components.iter().copied())
+            });
+            let file = rows.next().ok_or(InventoryError::Conflict)?.file_index;
+            if rows.next().is_some() {
+                return Err(InventoryError::Conflict);
+            }
+            Ok(file)
+        }
         pub fn mark_incomplete(&mut self) {
             self.incomplete = true;
         }
@@ -4642,6 +5212,7 @@ struct CallbackState {
     #[cfg(feature = "synthetic-agent-integration")]
     fetch_validation_stage: AtomicUsize,
     hydrated_files: Mutex<hydration_inventory::HydratedFileInventory>,
+    writable_cleanup: Mutex<crate::writable_cleanup_receipts::Receipts<WritableCleanupReceipt>>,
     readiness: std::sync::atomic::AtomicU8,
     readiness_fetch_rejections: AtomicUsize,
     activity: Mutex<CallbackActivity>,
@@ -4727,6 +5298,7 @@ impl CallbackState {
             #[cfg(feature = "synthetic-agent-integration")]
             fetch_validation_stage: AtomicUsize::new(0),
             hydrated_files: Mutex::new(hydration_inventory::HydratedFileInventory::new()),
+            writable_cleanup: Mutex::new(crate::writable_cleanup_receipts::Receipts::default()),
             readiness: std::sync::atomic::AtomicU8::new(readiness),
             readiness_fetch_rejections: AtomicUsize::new(0),
             activity: Mutex::new(CallbackActivity {
@@ -4825,6 +5397,12 @@ impl CallbackState {
         }
     }
 
+    fn invalidate_writable_cleanup(&self) {
+        if let Ok(mut receipts) = self.writable_cleanup.lock() {
+            receipts.invalidate_all();
+        }
+    }
+
     fn record_placeholder_close(
         &self,
         info: &CfCallbackInfo,
@@ -4833,12 +5411,14 @@ impl CallbackState {
         self.last_close_file_id
             .store(info.file_id as u64, Ordering::Release);
         let Some(_permit) = self.close_check_pool.try_acquire() else {
+            self.invalidate_writable_cleanup();
             self.close_pool_refusals.fetch_add(1, Ordering::Relaxed);
             self.unverifiable_placeholder_closes
                 .fetch_add(1, Ordering::AcqRel);
             return None;
         };
         if flags & CF_CALLBACK_CLOSE_COMPLETION_FLAG_DELETED != 0 {
+            self.invalidate_writable_cleanup();
             self.deleted_placeholder_closes
                 .fetch_add(1, Ordering::Relaxed);
             self.unverifiable_placeholder_closes
@@ -4870,6 +5450,7 @@ impl CallbackState {
                 notification
             }
             Err((stage, hresult, modified)) => {
+                self.invalidate_writable_cleanup();
                 #[cfg(feature = "synthetic-agent-integration")]
                 eprintln!(
                     "synthetic close validation refused stage={stage} hresult={hresult:#010x} modified={modified}"
@@ -4992,6 +5573,15 @@ impl CallbackState {
             eprintln!("synthetic close metadata clean without data open=true");
             return Ok(ModifiedCloseCapture::Clean);
         }
+        // Known MODIFIED bytes invalidate this connection's exact opaque receipt
+        // immediately, before any data open, revoked route lookup or retention
+        // can block. Other clean files keep their own receipts. This establishes
+        // a conservative late-activity footprint independently of capture success.
+        let modified_identity: [u8; 16] = identity.try_into().map_err(|_| (68, 0, true))?;
+        self.writable_cleanup
+            .lock()
+            .map_err(|_| (68, 0, true))?
+            .invalidate(&modified_identity);
         // A partial file with modified bytes cannot be captured as a complete
         // recovery body. Preserve that known dirty state without hydrating it.
         if snapshot.placeholder_state & CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK != 0 {
@@ -5149,9 +5739,12 @@ impl CallbackState {
                         // Register BEFORE this lexical route/token/epoch fence
                         // ends. Completion's route WRITE drains every such close;
                         // no delayed post-fence insert can erase/replace a proof.
-                        self.vault_dirty
+                        let mut dirty = self.vault_dirty.lock().map_err(|_| (68, 0, true))?;
+                        self.writable_cleanup
                             .lock()
                             .map_err(|_| (68, 0, true))?
+                            .invalidate(&baseline.identity());
+                        dirty
                             .record(
                                 baseline.identity(),
                                 dirty_file,

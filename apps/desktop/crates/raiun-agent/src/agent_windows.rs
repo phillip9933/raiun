@@ -31,6 +31,9 @@ mod windows_vault_custody;
 #[path = "windows_vault_close_worker.rs"]
 mod windows_vault_close_worker;
 
+#[path = "windows_vault_cleanup_holds.rs"]
+mod windows_vault_cleanup_holds;
+
 #[path = "windows_proxy.rs"]
 mod windows_proxy;
 
@@ -87,7 +90,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use zeroize::Zeroizing;
 
@@ -451,6 +454,16 @@ struct VerifiedVaultBackend {
     custody: Arc<windows_vault_custody::WindowsVaultCustody>,
 }
 
+// Owner-thread only: the opaque native fence never enters a command or response.
+struct PendingNativeVaultCleanup {
+    binding: ActiveProviderBinding,
+    expected_backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
+    route: Arc<raiun_cloudfiles_windows::vault_routes::VerifiedVaultRoute>,
+    fence: raiun_cloudfiles_windows::VaultCleanupFence,
+}
+
+type PendingVaultCleanupTicket = windows_vault_cleanup_holds::PendingCleanupTicket;
+
 enum ProviderCommand {
     InstallFolders {
         setup: Box<windows_folder_sync::Setup>,
@@ -504,11 +517,21 @@ enum ProviderCommand {
         root_path: String,
         response: std::sync::mpsc::SyncSender<Result<(), String>>,
     },
-    LockVaultRoute {
+    BeginLockVaultRoute {
         binding: ActiveProviderBinding,
         space_id: String,
         root_resource_id: String,
         root_path: String,
+        response: std::sync::mpsc::SyncSender<Result<PendingVaultCleanupTicket, String>>,
+    },
+    FinishLockVaultRoute {
+        binding: ActiveProviderBinding,
+        ticket: PendingVaultCleanupTicket,
+        response: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+    AbortLockVaultRoute {
+        binding: ActiveProviderBinding,
+        ticket: PendingVaultCleanupTicket,
         response: std::sync::mpsc::SyncSender<Result<(), String>>,
     },
     InspectVaultBackend {
@@ -579,6 +602,12 @@ enum ProviderCommand {
     #[cfg(test)]
     VaultFilePendingForTest {
         identity: [u8; 16],
+        response: std::sync::mpsc::SyncSender<Result<bool, String>>,
+    },
+    #[cfg(test)]
+    VaultCleanupFixture {
+        binding: ActiveProviderBinding,
+        forget_receipt: Option<[u8; 16]>,
         response: std::sync::mpsc::SyncSender<Result<bool, String>>,
     },
     #[cfg(test)]
@@ -666,6 +695,7 @@ impl ProviderManager {
                 let mut active_binding: Option<ActiveProviderBinding> = None;
                 let mut last_vault_cleanup_error: Option<raiun_cloudfiles_windows::Error> = None;
                 let mut folders: Option<windows_folder_sync::Runtime> = None;
+                let mut cleanup_holds = windows_vault_cleanup_holds::PendingCleanupHolds::<PendingNativeVaultCleanup>::new();
                 let mut pending_command = None;
                 loop {
                     let command = match pending_command.take().map_or_else(
@@ -675,6 +705,11 @@ impl ProviderManager {
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     };
+                    // Sweep on every command and the existing bounded idle tick.
+                    cleanup_holds.sweep(Instant::now());
+                    if active_binding.as_ref().is_some_and(|binding| worker_generation.load(Ordering::Acquire) != binding.generation) {
+                        cleanup_holds.clear();
+                    }
                     let handled_command = command.is_some();
                     if let Some(command) = command {
                     match command {
@@ -847,38 +882,76 @@ impl ProviderManager {
                             }
                             let _ = response.send(result);
                         }
-                        ProviderCommand::LockVaultRoute { binding, space_id, root_resource_id, root_path, response } => {
+                        ProviderCommand::BeginLockVaultRoute { binding, space_id, root_resource_id, root_path, response } => {
                             let result = (|| {
-                                if binding.generation == 0 || worker_generation.load(Ordering::Acquire) != binding.generation
-                                    || active_binding.as_ref() != Some(&binding) || connection.is_none() {
+                                if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) || connection.is_none() {
                                     return Err("The Windows drive changed before vault cleanup".to_owned());
                                 }
-                                let backend = backend.as_ref().ok_or("The Windows drive is unavailable")?;
-                                let pending = retired_vaults.iter().position(|route| route.space_id() == space_id
-                                    && route.root_resource_id() == root_resource_id && route.root_path() == root_path);
-                                let index = match pending {
+                                // Reserve finite hold capacity and reject duplicate scope BEFORE native work.
+                                if !cleanup_holds.has_capacity() || cleanup_holds.any(|hold| hold.binding == binding
+                                    && hold.route.space_id() == space_id && hold.route.root_resource_id() == root_resource_id
+                                    && hold.route.root_path() == root_path) {
+                                    return Err("Vault cleanup is already pending or capacity is unavailable".to_owned());
+                                }
+                                let expected_backend = backend.as_ref().ok_or("The Windows drive is unavailable")?;
+                                let index = match retired_vaults.iter().position(|route| route.space_id() == space_id
+                                    && route.root_resource_id() == root_resource_id && route.root_path() == root_path) {
                                     Some(index) => index,
                                     None => {
-                                        let route = backend.retire_vault_route(&space_id, &root_resource_id, &root_path)
+                                        let route = expected_backend.retire_vault_route(&space_id, &root_resource_id, &root_path)
                                             .map_err(|_| "Could not retain this vault for cleanup")?
                                             .ok_or("This vault has no active route")?;
                                         retired_vaults.push(route);
                                         retired_vaults.len() - 1
                                     }
                                 };
-                                // Retain the Arc BEFORE a fallible revoke or file operation.
-                                let route = &retired_vaults[index];
+                                let route = Arc::clone(&retired_vaults[index]);
                                 route.revoke_hydration().map_err(|_| "Vault hydration could not fully drain")?;
-                                connection.as_ref().ok_or("The Windows drive is unavailable")?
-                                    .cleanup_retired_vault_route(route)
-                                    .map_err(|error| {
+                                let fence = connection.as_ref().ok_or("The Windows drive is unavailable")?
+                                    .begin_cleanup_retired_vault_route(&route).map_err(|error| {
                                         last_vault_cleanup_error = Some(error);
                                         "Vault reads stopped, but local cleanup is incomplete; edits and retry state were preserved"
                                     })?;
-                                retired_vaults.remove(index);
+                                if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) {
+                                    return Err("The account changed during vault cleanup".to_owned());
+                                }
+                                cleanup_holds.insert(PendingNativeVaultCleanup { binding, expected_backend: Arc::clone(expected_backend), route, fence }, Instant::now())
+                                    .map_err(|_hold| "Vault cleanup hold capacity is unavailable".to_owned())
+                            })();
+                            // Failed response drops the only ticket weak ref. Release native
+                            // references immediately, retaining the retired route as incomplete.
+                            if let Err(failed) = response.send(result) {
+                                if let Ok(ticket) = failed.0 { cleanup_holds.abort(ticket); }
+                            }
+                        }
+                        ProviderCommand::FinishLockVaultRoute { binding, ticket, response } => {
+                            let result = (|| {
+                                let hold = cleanup_holds.take(ticket, Instant::now()).ok_or("Vault cleanup hold expired or was abandoned")?;
+                                if hold.binding != binding
+                                    || !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref())
+                                    || backend.as_ref().is_none_or(|current| !Arc::ptr_eq(current, &hold.expected_backend))
+                                    || !retired_vaults.iter().any(|route| Arc::ptr_eq(route, &hold.route)) {
+                                    return Err("The Windows drive changed before vault cleanup finished".to_owned());
+                                }
+                                connection.as_ref().ok_or("The Windows drive is unavailable")?
+                                    .finish_vault_cleanup(hold.fence).map_err(|error| {
+                                        last_vault_cleanup_error = Some(error);
+                                        "Vault keys are locked, but local cleanup is incomplete"
+                                    })?;
+                                if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) {
+                                    return Err("The account changed during vault cleanup".to_owned());
+                                }
+                                retired_vaults.retain(|route| !Arc::ptr_eq(route, &hold.route));
                                 Ok(())
                             })();
                             let _ = response.send(result);
+                        }
+                        ProviderCommand::AbortLockVaultRoute { binding, ticket, response } => {
+                            // Ticket consumption releases holds even on a stale caller binding;
+                            // abort never removes a retired route or reports cleanup complete.
+                            let current = vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref());
+                            let aborted = cleanup_holds.abort(ticket);
+                            let _ = response.send(if current && aborted { Ok(()) } else { Err("Vault cleanup hold is no longer current".to_owned()) });
                         }
                         ProviderCommand::InspectVaultBackend { binding, response } => {
                             let result = if binding.generation == 0
@@ -961,7 +1034,10 @@ impl ProviderManager {
                                 Err("The Windows drive changed before cleanup inspection".to_owned())
                             } else {
                                 // Absence is unknown, never proof of complete cleanup.
-                                Ok(retired_vaults.iter().any(|route| route.space_id() == space_id && route.root_resource_id() == root_resource_id && route.root_path() == root_path))
+                                connection.as_ref().ok_or_else(|| "The Windows drive is unavailable".to_owned()).and_then(|active| {
+                                    let footprint = active.writable_vault_cleanup_incomplete().map_err(|_| "Current vault cleanup status is unavailable".to_owned())?;
+                                    Ok(footprint || retired_vaults.iter().any(|route| route.space_id() == space_id && route.root_resource_id() == root_resource_id && route.root_path() == root_path))
+                                })
                             };
                             let result = if worker_generation.load(Ordering::Acquire) == binding.generation { result }
                                 else { Err("The Windows drive changed during cleanup inspection".to_owned()) };
@@ -1124,6 +1200,7 @@ impl ProviderManager {
                         }
                         #[cfg(all(test, debug_assertions))]
                         ProviderCommand::RevokeBackendForTest(response) => {
+                            cleanup_holds.clear();
                             let result = backend.as_ref().map(|backend| backend.revoke())
                                 .ok_or_else(|| "No active backend to revoke".to_owned());
                             let _ = response.send(result);
@@ -1219,6 +1296,24 @@ impl ProviderManager {
                             let _ = response.send(result);
                         }
                         #[cfg(test)]
+                        ProviderCommand::VaultCleanupFixture { binding, forget_receipt, response } => {
+                            let result = (|| {
+                                if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) {
+                                    return Err("The Windows drive changed before the synthetic cleanup observation".to_owned());
+                                }
+                                let active = connection.as_ref().ok_or("The Windows drive is not connected")?;
+                                if let Some(identity) = forget_receipt {
+                                    active.forget_writable_cleanup_receipt_for_integration(identity)
+                                        .map_err(|_| "Could not drop the matching volatile synthetic receipt".to_owned())?;
+                                    Ok(false)
+                                } else {
+                                    active.placeholder_on_disk_empty_for_integration(&["Personal", "Travel.vault", "1"])
+                                        .map_err(|_| "Could not inspect synthetic native on-disk ranges".to_owned())
+                                }
+                            })();
+                            let _ = response.send(result);
+                        }
+                        #[cfg(test)]
                         ProviderCommand::CloseObservation(response) => {
                             let result = connection
                                 .as_ref()
@@ -1227,6 +1322,7 @@ impl ProviderManager {
                             let _ = response.send(result);
                         }
                         ProviderCommand::Disconnect(response) => {
+                            cleanup_holds.clear();
                             if let Ok(mut handle) = worker_folder_revocation.lock() { if let Some(handle) = handle.take() { handle.revoke(); } }
                             drop(folders.take());
                             worker_folder_generation.store(0, Ordering::Release);
@@ -1246,6 +1342,7 @@ impl ProviderManager {
                             let _ = response.send(result);
                         }
                         ProviderCommand::Stop(response) => {
+                            cleanup_holds.clear();
                             if let Ok(mut handle) = worker_folder_revocation.lock() { if let Some(handle) = handle.take() { handle.revoke(); } }
                             drop(folders.take());
                             worker_folder_generation.store(0, Ordering::Release);
@@ -1310,6 +1407,7 @@ impl ProviderManager {
                         }
                     }
                 }
+                cleanup_holds.clear();
                 worker_jobs.cancel_all();
                 if disconnect_provider_connection(
                     &mut retired_vaults,
@@ -1418,16 +1516,16 @@ impl ProviderManager {
             .map_err(|_| "Windows Cloud Files connection manager stopped")?
     }
 
-    fn lock_vault_route(
+    fn begin_lock_vault_route(
         &self,
         binding: ActiveProviderBinding,
         space_id: String,
         root_resource_id: String,
         root_path: String,
-    ) -> Result<(), String> {
+    ) -> Result<PendingVaultCleanupTicket, String> {
         let (response, result) = std::sync::mpsc::sync_channel(1);
         self.commands
-            .send(ProviderCommand::LockVaultRoute {
+            .send(ProviderCommand::BeginLockVaultRoute {
                 binding,
                 space_id,
                 root_resource_id,
@@ -1438,6 +1536,61 @@ impl ProviderManager {
         result
             .recv()
             .map_err(|_| "Windows Cloud Files connection manager stopped")?
+    }
+
+    fn finish_lock_vault_route(
+        &self,
+        binding: ActiveProviderBinding,
+        ticket: PendingVaultCleanupTicket,
+    ) -> Result<(), String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::FinishLockVaultRoute {
+                binding,
+                ticket,
+                response,
+            })
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result
+            .recv()
+            .map_err(|_| "Windows Cloud Files connection manager stopped")?
+    }
+
+    fn abort_lock_vault_route(
+        &self,
+        binding: ActiveProviderBinding,
+        ticket: PendingVaultCleanupTicket,
+    ) -> Result<(), String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::AbortLockVaultRoute {
+                binding,
+                ticket,
+                response,
+            })
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result
+            .recv()
+            .map_err(|_| "Windows Cloud Files connection manager stopped")?
+    }
+
+    #[cfg(test)]
+    fn vault_cleanup_fixture(
+        &self,
+        binding: ActiveProviderBinding,
+        forget_receipt: Option<[u8; 16]>,
+    ) -> Result<bool, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::VaultCleanupFixture {
+                binding,
+                forget_receipt,
+                response,
+            })
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "Synthetic cleanup observation timed out")?
     }
 
     fn verified_vault_backend(
@@ -8428,9 +8581,32 @@ mod tests {
 
     #[cfg(all(windows, debug_assertions))]
     #[test]
-    #[ignore = "requires isolated ordinary RaiunLabUser/fresh child LOCALAPPDATA; native writable-byte completion retains incomplete readonly cleanup"]
+    #[ignore = "requires isolated ordinary RaiunLabUser/fresh child LOCALAPPDATA; missing volatile receipt refuses cleanup despite historical native writable-byte completion"]
     fn native_broker_vault_writable_bytes_complete_preserves_pending_cleanup() {
-        broker_remembered_lifecycle_fixture_with_modes(true, true, true, true, false, false, true);
+        broker_remembered_lifecycle_fixture_with_modes(
+            true,
+            true,
+            true,
+            true,
+            false,
+            false,
+            WritableCleanupFixtureMode::MissingReceipt,
+        );
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser/fresh child appdata; verifies same-live writable cleanup boundary and one bounded late-write outcome"]
+    fn native_broker_vault_writable_bytes_lock_evicts_with_late_activity_truthfulness() {
+        broker_remembered_lifecycle_fixture_with_modes(
+            true,
+            true,
+            true,
+            true,
+            false,
+            false,
+            WritableCleanupFixtureMode::NormalCleanup,
+        );
     }
 
     #[cfg(all(windows, debug_assertions))]
@@ -8506,7 +8682,7 @@ mod tests {
             false,
             true,
             automatic,
-            false,
+            WritableCleanupFixtureMode::Disabled,
         );
     }
 
@@ -8541,8 +8717,15 @@ mod tests {
             complete_local,
             inject_writer_probe,
             false,
-            false,
+            WritableCleanupFixtureMode::Disabled,
         );
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    enum WritableCleanupFixtureMode {
+        Disabled,
+        MissingReceipt,
+        NormalCleanup,
     }
 
     #[cfg(all(windows, debug_assertions))]
@@ -8553,8 +8736,10 @@ mod tests {
         complete_local: bool,
         inject_writer_probe: bool,
         automatic: bool,
-        writable_bytes: bool,
+        writable_mode: WritableCleanupFixtureMode,
     ) {
+        let writable_bytes = !matches!(writable_mode, WritableCleanupFixtureMode::Disabled);
+        let writable_cleanup = matches!(writable_mode, WritableCleanupFixtureMode::NormalCleanup);
         assert!(!writable_bytes || (complete_local && !automatic && !inject_writer_probe));
         assert!(!automatic || (upload_edit && !complete_local));
         assert!(!complete_local || upload_edit);
@@ -9285,11 +9470,313 @@ mod tests {
                             .vault_file_pending_for_test(original.opaque())
                             .unwrap()
                     );
+                    if writable_cleanup {
+                        let mut lock = target();
+                        lock["action"] = json!("vault_lock");
+                        let locked = broker
+                            .handle_isolated_lifecycle_session(lock)
+                            .expect(
+                                "same-live writable completion permits held-reference clean Lock",
+                            )
+                            .0;
+                        assert_eq!(locked["unlocked"], false);
+                        assert_eq!(locked["vault_lock_cleanup_status"], "complete");
+                        assert!(!sessions.is_unlocked(&scope).unwrap());
+                        assert!(sessions.capture_session_epoch(&scope).is_err());
+                        assert!(
+                            runtime
+                                .provider
+                                .vault_cleanup_fixture(active.clone(), None)
+                                .unwrap(),
+                            "current native ONDISK ranges must be empty after Lock"
+                        );
+                        let empty_native = runtime
+                            .provider
+                            .read_only_placeholder_observation(
+                                NativeRestartProbePath::VaultCapturedFile,
+                            )
+                            .unwrap()
+                            .2
+                            .expect("evicted writable native observation");
+                        assert_eq!(empty_native.0 & 1, 0, "cleanup never restores READONLY");
+                        assert_eq!(empty_native.3, edited.len() as u64);
+                        use sha2::Digest as _;
+                        let hash = format!("{:x}", sha2::Sha256::digest(&edited));
+                        assert!(
+                            !broker_vault_read_in_child(&file, edited.len(), &hash).unwrap(),
+                            "fresh ordinary reader must refuse after keys locked/cache eviction"
+                        );
+                        assert!(
+                            runtime
+                                .provider
+                                .vault_cleanup_fixture(active.clone(), None)
+                                .unwrap(),
+                            "refused read must not restore native plaintext"
+                        );
+                        assert_eq!(
+                            remote.native_reads.lock().unwrap().vault_get_count,
+                            gets_after_upload
+                        );
+                        let protected = verified
+                            .custody
+                            .inspect_capture_for_test(&scope, "/Travel.vault")
+                            .unwrap();
+                        assert_eq!(protected.captures.len(), 1);
+                        assert_eq!(
+                            protected.captures[0].0.bytes_for_recovery(),
+                            edited.as_slice()
+                        );
+                        assert!(
+                            protected.captures[0].0.encoded_frame_ref()
+                                == retained.encoded_frame_ref()
+                        );
+                        assert!(protected.captures[0].1 == original);
+                        println!(
+                            "C06_VAULT_WRITABLE_CLEANUP_LOCK_VERIFIED=true;keys_locked=true;on_disk_empty=true;locked_read_refused=true;readonly=false;protected_body_retained=true;DELETE=0"
+                        );
+                        // The held-reference proof ends at Lock. This one ordinary
+                        // existing-file write measures later activity, never permanent
+                        // exclusion. No permission/metadata mutation or hydration read.
+                        let before_late = runtime.provider.close_observation().unwrap();
+                        let late = (0..31).map(|i| (i * 7 + 5) as u8).collect::<Vec<_>>();
+                        let mut late_writer = Command::new("powershell.exe")
+                            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                                "$ErrorActionPreference='Stop'; try { $b=New-Object byte[] 31; for($i=0;$i -lt $b.Length;$i++){$b[$i]=[byte](($i*7+5)-band 255)}; $f=[IO.File]::Open($env:RAIUN_SYNTHETIC_EDIT_FILE,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::Read); try{$f.SetLength($b.Length); $f.Write($b,0,$b.Length); $f.Flush($true)}finally{$f.Dispose()}; [Console]::WriteLine('WRITTEN') } catch { $e=$_.Exception; while($e.InnerException){$e=$e.InnerException}; [Console]::WriteLine(('DENIED|{0}' -f $e.HResult)); exit 24 }"])
+                            .env("RAIUN_SYNTHETIC_EDIT_FILE", &file)
+                            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+                        let deadline = Instant::now() + Duration::from_secs(20);
+                        let status = loop {
+                            if let Some(status) = late_writer.try_wait().unwrap() {
+                                break status;
+                            }
+                            assert!(
+                                Instant::now() < deadline,
+                                "late writer timed out; preserve owned process and fixture"
+                            );
+                            thread::sleep(Duration::from_millis(20));
+                        };
+                        let output = late_writer.wait_with_output().unwrap();
+                        let report = String::from_utf8(output.stdout).unwrap();
+                        let report = report.trim();
+                        println!(
+                            "C06_VAULT_WRITABLE_CLEANUP_LATE_WRITER_RAW={report};exit={:?}",
+                            status.code()
+                        );
+                        let late_written = if status.success() {
+                            assert_eq!(report, "WRITTEN");
+                            let deadline = Instant::now() + Duration::from_secs(15);
+                            loop {
+                                let observation = runtime.provider.close_observation().unwrap();
+                                if observation.0 > before_late.0 || observation.1 > before_late.1 {
+                                    break;
+                                }
+                                assert!(
+                                    Instant::now() < deadline,
+                                    "late modified/uncertain close not observed; preserve fixture"
+                                );
+                                thread::sleep(Duration::from_millis(25));
+                            }
+                            assert!(
+                                runtime
+                                    .provider
+                                    .vault_lock_cleanup_status(
+                                        active.clone(),
+                                        "synthetic-personal-drive".into(),
+                                        "synthetic-vault-root".into(),
+                                        "/Travel.vault".into()
+                                    )
+                                    .unwrap(),
+                                "later observed activity must make current cleanup incomplete after route removal"
+                            );
+                            assert_eq!(
+                                std::fs::read(&file).unwrap(),
+                                late,
+                                "late native bytes must survive"
+                            );
+                            assert!(
+                                !runtime
+                                    .provider
+                                    .vault_cleanup_fixture(active.clone(), None)
+                                    .unwrap(),
+                                "same recorded native file now has retained late ONDISK bytes"
+                            );
+                            assert!(
+                                broker.stop_all().is_err(),
+                                "later dirty bytes refuse stop cleanup"
+                            );
+                            println!(
+                                "C06_VAULT_WRITABLE_CLEANUP_LATE_ACTIVITY=true;current_cleanup=incomplete;new_bytes_retained=true;permanent_exclusion_claim=false"
+                            );
+                            true
+                        } else {
+                            assert_eq!(status.code(), Some(24));
+                            let hr = report
+                                .strip_prefix("DENIED|")
+                                .and_then(|s| s.parse::<i32>().ok())
+                                .expect("late refusal must report actual HRESULT");
+                            let code = hr as u32 & 0xffff;
+                            assert_eq!(
+                                hr as u32 & 0xffff0000,
+                                0x80070000,
+                                "unexpected setup/.NET error is not a safe write denial"
+                            );
+                            assert!(
+                                matches!(code, 5 | 32 | 362 | 389 | 395),
+                                "late failure must be a known access/sharing/cloud-file error"
+                            );
+                            let after_denial = runtime
+                                .provider
+                                .read_only_placeholder_observation(
+                                    NativeRestartProbePath::VaultCapturedFile,
+                                )
+                                .unwrap()
+                                .2
+                                .expect("current metadata after denied late write");
+                            assert_eq!(
+                                after_denial.0, empty_native.0,
+                                "late denied writer must not change attributes"
+                            );
+                            println!(
+                                "C06_VAULT_WRITABLE_CLEANUP_LATE_DENIAL_METADATA=hresult:{hr};win32:{code};before_attrs:{};after_attrs:{};before_tag:{};after_tag:{};before_state:{};after_state:{};before_len:{};after_len:{}",
+                                empty_native.0,
+                                after_denial.0,
+                                empty_native.1,
+                                after_denial.1,
+                                empty_native.2,
+                                after_denial.2,
+                                empty_native.3,
+                                after_denial.3
+                            );
+                            assert!(
+                                runtime
+                                    .provider
+                                    .vault_cleanup_fixture(active.clone(), None)
+                                    .unwrap(),
+                                "denied writer must leave current ONDISK empty, including after a length-only side effect"
+                            );
+                            let observed = runtime.provider.close_observation().unwrap();
+                            let pending = runtime
+                                .provider
+                                .vault_lock_cleanup_status(
+                                    active.clone(),
+                                    "synthetic-personal-drive".into(),
+                                    "synthetic-vault-root".into(),
+                                    "/Travel.vault".into(),
+                                )
+                                .unwrap();
+                            println!(
+                                "C06_VAULT_WRITABLE_CLEANUP_LATE_DENIAL_OBSERVATION=before:{before_late:?};after:{observed:?};pending:{pending}"
+                            );
+                            let changed = after_denial != empty_native
+                                || observed.0 > before_late.0
+                                || observed.1 > before_late.1
+                                || pending;
+                            let stopped = if changed {
+                                None
+                            } else {
+                                Some(broker.stop_all())
+                            };
+                            let incomplete =
+                                changed || stopped.as_ref().is_some_and(Result::is_err);
+                            if incomplete {
+                                let deadline = Instant::now() + Duration::from_secs(15);
+                                let observed = loop {
+                                    let observation = runtime.provider.close_observation().unwrap();
+                                    if observation.0 > before_late.0
+                                        || observation.1 > before_late.1
+                                    {
+                                        break observation;
+                                    }
+                                    assert!(
+                                        Instant::now() < deadline,
+                                        "denied late write side effect has no observed modified/uncertain close; preserve fixture"
+                                    );
+                                    thread::sleep(Duration::from_millis(25));
+                                };
+                                assert!(
+                                    runtime
+                                        .provider
+                                        .vault_lock_cleanup_status(
+                                            active.clone(),
+                                            "synthetic-personal-drive".into(),
+                                            "synthetic-vault-root".into(),
+                                            "/Travel.vault".into()
+                                        )
+                                        .unwrap()
+                                );
+                                if stopped.is_none() {
+                                    assert!(
+                                        broker.stop_all().is_err(),
+                                        "observed late side effects refuse stop cleanup"
+                                    );
+                                }
+                                println!(
+                                    "C06_VAULT_WRITABLE_CLEANUP_LATE_DENIAL_SIDE_EFFECT=true;hresult={hr};win32={code};native_len={};modified_closes={};uncertain_closes={};current_cleanup=incomplete;native_state_preserved=true;permanent_exclusion_claim=false",
+                                    after_denial.3, observed.0, observed.1
+                                );
+                            } else {
+                                assert!(stopped.unwrap().is_ok());
+                                println!(
+                                    "C06_VAULT_WRITABLE_CLEANUP_LATE_WRITE_DENIED=true;hresult={hr};win32={code};observed_mutation=false;actual_stop=complete;permanent_exclusion_claim=false"
+                                );
+                            }
+                            false
+                        };
+                        assert!(!sessions.is_unlocked(&scope).unwrap());
+                        assert!(sessions.capture_session_epoch(&scope).is_err());
+                        assert_eq!(
+                            remote.native_reads.lock().unwrap().vault_get_count,
+                            gets_after_upload
+                        );
+                        assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+                        assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
+                        let protected_after_late = verified
+                            .custody
+                            .inspect_capture_for_test(&scope, "/Travel.vault")
+                            .unwrap();
+                        assert_eq!(protected_after_late.captures.len(), 1);
+                        assert_eq!(
+                            protected_after_late.captures[0].0.bytes_for_recovery(),
+                            edited.as_slice()
+                        );
+                        assert!(
+                            protected_after_late.captures[0].0.encoded_frame_ref()
+                                == retained.encoded_frame_ref()
+                        );
+                        assert!(protected_after_late.captures[0].1 == original);
+                        {
+                            let state = remote.vault_upload.as_ref().unwrap().lock().unwrap();
+                            assert_eq!(state.put_attempt_count, 1);
+                            assert_eq!(state.put_count, 1);
+                            assert_eq!(state.body_get_count, 1);
+                            assert_eq!(state.forbidden_mutation_count, 0);
+                        }
+                        drop(root_pin);
+                        drop(verified);
+                        drop(broker);
+                        drop(runtime);
+                        drop(sessions);
+                        remote.join().unwrap();
+                        appdata_pin.verify_path().unwrap();
+                        println!(
+                            "C06_VAULT_WRITABLE_CLEANUP_BOUNDARY_VERIFIED=true;vaultPUT=1;authenticatedBodyGET=1;noReplay=true;native_completed=true;keys_locked=true;late_written={late_written};no_product_activation=true"
+                        );
+                        return;
+                    }
+                    // Historical NativeCompleted is NOT cleanup authority. This
+                    // legacy denial case drops only the exact live volatile row.
+                    runtime
+                        .provider
+                        .vault_cleanup_fixture(active.clone(), Some(original.opaque()))
+                        .unwrap();
+                    println!(
+                        "C06_VAULT_WRITABLE_CLEANUP_VOLATILE_RECEIPT_DROPPED=true;protected_history_unchanged=true"
+                    );
                     let mut lock = target();
                     lock["action"] = json!("vault_lock");
                     assert!(
                         broker.handle_isolated_lifecycle_session(lock).is_err(),
-                        "writable native bytes are not current readonly cleanup authority"
+                        "historical native completion without live receipt cannot authorize writable cleanup"
                     );
                     assert!(!sessions.is_unlocked(&scope).unwrap());
                     assert!(
