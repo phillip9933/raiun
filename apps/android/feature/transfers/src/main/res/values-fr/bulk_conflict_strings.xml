@@ -1,0 +1,5 @@
+<resources>
+    <string name="transfers_cancel_conflicts_action">Annuler tous les envois en conflit</string>
+    <string name="transfers_cancel_conflicts_title">Annuler les envois en conflit ?</string>
+    <string name="transfers_cancel_conflicts_confirmation">Annuler %1$d envois en conflit pour ce compte ? Les fichiers locaux et distants ne seront pas supprimés. Les autres transferts continueront.</string>
+</resources>

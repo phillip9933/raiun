@@ -1,0 +1,5 @@
+<resources>
+    <string name="transfers_cancel_conflicts_action">Cancel all conflicting uploads</string>
+    <string name="transfers_cancel_conflicts_title">Cancel conflicting uploads?</string>
+    <string name="transfers_cancel_conflicts_confirmation">Cancel %1$d conflicting uploads for this account? Local and cloud files will not be deleted. Other transfers will continue.</string>
+</resources>

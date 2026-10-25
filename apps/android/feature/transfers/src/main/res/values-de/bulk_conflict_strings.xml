@@ -1,0 +1,5 @@
+<resources>
+    <string name="transfers_cancel_conflicts_action">Alle Upload-Konflikte abbrechen</string>
+    <string name="transfers_cancel_conflicts_title">Upload-Konflikte abbrechen?</string>
+    <string name="transfers_cancel_conflicts_confirmation">%1$d Upload-Konflikte für dieses Konto abbrechen? Lokale Dateien und Cloud-Dateien werden nicht gelöscht. Andere Übertragungen laufen weiter.</string>
+</resources>

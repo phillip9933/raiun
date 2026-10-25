@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.Upload
 import androidx.compose.material3.Card
 import androidx.compose.material3.DropdownMenu
@@ -62,6 +63,7 @@ internal fun SettingsSections(
     onPermissions: () -> Unit,
     onOpenTemporary: () -> Unit,
     onFileOpening: () -> Unit,
+    onUpdates: () -> Unit,
 ) {
     Column(
         Modifier.padding(OpenCloudDimensions.SpacingMd),
@@ -132,6 +134,15 @@ internal fun SettingsSections(
         }
         Text(stringResource(R.string.settings_troubleshooting), style = MaterialTheme.typography.titleSmall)
         DiagnosticsCard(state, diagnostics)
+        Card(onClick = onUpdates, modifier = Modifier.fillMaxWidth()) {
+            ListItem(
+                headlineContent = { Text(stringResource(R.string.updates_title)) },
+                supportingContent = { Text(stringResource(R.string.updates_summary)) },
+                leadingContent = { Icon(Icons.Default.SystemUpdate, null) },
+                trailingContent = { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null) },
+                colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceContainerHighest),
+            )
+        }
     }
 }
 

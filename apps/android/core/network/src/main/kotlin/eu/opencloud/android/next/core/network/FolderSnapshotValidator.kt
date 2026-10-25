@@ -6,6 +6,7 @@ import org.w3c.dom.Element
 /** A failed resource response is not evidence that the resource was deleted. */
 internal class FolderSnapshotValidator(
     requestUrl: String,
+    private val registerPath: ((String) -> Boolean)? = null,
 ) {
     private val requested = requestUrl.toHttpUrl()
     private val parentSegments = requested.pathSegments.dropLastWhile { it.isEmpty() }
@@ -18,7 +19,12 @@ internal class FolderSnapshotValidator(
         requireSameOrigin(url, requested)
         val segments = url.pathSegments.dropLastWhile { it.isEmpty() }
         if (segments != parentSegments && segments.dropLast(1) != parentSegments) invalidSnapshot()
-        if (!seen.add(segments.joinToString("/"))) invalidSnapshot()
+        val canonicalPath = segments.joinToString("/")
+        if (registerPath?.invoke(canonicalPath) == false ||
+            (registerPath == null && !seen.add(canonicalPath))
+        ) {
+            invalidSnapshot()
+        }
         keepSuccessfulProperties(response)
         val collection = segments == parentSegments
         if (collection) {

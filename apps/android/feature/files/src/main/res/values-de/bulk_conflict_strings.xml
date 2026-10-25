@@ -1,0 +1,7 @@
+<resources>
+    <string name="browser_cancel_conflicts_action">Alle Upload-Konflikte abbrechen</string>
+    <string name="browser_cancel_conflicts_title">Upload-Konflikte abbrechen?</string>
+    <string name="browser_cancel_conflicts_confirmation">%1$d Upload-Konflikte für dieses Konto abbrechen? Lokale Dateien und Cloud-Dateien werden nicht gelöscht. Andere Übertragungen laufen weiter.</string>
+    <string name="browser_keep_conflicts">Konflikte behalten</string>
+    <string name="browser_cancelling_conflicts">Upload-Konflikte werden abgebrochen…</string>
+</resources>

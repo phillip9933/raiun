@@ -13,19 +13,23 @@ import androidx.work.workDataOf
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.FolderBackupEntity
-import eu.opencloud.android.next.core.database.ResourceEntity
+import eu.opencloud.android.next.core.database.FolderSnapshotScope
 import eu.opencloud.android.next.core.database.SpaceEntity
-import eu.opencloud.android.next.core.model.ResourceKind
 import eu.opencloud.android.next.core.network.LibreGraphSpacesClient
 import eu.opencloud.android.next.core.network.OpenCloudError
+import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.network.RemoteDiscoveryClient
+import eu.opencloud.android.next.core.network.RemoteFolderSink
 import eu.opencloud.android.next.core.network.safeMessage
 import eu.opencloud.android.next.core.network.toOpenCloudError
+import eu.opencloud.android.next.core.security.AccountSessions
 import eu.opencloud.android.next.core.security.TlsPolicy
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
+import java.io.File
 
 class AccountDiscoveryWorker(
     context: Context,
@@ -38,6 +42,7 @@ class AccountDiscoveryWorker(
                 val store = store()
                 val accountId = requireNotNull(inputData.getString(ACCOUNT_ID))
                 val account = requireNotNull(store.account(accountId))
+                val accountLease = AccountSessions.get(applicationContext).beginLease(accountId)
                 val httpClient = httpClient(account.serverUrl)
                 val remote = RemoteDiscoveryClient(httpClient)
                 val authorization = WorkerAuthorizationProvider(applicationContext).authorization(account)
@@ -47,9 +52,24 @@ class AccountDiscoveryWorker(
                         account.id,
                         account.serverUrl,
                         authorization,
+                        publicationGuard = {
+                            if (!accountLease()) throw OpenCloudException(OpenCloudError.AccessDenied)
+                        },
                     )
                 spaces.filterNot { it.isDeleted || it.isDisabled }.forEach { space ->
-                    refreshFolder(FolderRefresh(store, remote, account.id, space, null, "/", authorization))
+                    refreshFolder(
+                        FolderRefresh(
+                            store,
+                            remote,
+                            account.id,
+                            space,
+                            null,
+                            "/",
+                            authorization,
+                            applicationContext.cacheDir,
+                            accountLease,
+                        ),
+                    )
                 }
                 store.account(account.id)?.remoteSearchUrl?.let { endpoint ->
                     val token = store.beginSnapshot(account.id)
@@ -75,9 +95,20 @@ class AccountDiscoveryWorker(
                         ) { spaceId, parentId, path ->
                             val space = requireNotNull(spaces.find { it.driveId == spaceId })
                             refreshFolder(
-                                FolderRefresh(store, remote, account.id, space, parentId, path, authorization),
+                                FolderRefresh(
+                                    store,
+                                    remote,
+                                    account.id,
+                                    space,
+                                    parentId,
+                                    path,
+                                    authorization,
+                                    applicationContext.cacheDir,
+                                    accountLease,
+                                ),
                             )
                         }.hydrate(account.id, favorites)
+                    if (!accountLease()) throw OpenCloudException(OpenCloudError.AccessDenied)
                     if (!store.replaceFavoriteSnapshot(account.id, favorites.mapValues { it.value.keys }, token)) {
                         throw SupersededDiscovery()
                     }
@@ -111,6 +142,7 @@ class FolderDiscoveryWorker(
                 val spaceId = requireNotNull(inputData.getString(SPACE_ID))
                 val folderId = inputData.getString(FOLDER_ID)
                 val account = requireNotNull(store.account(accountId))
+                val accountLease = AccountSessions.get(applicationContext).beginLease(accountId)
                 val space = requireNotNull(store.space(accountId, spaceId))
                 val path = folderId?.let { requireNotNull(store.resource(accountId, spaceId, it)).path } ?: "/"
                 refreshFolder(
@@ -122,6 +154,8 @@ class FolderDiscoveryWorker(
                         folderId,
                         path,
                         WorkerAuthorizationProvider(applicationContext).authorization(account),
+                        applicationContext.cacheDir,
+                        accountLease,
                     ),
                 )
                 if (revision != null) store.acknowledgeDiscovery(revision)
@@ -372,40 +406,54 @@ internal data class FolderRefresh(
     val parentId: String?,
     val path: String,
     val authorization: String,
+    val cacheDir: File,
+    val accountLease: () -> Boolean,
 )
 
 internal suspend fun refreshFolder(request: FolderRefresh) {
+    val coroutine = currentCoroutineContext()
+
+    fun requireLease() {
+        coroutine.ensureActive()
+        if (!request.accountLease()) throw OpenCloudException(OpenCloudError.AccessDenied)
+    }
+
+    requireLease()
     val root = webDavRoot(request.space)
     val token = request.store.beginFolderSnapshot(request.accountId, request.space.driveId, request.parentId)
     val now = System.currentTimeMillis()
-    val snapshot = request.client.folderSnapshot(root, request.path, request.authorization)
-    val resources =
-        snapshot.resources.map {
-            ResourceEntity(
-                request.accountId,
-                request.space.driveId,
-                it.id,
-                request.parentId,
-                it.path,
-                it.name,
-                if (it.folder) ResourceKind.FOLDER else ResourceKind.FILE,
-                it.mimeType,
-                it.size,
-                it.eTag,
-                it.modifiedAtEpochMillis,
-                it.createdAtEpochMillis.takeIf { value -> value > 0 } ?: now,
-                isFavorite = it.favorite,
-            )
-        }
-    if (!request.store.replaceDiscoveredFolderSnapshot(
-            request.accountId,
-            request.space.driveId,
-            request.parentId,
-            eu.opencloud.android.next.core.database
-                .FolderSnapshot(resources, snapshot.excludedVaultPaths),
-            token,
+    StagedRemoteFolder.create(request.cacheDir).use { stage ->
+        request.client.streamFolder(
+            root,
+            request.path,
+            request.authorization,
+            RemoteFolderSink(
+                registerCanonicalPath = {
+                    requireLease()
+                    stage.registerCanonicalPath(it)
+                },
+                registerCollectionId = {
+                    requireLease()
+                    stage.registerCollectionId(it)
+                },
+                onEntry = {
+                    requireLease()
+                    stage.add(it)
+                },
+            ),
         )
-    ) {
-        throw SupersededDiscovery()
+        requireLease()
+        stage.finish()
+        requireLease()
+        if (!request.store.replaceStagedFolderSnapshot(
+                request.accountId,
+                FolderSnapshotScope(request.space.driveId, request.parentId),
+                stage.reader(request.accountId, request.space.driveId, request.parentId, now),
+                token,
+                publicationGuard = ::requireLease,
+            )
+        ) {
+            throw SupersededDiscovery()
+        }
     }
 }

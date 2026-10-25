@@ -5,10 +5,13 @@ import eu.opencloud.android.next.core.database.AccountEntity
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.SpaceEntity
+import eu.opencloud.android.next.core.network.OpenCloudError
+import eu.opencloud.android.next.core.network.OpenCloudException
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
@@ -18,6 +21,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
+import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 class ProviderFolderOperationsTest {
@@ -25,6 +29,8 @@ class ProviderFolderOperationsTest {
     private val database = Room.inMemoryDatabaseBuilder(context, FileBrowserDatabase::class.java).build()
     private val store = FileBrowserStore(database)
     private val server = MockWebServer()
+    private var leaseValid = true
+    private val accountLease: () -> Boolean = { leaseValid }
     private val http =
         OkHttpClient
             .Builder()
@@ -44,7 +50,14 @@ class ProviderFolderOperationsTest {
                         ).build(),
                 )
             }.build()
-    private val operations = ProviderFolderOperations(context, store, { "Bearer fixture" }, { http })
+    private val operations =
+        ProviderFolderOperations(
+            context,
+            store,
+            { "Bearer fixture" },
+            { http },
+            { accountLease },
+        )
 
     @Before fun seed() =
         runBlocking {
@@ -69,9 +82,9 @@ class ProviderFolderOperationsTest {
             val folder = operations.create("a", "s", null, "Backups", "vnd.android.document/directory") { true }
             assertEquals("folder-id", folder.remoteId)
             assertEquals("/Backups", folder.path)
-            assertEquals("PROPFIND", server.takeRequest().method)
-            assertEquals("MKCOL", server.takeRequest().method)
-            assertEquals("PROPFIND", server.takeRequest().method)
+            assertEquals("PROPFIND", nextRequest().method)
+            assertEquals("MKCOL", nextRequest().method)
+            assertEquals("PROPFIND", nextRequest().method)
 
             server.enqueue(listing("/dav/Backups/"))
             server.enqueue(MockResponse().setResponseCode(404))
@@ -81,13 +94,13 @@ class ProviderFolderOperationsTest {
             assertEquals("file-id", file.remoteId)
             assertEquals("folder-id", file.parentId)
             assertEquals("/Backups/backup.json", file.path)
-            server.takeRequest()
-            assertEquals("HEAD", server.takeRequest().method)
-            val put = server.takeRequest()
+            nextRequest()
+            assertEquals("HEAD", nextRequest().method)
+            val put = nextRequest()
             assertEquals("PUT", put.method)
             assertEquals("*", put.getHeader("If-None-Match"))
             assertEquals(0L, put.bodySize)
-            server.takeRequest()
+            nextRequest()
         }
 
     @Test fun `existing file and invalid names never trigger a write`() {
@@ -95,7 +108,7 @@ class ProviderFolderOperationsTest {
         assertThrows(IllegalStateException::class.java) {
             runBlocking { operations.create("a", "s", null, "backup.json", "application/json") { true } }
         }
-        assertEquals("PROPFIND", server.takeRequest().method)
+        assertEquals("PROPFIND", nextRequest().method)
         listOf("../file", "folder/file", "..", "bad\\name").forEach { name ->
             assertThrows(IllegalArgumentException::class.java) {
                 runBlocking { operations.create("a", "s", null, name, "application/json") { true } }
@@ -108,20 +121,20 @@ class ProviderFolderOperationsTest {
         runBlocking {
             server.enqueue(listing("/dav/", item("/dav/backup.tmp", "file-id", false)))
             operations.refresh("a", "s", null) { true }
-            server.takeRequest()
+            nextRequest()
             val file = store.children("a", "s", null).single()
             server.enqueue(MockResponse().setResponseCode(201))
             server.enqueue(listing("/dav/", item("/dav/backup.json", "file-id", false)))
             val renamed = operations.rename(file, "backup.json") { true }
-            val move = server.takeRequest()
+            val move = nextRequest()
             assertEquals("MOVE", move.method)
             assertEquals("F", move.getHeader("Overwrite"))
             assertEquals("\"v1\"", move.getHeader("If-Match"))
             assertTrue(requireNotNull(move.getHeader("Destination")).endsWith("/backup.json"))
-            server.takeRequest()
+            nextRequest()
             server.enqueue(MockResponse().setResponseCode(204))
             operations.delete(renamed) { true }
-            val delete = server.takeRequest()
+            val delete = nextRequest()
             assertEquals("DELETE", delete.method)
             assertEquals("\"v1\"", delete.getHeader("If-Match"))
             assertTrue(store.children("a", "s", null).isEmpty())
@@ -133,6 +146,18 @@ class ProviderFolderOperationsTest {
         }
         assertEquals(0, server.requestCount)
     }
+
+    @Test fun `revoked account lease prevents refresh request`() {
+        leaseValid = false
+        val failure =
+            assertThrows(OpenCloudException::class.java) {
+                runBlocking { operations.refresh("a", "s", null) { true } }
+            }
+        assertEquals(OpenCloudError.AccessDenied, failure.error)
+        assertEquals(0, server.requestCount)
+    }
+
+    private fun nextRequest(): RecordedRequest = requireNotNull(server.takeRequest(2, TimeUnit.SECONDS))
 
     private fun listing(
         path: String,

@@ -43,7 +43,7 @@ Settings rendered from the Android app with test data.
 
 ## Install
 
-Download the Android 1.0.0 APK from [GitHub Releases](https://github.com/phillip9933/raiun/releases/tag/android-v1.0.0) and verify it against the attached SHA256SUMS file. Install over an existing Raiun release to keep its app data. Please report problems through the project issue tracker.
+Download the latest Android APK from [GitHub Releases](https://github.com/phillip9933/raiun/releases) and verify it against the attached SHA256SUMS file. Install over an existing Raiun release to keep its app data. See the [release notes](docs/RELEASE-NOTES-1.1.0.md) for Android 1.1.0 changes. Please report problems through the project issue tracker.
 
 ## Build and test
 
@@ -57,9 +57,9 @@ python scripts/install_offline_scanner_sdk.py
 
 On Windows use `gradlew.bat`. Release builds contain no development credentials and are unsigned until the maintainer signs them. See [release procedure](docs/RELEASING.md), [privacy](PRIVACY.md), [security reporting](../../SECURITY.md) and [third-party notices](THIRD-PARTY-NOTICES.md).
 
-Translations use standard Android resource files. The unreleased candidate includes German, French, Spanish, European Portuguese and Japanese; missing translations fall back to English. Draft translations still need native-speaker review.
+Translations use standard Android resource files. Android 1.0.0 includes German, French, Spanish, European Portuguese and Japanese alongside English. Missing translations fall back to English, and the draft translations still need native-speaker review.
 
-## Known beta limitations
+## Known limitations
 
 - Encrypted storage follows the Web-compatible rclone crypt format. It authenticates content blocks, but the format does not authenticate filenames or a complete file manifest. Server metadata can be observed, and a malicious server can replay valid older ciphertext or alter metadata in ways the format cannot detect. See the [encrypted security review](docs/ENCRYPTED-SECURITY-REVIEW.md#format-limitations-preserved-for-web-compatibility).
 - Encrypted location identity and root labels may be visible while locked so locations can be listed; child names and file contents require unlock.
@@ -84,7 +84,7 @@ I use AI tools to help with development, including analysis, code, tests and doc
 
 I document validation and known limitations so you can assess the evidence for yourself. Contributions should disclose material AI assistance and distinguish checks actually run from checks still needed.
 
-See [beta limitations](#known-beta-limitations), [testing guidance](docs/TESTING.md) and [contribution guidance](CONTRIBUTING.md#ai-usage).
+See [limitations](#known-limitations), [testing guidance](docs/TESTING.md) and [contribution guidance](CONTRIBUTING.md#ai-usage).
 
 ## Source licensing
 

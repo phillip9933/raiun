@@ -8,10 +8,10 @@ I build projects to solve problems I run into in my own life. I share them becau
 
 | Platform | Source and setup | Release status |
 | --- | --- | --- |
-| Android | [apps/android](apps/android/README.md) | 1.0.0 |
+| Android | [apps/android](apps/android/README.md) | 1.1.0 |
 | Linux Desktop | [apps/desktop](apps/desktop/README.md) | 0.7.0-beta.1; early beta |
 
-Android and desktop have independent versions and release pages. This coordinated release pairs Android 1.0.0 with the first Linux Desktop 0.7 beta. Windows and macOS are not released.
+Android and desktop have independent versions and release pages. Android 1.1.0 is the latest Android release; Linux Desktop remains on the separate 0.7 beta. Windows and macOS are not released.
 
 Android includes Personal files and Spaces, encrypted folders and Spaces, offline access, transfers, folder/camera backup and document scanning. See its [features and limitations](apps/android/README.md), [privacy notice](apps/android/PRIVACY.md) and [changelog](apps/android/CHANGELOG.md).
 

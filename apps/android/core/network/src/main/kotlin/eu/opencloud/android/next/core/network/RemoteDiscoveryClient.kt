@@ -17,11 +17,20 @@ class RemoteDiscoveryClient(
         require(maxResponseBytes in 1..32L * 1024 * 1024)
     }
 
-    private val client =
+    private val metadataClient =
         client
             .withMetadataDeadline()
             .newBuilder()
             .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
+    private val streamingClient =
+        client
+            .newBuilder()
+            .callTimeout(
+                minOf(client.callTimeoutMillis.takeIf { it > 0 } ?: 300_000, 300_000).toLong(),
+                java.util.concurrent.TimeUnit.MILLISECONDS,
+            ).followRedirects(false)
             .followSslRedirects(false)
             .build()
 
@@ -35,7 +44,17 @@ class RemoteDiscoveryClient(
         rootWebDavUrl: String,
         path: String,
         authorization: String,
-    ): RemoteFolderSnapshot = readFolder(rootWebDavUrl, path, authorization, "1")
+    ): RemoteFolderSnapshot = readFolder(rootWebDavUrl, path, authorization)
+
+    /** Sink callbacks are provisional until this method returns after complete root and XML validation. */
+    fun streamFolder(
+        rootWebDavUrl: String,
+        path: String,
+        authorization: String,
+        sink: RemoteFolderSink,
+    ) {
+        readFolder(rootWebDavUrl, path, authorization, FolderReadOptions(sink = sink))
+    }
 
     /** Shared listings must publish encrypted requested-collection evidence for atomic cache revocation. */
     fun sharedFolderSnapshot(
@@ -44,7 +63,7 @@ class RemoteDiscoveryClient(
         authorization: String,
     ): RemoteFolderSnapshot =
         try {
-            readFolder(rootWebDavUrl, path, authorization, "1", reportEncryptedCollection = true)
+            readFolder(rootWebDavUrl, path, authorization, FolderReadOptions(reportEncryptedCollection = true))
         } catch (failure: OpenCloudException) {
             if (failure.error != OpenCloudError.InvalidResponse) throw failure
             throw SharedMetadataException(SharedMetadataStage.DAV_LISTING)
@@ -54,7 +73,7 @@ class RemoteDiscoveryClient(
         url: String,
         authorization: String,
     ) {
-        if (readFolder(url, "", authorization, "0").resources.isNotEmpty()) {
+        if (readFolder(url, "", authorization, FolderReadOptions(depth = "0")).resources.isNotEmpty()) {
             throw OpenCloudException(OpenCloudError.PreconditionFailed)
         }
     }
@@ -65,18 +84,16 @@ class RemoteDiscoveryClient(
         authorization: String,
         expectedId: String,
     ) {
-        readFolder(url, "", authorization, "0", expectedCollectionId = expectedId)
+        readFolder(url, "", authorization, FolderReadOptions(depth = "0", expectedCollectionId = expectedId))
     }
 
     // Explicit read constraints; fail closed and preserve cancellation.
-    @Suppress("TooGenericExceptionCaught", "ThrowsCount", "LongParameterList")
+    @Suppress("TooGenericExceptionCaught", "ThrowsCount")
     private fun readFolder(
         rootWebDavUrl: String,
         path: String,
         authorization: String,
-        depth: String,
-        reportEncryptedCollection: Boolean = false,
-        expectedCollectionId: String? = null,
+        options: FolderReadOptions = FolderReadOptions(),
     ): RemoteFolderSnapshot {
         val url = rootWebDavUrl.childUrl(path)
         if (isVaultPath(url.toHttpUrl().pathSegments.joinToString("/"))) {
@@ -88,31 +105,19 @@ class RemoteDiscoveryClient(
                 .url(
                     url,
                 ).header("Authorization", authorization)
-                .header("Depth", depth)
+                .header("Depth", options.depth)
                 .method("PROPFIND", PROPFIND_BODY)
                 .build()
-        val validator = FolderSnapshotValidator(url)
-        val excluded = mutableSetOf<String>()
-        val identities = mutableSetOf<Pair<String, String>>()
-        val resources = mutableListOf<RemoteResource>()
-        var encryptedCollection = false
-        var plainCollectionConfirmed = false
-        client.newCall(request).execute().use { response ->
+        val state = FolderReadState(url, path, options)
+        (if (options.sink == null) metadataClient else streamingClient).newCall(request).execute().use { response ->
             if (!response.isSuccessful) throw TransferHttpException(response.code)
             val body = response.body ?: throw OpenCloudException(OpenCloudError.InvalidResponse)
             try {
-                readDavResponses(body.byteStream(), maxResponseBytes) { element ->
-                    if (validator.accept(element)) {
-                        element.requireIdentity(expectedCollectionId)
-                        encryptedCollection = element.isEncryptedVault()
-                        plainCollectionConfirmed = reportEncryptedCollection && element.confirmsPlainCollection()
-                    } else {
-                        val href =
-                            element.text(DAV_NAMESPACE, "href")
-                                ?: throw OpenCloudException(OpenCloudError.InvalidResponse)
-                        element.resource(path, href, excluded, identities)?.let(resources::add)
-                    }
-                }
+                readDavResponses(
+                    body.byteStream(),
+                    if (options.sink == null) maxResponseBytes else STREAMING_RESPONSE_LIMIT_BYTES,
+                    state::consume,
+                )
             } catch (cancelled: java.util.concurrent.CancellationException) {
                 throw cancelled
             } catch (failure: OpenCloudException) {
@@ -123,12 +128,56 @@ class RemoteDiscoveryClient(
                 throw OpenCloudException(OpenCloudError.InvalidResponse)
             }
         }
-        validator.finish()
-        if (encryptedCollection) {
-            if (!reportEncryptedCollection) throw OpenCloudException(OpenCloudError.Unsupported)
+        state.finish()
+        if (state.encryptedCollection) {
+            if (!options.reportEncryptedCollection) throw OpenCloudException(OpenCloudError.Unsupported)
             return RemoteFolderSnapshot(emptyList(), setOf(path))
         }
-        return RemoteFolderSnapshot(resources, excluded.toSet(), plainCollectionConfirmed)
+        return RemoteFolderSnapshot(state.resources, state.excluded.toSet(), state.plainCollectionConfirmed)
+    }
+
+    private data class FolderReadOptions(
+        val depth: String = "1",
+        val reportEncryptedCollection: Boolean = false,
+        val expectedCollectionId: String? = null,
+        val sink: RemoteFolderSink? = null,
+    )
+
+    private inner class FolderReadState(
+        url: String,
+        private val path: String,
+        private val options: FolderReadOptions,
+    ) {
+        private val validator = FolderSnapshotValidator(url, options.sink?.registerCanonicalPath)
+        private val identities = if (options.sink == null) mutableSetOf<Pair<String, String>>() else null
+        val excluded = mutableSetOf<String>()
+        val resources = mutableListOf<RemoteResource>()
+        var encryptedCollection = false
+            private set
+        var plainCollectionConfirmed = false
+            private set
+
+        fun consume(element: Element) {
+            if (validator.accept(element)) {
+                element.requireIdentity(options.expectedCollectionId)
+                (element.text(OC_NAMESPACE, "fileid") ?: element.text(OC_NAMESPACE, "id"))?.let(::registerCollectionId)
+                encryptedCollection = element.isEncryptedVault()
+                plainCollectionConfirmed = options.reportEncryptedCollection && element.confirmsPlainCollection()
+                return
+            }
+            val href = element.text(DAV_NAMESPACE, "href") ?: throw OpenCloudException(OpenCloudError.InvalidResponse)
+            element.resource(path, href, excluded, identities, options.sink?.onEntry)?.let(resources::add)
+        }
+
+        fun finish() = validator.finish()
+
+        private fun registerCollectionId(id: String) {
+            val accepted =
+                id.isNotBlank() &&
+                    (identities?.add("id" to id) ?: true) &&
+                    (options.sink?.registerCollectionId?.invoke(id) ?: true)
+            if (!accepted) throw OpenCloudException(OpenCloudError.InvalidResponse)
+        }
     }
 
     private fun Element.requireIdentity(expectedId: String?) {
@@ -141,7 +190,8 @@ class RemoteDiscoveryClient(
         path: String,
         href: String,
         excluded: MutableSet<String>,
-        identities: MutableSet<Pair<String, String>>,
+        identities: MutableSet<Pair<String, String>>?,
+        onEntry: ((RemoteFolderEntry) -> Unit)?,
     ): RemoteResource? {
         val response = this
         val decodedPath =
@@ -153,26 +203,28 @@ class RemoteDiscoveryClient(
         requireRemoteName(name)
         val relativePath = "${path.trimEnd('/')}/$name".let { if (it.startsWith('/')) it else "/$it" }
         val id = response.text(OC_NAMESPACE, "fileid") ?: response.text(OC_NAMESPACE, "id") ?: href
-        if (id.isBlank() || !identities.add("path" to relativePath) || !identities.add("id" to id)) {
-            throw OpenCloudException(OpenCloudError.InvalidResponse)
-        }
+        requireResourceIdentity(id, relativePath, identities)
         if (response.excludesVaultPath(relativePath)) {
-            excluded.add(relativePath)
+            if (onEntry == null) excluded.add(relativePath)
+            onEntry?.invoke(RemoteFolderEntry(id, relativePath, null))
             return null
         }
-        return RemoteResource(
-            id = id,
-            path = relativePath,
-            name = name,
-            folder = response.getElementsByTagNameNS(DAV_NAMESPACE, "collection").length > 0,
-            mimeType = response.text(DAV_NAMESPACE, "getcontenttype"),
-            size = response.resourceSize(),
-            eTag = response.text(DAV_NAMESPACE, "getetag"),
-            modifiedAtEpochMillis = response.text(DAV_NAMESPACE, "getlastmodified").toEpochMillis(),
-            createdAtEpochMillis = response.text(DAV_NAMESPACE, "creationdate").toEpochMillis(),
-            favorite =
-                response.text(OC_NAMESPACE, "favorite") == "1" || response.text(OC_NAMESPACE, "favorite") == "true",
-        )
+        val resource =
+            RemoteResource(
+                id = id,
+                path = relativePath,
+                name = name,
+                folder = response.getElementsByTagNameNS(DAV_NAMESPACE, "collection").length > 0,
+                mimeType = response.text(DAV_NAMESPACE, "getcontenttype"),
+                size = response.resourceSize(),
+                eTag = response.text(DAV_NAMESPACE, "getetag"),
+                modifiedAtEpochMillis = response.text(DAV_NAMESPACE, "getlastmodified").toEpochMillis(),
+                createdAtEpochMillis = response.text(DAV_NAMESPACE, "creationdate").toEpochMillis(),
+                favorite =
+                    response.text(OC_NAMESPACE, "favorite") == "1" || response.text(OC_NAMESPACE, "favorite") == "true",
+            )
+        onEntry?.invoke(RemoteFolderEntry(id, relativePath, resource))
+        return if (onEntry == null) resource else null
     }
 
     private fun Element.resourceSize(): Long =
@@ -180,7 +232,20 @@ class RemoteDiscoveryClient(
             ?: text(OC_NAMESPACE, "size")?.toLongOrNull()
             ?: 0
 
+    private fun requireResourceIdentity(
+        id: String,
+        path: String,
+        identities: MutableSet<Pair<String, String>>?,
+    ) {
+        val valid =
+            id.isNotBlank() &&
+                (identities?.add("path" to path) ?: true) &&
+                (identities?.add("id" to id) ?: true)
+        if (!valid) throw OpenCloudException(OpenCloudError.InvalidResponse)
+    }
+
     private companion object {
+        const val STREAMING_RESPONSE_LIMIT_BYTES = 256L * 1024 * 1024
         const val DAV_NAMESPACE = "DAV:"
         const val OC_NAMESPACE = "http://owncloud.org/ns"
         val PROPFIND_BODY =
@@ -190,6 +255,20 @@ class RemoteDiscoveryClient(
                 )
     }
 }
+
+/** A null resource marks a vault path that must be excluded from the ordinary cache. */
+data class RemoteFolderEntry(
+    val id: String,
+    val path: String,
+    val resource: RemoteResource?,
+)
+
+/** Callbacks are provisional until [RemoteDiscoveryClient.streamFolder] returns successfully. */
+data class RemoteFolderSink(
+    val registerCanonicalPath: (String) -> Boolean,
+    val registerCollectionId: (String) -> Boolean,
+    val onEntry: (RemoteFolderEntry) -> Unit,
+)
 
 private fun requireSnapshotName(name: String) {
     require(name !in setOf(".", "..") && name.none { it == '/' || it == '\\' || it.isISOControl() })

@@ -443,6 +443,10 @@ class TransferManager(
         )
     }
 
+    /** Cancels only this account's upload conflicts that are still conflicts when the database updates them. */
+    suspend fun cancelUploadConflicts(accountId: String): Int =
+        store.cancelUploadConflicts(accountId, clock.epochMillis())
+
     suspend fun saveBackup(configuration: eu.opencloud.android.next.core.database.FolderBackupEntity) {
         BackupExclusions.parse(configuration.exclusionPatterns)
         require(

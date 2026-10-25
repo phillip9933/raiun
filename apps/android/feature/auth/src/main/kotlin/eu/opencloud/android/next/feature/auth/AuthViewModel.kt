@@ -16,14 +16,17 @@ import eu.opencloud.android.next.core.model.auth.OidcConfiguration
 import eu.opencloud.android.next.core.network.OpenCloudApi
 import eu.opencloud.android.next.core.network.safeMessage
 import eu.opencloud.android.next.core.network.toOpenCloudError
+import eu.opencloud.android.next.core.security.AccountSessions
 import eu.opencloud.android.next.core.security.KeystoreCredentialStore
 import eu.opencloud.android.next.core.security.TlsPolicy
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import java.security.cert.CertificateException
 import javax.net.ssl.SSLHandshakeException
@@ -212,8 +215,22 @@ class AuthViewModel(
         )
     }
 
+    @Suppress("TooGenericExceptionCaught") // Any account persistence failure needs the same orphan cleanup.
     private suspend fun setSession(session: AuthenticatedSession) {
-        fileStore.saveAccount(session.account, session.capabilities, session.oidcConfiguration)
+        try {
+            fileStore.saveAccount(session.account, session.capabilities, session.oidcConfiguration)
+        } catch (failure: Exception) {
+            // Repository login has already committed credentials. If the account row did not
+            // survive, do not leave a session that account removal cannot discover.
+            withContext(NonCancellable) {
+                val saved = runCatching { fileStore.account(session.account.id) }
+                if (saved.isSuccess && saved.getOrNull() == null) {
+                    runCatching { AccountSessions.get(getApplication()).remove(session.account.id) }
+                        .onFailure(failure::addSuppressed)
+                }
+            }
+            throw failure
+        }
         settings.setActiveAccountId(session.account.id)
         mutableState.value =
             mutableState.value.copy(

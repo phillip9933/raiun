@@ -1,0 +1,7 @@
+<resources>
+    <string name="browser_cancel_conflicts_action">競合するアップロードをすべてキャンセル</string>
+    <string name="browser_cancel_conflicts_title">競合するアップロードをキャンセルしますか？</string>
+    <string name="browser_cancel_conflicts_confirmation">このアカウントの競合するアップロード %1$d 件をキャンセルしますか？ローカルとクラウドのファイルは削除されません。他の転送は続行されます。</string>
+    <string name="browser_keep_conflicts">競合を残す</string>
+    <string name="browser_cancelling_conflicts">競合するアップロードをキャンセル中…</string>
+</resources>

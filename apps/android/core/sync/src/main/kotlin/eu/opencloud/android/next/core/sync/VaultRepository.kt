@@ -11,6 +11,7 @@ import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.network.RemoteSpace
 import eu.opencloud.android.next.core.network.RemoteSpacesSnapshot
+import eu.opencloud.android.next.core.network.TransferConflictException
 import eu.opencloud.android.next.core.network.VaultDavClient
 import eu.opencloud.android.next.core.network.VaultDavEntry
 import eu.opencloud.android.next.core.network.VaultDavListing
@@ -192,7 +193,14 @@ class VaultRepository internal constructor(
                 transferContext.ensureActive()
                 if (!permit()) throw OpenCloudException(OpenCloudError.AccessDenied)
             }
-            requireCurrentLocation(access, graphSnapshot(access), job.location, dav)
+            try {
+                requireCurrentLocation(access, graphSnapshot(access), job.location, dav)
+            } catch (failure: OpenCloudException) {
+                if (mayHaveCommitted && failure.error == OpenCloudError.NotFound) {
+                    throw OpenCloudException(OpenCloudError.NotReady(null))
+                }
+                throw failure
+            }
 
             suspend fun checkRoot() {
                 access.requireCurrent()
@@ -233,8 +241,32 @@ class VaultRepository internal constructor(
                     ) == job.digest
                 }
             }
-            val previous = destination()
-            if (mayHaveCommitted && previous != null && verify(previous)) {
+
+            fun pendingVerification(entry: VaultDavEntry): Boolean =
+                try {
+                    if (!entry.isFolder && entry.size == job.size && entry.strongETag == null) {
+                        throw OpenCloudException(OpenCloudError.NotReady(null))
+                    }
+                    verify(entry)
+                } catch (failure: OpenCloudException) {
+                    if (failure.error == OpenCloudError.NotFound) {
+                        throw OpenCloudException(OpenCloudError.NotReady(null))
+                    }
+                    throw failure
+                }
+
+            suspend fun pendingDestination(): VaultDavEntry? =
+                try {
+                    destination()
+                } catch (failure: OpenCloudException) {
+                    if (failure.error == OpenCloudError.NotFound) {
+                        throw OpenCloudException(OpenCloudError.NotReady(null))
+                    }
+                    throw failure
+                }
+
+            val previous = if (mayHaveCommitted) pendingDestination() else destination()
+            if (mayHaveCommitted && previous != null && pendingVerification(previous)) {
                 checkRoot()
                 return@withContext requireNotNull(previous.strongETag)
             }
@@ -244,29 +276,37 @@ class VaultRepository internal constructor(
             }
             checkRoot()
             onMutationStarted()
-            dav.putCiphertext(
-                job.location.rootWebDavUrl,
-                job.destination,
-                access.authorization,
-                job.size,
-                job.expectedETag,
-            ) { output ->
-                payloads.open(job).use { input ->
-                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                    var count = 0L
-                    while (true) {
-                        checkActive()
-                        val size = input.read(buffer)
-                        if (size < 0) break
-                        output.write(buffer, 0, size)
-                        count += size
-                        onProgress(count)
+            try {
+                dav.putCiphertext(
+                    job.location.rootWebDavUrl,
+                    job.destination,
+                    access.authorization,
+                    job.size,
+                    job.expectedETag,
+                ) { output ->
+                    payloads.open(job).use { input ->
+                        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                        var count = 0L
+                        while (true) {
+                            checkActive()
+                            val size = input.read(buffer)
+                            if (size < 0) break
+                            output.write(buffer, 0, size)
+                            count += size
+                            onProgress(count)
+                        }
+                        if (count != job.size) throw OpenCloudException(OpenCloudError.InvalidResponse)
                     }
-                    if (count != job.size) throw OpenCloudException(OpenCloudError.InvalidResponse)
                 }
+            } catch (collision: TransferConflictException) {
+                if (!mayHaveCommitted) throw collision
+                val committed = pendingDestination() ?: throw OpenCloudException(OpenCloudError.NotReady(null))
+                if (!pendingVerification(committed)) throw collision
+                checkRoot()
+                return@withContext requireNotNull(committed.strongETag)
             }
-            val after = destination() ?: throw OpenCloudException(OpenCloudError.InvalidResponse)
-            if (!verify(after)) throw OpenCloudException(OpenCloudError.InvalidResponse)
+            val after = pendingDestination() ?: throw OpenCloudException(OpenCloudError.NotReady(null))
+            if (!pendingVerification(after)) throw OpenCloudException(OpenCloudError.InvalidResponse)
             checkRoot()
             requireNotNull(after.strongETag)
         }

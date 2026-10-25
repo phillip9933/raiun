@@ -340,6 +340,35 @@ class SnapshotOrderingTest {
             assertEquals(null, refreshed.localPath)
         }
 
+    @Test fun `staged publication guard aborts before and after mutations without changing the snapshot`() =
+        runTest {
+            store.replaceFolderSnapshot("a", "s", null, listOf(resource))
+            val replacement = resource.copy(remoteId = "replacement", path = "/replacement", name = "replacement")
+            val staged =
+                object : FolderSnapshotReader {
+                    override fun page(afterSequence: Long): List<FolderSnapshotRow> =
+                        if (afterSequence == 0L) listOf(FolderSnapshotRow(1, replacement)) else emptyList()
+
+                    override fun containsRemoteId(remoteId: String): Boolean = remoteId == replacement.remoteId
+                }
+            for (failAt in 1..2) {
+                var calls = 0
+                org.junit.Assert.assertThrows(IllegalStateException::class.java) {
+                    kotlinx.coroutines.runBlocking {
+                        store.replaceStagedFolderSnapshot("a", FolderSnapshotScope("s", null), staged) {
+                            if (++calls == failAt) error("Publication revoked")
+                        }
+                    }
+                }
+                assertEquals(failAt, calls)
+                assertEquals(listOf(resource), store.children("a", "s", null))
+            }
+            var calls = 0
+            assertTrue(store.replaceStagedFolderSnapshot("a", FolderSnapshotScope("s", null), staged) { calls++ })
+            assertEquals(2, calls)
+            assertEquals(listOf(replacement), store.children("a", "s", null))
+        }
+
     @Test fun `cancelled or superseded download cannot publish cache`() =
         runTest {
             database.accountDao().upsert(AccountEntity("a", "https://cloud.example", "user", "User", "BASIC", false))

@@ -129,6 +129,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import eu.opencloud.android.next.core.database.FolderBackupEntity
 import eu.opencloud.android.next.core.database.ResourceEntity
 import eu.opencloud.android.next.core.database.SpaceEntity
+import eu.opencloud.android.next.core.database.TransferDirection
 import eu.opencloud.android.next.core.database.TransferEntity
 import eu.opencloud.android.next.core.database.TransferState
 import eu.opencloud.android.next.core.datastore.DEFAULT_PINNED_NAVIGATION_ITEMS
@@ -287,6 +288,7 @@ fun FileBrowserRoute(
             onRemoveLocalCopy = viewModel::removeLocalCopy,
             onToggleFavorite = viewModel::toggleFavorite,
             onResolveConflict = viewModel::resolveConflict,
+            onCancelUploadConflicts = viewModel::cancelUploadConflicts,
             onClearMessage = viewModel::clearMessage,
             onSearchQueryChange = viewModel::setSearchQuery,
             onOpenTransfers = destinations.onOpenTransfers,
@@ -295,6 +297,7 @@ fun FileBrowserRoute(
             onRefreshFavorites = favoritesViewModel::refresh,
             onOpenDeletedFiles = destinations.onOpenDeletedFiles,
             onOpenSettings = destinations.onOpenSettings,
+            onOpenAppUpdates = destinations.onOpenAppUpdates,
             onOpenVaults = destinations.onOpenVaults,
             onOpenEncryptedOffline = destinations.onOpenEncryptedOffline,
             onOpenEncryptedLocation = destinations.onOpenEncryptedLocation,
@@ -348,6 +351,7 @@ data class FileBrowserDestinations(
     val onOpenEncryptedLocation: (VaultLocation) -> Unit = {},
     val onEncryptedLocationActions: (VaultLocation) -> Unit = {},
     val onOtherLocation: ((List<ResourceEntity>, Boolean) -> Unit)? = null,
+    val onOpenAppUpdates: () -> Unit = {},
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -378,6 +382,7 @@ fun FileBrowserScreen(
     onDownloadForOffline: (ResourceEntity) -> Unit,
     onToggleFavorite: (ResourceEntity) -> Unit,
     onResolveConflict: (TransferEntity, ConflictDecision) -> Unit,
+    onCancelUploadConflicts: () -> Unit = {},
     onClearMessage: () -> Unit,
     onSearchQueryChange: (String) -> Unit,
     onOpenTransfers: () -> Unit,
@@ -386,6 +391,7 @@ fun FileBrowserScreen(
     onRefreshFavorites: () -> Unit = {},
     onOpenDeletedFiles: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenAppUpdates: () -> Unit = {},
     onOpenVaults: (() -> Unit)? = null,
     onOpenEncryptedOffline: (() -> Unit)? = null,
     onOpenEncryptedLocation: (VaultLocation) -> Unit = {},
@@ -542,6 +548,10 @@ fun FileBrowserScreen(
                 onSettings = {
                     scope.launch { drawerState.close() }
                     onOpenSettings()
+                },
+                onAppUpdates = {
+                    scope.launch { drawerState.close() }
+                    onOpenAppUpdates()
                 },
                 onVaults =
                     onOpenVaults?.let { open ->
@@ -992,8 +1002,15 @@ fun FileBrowserScreen(
         }
     }
 
-    state.transfers.firstOrNull { it.state == TransferState.CONFLICT.name }?.let { conflict ->
-        ConflictResolutionDialog(conflict = conflict, onDecision = { onResolveConflict(conflict, it) })
+    val uploadConflicts = bulkUploadConflictTargets(state.transfers, accountId)
+    uploadConflicts.firstOrNull { it.locationKind != "VAULT" }?.let { conflict ->
+        ConflictResolutionDialog(
+            conflict = conflict,
+            count = uploadConflicts.size,
+            busy = state.bulkConflictCancelling,
+            onDecision = { onResolveConflict(conflict, it) },
+            onCancelAll = onCancelUploadConflicts,
+        )
     }
     state.message?.let { BrowserNotice(stringResource(R.string.browser_notice), it, onClearMessage) }
     details?.let { resource ->
@@ -1432,6 +1449,7 @@ private fun BrowserNavigationDrawer(
     onNavigate: (NavigationItem) -> Unit,
     onDeletedFiles: () -> Unit,
     onSettings: () -> Unit,
+    onAppUpdates: () -> Unit,
     personalSpace: eu.opencloud.android.next.core.database.SpaceEntity?,
     onVaults: (() -> Unit)? = null,
 ) = ModalDrawerSheet(
@@ -1516,7 +1534,7 @@ private fun BrowserNavigationDrawer(
     }
     Text(
         text = stringResource(R.string.browser_version, releaseVersion),
-        modifier = Modifier.padding(OpenCloudDimensions.SpacingXl),
+        modifier = Modifier.clickable(onClick = onAppUpdates).padding(OpenCloudDimensions.SpacingXl),
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         style = MaterialTheme.typography.bodySmall,
     )
@@ -1954,34 +1972,82 @@ private fun BrowserNotice(
 )
 
 @Composable
-private fun ConflictResolutionDialog(
+internal fun ConflictResolutionDialog(
     conflict: TransferEntity,
+    count: Int,
+    busy: Boolean,
     onDecision: (ConflictDecision) -> Unit,
-) = AlertDialog(
-    onDismissRequest = {},
-    title = { Text(stringResource(R.string.browser_upload_conflict)) },
-    text = { Text(stringResource(R.string.browser_conflict_message, conflict.displayName)) },
-    confirmButton = {
-        Column(Modifier.fillMaxWidth()) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingSm),
-            ) {
-                FilledTonalButton(
-                    onClick = { onDecision(ConflictDecision.KEEP_BOTH) },
-                    modifier = Modifier.weight(1f),
-                ) { Text(stringResource(R.string.browser_keep_both), textAlign = TextAlign.Center) }
-                FilledTonalButton(
-                    onClick = { onDecision(ConflictDecision.REPLACE) },
-                    modifier = Modifier.weight(1f),
-                ) { Text(stringResource(R.string.browser_replace_remote), textAlign = TextAlign.Center) }
-            }
-            TextButton(onClick = { onDecision(ConflictDecision.CANCEL) }) {
-                Text(stringResource(R.string.browser_cancel_upload))
-            }
-        }
-    },
-)
+    onCancelAll: () -> Unit,
+) {
+    var confirmCancelAll by remember(conflict.accountId) { mutableStateOf(false) }
+    if (confirmCancelAll) {
+        AlertDialog(
+            onDismissRequest = { if (!busy) confirmCancelAll = false },
+            title = { Text(stringResource(R.string.browser_cancel_conflicts_title)) },
+            text = { Text(stringResource(R.string.browser_cancel_conflicts_confirmation, count)) },
+            confirmButton = {
+                TextButton(
+                    enabled = !busy,
+                    onClick = {
+                        confirmCancelAll = false
+                        onCancelAll()
+                    },
+                ) { Text(stringResource(R.string.browser_cancel_conflicts_action)) }
+            },
+            dismissButton = {
+                TextButton(enabled = !busy, onClick = { confirmCancelAll = false }) {
+                    Text(stringResource(R.string.browser_keep_conflicts))
+                }
+            },
+        )
+    } else {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text(stringResource(R.string.browser_upload_conflict)) },
+            text = {
+                Column {
+                    Text(stringResource(R.string.browser_conflict_message, conflict.displayName))
+                    if (busy) Text(stringResource(R.string.browser_cancelling_conflicts))
+                }
+            },
+            confirmButton = {
+                Column(Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingSm),
+                    ) {
+                        FilledTonalButton(
+                            onClick = { onDecision(ConflictDecision.KEEP_BOTH) },
+                            enabled = !busy,
+                            modifier = Modifier.weight(1f),
+                        ) { Text(stringResource(R.string.browser_keep_both), textAlign = TextAlign.Center) }
+                        FilledTonalButton(
+                            onClick = { onDecision(ConflictDecision.REPLACE) },
+                            enabled = !busy,
+                            modifier = Modifier.weight(1f),
+                        ) { Text(stringResource(R.string.browser_replace_remote), textAlign = TextAlign.Center) }
+                    }
+                    TextButton(onClick = { onDecision(ConflictDecision.CANCEL) }, enabled = !busy) {
+                        Text(stringResource(R.string.browser_cancel_upload))
+                    }
+                    TextButton(onClick = { confirmCancelAll = true }, enabled = !busy) {
+                        Text(stringResource(R.string.browser_cancel_conflicts_action))
+                    }
+                }
+            },
+        )
+    }
+}
+
+internal fun bulkUploadConflictTargets(
+    transfers: List<TransferEntity>,
+    accountId: String,
+): List<TransferEntity> =
+    transfers.filter {
+        it.accountId == accountId &&
+            it.direction == TransferDirection.UPLOAD.name &&
+            it.state == TransferState.CONFLICT.name
+    }
 
 @Composable
 @Suppress("LongParameterList")

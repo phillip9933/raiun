@@ -37,6 +37,32 @@ LICENSE_FILENAMES = re.compile(
     re.IGNORECASE,
 )
 
+# These exact texts were reviewed and shipped with the previous runtime notice
+# inventory. Keep them through offline regeneration, but reject altered copies.
+# The source URLs are provenance from that inventory, not a fresh network check.
+VETTED_LICENSE_TEXTS = {
+    ("com.google.protobuf:protobuf-javalite", "3.25.8", "BSD-3-Clause"): (
+        "BSD-3-Clause.txt",
+        "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d",
+        "https://raw.githubusercontent.com/protocolbuffers/protobuf/v25.8/LICENSE",
+    ),
+    ("com.goterl:lazysodium-android", "5.2.0", "Mozilla Public License, Version 2.0"): (
+        "Mozilla_Public_License_Version_2.0.txt",
+        "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
+        "https://www.mozilla.org/MPL/2.0/index.txt",
+    ),
+    ("net.java.dev.jna:jna", "5.17.0", "LGPL-2.1-or-later"): (
+        "LGPL-2.1-or-later.txt",
+        "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95",
+        "https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt",
+    ),
+    ("org.bouncycastle:bcprov-jdk18on", "1.85.2", "Bouncy Castle Licence"): (
+        "Bouncy_Castle_Licence.txt",
+        "0e01f1549c9022f406392ac2947d32223b7c2e977d21ea2f8c182fdeb4dae5fd",
+        "https://raw.githubusercontent.com/bcgit/bc-java/r1rv85v2/LICENSE.md",
+    ),
+}
+
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
@@ -115,6 +141,10 @@ def portable_source(source: str, cache: Path, scanner: Path, version: str) -> st
         return source
     path = Path(source)
     try:
+        return "bundled updater / " + path.resolve().relative_to((ROOT / "third_party/android-updater").resolve()).as_posix()
+    except (ValueError, OSError):
+        pass
+    try:
         return "Gradle module cache / " + path.resolve().relative_to(cache.resolve()).as_posix()
     except (ValueError, OSError):
         pass
@@ -133,7 +163,22 @@ def fetch_url(url: str) -> bytes | None:
         return None
 
 
+def bundled_updater_file(group: str, artifact: str, version: str, suffix: str) -> Path | None:
+    if (group, artifact) != ("io.github.phillip9933", "android-updater"):
+        return None
+    bundle = ROOT / "third_party/android-updater"
+    relative = f"maven/io/github/phillip9933/android-updater/{version}/android-updater-{version}{suffix}"
+    path = bundle / relative
+    pins = dict(line.split("  ", 1)[::-1] for line in (bundle / "SHA256SUMS").read_text().splitlines() if line)
+    if relative not in pins or not path.is_file() or sha256(path.read_bytes()) != pins[relative]:
+        raise SystemExit(f"Missing or modified pinned updater artifact: {relative}")
+    return path
+
+
 def local_pom(cache: Path, group: str, artifact: str, version: str) -> Path | None:
+    bundled = bundled_updater_file(group, artifact, version, ".pom")
+    if bundled is not None:
+        return bundled
     base = cache / group / artifact / version
     if not base.exists():
         return None
@@ -205,6 +250,9 @@ def artifact_file(cache: Path, group: str, artifact: str, version: str) -> Path 
 
 
 def find_artifact(cache: Path, scanner: Path, group: str, artifact: str, version: str) -> Path | None:
+    bundled = bundled_updater_file(group, artifact, version, ".aar")
+    if bundled is not None:
+        return bundled
     if group == "dev.offlinescan":
         base = scanner / "maven" / group.replace(".", "/") / artifact / version
         if base.exists():
@@ -244,13 +292,33 @@ def extract_notices(archive: Path | None, coordinate: str, dest: Path) -> list[d
     return found
 
 
-def license_texts(licenses: list[dict[str, str]], sources: dict[str, tuple[bytes, str]], dest: Path, coordinate: str, version: str) -> list[dict[str, str]]:
+def preserved_license_texts(directory: Path) -> dict[str, bytes]:
+    preserved = {}
+    for filename, expected, _ in VETTED_LICENSE_TEXTS.values():
+        path = directory / filename
+        if not path.is_file():
+            raise SystemExit(f"Missing vetted license text: {path}")
+        data = path.read_bytes()
+        if sha256(data) != expected:
+            raise SystemExit(f"Vetted license text checksum mismatch: {path}")
+        preserved[filename] = data
+    return preserved
+
+
+def license_texts(licenses: list[dict[str, str]], sources: dict[str, tuple[bytes, str]], dest: Path, coordinate: str, version: str, preserved: dict[str, bytes]) -> list[dict[str, str]]:
     resolved: list[dict[str, str]] = []
     for lic in licenses:
         name, url = lic.get("name", ""), lic.get("url", "")
         data = None
         source = ""
         lower = (name + " " + url).lower()
+        if coordinate == "io.github.phillip9933:android-updater" and "affero" in lower:
+            license_path = ROOT / "third_party/android-updater/LICENSE"
+            pins = dict(line.split("  ", 1)[::-1] for line in (license_path.parent / "SHA256SUMS").read_text().splitlines() if line)
+            raw = license_path.read_bytes()
+            if sha256(raw) != pins.get("LICENSE"):
+                raise SystemExit("Bundled updater license checksum mismatch")
+            data, source = raw, "bundled updater / LICENSE"
         if "apache" in lower:
             raw, candidate_source = sources["apache"]
             if b"Apache License" in raw and b"Version 2.0" in raw:
@@ -273,6 +341,13 @@ def license_texts(licenses: list[dict[str, str]], sources: dict[str, tuple[bytes
             if data and data.lstrip().lower().startswith((b"<!doctype html", b"<html")):
                 data = None
             source = normalized if data else ""
+        fallback = VETTED_LICENSE_TEXTS.get((coordinate, version, name))
+        if fallback and (data is None or sha256(data) != fallback[1]):
+            filename, expected, previous_source = fallback
+            data = preserved[filename]
+            if sha256(data) != expected:
+                raise SystemExit(f"Vetted license text checksum mismatch: {filename}")
+            source = f"preserved vetted release text (original source: {previous_source})"
         if data:
             slug = re.sub(r"[^A-Za-z0-9.-]+", "_", name or url or "license").strip("._")
             path = dest / f"{slug}.txt"
@@ -296,6 +371,7 @@ def main() -> int:
         fetch_url = lambda _url: None  # type: ignore[assignment]
 
     sources = scanner_release(args.scanner, lock)
+    preserved = preserved_license_texts(OUTPUT / "license-texts")
 
     deps = json.loads(INVENTORY.read_text(encoding="utf-8"))
     if not isinstance(deps, dict):
@@ -318,7 +394,7 @@ def main() -> int:
         pom = scanner_pom(args.scanner, group, artifact, version) if group == "dev.offlinescan" else local_pom(args.cache, group, artifact, version)
         archive = find_artifact(args.cache, args.scanner, group, artifact, version)
         embedded = extract_notices(archive, coordinate, OUTPUT / "embedded")
-        texts = license_texts(licenses, sources, OUTPUT / "license-texts", coordinate, version)
+        texts = license_texts(licenses, sources, OUTPUT / "license-texts", coordinate, version, preserved)
         recorded_names = {(x.get("name", "").lower(), x.get("url", "").lower()) for x in texts}
         for lic in licenses:
             if (lic.get("name", "").lower(), lic.get("url", "").lower()) not in recorded_names:

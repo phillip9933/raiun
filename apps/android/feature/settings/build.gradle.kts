@@ -26,6 +26,8 @@ android {
 }
 
 dependencies {
+    api(libs.android.app.updater)
+    implementation(libs.androidx.core)
     implementation(libs.androidx.appcompat)
     implementation(project(":core:security"))
     implementation(project(":core:sync"))
@@ -40,5 +42,4 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.kotlinx.coroutines.android)
     testImplementation(libs.junit)
-    testImplementation(libs.kotlinx.coroutines.test)
 }

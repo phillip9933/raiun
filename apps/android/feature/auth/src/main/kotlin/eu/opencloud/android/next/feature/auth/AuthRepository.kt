@@ -56,9 +56,10 @@ class AuthRepository(
                 profile.displayName,
                 AuthenticationType.BASIC,
             )
-        credentialStore.saveBasicCredentials(account.id, username, password)
         val authorization = okhttp3.Credentials.basic(username, password)
-        return AuthenticatedSession(account, profile, api.capabilities(serverUrl, authorization))
+        val capabilities = api.capabilities(serverUrl, authorization)
+        credentialStore.saveBasicCredentials(account.id, username, password)
+        return AuthenticatedSession(account, profile, capabilities)
     }
 
     fun beginPkce(configuration: OidcConfiguration): PkceRequest {
@@ -110,11 +111,12 @@ class AuthRepository(
                 profile.displayName,
                 AuthenticationType.OIDC,
             )
+        val capabilities = api.capabilities(serverUrl, "Bearer ${tokens.accessToken}")
         sessions.save(account.id, tokens, registration)
         return AuthenticatedSession(
             account,
             profile,
-            api.capabilities(serverUrl, "Bearer ${tokens.accessToken}"),
+            capabilities,
             configuration,
         )
     }

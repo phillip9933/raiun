@@ -13,6 +13,7 @@ import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.model.ResourceKind
 import eu.opencloud.android.next.core.network.RemoteDiscoveryClient
 import eu.opencloud.android.next.core.network.toOpenCloudError
+import eu.opencloud.android.next.core.security.AccountSessions
 import eu.opencloud.android.next.core.security.TlsPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -47,6 +48,7 @@ class PendingPinWorker(
         takeRequest: () -> Boolean,
     ): Boolean {
         val account = requireNotNull(store.account(pin.accountId))
+        val accountLease = AccountSessions.get(applicationContext).beginLease(pin.accountId)
         val space = requireNotNull(store.space(pin.accountId, pin.spaceId))
         val client =
             RemoteDiscoveryClient(TlsPolicy(applicationContext).applyTo(OkHttpClient(), account.serverUrl))
@@ -60,7 +62,17 @@ class PendingPinWorker(
             if (cached?.path != expected || expected == pin.path) {
                 if (!takeRequest()) return false
                 refreshFolder(
-                    FolderRefresh(store, client, pin.accountId, space, parentId, path, authorization),
+                    FolderRefresh(
+                        store,
+                        client,
+                        pin.accountId,
+                        space,
+                        parentId,
+                        path,
+                        authorization,
+                        applicationContext.cacheDir,
+                        accountLease,
+                    ),
                 )
                 schedulePendingExcludedCache(applicationContext)
             }

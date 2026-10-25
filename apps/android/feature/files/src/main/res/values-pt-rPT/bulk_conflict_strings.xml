@@ -1,0 +1,7 @@
+<resources>
+    <string name="browser_cancel_conflicts_action">Cancelar todos os envios em conflito</string>
+    <string name="browser_cancel_conflicts_title">Cancelar os envios em conflito?</string>
+    <string name="browser_cancel_conflicts_confirmation">Cancelar %1$d envios em conflito desta conta? Os ficheiros locais e na nuvem não serão eliminados. As outras transferências continuarão.</string>
+    <string name="browser_keep_conflicts">Manter conflitos</string>
+    <string name="browser_cancelling_conflicts">A cancelar envios em conflito…</string>
+</resources>

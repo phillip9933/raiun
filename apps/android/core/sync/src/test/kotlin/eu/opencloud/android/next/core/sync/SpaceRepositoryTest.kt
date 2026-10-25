@@ -17,6 +17,7 @@ import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -114,6 +115,34 @@ class SpaceRepositoryTest {
             assertEquals(newer, store.space("account", "newer"))
             assertEquals(null, store.space("account", "delayed"))
             assertTrue(requireNotNull(store.space("account", "stale")).isDisabled)
+        }
+
+    @Test
+    fun `revoked account lease rolls back space publication`() =
+        runTest {
+            val old = staleSpace()
+            store.replaceRemoteSpaces("account", listOf(old))
+            server.enqueue(
+                MockResponse().setBody(
+                    """{"value":[{"id":"new","name":"New","driveType":"project","root":{"id":"root","webDavUrl":"${server.url(
+                        "dav/spaces/new",
+                    )}"}}]}""",
+                ),
+            )
+            var checks = 0
+            assertThrows(IllegalStateException::class.java) {
+                kotlinx.coroutines.runBlocking {
+                    repository.synchronize(
+                        "account",
+                        server.url("/").toString(),
+                        "Bearer token",
+                        publicationGuard = { if (++checks == 3) error("Account lease revoked") },
+                    )
+                }
+            }
+            assertEquals(3, checks)
+            assertEquals(old, store.space("account", old.driveId))
+            assertEquals(null, store.space("account", "new"))
         }
 
     @Test
