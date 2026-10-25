@@ -23,6 +23,11 @@ mod vault_edit_upload;
 mod windows_vault_credentials;
 #[path = "windows_vault_custody.rs"]
 mod windows_vault_custody;
+// Dormant in normal activation; only an explicit per-Agent native fixture
+// starts this fresh-only consumer. No history/startup dispatch.
+#[allow(dead_code)]
+#[path = "windows_vault_close_worker.rs"]
+mod windows_vault_close_worker;
 
 #[path = "windows_proxy.rs"]
 mod windows_proxy;
@@ -379,6 +384,7 @@ struct WindowsAgent {
     provider: Arc<ProviderManager>,
     auth_thread: Mutex<Option<JoinHandle<()>>>,
     refresh_thread: Mutex<Option<JoinHandle<()>>>,
+    fresh_close_worker: Mutex<Option<windows_vault_close_worker::FreshCloseWorker>>,
     folder_lifecycle: Mutex<()>,
     vault_credential_operation: Mutex<()>,
 }
@@ -403,6 +409,7 @@ struct ProviderManager {
     recovery_cursor_nonce: Option<[u8; 32]>,
     offline_jobs: Arc<windows_offline_jobs::OfflineJobs>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    fresh_close_source: Mutex<Option<windows_vault_close_worker::VaultClosePublisherSource>>,
     folder_generation: Arc<AtomicU64>,
     folder_revocation: Arc<Mutex<Option<raiun_engine::SyncRevocationHandle>>>,
     folder_error: Arc<Mutex<Option<String>>>,
@@ -530,6 +537,7 @@ enum ProviderCommand {
         recovery: Arc<dyn raiun_cloudfiles_windows::EditRecoveryProvider>,
         custody_account: Vec<u8>,
         custody_store: Arc<dyn SessionStore>,
+        fresh_close_publisher: Option<windows_vault_close_worker::VaultClosePublisher>,
         response: std::sync::mpsc::SyncSender<Result<(), String>>,
     },
     DispatchRecovery {
@@ -935,6 +943,7 @@ impl ProviderManager {
                             recovery,
                             custody_account,
                             custody_store,
+                            fresh_close_publisher,
                             response,
                         } => {
                             let candidate_binding = ActiveProviderBinding {
@@ -975,9 +984,14 @@ impl ProviderManager {
                                     let custody = raiun_cloudfiles_windows::prepare_vault_custody_root(
                                         &lease, next_backend.as_ref(), composite_root_identity,
                                     ).ok().and_then(|context| {
-                                        windows_vault_custody::WindowsVaultCustody::prepare(
-                                            custody_store, &custody_account, &context,
-                                        ).ok()
+                                        match fresh_close_publisher {
+                                            Some(publisher) => windows_vault_custody::WindowsVaultCustody::prepare_with_fresh_close_publisher(
+                                                custody_store, &custody_account, &context, Some(publisher),
+                                            ),
+                                            None => windows_vault_custody::WindowsVaultCustody::prepare(
+                                                custody_store, &custody_account, &context,
+                                            ),
+                                        }.ok()
                                     });
                                     let prepared = raiun_cloudfiles_windows::prepare_configured_root_runtime(
                                         lease,
@@ -1268,6 +1282,7 @@ impl ProviderManager {
                 getrandom::fill(&mut nonce).ok().map(|_| nonce)
             },
             worker: Mutex::new(Some(worker)),
+            fresh_close_source: Mutex::new(None),
             #[cfg(all(test, debug_assertions))]
             lifecycle_test_activation: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions))]
@@ -1292,6 +1307,12 @@ impl ProviderManager {
         custody_account: Vec<u8>,
         custody_store: Arc<dyn SessionStore>,
     ) -> Result<(), String> {
+        let fresh_close_publisher = self
+            .fresh_close_source
+            .lock()
+            .map_err(|_| "Fresh vault close publication is unavailable")?
+            .as_ref()
+            .and_then(|source| source.publisher(generation));
         let (response, result) = std::sync::mpsc::sync_channel(1);
         self.commands
             .send(ProviderCommand::Connect {
@@ -1305,6 +1326,7 @@ impl ProviderManager {
                 recovery,
                 custody_account,
                 custody_store,
+                fresh_close_publisher,
                 response,
             })
             .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
@@ -1413,6 +1435,17 @@ impl ProviderManager {
             .map_err(|_| "Windows Cloud Files connection manager stopped unexpectedly")?
     }
 
+    fn cancel_fresh_close(&self) {
+        let source = self
+            .fresh_close_source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(source) = source {
+            source.cancel();
+        }
+    }
+
     fn revoke_folders(&self) {
         // Serialize cancellation publication with InstallFolders. No database
         // owner or token lock crosses threads or is held through networking.
@@ -1468,6 +1501,7 @@ impl ProviderManager {
     }
 
     fn disconnect(&self) -> Result<(), String> {
+        self.cancel_fresh_close();
         self.bandwidth.suspend();
         self.revoke_folders();
         let (response, result) = std::sync::mpsc::sync_channel(1);
@@ -1587,6 +1621,7 @@ impl ProviderManager {
     }
 
     fn authorize_generation(&self, generation: u64) {
+        self.cancel_fresh_close();
         self.bandwidth.authorize_generation(generation);
         // InstallFolders checks/publishes under this same lock. Revocation and
         // the generation change must be atomic against that publication.
@@ -1734,6 +1769,7 @@ fn disconnect_provider_connection(
 
 impl Drop for ProviderManager {
     fn drop(&mut self) {
+        self.cancel_fresh_close();
         self.bandwidth.suspend();
         self.revoke_folders();
         let (response, result) = std::sync::mpsc::sync_channel(1);
@@ -1761,6 +1797,72 @@ fn valid_runtime_profile(profile: &str) -> bool {
 }
 
 impl WindowsAgent {
+    // Not present in normal production activation or IPC/configuration. Call
+    // after authenticating the fixture's generation and before provider install.
+    #[cfg(all(test, debug_assertions))]
+    fn start_fresh_close_worker_for_test(self: &Arc<Self>) -> Result<(), String> {
+        let mut slot = self
+            .fresh_close_worker
+            .lock()
+            .map_err(|_| "Fresh vault close worker ownership is unavailable")?;
+        if slot.is_some() {
+            return Err("Fresh vault close worker is already owned".into());
+        }
+        let mut source = self
+            .provider
+            .fresh_close_source
+            .lock()
+            .map_err(|_| "Fresh vault close publication is unavailable")?;
+        if source.is_some() || self.provider.connected.load(Ordering::Acquire) {
+            return Err("Start fresh vault close publication before provider installation".into());
+        }
+        let worker = windows_vault_close_worker::FreshCloseWorker::start(
+            Arc::downgrade(self),
+            Arc::clone(&self.provider.authorized_generation),
+        )?;
+        *source = Some(worker.source());
+        *slot = Some(worker);
+        Ok(())
+    }
+
+    #[cfg(all(test, debug_assertions))]
+    fn fresh_close_observation_for_test(
+        &self,
+    ) -> Result<windows_vault_close_worker::FreshCloseObservation, String> {
+        self.fresh_close_worker
+            .lock()
+            .map_err(|_| "Fresh close worker unavailable")?
+            .as_ref()
+            .ok_or("Fresh close worker is absent")?
+            .observation()
+    }
+
+    fn fresh_close_active_marker(
+        &self,
+        expected_generation: u64,
+    ) -> Result<Arc<AtomicBool>, String> {
+        self.fresh_close_worker
+            .lock()
+            .map_err(|_| "Fresh close worker is unavailable")?
+            .as_ref()
+            .and_then(|worker| worker.active_marker(expected_generation))
+            .ok_or_else(|| "The fresh close worker generation is no longer active".into())
+    }
+
+    fn stop_fresh_close_worker(&self) -> Result<(), String> {
+        self.provider.cancel_fresh_close();
+        let worker = self
+            .fresh_close_worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        // Release the ownership mutex before an in-flight guarded HTTP call
+        // finishes or the consumer's last Agent Arc drops.
+        if let Some(worker) = worker {
+            worker.stop()?;
+        }
+        Ok(())
+    }
     fn new(session_store: impl SessionStore + 'static) -> Self {
         Self::new_for_profile("default", session_store)
             .expect("default runtime and session store must match")
@@ -1811,6 +1913,7 @@ impl WindowsAgent {
             provider: Arc::new(ProviderManager::new()),
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
+            fresh_close_worker: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
             vault_credential_operation: Mutex::new(()),
         };
@@ -4063,6 +4166,7 @@ impl WindowsAgent {
     }
 
     fn stop_and_join(&self) -> Result<(), String> {
+        self.provider.cancel_fresh_close();
         let _ = self.cancel_auth()?;
         let handle = self
             .auth_thread
@@ -4084,8 +4188,25 @@ impl WindowsAgent {
                 .join()
                 .map_err(|_| "Session refresh worker stopped unexpectedly")?;
         }
-        self.provider.disconnect()?;
+        let disconnect = self.provider.disconnect();
+        let worker = self.stop_fresh_close_worker();
+        disconnect?;
+        worker?;
         Ok(())
+    }
+}
+
+impl Drop for WindowsAgent {
+    fn drop(&mut self) {
+        self.provider.cancel_fresh_close();
+        let worker = self
+            .fresh_close_worker
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(worker) = worker {
+            let _ = worker.stop();
+        }
     }
 }
 
@@ -7906,6 +8027,13 @@ mod tests {
 
     #[cfg(all(windows, debug_assertions))]
     #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser/fresh child-only LOCALAPPDATA; automatic fresh-close upload leaves dirty native fixture"]
+    fn native_broker_vault_fresh_close_automatically_uploads_retained_edit() {
+        broker_remembered_lifecycle_fixture_with_automatic_upload(true, true, true, true);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
     fn vault_readiness_binding_refuses_stale_missing_or_foreign_root() {
         use super::vault_worker_binding_current;
         let binding = ActiveProviderBinding {
@@ -7955,6 +8083,22 @@ mod tests {
         capture_edit: bool,
         upload_edit: bool,
     ) {
+        broker_remembered_lifecycle_fixture_with_automatic_upload(
+            payload,
+            capture_edit,
+            upload_edit,
+            false,
+        );
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    fn broker_remembered_lifecycle_fixture_with_automatic_upload(
+        payload: bool,
+        capture_edit: bool,
+        upload_edit: bool,
+        automatic: bool,
+    ) {
+        assert!(!automatic || upload_edit);
         assert!(!upload_edit || capture_edit);
         assert!(!capture_edit || payload);
         use super::{
@@ -8047,6 +8191,16 @@ mod tests {
                 &json!({"action":"configure_root","profile_id":profile,"cloud_root":drive}),
             )
             .unwrap();
+        if automatic {
+            runtime.start_fresh_close_worker_for_test().unwrap();
+            assert_eq!(
+                runtime
+                    .fresh_close_observation_for_test()
+                    .unwrap()
+                    .attempted,
+                0
+            );
+        }
         WindowsAgent::connect_verified_root(
             &runtime.session_store,
             &runtime.state,
@@ -8201,6 +8355,13 @@ mod tests {
             let before_close = runtime.provider.close_observation().unwrap();
             assert_eq!(before_close.0, 0, "fresh fixture has no modified closes");
             assert_eq!(before_close.7, 0);
+            if automatic {
+                let mut state = remote.vault_upload.as_ref().unwrap().lock().unwrap();
+                assert!(!state.enabled);
+                assert_eq!(state.put_count, 0);
+                assert_eq!(state.body_get_count, 0);
+                state.enabled = true;
+            }
             // Exact fresh fixture path only. Open existing preserves the native
             // file ID/reparse point; only read-only is cleared for this forced
             // synthetic edit. Production vault publication remains read-only.
@@ -8235,6 +8396,38 @@ mod tests {
                 );
                 thread::sleep(Duration::from_millis(25));
             };
+            if automatic {
+                // No protected inspector runs while the off-provider ledger CAS
+                // is in flight. This per-Agent observation contains no payload.
+                let deadline = Instant::now() + Duration::from_secs(60);
+                let completed = loop {
+                    let value = runtime.fresh_close_observation_for_test().unwrap();
+                    if value.completed != 0 {
+                        break value;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "fresh native close did not finish its bounded off-provider attempt; preserve fixture"
+                    );
+                    thread::sleep(Duration::from_millis(25));
+                };
+                assert_eq!(completed.attempted, 1);
+                assert_eq!(completed.completed, 1);
+                assert_eq!(completed.failed, 0);
+                assert!(completed.remote_verified);
+                assert_eq!(completed.native_confirmation, Some(false));
+                let provider_thread = runtime
+                    .provider
+                    .worker
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .thread()
+                    .id();
+                assert_ne!(completed.thread, Some(provider_thread));
+                assert_ne!(completed.thread, Some(thread::current().id()));
+            }
             // A protected read holds an immutable no-delete pin. Wait for the
             // producer callback's completed outcome before opening any index or
             // body, so acceptance inspection cannot interfere with its CAS.
@@ -8265,7 +8458,10 @@ mod tests {
             );
             assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
             assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
-            assert_eq!(remote.native_reads.lock().unwrap().vault_get_count, gets);
+            assert_eq!(
+                remote.native_reads.lock().unwrap().vault_get_count,
+                gets + usize::from(automatic)
+            );
             assert_eq!(
                 std::fs::metadata(&file).unwrap().file_attributes() & 0x400,
                 attributes & 0x400
@@ -8282,7 +8478,7 @@ mod tests {
                     .vault_upload
                     .as_ref()
                     .expect("explicit opt-in remote state");
-                {
+                if !automatic {
                     let mut state = vault_remote.lock().unwrap();
                     assert!(!state.enabled);
                     assert_eq!(state.put_count, 0);
@@ -8290,10 +8486,12 @@ mod tests {
                     assert_eq!(state.etag, original.etag());
                     state.enabled = true;
                 }
-                let result = runtime
-                    .upload_windows_vault_capture(&scope, "/Travel.vault", capture_id)
-                    .expect("explicit broker worker must verify encrypted remote readback");
-                assert_eq!(result["state"], "remote_verified_pending_local");
+                if !automatic {
+                    let result = runtime
+                        .upload_windows_vault_capture(&scope, "/Travel.vault", capture_id)
+                        .expect("explicit broker worker must verify encrypted remote readback");
+                    assert_eq!(result["state"], "remote_verified_pending_local");
+                }
                 {
                     let state = vault_remote.lock().unwrap();
                     assert_eq!(state.put_attempt_count, 1);
@@ -8330,12 +8528,87 @@ mod tests {
                     proof.body_sha256(),
                     <[u8; 32]>::from(sha2::Sha256::digest(&edited))
                 );
-                assert!(
-                    runtime
-                        .upload_windows_vault_capture(&scope, "/Travel.vault", capture_id)
-                        .is_err(),
-                    "persisted attempt must refuse a second dispatch"
-                );
+                if !automatic {
+                    assert!(
+                        runtime
+                            .upload_windows_vault_capture(&scope, "/Travel.vault", capture_id)
+                            .is_err(),
+                        "persisted attempt must refuse a second dispatch"
+                    );
+                } else {
+                    // Reopening protected references cannot mint a fresh job.
+                    let reopened = verified
+                        .custody
+                        .retained_capture_ids(&trusted, &scope, "/Travel.vault")
+                        .unwrap();
+                    assert_eq!(reopened, capture_ids);
+                    let _reopened_attempt = verified
+                        .custody
+                        .upload_ledger(&trusted, &scope, "/Travel.vault", capture_id)
+                        .unwrap()
+                        .reopen_attempt()
+                        .unwrap();
+                    let before_repeat = runtime.provider.close_observation().unwrap();
+                    assert_eq!(before_repeat.1, 0, "no earlier unverifiable close");
+                    assert_eq!(before_repeat.4, 0, "no earlier close failure stage");
+                    assert_eq!(before_repeat.5, 0, "no earlier close failure HRESULT");
+                    assert_eq!(before_repeat.7, 0, "no ordinary journal completion");
+                    // A read-only reopen need not emit a native close callback.
+                    // Reuse the exact existing-file writer with IDENTICAL bytes;
+                    // the capture identity deliberately excludes USN/time.
+                    let mut repeat_writer = Command::new("powershell.exe")
+                        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                            "$ErrorActionPreference='Stop'; $p=$env:RAIUN_SYNTHETIC_EDIT_FILE; $a=[IO.File]::GetAttributes($p); [IO.File]::SetAttributes($p,($a -band (-bnot [IO.FileAttributes]::ReadOnly))); $b=New-Object byte[] 65553; for($i=0;$i -lt $b.Length;$i++){$b[$i]=[byte](($i*13+11)-band 255)}; $f=[IO.File]::Open($p,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::Read); try{$f.SetLength($b.Length); $f.Write($b,0,$b.Length); $f.Flush($true)}finally{$f.Dispose()}"])
+                        .env("RAIUN_SYNTHETIC_EDIT_FILE", &file)
+                        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+                        .spawn().unwrap();
+                    let writer_deadline = Instant::now() + Duration::from_secs(20);
+                    loop {
+                        if let Some(status) = repeat_writer.try_wait().unwrap() {
+                            assert_eq!(status.code(), Some(0), "identical synthetic writer failed");
+                            break;
+                        }
+                        assert!(
+                            Instant::now() < writer_deadline,
+                            "identical synthetic writer timed out; process and fixture preserved"
+                        );
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    let deadline = Instant::now() + Duration::from_secs(15);
+                    let after_repeat = loop {
+                        let value = runtime.provider.close_observation().unwrap();
+                        if value.0 > before_repeat.0 {
+                            break value;
+                        }
+                        assert!(
+                            Instant::now() < deadline,
+                            "identical modified-close callback was not observed"
+                        );
+                        thread::sleep(Duration::from_millis(25));
+                    };
+                    // Modified count also rises on refusal. The existing failure
+                    // stage is published before that increment, so require all
+                    // error/journal fields to remain at their fresh baseline.
+                    assert_eq!(
+                        after_repeat.1, 0,
+                        "duplicate close must not be unverifiable"
+                    );
+                    assert_eq!(
+                        after_repeat.4, 0,
+                        "duplicate close must not fail validation"
+                    );
+                    assert_eq!(after_repeat.5, 0, "duplicate close must not fail natively");
+                    assert_eq!(
+                        after_repeat.7, 0,
+                        "duplicate vault close is not journal completion"
+                    );
+                    let observed = runtime.fresh_close_observation_for_test().unwrap();
+                    assert_eq!(
+                        observed.attempted, 1,
+                        "identical close/reopened history must not enqueue a new dispatch"
+                    );
+                    assert_eq!(observed.completed, 1);
+                }
                 {
                     let state = vault_remote.lock().unwrap();
                     assert_eq!(state.put_attempt_count, 1, "no conditional PUT replay");
@@ -8357,12 +8630,37 @@ mod tests {
                 );
                 assert!(after_upload.captures[0].1 == original);
                 assert_eq!(std::fs::read(&file).unwrap(), edited);
+                if automatic {
+                    let after_protected_read = runtime.provider.close_observation().unwrap();
+                    assert_eq!(
+                        after_protected_read.1, 0,
+                        "protected duplicate/frame inspection must not hide an unverifiable close"
+                    );
+                    assert_eq!(
+                        after_protected_read.4, 0,
+                        "protected duplicate/frame inspection must not hide validation refusal"
+                    );
+                    assert_eq!(
+                        after_protected_read.5, 0,
+                        "protected duplicate/frame inspection must not hide native error"
+                    );
+                    assert_eq!(
+                        after_protected_read.7, 0,
+                        "no ordinary journal completion after duplicate"
+                    );
+                }
                 assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
                 assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
                 assert_eq!(runtime.provider.close_observation().unwrap().7, 0);
-                println!(
-                    "C06_VAULT_EXPLICIT_CAPTURE_UPLOAD_VERIFIED=true;vaultPUT=1;authenticatedBodyGET=1;noReplay=true;capture_pending=true;cleanup=incomplete"
-                );
+                if automatic {
+                    println!(
+                        "C06_VAULT_FRESH_CLOSE_AUTO_UPLOAD_VERIFIED=true;vaultPUT=1;authenticatedBodyGET=1;off_provider_thread=true;noReplay=true;native_confirmation=false;capture_pending=true;cleanup=incomplete"
+                    );
+                } else {
+                    println!(
+                        "C06_VAULT_EXPLICIT_CAPTURE_UPLOAD_VERIFIED=true;vaultPUT=1;authenticatedBodyGET=1;noReplay=true;capture_pending=true;cleanup=incomplete"
+                    );
+                }
             }
             let mut lock = target();
             lock["action"] = json!("vault_lock");
@@ -8405,6 +8703,9 @@ mod tests {
                 broker.stop_all().is_err(),
                 "dirty native namespace remains retained on stop"
             );
+            if automatic {
+                runtime.stop_fresh_close_worker().unwrap();
+            }
             drop(root_pin);
             drop(verified);
             drop(broker);
@@ -8412,7 +8713,11 @@ mod tests {
             drop(sessions);
             remote.join().unwrap();
             appdata_pin.verify_path().unwrap();
-            if upload_edit {
+            if automatic {
+                println!(
+                    "C06_VAULT_FRESH_CLOSE_AUTO_UPLOAD_DIRTY_FIXTURE_RETAINED=true;ordinaryPUT=0;cleanup=incomplete;no_native_completion=true"
+                );
+            } else if upload_edit {
                 println!(
                     "C06_VAULT_EXPLICIT_UPLOAD_DIRTY_FIXTURE_RETAINED=true;ordinaryPUT=0;cleanup=incomplete"
                 );
@@ -13599,6 +13904,7 @@ mod tests {
             provider: Arc::new(ProviderManager::new()),
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
+            fresh_close_worker: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
             vault_credential_operation: Mutex::new(()),
         });
@@ -13670,6 +13976,7 @@ mod tests {
             provider: Arc::new(ProviderManager::new()),
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
+            fresh_close_worker: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
             vault_credential_operation: Mutex::new(()),
         });
@@ -14331,6 +14638,7 @@ mod tests {
             provider: Arc::new(ProviderManager::new()),
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
+            fresh_close_worker: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
             vault_credential_operation: Mutex::new(()),
         });
@@ -14382,6 +14690,7 @@ mod tests {
             provider: Arc::new(ProviderManager::new()),
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
+            fresh_close_worker: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
             vault_credential_operation: Mutex::new(()),
         });
@@ -14417,6 +14726,7 @@ mod tests {
             provider: Arc::new(ProviderManager::new()),
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
+            fresh_close_worker: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
             vault_credential_operation: Mutex::new(()),
         });

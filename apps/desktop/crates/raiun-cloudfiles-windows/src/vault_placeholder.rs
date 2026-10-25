@@ -200,6 +200,22 @@ mod runtime {
                 custody,
             })
         }
+        /// Early local freshness check only. No body, HTTP or live permit
+        /// escapes; the upload path still performs full custody validation.
+        pub(crate) fn validate_capture_dispatch_target(
+            &self,
+            target: &crate::ExistingVaultUploadTarget,
+        ) -> Result<(), CloudError> {
+            let saved = self.saved(target.identity()).map_err(|_| refused())?;
+            self.binding.with_publication(|| {
+                self.binding.validate_upload_target(target)?;
+                if key(&saved) != key(target.original()) || !target.matches_original(&saved) {
+                    return Err(refused());
+                }
+                Ok(())
+            })
+        }
+
         pub(crate) fn upload_existing_capture<R: std::io::Read + std::io::Seek>(
             &self,
             target: &crate::ExistingVaultUploadTarget,
@@ -532,6 +548,7 @@ mod runtime {
     }
     struct LocalExistingCapture<'a> {
         baseline: crate::vault_custody::ExistingVaultEditBaseline,
+        binding: &'a WindowsVaultReadBinding,
         custody: &'a dyn crate::vault_custody::VaultPublicationCustody,
         acknowledgement: crate::backend::ExistingCaptureAcknowledgement,
     }
@@ -542,7 +559,8 @@ mod runtime {
         fn retain(
             &self,
             payload: crate::vault_custody::ExistingVaultEditPayload,
-        ) -> Result<(), BackendError> {
+        ) -> Result<Option<Box<dyn crate::DeferredVaultCaptureNotification>>, BackendError>
+        {
             self.acknowledgement.begin_attempt()?;
             if payload.bytes.len() > crate::MAX_VAULT_EDIT_CAPTURE_BYTES
                 || payload.root != self.baseline.root()
@@ -554,9 +572,13 @@ mod runtime {
             {
                 return Err(BackendError::Unavailable);
             }
-            self.custody.retain_existing_edit(&self.baseline, payload)?;
+            let notification = self.custody.retain_existing_edit(
+                &self.baseline,
+                payload,
+                self.binding.capture_dispatch_stamp(),
+            )?;
             self.acknowledgement.acknowledge_retained();
-            Ok(())
+            Ok(notification)
         }
     }
     impl PlaceholderBackend for WindowsVaultPlaceholderBackend {
@@ -592,6 +614,7 @@ mod runtime {
                         .map_err(|_| refused())?;
                     let context = LocalExistingCapture {
                         baseline,
+                        binding: &self.binding,
                         custody: self.custody.as_ref(),
                         acknowledgement: crate::backend::ExistingCaptureAcknowledgement::default(),
                     };
@@ -675,6 +698,9 @@ mod runtime {
     }
     #[cfg(test)]
     mod native_tests {
+        #[cfg(feature = "synthetic-agent-integration")]
+        use raiun_core::backend::CloudBackend;
+
         // Test-only in-memory evidence, never a protected durable service or
         // restart/cleanup authority. Production constructors still require the
         // broker-supplied protected implementation; there is no fallback.

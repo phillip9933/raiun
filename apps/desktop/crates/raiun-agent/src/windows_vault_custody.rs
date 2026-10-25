@@ -6,13 +6,15 @@ use super::{
     root_manifest::{RootBinding, RootManifest},
     vault_custody::{self, Custody, Entry, Scope},
     vault_edit_capture as capture, vault_edit_retention, vault_edit_upload as upload,
+    windows_vault_close_worker::{FreshVaultCloseJob, VaultClosePublisher},
 };
 use raiun_cloudfiles_windows::vault_custody::{
     ExistingVaultEditBaseline, ExistingVaultEditPayload, VaultCatalogueEntry, VaultHydrationIntent,
     VaultPublicationCustody, VaultPublishedHistorySource,
 };
 use raiun_cloudfiles_windows::{
-    BackendError, ConfiguredRootIdentity, ProviderScope, VaultCustodyRootContext,
+    BackendError, ConfiguredRootIdentity, DeferredVaultCaptureNotification,
+    FreshVaultCaptureDispatch, ProviderScope, VaultCustodyRootContext,
 };
 use raiun_core::backend::RemoteEntry;
 use raiun_vault::session::VaultSessionScope;
@@ -20,7 +22,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 use zeroize::Zeroizing;
 
@@ -163,6 +165,37 @@ struct State {
     children: BTreeMap<Vec<u8>, Arc<Child>>,
     failed: bool,
 }
+/// Local source-instance locator, not upload authority. The marker is the
+/// broker's existing failure flag, not an independently minted identity.
+pub(super) struct FreshCaptureOrigin {
+    owner: ProviderScope,
+    root: ConfiguredRootIdentity,
+    broker: Weak<std::sync::atomic::AtomicBool>,
+}
+impl FreshCaptureOrigin {
+    pub(super) fn owner(&self) -> &ProviderScope {
+        &self.owner
+    }
+    pub(super) fn root(&self) -> ConfiguredRootIdentity {
+        self.root
+    }
+}
+
+struct FreshCloseNotification {
+    publisher: VaultClosePublisher,
+    job: FreshVaultCloseJob,
+}
+impl DeferredVaultCaptureNotification for FreshCloseNotification {
+    fn try_publish(self: Box<Self>) -> std::result::Result<(), BackendError> {
+        // Called only after the native callback and every publication/storage
+        // guard has ended. No lookup, persistence, auth or HTTP is permitted.
+        let Self { publisher, job } = *self;
+        publisher
+            .try_send(job)
+            .map_err(|_| BackendError::Unavailable)
+    }
+}
+
 /// This service is scoped to one exact provider generation and native root.
 /// It owns no native handles and cannot clear incomplete history. The broker
 /// must retain/revalidate its root and publication/session fences independently.
@@ -174,6 +207,7 @@ pub(super) struct WindowsVaultCustody {
     store: ProtectedStore,
     state: Mutex<State>,
     failed: Arc<std::sync::atomic::AtomicBool>,
+    fresh_close_publisher: Option<VaultClosePublisher>,
 }
 impl WindowsVaultCustody {
     pub(super) fn prepare(
@@ -181,6 +215,20 @@ impl WindowsVaultCustody {
         account: &[u8],
         context: &VaultCustodyRootContext<'_>,
     ) -> Result<Arc<Self>> {
+        Self::prepare_with_fresh_close_publisher(store, account, context, None)
+    }
+    pub(super) fn prepare_with_fresh_close_publisher(
+        store: Arc<dyn SessionStore>,
+        account: &[u8],
+        context: &VaultCustodyRootContext<'_>,
+        publisher: Option<VaultClosePublisher>,
+    ) -> Result<Arc<Self>> {
+        if publisher
+            .as_ref()
+            .is_some_and(|source| source.generation() == 0)
+        {
+            return Err(refused());
+        }
         context.revalidate().map_err(|_| refused())?;
         let root = context.root_identity();
         let binding = RootBinding::new(
@@ -240,12 +288,22 @@ impl WindowsVaultCustody {
             registration: context.registration_binding().into(),
             store,
             failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fresh_close_publisher: publisher,
             state: Mutex::new(State {
                 manifest,
                 children,
                 failed: false,
             }),
         }))
+    }
+    pub(super) fn matches_fresh_origin(&self, origin: &FreshCaptureOrigin) -> bool {
+        origin.owner() == &self.owner
+            && origin.root() == self.root
+            && Weak::ptr_eq(&origin.broker, &Arc::downgrade(&self.failed))
+            && origin
+                .broker
+                .upgrade()
+                .is_some_and(|failed| !failed.load(std::sync::atomic::Ordering::Acquire))
     }
     /// Bounded historical IDs only, with no body or live authority creation.
     #[cfg(test)]
@@ -432,6 +490,7 @@ impl WindowsVaultCustody {
             root: self.root,
             store: ProtectedStore(Arc::clone(&self.store.0)),
             child,
+            fresh_close_publisher: self.fresh_close_publisher.clone(),
         }))
     }
 }
@@ -728,6 +787,7 @@ struct View {
     root: ConfiguredRootIdentity,
     store: ProtectedStore,
     child: Arc<Child>,
+    fresh_close_publisher: Option<VaultClosePublisher>,
 }
 // Deterministic locator only, never authority. Length framing binds each
 // trusted field and the edited body digest without retaining plaintext copies.
@@ -761,7 +821,8 @@ impl VaultPublicationCustody for View {
         &self,
         baseline: &ExistingVaultEditBaseline,
         payload: ExistingVaultEditPayload,
-    ) -> std::result::Result<(), BackendError> {
+        dispatch: FreshVaultCaptureDispatch,
+    ) -> std::result::Result<Option<Box<dyn DeferredVaultCaptureNotification>>, BackendError> {
         let result = (|| {
             self.verify_context(baseline.owner(), baseline.vault(), baseline.remote_root())?;
             if baseline.root() != self.root
@@ -821,9 +882,10 @@ impl VaultPublicationCustody for View {
             .map_err(unavailable)?;
             let prepared = capture::PreparedCapture::new(&self.scope, &id, original, payload.bytes)
                 .map_err(unavailable)?;
+            let capture_id = prepared.id().to_owned();
             // Service matches the exact persisted hydration file/components and
             // enrolls the full immutable frame before any protected body put.
-            vault_edit_retention::retain_indexed(
+            let outcome = vault_edit_retention::retain_indexed(
                 &self.store,
                 &mut child,
                 &CaptureStore(Arc::clone(&self.store.0)),
@@ -834,7 +896,32 @@ impl VaultPublicationCustody for View {
             manifest.verify_current(&self.store).map_err(unavailable)?;
             self.verify_context(baseline.owner(), baseline.vault(), baseline.remote_root())?;
             *cached = child;
-            Ok(())
+            // No guard or body escapes. Only a genuinely new acknowledged
+            // publication can supply a live-close locator to the deferred sink.
+            drop(cached);
+            if outcome != vault_edit_retention::RetentionOutcome::New {
+                return Ok(None);
+            }
+            let Some(publisher) = self.fresh_close_publisher.as_ref() else {
+                return Ok(None);
+            };
+            let job = FreshVaultCloseJob {
+                origin: FreshCaptureOrigin {
+                    owner: self.owner.clone(),
+                    root: self.root,
+                    broker: Arc::downgrade(&self.root_failed),
+                },
+                vault: baseline.vault().clone(),
+                remote_root: baseline.remote_root().to_owned(),
+                capture_id,
+                dispatch,
+                expected_generation: publisher.generation(),
+            };
+            Ok(Some(Box::new(FreshCloseNotification {
+                publisher: publisher.clone(),
+                job,
+            })
+                as Box<dyn DeferredVaultCaptureNotification>))
         })();
         if result.is_err() {
             // Includes uncertainty after publication. Retain every protected
@@ -1071,6 +1158,7 @@ mod tests {
             registration: "registration".into(),
             store: protected,
             failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fresh_close_publisher: None,
             state: Mutex::new(State {
                 manifest,
                 children: BTreeMap::new(),
@@ -1081,6 +1169,47 @@ mod tests {
             VaultSessionScope::new("default", "https://example.test", "space", "vault-root")
                 .unwrap();
         (store, service, owner, vault)
+    }
+    #[test]
+    fn fresh_origin_is_exact_broker_instance_owner_root_and_never_revives_failure() {
+        let (_, service, _, _) = fixture();
+        let origin = FreshCaptureOrigin {
+            owner: service.owner.clone(),
+            root: service.root,
+            broker: Arc::downgrade(&service.failed),
+        };
+        assert!(service.matches_fresh_origin(&origin));
+        let (_, other, _, _) = fixture();
+        assert!(!other.matches_fresh_origin(&origin));
+        let foreign_root = FreshCaptureOrigin {
+            owner: service.owner.clone(),
+            root: ConfiguredRootIdentity {
+                file_index: service.root.file_index + 1,
+                ..service.root
+            },
+            broker: Arc::downgrade(&service.failed),
+        };
+        assert!(!service.matches_fresh_origin(&foreign_root));
+        let client =
+            raiun_opencloud::OpenCloudClient::new("https://example.test/", "synthetic".into())
+                .unwrap();
+        let foreign_owner = FreshCaptureOrigin {
+            owner: ProviderScope::new(
+                &client,
+                "default".into(),
+                "foreign".into(),
+                "https://example.test".into(),
+            )
+            .unwrap(),
+            root: service.root,
+            broker: Arc::downgrade(&service.failed),
+        };
+        assert!(!service.matches_fresh_origin(&foreign_owner));
+        service.failed.store(true, Ordering::Release);
+        assert!(!service.matches_fresh_origin(&origin));
+        drop(service);
+        assert!(origin.broker.upgrade().is_none());
+        assert!(!other.matches_fresh_origin(&origin));
     }
     fn entry(id: u8) -> VaultCatalogueEntry {
         VaultCatalogueEntry {

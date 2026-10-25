@@ -1,9 +1,54 @@
-// Explicit hot-route capture upload. No scheduler, native acknowledgement,
-// cleanup, history retirement or writable publication is enabled here.
+// Guarded hot-route capture upload, shared with private fresh-close dispatch.
+// No native acknowledgement, cleanup, history retirement or writable
+// publication is enabled here.
 
 const WINDOWS_VAULT_EDIT_UPLOAD_ENABLED: bool = false;
 
+struct FreshVaultUploadExpectation {
+    origin: windows_vault_custody::FreshCaptureOrigin,
+    expected_generation: u64,
+    dispatch: raiun_cloudfiles_windows::FreshVaultCaptureDispatch,
+    active: Arc<std::sync::atomic::AtomicBool>,
+}
+
 impl WindowsAgent {
+    /// Private one-use queue admission; a locator from history cannot call this
+    /// without its original process-local custody and vault-binding identities.
+    fn upload_from_fresh_close(
+        &self,
+        job: windows_vault_close_worker::FreshVaultCloseJob,
+    ) -> Result<Value, String> {
+        // Snapshot this worker's cancellation identity once. No worker mutex
+        // may be reacquired by the network cancellation predicate or join path.
+        let active = self.fresh_close_active_marker(job.expected_generation)?;
+        let windows_vault_close_worker::FreshVaultCloseJob {
+            origin,
+            vault,
+            remote_root,
+            capture_id,
+            dispatch,
+            expected_generation,
+        } = job;
+        let mut result = self.upload_windows_vault_capture_inner(
+            &vault,
+            &remote_root,
+            &capture_id,
+            Some(FreshVaultUploadExpectation {
+                origin,
+                expected_generation,
+                dispatch,
+                active,
+            }),
+        )?;
+        // Remote verification never authorizes native acknowledgement, dirty
+        // history removal or Lock cleanup. Keep that boundary explicit.
+        result
+            .as_object_mut()
+            .ok_or("The fresh upload result is unavailable")?
+            .insert("native_confirmation".into(), Value::Bool(false));
+        Ok(result)
+    }
+
     fn upload_windows_vault_capture_request(&self, request: &Value) -> Result<Value, String> {
         let field = |name: &str| {
             request
@@ -42,12 +87,31 @@ impl WindowsAgent {
         remote_root: &str,
         capture_id: &str,
     ) -> Result<Value, String> {
+        self.upload_windows_vault_capture_inner(vault, remote_root, capture_id, None)
+    }
+
+    fn upload_windows_vault_capture_inner(
+        &self,
+        vault: &raiun_vault::session::VaultSessionScope,
+        remote_root: &str,
+        capture_id: &str,
+        fresh: Option<FreshVaultUploadExpectation>,
+    ) -> Result<Value, String> {
         use raiun_cloudfiles_windows::{CancellationToken, ExistingVaultUploadTarget};
         use raiun_core::backend::{ErrorKind, RemoteEntry};
         use raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome;
         use sha2::{Digest, Sha256};
         use std::time::Instant;
 
+        let (fresh_origin, fresh_generation, dispatch, fresh_active) = match fresh {
+            Some(fresh) => (
+                Some(fresh.origin),
+                Some(fresh.expected_generation),
+                Some(fresh.dispatch),
+                Some(fresh.active),
+            ),
+            None => (None, None, None, None),
+        };
         vault_edit_capture::CaptureId::new(capture_id)
             .map_err(|_| "Select an existing retained vault edit")?;
         if remote_root.len() > 4096 || !remote_root.starts_with('/') {
@@ -85,6 +149,7 @@ impl WindowsAgent {
             .origin()
             .ascii_serialization();
         if generation == 0
+            || fresh_generation.is_some_and(|expected| expected == 0 || expected != generation)
             || generation != self.generation.load(Ordering::Acquire)
             || generation != self.provider.authorized_generation.load(Ordering::Acquire)
             || !configuration.valid
@@ -121,6 +186,12 @@ impl WindowsAgent {
                 .ok_or("The original drive root is unverified")?,
         };
         let verified = self.provider.verified_vault_backend(active.clone())?;
+        if fresh_origin
+            .as_ref()
+            .is_some_and(|origin| !verified.custody.matches_fresh_origin(origin))
+        {
+            return Err("The fresh edit belongs to an earlier Windows connection".into());
+        }
         let (_, trusted) = verified
             .backend
             .vault_read_context(identity)
@@ -134,6 +205,12 @@ impl WindowsAgent {
             if generation != self.generation.load(Ordering::Acquire)
                 || generation != self.provider.authorized_generation.load(Ordering::Acquire)
                 || verified.backend.is_revoked()
+                || fresh_active
+                    .as_ref()
+                    .is_some_and(|active| !active.load(Ordering::Acquire))
+                || fresh_origin
+                    .as_ref()
+                    .is_some_and(|origin| !verified.custody.matches_fresh_origin(origin))
             {
                 return Err("The account or Windows drive changed".into());
             }
@@ -224,6 +301,23 @@ impl WindowsAgent {
             },
         )
         .map_err(|_| "The retained edit has an invalid original target")?;
+        let target = match dispatch {
+            Some(dispatch) => target.with_fresh_dispatch(dispatch),
+            None => target,
+        };
+        let verify_fresh_dispatch = || -> Result<(), String> {
+            if fresh_generation.is_some() {
+                verified
+                    .backend
+                    .validate_fresh_vault_capture_dispatch(&target)
+                    .map_err(|_| "The fresh edit's original unlock or route changed")?;
+            }
+            Ok(())
+        };
+        // A stale queue event must not initialize or consume a durable attempt
+        // by silently selecting a replacement login, connection or unlock.
+        current()?;
+        verify_fresh_dispatch()?;
         let mut attempt = match ledger.reopen_attempt() {
             Ok(attempt) => attempt,
             Err(vault_edit_upload::Error::Missing) => ledger
@@ -235,6 +329,7 @@ impl WindowsAgent {
         ledger
             .verify_current()
             .map_err(|_| "The retained edit context changed")?;
+        verify_fresh_dispatch()?;
         let ticket = attempt.begin_attempt(&ledger).map_err(
             |_| "This retained edit already has an attempt; inspect recovery before continuing",
         )?;
@@ -247,6 +342,9 @@ impl WindowsAgent {
                 || self.generation.load(Ordering::Acquire) != generation
                 || self.provider.authorized_generation.load(Ordering::Acquire) != generation
                 || verified.backend.is_revoked()
+                || fresh_active
+                    .as_ref()
+                    .is_some_and(|active| !active.load(Ordering::Acquire))
         };
         let mut source = std::io::Cursor::new(retained.bytes_for_recovery());
         let outcome = verified.backend.upload_existing_vault_capture(

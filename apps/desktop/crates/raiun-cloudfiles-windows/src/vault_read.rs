@@ -142,10 +142,19 @@ impl WindowsVaultReadBinding {
         if target.owner() != &self.trusted
             || target.vault() != &self.scope
             || target.remote_root() != self.root_path
+            || target
+                .dispatch()
+                .is_some_and(|dispatch| !dispatch.matches_binding(&self.identity))
         {
             return Err(refused());
         }
         Ok(())
+    }
+
+    /// Local capture already owns the publication/token/opaque-epoch fences.
+    /// Copy only this immutable binding's weak identity, never its key or lease.
+    pub(crate) fn capture_dispatch_stamp(&self) -> crate::FreshVaultCaptureDispatch {
+        crate::FreshVaultCaptureDispatch::from_binding(&self.identity)
     }
 
     #[cfg(windows)]

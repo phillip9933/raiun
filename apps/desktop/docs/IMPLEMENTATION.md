@@ -2732,3 +2732,38 @@ promotion and clean Lock are not established by this explicit fixture. The
 512 KiB bound and separate post-lock/restart reconciliation gap remain. No product
 package, host installation or publication was performed; r117 remains installed
 and closed only in the isolated VM.
+
+### Fresh-close guarded Windows vault upload (26 October)
+
+The internal native close path can now send a newly acknowledged protected
+capture to a bounded, off-provider worker. The notification is published only
+after retention readback, sticky dirty accounting, and release of the callback,
+file, custody and publication guards. It carries weak process-local identities
+for the original custody and unlock binding, rather than keys or a reusable
+permission. The worker rechecks the exact account, root, route and generation
+before claiming its one durable attempt. Queue saturation, cancellation or
+uncertainty preserves the capture; there is no history scan or automatic retry.
+
+The exact source passes Linux formatting, strict workspace lint and 1,044 tests
+(14 ignored), and the GNU Windows binary/test and Cloud Files strict checks
+without warnings. The selected MSVC ordinary-user native fixture passed: a fresh
+65,553-byte edit caused one conditional encrypted PUT and authenticated full
+readback automatically, with no manual upload call. Reopening the protected
+history and an identical modified close caused no additional attempt. The
+original frame and local bytes remained intact, ordinary PUT/journal counts stayed zero,
+and native confirmation remained false. Dirty Lock/stop cleanup correctly
+remained incomplete. Native/wrapper exits and owned process counts were zero,
+followed by normal guest shutdown and cold preservation.
+
+Evidence: `windows-vault-fresh-close-r1/combined-r3/` and `gnu-r3/` under
+`outputs/desktop-next-20261021/`; native evidence is
+`outputs/local-windows-native-20261023-r1/agent-vault-fresh-close-native-r24/`.
+Source archive: `85198080…`. The initial GNU unused-adapter warning and its
+narrow default-path repair are preserved, along with the R23 native failure at
+an unsupported read-close observer. The corrected fixture uses a second
+identical write and validates two successful native retention notifications.
+This accepts the private fresh-close remote-upload bridge only. Normal automatic dispatch, public upload RPC and
+writable publication remain disabled; baseline promotion, native completion,
+clean Lock and post-lock/restart reconciliation are still separate gaps. No new
+package, host installation or publication occurred; r117 remains installed and
+closed in the isolated VM.

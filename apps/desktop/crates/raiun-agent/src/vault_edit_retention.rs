@@ -7,6 +7,13 @@ pub(crate) enum Error {
     Custody(custody::Error),
     Capture(capture::Error),
 }
+/// A fresh notification is eligible only for this invocation's acknowledged
+/// new index and immutable-body publication. Reopened history is never fresh.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RetentionOutcome {
+    New,
+    Existing,
+}
 /// Only acknowledged new enrollment permits a body put. Existing/recovered
 /// references can reopen and compare; missing bodies are never healed here.
 pub(crate) fn retain_indexed(
@@ -15,13 +22,16 @@ pub(crate) fn retain_indexed(
     body_store: &impl capture::Store,
     prepared: capture::PreparedCapture,
     native_components: &[String],
-) -> Result<capture::RetainedEdit, Error> {
+) -> Result<RetentionOutcome, Error> {
     match child
         .enroll_capture(custody_store, &prepared, native_components)
         .map_err(Error::Custody)?
     {
         custody::CaptureEnrollment::New(ticket) => {
-            capture::persist_prepared_new(body_store, prepared, ticket).map_err(Error::Capture)
+            // This includes exact full-frame/body readback; publication errors,
+            // collisions and uncertain persistence never produce New.
+            capture::persist_prepared_new(body_store, prepared, ticket).map_err(Error::Capture)?;
+            Ok(RetentionOutcome::New)
         }
         custody::CaptureEnrollment::Existing(reference) => {
             let id = capture::CaptureId::new(reference.id()).map_err(Error::Capture)?;
@@ -30,7 +40,7 @@ pub(crate) fn retain_indexed(
             if retained.encoded_frame_ref() != reference.frame() {
                 return Err(Error::Capture(capture::Error::Conflict));
             }
-            Ok(retained)
+            Ok(RetentionOutcome::Existing)
         }
     }
 }
@@ -54,6 +64,8 @@ mod tests {
         writes: Vec<&'static str>,
         uncertain_index: bool,
         fail_body: bool,
+        uncertain_body_after_publication: bool,
+        corrupt_body_after_publication: bool,
     }
     #[derive(Clone, Default)]
     struct Memory(Rc<RefCell<State>>);
@@ -101,8 +113,14 @@ mod tests {
                 return Ok(capture::PutNew::AlreadyExists);
             }
             s.writes.push("body");
-            s.bodies
-                .insert(binding.to_vec(), Zeroizing::new(body.to_vec()));
+            let mut published = body.to_vec();
+            if s.corrupt_body_after_publication {
+                *published.last_mut().unwrap() ^= 1;
+            }
+            s.bodies.insert(binding.to_vec(), Zeroizing::new(published));
+            if s.uncertain_body_after_publication {
+                return Err(capture::Error::Persistence);
+            }
             Ok(capture::PutNew::Created)
         }
     }
@@ -168,7 +186,13 @@ mod tests {
             &components(),
         )
         .unwrap();
-        assert_eq!(retained.bytes_for_recovery(), bytes);
+        assert_eq!(retained, RetentionOutcome::New);
+        assert_eq!(
+            capture::reopen_for_recovery(&s, &scope, &CaptureId::new("capture-1").unwrap())
+                .unwrap()
+                .bytes_for_recovery(),
+            bytes
+        );
         assert_eq!(s.0.borrow().writes, ["index", "body"]);
         assert!(matches!(
             child.publication_history(),
@@ -185,12 +209,58 @@ mod tests {
             &components(),
         )
         .unwrap();
-        assert_eq!(recovered.bytes_for_recovery(), bytes);
+        assert_eq!(recovered, RetentionOutcome::Existing);
+        assert_eq!(
+            capture::reopen_for_recovery(&s, &scope, &CaptureId::new("capture-1").unwrap())
+                .unwrap()
+                .bytes_for_recovery(),
+            bytes
+        );
         assert!(s.0.borrow().writes.is_empty());
         assert!(matches!(
             fresh.publication_history(),
             Err(custody::Error::Incomplete)
         ));
+    }
+    #[test]
+    fn published_but_uncertain_or_wrong_readback_never_becomes_a_new_close() {
+        for corrupt in [false, true] {
+            let (s, scope, mut child) = fixture();
+            s.0.borrow_mut().uncertain_body_after_publication = !corrupt;
+            s.0.borrow_mut().corrupt_body_after_publication = corrupt;
+            assert!(
+                retain_indexed(
+                    &s,
+                    &mut child,
+                    &s,
+                    prepared(&scope, "capture-1", b"retained bytes"),
+                    &components(),
+                )
+                .is_err()
+            );
+            assert_eq!(child.captures_for_reconciliation().len(), 1);
+            assert_eq!(s.0.borrow().bodies.len(), 1);
+            let body_before = s.0.borrow().bodies.clone();
+            s.0.borrow_mut().uncertain_body_after_publication = false;
+            s.0.borrow_mut().corrupt_body_after_publication = false;
+            s.0.borrow_mut().writes.clear();
+            let mut reopened = custody::Custody::reopen(&s, &scope).unwrap();
+            let result = retain_indexed(
+                &s,
+                &mut reopened,
+                &s,
+                prepared(&scope, "capture-1", b"retained bytes"),
+                &components(),
+            );
+            if corrupt {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap(), RetentionOutcome::Existing);
+            }
+            assert!(s.0.borrow().writes.is_empty());
+            assert!(s.0.borrow().bodies == body_before);
+            assert!(reopened.publication_history().is_err());
+        }
     }
     #[test]
     fn crash_after_enrollment_and_uncertain_cas_never_fill_a_recovered_missing_body() {

@@ -2692,7 +2692,12 @@ unsafe extern "system" fn notify_file_close_completion_callback(
             .fetch_add(1, Ordering::AcqRel);
         return;
     }
-    guard.0.record_placeholder_close(info, flags);
+    let notification = guard.0.record_placeholder_close(info, flags);
+    // The owned notification contains no callback/native pointers. All path,
+    // file, store, route/token/epoch and close-pool guards have unwound; release
+    // callback lifetime accounting too before the sole nonblocking send.
+    drop(guard);
+    let _ = crate::backend::publish_vault_capture_notification(notification);
 }
 
 fn valid_close_completion_param_size(value: usize) -> bool {
@@ -4173,12 +4178,13 @@ mod hydration_inventory {
     }
 }
 
-/// Retaining a vault edit is historical evidence only. Keep it distinct from
-/// the ordinary journal outcome so it cannot schedule or imply completion.
+/// Retaining a vault edit is historical evidence only. An optional fresh
+/// notification remains separate from ordinary journaling and completion;
+/// only the outer callback may publish it after dirty accounting and guard drop.
 enum ModifiedCloseCapture {
     Clean,
     OrdinaryJournaled,
-    VaultRetained,
+    VaultRetained(Option<Box<dyn crate::DeferredVaultCaptureNotification>>),
 }
 
 struct CallbackState {
@@ -4357,39 +4363,47 @@ impl CallbackState {
         }
     }
 
-    fn record_placeholder_close(&self, info: &CfCallbackInfo, flags: u32) {
+    fn record_placeholder_close(
+        &self,
+        info: &CfCallbackInfo,
+        flags: u32,
+    ) -> Option<Box<dyn crate::DeferredVaultCaptureNotification>> {
         self.last_close_file_id
             .store(info.file_id as u64, Ordering::Release);
         let Some(_permit) = self.close_check_pool.try_acquire() else {
             self.close_pool_refusals.fetch_add(1, Ordering::Relaxed);
             self.unverifiable_placeholder_closes
                 .fetch_add(1, Ordering::AcqRel);
-            return;
+            return None;
         };
         if flags & CF_CALLBACK_CLOSE_COMPLETION_FLAG_DELETED != 0 {
             self.deleted_placeholder_closes
                 .fetch_add(1, Ordering::Relaxed);
             self.unverifiable_placeholder_closes
                 .fetch_add(1, Ordering::AcqRel);
-            return;
+            return None;
         }
         let result = self.capture_and_journal_modified_file(info);
         match result {
-            Ok(ModifiedCloseCapture::Clean) => {}
+            Ok(ModifiedCloseCapture::Clean) => None,
             Ok(ModifiedCloseCapture::OrdinaryJournaled) => {
                 self.modified_placeholder_closes
                     .fetch_add(1, Ordering::AcqRel);
                 self.journaled_placeholder_closes
                     .fetch_add(1, Ordering::AcqRel);
+                None
             }
-            Ok(ModifiedCloseCapture::VaultRetained) => {
+            Ok(ModifiedCloseCapture::VaultRetained(notification)) => {
                 // Protected capture preserves dirty history; it is not ordinary
                 // journal completion and cannot clear sticky failures or grant
-                // unregister, dehydration, in-sync or dispatch authority.
+                // unregister, dehydration, in-sync or upload authority. Commit
+                // this existing sticky dirty observation BEFORE returning an
+                // optional fresh notification to the outer callback.
                 self.modified_placeholder_closes
                     .fetch_add(1, Ordering::AcqRel);
                 #[cfg(feature = "synthetic-agent-integration")]
                 eprintln!("synthetic vault close historically retained; dirty native remains=true");
+                notification
             }
             Err((stage, hresult, modified)) => {
                 #[cfg(feature = "synthetic-agent-integration")]
@@ -4409,6 +4423,7 @@ impl CallbackState {
                 // conservative; disconnect preserves the root for recovery.
                 self.unverifiable_placeholder_closes
                     .fetch_add(1, Ordering::AcqRel);
+                None
             }
         }
     }
@@ -4568,7 +4583,9 @@ impl CallbackState {
             let mut stream = Some(content_handle);
             let mut failure = (62, 0, true);
             let mut retained = false;
-            self.backend
+            let mut notification = None;
+            let callback_result = self
+                .backend
                 .with_vault_edit_capture(identity, &mut |capture| {
                     let result = (|| {
                         let baseline = capture.baseline();
@@ -4643,7 +4660,7 @@ impl CallbackState {
                             .ok_or((65, 0, true))?;
                         // No comparison with the baseline remote size: this is
                         // the checked edited length, which may legitimately differ.
-                        capture
+                        notification = capture
                             .retain(crate::ExistingVaultEditPayload {
                                 root: crate::ConfiguredRootIdentity {
                                     volume_serial: root_identity.volume_serial,
@@ -4661,15 +4678,24 @@ impl CallbackState {
                         Ok(())
                     })();
                     result.map_err(|error| {
+                        // Never let an error, even if swallowed by an adapter,
+                        // carry a previously retained notification outward.
+                        retained = false;
+                        notification = None;
                         failure = error;
                         BackendError::Unavailable
                     })
-                })
-                .map_err(|_| failure)?;
-            if !retained {
-                return Err((67, 0, true));
+                });
+            if callback_result.is_ok() && !retained {
+                failure = (67, 0, true);
             }
-            return Ok(ModifiedCloseCapture::VaultRetained);
+            let notification = crate::backend::finish_vault_capture_notification(
+                callback_result,
+                retained,
+                notification,
+            )
+            .map_err(|_| failure)?;
+            return Ok(ModifiedCloseCapture::VaultRetained(notification));
         }
         // Ordinary files retain the existing account/root edit lease before
         // reading content or publishing encrypted recovery. Vault identities

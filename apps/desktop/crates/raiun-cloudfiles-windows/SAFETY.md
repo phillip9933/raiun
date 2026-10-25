@@ -483,3 +483,45 @@ effect and locked reads fail without downloads, then performs a fresh manual
 read and Lock. It follows a successful prior Lock; it is not an OS-process crash
 or a proof of cleanup after unclean shutdown with resident data. Those native
 acceptance limits remain explicit.
+
+### Fresh-close deferred upload notification
+
+A retained existing vault edit remains protected historical evidence and native
+incomplete data. Its optional deferred notification is a process-local locator,
+not an upload/session/cleanup permit. Only acknowledged new indexed capture and
+full protected readback may supply it; Existing/reopened captures and the
+capture-only default supply None. The broker notification implementation owns
+only a bounded nonblocking publisher and locator fields. Dropping it never sends;
+refused publication queues nothing and never retries or alters dirty history.
+
+The local capture adapter obtains the opaque dispatch stamp from the existing
+binding identity while already inside the route/token/opaque-epoch publication
+fences. The stamp contains only a Weak of that immutable binding marker: no
+keys, epoch lease, body, Clone/serialization or historical reconstruction. An
+optional consuming attachment on ExistingVaultUploadTarget is checked only by
+the receiving current binding under its usual guards. The early target check
+validates current binding and exact saved original metadata locally, with no
+body reads, HTTP, coordinator or provider reentry. Actual upload retains its
+existing full custody/account/root/original entry and cancellation validation.
+
+Native capture keeps a deferred value private until durable retain and lexical
+callback acknowledgement both succeed. Any callback error, missing retention,
+or repeated capture failure drops the value without publication. The native
+close outcome remains distinct from ordinary journaling. The existing sticky
+modified-close observation is committed before record_placeholder_close returns
+the optional value; no new per-file tracker or dirty resolution is imported.
+All path/read handles, DPAPI/custody locks, route/token/epoch guards and the
+close-pool permit have then unwound. Only at the final outer close-callback
+statement, after explicitly dropping callback lifetime accounting, is the
+one-use try_publish invoked. No callback/native pointer or borrowed guard is
+carried by the notification. The new call contains panic propagation at the FFI
+boundary and does not retry a refused send.
+
+Notifications do not reconstruct current authorization. The receiver must check
+its expected provider generation, root/account and broker instance, the original
+binding stamp and actual current token/opaque epoch before its durable one-attempt
+upload. A retired/replaced/re-unlocked route cannot adopt an old notification.
+Network work remains outside the provider command thread and every publication
+lock. Public upload and writable publication remain disabled; verified remote
+upload still leaves native dirty data and recovery history pending. No native
+acknowledgement, cleanup, SDK/v4 disposition or completion policy is introduced.

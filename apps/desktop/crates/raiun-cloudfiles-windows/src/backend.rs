@@ -84,13 +84,52 @@ pub struct PlaceholderEditBinding {
 
 /// Borrowed only inside the exact live vault capture callback. This exposes
 /// immutable historical metadata and local retention, never keys or a live lease.
+/// A successful retain may return a one-use notification, which is not published
+/// until native dirty accounting and every capture/callback guard have finished.
 #[cfg(windows)]
 pub trait ExistingVaultEditCapture {
     fn baseline(&self) -> &crate::vault_custody::ExistingVaultEditBaseline;
     fn retain(
         &self,
         payload: crate::vault_custody::ExistingVaultEditPayload,
-    ) -> Result<(), BackendError>;
+    ) -> Result<Option<Box<dyn DeferredVaultCaptureNotification>>, BackendError>;
+}
+
+/// Owned fresh-close locator only, never upload/session/cleanup authority.
+/// Implementations perform only one bounded nonblocking send. A refused send
+/// queues nothing; dropping this value must never publish. No locks, body,
+/// native pointers, account lookup, provider reentry or HTTP may escape here.
+pub trait DeferredVaultCaptureNotification: Send {
+    fn try_publish(self: Box<Self>) -> Result<(), BackendError>;
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn finish_vault_capture_notification(
+    callback: Result<(), BackendError>,
+    retained: bool,
+    notification: Option<Box<dyn DeferredVaultCaptureNotification>>,
+) -> Result<Option<Box<dyn DeferredVaultCaptureNotification>>, BackendError> {
+    callback?;
+    if !retained {
+        return Err(BackendError::Unavailable);
+    }
+    Ok(notification)
+}
+
+/// Called only after native close accounting and all callback guards dropped.
+/// Contain an implementation panic at the external callback boundary; neither
+/// an error nor a panic retries publication or changes retained dirty history.
+#[cfg(any(windows, test))]
+pub(crate) fn publish_vault_capture_notification(
+    notification: Option<Box<dyn DeferredVaultCaptureNotification>>,
+) -> Result<(), BackendError> {
+    match notification {
+        Some(notification) => {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notification.try_publish()))
+                .unwrap_or(Err(BackendError::Unavailable))
+        }
+        None => Ok(()),
+    }
 }
 
 /// Local synchronous accounting only, never a durable or live permit. Even a
@@ -127,6 +166,74 @@ impl ExistingCaptureAcknowledgement {
 #[cfg(test)]
 mod existing_capture_ack_tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{SyncSender, sync_channel},
+    };
+
+    struct Notice {
+        sender: SyncSender<()>,
+        attempts: Arc<AtomicUsize>,
+    }
+    impl DeferredVaultCaptureNotification for Notice {
+        fn try_publish(self: Box<Self>) -> Result<(), BackendError> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            self.sender
+                .try_send(())
+                .map_err(|_| BackendError::Unavailable)
+        }
+    }
+
+    #[test]
+    fn deferred_notice_requires_retention_and_successful_outer_ack() {
+        let (sender, receiver) = sync_channel(1);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let notice = || -> Option<Box<dyn DeferredVaultCaptureNotification>> {
+            Some(Box::new(Notice {
+                sender: sender.clone(),
+                attempts: Arc::clone(&attempts),
+            }))
+        };
+        assert!(finish_vault_capture_notification(Ok(()), false, notice()).is_err());
+        assert!(
+            finish_vault_capture_notification(Err(BackendError::Unavailable), true, notice())
+                .is_err()
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+        assert!(receiver.try_recv().is_err());
+        let deferred = finish_vault_capture_notification(Ok(()), true, notice()).unwrap();
+        // Native accounting/guard unwinding must happen before this later call.
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+        assert!(receiver.try_recv().is_err());
+        publish_vault_capture_notification(deferred).unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(receiver.try_recv(), Ok(()));
+        assert!(receiver.try_recv().is_err());
+        assert!(
+            finish_vault_capture_notification(Ok(()), true, None)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn refused_nonblocking_publish_is_not_retried_or_queued() {
+        let (sender, receiver) = sync_channel(1);
+        sender.try_send(()).unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let deferred = Some(Box::new(Notice {
+            sender: sender.clone(),
+            attempts: Arc::clone(&attempts),
+        }) as Box<dyn DeferredVaultCaptureNotification>);
+        assert!(publish_vault_capture_notification(deferred).is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(receiver.try_recv(), Ok(()));
+        assert!(receiver.try_recv().is_err());
+        publish_vault_capture_notification(None).unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn callback_success_requires_exactly_one_acknowledged_retain() {
         let absent = ExistingCaptureAcknowledgement::default();

@@ -24,6 +24,7 @@ pub struct ExistingVaultUploadTarget {
     configured_root: ConfiguredRootIdentity,
     opaque: [u8; 16],
     original: RemoteEntry,
+    fresh_dispatch: Option<crate::FreshVaultCaptureDispatch>,
 }
 impl ExistingVaultUploadTarget {
     pub fn new(
@@ -67,7 +68,17 @@ impl ExistingVaultUploadTarget {
             configured_root,
             opaque,
             original,
+            fresh_dispatch: None,
         })
+    }
+    /// Attach the producer's opaque route-instance stamp. This locator grants
+    /// no authority: a current live binding must validate it before any upload.
+    pub fn with_fresh_dispatch(mut self, dispatch: crate::FreshVaultCaptureDispatch) -> Self {
+        self.fresh_dispatch = Some(dispatch);
+        self
+    }
+    pub(crate) fn dispatch(&self) -> Option<&crate::FreshVaultCaptureDispatch> {
+        self.fresh_dispatch.as_ref()
     }
     pub(crate) fn owner(&self) -> &ProviderScope {
         &self.current_owner
@@ -226,7 +237,8 @@ pub trait VaultPublicationCustody: Send + Sync {
         &self,
         _baseline: &ExistingVaultEditBaseline,
         _payload: ExistingVaultEditPayload,
-    ) -> Result<(), BackendError> {
+        _dispatch: crate::FreshVaultCaptureDispatch,
+    ) -> Result<Option<Box<dyn crate::DeferredVaultCaptureNotification>>, BackendError> {
         Err(BackendError::Unavailable)
     }
 

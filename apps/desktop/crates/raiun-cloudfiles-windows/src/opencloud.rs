@@ -1503,6 +1503,38 @@ impl OpenCloudPlaceholderBackend {
             .install(backend, expected_root)
     }
 
+    /// Validate a fresh close event against its original live route before any
+    /// durable attempt is created. This performs only current local admission;
+    /// the upload repeats the same binding check before its network operation.
+    #[cfg(windows)]
+    pub fn validate_fresh_vault_capture_dispatch(
+        &self,
+        target: &crate::ExistingVaultUploadTarget,
+    ) -> Result<(), raiun_core::backend::CloudError> {
+        use raiun_core::backend::CloudError;
+        let refused = || CloudError::new(ErrorKind::Forbidden, "fresh vault close route changed");
+        let _lease = self.lease_gate.read().map_err(|_| refused())?;
+        self.ensure_active().map_err(|_| refused())?;
+        if target.dispatch().is_none()
+            || target.owner() != &self.scope
+            || self.local_root_identity != Some(target.root())
+        {
+            return Err(refused());
+        }
+        let route = self
+            .vault_for_identity(target.identity())
+            .map_err(|_| refused())?
+            .ok_or_else(refused)?;
+        if route.local_root() != target.root()
+            || route.space_id() != target.vault().space_id()
+            || route.root_resource_id() != target.vault().resource_id()
+            || route.root_path() != target.remote_root()
+        {
+            return Err(refused());
+        }
+        route.backend().validate_capture_dispatch_target(target)
+    }
+
     /// Broker-only hot-route upload seam. Caller authenticates the exact retained
     /// frame/index and holds its real registered-root pin and admitted attempt.
     /// No HTTP runs under the account/root lease or a native publication fence.

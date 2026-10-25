@@ -13,6 +13,10 @@ mod initial_edit_queue;
 mod opencloud;
 mod recovery_provider;
 mod recovery_reconcile;
+#[cfg(any(windows, test))]
+mod vault_capture_dispatch;
+#[cfg(any(windows, test))]
+pub use vault_capture_dispatch::FreshVaultCaptureDispatch;
 #[cfg(windows)]
 pub mod vault_custody;
 #[cfg(any(windows, test))]
@@ -27,12 +31,13 @@ pub use backend::ExistingVaultEditCapture;
 pub(crate) use backend::placeholder_population_completed;
 pub use backend::{
     BackendError, BoundedPermit, BoundedPermitPool, CancellationToken, DEFAULT_FETCH_TIMEOUT,
-    EditRecoveryProvider, FetchRange, MAX_CONCURRENT_DIRECTORY_ENUMERATIONS,
-    MAX_CONCURRENT_FETCHES, MAX_DIRECTORY_CHILDREN, MAX_FILE_BYTES, MAX_RANGE_BYTES,
-    MAX_REQUEST_BYTES, MAX_STAGED_CALLBACKS, MAX_VAULT_EDIT_CAPTURE_BYTES, PlaceholderBackend,
-    PlaceholderChild, PlaceholderEditBinding, PlaceholderMetadata, PreparedEditBinding,
-    PreparedEditRecovery, PreparedEnumeration, PreparedFetch, PreparedFetchSession, PublishPermit,
-    RequestPublicationGate, RequestPublicationPermit, checked_fetch_range, next_chunk_len,
+    DeferredVaultCaptureNotification, EditRecoveryProvider, FetchRange,
+    MAX_CONCURRENT_DIRECTORY_ENUMERATIONS, MAX_CONCURRENT_FETCHES, MAX_DIRECTORY_CHILDREN,
+    MAX_FILE_BYTES, MAX_RANGE_BYTES, MAX_REQUEST_BYTES, MAX_STAGED_CALLBACKS,
+    MAX_VAULT_EDIT_CAPTURE_BYTES, PlaceholderBackend, PlaceholderChild, PlaceholderEditBinding,
+    PlaceholderMetadata, PreparedEditBinding, PreparedEditRecovery, PreparedEnumeration,
+    PreparedFetch, PreparedFetchSession, PublishPermit, RequestPublicationGate,
+    RequestPublicationPermit, checked_fetch_range, next_chunk_len,
 };
 #[cfg(windows)]
 pub use edit_journal::DpapiEditRecordProtector;
