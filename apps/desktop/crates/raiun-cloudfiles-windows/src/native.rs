@@ -15,6 +15,7 @@ use crate::{
     PreparedFetch, RequestPublicationGate, RequestPublicationPermit, SyntheticEntry,
     checked_fetch_range, next_chunk_len, placeholder_population_completed,
 };
+use sha2::{Digest, Sha256};
 use std::time::Instant;
 use std::{
     collections::{HashMap, HashSet},
@@ -447,6 +448,7 @@ struct CfOperationParameters {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 struct FileBasicInfo {
     creation_time: i64,
@@ -542,6 +544,8 @@ struct RootSnapshot {
 
 #[cfg(target_pointer_width = "64")]
 const _: () = {
+    assert!(size_of::<FileBasicInfo>() == 40);
+    assert!(size_of::<CfFsMetadata>() == 48);
     assert!(size_of::<CfSyncRegistration>() == 72);
     assert!(size_of::<CfSyncPolicies>() == 24);
     assert!(size_of::<CfConnectionKey>() == 8);
@@ -1971,6 +1975,432 @@ impl ConfiguredRootConnection {
         #[cfg(feature = "synthetic-agent-integration")]
         eprintln!("synthetic cleanup postcondition on_disk_empty=true");
         Ok(())
+    }
+
+    #[cfg(feature = "synthetic-agent-integration")]
+    pub(super) fn vault_file_pending_for_test(&self, identity: &[u8; 16]) -> Result<bool, Error> {
+        self.state
+            .vault_dirty
+            .lock()
+            .map(|dirty| dirty.pending(identity))
+            .map_err(|_| Error::EditRecoveryUnavailable)
+    }
+
+    pub(super) fn complete_vault_upload(
+        &self,
+        upload: crate::FreshVaultUpload,
+        store: &mut dyn crate::VaultLocalCompletionStore,
+    ) -> Result<(), Error> {
+        self.complete_vault_upload_mode(upload, store, true)
+    }
+
+    pub(super) fn complete_writable_vault_upload(
+        &self,
+        upload: crate::FreshVaultUpload,
+        store: &mut dyn crate::VaultLocalCompletionStore,
+    ) -> Result<(), Error> {
+        self.complete_vault_upload_mode(upload, store, false)
+    }
+
+    fn complete_vault_upload_mode(
+        &self,
+        upload: crate::FreshVaultUpload,
+        store: &mut dyn crate::VaultLocalCompletionStore,
+        restore_readonly: bool,
+    ) -> Result<(), Error> {
+        macro_rules! completion_stage {
+            ($stage:literal) => {
+                #[cfg(feature = "synthetic-agent-integration")]
+                eprintln!("synthetic_vault_completion_stage={}", $stage);
+            };
+            ($stage:literal,$hr:expr) => {
+                #[cfg(feature = "synthetic-agent-integration")]
+                eprintln!(
+                    "synthetic_vault_completion_stage={} hresult={:#010x}",
+                    $stage, $hr
+                );
+            };
+        }
+        macro_rules! completion_metadata_diagnostic {
+            ($stage:literal, $handle:expr, $snapshot:expr, $tag:expr, $state:expr, $basic:expr) => {
+                #[cfg(feature = "synthetic-agent-integration")]
+                {
+                    let basic = completion_basic_info($handle);
+                    let times_equal = basic.as_ref().is_ok_and(|observed| {
+                        observed.creation_time == $basic.creation_time
+                            && observed.last_access_time == $basic.last_access_time
+                            && observed.last_write_time == $basic.last_write_time
+                            && observed.change_time == $basic.change_time
+                    });
+                    eprintln!(
+                        "synthetic_vault_completion_metadata stage={} attrs={:#010x} expected_attrs={:#010x} tag={:#010x} expected_tag={:#010x} state={:#010x} reference_state={:#010x} basic_query_ok={} timestamp_eq={}",
+                        $stage, $snapshot.file_attributes, $basic.file_attributes,
+                        $snapshot.reparse_tag, $tag, $snapshot.placeholder_state, $state,
+                        u8::from(basic.is_ok()), u8::from(times_equal)
+                    );
+                }
+            };
+        }
+        completion_stage!("connection_and_scope");
+        if !self.connected {
+            return Err(Error::ConnectionStateInvalid);
+        }
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        let target = store.target().clone();
+        if upload.root().volume_serial != root.identity.volume_serial
+            || upload.root().file_index != root.identity.file_index
+            || target.local_file().volume_serial != root.identity.volume_serial
+            || upload.remote_evidence().entry().size > crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        let composite = Arc::clone(&upload.composite);
+        let binding = Arc::clone(upload.route.backend().binding());
+        let mut attempted_prepare = false;
+        composite.with_vault_completion(&upload, || {
+            let result = (|| {
+                upload.check_current()?;
+                root.verify_identity(true)?;
+                root.verify_registered()?;
+                let mut path = root.path.clone();
+                for part in target.components() {
+                    if !valid_component(part) {
+                        return Err(Error::InvalidSyntheticPath);
+                    }
+                    path.push(part);
+                }
+                let length = upload.remote_evidence().entry().size;
+                let (root_final, _ancestors, entry, before) = pin_callback_path_chain(
+                    &path,
+                    root.identity,
+                    target.local_file().file_index,
+                    CallbackSizePolicy::Exact(length),
+                )
+                .map_err(|_| Error::ConfiguredRootChanged)?;
+                if before.placeholder_state & CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK != 0 {
+                    return Err(Error::EditRecoveryUnavailable);
+                }
+                // Always first use existing EXCLUSIVE|WRITE_ACCESS. No READONLY
+                // clearing, permission change, foreground or weaker open fallback.
+                // This operation selects the borrowed Win32 handle UPFRONT for
+                // every handle-based CldApi call below, never as an error retry.
+                // ProtectedCompletionFile owns the opaque handle and retains its
+                // successful CfReference until all raw calls/postproof/CAS finish.
+                // The raw handle is never reopened, wrapped as owned, or closed.
+                completion_stage!("exclusive_open");
+                let file = ProtectedCompletionFile::open(&wide_path(&path)?)?;
+                completion_stage!("exclusive_open_accepted");
+                let opened = root_snapshot(file.raw)?;
+                let entry_final =
+                    final_path_for_handle(entry.0).map_err(|_| Error::ConfiguredRootChanged)?;
+                let opened_final =
+                    final_path_for_handle(file.raw).map_err(|_| Error::ConfiguredRootChanged)?;
+                if !same_edit_snapshot(before, opened)
+                    || !windows_paths_equal(&entry_final, &opened_final)
+                    || !windows_path_is_within(&opened_final, &root_final)
+                {
+                    return Err(Error::ConfiguredRootChanged);
+                }
+                verify_completion_identity(file.raw, &upload.identity())?;
+                let saved_usn = completion_usn(file.raw, target.local_file().file_index)?;
+                let mut bytes = Zeroizing::new(vec![0u8; length as usize]);
+                file.read_complete(&mut bytes)?;
+                let sha: [u8; 32] = Sha256::digest(&bytes).into();
+                if sha != upload.remote_evidence().plaintext_sha256()
+                    || !same_edit_snapshot(opened, root_snapshot(file.raw)?)
+                    || completion_usn(file.raw, target.local_file().file_index)? != saved_usn
+                {
+                    return Err(Error::EditRecoveryUnavailable);
+                }
+                completion_stage!("body_and_usn_validated");
+                // Keep this observation lock until durable completion and exact
+                // resolve. Other files/unknown history are never removed or reset.
+                let mut dirty = self
+                    .state
+                    .vault_dirty
+                    .lock()
+                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                let observation = dirty
+                    .snapshot(&upload.identity())
+                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                if observation.file != target.local_file()
+                    || observation.length != length
+                    || observation.sha256 != sha
+                    || observation.components != target.components()
+                {
+                    return Err(Error::EditRecoveryUnavailable);
+                }
+                let basic_before = completion_basic_info(file.raw)?;
+                // Bounded observed metadata contract: R/H/S/ARCHIVE are the
+                // standard settable bits. REPARSE is intrinsic, not requested.
+                // Unknown/cloud flags refuse instead of masking them away.
+                const SETTABLE_COMPLETION_ATTRIBUTES: u32 = 0x1 | 0x2 | 0x4 | 0x20;
+                if basic_before.file_attributes != opened.file_attributes
+                    || basic_before.file_attributes
+                        & !(SETTABLE_COMPLETION_ATTRIBUTES | FILE_ATTRIBUTE_REPARSE_POINT)
+                        != 0
+                    || basic_before.creation_time <= 0
+                    || basic_before.last_access_time <= 0
+                    || basic_before.last_write_time <= 0
+                    || basic_before.change_time <= 0
+                {
+                    return Err(Error::ConfiguredRootChanged);
+                }
+                upload.check_current()?;
+                root.verify_identity(true)?;
+                root.verify_registered()?;
+                completion_stage!("prepare_durable_promotion");
+                attempted_prepare = true; // Failure may follow an acknowledged protected CAS.
+                store
+                    .prepare(&crate::VaultNativePreparation::from_native(
+                        &upload, &target,
+                    ))
+                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                completion_stage!("prepared");
+                upload.check_current()?;
+                upload
+                    .route
+                    .backend()
+                    .promote_completed_catalogue(&upload)
+                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                self.state
+                    .hydrated_files
+                    .lock()
+                    .map_err(|_| Error::EditRecoveryUnavailable)?
+                    .promote_verified(
+                        upload.identity(),
+                        target.local_file().file_index,
+                        upload.target.original().size,
+                        length,
+                        target.components(),
+                    )
+                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                completion_stage!("runtime_promoted");
+                #[cfg(feature = "synthetic-agent-integration")]
+                eprintln!(
+                    "synthetic_vault_completion_probe_attributes={:#010x}",
+                    basic_before.file_attributes
+                );
+                #[cfg(feature = "synthetic-agent-integration")]
+                store
+                    .before_in_sync_for_test()
+                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                upload.check_current()?;
+                root.verify_identity(true)?;
+                root.verify_registered()?;
+                if !same_edit_snapshot(opened, root_snapshot(file.raw)?)
+                    || completion_basic_info(file.raw)? != basic_before
+                    || completion_usn(file.raw, target.local_file().file_index)? != saved_usn
+                {
+                    return Err(Error::EditRecoveryUnavailable);
+                }
+                // Fresh remote verification + exact native full-body proof,
+                // Prepared CAS and the retained writer-excluding reference are
+                // the authority for this fixed in-sync operation, as in ordinary
+                // completion. Native state alone never resolves dirty history.
+                upload.check_current()?;
+                // SAFETY: same exclusive referenced raw handle and all root,
+                // route/token/opaque epoch fences remain held through Mark,
+                // the selected metadata policy, postproof and durable CAS.
+                let hr = unsafe { CfSetInSyncState(file.raw, 1, 0, null_mut()) };
+                completion_stage!("in_sync_hresult", hr);
+                if hr < 0 {
+                    return Err(native_error("complete verified vault edit in-sync", hr));
+                }
+                upload.check_current()?;
+                // Force one fresh journal baseline BEFORE reading CURRENT
+                // post-Mark metadata. Never refresh it after a failed update.
+                let marked_usn = journal_completion_usn(file.raw, target.local_file().file_index)?;
+                completion_stage!("post_mark_journal_fresh");
+                let marked = root_snapshot(file.raw)?;
+                let marked_basic = completion_basic_info(file.raw)?;
+                completion_metadata_diagnostic!(
+                    "in_sync",
+                    file.raw,
+                    marked,
+                    opened.reparse_tag,
+                    opened.placeholder_state | CF_PLACEHOLDER_STATE_IN_SYNC,
+                    marked_basic
+                );
+                if marked.identity != opened.identity
+                    || marked.file_size != length
+                    // Only the fixed successful Mark boundary permits the
+                    // observed CLOUD_2 -> CLOUD_6 transition. Both remain exact
+                    // named cloud tags; no variant-bit meaning is inferred.
+                    || !cleanup_cloud_reparse_tag(opened.reparse_tag)
+                    || !cleanup_cloud_reparse_tag(marked.reparse_tag)
+                    || !(marked.reparse_tag == opened.reparse_tag
+                        || (opened.reparse_tag == 0x9000_201a
+                            && marked.reparse_tag == 0x9000_601a))
+                    || marked.placeholder_state
+                        != (opened.placeholder_state | CF_PLACEHOLDER_STATE_IN_SYNC)
+                    || marked.placeholder_state & CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK != 0
+                    || marked_basic.file_attributes != marked.file_attributes
+                    || marked_basic.file_attributes
+                        & !(SETTABLE_COMPLETION_ATTRIBUTES | FILE_ATTRIBUTE_REPARSE_POINT)
+                        != 0
+                    || marked_basic.creation_time <= 0
+                    || marked_basic.last_access_time <= 0
+                    || marked_basic.last_write_time <= 0
+                    || marked_basic.change_time <= 0
+                {
+                    return Err(Error::ConfiguredRootChanged);
+                }
+                verify_completion_identity(file.raw, &upload.identity())?;
+                file.read_complete(&mut bytes)?;
+                if <[u8; 32]>::from(Sha256::digest(&bytes)) != sha
+                    || !same_edit_snapshot(marked, root_snapshot(file.raw)?)
+                    || completion_basic_info(file.raw)? != marked_basic
+                    || completion_usn(file.raw, target.local_file().file_index)? != marked_usn
+                    || modified_ranges_for_handle(file.raw)
+                        .map_err(|_| Error::EditRecoveryUnavailable)?
+                {
+                    return Err(Error::EditRecoveryUnavailable);
+                }
+                root.verify_identity(true)?;
+                root.verify_registered()?;
+                upload.check_current()?;
+                completion_stage!("in_sync_postproof");
+                // Select this operation's metadata policy upfront. Writable-byte
+                // completion omits the ENTIRE metadata write; no optional CAS is
+                // removed from a write, and there is no fallback after failure.
+                let (expected_basic, completed_usn) = if restore_readonly {
+                    // Preserve the coherent CURRENT metadata, not the pre-Mark
+                    // timestamps/attrs. Restore only READONLY; no identity rewrite.
+                    let readonly_basic = FileBasicInfo {
+                        file_attributes: marked_basic.file_attributes | FILE_ATTRIBUTE_READONLY,
+                        ..marked_basic
+                    };
+                    let fs_metadata = CfFsMetadata {
+                        basic_info: FileBasicInfo {
+                            file_attributes: (marked_basic.file_attributes
+                                & SETTABLE_COMPLETION_ATTRIBUTES)
+                                | FILE_ATTRIBUTE_READONLY,
+                            ..marked_basic
+                        },
+                        file_size: i64::try_from(length)
+                            .map_err(|_| Error::EditRecoveryUnavailable)?,
+                    };
+                    let mut update_usn = marked_usn;
+                    // SAFETY: same retained referenced exclusive raw file, SDK-layout
+                    // CURRENT metadata and the SAME positive bracketed USN input CAS.
+                    // VERIFY_IN_SYNC | MARK_IN_SYNC(3): verify before updating and
+                    // mark in-sync upon successful metadata update. NULL identity/0
+                    // WITHOUT REMOVE_FILE_IDENTITY, no ranges/force/dehydration.
+                    // No retry, fallback or second standalone in-sync call. Optional
+                    // output USN is not completion authority and need not change.
+                    let hr = unsafe {
+                        CfUpdatePlaceholder(
+                            file.raw,
+                            &fs_metadata,
+                            null(),
+                            0,
+                            null(),
+                            0,
+                            1 | 2,
+                            &mut update_usn,
+                            null_mut(),
+                        )
+                    };
+                    completion_stage!("readonly_update_hresult", hr);
+                    if hr < 0 {
+                        return Err(native_error(
+                            "restore completed vault read-only metadata",
+                            hr,
+                        ));
+                    }
+                    upload.check_current()?;
+                    let completed_usn = completion_usn(file.raw, target.local_file().file_index)?;
+                    (readonly_basic, completed_usn)
+                } else {
+                    // No metadata syscall: preserve the coherent current basic
+                    // timestamps/attributes and SAME positive post-Mark USN.
+                    completion_stage!("writable_metadata_untouched");
+                    (marked_basic, marked_usn)
+                };
+                let completed = root_snapshot(file.raw)?;
+                if restore_readonly {
+                    completion_metadata_diagnostic!(
+                        "readonly",
+                        file.raw,
+                        completed,
+                        marked.reparse_tag,
+                        marked.placeholder_state,
+                        expected_basic
+                    );
+                } else {
+                    completion_metadata_diagnostic!(
+                        "writable",
+                        file.raw,
+                        completed,
+                        marked.reparse_tag,
+                        marked.placeholder_state,
+                        expected_basic
+                    );
+                }
+                if completed.identity != opened.identity
+                    || completed.file_size != length
+                    || completed.file_attributes != expected_basic.file_attributes
+                    || completion_basic_info(file.raw)? != expected_basic
+                    || completed.reparse_tag != marked.reparse_tag
+                    || completed.placeholder_state != marked.placeholder_state
+                    || completed.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC == 0
+                    || completed.placeholder_state & CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK != 0
+                {
+                    return Err(Error::ConfiguredRootChanged);
+                }
+                verify_completion_identity(file.raw, &upload.identity())?;
+                file.read_complete(&mut bytes)?;
+                if <[u8; 32]>::from(Sha256::digest(&bytes)) != sha
+                    || !same_edit_snapshot(completed, root_snapshot(file.raw)?)
+                    || completion_basic_info(file.raw)? != expected_basic
+                    || completion_usn(file.raw, target.local_file().file_index)? != completed_usn
+                    || modified_ranges_for_handle(file.raw)
+                        .map_err(|_| Error::EditRecoveryUnavailable)?
+                {
+                    return Err(Error::EditRecoveryUnavailable);
+                }
+                root.verify_identity(true)?;
+                root.verify_registered()?;
+                upload.check_current()?;
+                if restore_readonly {
+                    completion_stage!("readonly_postproof");
+                } else {
+                    completion_stage!("writable_bytes_postproof");
+                }
+                store
+                    .complete(&crate::VaultNativeCompletionProof::from_native(
+                        &upload, &target,
+                    ))
+                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                completion_stage!("durable_completed");
+                upload.check_current()?;
+                root.verify_identity(true)?;
+                root.verify_registered()?;
+                verify_completion_identity(file.raw, &upload.identity())?;
+                if !same_edit_snapshot(completed, root_snapshot(file.raw)?)
+                    || completion_basic_info(file.raw)? != expected_basic
+                    || completion_usn(file.raw, target.local_file().file_index)? != completed_usn
+                {
+                    return Err(Error::EditRecoveryUnavailable);
+                }
+                dirty
+                    .resolve(&observation)
+                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                completion_stage!("dirty_observation_resolved");
+                #[cfg(feature = "synthetic-agent-integration")]
+                store
+                    .before_completion_guard_release_for_test()
+                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                Ok(())
+            })();
+            if result.is_err() && attempted_prepare {
+                // Poison BEFORE dropping the exclusive publication fence:
+                // storage/native promotion may already have happened.
+                binding.mark_completion_failed();
+            }
+            result
+        })
     }
 
     pub(super) fn acknowledge_verified_edit(
@@ -4074,6 +4504,27 @@ mod hydration_inventory {
             );
             Ok(())
         }
+        pub(super) fn promote_verified(
+            &mut self,
+            identity: [u8; 16],
+            file_index: u64,
+            old_length: u64,
+            new_length: u64,
+            components: &[String],
+        ) -> Result<(), InventoryError> {
+            if !self.is_complete() {
+                return Err(InventoryError::Conflict);
+            }
+            let row = self
+                .rows
+                .get_mut(&(identity, file_index))
+                .ok_or(InventoryError::Conflict)?;
+            if row.length != old_length || row.components != components {
+                return Err(InventoryError::Conflict);
+            }
+            row.length = new_length;
+            Ok(())
+        }
         pub fn mark_incomplete(&mut self) {
             self.incomplete = true;
         }
@@ -4201,6 +4652,8 @@ struct CallbackState {
     root_path: Option<PathBuf>,
     root_identity: Option<RootIdentity>,
     modified_placeholder_closes: AtomicUsize,
+    non_vault_modified_closes: AtomicUsize,
+    vault_dirty: Mutex<crate::vault_dirty::VaultDirtyFiles>,
     journaled_placeholder_closes: AtomicUsize,
     unverifiable_placeholder_closes: AtomicUsize,
     close_completion_callbacks: AtomicUsize,
@@ -4289,6 +4742,8 @@ impl CallbackState {
             root_path,
             root_identity,
             modified_placeholder_closes: AtomicUsize::new(0),
+            non_vault_modified_closes: AtomicUsize::new(0),
+            vault_dirty: Mutex::new(crate::vault_dirty::VaultDirtyFiles::default()),
             journaled_placeholder_closes: AtomicUsize::new(0),
             unverifiable_placeholder_closes: AtomicUsize::new(0),
             close_completion_callbacks: AtomicUsize::new(0),
@@ -4344,7 +4799,12 @@ impl CallbackState {
     }
 
     fn has_unresolved_placeholder_data(&self) -> bool {
-        self.modified_placeholder_closes.load(Ordering::Acquire) != 0
+        self.non_vault_modified_closes.load(Ordering::Acquire) != 0
+            || self
+                .vault_dirty
+                .lock()
+                .map(|dirty| dirty.has_pending())
+                .unwrap_or(true)
             || self.unverifiable_placeholder_closes.load(Ordering::Acquire) != 0
             || self
                 .recovery
@@ -4354,6 +4814,8 @@ impl CallbackState {
 
     fn record_reconnect_scan(&self, scan: ReconnectScan) {
         if scan.modified_files != 0 {
+            self.non_vault_modified_closes
+                .fetch_add(scan.modified_files, Ordering::AcqRel);
             self.modified_placeholder_closes
                 .fetch_add(scan.modified_files, Ordering::AcqRel);
         }
@@ -4387,6 +4849,8 @@ impl CallbackState {
         match result {
             Ok(ModifiedCloseCapture::Clean) => None,
             Ok(ModifiedCloseCapture::OrdinaryJournaled) => {
+                self.non_vault_modified_closes
+                    .fetch_add(1, Ordering::AcqRel);
                 self.modified_placeholder_closes
                     .fetch_add(1, Ordering::AcqRel);
                 self.journaled_placeholder_closes
@@ -4415,6 +4879,8 @@ impl CallbackState {
                 self.last_close_validation_hresult
                     .store(hresult, Ordering::Release);
                 if modified {
+                    self.non_vault_modified_closes
+                        .fetch_add(1, Ordering::AcqRel);
                     self.modified_placeholder_closes
                         .fetch_add(1, Ordering::AcqRel);
                 }
@@ -4660,6 +5126,12 @@ impl CallbackState {
                             .ok_or((65, 0, true))?;
                         // No comparison with the baseline remote size: this is
                         // the checked edited length, which may legitimately differ.
+                        let dirty_file = LocalFileIdentity {
+                            volume_serial: after_read.identity.volume_serial,
+                            file_index: after_read.identity.file_index,
+                        };
+                        let dirty_sha: [u8; 32] = Sha256::digest(&content).into();
+                        let dirty_components = components.clone();
                         notification = capture
                             .retain(crate::ExistingVaultEditPayload {
                                 root: crate::ConfiguredRootIdentity {
@@ -4674,6 +5146,20 @@ impl CallbackState {
                                 bytes: content,
                             })
                             .map_err(|_| (66, 0, true))?;
+                        // Register BEFORE this lexical route/token/epoch fence
+                        // ends. Completion's route WRITE drains every such close;
+                        // no delayed post-fence insert can erase/replace a proof.
+                        self.vault_dirty
+                            .lock()
+                            .map_err(|_| (68, 0, true))?
+                            .record(
+                                baseline.identity(),
+                                dirty_file,
+                                after_read.file_size,
+                                dirty_sha,
+                                dirty_components,
+                            )
+                            .map_err(|_| (68, 0, true))?;
                         retained = true;
                         Ok(())
                     })();
@@ -7740,6 +8226,38 @@ fn journal_cleanup_usn(handle: Handle, expected_file_id: u64) -> Result<i64, Err
     Ok(usn)
 }
 
+// Completion-only journal freshness barrier. Call once after fixed Mark and
+// before the current metadata/body USN bracket; never rebase a failed update.
+fn journal_completion_usn(handle: Handle, expected_file_id: u64) -> Result<i64, Error> {
+    const FSCTL_WRITE_USN_CLOSE_RECORD: u32 = 0x0009_00ef;
+    let mut usn = 0_i64;
+    let mut io = CompletionIo::new()?;
+    // SAFETY: same referenced RH handle, aligned fixed 8-byte output and owned
+    // OVERLAPPED/event remain live until definitive I/O completion. This FSCTL
+    // appends a journal close record, without changing file data or permissions.
+    let result = unsafe {
+        DeviceIoControl(
+            handle,
+            FSCTL_WRITE_USN_CLOSE_RECORD,
+            null(),
+            0,
+            (&mut usn as *mut i64).cast(),
+            size_of::<i64>() as u32,
+            null_mut(),
+            (&mut io.overlapped as *mut CompletionOverlapped).cast(),
+        )
+    };
+    if io.finish(handle, result)? != size_of::<i64>() as u32
+        || usn <= 0
+        || completion_usn(handle, expected_file_id)? != usn
+    {
+        return Err(Error::EditRecoveryUnavailable);
+    }
+    #[cfg(feature = "synthetic-agent-integration")]
+    eprintln!("synthetic completion journal close positive_and_fresh=true");
+    Ok(usn)
+}
+
 fn completion_usn(handle: Handle, expected_file_id: u64) -> Result<i64, Error> {
     // FSCTL_READ_FILE_USN_DATA, V2 only. This borrowed protected handle is
     // asynchronous: retain aligned output, OVERLAPPED and event to completion.
@@ -7834,6 +8352,24 @@ fn delete_by_handle(handle: Handle) -> Result<(), Error> {
         return Err(win32_io_error("delete verified synthetic handle"));
     }
     Ok(())
+}
+
+// SDK FILE_INFO_BY_HANDLE_CLASS::FileBasicInfo = 0. No new FFI boundary.
+fn completion_basic_info(handle: Handle) -> Result<FileBasicInfo, Error> {
+    let mut basic: FileBasicInfo = unsafe { zeroed() };
+    // SAFETY: same retained native file, exact FILE_BASIC_INFO layout/size.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            0,
+            (&mut basic as *mut FileBasicInfo).cast(),
+            size_of::<FileBasicInfo>() as u32,
+        )
+    } == 0
+    {
+        return Err(win32_io_error("read exact completion basic metadata"));
+    }
+    Ok(basic)
 }
 
 fn root_snapshot(handle: Handle) -> Result<RootSnapshot, Error> {

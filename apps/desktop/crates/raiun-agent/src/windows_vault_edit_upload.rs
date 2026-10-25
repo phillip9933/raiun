@@ -1,6 +1,6 @@
 // Guarded hot-route capture upload, shared with private fresh-close dispatch.
-// No native acknowledgement, cleanup, history retirement or writable
-// publication is enabled here.
+// Normal activation, cleanup, history retirement and writable publication
+// remain disabled. Explicit native byte-completion candidates are private.
 
 const WINDOWS_VAULT_EDIT_UPLOAD_ENABLED: bool = false;
 
@@ -33,6 +33,8 @@ impl WindowsAgent {
             &vault,
             &remote_root,
             &capture_id,
+            false,
+            false,
             Some(FreshVaultUploadExpectation {
                 origin,
                 expected_generation,
@@ -87,7 +89,53 @@ impl WindowsAgent {
         remote_root: &str,
         capture_id: &str,
     ) -> Result<Value, String> {
-        self.upload_windows_vault_capture_inner(vault, remote_root, capture_id, None)
+        self.upload_windows_vault_capture_with_completion(vault, remote_root, capture_id, false)
+    }
+
+    /// Private readonly-completion compatibility seam. Historical readback alone
+    /// never supplies the owned native continuation.
+    fn upload_windows_vault_capture_with_completion(
+        &self,
+        vault: &raiun_vault::session::VaultSessionScope,
+        remote_root: &str,
+        capture_id: &str,
+        complete_local: bool,
+    ) -> Result<Value, String> {
+        self.upload_windows_vault_capture_inner(
+            vault,
+            remote_root,
+            capture_id,
+            complete_local,
+            false,
+            None,
+        )
+    }
+
+    /// Explicit writable byte-completion candidate only. This chooses the native
+    /// operation before upload; it never retries a failed readonly metadata write.
+    /// The current readonly Lock cleanup guard remains authoritative and may refuse.
+    #[cfg(all(test, debug_assertions))]
+    fn upload_windows_vault_capture_with_writable_completion(
+        &self,
+        vault: &raiun_vault::session::VaultSessionScope,
+        remote_root: &str,
+        capture_id: &str,
+    ) -> Result<Value, String> {
+        let mut result = self.upload_windows_vault_capture_inner(
+            vault,
+            remote_root,
+            capture_id,
+            true,
+            true,
+            None,
+        )?;
+        let native_completed = result["state"] == "local_completed";
+        let value = result
+            .as_object_mut()
+            .ok_or("Native byte-completion result unavailable")?;
+        value.insert("native_confirmation".into(), Value::Bool(native_completed));
+        value.insert("read_only_restored".into(), Value::Bool(false));
+        Ok(result)
     }
 
     fn upload_windows_vault_capture_inner(
@@ -95,14 +143,24 @@ impl WindowsAgent {
         vault: &raiun_vault::session::VaultSessionScope,
         remote_root: &str,
         capture_id: &str,
+        complete_local: bool,
+        writable_bytes: bool,
         fresh: Option<FreshVaultUploadExpectation>,
     ) -> Result<Value, String> {
-        use raiun_cloudfiles_windows::{CancellationToken, ExistingVaultUploadTarget};
+        use raiun_cloudfiles_windows::{
+            CancellationToken, ExistingVaultUploadTarget, FreshVaultUpload, VaultLiveUploadOutcome,
+            VaultUploadControl,
+        };
         use raiun_core::backend::{ErrorKind, RemoteEntry};
         use raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome;
         use sha2::{Digest, Sha256};
         use std::time::Instant;
 
+        // Fresh automatic notifications remain remote-only. Their worker cancel
+        // identity is borrowed for HTTP and is not an owned native continuation.
+        if (fresh.is_some() && complete_local) || (writable_bytes && !complete_local) {
+            return Err("The requested vault completion mode is unavailable".into());
+        }
         let (fresh_origin, fresh_generation, dispatch, fresh_active) = match fresh {
             Some(fresh) => (
                 Some(fresh.origin),
@@ -334,7 +392,8 @@ impl WindowsAgent {
             |_| "This retained edit already has an attempt; inspect recovery before continuing",
         )?;
         let cancellation = CancellationToken::for_offline_job();
-        let deadline = Instant::now() + Duration::from_secs(300);
+        let deadline = Instant::now()
+            + Duration::from_secs(session.expires_at.saturating_sub(unix_time_now()).min(300));
         let cancelled = || {
             cancellation.is_cancelled()
                 || cancellation.is_expired()
@@ -347,14 +406,73 @@ impl WindowsAgent {
                     .is_some_and(|active| !active.load(Ordering::Acquire))
         };
         let mut source = std::io::Cursor::new(retained.bytes_for_recovery());
-        let outcome = verified.backend.upload_existing_vault_capture(
-            &target,
-            &mut source,
-            retained.bytes_for_recovery().len() as u64,
-            Arc::clone(&self.provider.authorized_generation),
-            generation,
-            &cancelled,
-        );
+        // Normalize remote evidence without cloning or reconstructing the live
+        // completion capability. The remote-only path deliberately never mints it.
+        struct VerifiedResult {
+            entry: RemoteEntry,
+            digest: [u8; 32],
+            completion: Option<FreshVaultUpload>,
+        }
+        enum UploadResult {
+            Verified(VerifiedResult),
+            NeedsReconciliation,
+        }
+        let outcome = if complete_local {
+            // CancellationToken owns its fixed deadline; the cap carries it
+            // through local completion, independently of this borrowed closure.
+            let control = VaultUploadControl::new(
+                Arc::clone(&self.provider.authorized_generation),
+                generation,
+                cancellation.clone(),
+                deadline,
+            )
+            .map_err(|_| "The retained edit upload context changed")?;
+            verified
+                .backend
+                .upload_existing_vault_capture_live(
+                    target,
+                    &mut source,
+                    retained.bytes_for_recovery().len() as u64,
+                    control,
+                    &cancelled,
+                )
+                .map(|result| match result {
+                    VaultLiveUploadOutcome::Verified(capability) => {
+                        let receipt = capability.remote_evidence();
+                        UploadResult::Verified(VerifiedResult {
+                            entry: receipt.entry().clone(),
+                            digest: receipt.plaintext_sha256(),
+                            completion: Some(capability),
+                        })
+                    }
+                    VaultLiveUploadOutcome::NeedsReconciliation { .. } => {
+                        UploadResult::NeedsReconciliation
+                    }
+                })
+        } else {
+            verified
+                .backend
+                .upload_existing_vault_capture(
+                    &target,
+                    &mut source,
+                    retained.bytes_for_recovery().len() as u64,
+                    Arc::clone(&self.provider.authorized_generation),
+                    generation,
+                    &cancelled,
+                )
+                .map(|result| match result {
+                    VaultExistingOverwriteOutcome::Verified(receipt) => {
+                        UploadResult::Verified(VerifiedResult {
+                            entry: receipt.entry().clone(),
+                            digest: receipt.plaintext_sha256(),
+                            completion: None,
+                        })
+                    }
+                    VaultExistingOverwriteOutcome::NeedsReconciliation { .. } => {
+                        UploadResult::NeedsReconciliation
+                    }
+                })
+        };
         let uncertain = || {
             json!({"state":"uncertain", "capture_id":capture_id,
             "retained":true, "local_cleanup":"incomplete", "automatic_retry":false})
@@ -367,13 +485,13 @@ impl WindowsAgent {
             return Ok(uncertain());
         }
         match outcome {
-            Ok(VaultExistingOverwriteOutcome::Verified(receipt)) => {
+            Ok(UploadResult::Verified(receipt)) => {
                 let digest: [u8; 32] = Sha256::digest(retained.bytes_for_recovery()).into();
-                if receipt.plaintext_sha256() != digest {
+                if receipt.digest != digest {
                     let _ = attempt.record_uncertain(&ledger, ticket);
                     return Ok(uncertain());
                 }
-                let entry = receipt.entry();
+                let entry = &receipt.entry;
                 if attempt
                     .record_readback_evidence(
                         &ledger,
@@ -387,12 +505,86 @@ impl WindowsAgent {
                 {
                     return Ok(uncertain());
                 }
+                if let Some(capability) = receipt.completion {
+                    // A recorded readback is still historical evidence. Only the
+                    // fresh route capability and the actual native exclusive
+                    // body proof can authorize the local disposition callbacks.
+                    if current().is_err() || cancelled() {
+                        return Ok(
+                            json!({"state":"remote_verified_pending_local", "capture_id":capture_id,
+                            "retained":true, "local_cleanup":"incomplete", "automatic_retry":false}),
+                        );
+                    }
+                    let store = match ledger.local_completion_store() {
+                        Ok(store) => store,
+                        Err(_) => {
+                            return Ok(
+                                json!({"state":"remote_verified_pending_local", "capture_id":capture_id,
+                            "retained":true, "local_cleanup":"incomplete", "automatic_retry":false}),
+                            );
+                        }
+                    };
+                    let store: Box<dyn raiun_cloudfiles_windows::VaultLocalCompletionStore> =
+                        Box::new(store);
+                    #[cfg(all(test, debug_assertions))]
+                    let (store, writer_probe) = if self.synthetic_vault_completion_writer_probe {
+                        let (store, probe) = tests::instrument_vault_completion_store(
+                            store,
+                            PathBuf::from(&configuration.path),
+                        );
+                        (store, Some(probe))
+                    } else {
+                        (store, None)
+                    };
+                    let completion_result = if writable_bytes {
+                        self.provider.complete_writable_vault_upload(
+                            active,
+                            Arc::clone(&verified.backend),
+                            capability,
+                            store,
+                        )
+                    } else {
+                        self.provider.complete_vault_upload(
+                            active,
+                            Arc::clone(&verified.backend),
+                            capability,
+                            store,
+                        )
+                    };
+                    #[cfg(all(test, debug_assertions))]
+                    let probe_result = writer_probe
+                        .map(tests::finalize_vault_completion_probe)
+                        .transpose();
+                    #[cfg(all(test, debug_assertions))]
+                    if let Err(error) = &probe_result {
+                        eprintln!("C06_VAULT_WRITER_PROBE_FINAL_RESULT_REFUSED={error}");
+                    }
+                    if completion_result.is_err() {
+                        return Ok(
+                            json!({"state":"remote_verified_pending_local", "capture_id":capture_id,
+                            "retained":true, "local_cleanup":"incomplete", "automatic_retry":false}),
+                        );
+                    }
+                    let completed = json!({"state":"local_completed", "capture_id":capture_id,
+                        "retained":true, "local_cleanup":"requires_current_native_check", "automatic_retry":false});
+                    #[cfg(all(test, debug_assertions))]
+                    let completed = {
+                        let mut value = completed;
+                        if let Some(probe) = probe_result? {
+                            value["native_writer_exclusion"] =
+                                probe["native_writer_exclusion"].clone();
+                            value["native_writer_error"] = probe["native_writer_error"].clone();
+                        }
+                        value
+                    };
+                    return Ok(completed);
+                }
                 Ok(
                     json!({"state":"remote_verified_pending_local", "capture_id":capture_id,
                     "retained":true, "local_cleanup":"incomplete", "automatic_retry":false}),
                 )
             }
-            Ok(VaultExistingOverwriteOutcome::NeedsReconciliation { .. }) => {
+            Ok(UploadResult::NeedsReconciliation) => {
                 let _ = attempt.record_uncertain(&ledger, ticket);
                 Ok(uncertain())
             }

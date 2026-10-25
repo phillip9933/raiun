@@ -17,7 +17,7 @@ use std::{
     io::{Read, Seek, SeekFrom},
     sync::{
         Arc, RwLock, RwLockReadGuard,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use zeroize::Zeroizing;
@@ -33,6 +33,7 @@ pub struct WindowsVaultReadBinding {
     identity: Arc<()>,
     revoked: AtomicBool,
     publication_gate: RwLock<()>,
+    publication_revision: AtomicU64,
 }
 struct VaultPublishPermit<'a> {
     _route: RwLockReadGuard<'a, ()>,
@@ -74,6 +75,7 @@ pub struct UnpublishedVaultStage {
     reader: raiun_control_windows::OwnedPrivateStagedReader,
     metadata: RemoteEntry,
     binding_identity: Arc<()>,
+    publication_revision: u64,
 }
 impl UnpublishedVaultStage {
     pub fn metadata(&self) -> &RemoteEntry {
@@ -130,6 +132,7 @@ impl WindowsVaultReadBinding {
             identity: Arc::new(()),
             revoked: AtomicBool::new(false),
             publication_gate: RwLock::new(()),
+            publication_revision: AtomicU64::new(1),
         };
         binding.check_current()?;
         Ok(binding)
@@ -229,6 +232,7 @@ impl WindowsVaultReadBinding {
         maximum_bytes: u64,
     ) -> Result<UnpublishedVaultStage, CloudError> {
         self.check_current()?;
+        let revision = self.publication_revision();
         if expected.directory
             || expected.size > maximum_bytes
             || expected.path != path
@@ -281,11 +285,13 @@ impl WindowsVaultReadBinding {
             })
         })?;
         self.check_current()?; // failure drops the exact owned stage here
+        self.with_publication_revision(revision, || Ok(()))?;
         metadata.writable = false;
         Ok(UnpublishedVaultStage {
             reader,
             metadata,
             binding_identity: Arc::clone(&self.identity),
+            publication_revision: revision,
         })
     }
 
@@ -375,6 +381,81 @@ impl WindowsVaultReadBinding {
             })?
     }
 
+    /// Pure atomic revocation check, safe while token/epoch fences are held.
+    pub(crate) fn is_revoked(&self) -> bool {
+        self.revoked.load(Ordering::Acquire)
+    }
+    pub(crate) fn publication_revision(&self) -> u64 {
+        self.publication_revision.load(Ordering::Acquire)
+    }
+    pub(crate) fn with_publication_revision<T>(
+        &self,
+        revision: u64,
+        publish: impl FnOnce() -> Result<T, CloudError>,
+    ) -> Result<T, CloudError> {
+        self.with_publication(|| {
+            if self.publication_revision() != revision {
+                return Err(refused());
+            }
+            publish()
+        })
+    }
+    pub(crate) fn try_begin_publish_revision<'a>(
+        &'a self,
+        revision: u64,
+        cancellation: &CancellationToken,
+    ) -> Result<Box<dyn PublishPermit + 'a>, BackendError> {
+        let permit = self.try_begin_publish(cancellation)?;
+        if self.publication_revision() != revision {
+            return Err(BackendError::Unavailable);
+        }
+        Ok(permit)
+    }
+    pub(crate) fn mark_completion_failed(&self) {
+        // Already under the exclusive route fence. Never recursively drain it.
+        self.revoked.store(true, Ordering::Release);
+    }
+    pub(crate) fn with_exclusive_completion<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, crate::Error>,
+    ) -> Result<T, crate::Error> {
+        let unavailable = || crate::Error::EditRecoveryUnavailable;
+        let _route = self.publication_gate.write().map_err(|_| unavailable())?;
+        self.check_current().map_err(|_| unavailable())?;
+        self.client
+            .with_token_generation(self.trusted.token_generation(), || {
+                self.sessions
+                    .with_session_epoch(&self.scope, &self.epoch, || {
+                        if self.revoked.load(Ordering::Acquire) {
+                            return Err(unavailable());
+                        }
+                        // This exclusive publication writer is the only revision
+                        // mutator. Keep overflow refusal without a newer atomic API.
+                        let revision = self.publication_revision.load(Ordering::Acquire);
+                        let next = revision.checked_add(1).ok_or_else(unavailable)?;
+                        self.publication_revision.store(next, Ordering::Release);
+                        operation()
+                    })
+                    .map_err(|_| unavailable())?
+            })
+            .map_err(|_| unavailable())?
+    }
+    pub(crate) fn publish_stage_range_at_revision<T>(
+        &self,
+        revision: u64,
+        stage: &mut UnpublishedVaultStage,
+        offset: u64,
+        length: usize,
+        publish: impl FnOnce(&[u8]) -> Result<T, CloudError>,
+    ) -> Result<T, CloudError> {
+        self.publish_stage_range(stage, offset, length, |bytes| {
+            if self.publication_revision() != revision {
+                return Err(refused());
+            }
+            publish(bytes)
+        })
+    }
+
     /// Admit one native publication without blocking on route/auth/session
     /// locks. The returned opaque permit retains all three leases until dropped.
     pub fn try_begin_publish<'a>(
@@ -437,7 +518,7 @@ impl WindowsVaultReadBinding {
         {
             return Err(refused());
         }
-        self.with_publication(|| {
+        self.with_publication_revision(stage.publication_revision, || {
             let mut bytes = Zeroizing::new(vec![0u8; length]);
             stage
                 .reader

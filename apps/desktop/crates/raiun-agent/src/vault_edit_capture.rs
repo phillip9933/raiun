@@ -82,6 +82,18 @@ impl Baseline {
         baseline.validate()?;
         Ok(baseline)
     }
+    pub(crate) fn opaque_file(&self) -> [u8; 16] {
+        self.opaque_file
+    }
+    pub(crate) fn strong_etag(&self) -> &str {
+        &self.strong_etag
+    }
+    pub(crate) fn native_volume(&self) -> u32 {
+        self.native_volume
+    }
+    pub(crate) fn native_file(&self) -> u64 {
+        self.native_file
+    }
     fn validate(&self) -> Result<()> {
         if self.opaque_file == [0; 16]
             || !strong_etag(&self.strong_etag)
@@ -228,6 +240,12 @@ pub struct RetainedEdit {
     body_offset: usize,
 }
 impl RetainedEdit {
+    pub(crate) fn scope(&self) -> &Scope {
+        &self.metadata.scope
+    }
+    pub(crate) fn capture_id(&self) -> &str {
+        &self.metadata.capture_id
+    }
     pub fn bytes_for_recovery(&self) -> &[u8] {
         &self.raw[self.body_offset..]
     }
@@ -319,6 +337,12 @@ pub(crate) struct EncodedFrameRef {
     sha256: [u8; 32],
 }
 impl EncodedFrameRef {
+    pub(crate) fn sha256(&self) -> [u8; 32] {
+        self.sha256
+    }
+    pub(crate) fn length(&self) -> usize {
+        self.length
+    }
     pub(crate) fn validate(&self) -> Result<()> {
         if self.length <= MAGIC.len() + 4
             || self.length > MAX_RECORD_BYTES

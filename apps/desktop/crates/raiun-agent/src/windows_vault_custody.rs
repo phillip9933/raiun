@@ -5,7 +5,8 @@ use super::{
     SessionStore,
     root_manifest::{RootBinding, RootManifest},
     vault_custody::{self, Custody, Entry, Scope},
-    vault_edit_capture as capture, vault_edit_retention, vault_edit_upload as upload,
+    vault_edit_capture as capture, vault_edit_disposition as disposition, vault_edit_retention,
+    vault_edit_upload as upload,
     windows_vault_close_worker::{FreshVaultCloseJob, VaultClosePublisher},
 };
 use raiun_cloudfiles_windows::vault_custody::{
@@ -602,7 +603,23 @@ impl VaultPublishedHistorySource for WindowsVaultCustody {
                 .map_err(|_| refused())?
             {
                 let child = Custody::reopen(&self.store, scope).map_err(|_| refused())?;
-                for row in child.publication_history().map_err(|_| refused())? {
+                let history = child.publication_history().map_err(|_| refused())?;
+                // Promoted v4 history still retains every immutable capture.
+                // Authenticate each full frame sequentially before returning
+                // reconstructed intents. Missing/corrupt history is never healed.
+                for reference in child.captures_for_reconciliation() {
+                    let id = capture::CaptureId::new(reference.id()).map_err(|_| refused())?;
+                    let retained = capture::reopen_for_recovery(
+                        &CaptureStore(Arc::clone(&self.store.0)),
+                        scope,
+                        &id,
+                    )
+                    .map_err(|_| refused())?;
+                    child
+                        .validate_reconstructed_disposition(reference, &retained)
+                        .map_err(|_| refused())?;
+                }
+                for row in history {
                     if intents.len() == 100_000
                         || !identities.insert(row.opaque())
                         || !files.insert(row.file_index())
@@ -744,6 +761,95 @@ impl UploadLedger {
             self.reference.entry(),
         )
     }
+    pub(super) fn disposition_descriptor(
+        &self,
+    ) -> disposition::Result<disposition::DispositionDescriptor> {
+        let retained = self
+            .read_body()
+            .map_err(|_| disposition::Error::Persistence)?;
+        self.with_ledger(|_| {
+            let child = Custody::reopen(&self.store, &self.scope)
+                .map_err(|_| upload::Error::Persistence)?;
+            let raw = child
+                .load_upload_attempt(&self.reference)
+                .map_err(|_| upload::Error::Persistence)?
+                .ok_or(upload::Error::Missing)?;
+            upload::bound_readback_evidence(&raw, &self.scope, &self.reference)?
+                .ok_or(upload::Error::Missing)?;
+            child
+                .disposition_descriptor(&self.reference, &retained)
+                .map_err(|_| upload::Error::Persistence)
+        })
+        .map_err(|_| disposition::Error::Persistence)
+    }
+    #[cfg(test)]
+    pub(super) fn local_disposition(
+        &self,
+    ) -> disposition::Result<Option<disposition::DispositionStatus>> {
+        self.with_ledger(|_| {
+            Custody::reopen(&self.store, &self.scope)
+                .and_then(|child| child.local_disposition(&self.reference))
+                .map_err(|_| upload::Error::Persistence)
+        })
+        .map_err(|_| disposition::Error::Persistence)
+    }
+    pub(super) fn prepare_disposition(
+        &self,
+        descriptor: &disposition::DispositionDescriptor,
+        proof: &raiun_cloudfiles_windows::VaultNativePreparation,
+    ) -> disposition::Result<disposition::PreparedDisposition> {
+        if descriptor.scope() != &self.scope || descriptor.reference() != &self.reference {
+            return Err(disposition::Error::Foreign);
+        }
+        self.with_ledger(|_| {
+            let mut child = Custody::reopen(&self.store, &self.scope)
+                .map_err(|_| upload::Error::Persistence)?;
+            child
+                .prepare_disposition(&self.store, descriptor, proof)
+                .map_err(|_| upload::Error::Persistence)
+        })
+        .map_err(|_| disposition::Error::Persistence)
+    }
+    pub(super) fn complete_native(
+        &self,
+        ticket: disposition::PreparedDisposition,
+        proof: &raiun_cloudfiles_windows::VaultNativeCompletionProof,
+    ) -> disposition::Result<()> {
+        if ticket.reference() != &self.reference {
+            return Err(disposition::Error::Foreign);
+        }
+        self.with_ledger(|_| {
+            let mut child = Custody::reopen(&self.store, &self.scope)
+                .map_err(|_| upload::Error::Persistence)?;
+            child
+                .complete_native(&self.store, ticket, proof)
+                .map_err(|_| upload::Error::Persistence)
+        })
+        .map_err(|_| disposition::Error::Persistence)
+    }
+    /// Structural target only. Parent must first compare the complete current
+    /// canonical account. Native prepare/complete proofs provide live authority.
+    pub(super) fn local_completion_store(self) -> disposition::Result<LocalDisposition> {
+        let descriptor = self.disposition_descriptor()?;
+        let target = raiun_cloudfiles_windows::VaultLocalCompletionTarget::new(
+            descriptor.scope_binding()?,
+            descriptor.reference().id().into(),
+            descriptor.reference().frame().sha256(),
+            descriptor.reference().frame().length() as u64,
+            raiun_cloudfiles_windows::LocalFileIdentity {
+                volume_serial: descriptor.scope().native_root().0,
+                file_index: descriptor.hydration().file_index(),
+            },
+            descriptor.hydration().components().to_vec(),
+        )
+        .map_err(|_| disposition::Error::Invalid)?;
+        Ok(LocalDisposition {
+            ledger: self,
+            descriptor,
+            target,
+            prepared: None,
+        })
+    }
     pub(super) fn read_body(&self) -> std::result::Result<capture::RetainedEdit, upload::Error> {
         self.with_ledger(|ledger| {
             let key = upload::locator(&self.scope, &self.reference)?;
@@ -764,6 +870,41 @@ impl UploadLedger {
         })
     }
 }
+pub(super) struct LocalDisposition {
+    ledger: UploadLedger,
+    descriptor: disposition::DispositionDescriptor,
+    target: raiun_cloudfiles_windows::VaultLocalCompletionTarget,
+    prepared: Option<disposition::PreparedDisposition>,
+}
+impl raiun_cloudfiles_windows::VaultLocalCompletionStore for LocalDisposition {
+    fn target(&self) -> &raiun_cloudfiles_windows::VaultLocalCompletionTarget {
+        &self.target
+    }
+    fn prepare(
+        &mut self,
+        proof: &raiun_cloudfiles_windows::VaultNativePreparation,
+    ) -> std::result::Result<(), BackendError> {
+        if self.prepared.is_some() {
+            return Err(BackendError::Unavailable);
+        }
+        self.prepared = Some(
+            self.ledger
+                .prepare_disposition(&self.descriptor, proof)
+                .map_err(unavailable)?,
+        );
+        Ok(())
+    }
+    fn complete(
+        &mut self,
+        proof: &raiun_cloudfiles_windows::VaultNativeCompletionProof,
+    ) -> std::result::Result<(), BackendError> {
+        let ticket = self.prepared.take().ok_or(BackendError::Unavailable)?;
+        self.ledger
+            .complete_native(ticket, proof)
+            .map_err(unavailable)
+    }
+}
+
 impl upload::Store for UploadLedger {
     fn load(&self, key: &[u8]) -> std::result::Result<Option<Zeroizing<Vec<u8>>>, upload::Error> {
         self.with_ledger(|ledger| upload::Store::load(ledger, key))

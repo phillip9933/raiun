@@ -509,7 +509,9 @@ callback acknowledgement both succeed. Any callback error, missing retention,
 or repeated capture failure drops the value without publication. The native
 close outcome remains distinct from ordinary journaling. The existing sticky
 modified-close observation is committed before record_placeholder_close returns
-the optional value; no new per-file tracker or dirty resolution is imported.
+the optional value. Its exact per-file dirty observation is also registered
+inside the original publication fence before the deferred value can escape;
+explicit completion resolves only that observation as described below.
 All path/read handles, DPAPI/custody locks, route/token/epoch guards and the
 close-pool permit have then unwound. Only at the final outer close-callback
 statement, after explicitly dropping callback lifetime accounting, is the
@@ -524,4 +526,203 @@ upload. A retired/replaced/re-unlocked route cannot adopt an old notification.
 Network work remains outside the provider command thread and every publication
 lock. Public upload and writable publication remain disabled; verified remote
 upload still leaves native dirty data and recovery history pending. No native
-acknowledgement, cleanup, SDK/v4 disposition or completion policy is introduced.
+acknowledgement or cleanup authority follows from notification publication;
+explicit fresh native completion is a separate operation described below.
+
+### Fresh per-file vault completion (source only, disabled)
+
+The alternative live upload API returns an owned, non-cloneable continuation of
+that exact composite/route/client/opaque epoch and remote byte verification.
+It retains the actual provider-generation atomic, cancellation token and original
+operation deadline. Historical readback records cannot reconstruct it. HTTP
+holds no route/token/session leases. Native completion runs on the existing
+connection owner thread after its independent current binding checks.
+
+Completion drains this vault's publication gate exclusively, holds token and
+opaque session leases continuously, and invalidates every prior staged read,
+prepared range and enumeration using a checked publication revision. The same
+opaque ID is promoted from the original exact ID/path/ETag/length to the newly
+verified version. Protected catalogue/hydration promotion occurs only in the
+broker's fresh Prepared CAS callback, after native proof; runtime catalogue and
+hydration length follow under the same fence. Storage callbacks must perform
+only local protected persistence, never auth/backend/coordinator reentry.
+
+The native method first uses existing EXCLUSIVE|WRITE_ACCESS
+`ProtectedCompletionFile::open`, retains its reference and no-follow ancestor
+chain, requires exact root/file/opaque identity, full resident bytes and a
+matching bounded SHA-256, then verifies two positive stable USN reads. That same
+handle excludes writers through Prepared, metadata/in-sync calls, full native
+postproof and the exact NativeCompleted CAS/readback callback. Failure after a
+possible Prepared transition revokes future route publication before releasing
+the exclusive gate; pending bytes and references are retained.
+
+Actual dirty fixture attributes were `0x420`; clean vault cleanup requires
+READONLY. The metadata update restores only READONLY. It queries all four actual
+positive timestamps using existing `GetFileInformationByHandleEx` FileBasicInfo
+class/layout, supplies the actual edited length and same opaque identity to
+existing `CfUpdatePlaceholder`, with VERIFY_IN_SYNC | MARK_IN_SYNC(3), no dehydration ranges and a
+positive input USN CAS. The optional output USN is not completion authority.
+There is no fallback, force, permission change, READONLY clearing or weaker open.
+The fixed mark-first order described below establishes in-sync before the
+coherent-current metadata update and exact final postproof.
+
+The bounded input accepts only standard READONLY/HIDDEN/SYSTEM/ARCHIVE bits plus
+intrinsic REPARSE. It supplies the current standard bits plus READONLY (for example, current `0x420` supplies
+`0x21` and requires actual `0x421`). The baseline is sampled after Mark, not
+assumed from the earlier dirty observation. The result must equal that current
+baseline plus READONLY, with unchanged timestamps, size, physical/opaque identity,
+cloud tag/state and body. Unknown flags refuse rather than being masked away.
+Microsoft documents [CfUpdatePlaceholder metadata, flags and USN semantics](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfupdateplaceholder),
+[CF_FS_METADATA](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/ns-cfapi-cf_fs_metadata),
+[FileBasicInfo](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ne-minwinbase-file_info_by_handle_class),
+and [ordinary settable attributes versus intrinsic reparse points](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileattributesw).
+The CfUpdate-specific input mask is not explicitly documented there: preserving
+the intrinsic REPARSE bit with standard-only input is an inference requiring the
+exact isolated native case, not an OS behavior already qualified by source tests.
+
+Per-file dirty observations are inserted inside the original capture publication
+fence, before it is released. Completion holds the observation lock through
+both durable callbacks and resolves only the exact sequence/file/body/components
+it proved. Other files, unknown/overflow/poisoned history, ordinary edits and
+unverifiable closes remain blocking. The global modified-close counter remains
+monotonic telemetry. NativeCompleted history alone grants no cleanup authority;
+Lock still requires fresh native cleanup proof and an absence of all unresolved
+history. Public capability/readonly flags and the existing remote-only upload
+API remain unchanged. Windows compilation and native acceptance are pending the
+combined parent source; this section claims source behavior only.
+
+
+### Referenced Win32 handle selected before vault completion
+
+Only the new `complete_vault_upload` selects the borrowed Win32 handle upfront
+for `CfUpdatePlaceholder`, `CfSetInSyncState` and its `CfGetPlaceholderInfo`
+identity checks. The same `ProtectedCompletionFile` retains ownership of the
+opaque handle and its successful reference throughout every native call, full
+postproof and durable callback. The raw handle is never reopened or closed and
+is not converted into an owning Rust file. This is one fixed operation path;
+there is no retry after failure or switch to weaker sharing.
+
+Microsoft's [CfGetWin32HandleFromProtectedHandle contract](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfgetwin32handlefromprotectedhandle)
+permits handle-based Win32 APIs while the reference synchronizes use with oplock
+break acknowledgement. [CfReferenceProtectedHandle](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfreferenceprotectedhandle)
+explains that a retained reference prevents break acknowledgement. The individual
+[update](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfupdateplaceholder),
+[in-sync](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfsetinsyncstate)
+and [information](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfgetplaceholderinfo)
+APIs accept a file HANDLE; their documented access requirements remain enforced.
+
+R8 observed ERROR_INVALID_HANDLE (`0x80070006`) from the opaque-handle metadata
+call while referenced raw metadata/USN queries had succeeded. A pending oplock
+break affecting an internal opaque re-reference is a plausible inference, not a
+proven or documented cause of that failure. Raw handle validity does not prove
+the replacement update will succeed. The exact native case remains required.
+All root/body/USN/auth/epoch/storage/metadata predicates remain unchanged. Fixed
+synthetic diagnostics expose only numerical attributes/tag/state and timestamp
+equality after metadata and in-sync calls; they add no completion authority.
+Existing ordinary completion and readonly cleanup retain their qualified paths.
+
+
+### Mark-first completion with coherent current metadata
+
+The new completion path uses one fixed fresh-attempt order: existing verified
+remote/native body proof and Prepared publication, then existing in-sync marking,
+then readonly metadata restoration with VERIFY_IN_SYNC | MARK_IN_SYNC and positive input USN.
+[In-sync marking](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfsetinsyncstate)
+is authorized by the exact fresh byte proof and continuously retained writer
+fence, not by recovered evidence. Prepared/dirty history remains pending even if
+Mark succeeds; any later failure poisons route publication and blocks cleanup.
+There is no second Mark, retry after refusal, force, dehydration or weaker open.
+
+Immediately after Mark, one completion-only
+[FSCTL_WRITE_USN_CLOSE_RECORD](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_write_usn_close_record)
+forces a journal record containing current reasons on the same referenced raw
+file. It requires exactly eight output bytes, a positive USN, and exact
+file-ID-bound READ_FILE_USN_DATA readback. The returned USN itself starts the
+metadata/body bracket; it is never refreshed after a failed update. The existing
+cleanup helper and its callers remain unchanged. [READ_FILE_USN_DATA](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_read_file_usn_data)
+returns the last USN written to the journal; it does not force current reasons.
+This supplies a freshly journaled baseline without disabling the atomic metadata
+USN comparison. R11 passed Mark/postproof and still returned ERROR377 from the
+readonly update; stale journal baseline is a hypothesis, not an established
+cause or a promise this barrier resolves the refusal. The failed case remains
+preserved and a fresh native case must qualify actual behavior.
+
+Using that same returned baseline, the method brackets the CURRENT native snapshot, all four
+actual positive basic timestamps/known attributes and full body hash between two
+equal positive USN reads. The first USN is sampled BEFORE current metadata; a
+newer later USN cannot authorize stale attributes. Snapshot/basic identity and
+full resident/in-sync state must be stable. Readonly input preserves that current
+metadata, including any legitimate changes before its coherent snapshot, rather
+than restoring pre-Mark timestamps or attributes. Root/file/opaque identity and
+edited length are never rebased.
+
+At this one successful Mark boundary, both tags must pass the existing exact
+sixteen-tag cloud classifier. The tag must remain identical, except for the
+single observed `IO_REPARSE_TAG_CLOUD_2` (`0x9000201a`) to
+`IO_REPARSE_TAG_CLOUD_6` (`0x9000601a`) transition. Placeholder state must equal
+its original value with IN_SYNC added. [Microsoft's tag definitions](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/c8e77b37-3909-4fe6-a4ea-2b9d423b1ee4)
+identify both as Cloud Files filter tags; they do not document this transition
+or assign semantics to their differing bit. This narrow exception is empirical:
+R10 observed successful Mark and this transition with unchanged attributes and
+expected state, then refused the old tag-equality predicate before completion.
+It grants no authority to other tag changes or reverse transitions. The current
+post-Mark tag remains exact through the coherent USN bracket, metadata update,
+full postproof and durable completion checks. All root/file/opaque/body and
+continuous publication/token/epoch/reference fences remain required. R10's
+failure is preserved; a fresh native case must qualify the new predicate.
+
+The sole [metadata update](https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfupdateplaceholder)
+uses VERIFY_IN_SYNC | MARK_IN_SYNC(3) with that SAME positive bracketed USN input CAS, no data
+ranges and NULL FileIdentity/0 with NO REMOVE_FILE_IDENTITY flag. Opaque identity
+is independently checked before/after. VERIFY keeps its current in-sync
+precondition; MARK requests in-sync on successful metadata update in that same
+API operation. There is no second standalone in-sync call or optional USN
+removal. Output USN is not completion authority. Fresh positive-USN/full-body,
+root/file/opaque, exact current timestamps/only READONLY gain, in-sync/resident and
+zero-modified-range postproof precedes the unchanged NativeCompleted CAS,
+postchecks, exact dirty resolution and synthetic end-of-critical-span hook.
+
+The fixed combined flags are selected upfront for this fresh attempt, never as
+a retry or fallback after a refused update. The
+[SDK flag definitions](https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/um/cfapi.h)
+provide combinable VERIFY(1) and MARK(2); the documented MARK behavior is to mark
+the placeholder in-sync upon a successful metadata update. Neither VERIFY nor
+the positive metadata-USN CAS is removed. R14's uncontended normal case still
+returned ERROR377 after Mark, fresh journal baseline and postproof; no API
+ordering or internal cause has been established, and this flag choice is not a
+proven fix. Prior failed cases remain preserved. Exact native acceptance is
+still required for the combined operation and all unchanged postproofs.
+
+The NULL optional-USN alternative remains unapplied: a WRITE_ATTRIBUTES-only
+race could overwrite newer metadata unnoticed. The coherent current snapshot
+and atomic positive update USN comparison are retained here. R9's observed 377
+refusal does not establish whether USN, dirty state or another internal condition
+caused it. Mark-first establishes the documented in-sync precondition; only the
+next fresh native case can qualify actual behavior. Ordinary completion and
+readonly cleanup retain their existing paths unchanged.
+
+### Explicit writable-byte completion (source only, disabled)
+
+`complete_writable_vault_upload` chooses its private operation mode before any
+native action. It shares the exact fresh live route/token/opaque epoch, physical
+root/file/opaque identity, resident full-body/hash, positive stable USN, retained
+exclusive reference, Prepared CAS and runtime catalogue/hydration promotion of
+the readonly method. It performs the same single legitimate in-sync Mark and
+coherent current post-Mark metadata/body/USN proof, then omits the ENTIRE
+`CfUpdatePlaceholder`/filesystem-metadata overwrite. No metadata write loses an
+atomic USN guard; there is no retry, NULL-USN fallback, attribute/timestamp write
+or second standalone Mark. The readonly method still performs its original
+positive-USN guarded readonly metadata update.
+
+Writable final postproof requires the exact current post-Mark basic attributes
+and all four timestamps, tag/state, physical/opaque identity, full body/hash,
+zero modified ranges and the SAME positive USN. Those proofs and current fences
+span NativeCompleted CAS/readback, final native checks and exact dirty-sequence
+resolution. Any uncertainty preserves protected/native bytes and poisons future
+route publication under the existing fence. Historical NativeCompleted is only
+byte/in-sync history: it does not assert READONLY restoration or authorize
+cleanup. Readonly cleanup predicates remain unchanged; a writable file may
+therefore keep Lock/stop cleanup incomplete even after byte completion. Other
+files, unknown history and the monotonic global telemetry remain untouched.
+Normal writable publication, fresh-worker activation and public RPC stay
+disabled. Exact native acceptance remains pending the combined source gates.

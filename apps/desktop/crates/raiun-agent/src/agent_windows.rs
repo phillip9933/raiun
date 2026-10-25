@@ -14,6 +14,8 @@ mod vault_custody;
 #[allow(dead_code)]
 #[path = "vault_edit_capture.rs"]
 mod vault_edit_capture;
+#[path = "vault_edit_disposition.rs"]
+mod vault_edit_disposition;
 #[allow(dead_code)]
 #[path = "vault_edit_retention.rs"]
 mod vault_edit_retention;
@@ -387,6 +389,8 @@ struct WindowsAgent {
     fresh_close_worker: Mutex<Option<windows_vault_close_worker::FreshCloseWorker>>,
     folder_lifecycle: Mutex<()>,
     vault_credential_operation: Mutex<()>,
+    #[cfg(all(test, debug_assertions))]
+    synthetic_vault_completion_writer_probe: bool,
 }
 
 #[derive(Clone)]
@@ -511,6 +515,14 @@ enum ProviderCommand {
         binding: ActiveProviderBinding,
         response: std::sync::mpsc::SyncSender<Result<VerifiedVaultBackend, String>>,
     },
+    CompleteVaultUpload {
+        writable_bytes: bool,
+        binding: ActiveProviderBinding,
+        expected_backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
+        upload: raiun_cloudfiles_windows::FreshVaultUpload,
+        store: Box<dyn raiun_cloudfiles_windows::VaultLocalCompletionStore>,
+        response: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
     VaultCleanupDiagnostics {
         binding: ActiveProviderBinding,
         response: std::sync::mpsc::SyncSender<Result<Value, String>>,
@@ -565,6 +577,11 @@ enum ProviderCommand {
         response: std::sync::mpsc::SyncSender<Result<i32, String>>,
     },
     #[cfg(test)]
+    VaultFilePendingForTest {
+        identity: [u8; 16],
+        response: std::sync::mpsc::SyncSender<Result<bool, String>>,
+    },
+    #[cfg(test)]
     CloseObservation(std::sync::mpsc::SyncSender<Result<NativeCloseObservation, String>>),
     Disconnect(std::sync::mpsc::SyncSender<Result<(), String>>),
     Stop(std::sync::mpsc::SyncSender<Result<(), String>>),
@@ -610,6 +627,7 @@ enum NativeRestartProbePath {
     ProjectsNativeRead,
     RecoveryDocument,
     RecoveryReadOnlyProbe,
+    VaultCapturedFile,
 }
 
 impl ProviderManager {
@@ -883,6 +901,39 @@ impl ProviderManager {
                             };
                             let _ = response.send(result);
                         }
+                        ProviderCommand::CompleteVaultUpload { writable_bytes, binding, expected_backend, upload, mut store, response } => {
+                            // The HTTP caller hands over an owned fresh capability. Only
+                            // this native owner thread may complete the already-live file.
+                            // Storage callbacks perform local protected CAS only; never
+                            // account/coordinator lookup or HTTP under publication fences.
+                            let result = (|| {
+                                if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref())
+                                    || !retired_vaults.is_empty()
+                                    || backend.as_ref().is_none_or(|current| !Arc::ptr_eq(current, &expected_backend) || current.is_revoked())
+                                    || upload.root() != binding.identity
+                                {
+                                    return Err("The Windows drive changed before local save completion".to_owned());
+                                }
+                                let active = connection.as_ref().ok_or("The Windows drive is not connected")?;
+                                let completed = if writable_bytes {
+                                    active.complete_writable_vault_upload(upload, store.as_mut())
+                                } else {
+                                    active.complete_vault_upload(upload, store.as_mut())
+                                };
+                                completed.map_err(|error| {
+                                        #[cfg(all(test, debug_assertions))]
+                                        eprintln!("synthetic_vault_local_completion_refused error={error:?}");
+                                        #[cfg(not(all(test, debug_assertions)))]
+                                        let _ = error;
+                                        "The cloud save is verified, but local completion needs recovery review".to_owned()
+                                    })?;
+                                if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) {
+                                    return Err("The account changed during local save completion".to_owned());
+                                }
+                                Ok(())
+                            })();
+                            let _ = response.send(result);
+                        }
                         ProviderCommand::VaultCleanupDiagnostics { binding, response } => {
                             let result = if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) {
                                 Err("The Windows drive changed before support inspection".to_owned())
@@ -1108,6 +1159,13 @@ impl ProviderManager {
                             let _ = response.send(result);
                         }
                         #[cfg(test)]
+                        ProviderCommand::VaultFilePendingForTest { identity, response } => {
+                            let result = connection.as_ref().ok_or_else(|| "Windows Cloud Files connection is not active".to_owned())
+                                .and_then(|active| active.vault_file_pending_for_test(&identity)
+                                    .map_err(|_| "Vault file pending state is unavailable".to_owned()));
+                            let _ = response.send(result);
+                        }
+                        #[cfg(test)]
                         ProviderCommand::ReadOnlyPlaceholderObservation { path, response } => {
                             let result = connection
                                 .as_ref()
@@ -1125,6 +1183,9 @@ impl ProviderManager {
                                         }
                                         NativeRestartProbePath::RecoveryReadOnlyProbe => {
                                             &["Spaces", "Projects", "RecoveryRoot", "read-probe.bin"][..]
+                                        }
+                                        NativeRestartProbePath::VaultCapturedFile => {
+                                            &["Personal", "Travel.vault", "1"][..]
                                         }
                                     };
                                     (
@@ -1390,6 +1451,61 @@ impl ProviderManager {
         result
             .recv()
             .map_err(|_| "Windows Cloud Files connection manager stopped unexpectedly")?
+    }
+
+    fn complete_vault_upload(
+        &self,
+        binding: ActiveProviderBinding,
+        expected_backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
+        upload: raiun_cloudfiles_windows::FreshVaultUpload,
+        store: Box<dyn raiun_cloudfiles_windows::VaultLocalCompletionStore>,
+    ) -> Result<(), String> {
+        self.complete_vault_upload_mode(binding, expected_backend, upload, store, false)
+    }
+
+    fn complete_writable_vault_upload(
+        &self,
+        binding: ActiveProviderBinding,
+        expected_backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
+        upload: raiun_cloudfiles_windows::FreshVaultUpload,
+        store: Box<dyn raiun_cloudfiles_windows::VaultLocalCompletionStore>,
+    ) -> Result<(), String> {
+        self.complete_vault_upload_mode(binding, expected_backend, upload, store, true)
+    }
+
+    fn complete_vault_upload_mode(
+        &self,
+        binding: ActiveProviderBinding,
+        expected_backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
+        upload: raiun_cloudfiles_windows::FreshVaultUpload,
+        store: Box<dyn raiun_cloudfiles_windows::VaultLocalCompletionStore>,
+        writable_bytes: bool,
+    ) -> Result<(), String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::CompleteVaultUpload {
+                writable_bytes,
+                binding,
+                expected_backend,
+                upload,
+                store,
+                response,
+            })
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result
+            .recv()
+            .map_err(|_| "Windows Cloud Files connection manager stopped during save completion")?
+    }
+
+    #[cfg(test)]
+    fn vault_file_pending_for_test(&self, identity: [u8; 16]) -> Result<bool, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::VaultFilePendingForTest { identity, response })
+            .map_err(|_| "Windows provider manager is unavailable")?;
+        result
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "Vault pending inspection did not complete within its bound".to_owned())?
     }
 
     fn vault_cleanup_diagnostics(&self, binding: ActiveProviderBinding) -> Result<Value, String> {
@@ -1916,6 +2032,8 @@ impl WindowsAgent {
             fresh_close_worker: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
             vault_credential_operation: Mutex::new(()),
+            #[cfg(all(test, debug_assertions))]
+            synthetic_vault_completion_writer_probe: true,
         };
         agent.restore_active_session();
         Ok(agent)
@@ -8026,10 +8144,293 @@ mod tests {
     }
 
     #[cfg(all(windows, debug_assertions))]
+    #[derive(Debug)]
+    enum VaultWriterOpenOutcome {
+        Opened,
+        Error(Option<i32>),
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    struct VaultWriterOpenResult {
+        outcome: VaultWriterOpenOutcome,
+        critical_span_finished: bool,
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    enum VaultCompletionProbeState {
+        NotStarted,
+        SharingDenied,
+        Pending {
+            received: std::sync::mpsc::Receiver<VaultWriterOpenResult>,
+            competitor: thread::JoinHandle<()>,
+        },
+        Failed,
+        Finalized,
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    pub(super) struct VaultCompletionProbeHandle {
+        state: Arc<Mutex<VaultCompletionProbeState>>,
+        critical_span_finished: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    pub(super) fn finalize_vault_completion_probe(
+        probe: VaultCompletionProbeHandle,
+    ) -> Result<Value, String> {
+        let state = std::mem::replace(
+            &mut *probe
+                .state
+                .lock()
+                .map_err(|_| "writer probe lock poisoned")?,
+            VaultCompletionProbeState::Finalized,
+        );
+        match state {
+            VaultCompletionProbeState::SharingDenied => {
+                if !probe.critical_span_finished.load(Ordering::SeqCst) {
+                    return Err(
+                        "sharing denial observed but full critical span did not finish".into(),
+                    );
+                }
+                Ok(json!({"native_writer_exclusion":"sharing_denied", "native_writer_error":32}))
+            }
+            VaultCompletionProbeState::Pending {
+                received,
+                competitor,
+            } => {
+                // This is an observed channel/marker ordering, not proof of the
+                // exact kernel admission instant: the thread may be preempted.
+                // The real retained native reference and production postproofs
+                // remain the security authority for completion.
+                let result = received
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|error| {
+                        // Do not block joining a still-pending open or kill its thread.
+                        // Releasing the native guard lets it finish naturally.
+                        eprintln!("C06_VAULT_WRITER_PROBE_FINALIZE_FAILED={error:?}");
+                        "writer open result was not received within five seconds after command returned"
+                            .to_string()
+                    })?;
+                competitor
+                    .join()
+                    .map_err(|_| "writer probe thread panicked")?;
+                let raw = match result.outcome {
+                    VaultWriterOpenOutcome::Opened => 0,
+                    VaultWriterOpenOutcome::Error(Some(5)) => 5,
+                    other => {
+                        return Err(format!("unexpected post-command writer outcome: {other:?}"));
+                    }
+                };
+                if !result.critical_span_finished {
+                    return Err(
+                        "writer thread sampled an unfinished critical span after Open returned"
+                            .into(),
+                    );
+                }
+                eprintln!(
+                    "C06_VAULT_NATIVE_WRITER_EXCLUSION=pending_through_completion;error={raw}"
+                );
+                Ok(
+                    json!({"native_writer_exclusion":"pending_through_completion", "native_writer_error":raw}),
+                )
+            }
+            _ => Err("writer exclusion probe never reached a qualifying completed state".into()),
+        }
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    pub(super) fn instrument_vault_completion_store(
+        inner: Box<dyn raiun_cloudfiles_windows::VaultLocalCompletionStore>,
+        root: PathBuf,
+    ) -> (
+        Box<dyn raiun_cloudfiles_windows::VaultLocalCompletionStore>,
+        VaultCompletionProbeHandle,
+    ) {
+        struct Instrumented {
+            inner: Box<dyn raiun_cloudfiles_windows::VaultLocalCompletionStore>,
+            root: PathBuf,
+            state: Arc<Mutex<VaultCompletionProbeState>>,
+            critical_span_finished: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl raiun_cloudfiles_windows::VaultLocalCompletionStore for Instrumented {
+            fn target(&self) -> &raiun_cloudfiles_windows::VaultLocalCompletionTarget {
+                self.inner.target()
+            }
+            fn prepare(
+                &mut self,
+                proof: &raiun_cloudfiles_windows::VaultNativePreparation,
+            ) -> Result<(), raiun_cloudfiles_windows::BackendError> {
+                self.inner.prepare(proof)
+            }
+            fn complete(
+                &mut self,
+                proof: &raiun_cloudfiles_windows::VaultNativeCompletionProof,
+            ) -> Result<(), raiun_cloudfiles_windows::BackendError> {
+                self.inner.complete(proof)
+            }
+            fn before_in_sync_for_test(
+                &mut self,
+            ) -> Result<(), raiun_cloudfiles_windows::BackendError> {
+                use raiun_cloudfiles_windows::BackendError;
+                let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
+                if !matches!(*state, VaultCompletionProbeState::NotStarted) {
+                    return Err(BackendError::Unavailable);
+                }
+                *state = VaultCompletionProbeState::Failed;
+                let components = self.inner.target().components();
+                if !self.root.is_absolute()
+                    || components.is_empty()
+                    || components.iter().any(|component| {
+                        component.is_empty()
+                            || component == "."
+                            || component == ".."
+                            || component.contains(['/', '\\', ':'])
+                    })
+                {
+                    return Err(BackendError::Unavailable);
+                }
+                let mut path = self.root.clone();
+                for component in components {
+                    path.push(component);
+                }
+                let (entered_sent, entered_received) = std::sync::mpsc::sync_channel(1);
+                let (sent, received) = std::sync::mpsc::sync_channel(1);
+                let finished = Arc::clone(&self.critical_span_finished);
+                let competitor = thread::spawn(move || {
+                    let _ = entered_sent.send(());
+                    // Ordinary existing-file write OPEN only: never write bytes,
+                    // truncate, create, alter permissions or retry after denial.
+                    let opened = std::fs::OpenOptions::new().write(true).open(path);
+                    let critical_span_finished = finished.load(Ordering::SeqCst);
+                    let outcome = match opened {
+                        Ok(file) => {
+                            drop(file);
+                            VaultWriterOpenOutcome::Opened
+                        }
+                        Err(error) => VaultWriterOpenOutcome::Error(error.raw_os_error()),
+                    };
+                    eprintln!(
+                        "C06_VAULT_WRITER_OPEN_RETURN={outcome:?};critical_span_finished={critical_span_finished}"
+                    );
+                    let _ = sent.send(VaultWriterOpenResult {
+                        outcome,
+                        critical_span_finished,
+                    });
+                });
+                if entered_received
+                    .recv_timeout(Duration::from_secs(1))
+                    .is_err()
+                {
+                    eprintln!("C06_VAULT_WRITER_PROBE_ENTER_TIMEOUT");
+                    return Err(BackendError::Unavailable);
+                }
+                match received.recv_timeout(Duration::from_secs(2)) {
+                    Ok(VaultWriterOpenResult {
+                        outcome: VaultWriterOpenOutcome::Error(Some(32)),
+                        ..
+                    }) => {
+                        competitor.join().map_err(|_| BackendError::Unavailable)?;
+                        *state = VaultCompletionProbeState::SharingDenied;
+                        eprintln!("C06_VAULT_NATIVE_WRITER_EXCLUSION=sharing_denied;error=32");
+                        Ok(())
+                    }
+                    Ok(result) => {
+                        eprintln!(
+                            "C06_VAULT_WRITER_PROBE_IMMEDIATE_FAILURE={:?}",
+                            result.outcome
+                        );
+                        let _ = competitor.join();
+                        Err(BackendError::Unavailable)
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        // Provisional only. The final hook must still observe a
+                        // pending probe result, and finalization must qualify its return.
+                        *state = VaultCompletionProbeState::Pending {
+                            received,
+                            competitor,
+                        };
+                        eprintln!("C06_VAULT_WRITER_PROBE_PENDING_PROVISIONAL=true");
+                        Ok(())
+                    }
+                    Err(error) => {
+                        eprintln!("C06_VAULT_WRITER_PROBE_CHANNEL_FAILURE={error:?}");
+                        let _ = competitor.join();
+                        Err(BackendError::Unavailable)
+                    }
+                }
+            }
+            fn before_completion_guard_release_for_test(
+                &mut self,
+            ) -> Result<(), raiun_cloudfiles_windows::BackendError> {
+                use raiun_cloudfiles_windows::BackendError;
+                let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
+                match &*state {
+                    VaultCompletionProbeState::SharingDenied => {}
+                    VaultCompletionProbeState::Pending { received, .. } => {
+                        if !matches!(
+                            received.try_recv(),
+                            Err(std::sync::mpsc::TryRecvError::Empty)
+                        ) {
+                            eprintln!(
+                                "C06_VAULT_WRITER_PROBE_RETURNED_BEFORE_CRITICAL_SPAN_END=true"
+                            );
+                            *state = VaultCompletionProbeState::Failed;
+                            return Err(BackendError::Unavailable);
+                        }
+                    }
+                    _ => return Err(BackendError::Unavailable),
+                }
+                // No result has been observed yet for the pending branch. This
+                // does not establish the exact kernel admission instant.
+                // Native completion, postproof and exact dirty resolution are
+                // already durable. The exclusive guard/fences remain held here.
+                self.critical_span_finished.store(true, Ordering::SeqCst);
+                eprintln!("C06_VAULT_WRITER_PROBE_CRITICAL_SPAN_FINISHED=true");
+                Ok(())
+            }
+        }
+        let state = Arc::new(Mutex::new(VaultCompletionProbeState::NotStarted));
+        let critical_span_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        (
+            Box::new(Instrumented {
+                inner,
+                root,
+                state: Arc::clone(&state),
+                critical_span_finished: Arc::clone(&critical_span_finished),
+            }),
+            VaultCompletionProbeHandle {
+                state,
+                critical_span_finished,
+            },
+        )
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser with fresh child-only LOCALAPPDATA; verifies native local disposition after one explicit synthetic upload"]
+    fn native_broker_vault_verified_upload_completes_local_disposition() {
+        broker_remembered_lifecycle_fixture_with_disposition(true, true, true, true);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser with fresh child-only LOCALAPPDATA; verifies full local disposition after normal close without an injected writer"]
+    fn native_broker_vault_verified_upload_normal_close_completes_local_disposition() {
+        broker_remembered_lifecycle_fixture_with_writer_probe(true, true, true, true, false);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
     #[test]
     #[ignore = "requires isolated ordinary RaiunLabUser/fresh child-only LOCALAPPDATA; automatic fresh-close upload leaves dirty native fixture"]
     fn native_broker_vault_fresh_close_automatically_uploads_retained_edit() {
         broker_remembered_lifecycle_fixture_with_automatic_upload(true, true, true, true);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser/fresh child LOCALAPPDATA; native writable-byte completion retains incomplete readonly cleanup"]
+    fn native_broker_vault_writable_bytes_complete_preserves_pending_cleanup() {
+        broker_remembered_lifecycle_fixture_with_modes(true, true, true, true, false, false, true);
     }
 
     #[cfg(all(windows, debug_assertions))]
@@ -8083,7 +8484,7 @@ mod tests {
         capture_edit: bool,
         upload_edit: bool,
     ) {
-        broker_remembered_lifecycle_fixture_with_automatic_upload(
+        broker_remembered_lifecycle_fixture_with_disposition(
             payload,
             capture_edit,
             upload_edit,
@@ -8098,7 +8499,65 @@ mod tests {
         upload_edit: bool,
         automatic: bool,
     ) {
-        assert!(!automatic || upload_edit);
+        broker_remembered_lifecycle_fixture_with_modes(
+            payload,
+            capture_edit,
+            upload_edit,
+            false,
+            true,
+            automatic,
+            false,
+        );
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    fn broker_remembered_lifecycle_fixture_with_disposition(
+        payload: bool,
+        capture_edit: bool,
+        upload_edit: bool,
+        complete_local: bool,
+    ) {
+        broker_remembered_lifecycle_fixture_with_writer_probe(
+            payload,
+            capture_edit,
+            upload_edit,
+            complete_local,
+            true,
+        );
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    fn broker_remembered_lifecycle_fixture_with_writer_probe(
+        payload: bool,
+        capture_edit: bool,
+        upload_edit: bool,
+        complete_local: bool,
+        inject_writer_probe: bool,
+    ) {
+        broker_remembered_lifecycle_fixture_with_modes(
+            payload,
+            capture_edit,
+            upload_edit,
+            complete_local,
+            inject_writer_probe,
+            false,
+            false,
+        );
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    fn broker_remembered_lifecycle_fixture_with_modes(
+        payload: bool,
+        capture_edit: bool,
+        upload_edit: bool,
+        complete_local: bool,
+        inject_writer_probe: bool,
+        automatic: bool,
+        writable_bytes: bool,
+    ) {
+        assert!(!writable_bytes || (complete_local && !automatic && !inject_writer_probe));
+        assert!(!automatic || (upload_edit && !complete_local));
+        assert!(!complete_local || upload_edit);
         assert!(!upload_edit || capture_edit);
         assert!(!capture_edit || payload);
         use super::{
@@ -8167,7 +8626,7 @@ mod tests {
         let session = synthetic_session(&server, "synthetic-client", unix_time_now() + 3600);
         store.save_pending(&profile, &session).unwrap();
         store.publish_active(&profile, &session).unwrap();
-        let runtime = Arc::new(
+        let mut runtime = Arc::new(
             WindowsAgent::new_for_profile_with_services(
                 &profile,
                 store,
@@ -8176,6 +8635,9 @@ mod tests {
             )
             .unwrap(),
         );
+        Arc::get_mut(&mut runtime)
+            .expect("fresh test runtime has one owner before operations")
+            .synthetic_vault_completion_writer_probe = inject_writer_probe;
         let generation = runtime.generation.load(Ordering::Acquire);
         {
             let mut state = runtime.state.lock().unwrap();
@@ -8487,10 +8949,80 @@ mod tests {
                     state.enabled = true;
                 }
                 if !automatic {
-                    let result = runtime
-                        .upload_windows_vault_capture(&scope, "/Travel.vault", capture_id)
-                        .expect("explicit broker worker must verify encrypted remote readback");
-                    assert_eq!(result["state"], "remote_verified_pending_local");
+                    if complete_local {
+                        assert!(
+                            runtime
+                                .provider
+                                .vault_file_pending_for_test(original.opaque())
+                                .unwrap(),
+                            "the exact captured file is pending before live completion"
+                        );
+                    }
+                    // Completion remains an explicit mode; old remote-only entry
+                    // point and native selector retain their pending-local behavior.
+                    let result = if writable_bytes {
+                        runtime.upload_windows_vault_capture_with_writable_completion(
+                            &scope,
+                            "/Travel.vault",
+                            capture_id,
+                        )
+                    } else if complete_local {
+                        runtime.upload_windows_vault_capture_with_completion(
+                            &scope,
+                            "/Travel.vault",
+                            capture_id,
+                            true,
+                        )
+                    } else {
+                        runtime.upload_windows_vault_capture(&scope, "/Travel.vault", capture_id)
+                    }
+                    .expect("explicit broker worker must verify its requested outcome");
+                    assert_eq!(
+                        result["state"],
+                        if complete_local {
+                            "local_completed"
+                        } else {
+                            "remote_verified_pending_local"
+                        }
+                    );
+                    if complete_local {
+                        if writable_bytes {
+                            assert_eq!(result["native_confirmation"], true);
+                            assert_eq!(result["read_only_restored"], false);
+                        }
+                        if inject_writer_probe {
+                            match result["native_writer_exclusion"].as_str() {
+                                Some("sharing_denied") => {
+                                    assert_eq!(result["native_writer_error"], 32)
+                                }
+                                Some("pending_through_completion") => assert!(
+                                    matches!(result["native_writer_error"].as_i64(), Some(0 | 5)),
+                                    "observed pending probe completes after the marker: open succeeds or is denied by restored readonly"
+                                ),
+                                other => {
+                                    panic!(
+                                        "actual guarded writer exclusion was not qualified: {other:?}"
+                                    )
+                                }
+                            }
+                        } else {
+                            assert!(result.get("native_writer_exclusion").is_none());
+                            assert!(result.get("native_writer_error").is_none());
+                            eprintln!("C06_VAULT_NORMAL_CLOSE_WITHOUT_INJECTED_WRITER=true");
+                        }
+                        assert_eq!(result["local_cleanup"], "requires_current_native_check");
+                        assert!(
+                            !runtime
+                                .provider
+                                .vault_file_pending_for_test(original.opaque())
+                                .unwrap(),
+                            "only this exact native-completed file resolves"
+                        );
+                        assert!(
+                            runtime.provider.close_observation().unwrap().0 >= observation.0,
+                            "historical modified telemetry must never be globally reset"
+                        );
+                    }
                 }
                 {
                     let state = vault_remote.lock().unwrap();
@@ -8528,6 +9060,36 @@ mod tests {
                     proof.body_sha256(),
                     <[u8; 32]>::from(sha2::Sha256::digest(&edited))
                 );
+                if complete_local {
+                    let status = ledger
+                        .local_disposition()
+                        .unwrap()
+                        .expect("persisted v4 native disposition");
+                    assert!(
+                        status.is_native_completed(),
+                        "native S_OK alone is not durable completion"
+                    );
+                    assert!(status.reference().frame() == original_frame);
+                    assert!(status.reference().entry() == &original);
+                    assert_eq!(status.verified_entry().opaque(), original.opaque());
+                    assert_eq!(status.verified_entry().remote_id(), original.remote_id());
+                    assert_eq!(status.verified_entry().etag(), "\"child-rev-2\"");
+                    assert_eq!(status.verified_entry().length(), edited.len() as u64);
+                    assert_eq!(
+                        status.promoted_hydration().file_index(),
+                        hydration.file_index()
+                    );
+                    assert_eq!(
+                        status.promoted_hydration().components(),
+                        components.as_slice()
+                    );
+                    assert_eq!(status.promoted_hydration().length(), edited.len() as u64);
+                    assert_eq!(status.descriptor().body_len(), edited.len() as u64);
+                    assert_eq!(
+                        status.descriptor().body_sha256(),
+                        <[u8; 32]>::from(sha2::Sha256::digest(&edited))
+                    );
+                }
                 if !automatic {
                     assert!(
                         runtime
@@ -8656,11 +9218,222 @@ mod tests {
                     println!(
                         "C06_VAULT_FRESH_CLOSE_AUTO_UPLOAD_VERIFIED=true;vaultPUT=1;authenticatedBodyGET=1;off_provider_thread=true;noReplay=true;native_confirmation=false;capture_pending=true;cleanup=incomplete"
                     );
-                } else {
+                } else if !complete_local {
                     println!(
                         "C06_VAULT_EXPLICIT_CAPTURE_UPLOAD_VERIFIED=true;vaultPUT=1;authenticatedBodyGET=1;noReplay=true;capture_pending=true;cleanup=incomplete"
                     );
                 }
+            }
+            if complete_local {
+                let after = runtime
+                    .provider
+                    .read_only_placeholder_observation(NativeRestartProbePath::VaultCapturedFile)
+                    .unwrap()
+                    .2
+                    .expect("completed native placeholder observation");
+                assert_ne!(after.0 & 0x400, 0, "Cloud Files reparse point retained");
+                assert_ne!(after.2 & 0x8, 0, "actual native IN_SYNC state required");
+                assert_eq!(after.3, edited.len() as u64);
+                assert_eq!(std::fs::read(&file).unwrap(), edited);
+                let promoted = verified
+                    .custody
+                    .inspect_capture_for_test(&scope, "/Travel.vault")
+                    .unwrap();
+                assert_eq!(promoted.captures.len(), 1);
+                assert_eq!(
+                    promoted.captures[0].0.bytes_for_recovery(),
+                    edited.as_slice()
+                );
+                assert!(
+                    promoted.captures[0].1 == original,
+                    "historical capture baseline must not be rebased"
+                );
+                let entry = promoted
+                    .entries
+                    .iter()
+                    .find(|entry| entry.opaque() == original.opaque())
+                    .unwrap();
+                assert_eq!(entry.remote_id(), original.remote_id());
+                assert_eq!(entry.etag(), "\"child-rev-2\"");
+                assert_eq!(entry.length(), edited.len() as u64);
+                let hydration = promoted
+                    .hydrations
+                    .iter()
+                    .find(|item| item.opaque() == original.opaque())
+                    .unwrap();
+                assert_eq!(
+                    hydration.file_index(),
+                    baseline["native_file"].as_u64().unwrap()
+                );
+                assert_eq!(hydration.length(), edited.len() as u64);
+                assert_eq!(hydration.components(), components.as_slice());
+                let gets_after_upload = remote.native_reads.lock().unwrap().vault_get_count;
+                assert_eq!(
+                    gets_after_upload,
+                    gets + 1,
+                    "local disposition does no download"
+                );
+                if writable_bytes {
+                    assert_eq!(
+                        after.0 & 1,
+                        0,
+                        "writable byte completion must not restore READONLY"
+                    );
+                    assert!(
+                        !runtime
+                            .provider
+                            .vault_file_pending_for_test(original.opaque())
+                            .unwrap()
+                    );
+                    let mut lock = target();
+                    lock["action"] = json!("vault_lock");
+                    assert!(
+                        broker.handle_isolated_lifecycle_session(lock).is_err(),
+                        "writable native bytes are not current readonly cleanup authority"
+                    );
+                    assert!(!sessions.is_unlocked(&scope).unwrap());
+                    assert!(
+                        sessions.capture_session_epoch(&scope).is_err(),
+                        "Lock must refuse a new vault key/epoch lease"
+                    );
+                    assert!(
+                        runtime
+                            .provider
+                            .vault_lock_cleanup_status(
+                                active.clone(),
+                                "synthetic-personal-drive".into(),
+                                "synthetic-vault-root".into(),
+                                "/Travel.vault".into()
+                            )
+                            .unwrap()
+                    );
+                    let locked_native = runtime
+                        .provider
+                        .read_only_placeholder_observation(
+                            NativeRestartProbePath::VaultCapturedFile,
+                        )
+                        .unwrap()
+                        .2
+                        .expect("retained writable native file observation");
+                    assert_eq!(
+                        locked_native.0 & 1,
+                        0,
+                        "failed readonly cleanup cannot claim attribute restoration"
+                    );
+                    assert_eq!(locked_native.3, edited.len() as u64);
+                    assert_eq!(
+                        std::fs::read(&file).unwrap(),
+                        edited,
+                        "incomplete cleanup preserves owned native bytes"
+                    );
+                    assert_eq!(
+                        remote.native_reads.lock().unwrap().vault_get_count,
+                        gets_after_upload
+                    );
+                    let retained_after_lock = verified
+                        .custody
+                        .inspect_capture_for_test(&scope, "/Travel.vault")
+                        .unwrap();
+                    assert_eq!(retained_after_lock.captures.len(), 1);
+                    assert_eq!(
+                        retained_after_lock.captures[0].0.bytes_for_recovery(),
+                        edited.as_slice()
+                    );
+                    assert!(
+                        retained_after_lock.captures[0].0.encoded_frame_ref()
+                            == retained.encoded_frame_ref()
+                    );
+                    assert!(retained_after_lock.captures[0].1 == original);
+                    let diagnostics = runtime
+                        .provider
+                        .vault_cleanup_diagnostics(active.clone())
+                        .unwrap();
+                    assert!(
+                        diagnostics["modified_closes"].as_u64().unwrap() >= 1,
+                        "historical modified telemetry remains"
+                    );
+                    assert_eq!(diagnostics["journaled_closes"], 0);
+                    assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
+                    assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+                    {
+                        let state = remote.vault_upload.as_ref().unwrap().lock().unwrap();
+                        assert_eq!(state.put_attempt_count, 1);
+                        assert_eq!(state.put_count, 1);
+                        assert_eq!(state.body_get_count, 1);
+                        assert_eq!(state.forbidden_mutation_count, 0);
+                    }
+                    assert!(
+                        broker.stop_all().is_err(),
+                        "writable-byte completion must retain incomplete readonly cleanup"
+                    );
+                    drop(root_pin);
+                    drop(verified);
+                    drop(broker);
+                    drop(runtime);
+                    drop(sessions);
+                    remote.join().unwrap();
+                    appdata_pin.verify_path().unwrap();
+                    println!(
+                        "C06_VAULT_WRITABLE_BYTES_NATIVE_COMPLETED_CLEANUP_PENDING=true;vaultPUT=1;authenticatedBodyGET=1;noReplay=true;native_confirmation=true;read_only_restored=false;metadata_overwrite=false;keys_locked=true;cleanup=incomplete;no_product_activation=true"
+                    );
+                    return;
+                }
+                let mut lock = target();
+                lock["action"] = json!("vault_lock");
+                let locked = broker
+                    .handle_isolated_lifecycle_session(lock)
+                    .expect("verified local completion permits clean Lock")
+                    .0;
+                assert_eq!(locked["unlocked"], false);
+                assert_eq!(locked["vault_lock_cleanup_status"], "complete");
+                assert!(!sessions.is_unlocked(&scope).unwrap());
+                let locked_native = runtime
+                    .provider
+                    .read_only_placeholder_observation(NativeRestartProbePath::VaultCapturedFile)
+                    .unwrap()
+                    .2
+                    .expect("locked native placeholder observation");
+                assert_eq!(locked_native.3, edited.len() as u64);
+                assert_ne!(locked_native.0 & 1, 0, "clean locked file remains readonly");
+                use sha2::Digest as _;
+                let hash = format!("{:x}", sha2::Sha256::digest(&edited));
+                assert!(
+                    !broker_vault_read_in_child(&file, edited.len(), &hash).unwrap(),
+                    "one ordinary read after genuine clean Lock must refuse"
+                );
+                assert_eq!(
+                    remote.native_reads.lock().unwrap().vault_get_count,
+                    gets_after_upload
+                );
+                assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
+                assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+                {
+                    let state = remote.vault_upload.as_ref().unwrap().lock().unwrap();
+                    assert_eq!(state.put_attempt_count, 1);
+                    assert_eq!(state.put_count, 1);
+                    assert_eq!(state.body_get_count, 1);
+                    assert_eq!(state.forbidden_mutation_count, 0);
+                }
+                broker
+                    .stop_all()
+                    .expect("clean disposition stops normally without force");
+                drop(root_pin);
+                drop(verified);
+                drop(broker);
+                drop(runtime);
+                drop(sessions);
+                remote.join().unwrap();
+                appdata_pin.verify_path().unwrap();
+                if inject_writer_probe {
+                    println!(
+                        "C06_VAULT_FULL_SAVE_LOCAL_DISPOSITION_VERIFIED=true;vaultPUT=1;authenticatedBodyGET=1;noReplay=true;local_completed=true;locked_read_refused=true;DELETE=0"
+                    );
+                } else {
+                    println!(
+                        "C06_VAULT_NORMAL_CLOSE_FULL_SAVE_LOCAL_DISPOSITION_VERIFIED=true;vaultPUT=1;authenticatedBodyGET=1;noReplay=true;local_completed=true;locked_read_refused=true;DELETE=0;injected_writer=false"
+                    );
+                }
+                return;
             }
             let mut lock = target();
             lock["action"] = json!("vault_lock");
@@ -12996,6 +13769,7 @@ mod tests {
         body_get_count: usize,
         last_put_if_match: Option<String>,
         last_read_if_match: Option<String>,
+        forbidden_mutation_count: usize,
     }
 
     struct SyntheticPersonalSpacesFixture {
@@ -13187,6 +13961,7 @@ mod tests {
                 body_get_count: 0,
                 last_put_if_match: None,
                 last_read_if_match: None,
+                forbidden_mutation_count: 0,
             }))
         });
         let worker_vault_upload = vault_upload.as_ref().map(Arc::clone);
@@ -13221,6 +13996,15 @@ mod tests {
                     .expect("bound synthetic request reads");
                 let (request, headers, body) = read_request_with_headers(&request_stream);
                 worker_native_reads.lock().unwrap().request_count += 1;
+                // Count forbidden methods without granting them a handler.
+                // The existing initialized-vault assertion still rejects them.
+                if ["DELETE ", "MOVE "]
+                    .iter()
+                    .any(|method| request.starts_with(method))
+                    && let Some(remote) = worker_vault_upload.as_ref()
+                {
+                    remote.lock().unwrap().forbidden_mutation_count += 1;
+                }
                 if request.starts_with("GET /__test/remote_counts ") {
                     let snapshot = worker_recovery.lock().unwrap();
                     let counters = format!(
@@ -13907,6 +14691,8 @@ mod tests {
             fresh_close_worker: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
             vault_credential_operation: Mutex::new(()),
+            #[cfg(all(test, debug_assertions))]
+            synthetic_vault_completion_writer_probe: true,
         });
         let info = agent
             .begin_auth(&json!({"server":server,"client_id":"synthetic-client"}))
@@ -13979,6 +14765,8 @@ mod tests {
             fresh_close_worker: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
             vault_credential_operation: Mutex::new(()),
+            #[cfg(all(test, debug_assertions))]
+            synthetic_vault_completion_writer_probe: true,
         });
 
         agent
@@ -14641,6 +15429,8 @@ mod tests {
             fresh_close_worker: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
             vault_credential_operation: Mutex::new(()),
+            #[cfg(all(test, debug_assertions))]
+            synthetic_vault_completion_writer_probe: true,
         });
         let (server, fixture) = synthetic_oidc_server(true);
         let info = agent
@@ -14693,6 +15483,8 @@ mod tests {
             fresh_close_worker: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
             vault_credential_operation: Mutex::new(()),
+            #[cfg(all(test, debug_assertions))]
+            synthetic_vault_completion_writer_probe: true,
         });
         let _info = agent
             .begin_auth(&json!({"server":server,"client_id":"synthetic-client"}))
@@ -14729,6 +15521,8 @@ mod tests {
             fresh_close_worker: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
             vault_credential_operation: Mutex::new(()),
+            #[cfg(all(test, debug_assertions))]
+            synthetic_vault_completion_writer_probe: true,
         });
         let info = agent
             .begin_auth(&json!({"server":server,"client_id":"synthetic-client"}))

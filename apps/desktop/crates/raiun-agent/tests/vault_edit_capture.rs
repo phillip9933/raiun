@@ -17,3 +17,7 @@ mod vault_edit_upload;
 #[allow(dead_code)]
 #[path = "../src/root_manifest.rs"]
 mod root_manifest;
+
+#[allow(dead_code)]
+#[path = "../src/vault_edit_disposition.rs"]
+mod vault_edit_disposition;

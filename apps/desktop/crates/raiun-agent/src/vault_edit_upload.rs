@@ -133,7 +133,6 @@ pub(crate) struct HistoricalReadbackEvidence {
     body_len: usize,
     body_sha256: [u8; 32],
 }
-#[cfg(test)]
 impl HistoricalReadbackEvidence {
     pub(crate) fn resource_id(&self) -> &str {
         &self.resource_id
@@ -242,6 +241,18 @@ fn decode_bound_record(raw: &[u8], scope: &Scope, reference: &CaptureRef) -> Res
         return Err(Error::Foreign);
     }
     Ok(document)
+}
+/// Historical evidence through the existing exact bound parser; no authority.
+pub(crate) fn bound_readback_evidence(
+    raw: &[u8],
+    scope: &Scope,
+    reference: &CaptureRef,
+) -> Result<Option<HistoricalReadbackEvidence>> {
+    let document = decode_bound_record(raw, scope, reference)?;
+    Ok(match document.state {
+        State::ReadbackRecorded { evidence } => Some(evidence),
+        _ => None,
+    })
 }
 /// The protected adapter independently refuses reset/replay even if a future
 /// caller supplies serialized bytes directly instead of using this model.

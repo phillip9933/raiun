@@ -18,6 +18,16 @@ mod vault_capture_dispatch;
 #[cfg(any(windows, test))]
 pub use vault_capture_dispatch::FreshVaultCaptureDispatch;
 #[cfg(windows)]
+mod vault_completion;
+#[cfg(any(windows, test))]
+mod vault_dirty;
+#[cfg(windows)]
+pub use vault_completion::{
+    FreshVaultUpload, VaultLiveUploadOutcome, VaultLocalCompletionStore,
+    VaultLocalCompletionTarget, VaultNativeCompletionProof, VaultNativePreparation,
+    VaultUploadControl,
+};
+#[cfg(windows)]
 pub mod vault_custody;
 #[cfg(any(windows, test))]
 pub mod vault_placeholder;
@@ -452,6 +462,33 @@ impl ConfiguredRootConnection {
             .map_err(|_| Error::EditRecoveryUnavailable)?;
         self.inner
             .cleanup_recorded_vault_files(route.local_root(), &owned)
+    }
+
+    /// Native owner-thread continuation of one fresh live vault upload. No
+    /// historical proof, unlocked replacement route, or recovered ticket works.
+    pub fn complete_vault_upload(
+        &self,
+        upload: FreshVaultUpload,
+        store: &mut dyn VaultLocalCompletionStore,
+    ) -> Result<(), Error> {
+        self.inner.complete_vault_upload(upload, store)
+    }
+
+    /// Complete verified writable bytes under the same fresh native fences,
+    /// without an explicit attribute or timestamp overwrite. Platform effects
+    /// from Mark are sampled and verified. This does not restore READONLY or
+    /// authorize cleanup/Lock from historical evidence.
+    pub fn complete_writable_vault_upload(
+        &self,
+        upload: FreshVaultUpload,
+        store: &mut dyn VaultLocalCompletionStore,
+    ) -> Result<(), Error> {
+        self.inner.complete_writable_vault_upload(upload, store)
+    }
+    /// Exact per-file tracker observation only; never global cleanup authority.
+    #[cfg(feature = "synthetic-agent-integration")]
+    pub fn vault_file_pending_for_test(&self, identity: &[u8; 16]) -> Result<bool, Error> {
+        self.inner.vault_file_pending_for_test(identity)
     }
 
     /// Complete one freshly verified existing file under its exact live

@@ -16,6 +16,7 @@ pub const MAX_HYDRATIONS: usize = 4096;
 const VERSION: u32 = 1;
 const CAPTURE_VERSION: u32 = 2;
 const UPLOAD_VERSION: u32 = 3;
+const DISPOSITION_VERSION: u32 = 4;
 pub(crate) const MAX_CAPTURE_REFS: usize = 128;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -59,6 +60,9 @@ impl std::fmt::Debug for Scope {
     }
 }
 impl Scope {
+    pub(crate) fn native_root(&self) -> (u32, u64) {
+        (self.volume, self.root_file)
+    }
     /// Account bytes must be serialized ONCE from the authenticated canonical
     /// AccountScope, not rebuilt from raw session issuer spelling or request JSON.
     /// Root/registration arguments must come from retained native root proofs.
@@ -280,7 +284,7 @@ impl Entry {
         Ok(())
     }
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Hydration {
     opaque: [u8; 16],
@@ -289,6 +293,21 @@ pub struct Hydration {
     components: Vec<String>,
 }
 impl Hydration {
+    pub(crate) fn validate_for_entry(&self, entry: &Entry) -> Result<()> {
+        if self.opaque != entry.opaque
+            || self.file_index == 0
+            || self.length != entry.length
+            || !components(&self.components)
+        {
+            return Err(Error::Invalid);
+        }
+        Ok(())
+    }
+    pub(crate) fn with_verified_length(&self, length: u64) -> Self {
+        let mut next = self.clone();
+        next.length = length;
+        next
+    }
     pub fn opaque(&self) -> [u8; 16] {
         self.opaque
     }
@@ -405,6 +424,11 @@ fn decode_upload_attempts<'de, D: serde::Deserializer<'de>>(
 ) -> std::result::Result<Option<Vec<UploadAttemptRow>>, D::Error> {
     Vec::<UploadAttemptRow>::deserialize(deserializer).map(Some)
 }
+fn decode_dispositions<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<Vec<super::vault_edit_disposition::DispositionRow>>, D::Error> {
+    Vec::<super::vault_edit_disposition::DispositionRow>::deserialize(d).map(Some)
+}
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Document {
@@ -426,8 +450,20 @@ struct Document {
         deserialize_with = "decode_upload_attempts"
     )]
     upload_attempts: Option<Vec<UploadAttemptRow>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "decode_dispositions"
+    )]
+    dispositions: Option<Vec<super::vault_edit_disposition::DispositionRow>>,
 }
 impl Document {
+    fn capture_entry_known(&self, entry: &Entry) -> bool {
+        self.catalogue.contains(entry)
+            || self.dispositions.iter().flatten().any(|row| {
+                row.descriptor().original_entry() == entry || row.verified_entry() == entry
+            })
+    }
     fn validate(&self, scope: &Scope) -> Result<()> {
         self.scope.validate()?;
         if &self.scope != scope {
@@ -435,10 +471,16 @@ impl Document {
         }
         if self.revision == 0
             || !matches!(
-                (self.version, &self.capture_refs, &self.upload_attempts),
-                (VERSION, None, None)
-                    | (CAPTURE_VERSION, Some(_), None)
-                    | (UPLOAD_VERSION, Some(_), Some(_))
+                (
+                    self.version,
+                    &self.capture_refs,
+                    &self.upload_attempts,
+                    &self.dispositions
+                ),
+                (VERSION, None, None, None)
+                    | (CAPTURE_VERSION, Some(_), None, None)
+                    | (UPLOAD_VERSION, Some(_), Some(_), None)
+                    | (DISPOSITION_VERSION, Some(_), Some(_), Some(_))
             )
             || self
                 .capture_refs
@@ -470,7 +512,7 @@ impl Document {
             if capture.entry.directory
                 || !super::vault_edit_capture::strong_etag(&capture.entry.etag)
                 || !capture_ids.insert(&capture.capture_id)
-                || !self.catalogue.iter().any(|entry| entry == &capture.entry)
+                || !self.capture_entry_known(&capture.entry)
                 || !self
                     .pending
                     .iter()
@@ -499,6 +541,59 @@ impl Document {
                 .ok_or(Error::Foreign)?;
             super::vault_edit_upload::validate_bound_record(&row.record.0, scope, reference)
                 .map_err(|_| Error::Invalid)?;
+        }
+        if self
+            .dispositions
+            .as_ref()
+            .is_some_and(|rows| rows.is_empty() || rows.len() > MAX_CAPTURE_REFS)
+        {
+            return Err(Error::Invalid);
+        }
+        let mut disposition_ids = BTreeSet::new();
+        let mut latest = std::collections::BTreeMap::<
+            [u8; 16],
+            &super::vault_edit_disposition::DispositionRow,
+        >::new();
+        for row in self.dispositions.iter().flatten() {
+            if !disposition_ids.insert(row.reference().id()) {
+                return Err(Error::Conflict);
+            }
+            let reference = self
+                .capture_refs
+                .iter()
+                .flatten()
+                .find(|reference| *reference == row.reference())
+                .ok_or(Error::Foreign)?;
+            let attempt = self
+                .upload_attempts
+                .iter()
+                .flatten()
+                .find(|attempt| attempt.capture_id == reference.id())
+                .ok_or(Error::Invalid)?;
+            let evidence = super::vault_edit_upload::bound_readback_evidence(
+                &attempt.record.0,
+                scope,
+                reference,
+            )
+            .map_err(|_| Error::Invalid)?
+            .ok_or(Error::Invalid)?;
+            row.validate_bound(scope, reference, &evidence)
+                .map_err(|_| Error::Invalid)?;
+            if let Some(previous) = latest.insert(reference.entry().opaque(), row) {
+                if !previous.is_native_completed()
+                    || previous.verified_entry() != row.descriptor().original_entry()
+                    || previous.promoted_hydration() != row.descriptor().hydration()
+                {
+                    return Err(Error::Conflict);
+                }
+            }
+        }
+        for row in latest.values() {
+            if !self.catalogue.contains(row.verified_entry())
+                || !self.pending.contains(row.promoted_hydration())
+            {
+                return Err(Error::Conflict);
+            }
         }
         let mut files = BTreeSet::new();
         let mut hydrated_ids = BTreeSet::new();
@@ -565,6 +660,17 @@ pub trait Store {
 /// Per-vault evidence only. A separate root-wide durable manifest must cover
 /// every vault scope before any publication. This document cannot establish
 /// global connection completeness or clear legacy/reconnect unknown history.
+/// One acknowledged preparation only. No Clone/serde/public constructor;
+/// persisted Prepared/NativeCompleted rows cannot recreate this capability.
+pub(crate) struct PreparedDisposition {
+    expected: Zeroizing<Vec<u8>>,
+    row: super::vault_edit_disposition::DispositionRow,
+}
+impl PreparedDisposition {
+    pub(crate) fn reference(&self) -> &CaptureRef {
+        self.row.reference()
+    }
+}
 pub struct Custody {
     document: Document,
     raw: Zeroizing<Vec<u8>>,
@@ -589,6 +695,7 @@ impl Custody {
             pending: vec![],
             capture_refs: None,
             upload_attempts: None,
+            dispositions: None,
         };
         let raw = encode(&document)?;
         store
@@ -717,7 +824,22 @@ impl Custody {
     }
     /// Complete app-published history evidence, never native cleanup authority.
     pub fn publication_history(&self) -> Result<&[Hydration]> {
-        if self.failed || self.document.incomplete || self.document.capture_refs.is_some() {
+        if self.failed
+            || self.document.incomplete
+            || self
+                .document
+                .capture_refs
+                .iter()
+                .flatten()
+                .any(|reference| {
+                    !self
+                        .document
+                        .dispositions
+                        .iter()
+                        .flatten()
+                        .any(|row| row.reference() == reference && row.is_native_completed())
+                })
+        {
             return Err(Error::Incomplete);
         }
         Ok(&self.document.pending)
@@ -817,7 +939,7 @@ impl Custody {
             return Err(Error::Incomplete);
         }
         if !self.captures_for_reconciliation().contains(reference)
-            || !self.document.catalogue.contains(reference.entry())
+            || !self.document.capture_entry_known(reference.entry())
         {
             return Err(Error::Foreign);
         }
@@ -854,7 +976,7 @@ impl Custody {
         super::vault_edit_upload::validate_transition(old, next, &self.document.scope, reference)
             .map_err(|_| Error::Invalid)?;
         let mut document = self.document.clone();
-        document.version = UPLOAD_VERSION;
+        document.version = document.version.max(UPLOAD_VERSION);
         let rows = document.upload_attempts.get_or_insert_with(Vec::new);
         if let Some(row) = rows.iter_mut().find(|row| row.capture_id == reference.id()) {
             row.record = AttemptBytes(Zeroizing::new(next.to_vec()));
@@ -868,6 +990,210 @@ impl Custody {
             });
         }
         self.commit(store, document)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn local_disposition(
+        &self,
+        reference: &CaptureRef,
+    ) -> Result<Option<super::vault_edit_disposition::DispositionStatus>> {
+        self.require_capture(reference)?;
+        Ok(self
+            .document
+            .dispositions
+            .iter()
+            .flatten()
+            .find(|row| row.reference() == reference)
+            .cloned())
+    }
+    pub(crate) fn disposition_descriptor(
+        &self,
+        reference: &CaptureRef,
+        retained: &super::vault_edit_capture::RetainedEdit,
+    ) -> Result<super::vault_edit_disposition::DispositionDescriptor> {
+        self.require_capture(reference)?;
+        let hydration = if self.document.catalogue.contains(reference.entry()) {
+            self.document
+                .pending
+                .iter()
+                .find(|row| row.opaque() == reference.entry().opaque())
+                .cloned()
+        } else {
+            self.document.dispositions.iter().flatten().find_map(|row| {
+                if row.descriptor().original_entry() == reference.entry() {
+                    Some(row.descriptor().hydration().clone())
+                } else if row.verified_entry() == reference.entry() {
+                    Some(row.promoted_hydration().clone())
+                } else {
+                    None
+                }
+            })
+        }
+        .ok_or(Error::Foreign)?;
+        super::vault_edit_disposition::DispositionDescriptor::from_capture(
+            &self.document.scope,
+            reference,
+            &hydration,
+            retained,
+        )
+        .map_err(|_| Error::Invalid)
+    }
+    /// Rebuild from the already authenticated immutable body and historical
+    /// hydration, rather than trusting an internally consistent stored tuple.
+    pub(crate) fn validate_reconstructed_disposition(
+        &self,
+        reference: &CaptureRef,
+        retained: &super::vault_edit_capture::RetainedEdit,
+    ) -> Result<()> {
+        let descriptor = self.disposition_descriptor(reference, retained)?;
+        let row = self
+            .document
+            .dispositions
+            .iter()
+            .flatten()
+            .find(|row| row.reference() == reference)
+            .ok_or(Error::Foreign)?;
+        if !row.is_native_completed() || row.descriptor() != &descriptor {
+            return Err(Error::Foreign);
+        }
+        Ok(())
+    }
+    fn prepare_disposition_core(
+        &mut self,
+        store: &impl Store,
+        descriptor: &super::vault_edit_disposition::DispositionDescriptor,
+        verified: Entry,
+    ) -> Result<PreparedDisposition> {
+        self.require_capture(descriptor.reference())?;
+        if descriptor.scope() != &self.document.scope
+            || !self
+                .document
+                .catalogue
+                .contains(descriptor.original_entry())
+            || !self.document.pending.contains(descriptor.hydration())
+            || self
+                .document
+                .dispositions
+                .iter()
+                .flatten()
+                .any(|row| row.reference().id() == descriptor.reference().id())
+        {
+            return Err(Error::Conflict);
+        }
+        let row =
+            super::vault_edit_disposition::DispositionRow::prepared(descriptor.clone(), verified)
+                .map_err(|_| Error::Invalid)?;
+        let raw = self
+            .load_upload_attempt(descriptor.reference())?
+            .ok_or(Error::Invalid)?;
+        let evidence = super::vault_edit_upload::bound_readback_evidence(
+            &raw,
+            &self.document.scope,
+            descriptor.reference(),
+        )
+        .map_err(|_| Error::Invalid)?
+        .ok_or(Error::Invalid)?;
+        row.validate_bound(&self.document.scope, descriptor.reference(), &evidence)
+            .map_err(|_| Error::Invalid)?;
+        let mut next = self.document.clone();
+        next.version = DISPOSITION_VERSION;
+        let entry = next
+            .catalogue
+            .iter_mut()
+            .find(|entry| *entry == descriptor.original_entry())
+            .ok_or(Error::Foreign)?;
+        *entry = row.verified_entry().clone();
+        let hydration = next
+            .pending
+            .iter_mut()
+            .find(|hydration| *hydration == descriptor.hydration())
+            .ok_or(Error::Foreign)?;
+        *hydration = row.promoted_hydration().clone();
+        let rows = next.dispositions.get_or_insert_with(Vec::new);
+        if rows.len() == MAX_CAPTURE_REFS {
+            return self
+                .refuse_conflict(store, Error::Capacity)
+                .and(Err(Error::Capacity));
+        }
+        rows.push(row.clone());
+        self.commit(store, next)?;
+        self.verify_disposition_readback(store)?;
+        Ok(PreparedDisposition {
+            expected: self.raw.clone(),
+            row,
+        })
+    }
+    fn verify_disposition_readback(&mut self, store: &impl Store) -> Result<()> {
+        match Self::reopen(store, &self.document.scope) {
+            Ok(fresh) if fresh.raw == self.raw => Ok(()),
+            _ => {
+                self.failed = true;
+                Err(Error::Persistence)
+            }
+        }
+    }
+    fn complete_disposition_core(
+        &mut self,
+        store: &impl Store,
+        ticket: PreparedDisposition,
+    ) -> Result<()> {
+        if self.failed || self.document.incomplete {
+            return Err(Error::Incomplete);
+        }
+        if self.raw != ticket.expected {
+            return Err(Error::Conflict);
+        }
+        let mut next = self.document.clone();
+        let row = next
+            .dispositions
+            .as_mut()
+            .and_then(|rows| rows.iter_mut().find(|row| **row == ticket.row))
+            .ok_or(Error::Foreign)?;
+        if row.is_native_completed() {
+            return Err(Error::Conflict);
+        }
+        *row = row.completed();
+        self.commit(store, next)?;
+        self.verify_disposition_readback(store)
+    }
+    #[cfg(windows)]
+    pub(crate) fn prepare_disposition(
+        &mut self,
+        store: &impl Store,
+        descriptor: &super::vault_edit_disposition::DispositionDescriptor,
+        proof: &raiun_cloudfiles_windows::VaultNativePreparation,
+    ) -> Result<PreparedDisposition> {
+        let entry = super::vault_edit_disposition::preparation_entry(descriptor, proof)
+            .map_err(|_| Error::Foreign)?;
+        self.prepare_disposition_core(store, descriptor, entry)
+    }
+    #[cfg(windows)]
+    pub(crate) fn complete_native(
+        &mut self,
+        store: &impl Store,
+        ticket: PreparedDisposition,
+        proof: &raiun_cloudfiles_windows::VaultNativeCompletionProof,
+    ) -> Result<()> {
+        super::vault_edit_disposition::completion_matches(&ticket.row, proof)
+            .map_err(|_| Error::Foreign)?;
+        self.complete_disposition_core(store, ticket)
+    }
+    #[cfg(test)]
+    pub(crate) fn prepare_disposition_for_test(
+        &mut self,
+        store: &impl Store,
+        descriptor: &super::vault_edit_disposition::DispositionDescriptor,
+        entry: Entry,
+    ) -> Result<PreparedDisposition> {
+        self.prepare_disposition_core(store, descriptor, entry)
+    }
+    #[cfg(test)]
+    pub(crate) fn complete_disposition_for_test(
+        &mut self,
+        store: &impl Store,
+        ticket: PreparedDisposition,
+    ) -> Result<()> {
+        self.complete_disposition_core(store, ticket)
     }
 
     /// Write-ahead intent retained whether CfExecute succeeds, fails or crashes.

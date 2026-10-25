@@ -1601,6 +1601,108 @@ impl OpenCloudPlaceholderBackend {
         }
     }
 
+    /// Alternative owned live continuation; preserves the remote-only API.
+    #[cfg(windows)]
+    pub fn upload_existing_vault_capture_live<R: std::io::Read + std::io::Seek>(
+        self: &Arc<Self>,
+        target: crate::ExistingVaultUploadTarget,
+        source: &mut R,
+        edited_len: u64,
+        control: crate::VaultUploadControl,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<crate::VaultLiveUploadOutcome, raiun_core::backend::CloudError> {
+        use raiun_core::backend::CloudError;
+        use raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome;
+        let refused =
+            || CloudError::new(ErrorKind::Forbidden, "live upload continuation unavailable");
+        let route = {
+            let _lease = self.lease_gate.read().map_err(|_| refused())?;
+            self.ensure_active().map_err(|_| refused())?;
+            if target.owner() != &self.scope
+                || self.local_root_identity != Some(target.root())
+                || control.is_cancelled()
+                || cancelled()
+            {
+                return Err(refused());
+            }
+            let route = self
+                .vault_for_identity(target.identity())
+                .map_err(|_| refused())?
+                .ok_or_else(refused)?;
+            if route.local_root() != target.root()
+                || route.space_id() != target.vault().space_id()
+                || route.root_resource_id() != target.vault().resource_id()
+                || route.root_path() != target.remote_root()
+            {
+                return Err(refused());
+            }
+            route
+        }; // No lease survives the HTTP delegation.
+        let stop = || {
+            self.is_revoked()
+                || route.backend().binding().is_revoked()
+                || control.is_cancelled()
+                || cancelled()
+        };
+        let cancellation = crate::vault_custody::VaultUploadCancellation {
+            generation: control.generation(),
+            expected: control.expected(),
+            cancelled: &stop,
+        };
+        match route
+            .backend()
+            .upload_existing_capture(&target, source, edited_len, &cancellation)?
+        {
+            VaultExistingOverwriteOutcome::Verified(verified) => {
+                if stop() {
+                    return Ok(crate::VaultLiveUploadOutcome::NeedsReconciliation {
+                        reason: ErrorKind::Forbidden,
+                    });
+                }
+                Ok(crate::VaultLiveUploadOutcome::Verified(
+                    crate::FreshVaultUpload {
+                        composite: Arc::clone(self),
+                        route,
+                        target: Box::new(target),
+                        verified: Box::new(verified),
+                        control,
+                    },
+                ))
+            }
+            VaultExistingOverwriteOutcome::NeedsReconciliation { reason } => {
+                Ok(crate::VaultLiveUploadOutcome::NeedsReconciliation { reason })
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn with_vault_completion<T>(
+        &self,
+        upload: &crate::FreshVaultUpload,
+        operation: impl FnOnce() -> Result<T, crate::Error>,
+    ) -> Result<T, crate::Error> {
+        let refused = || crate::Error::EditRecoveryUnavailable;
+        let _lease = self.lease_gate.read().map_err(|_| refused())?;
+        self.ensure_active().map_err(|_| refused())?;
+        upload.check_current()?;
+        if !std::ptr::eq(self, Arc::as_ptr(&upload.composite)) {
+            return Err(refused());
+        }
+        let route = self
+            .vault_for_identity(upload.target.identity())
+            .map_err(|_| refused())?
+            .ok_or_else(refused)?;
+        if !Arc::ptr_eq(&route, &upload.route) {
+            return Err(refused());
+        }
+        // Drain this exact vault route, then retain auth and opaque epoch through
+        // bounded local native proof and both durable callbacks. Never HTTP.
+        route
+            .backend()
+            .binding()
+            .with_exclusive_completion(operation)
+    }
+
     #[cfg(windows)]
     pub fn remove_vault_route(&self, space: &str, root_id: &str) -> Result<bool, BackendError> {
         self.vault_routes

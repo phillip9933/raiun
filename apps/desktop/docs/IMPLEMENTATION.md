@@ -2767,3 +2767,46 @@ writable publication remain disabled; baseline promotion, native completion,
 clean Lock and post-lock/restart reconciliation are still separate gaps. No new
 package, host installation or publication occurred; r117 remains installed and
 closed in the isolated VM.
+
+### Explicit writable-byte native completion (26 October)
+
+A separate private completion mode now verifies and completes writable file
+bytes without requesting a filesystem-metadata overwrite. It retains the live
+account/root/token/opaque-unlock capability, exclusive native reference,
+complete current body/hash, positive USN brackets, native identity and in-sync
+postproof. Protected preparation promotes the catalogue/hydration baseline;
+durable NativeCompleted and exact per-file dirty resolution remain inside the
+same live fences. Captures and immutable original frames remain available.
+Stored completion is historical evidence, never current cleanup authority.
+
+The operation is selected before any native action. It performs the legitimate
+in-sync Mark, samples its actual platform effects, and preserves the coherent
+post-Mark metadata through completion. It omits the entire metadata-update
+operation. The existing readonly path still performs its guarded update; there
+is no retry or removal of a USN comparison from a metadata write. The accepted
+fresh-close automatic bridge continues to request remote-only verification.
+
+The exact combined source passes formatting, strict Linux workspace lint and
+1,094 tests (14 ignored), plus the current GNU Windows binary/test and Cloud
+Files strict checks without warnings. The selected ordinary-user MSVC/native
+fixture passed: one conditional encrypted PUT and authenticated full readback
+of 65,553 bytes, protected baseline promotion and NativeCompleted, native
+in-sync proof, and exact dirty resolution. Raw stages confirmed writable
+postproof through durable completion, with no readonly metadata update. Original
+frames and bytes survived. Native and wrapper exits and owned process counts
+were zero, followed by normal guest shutdown and cold preservation.
+
+READONLY remained false. Lock revoked the session and refused a new unlock
+epoch, but correctly reported cleanup incomplete and preserved native and
+protected bytes; ordinary resident-file read refusal is not claimed. Existing
+readonly cleanup guards remain unchanged. Safe writable cache cleanup and its
+late-writer/quiescence boundary require a separate current-native proof.
+
+Evidence: `windows-vault-writable-bytes-r1/combined-r1/` and `gnu-r1/` under
+`outputs/desktop-next-20261021/`; native evidence is
+`outputs/local-windows-native-20261023-r1/agent-vault-writable-bytes-native-r25/`.
+Source archive: `5f2be5b0…`. Normal automatic dispatch, writable publication and
+public upload RPC remain disabled. This is native byte-completion acceptance,
+not a complete writable-vault or clean-Lock workflow. No new package,
+installation or publication occurred; r117 remains installed and closed in the
+isolated VM.

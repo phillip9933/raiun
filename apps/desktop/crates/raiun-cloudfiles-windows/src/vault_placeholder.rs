@@ -272,6 +272,47 @@ mod runtime {
             }
         }
 
+        /// Caller retains this route's exclusive publication/auth/epoch fence.
+        /// Stable opaque identity is promoted explicitly; no name insertion or
+        /// remote rebasing and no additional storage write occurs here.
+        pub(crate) fn promote_completed_catalogue(
+            &self,
+            upload: &crate::FreshVaultUpload,
+        ) -> Result<(), BackendError> {
+            // Established order: exclusive route WRITE -> token -> epoch ->
+            // catalogue. All other catalogue readers clone before native/I/O;
+            // there is no catalogue -> route/auth acquisition. Waiting for a
+            // brief Explorer lookup must not fail an already durable Prepared.
+            let mut catalogue = self
+                .catalogue
+                .lock()
+                .map_err(|_| BackendError::Unavailable)?;
+            let id = upload.identity();
+            let old = catalogue.entries.get(&id).ok_or(BackendError::NotFound)?;
+            if !upload.target.matches_original(old)
+                || upload.verified.entry().id != old.id
+                || upload.verified.entry().path != old.path
+            {
+                return Err(BackendError::Unavailable);
+            }
+            let old_key = key(old);
+            let mut next = old.clone();
+            next.etag = upload.verified.entry().etag.clone();
+            next.size = upload.verified.entry().size;
+            let new_key = key(&next);
+            if catalogue
+                .versions
+                .get(&new_key)
+                .is_some_and(|other| *other != id)
+            {
+                return Err(BackendError::Unavailable);
+            }
+            catalogue.versions.remove(&old_key);
+            catalogue.versions.insert(new_key, id);
+            catalogue.entries.insert(id, next);
+            Ok(())
+        }
+
         pub(crate) fn custody_root_identity(&self) -> crate::ConfiguredRootIdentity {
             self.custody.root_identity()
         }
@@ -304,6 +345,7 @@ mod runtime {
             cancellation: &CancellationToken,
         ) -> Result<Box<dyn PreparedEnumeration + 'static>, BackendError> {
             check(cancellation)?;
+            let revision = self.binding.publication_revision();
             let parent = self.saved(identity)?;
             if !parent.directory {
                 return Err(BackendError::NotFound);
@@ -331,7 +373,7 @@ mod runtime {
             // catalogue commit order; no catalogue guard survives network I/O.
             let children = self
                 .binding
-                .with_publication(|| {
+                .with_publication_revision(revision, || {
                     check(cancellation).map_err(|_| refused())?;
                     let mut catalogue = self.catalogue.lock().map_err(|_| refused())?;
                     let (next, children) = catalogue
@@ -345,6 +387,7 @@ mod runtime {
             check(cancellation)?;
             Ok(Box::new(VaultEnumeration {
                 binding: self.binding.clone(),
+                revision,
                 children,
             }))
         }
@@ -388,6 +431,7 @@ mod runtime {
             cancellation: &CancellationToken,
         ) -> Result<VaultFetchSession, BackendError> {
             check(cancellation)?;
+            let revision = self.binding.publication_revision();
             let expected = self.saved(identity)?; // release catalogue before I/O/publication
             if expected.directory || expected.size > self.maximum_stage_bytes {
                 return Err(BackendError::Unavailable);
@@ -409,8 +453,12 @@ mod runtime {
                 )
                 .map_err(|_| BackendError::Unavailable)?;
             check(cancellation)?;
+            self.binding
+                .with_publication_revision(revision, || Ok(()))
+                .map_err(|_| BackendError::Unavailable)?;
             Ok(VaultFetchSession {
                 binding: self.binding.clone(),
+                revision,
                 custody: self.custody.clone(),
                 identity: identity.try_into().map_err(|_| BackendError::Unavailable)?,
                 metadata: metadata(&expected),
@@ -438,6 +486,7 @@ mod runtime {
 
     struct VaultEnumeration {
         binding: Arc<WindowsVaultReadBinding>,
+        revision: u64,
         children: Vec<PlaceholderChild>,
     }
     impl PreparedEnumeration for VaultEnumeration {
@@ -451,11 +500,13 @@ mod runtime {
             &'a self,
             cancellation: &CancellationToken,
         ) -> Result<Box<dyn PublishPermit + 'a>, BackendError> {
-            self.binding.try_begin_publish(cancellation)
+            self.binding
+                .try_begin_publish_revision(self.revision, cancellation)
         }
     }
     struct VaultFetch {
         binding: Arc<WindowsVaultReadBinding>,
+        revision: u64,
         custody: Arc<dyn crate::vault_custody::VaultPublicationCustody>,
         identity: [u8; 16],
         metadata: PlaceholderMetadata,
@@ -485,11 +536,13 @@ mod runtime {
             &'a self,
             cancellation: &CancellationToken,
         ) -> Result<Box<dyn PublishPermit + 'a>, BackendError> {
-            self.binding.try_begin_publish(cancellation)
+            self.binding
+                .try_begin_publish_revision(self.revision, cancellation)
         }
     }
     struct VaultFetchSession {
         binding: Arc<WindowsVaultReadBinding>,
+        revision: u64,
         custody: Arc<dyn crate::vault_custody::VaultPublicationCustody>,
         identity: [u8; 16],
         metadata: PlaceholderMetadata,
@@ -516,10 +569,16 @@ mod runtime {
                 check(cancellation)?;
                 let count = (length - copied).min(MAX_RANGE_BYTES);
                 self.binding
-                    .publish_stage_range(&mut stage, range.offset + copied as u64, count, |part| {
-                        bytes[copied..copied + count].copy_from_slice(part);
-                        Ok(())
-                    })
+                    .publish_stage_range_at_revision(
+                        self.revision,
+                        &mut stage,
+                        range.offset + copied as u64,
+                        count,
+                        |part| {
+                            bytes[copied..copied + count].copy_from_slice(part);
+                            Ok(())
+                        },
+                    )
                     .map_err(|_| BackendError::Unavailable)?;
                 check(cancellation)?;
                 copied += count;
@@ -527,6 +586,7 @@ mod runtime {
             check(cancellation)?;
             Ok(VaultFetch {
                 binding: self.binding.clone(),
+                revision: self.revision,
                 custody: self.custody.clone(),
                 identity: self.identity,
                 metadata: self.metadata,
