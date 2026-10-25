@@ -1,11 +1,11 @@
 {
-  "time_utc": "2026-10-24T04:05:22.494817+00:00",
+  "time_utc": "2026-10-25T14:20:44.017110+00:00",
   "candidate": "gradle/verification-metadata.xml",
-  "candidate_sha256": "604a98f2f02ca2dd814c993284b9139c6abc670416a251663fad87ffe75ff3b6",
-  "components": 895,
-  "artifacts": 1600,
+  "candidate_sha256": "44bd44460ae257a7bad65c5b51e1645e5a686e28d4d19ff15ffae15e523d6601",
+  "components": 897,
+  "artifacts": 1603,
   "counts": {
-    "verified": 1600
+    "verified": 1603
   },
   "results": [
     {
@@ -9455,6 +9455,24 @@
     {
       "group": "com.google.guava",
       "name": "guava-parent",
+      "version": "33.3.1-jre",
+      "artifacts": [
+        {
+          "artifact": "guava-parent-33.3.1-jre.pom",
+          "expected": "55441db27e8869dfefe053059bdf478bdc7e95585642bf391f0023345fd56287",
+          "status": "verified",
+          "actual": "55441db27e8869dfefe053059bdf478bdc7e95585642bf391f0023345fd56287",
+          "method": "publisher artifact bytes and SHA-1 sidecar",
+          "evidence": "https://repo.maven.apache.org/maven2/com/google/guava/guava-parent/33.3.1-jre/guava-parent-33.3.1-jre.pom",
+          "checksum_evidence": "https://repo.maven.apache.org/maven2/com/google/guava/guava-parent/33.3.1-jre/guava-parent-33.3.1-jre.pom.sha1",
+          "bytes": 20206,
+          "publisher_sha1": "94729a0ed1dc35f623edd13afa6c1c2fe9a15d7c"
+        }
+      ]
+    },
+    {
+      "group": "com.google.guava",
+      "name": "guava-parent",
       "version": "33.4.0-android",
       "artifacts": [
         {
@@ -17820,6 +17838,23 @@
     {
       "group": "org.jetbrains.kotlinx",
       "name": "kotlinx-coroutines-bom",
+      "version": "1.8.0",
+      "artifacts": [
+        {
+          "artifact": "kotlinx-coroutines-bom-1.8.0.pom",
+          "expected": "1239e9dbe1397cd5971342956b2511bc3ace7b641842e4372a088dcfa8b9ad55",
+          "status": "verified",
+          "actual": "1239e9dbe1397cd5971342956b2511bc3ace7b641842e4372a088dcfa8b9ad55",
+          "method": "publisher SHA-256 sidecar",
+          "evidence": "https://repo.maven.apache.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-bom/1.8.0/kotlinx-coroutines-bom-1.8.0.pom",
+          "checksum_evidence": "https://repo.maven.apache.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutines-bom/1.8.0/kotlinx-coroutines-bom-1.8.0.pom.sha256",
+          "bytes": 4291
+        }
+      ]
+    },
+    {
+      "group": "org.jetbrains.kotlinx",
+      "name": "kotlinx-coroutines-bom",
       "version": "1.8.1",
       "artifacts": [
         {
@@ -18760,6 +18795,16 @@
       "name": "junit-bom",
       "version": "5.10.2",
       "artifacts": [
+        {
+          "artifact": "junit-bom-5.10.2.module",
+          "expected": "de23b114b3e4119a8fe6eb17bed5a3852816698bace67071579d6d927ebb080a",
+          "status": "verified",
+          "actual": "de23b114b3e4119a8fe6eb17bed5a3852816698bace67071579d6d927ebb080a",
+          "method": "publisher SHA-256 sidecar",
+          "evidence": "https://repo.maven.apache.org/maven2/org/junit/junit-bom/5.10.2/junit-bom-5.10.2.module",
+          "checksum_evidence": "https://repo.maven.apache.org/maven2/org/junit/junit-bom/5.10.2/junit-bom-5.10.2.module.sha256",
+          "bytes": 6995
+        },
         {
           "artifact": "junit-bom-5.10.2.pom",
           "expected": "169dd904a4b0f6520cffe658cc62292bfe9f3c14a989fa92120724cde43a9968",
