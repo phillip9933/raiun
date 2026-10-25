@@ -310,6 +310,10 @@ impl CaptureRef {
     pub(crate) fn frame(&self) -> EncodedFrameRef {
         self.frame
     }
+    #[cfg(test)]
+    pub(crate) fn entry(&self) -> &Entry {
+        &self.entry
+    }
     fn matches(&self, prepared: &PreparedCapture) -> bool {
         let (opaque, etag, _, _) = prepared.existing_file_binding();
         self.capture_id == prepared.id()

@@ -627,6 +627,7 @@ unsafe extern "system" {
         info_buffer_length: u32,
         returned_length: *mut u32,
     ) -> HResult;
+    #[cfg(feature = "synthetic-agent-integration")]
     fn CfHydratePlaceholder(
         file_handle: Handle,
         starting_offset: i64,
@@ -1775,9 +1776,13 @@ impl ConfiguredRootConnection {
         for part in local_components {
             path.push(part);
         }
-        let (root_final, _ancestors, entry, before) =
-            pin_callback_path_chain(&path, root.identity, expected_file_index, expected_length)
-                .map_err(|_| Error::ConfiguredRootChanged)?;
+        let (root_final, _ancestors, entry, before) = pin_callback_path_chain(
+            &path,
+            root.identity,
+            expected_file_index,
+            CallbackSizePolicy::Exact(expected_length),
+        )
+        .map_err(|_| Error::ConfiguredRootChanged)?;
         let file = ProtectedCompletionFile::open_for_cleanup(&wide_path(&path)?)?;
         let opened = root_snapshot(file.raw)?;
         let entry_final =
@@ -2021,7 +2026,7 @@ impl ConfiguredRootConnection {
                 &path,
                 root.identity,
                 metadata.local_file.file_index,
-                metadata.content_len,
+                CallbackSizePolicy::Exact(metadata.content_len),
             )
             .map_err(|stage| {
                 #[cfg(feature = "synthetic-agent-integration")]
@@ -2705,13 +2710,22 @@ struct CallbackPathGuard {
     snapshot: RootSnapshot,
 }
 
+// Callback FileSize can remain the original placeholder length after an edit.
+// Only initial close admission may observe the pinned current length; fetch,
+// cleanup/completion and every post-read admission require an exact length.
+#[derive(Clone, Copy, Debug)]
+enum CallbackSizePolicy {
+    Exact(u64),
+    ObservedModifiedClose,
+}
+
 fn callback_path(
     root_path: &Path,
     volume_dos_name: *const u16,
     normalized_path: *const u16,
     expected_root: RootIdentity,
     expected_file_id: u64,
-    expected_size: u64,
+    size_policy: CallbackSizePolicy,
     mismatch_prefix_bytes: &AtomicUsize,
 ) -> Result<CallbackPathGuard, u8> {
     let dos_name = unsafe { read_bounded_wide_string(volume_dos_name).map_err(|_| 1)? };
@@ -2758,6 +2772,8 @@ fn callback_path(
             mismatch_prefix_bytes.store(common_prefix, Ordering::Release);
             // Keep diagnostics structural only. Never record either callback
             // path or a user-visible filename.
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!("synthetic callback path form refused={form:?}");
             return Err(match form {
                 NormalizedPathForm::NtDos => 21,
                 NormalizedPathForm::Win32Dos => 22,
@@ -2784,7 +2800,7 @@ fn callback_path(
     // root must match its registered volume/file ID. Below it, only ordinary
     // directories or Cloud Files directory placeholders are accepted.
     let (root_final_path, directory_chain, entry, snapshot) =
-        pin_callback_path_chain(&path, expected_root, expected_file_id, expected_size)
+        pin_callback_path_chain(&path, expected_root, expected_file_id, size_policy)
             .map_err(|stage| 13 + stage)?;
     Ok(CallbackPathGuard {
         path,
@@ -2799,7 +2815,7 @@ fn pin_callback_path_chain(
     path: &Path,
     expected_root: RootIdentity,
     expected_file_id: u64,
-    expected_size: u64,
+    size_policy: CallbackSizePolicy,
 ) -> Result<(PathBuf, Vec<RawOwnedHandle>, RawOwnedHandle, RootSnapshot), u8> {
     if !is_supported_local_drive_path(path) {
         return Err(1);
@@ -2879,7 +2895,7 @@ fn pin_callback_path_chain(
                 snapshot,
                 expected_root,
                 expected_file_id,
-                expected_size,
+                size_policy,
             ) {
                 return Err(9);
             }
@@ -2935,9 +2951,9 @@ fn valid_callback_entry_snapshot(
     child: RootSnapshot,
     expected_root: RootIdentity,
     expected_file_id: u64,
-    expected_size: u64,
+    size_policy: CallbackSizePolicy,
 ) -> bool {
-    valid_root_snapshot(root, expected_root, RootSnapshotState::Connected)
+    let valid = valid_root_snapshot(root, expected_root, RootSnapshotState::Connected)
         && child.identity.volume_serial == expected_root.volume_serial
         && child.identity.file_index == expected_file_id
         && child.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
@@ -2947,8 +2963,28 @@ fn valid_callback_entry_snapshot(
         && child.placeholder_state & CF_PLACEHOLDER_STATE_PLACEHOLDER != 0
         && child.placeholder_state & CF_PLACEHOLDER_STATE_SYNC_ROOT == 0
         && child.placeholder_state & !0x3f == 0
-        && child.file_size == expected_size
-        && child.file_size <= MAX_FILE_BYTES
+        && match size_policy {
+            CallbackSizePolicy::Exact(expected) => child.file_size == expected,
+            CallbackSizePolicy::ObservedModifiedClose => true,
+        }
+        && child.file_size <= MAX_FILE_BYTES;
+    #[cfg(feature = "synthetic-agent-integration")]
+    if !valid {
+        // Structural synthetic diagnostics only: no path, names, identity values,
+        // body, auth token or key material. Policy and lengths are structural only.
+        eprintln!(
+            "synthetic callback entry refused root_valid={} volume_match={} file_match={} attributes={:#x} tag={:#x} state={:#x} observed_size={} size_policy={:?}",
+            valid_root_snapshot(root, expected_root, RootSnapshotState::Connected),
+            child.identity.volume_serial == expected_root.volume_serial,
+            child.identity.file_index == expected_file_id,
+            child.file_attributes,
+            child.reparse_tag,
+            child.placeholder_state,
+            child.file_size,
+            size_policy,
+        );
+    }
+    valid
 }
 
 fn is_supported_local_drive_path(path: &Path) -> bool {
@@ -4137,6 +4173,14 @@ mod hydration_inventory {
     }
 }
 
+/// Retaining a vault edit is historical evidence only. Keep it distinct from
+/// the ordinary journal outcome so it cannot schedule or imply completion.
+enum ModifiedCloseCapture {
+    Clean,
+    OrdinaryJournaled,
+    VaultRetained,
+}
+
 struct CallbackState {
     #[cfg(feature = "synthetic-agent-integration")]
     fetch_validation_stage: AtomicUsize,
@@ -4331,12 +4375,21 @@ impl CallbackState {
         }
         let result = self.capture_and_journal_modified_file(info);
         match result {
-            Ok(false) => {}
-            Ok(true) => {
+            Ok(ModifiedCloseCapture::Clean) => {}
+            Ok(ModifiedCloseCapture::OrdinaryJournaled) => {
                 self.modified_placeholder_closes
                     .fetch_add(1, Ordering::AcqRel);
                 self.journaled_placeholder_closes
                     .fetch_add(1, Ordering::AcqRel);
+            }
+            Ok(ModifiedCloseCapture::VaultRetained) => {
+                // Protected capture preserves dirty history; it is not ordinary
+                // journal completion and cannot clear sticky failures or grant
+                // unregister, dehydration, in-sync or dispatch authority.
+                self.modified_placeholder_closes
+                    .fetch_add(1, Ordering::AcqRel);
+                #[cfg(feature = "synthetic-agent-integration")]
+                eprintln!("synthetic vault close historically retained; dirty native remains=true");
             }
             Err((stage, hresult, modified)) => {
                 #[cfg(feature = "synthetic-agent-integration")]
@@ -4363,7 +4416,7 @@ impl CallbackState {
     fn capture_and_journal_modified_file(
         &self,
         info: &CfCallbackInfo,
-    ) -> Result<bool, (usize, i32, bool)> {
+    ) -> Result<ModifiedCloseCapture, (usize, i32, bool)> {
         let root_path = self.root_path.as_deref().ok_or((1, 0, false))?;
         let root_identity = self.root_identity.ok_or((1, 0, false))?;
         if info.volume_serial_number != root_identity.volume_serial
@@ -4383,7 +4436,7 @@ impl CallbackState {
             info.normalized_path,
             root_identity,
             info.file_id as u64,
-            info.file_size as u64,
+            CallbackSizePolicy::ObservedModifiedClose,
             &self.last_close_path_common_prefix_bytes,
         )
         .map_err(|stage| (30 + usize::from(stage), 0, false))?;
@@ -4397,7 +4450,6 @@ impl CallbackState {
             || snapshot.reparse_tag & IO_REPARSE_TAG_CLOUD_MASK
                 != (IO_REPARSE_TAG_CLOUD & IO_REPARSE_TAG_CLOUD_MASK)
             || snapshot.placeholder_state & CF_PLACEHOLDER_STATE_PLACEHOLDER == 0
-            || snapshot.file_size != info.file_size as u64
             || snapshot.file_size > MAX_REQUEST_BYTES
         {
             return Err((9, 0, false));
@@ -4445,13 +4497,19 @@ impl CallbackState {
             }
         }
         if count == 0 {
+            // Observing a different length alone cannot prove a clean close or
+            // a complete modified body (including truncation to zero). Preserve
+            // that change as unresolved until modified ranges are established.
+            if snapshot.file_size != info.file_size as u64 {
+                return Err((68, 0, true));
+            }
             let after = root_snapshot(callback_guard.entry.0).map_err(|_| (22, 0, false))?;
             if !same_edit_snapshot(snapshot, after) {
                 return Err((23, 0, false));
             }
             #[cfg(feature = "synthetic-agent-integration")]
             eprintln!("synthetic close metadata clean without data open=true");
-            return Ok(false);
+            return Ok(ModifiedCloseCapture::Clean);
         }
         // A partial file with modified bytes cannot be captured as a complete
         // recovery body. Preserve that known dirty state without hydrating it.
@@ -4495,11 +4553,127 @@ impl CallbackState {
         {
             return Err((23, 0, true));
         }
-        // A clean close needs no write authority. In particular, read-only
-        // vault backends deliberately refuse edit bindings. Acquire the exact
-        // account/root lease only after native modified ranges are confirmed,
-        // before reading any content or publishing encrypted recovery. The
-        // lease blocks logout/token replacement through durable publication.
+        // Classification is authoritative: a known vault identity must never
+        // fall through to the ordinary journal or automatic edit dispatch.
+        // All backend/session fences are acquired lexically before the body
+        // read and retained through protected index/body publication/readback.
+        if self
+            .backend
+            .requires_hydration_inventory(identity)
+            .map_err(|_| (60, 0, true))?
+        {
+            if len > crate::MAX_VAULT_EDIT_CAPTURE_BYTES {
+                return Err((61, 0, true));
+            }
+            let mut stream = Some(content_handle);
+            let mut failure = (62, 0, true);
+            let mut retained = false;
+            self.backend
+                .with_vault_edit_capture(identity, &mut |capture| {
+                    let result = (|| {
+                        let baseline = capture.baseline();
+                        if baseline.identity().as_slice() != identity
+                            || baseline.root().volume_serial != root_identity.volume_serial
+                            || baseline.root().file_index != root_identity.file_index
+                            || baseline.metadata().directory
+                            || baseline.token_generation() == 0
+                            || baseline.unlock_epoch() == 0
+                        {
+                            return Err((63, 0, true));
+                        }
+                        // FnMut is object-safe; this owned stream can still be
+                        // consumed only once, even by a misbehaving backend.
+                        let content_handle = stream.take().ok_or((64, 0, true))?;
+                        #[cfg(feature = "synthetic-agent-integration")]
+                        if wait_for_synthetic_path_guard_release(
+                            info.sync_root_file_id as u64 == root_identity.file_index,
+                            content_snapshot.identity.volume_serial == root_identity.volume_serial
+                                && content_snapshot.identity.file_index == info.file_id as u64
+                                && windows_paths_equal(&content_final, &pinned_entry_final),
+                        )
+                        .is_err()
+                        {
+                            return Err((29, 0, true));
+                        }
+                        let (content, after_read) =
+                            read_placeholder_for_recovery(content_handle, len)
+                                .map_err(|(stage, hresult)| (stage, hresult, true))?;
+                        if after_read.identity != snapshot.identity
+                            || after_read.file_attributes != snapshot.file_attributes
+                            || after_read.reparse_tag != snapshot.reparse_tag
+                            || after_read.placeholder_state != snapshot.placeholder_state
+                            || after_read.file_size != snapshot.file_size
+                            || after_read.last_write_time != snapshot.last_write_time
+                        {
+                            return Err((16, 0, true));
+                        }
+                        let post_read_guard = callback_path(
+                            root_path,
+                            info.volume_dos_name,
+                            info.normalized_path,
+                            root_identity,
+                            info.file_id as u64,
+                            CallbackSizePolicy::Exact(snapshot.file_size),
+                            &self.last_close_path_common_prefix_bytes,
+                        )
+                        .map_err(|stage| (40 + usize::from(stage), 0, true))?;
+                        if !same_edit_snapshot(post_read_guard.snapshot, snapshot)
+                            || !windows_paths_equal(
+                                &post_read_guard.root_final_path,
+                                &callback_guard.root_final_path,
+                            )
+                        {
+                            return Err((39, 0, true));
+                        }
+                        let components = pinned_entry_final
+                            .strip_prefix(&callback_guard.root_final_path)
+                            .ok()
+                            .and_then(|relative| {
+                                relative
+                                    .components()
+                                    .map(|component| match component {
+                                        std::path::Component::Normal(value) => {
+                                            value.to_str().map(str::to_owned)
+                                        }
+                                        _ => None,
+                                    })
+                                    .collect::<Option<Vec<_>>>()
+                            })
+                            .filter(|components| !components.is_empty())
+                            .ok_or((65, 0, true))?;
+                        // No comparison with the baseline remote size: this is
+                        // the checked edited length, which may legitimately differ.
+                        capture
+                            .retain(crate::ExistingVaultEditPayload {
+                                root: crate::ConfiguredRootIdentity {
+                                    volume_serial: root_identity.volume_serial,
+                                    file_index: root_identity.file_index,
+                                },
+                                file: LocalFileIdentity {
+                                    volume_serial: after_read.identity.volume_serial,
+                                    file_index: after_read.identity.file_index,
+                                },
+                                components,
+                                bytes: content,
+                            })
+                            .map_err(|_| (66, 0, true))?;
+                        retained = true;
+                        Ok(())
+                    })();
+                    result.map_err(|error| {
+                        failure = error;
+                        BackendError::Unavailable
+                    })
+                })
+                .map_err(|_| failure)?;
+            if !retained {
+                return Err((67, 0, true));
+            }
+            return Ok(ModifiedCloseCapture::VaultRetained);
+        }
+        // Ordinary files retain the existing account/root edit lease before
+        // reading content or publishing encrypted recovery. Vault identities
+        // above never enter this journal/automatic-dispatch path.
         let prepared = self
             .backend
             .prepare_edit_binding(identity)
@@ -4549,11 +4723,11 @@ impl CallbackState {
             info.normalized_path,
             root_identity,
             info.file_id as u64,
-            info.file_size as u64,
+            CallbackSizePolicy::Exact(snapshot.file_size),
             &self.last_close_path_common_prefix_bytes,
         )
         .map_err(|stage| (40 + usize::from(stage), 0, true))?;
-        if post_read_guard.snapshot.identity != snapshot.identity
+        if !same_edit_snapshot(post_read_guard.snapshot, snapshot)
             || !windows_paths_equal(
                 &post_read_guard.root_final_path,
                 &callback_guard.root_final_path,
@@ -4625,7 +4799,7 @@ impl CallbackState {
                         .push_with_location(Arc::clone(recovery), receipt, location);
             }
         }
-        Ok(true)
+        Ok(ModifiedCloseCapture::OrdinaryJournaled)
     }
 
     fn record_fetch_callback(&self, param_size: usize) {
@@ -5219,7 +5393,7 @@ thread_local! {
     static STOP_INITIAL_POPULATION_AFTER_FIRST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "synthetic-agent-integration"))]
 pub(super) fn stop_initial_population_after_first_for_test() {
     STOP_INITIAL_POPULATION_AFTER_FIRST.with(|flag| assert!(!flag.replace(true)));
 }
@@ -5981,7 +6155,7 @@ unsafe extern "system" fn fetch_data_callback(
                     info.normalized_path,
                     root,
                     info.file_id as u64,
-                    info.file_size as u64,
+                    CallbackSizePolicy::Exact(info.file_size as u64),
                     &guard.0.last_close_path_common_prefix_bytes,
                 ) {
                     Ok(pinned) => pinned,
@@ -8458,6 +8632,153 @@ mod backend_tests {
         )));
     }
 
+    fn edited_close_snapshot_fixture(size: u64) -> (RootSnapshot, RootSnapshot) {
+        let root = RootSnapshot {
+            identity: RootIdentity {
+                volume_serial: 7,
+                file_index: 11,
+            },
+            file_attributes: FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT,
+            reparse_tag: IO_REPARSE_TAG_CLOUD,
+            placeholder_state: CF_PLACEHOLDER_STATE_PLACEHOLDER | CF_PLACEHOLDER_STATE_SYNC_ROOT,
+            file_size: 0,
+            last_write_time: 1,
+        };
+        let child = RootSnapshot {
+            identity: RootIdentity {
+                volume_serial: 7,
+                file_index: 12,
+            },
+            file_attributes: FILE_ATTRIBUTE_REPARSE_POINT,
+            reparse_tag: IO_REPARSE_TAG_CLOUD,
+            placeholder_state: CF_PLACEHOLDER_STATE_PLACEHOLDER,
+            file_size: size,
+            last_write_time: 2,
+        };
+        (root, child)
+    }
+
+    #[test]
+    fn close_observes_edited_growth_shrink_and_zero_without_relaxing_exact_admission() {
+        for edited_len in [65_553, 65_521, 0] {
+            let (root, child) = edited_close_snapshot_fixture(edited_len);
+            assert!(valid_callback_entry_snapshot(
+                root,
+                child,
+                root.identity,
+                12,
+                super::CallbackSizePolicy::ObservedModifiedClose
+            ));
+            assert!(!valid_callback_entry_snapshot(
+                root,
+                child,
+                root.identity,
+                12,
+                super::CallbackSizePolicy::Exact(65_537)
+            ));
+            assert!(valid_callback_entry_snapshot(
+                root,
+                child,
+                root.identity,
+                12,
+                super::CallbackSizePolicy::Exact(edited_len)
+            ));
+            let changed = RootSnapshot {
+                file_size: edited_len + 1,
+                ..child
+            };
+            assert!(!valid_callback_entry_snapshot(
+                root,
+                changed,
+                root.identity,
+                12,
+                super::CallbackSizePolicy::Exact(edited_len)
+            ));
+            assert!(!super::same_edit_snapshot(child, changed));
+        }
+        // Zero here proves metadata admission only. A zero-length native edit
+        // without confirmed modified ranges remains unresolved at stage 68.
+        let (root, oversized) = edited_close_snapshot_fixture(super::MAX_FILE_BYTES + 1);
+        assert!(!valid_callback_entry_snapshot(
+            root,
+            oversized,
+            root.identity,
+            12,
+            super::CallbackSizePolicy::ObservedModifiedClose
+        ));
+    }
+
+    #[test]
+    fn observed_close_keeps_root_file_reparse_state_and_postread_snapshot_guards() {
+        let (root, child) = edited_close_snapshot_fixture(65_553);
+        let observed = super::CallbackSizePolicy::ObservedModifiedClose;
+        assert!(!valid_callback_entry_snapshot(
+            root,
+            child,
+            root.identity,
+            99,
+            observed
+        ));
+        assert!(!valid_callback_entry_snapshot(
+            root,
+            child,
+            RootIdentity {
+                file_index: 99,
+                ..root.identity
+            },
+            12,
+            observed
+        ));
+        assert!(!valid_callback_entry_snapshot(
+            root,
+            RootSnapshot {
+                identity: RootIdentity {
+                    volume_serial: 8,
+                    ..child.identity
+                },
+                ..child
+            },
+            root.identity,
+            12,
+            observed
+        ));
+        assert!(!valid_callback_entry_snapshot(
+            root,
+            RootSnapshot {
+                reparse_tag: 0xA000_000C,
+                ..child
+            },
+            root.identity,
+            12,
+            observed
+        ));
+        assert!(!valid_callback_entry_snapshot(
+            root,
+            RootSnapshot {
+                placeholder_state: CF_PLACEHOLDER_STATE_PLACEHOLDER
+                    | CF_PLACEHOLDER_STATE_SYNC_ROOT,
+                ..child
+            },
+            root.identity,
+            12,
+            observed
+        ));
+        assert!(!super::same_edit_snapshot(
+            child,
+            RootSnapshot {
+                last_write_time: child.last_write_time + 1,
+                ..child
+            }
+        ));
+        assert!(!super::same_edit_snapshot(
+            child,
+            RootSnapshot {
+                file_attributes: child.file_attributes | super::FILE_ATTRIBUTE_READONLY,
+                ..child
+            }
+        ));
+    }
+
     #[test]
     fn callback_identity_guard_rejects_sibling_reparse_and_root_swap() {
         let root_identity = RootIdentity {
@@ -8488,14 +8809,14 @@ mod backend_tests {
             child,
             root_identity,
             12,
-            64
+            super::CallbackSizePolicy::Exact(64)
         ));
         assert!(!valid_callback_entry_snapshot(
             root,
             child,
             root_identity,
             13,
-            64
+            super::CallbackSizePolicy::Exact(64)
         ));
         assert!(!valid_callback_entry_snapshot(
             root,
@@ -8505,7 +8826,7 @@ mod backend_tests {
                 file_index: 99,
             },
             12,
-            64,
+            super::CallbackSizePolicy::Exact(64),
         ));
         assert!(!valid_callback_entry_snapshot(
             root,
@@ -8515,7 +8836,7 @@ mod backend_tests {
             },
             root_identity,
             12,
-            64,
+            super::CallbackSizePolicy::Exact(64),
         ));
         assert_eq!(
             IO_REPARSE_TAG_CLOUD & IO_REPARSE_TAG_CLOUD_MASK,

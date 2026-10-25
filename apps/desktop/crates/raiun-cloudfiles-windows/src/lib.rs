@@ -22,14 +22,16 @@ pub mod vault_read;
 #[cfg(windows)]
 pub mod vault_routes;
 #[cfg(windows)]
+pub use backend::ExistingVaultEditCapture;
+#[cfg(windows)]
 pub(crate) use backend::placeholder_population_completed;
 pub use backend::{
     BackendError, BoundedPermit, BoundedPermitPool, CancellationToken, DEFAULT_FETCH_TIMEOUT,
     EditRecoveryProvider, FetchRange, MAX_CONCURRENT_DIRECTORY_ENUMERATIONS,
     MAX_CONCURRENT_FETCHES, MAX_DIRECTORY_CHILDREN, MAX_FILE_BYTES, MAX_RANGE_BYTES,
-    MAX_REQUEST_BYTES, MAX_STAGED_CALLBACKS, PlaceholderBackend, PlaceholderChild,
-    PlaceholderEditBinding, PlaceholderMetadata, PreparedEditBinding, PreparedEditRecovery,
-    PreparedEnumeration, PreparedFetch, PreparedFetchSession, PublishPermit,
+    MAX_REQUEST_BYTES, MAX_STAGED_CALLBACKS, MAX_VAULT_EDIT_CAPTURE_BYTES, PlaceholderBackend,
+    PlaceholderChild, PlaceholderEditBinding, PlaceholderMetadata, PreparedEditBinding,
+    PreparedEditRecovery, PreparedEnumeration, PreparedFetch, PreparedFetchSession, PublishPermit,
     RequestPublicationGate, RequestPublicationPermit, checked_fetch_range, next_chunk_len,
 };
 #[cfg(windows)]
@@ -57,6 +59,8 @@ pub use recovery_reconcile::{
     ReconciliationIssue, ReconciliationOutcome, RecoveryRemote, RecoveryRemoteBody,
     RecoveryRemoteVersion, VerifiedEditReadback, verify_edit_readback,
 };
+#[cfg(windows)]
+pub use vault_custody::{ExistingVaultEditBaseline, ExistingVaultEditPayload};
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
@@ -1139,7 +1143,7 @@ mod tests {
     }
 
     /// Same bounded external-client pattern; emits only length and SHA256.
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "synthetic-agent-integration"))]
     pub(crate) fn query_owned_fixture_file_in_child(
         path: &std::path::Path,
         expected_len: usize,

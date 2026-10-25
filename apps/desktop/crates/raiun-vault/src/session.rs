@@ -156,6 +156,14 @@ pub struct VaultSessionEpoch {
     registry_identity: Weak<()>,
 }
 
+impl VaultSessionEpoch {
+    /// Historical numeric label only. This cannot authenticate a session,
+    /// reconstruct an epoch or replace the coordinator's opaque epoch lease.
+    pub fn historical_generation(&self) -> u64 {
+        self.generation
+    }
+}
+
 /// Retained local-publication lease. It holds no independently usable key and
 /// exposes no registry or session references. Drop releases the session lock.
 pub struct VaultSessionEpochLease<'a> {

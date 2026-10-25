@@ -2653,3 +2653,39 @@ evidence; the unchanged protected-store native proof is reused. Evidence is
 This models interruption safely; it is not an actual crash/reboot qualification.
 The native callback and encrypted upload remain disconnected, and writable vault
 access remains disabled.
+
+
+### Native Windows indexed edit capture (25 October)
+
+Modified closes for known vault files now retain an immutable recovery body through
+the scoped backend and existing protected custody child. Route, token generation
+and the exact opaque unlock remain fenced through the local read, index/body CAS
+and readback. The original protected catalogue entry, native identity and edited
+bytes remain bound together. No ordinary journal, upload or cleanup authority is
+created; vault publication remains read-only.
+
+The native changed-length fixture exposed stale callback FileSize metadata after
+an edit. Initial close admission now observes the pinned current size; fetch,
+cleanup/completion and final post-read validation retain exact-size checks. Root,
+file identity, no-follow ancestry, Cloud Files tag/state and full stable edited
+snapshot checks remain required. A size change without confirmed modified ranges
+refuses a clean result and remains unresolved, including truncation to zero.
+
+Formatting, strict Linux workspace lint and all 985 workspace tests pass (14
+ignored). Fresh Windows GNU Agent binary/test compilation and Cloud Files strict
+lint pass with actual current-source compiler evidence. Two added Windows unit
+tests compile in those checks; they were not executed separately. The exact MSVC
+Agent native test passed under the isolated ordinary user: a 65,537-byte baseline
+grew to 65,553 bytes, and exact protected index/frame/body plus original binding
+were verified. Ordinary journal and PUT counts stayed zero. Lock removed keys,
+while dirty bytes and incomplete cleanup remained preserved. Native and wrapper
+exits were zero, followed by actual normal guest shutdown and cold preservation.
+
+Evidence: `windows-vault-native-capture-r1/` under
+`outputs/desktop-next-20261021/`; exact native evidence is
+`outputs/local-windows-native-20261023-r1/agent-vault-indexed-capture-sizefix-native-r5/`.
+Source archive: `a885d7f2…`. Earlier native failures and the diagnostic proving the
+size mismatch remain preserved as r3/r4 evidence. The 512 KiB capture bound remains;
+zero-length capture, crash/reboot recovery, conditional upload, native disposition
+and installed writable-app acceptance are not established by this test. The r117
+installed candidate is unchanged and closed; no package or release was produced.

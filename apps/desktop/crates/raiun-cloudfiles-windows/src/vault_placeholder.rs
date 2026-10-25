@@ -474,7 +474,79 @@ mod runtime {
             Ok(Box::new(self.window(range, cancellation)?))
         }
     }
+    struct LocalExistingCapture<'a> {
+        baseline: crate::vault_custody::ExistingVaultEditBaseline,
+        custody: &'a dyn crate::vault_custody::VaultPublicationCustody,
+        acknowledgement: crate::backend::ExistingCaptureAcknowledgement,
+    }
+    impl crate::ExistingVaultEditCapture for LocalExistingCapture<'_> {
+        fn baseline(&self) -> &crate::vault_custody::ExistingVaultEditBaseline {
+            &self.baseline
+        }
+        fn retain(
+            &self,
+            payload: crate::vault_custody::ExistingVaultEditPayload,
+        ) -> Result<(), BackendError> {
+            self.acknowledgement.begin_attempt()?;
+            if payload.bytes.len() > crate::MAX_VAULT_EDIT_CAPTURE_BYTES
+                || payload.root != self.baseline.root()
+                || payload.file.volume_serial != payload.root.volume_serial
+                || payload.file.file_index == 0
+                || payload.components.is_empty()
+                || payload.components.len() > 256
+                || payload.components.iter().map(String::len).sum::<usize>() > 32000
+            {
+                return Err(BackendError::Unavailable);
+            }
+            self.custody.retain_existing_edit(&self.baseline, payload)?;
+            self.acknowledgement.acknowledge_retained();
+            Ok(())
+        }
+    }
     impl PlaceholderBackend for WindowsVaultPlaceholderBackend {
+        fn with_vault_edit_capture(
+            &self,
+            identity: &[u8],
+            callback: &mut dyn FnMut(
+                &dyn crate::ExistingVaultEditCapture,
+            ) -> Result<(), BackendError>,
+        ) -> Result<(), BackendError> {
+            // Resolve immutable original metadata locally before acquiring the
+            // lexical fences. Opaque identities are never rebound to fresh DAV
+            // metadata. Broker custody independently verifies this exact entry.
+            let saved = self.saved(identity)?;
+            let identity: [u8; 16] = identity.try_into().map_err(|_| BackendError::Unavailable)?;
+            self.binding
+                .with_publication(|| {
+                    self.binding
+                        .verify_custody_context(self.custody.as_ref())
+                        .map_err(|_| refused())?;
+                    // This is a local protected catalogue snapshot, not fresh
+                    // remote metadata or coordinator reentry. Require the exact
+                    // original opaque entry before native body reading begins.
+                    let catalogue = self.custody.catalogue_snapshot().map_err(|_| refused())?;
+                    let mut matching = catalogue.iter().filter(|row| row.identity == identity);
+                    let original = matching.next().ok_or_else(refused)?;
+                    if matching.next().is_some() || key(&original.metadata) != key(&saved) {
+                        return Err(refused());
+                    }
+                    let baseline = self
+                        .binding
+                        .existing_edit_baseline(identity, saved, self.custody.root_identity())
+                        .map_err(|_| refused())?;
+                    let context = LocalExistingCapture {
+                        baseline,
+                        custody: self.custody.as_ref(),
+                        acknowledgement: crate::backend::ExistingCaptureAcknowledgement::default(),
+                    };
+                    // No guard borrowed from this Arc escapes. Native body reads
+                    // and local protected index/body readback run inside this call.
+                    let result = callback(&context);
+                    Ok(context.acknowledgement.finish(result))
+                })
+                .map_err(|_| BackendError::Unavailable)?
+        }
+
         fn requires_hydration_inventory(&self, identity: &[u8]) -> Result<bool, BackendError> {
             if !self.owns_identity(identity)? {
                 return Err(BackendError::NotFound);
@@ -693,7 +765,6 @@ mod runtime {
             OpaqueIdentity, OpenCloudPlaceholderBackend, ProviderIdentityBinding,
             ProviderIdentityCatalog, ProviderIdentityCatalogScope,
         };
-        use raiun_core::backend::CloudBackend;
         struct MemoryCatalogue;
         impl ProviderIdentityCatalog for MemoryCatalogue {
             fn load(
@@ -745,6 +816,7 @@ mod runtime {
             stop: Arc<AtomicBool>,
             gets: Arc<AtomicUsize>,
             mutations: Arc<AtomicUsize>,
+            #[cfg(feature = "synthetic-agent-integration")]
             requests: Arc<Mutex<BTreeMap<&'static str, usize>>>,
             worker: Option<JoinHandle<()>>,
         }
@@ -787,6 +859,7 @@ mod runtime {
                     stop,
                     gets,
                     mutations,
+                    #[cfg(feature = "synthetic-agent-integration")]
                     requests: requests_seen,
                     worker: Some(worker),
                 }

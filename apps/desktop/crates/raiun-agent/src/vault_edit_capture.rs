@@ -12,9 +12,12 @@ pub const MAX_RECORD_BYTES: usize = 1024 * 1024;
 /// Deliberately bounded prerequisite, not general large-file save support.
 /// Binary framing avoids JSON byte-array expansion. Metadata has its own cap,
 /// and the final exact encoded size is checked before persistence.
+#[cfg(windows)]
+pub const MAX_BODY_BYTES: usize = raiun_cloudfiles_windows::MAX_VAULT_EDIT_CAPTURE_BYTES;
+#[cfg(not(windows))]
 pub const MAX_BODY_BYTES: usize = 512 * 1024;
 const MAX_METADATA_BYTES: usize = 128 * 1024;
-const DOMAIN: &[u8] = b"raiun-vault-existing-edit-capture-v1";
+pub(crate) const DOMAIN: &[u8] = b"raiun-vault-existing-edit-capture-v1";
 const MAGIC: &[u8] = b"RAIUN-VAULT-EXISTING-EDIT-CAPTURE\0\x01";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

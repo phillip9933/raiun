@@ -10,7 +10,7 @@ mod auth;
 mod root_manifest;
 #[path = "vault_custody.rs"]
 mod vault_custody;
-// Inert persistence contract only; no native writer or production store adapter.
+// Historical protected retention only; no upload or cleanup authority.
 #[allow(dead_code)]
 #[path = "vault_edit_capture.rs"]
 mod vault_edit_capture;
@@ -193,6 +193,19 @@ trait SessionStore: Send + Sync {
         _next: &[u8],
     ) -> Result<(), String> {
         Err("Protected vault history is unavailable".into())
+    }
+    fn load_vault_existing_edit_capture(
+        &self,
+        _binding: &[u8],
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
+        Err("Protected vault capture is unavailable".into())
+    }
+    fn put_new_vault_existing_edit_capture(
+        &self,
+        _binding: &[u8],
+        _record: &[u8],
+    ) -> Result<(), String> {
+        Err("Protected vault capture is unavailable".into())
     }
     fn before_publish(&self) {}
 }
@@ -4932,6 +4945,23 @@ impl DpapiStore {
 }
 
 impl SessionStore for DpapiStore {
+    fn load_vault_existing_edit_capture(
+        &self,
+        binding: &[u8],
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
+        self.store
+            .load_vault_existing_edit_capture(binding)
+            .map_err(|_| "Protected vault capture is unavailable".into())
+    }
+    fn put_new_vault_existing_edit_capture(
+        &self,
+        binding: &[u8],
+        record: &[u8],
+    ) -> Result<(), String> {
+        self.store
+            .put_new_vault_existing_edit_capture(binding, record)
+            .map_err(|_| "Vault capture publication is uncertain".into())
+    }
     fn load_vault_custody(
         &self,
         scope: &[u8],
@@ -7849,6 +7879,13 @@ mod tests {
 
     #[cfg(all(windows, debug_assertions))]
     #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser child with fresh owned LOCALAPPDATA; forced synthetic vault modification preserves dirty fixture"]
+    fn native_broker_vault_modified_close_retains_indexed_edit() {
+        broker_remembered_lifecycle_fixture_mode(true, true);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
     fn vault_readiness_binding_refuses_stale_missing_or_foreign_root() {
         use super::vault_worker_binding_current;
         let binding = ActiveProviderBinding {
@@ -7884,6 +7921,12 @@ mod tests {
 
     #[cfg(all(windows, debug_assertions))]
     fn broker_remembered_lifecycle_fixture(payload: bool) {
+        broker_remembered_lifecycle_fixture_mode(payload, false);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    fn broker_remembered_lifecycle_fixture_mode(payload: bool, capture_edit: bool) {
+        assert!(!capture_edit || payload);
         use super::{
             DpapiSessionStore, DpapiStore, VaultCredentialStore, windows_profile_registry,
             windows_profiles, windows_vault_credentials,
@@ -8055,6 +8098,196 @@ mod tests {
                 "bounded conditional ciphertext download"
             );
             println!("C06_SAVED_PAYLOAD_READ_VERIFIED=true");
+        }
+        if capture_edit {
+            let (configuration, root_pin) = runtime
+                .confirm_windows_vault_readiness(&scope, "/Travel.vault")
+                .unwrap();
+            let owner = configuration.registration_ownership.as_ref().unwrap();
+            let active = ActiveProviderBinding {
+                generation,
+                path: PathBuf::from(&configuration.path),
+                identity: raiun_cloudfiles_windows::ConfiguredRootIdentity {
+                    volume_serial: configuration.volume_serial,
+                    file_index: configuration.file_index,
+                },
+                personal_space_id: owner.personal_drive_id.clone(),
+                personal_root_resource_id: owner.personal_root_resource_id.clone().unwrap(),
+            };
+            let verified = runtime
+                .provider
+                .verified_vault_backend(active.clone())
+                .unwrap();
+            let (_, trusted) = verified
+                .backend
+                .vault_read_context(active.identity)
+                .unwrap();
+            let original_epoch = sessions
+                .capture_session_epoch(&scope)
+                .unwrap()
+                .historical_generation();
+            let before = verified
+                .custody
+                .inspect_capture_for_test(&scope, "/Travel.vault")
+                .unwrap();
+            assert!(before.captures.is_empty());
+            let original = before
+                .entries
+                .iter()
+                .find(|entry| !entry.is_directory() && entry.root_relative_path() == "/1")
+                .unwrap()
+                .clone();
+            assert_eq!(original.length(), 65537);
+            let hydration = before
+                .hydrations
+                .iter()
+                .find(|item| item.opaque() == original.opaque())
+                .unwrap();
+            let components = vec![
+                "Personal".to_owned(),
+                "Travel.vault".to_owned(),
+                "1".to_owned(),
+            ];
+            assert_eq!(hydration.components(), components.as_slice());
+            assert_eq!(hydration.length(), original.length());
+            let ordinary = runtime
+                .prepare_recovery_context()
+                .unwrap()
+                .recovery_provider;
+            assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
+            let file = drive.join("Personal/Travel.vault/1");
+            use std::os::windows::fs::MetadataExt as _;
+            let attributes = std::fs::metadata(&file).unwrap().file_attributes();
+            assert_ne!(
+                attributes & 0x400,
+                0,
+                "fixture must remain a Cloud Files reparse point"
+            );
+            let edited = (0..65553).map(|i| (i * 13 + 11) as u8).collect::<Vec<_>>();
+            assert_ne!(edited.len() as u64, original.length());
+            let gets = remote.native_reads.lock().unwrap().vault_get_count;
+            assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+            let before_close = runtime.provider.close_observation().unwrap();
+            assert_eq!(before_close.0, 0, "fresh fixture has no modified closes");
+            assert_eq!(before_close.7, 0);
+            // Exact fresh fixture path only. Open existing preserves the native
+            // file ID/reparse point; only read-only is cleared for this forced
+            // synthetic edit. Production vault publication remains read-only.
+            use std::process::{Command, Stdio};
+            let mut writer = Command::new("powershell.exe")
+                .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                    "$ErrorActionPreference='Stop'; $p=$env:RAIUN_SYNTHETIC_EDIT_FILE; $a=[IO.File]::GetAttributes($p); [IO.File]::SetAttributes($p,($a -band (-bnot [IO.FileAttributes]::ReadOnly))); $b=New-Object byte[] 65553; for($i=0;$i -lt $b.Length;$i++){$b[$i]=[byte](($i*13+11)-band 255)}; $f=[IO.File]::Open($p,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::Read); try{$f.SetLength($b.Length); $f.Write($b,0,$b.Length); $f.Flush($true)}finally{$f.Dispose()}"])
+                .env("RAIUN_SYNTHETIC_EDIT_FILE", &file)
+                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+                .spawn().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                if let Some(status) = writer.try_wait().unwrap() {
+                    assert_eq!(status.code(), Some(0), "synthetic in-place writer failed");
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "synthetic writer timed out; process and fixture preserved"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let observation = loop {
+                let observation = runtime.provider.close_observation().unwrap();
+                if observation.0 > before_close.0 {
+                    break observation;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "native modified-close callback did not complete"
+                );
+                thread::sleep(Duration::from_millis(25));
+            };
+            // A protected read holds an immutable no-delete pin. Wait for the
+            // producer callback's completed outcome before opening any index or
+            // body, so acceptance inspection cannot interfere with its CAS.
+            let captured = verified
+                .custody
+                .inspect_capture_for_test(&scope, "/Travel.vault")
+                .expect("completed callback must retain exact protected capture");
+            assert_eq!(captured.captures.len(), 1);
+            let (retained, entry) = &captured.captures[0];
+            assert!(
+                entry == &original,
+                "capture must preserve original protected catalogue row"
+            );
+            assert_eq!(retained.bytes_for_recovery(), edited.as_slice());
+            let baseline = serde_json::to_value(retained.historical_baseline()).unwrap();
+            assert_eq!(
+                baseline["opaque_file"],
+                serde_json::to_value(original.opaque()).unwrap()
+            );
+            assert_eq!(baseline["strong_etag"], original.etag());
+            assert_eq!(baseline["native_volume"], configuration.volume_serial);
+            assert_eq!(baseline["native_file"], hydration.file_index());
+            assert_eq!(baseline["unlock_epoch"], original_epoch);
+            assert_eq!(baseline["token_generation"], trusted.token_generation());
+            assert_eq!(
+                observation.7, 0,
+                "vault capture is not ordinary journal completion"
+            );
+            assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
+            assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+            assert_eq!(remote.native_reads.lock().unwrap().vault_get_count, gets);
+            assert_eq!(
+                std::fs::metadata(&file).unwrap().file_attributes() & 0x400,
+                attributes & 0x400
+            );
+            let mut lock = target();
+            lock["action"] = json!("vault_lock");
+            assert!(
+                broker.handle_isolated_lifecycle_session(lock).is_err(),
+                "dirty historical capture cannot acknowledge complete cleanup"
+            );
+            assert!(!sessions.is_unlocked(&scope).unwrap());
+            assert!(
+                runtime
+                    .provider
+                    .vault_lock_cleanup_status(
+                        active.clone(),
+                        "synthetic-personal-drive".into(),
+                        "synthetic-vault-root".into(),
+                        "/Travel.vault".into()
+                    )
+                    .unwrap()
+            );
+            let diagnostics = runtime.provider.vault_cleanup_diagnostics(active).unwrap();
+            assert!(diagnostics["modified_closes"].as_u64().unwrap() >= 1);
+            assert_eq!(diagnostics["journaled_closes"], 0);
+            assert_eq!(std::fs::read(&file).unwrap(), edited);
+            assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
+            assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+            assert_eq!(remote.native_reads.lock().unwrap().vault_get_count, gets);
+            let retained_after_lock = verified
+                .custody
+                .inspect_capture_for_test(&scope, "/Travel.vault")
+                .unwrap();
+            assert_eq!(retained_after_lock.captures.len(), 1);
+            assert_eq!(
+                retained_after_lock.captures[0].0.bytes_for_recovery(),
+                edited.as_slice()
+            );
+            assert!(
+                broker.stop_all().is_err(),
+                "dirty native namespace remains retained on stop"
+            );
+            drop(root_pin);
+            drop(verified);
+            drop(broker);
+            drop(runtime);
+            drop(sessions);
+            remote.join().unwrap();
+            appdata_pin.verify_path().unwrap();
+            println!(
+                "C06_VAULT_MODIFIED_CLOSE_INDEXED_CAPTURE_VERIFIED=true;ordinary_journal=0;PUT=0;cleanup=incomplete;dirty_fixture_retained=true"
+            );
+            return;
         }
         let forgotten = broker.handle_isolated_lifecycle_session(json!({"action":"vault_forget",
             "profile_id":profile,"space_id":"synthetic-personal-drive","root_resource_id":"synthetic-vault-root"})).unwrap().0;

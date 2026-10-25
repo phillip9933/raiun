@@ -2340,6 +2340,26 @@ impl OpenCloudPlaceholderBackend {
 
 impl PlaceholderBackend for OpenCloudPlaceholderBackend {
     #[cfg(windows)]
+    fn with_vault_edit_capture(
+        &self,
+        identity: &[u8],
+        callback: &mut dyn FnMut(&dyn crate::ExistingVaultEditCapture) -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        // Keep account/root replacement and new encrypted-route admission
+        // drained through the callback and protected durable readback. Resolve
+        // the exact Arc only after this outer lease; inner guards stay lexical.
+        let _lease = self
+            .lease_gate
+            .read()
+            .map_err(|_| BackendError::Unavailable)?;
+        self.ensure_active()?;
+        let route = self
+            .vault_for_identity(identity)?
+            .ok_or(BackendError::Unavailable)?;
+        route.backend().with_vault_edit_capture(identity, callback)
+    }
+
+    #[cfg(windows)]
     fn requires_hydration_inventory(&self, identity: &[u8]) -> Result<bool, BackendError> {
         Ok(self.vault_for_identity(identity)?.is_some())
     }

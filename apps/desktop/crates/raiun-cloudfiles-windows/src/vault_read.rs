@@ -216,6 +216,26 @@ impl WindowsVaultReadBinding {
         custody.verify_context(&self.trusted, &self.scope, &self.root_path)
     }
 
+    /// Caller already holds this binding's route/token/opaque epoch fence.
+    /// Pure immutable metadata construction only: never reenter the coordinator,
+    /// token gate, backend/network or check_current from this method.
+    pub(crate) fn existing_edit_baseline(
+        &self,
+        identity: [u8; 16],
+        metadata: RemoteEntry,
+        root: crate::ConfiguredRootIdentity,
+    ) -> Result<crate::vault_custody::ExistingVaultEditBaseline, BackendError> {
+        crate::vault_custody::ExistingVaultEditBaseline::new(
+            identity,
+            metadata,
+            self.trusted.clone(),
+            self.scope.clone(),
+            self.root_path.clone(),
+            root,
+            self.epoch.historical_generation(),
+        )
+    }
+
     pub(crate) fn route_location(
         &self,
         owner: &ProviderScope,

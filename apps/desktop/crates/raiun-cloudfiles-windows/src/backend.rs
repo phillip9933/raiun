@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 
 /// Maximum number of bytes passed to one backend range read.
 pub const MAX_RANGE_BYTES: usize = 64 * 1024;
+/// Historical vault edit retention bound; never writable-mount activation.
+pub const MAX_VAULT_EDIT_CAPTURE_BYTES: usize = 512 * 1024;
 /// Bound total work accepted for one callback request.
 pub const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 /// Total native file/request bound; individual staging windows remain 16 MiB.
@@ -78,6 +80,75 @@ pub struct PlaceholderEditBinding {
     pub virtual_path: String,
     pub base_etag: String,
     pub base_size: u64,
+}
+
+/// Borrowed only inside the exact live vault capture callback. This exposes
+/// immutable historical metadata and local retention, never keys or a live lease.
+#[cfg(windows)]
+pub trait ExistingVaultEditCapture {
+    fn baseline(&self) -> &crate::vault_custody::ExistingVaultEditBaseline;
+    fn retain(
+        &self,
+        payload: crate::vault_custody::ExistingVaultEditPayload,
+    ) -> Result<(), BackendError>;
+}
+
+/// Local synchronous accounting only, never a durable or live permit. Even a
+/// swallowed failed/second retain attempt prevents a successful callback ack.
+#[cfg(any(windows, test))]
+#[derive(Default)]
+pub(crate) struct ExistingCaptureAcknowledgement {
+    attempts: std::cell::Cell<u8>,
+    retained: std::cell::Cell<bool>,
+}
+#[cfg(any(windows, test))]
+impl ExistingCaptureAcknowledgement {
+    pub(crate) fn begin_attempt(&self) -> Result<(), BackendError> {
+        let previous = self.attempts.get();
+        self.attempts.set(previous.saturating_add(1));
+        if previous == 0 {
+            Ok(())
+        } else {
+            Err(BackendError::Unavailable)
+        }
+    }
+    pub(crate) fn acknowledge_retained(&self) {
+        self.retained.set(true);
+    }
+    pub(crate) fn finish(&self, callback: Result<(), BackendError>) -> Result<(), BackendError> {
+        callback?;
+        if self.attempts.get() == 1 && self.retained.get() {
+            Ok(())
+        } else {
+            Err(BackendError::Unavailable)
+        }
+    }
+}
+#[cfg(test)]
+mod existing_capture_ack_tests {
+    use super::*;
+    #[test]
+    fn callback_success_requires_exactly_one_acknowledged_retain() {
+        let absent = ExistingCaptureAcknowledgement::default();
+        assert!(absent.finish(Ok(())).is_err());
+        let failed = ExistingCaptureAcknowledgement::default();
+        failed.begin_attempt().unwrap();
+        assert!(failed.finish(Ok(())).is_err());
+        let retained = ExistingCaptureAcknowledgement::default();
+        retained.begin_attempt().unwrap();
+        retained.acknowledge_retained();
+        assert!(retained.finish(Ok(())).is_ok());
+        // Caller errors remain errors even after durable retention succeeded.
+        assert!(retained.finish(Err(BackendError::Unavailable)).is_err());
+    }
+    #[test]
+    fn swallowed_second_retain_error_cannot_acknowledge_the_callback() {
+        let retained = ExistingCaptureAcknowledgement::default();
+        retained.begin_attempt().unwrap();
+        retained.acknowledge_retained();
+        assert!(retained.begin_attempt().is_err());
+        assert!(retained.finish(Ok(())).is_err());
+    }
 }
 
 /// Holds the account/root revocation lease while a local edit record is being
@@ -526,6 +597,20 @@ pub trait PlaceholderBackend: Send + Sync + 'static {
     }
 
     fn lookup(&self, identity: &[u8]) -> Result<Option<PlaceholderMetadata>, BackendError>;
+
+    /// Synchronously invoke exactly one callback while the exact vault's live
+    /// account/root/route/token/session fences remain held. The caller must have
+    /// classified this as a vault identity; refusal must never fall through to
+    /// ordinary edit dispatch. No network or coordinator/token reentry is allowed
+    /// in the callback. Ok acknowledges one historical retention only.
+    #[cfg(windows)]
+    fn with_vault_edit_capture(
+        &self,
+        _identity: &[u8],
+        _callback: &mut dyn FnMut(&dyn ExistingVaultEditCapture) -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unavailable)
+    }
 
     /// Prepare an exact account-bound baseline for a user-edited placeholder.
     /// Backends that cannot prove the callback identity return an error; native

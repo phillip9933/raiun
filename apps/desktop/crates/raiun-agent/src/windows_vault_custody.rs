@@ -5,9 +5,11 @@ use super::{
     SessionStore,
     root_manifest::{RootBinding, RootManifest},
     vault_custody::{self, Custody, Entry, Scope},
+    vault_edit_capture as capture, vault_edit_retention,
 };
 use raiun_cloudfiles_windows::vault_custody::{
-    VaultCatalogueEntry, VaultHydrationIntent, VaultPublicationCustody, VaultPublishedHistorySource,
+    ExistingVaultEditBaseline, ExistingVaultEditPayload, VaultCatalogueEntry, VaultHydrationIntent,
+    VaultPublicationCustody, VaultPublishedHistorySource,
 };
 use raiun_cloudfiles_windows::{
     BackendError, ConfiguredRootIdentity, ProviderScope, VaultCustodyRootContext,
@@ -34,9 +36,21 @@ fn unavailable<T>(_: T) -> BackendError {
 trait Storage: Send + Sync {
     fn load(&self, key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>>;
     fn cas(&self, key: &[u8], old: Option<&[u8]>, next: &[u8]) -> Result<()>;
+    fn load_capture(&self, _key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        Err(refused())
+    }
+    fn put_new_capture(&self, _key: &[u8], _record: &[u8]) -> Result<()> {
+        Err(refused())
+    }
 }
 struct SessionStorage(Arc<dyn SessionStore>);
 impl Storage for SessionStorage {
+    fn load_capture(&self, key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        self.0.load_vault_existing_edit_capture(key)
+    }
+    fn put_new_capture(&self, key: &[u8], record: &[u8]) -> Result<()> {
+        self.0.put_new_vault_existing_edit_capture(key, record)
+    }
     fn load(&self, key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>> {
         self.0.load_vault_custody(key)
     }
@@ -45,6 +59,45 @@ impl Storage for SessionStorage {
     }
 }
 struct ProtectedStore(Arc<dyn Storage>);
+struct CaptureStore(Arc<dyn Storage>);
+impl capture::Store for CaptureStore {
+    fn load(
+        &self,
+        domain: &[u8],
+        binding: &[u8],
+    ) -> std::result::Result<Option<Zeroizing<Vec<u8>>>, capture::Error> {
+        if domain != capture::DOMAIN {
+            return Err(capture::Error::Foreign);
+        }
+        self.0
+            .load_capture(binding)
+            .map_err(|_| capture::Error::Persistence)
+    }
+    fn put_new(
+        &self,
+        domain: &[u8],
+        binding: &[u8],
+        record: &[u8],
+    ) -> std::result::Result<capture::PutNew, capture::Error> {
+        if domain != capture::DOMAIN {
+            return Err(capture::Error::Foreign);
+        }
+        if self
+            .0
+            .load_capture(binding)
+            .map_err(|_| capture::Error::Persistence)?
+            .is_some()
+        {
+            return Ok(capture::PutNew::AlreadyExists);
+        }
+        // A race or post-publication failure remains uncertain, never success.
+        self.0
+            .put_new_capture(binding, record)
+            .map_err(|_| capture::Error::Persistence)?;
+        Ok(capture::PutNew::Created)
+    }
+}
+
 impl super::root_manifest::Store for ProtectedStore {
     fn load(
         &self,
@@ -275,6 +328,66 @@ impl WindowsVaultCustody {
         }))
     }
 }
+/// Read-only synthetic acceptance view. No registration, adoption or writes.
+#[cfg(test)]
+pub(super) struct CaptureInspection {
+    pub entries: Vec<Entry>,
+    pub hydrations: Vec<vault_custody::Hydration>,
+    pub captures: Vec<(capture::RetainedEdit, Entry)>,
+}
+#[cfg(test)]
+impl WindowsVaultCustody {
+    pub(super) fn inspect_capture_for_test(
+        &self,
+        vault: &VaultSessionScope,
+        remote_root: &str,
+    ) -> Result<CaptureInspection> {
+        let binding = RootBinding::new(
+            &self.account,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(|_| refused())?;
+        let scope = Scope::new(
+            &self.account,
+            vault,
+            remote_root,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(|_| refused())?;
+        let mut manifest = RootManifest::reopen(&self.store, &binding).map_err(|_| refused())?;
+        if !manifest
+            .scopes_for_reconciliation()
+            .map_err(|_| refused())?
+            .contains(&scope)
+        {
+            return Err(refused());
+        }
+        let child = Custody::reopen(&self.store, &scope).map_err(|_| refused())?;
+        let mut captures = Vec::new();
+        for reference in child.captures_for_reconciliation() {
+            let id = capture::CaptureId::new(reference.id()).map_err(|_| refused())?;
+            let retained =
+                capture::reopen_for_recovery(&CaptureStore(Arc::clone(&self.store.0)), &scope, &id)
+                    .map_err(|_| refused())?;
+            if retained.encoded_frame_ref() != reference.frame() {
+                return Err(refused());
+            }
+            captures.push((retained, reference.entry().clone()));
+        }
+        manifest
+            .verify_current(&self.store)
+            .map_err(|_| refused())?;
+        Ok(CaptureInspection {
+            entries: child.entries_for_reconciliation().to_vec(),
+            hydrations: child.hydrations_for_reconciliation().to_vec(),
+            captures,
+        })
+    }
+}
 /// Called only after exclusive CfConnect and before Ready or fresh view exposure.
 /// Reopening every document closes the previous-provider snapshot race. The
 /// resulting retained intents are evidence, not native identity/range authority.
@@ -386,7 +499,122 @@ struct View {
     store: ProtectedStore,
     child: Arc<Child>,
 }
+// Deterministic locator only, never authority. Length framing binds each
+// trusted field and the edited body digest without retaining plaintext copies.
+fn deterministic_capture_id(
+    scope: &Scope,
+    entry: &Entry,
+    baseline: &ExistingVaultEditBaseline,
+    payload: &ExistingVaultEditPayload,
+) -> std::result::Result<capture::CaptureId, BackendError> {
+    let scope = scope.authenticated_store_binding().map_err(unavailable)?;
+    let entry = Zeroizing::new(serde_json::to_vec(entry).map_err(unavailable)?);
+    let mut hash = Sha256::new();
+    let mut field = |bytes: &[u8]| {
+        hash.update((bytes.len() as u64).to_le_bytes());
+        hash.update(bytes);
+    };
+    field(b"raiun-vault-native-existing-edit-capture-id-v1");
+    field(&scope);
+    field(&entry);
+    field(&baseline.unlock_epoch().to_le_bytes());
+    field(&baseline.token_generation().to_le_bytes());
+    field(&payload.file.volume_serial.to_le_bytes());
+    field(&payload.file.file_index.to_le_bytes());
+    field(&(payload.bytes.len() as u64).to_le_bytes());
+    field(&Sha256::digest(payload.bytes.as_slice()));
+    capture::CaptureId::new(&format!("{:x}", hash.finalize())).map_err(unavailable)
+}
+
 impl VaultPublicationCustody for View {
+    fn retain_existing_edit(
+        &self,
+        baseline: &ExistingVaultEditBaseline,
+        payload: ExistingVaultEditPayload,
+    ) -> std::result::Result<(), BackendError> {
+        let result = (|| {
+            self.verify_context(baseline.owner(), baseline.vault(), baseline.remote_root())?;
+            if baseline.root() != self.root
+                || payload.root != self.root
+                || payload.file.volume_serial != self.root.volume_serial
+                || payload.file.file_index == 0
+                || payload.bytes.len() > capture::MAX_BODY_BYTES
+                || payload.components.len() > 256
+                || payload.components.iter().map(String::len).sum::<usize>() > 32000
+                || baseline.metadata().writable
+            {
+                return Err(BackendError::Unavailable);
+            }
+            let binding = RootBinding::new(
+                &self.account,
+                self.root.volume_serial,
+                self.root.file_index,
+                &self.registration,
+            )
+            .map_err(unavailable)?;
+            // Existing membership only: never call view/register or initialize
+            // a child from a native callback, even when storage is missing.
+            let mut manifest = RootManifest::reopen(&self.store, &binding).map_err(unavailable)?;
+            if !manifest
+                .scopes_for_reconciliation()
+                .map_err(unavailable)?
+                .contains(&self.scope)
+            {
+                return Err(BackendError::Unavailable);
+            }
+            manifest.verify_current(&self.store).map_err(unavailable)?;
+            let mut cached = self.child.custody.lock().map_err(unavailable)?;
+            self.verify_context(baseline.owner(), baseline.vault(), baseline.remote_root())?;
+            let mut child = Custody::reopen(&self.store, &self.scope).map_err(unavailable)?;
+            let metadata = baseline.metadata();
+            let expected = Entry::new(
+                baseline.identity(),
+                &metadata.id,
+                &metadata.path,
+                &metadata.etag,
+                metadata.directory,
+                metadata.size,
+            )
+            .map_err(unavailable)?;
+            if !child.entries_for_reconciliation().contains(&expected) {
+                return Err(BackendError::Unavailable);
+            }
+            let id = deterministic_capture_id(&self.scope, &expected, baseline, &payload)?;
+            let original = capture::Baseline::new(
+                baseline.identity(),
+                &metadata.etag,
+                baseline.unlock_epoch(),
+                baseline.token_generation(),
+                payload.file.volume_serial,
+                payload.file.file_index,
+            )
+            .map_err(unavailable)?;
+            let prepared = capture::PreparedCapture::new(&self.scope, &id, original, payload.bytes)
+                .map_err(unavailable)?;
+            // Service matches the exact persisted hydration file/components and
+            // enrolls the full immutable frame before any protected body put.
+            vault_edit_retention::retain_indexed(
+                &self.store,
+                &mut child,
+                &CaptureStore(Arc::clone(&self.store.0)),
+                prepared,
+                &payload.components,
+            )
+            .map_err(unavailable)?;
+            manifest.verify_current(&self.store).map_err(unavailable)?;
+            self.verify_context(baseline.owner(), baseline.vault(), baseline.remote_root())?;
+            *cached = child;
+            Ok(())
+        })();
+        if result.is_err() {
+            // Includes uncertainty after publication. Retain every protected
+            // row/body and native dirty file; never acknowledge or roll back.
+            self.child
+                .failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
+    }
     fn root_identity(&self) -> ConfiguredRootIdentity {
         self.root
     }
