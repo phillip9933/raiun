@@ -2942,3 +2942,43 @@ cleanup, unsupported namespace operations and whole-category completion are not
 established by these cases. Exact-package/installed-app acceptance remains
 pending. No new package, installation, signing or publication occurred; r117
 remains installed and closed, with both test VMs shut down and cold.
+
+## Installed Windows encrypted-save candidate — 26 October 2026
+
+Unsigned installer SHA256 `f51584bd19078c59c141f4795c5c8f75a1a7eb8055c8745e0c5c0244d87479ee`
+was built from integrated source `079a6e44` (filtered archive `27d8baaeed7f2cc86a421faf0469df67bbbb6b3c9dfb699da6b7b8bef60ee43c`).
+R35 installed it once as the ordinary isolated Windows user and verified all
+three installed payloads, CLI version and running shell/sidecar identities.
+The normal UI manually unlocked and later re-unlocked the same vault with
+Remember unchecked; independent inspection reported `not_saved`. An ordinary
+65537-byte full read, one 65553-byte in-place edit, one conditional encrypted
+PUT with authenticated readback, and the subsequent full edited-file read
+passed. Both ordinary public-RPC Locks returned explicit cleanup completion;
+independent inspection showed locked/not-saved and ordinary locked reads were
+refused without GET. Inspection's `unknown` cleanup value was never promoted
+to completion: the actual Lock replies supplied that proof.
+
+Parent verification checked 96 primary plus 47 supplemental pinned files,
+exact source/package/installed-process bindings, six successful ordinary child
+exits, zero remaining app/Node processes, actual normal guest shutdown and cold
+preservation. The candidate remains installed and closed. The finite fixture
+expired before its explicit stop request; that original stop gate failed and
+remains preserved. A separately reviewed expiry closure records this honestly,
+without replay, restart, extension or process termination. Evidence is
+`integrated-package-installed-r35/` under `outputs/local-windows-native-20261023-r1/`
+and `windows-integrated-package-r1/` under `outputs/desktop-next-20261021/`.
+
+This accepts the bounded installed existing-file workflow, with manual UI
+unlock/re-unlock and public-RPC Lock. It does not accept a UI Lock click,
+independent native extent inspection, restart recovery or whole C05/C10.
+Existing-file in-place saves remain limited to eligible files up to 512 KiB;
+replacement editors, new files, rename/move/delete and offline editing remain
+unsupported. The protected per-vault index still caps at 128 retained capture
+references, with a separate byte bound that can refuse earlier; completed
+history lifecycle and protected-edit recovery access remain open work.
+
+The unlock dialog's blanket editing-denial sentence is corrected in subsequent
+source to defer save support to the capability shown after unlock. Its isolated
+TypeScript/Vite build passed with unchanged package/lock files. This wording-only
+change is not included in the installer above; no runtime capability changes.
+No signing, publication, Android changes or whole-category completion occurred.

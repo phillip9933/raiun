@@ -2490,7 +2490,7 @@ function vaultDialog() {
       : flow.initialized
         ? flow.offlineUnlockOnly ? flow.offlinePinId ? 'Verified encrypted offline copy · unlock to browse names' : 'Saved encrypted location · offline snapshot availability not confirmed' : flow.intent === 'browse' ? 'Locked · unlock to browse encrypted names' : 'Locked · unlock to resume sync and browse names'
         : 'No usable integrity token was found. This folder cannot be unlocked.';
-  const browseExplanation = nativeVaultAccess() ? 'Unlock this location to read its files through the Windows drive. Editing, encrypted offline copies and in-app file browsing are unavailable in this mode.' : flow.intent === 'browse'
+  const browseExplanation = nativeVaultAccess() ? 'Unlock this location to read its files through the Windows drive. Supported file saves are shown after unlocking. Encrypted offline copies and in-app file browsing are unavailable in this mode.' : flow.intent === 'browse'
     ? flow.offlineUnlockOnly
       ? flow.offlinePinId
         ? 'Enter the vault password, or use a saved key, to verify this complete encrypted snapshot. Offline access is read-only; no files are uploaded or changed.'
