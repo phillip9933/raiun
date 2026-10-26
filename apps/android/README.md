@@ -58,7 +58,7 @@ python scripts/install_offline_scanner_sdk.py
 
 On Windows use `gradlew.bat`. Release builds contain no development credentials and are unsigned until the maintainer signs them. See [release procedure](docs/RELEASING.md), [privacy](PRIVACY.md), [security reporting](../../SECURITY.md) and [third-party notices](THIRD-PARTY-NOTICES.md).
 
-Translations use standard Android resource files. Android 1.1.0 includes German, French, Spanish, European Portuguese and Japanese alongside English. Missing translations fall back to English. These translations remain drafts and need full native-speaker review; passing structural and key-completeness checks does not establish linguistic acceptance.
+Translations use standard Android resource files. Android 1.1.0 includes German, French, Spanish, European Portuguese and Japanese alongside English. Missing translations fall back to English. Native-speaker sign-off is not required for release. Please [report translation or layout problems](https://github.com/phillip9933/raiun/issues/new), including the app version, selected language and affected screen. Automated resource checks do not guarantee every phrase is correct.
 
 ## Known limitations
 
