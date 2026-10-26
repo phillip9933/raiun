@@ -19,7 +19,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -133,7 +132,7 @@ internal fun PhotoVideoMetadataSettings(
                     Text(stringResource(R.string.settings_request_photo_video_metadata))
                 }
             }
-            OutlinedButton(onClick = onManagePermissions, modifier = Modifier.fillMaxWidth()) {
+            FilledTonalButton(onClick = onManagePermissions, modifier = Modifier.fillMaxWidth()) {
                 Text(stringResource(R.string.settings_manage_app_permissions))
             }
         }

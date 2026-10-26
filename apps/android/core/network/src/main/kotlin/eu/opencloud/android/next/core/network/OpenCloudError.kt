@@ -59,6 +59,10 @@ sealed interface OpenCloudError {
 
     data object Unsupported : OpenCloudError
 
+    data object ClientCertificateRequired : OpenCloudError
+
+    data object NetworkRouteChanged : OpenCloudError
+
     data object Trust : OpenCloudError
 
     data object Unknown : OpenCloudError
@@ -114,11 +118,27 @@ open class OpenCloudException(
     val error: OpenCloudError,
 ) : IllegalStateException(error.safeMessage())
 
+/** TLS may wrap a refused client-identity operation. Only typed, fixed policy errors cross this boundary. */
+private fun Throwable.transportPolicyError(): OpenCloudError? {
+    var current: Throwable? = this
+    var result: OpenCloudError? = null
+    var inspectedCount = 0
+    while (current != null && result == null && inspectedCount < 8) {
+        val inspected = current
+        if (inspected is CancellationException) throw inspected
+        if (inspected is TransportPolicyException) result = inspected.error
+        current = inspected.cause?.takeUnless { it === inspected }
+        inspectedCount++
+    }
+    return result
+}
+
 /** Cancellation is control flow; callers must not persist it or turn it into retry/failure. */
 fun Throwable.toOpenCloudError(): OpenCloudError =
-    when (this) {
+    transportPolicyError() ?: when (this) {
         is CancellationException -> throw this
         is OpenCloudException -> error
+        is TransportPolicyException -> error
         is SocketTimeoutException -> OpenCloudError.Timeout
         is UnknownHostException, is ConnectException -> OpenCloudError.Connectivity
         is SSLException -> OpenCloudError.Trust
@@ -202,6 +222,10 @@ fun OpenCloudError.safeMessage(): String =
             "The selected file changed while preparing the upload. Select it again before uploading."
         OpenCloudError.SourcePermissionDenied -> "Permission to read the selected file was lost."
         OpenCloudError.Unsupported -> "The server does not support this operation."
+        OpenCloudError.ClientCertificateRequired ->
+            "The selected client certificate is unavailable or has changed. Review Server connection settings."
+        OpenCloudError.NetworkRouteChanged ->
+            "The network or server connection settings changed. Refresh or retry to reconnect safely."
         OpenCloudError.Trust -> "The secure connection could not be verified."
         OpenCloudError.Unknown -> "The operation could not be completed."
         is OpenCloudError.NotReady -> "The server is still preparing this file. Retrying shortly."
@@ -243,6 +267,8 @@ fun OpenCloudError.safeMessage(context: Context): String =
         OpenCloudError.SourceChanged -> context.getString(R.string.error_source_changed)
         OpenCloudError.SourcePermissionDenied -> context.getString(R.string.error_source_permission_denied)
         OpenCloudError.Unsupported -> context.getString(R.string.error_unsupported)
+        OpenCloudError.ClientCertificateRequired -> context.getString(R.string.error_client_certificate_required)
+        OpenCloudError.NetworkRouteChanged -> context.getString(R.string.error_network_route_changed)
         OpenCloudError.Trust -> context.getString(R.string.error_trust)
         OpenCloudError.Unknown -> context.getString(R.string.error_unknown)
         is OpenCloudError.NotReady -> context.getString(R.string.error_not_ready)

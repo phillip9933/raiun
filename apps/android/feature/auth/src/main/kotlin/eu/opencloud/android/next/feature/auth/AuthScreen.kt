@@ -41,6 +41,7 @@ fun AuthScreen(
     onBeginOidc: () -> Unit,
     modifier: Modifier = Modifier,
     onAppTokenLogin: ((String, String, String) -> Unit)? = null,
+    onConnectionSettings: ((String) -> Unit)? = null,
 ) {
     var useAppToken by rememberSaveable { mutableStateOf(false) }
     var serverUrl by rememberSaveable { mutableStateOf("") }
@@ -70,6 +71,7 @@ fun AuthScreen(
             label = { Text(stringResource(R.string.auth_server_address)) },
             singleLine = true,
         )
+        ConnectionSettingsAction(serverUrl, state.isLoading, onConnectionSettings)
         onAppTokenLogin?.let { login ->
             TextButton(onClick = { useAppToken = !useAppToken }, enabled = !state.isLoading) {
                 Text(
@@ -190,4 +192,17 @@ data class DevLoginConfiguration(
     val password: String,
 ) {
     val isConfigured: Boolean = serverUrl.isNotBlank() && username.isNotBlank() && password.isNotBlank()
+}
+
+@Composable
+private fun ConnectionSettingsAction(
+    serverUrl: String,
+    busy: Boolean,
+    onOpen: ((String) -> Unit)?,
+) {
+    onOpen?.let { open ->
+        TextButton(onClick = { open(serverUrl) }, enabled = serverUrl.isNotBlank() && !busy) {
+            Text(stringResource(R.string.auth_connection_settings))
+        }
+    }
 }

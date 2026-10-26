@@ -24,5 +24,5 @@
     <string name="auth_required_fields">Introduza o endereço do servidor, o nome de utilizador e a palavra-passe de aplicação ou token.</string>
     <string name="auth_oidc_session_expired">A sessão expirou ou não pôde ser verificada. Inicie sessão novamente.</string>
     <string name="auth_sign_in_cancelled">O início de sessão foi cancelado ou rejeitado.</string>
-    <string name="auth_certificate_untrusted">Não foi possível confiar no certificado do servidor. Verifique a impressão digital do certificado antes de aprovar a sua fixação explícita.</string>
+    <string name="auth_certificate_untrusted">A ligação segura falhou. Verifique o certificado do servidor e qualquer certificado de cliente necessário nas definições de ligação ao servidor.</string>
 </resources>

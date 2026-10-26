@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="error_client_certificate_required">Das ausgewählte Client-Zertifikat ist nicht verfügbar oder wurde geändert. Prüfe die Serververbindungseinstellungen.</string>
+    <string name="error_network_route_changed">Das Netzwerk oder die Serververbindungseinstellungen wurden geändert. Aktualisiere oder versuche es erneut.</string>
+</resources>

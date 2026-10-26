@@ -25,6 +25,17 @@ class TransferErrorPolicyTest {
         org.junit.Assert.assertEquals(121000L, error.retryDeadline(1000L))
     }
 
+    @Test fun `unsent route changes retry but unavailable identity requires user action`() {
+        assertTrue(OpenCloudError.NetworkRouteChanged.canRetryTransfer(0))
+        assertFalse(OpenCloudError.NetworkRouteChanged.canRetryTransfer(5))
+        assertFalse(OpenCloudError.ClientCertificateRequired.canRetryTransfer(0))
+        org.junit.Assert.assertEquals("NETWORK_ROUTE_CHANGED", OpenCloudError.NetworkRouteChanged.diagnosticCode())
+        org.junit.Assert.assertEquals(
+            "CLIENT_CERTIFICATE_REQUIRED",
+            OpenCloudError.ClientCertificateRequired.diagnosticCode(),
+        )
+    }
+
     @Test fun `connectivity retries are bounded`() {
         assertTrue(OpenCloudError.Connectivity.canRetryTransfer(0))
         assertTrue(OpenCloudError.Connectivity.canRetryTransfer(4))

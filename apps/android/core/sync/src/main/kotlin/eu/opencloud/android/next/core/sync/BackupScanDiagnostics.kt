@@ -126,6 +126,8 @@ private val BACKUP_SCAN_ERRORS =
         "SOURCE_PERMISSION" to OpenCloudError.SourcePermissionDenied,
         "REMOTE_QUOTA" to OpenCloudError.QuotaExceeded,
         "UNSUPPORTED" to OpenCloudError.Unsupported,
+        "CLIENT_CERTIFICATE_REQUIRED" to OpenCloudError.ClientCertificateRequired,
+        "NETWORK_ROUTE_CHANGED" to OpenCloudError.NetworkRouteChanged,
         "TRUST" to OpenCloudError.Trust,
         "REMOTE_NOT_READY" to OpenCloudError.NotReady(null),
         "RATE_LIMITED" to OpenCloudError.RateLimited(null),

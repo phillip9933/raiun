@@ -12,6 +12,7 @@ import java.net.URI
 class TlsPolicy(
     context: Context,
 ) {
+    private val app = context.applicationContext
     private val preferences = context.getSharedPreferences("tls_trust", Context.MODE_PRIVATE)
 
     fun approvedPins(host: String): Set<String> =
@@ -36,12 +37,20 @@ class TlsPolicy(
     ): OkHttpClient {
         val host = URI(serverUrl).host ?: return baseClient
         val pins = approvedPins(host)
-        if (pins.isEmpty()) return baseClient
+
         // OkHttp accepts pins only through a vararg API; this is the required boundary conversion.
         @Suppress("SpreadOperator")
-        return baseClient
-            .newBuilder()
-            .certificatePinner(CertificatePinner.Builder().add(host, *pins.toTypedArray()).build())
-            .build()
+        val pinned =
+            if (pins.isEmpty()) {
+                baseClient
+            } else {
+                baseClient
+                    .newBuilder()
+                    .certificatePinner(CertificatePinner.Builder().add(host, *pins.toTypedArray()).build())
+                    .build()
+            }
+        val identified = ClientCertificatePolicy(app).applyTo(pinned, serverUrl)
+        val route = ServerConnectionRoute(app)
+        return route.applyTo(identified, route.createSnapshot(serverUrl))
     }
 }

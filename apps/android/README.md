@@ -44,7 +44,7 @@ Settings rendered from the Android app with test data.
 
 ## Install
 
-Download the latest Android APK from [GitHub Releases](https://github.com/phillip9933/raiun/releases) and verify it against the attached SHA256SUMS file. Install over an existing Raiun release to keep its app data. See the [release notes](docs/RELEASE-NOTES-1.1.0.md) for Android 1.1.0 changes. Please report problems through the project issue tracker.
+Download the latest Android APK from [GitHub Releases](https://github.com/phillip9933/raiun/releases) and verify it against the attached SHA256SUMS file. Install over an existing Raiun release to keep its app data. See the [release notes](docs/RELEASE-NOTES-1.2.0.md) for Android 1.2.0 changes. Please report problems through the project issue tracker.
 
 ## Build and test
 

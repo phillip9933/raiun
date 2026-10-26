@@ -9,7 +9,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>io.github.phillip9933</groupId>
   <artifactId>android-updater</artifactId>
-  <version>0.2.0</version>
+  <version>0.2.1</version>
   <packaging>aar</packaging>
   <name>Android App Updater</name>
   <description>GitHub release discovery and verified user-confirmed Android APK updates</description>

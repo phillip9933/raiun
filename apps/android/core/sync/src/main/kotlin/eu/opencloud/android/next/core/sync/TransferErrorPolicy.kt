@@ -6,7 +6,12 @@ import eu.opencloud.android.next.core.network.OpenCloudError
 /** Refused or unsent requests only; ambiguous timeout/server failures require reconciliation. */
 internal fun OpenCloudError.canRetryTransfer(attempt: Int): Boolean =
     attempt < 5 &&
-        (this == OpenCloudError.Connectivity || this is OpenCloudError.RateLimited || this is OpenCloudError.NotReady)
+        (
+            this == OpenCloudError.Connectivity ||
+                this == OpenCloudError.NetworkRouteChanged ||
+                this is OpenCloudError.RateLimited ||
+                this is OpenCloudError.NotReady
+        )
 
 /** Retry ambiguous network outcomes only when replay cannot replace a newer remote file. */
 internal fun OpenCloudError.canRetryTransfer(transfer: TransferEntity): Boolean {
@@ -55,6 +60,8 @@ internal fun OpenCloudError.diagnosticCode(): String =
         OpenCloudError.SourceChanged -> "SOURCE_CHANGED"
         OpenCloudError.SourcePermissionDenied -> "SOURCE_PERMISSION"
         OpenCloudError.Unsupported -> "UNSUPPORTED"
+        OpenCloudError.ClientCertificateRequired -> "CLIENT_CERTIFICATE_REQUIRED"
+        OpenCloudError.NetworkRouteChanged -> "NETWORK_ROUTE_CHANGED"
         OpenCloudError.Trust -> "TRUST"
         OpenCloudError.Unknown -> "UNKNOWN"
         is OpenCloudError.NotReady -> "REMOTE_NOT_READY"
