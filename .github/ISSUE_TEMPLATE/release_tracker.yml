@@ -1,0 +1,93 @@
+{
+  "name": "Release tracker",
+  "description": "Record intended scope, owner, evidence and promotion gates.",
+  "labels": [
+    "type:release"
+  ],
+  "body": [
+    {
+      "type": "markdown",
+      "attributes": {
+        "value": "Set maturity in the Project Stage field, not a label. Do not assign a version milestone until the stable target is intended. Stable means actually published."
+      }
+    },
+    {
+      "type": "textarea",
+      "id": "target",
+      "attributes": {
+        "label": "Target version and supported platforms",
+        "description": "State an intended stable version, or Unassigned. Beta/RC builds share the stable milestone."
+      },
+      "validations": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "id": "owner",
+      "attributes": {
+        "label": "Release owner",
+        "description": "One accountable GitHub owner."
+      },
+      "validations": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "id": "goal",
+      "attributes": {
+        "label": "Goal",
+        "description": "What does this release deliver?"
+      },
+      "validations": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "id": "scope",
+      "attributes": {
+        "label": "Included work and exclusions",
+        "description": "Link included issues; state non-goals."
+      },
+      "validations": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "id": "acceptance",
+      "attributes": {
+        "label": "Done when and promotion gates",
+        "description": "Include Planned\u2192Alpha, Alpha\u2192Beta, Beta\u2192RC and RC\u2192Stable checklists from CONTRIBUTING.md; relevant encryption/storage/backup/restore/sync evidence is required.",
+        "value": "### Planned \u2192 Alpha\n- [ ] Scope, acceptance criteria and supported platforms recorded.\n- [ ] An installable build exists.\n\n### Alpha \u2192 Beta\n- [ ] Intended features implemented.\n- [ ] Core workflows pass.\n- [ ] Remaining limitations documented.\n\n### Beta \u2192 RC\n- [ ] Release-blocking bugs resolved.\n- [ ] Required regression and upgrade/migration checks pass.\n- [ ] Relevant encryption, storage, backup/restore and sync safety checks pass.\n- [ ] Scope frozen.\n\n### RC \u2192 Stable\n- [ ] Final candidate validated.\n- [ ] Release notes and known limitations ready.\n- [ ] Signed/checksummed artifacts verified where applicable.\n- [ ] Release published.\n"
+      },
+      "validations": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "id": "dependencies",
+      "attributes": {
+        "label": "Dependencies and remaining blockers",
+        "description": "Link what must happen and what unblocks it; write None where applicable."
+      },
+      "validations": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "id": "verification",
+      "attributes": {
+        "label": "Verification and build/release links",
+        "description": "Distinguish source tests, platform tests, installed-package checks and publication. Pending is valid until verified."
+      },
+      "validations": {
+        "required": true
+      }
+    }
+  ]
+}

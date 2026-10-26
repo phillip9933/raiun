@@ -1,0 +1,85 @@
+{
+  "name": "Docs request",
+  "description": "Improve documentation without changing runtime behavior.",
+  "labels": [
+    "type:docs"
+  ],
+  "body": [
+    {
+      "type": "markdown",
+      "attributes": {
+        "value": "Use one purpose label. Do not include credentials, private files or suspected vulnerability details. Maintainers assign priority, platform and Project Status after triage."
+      }
+    },
+    {
+      "type": "dropdown",
+      "id": "platform",
+      "attributes": {
+        "label": "App platform",
+        "options": [
+          "Android",
+          "Desktop",
+          "Shared"
+        ]
+      },
+      "validations": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "id": "goal",
+      "attributes": {
+        "label": "Goal or problem",
+        "description": "What outcome is needed and who benefits?"
+      },
+      "validations": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "id": "scope",
+      "attributes": {
+        "label": "Scope and exclusions",
+        "description": "Describe included work and explicit non-goals."
+      },
+      "validations": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "id": "acceptance",
+      "attributes": {
+        "label": "Done when",
+        "description": "Use an observable acceptance checklist."
+      },
+      "validations": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "id": "dependencies",
+      "attributes": {
+        "label": "Dependencies",
+        "description": "Link prerequisites, or write None."
+      },
+      "validations": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "id": "verification",
+      "attributes": {
+        "label": "Verification",
+        "description": "Results or links; write Pending until checks run."
+      },
+      "validations": {
+        "required": false
+      }
+    }
+  ]
+}

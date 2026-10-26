@@ -35,6 +35,10 @@ Desktop light and dark interfaces (browser layout previews; no account connected
 | --- | --- |
 | ![Desktop light interface](docs/screenshots/desktop-light.png) | ![Desktop dark interface](docs/screenshots/desktop-dark.png) |
 
+## Roadmap and work
+
+Follow the public [Roadmap and work board](https://github.com/users/phillip9933/projects/3) for Android and Desktop release planning and implementation status. [Issues](https://github.com/phillip9933/raiun/issues) contain scope, acceptance criteria and verification. Release maturity and work completion are separate; see the [contribution and release policy](CONTRIBUTING.md#issues-work-board-and-release-roadmap).
+
 ## Develop
 
 Each app owns its toolchain, dependency locks, tests and build outputs. To build Android:
