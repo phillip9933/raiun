@@ -28,7 +28,7 @@ saved backup cards now explain the Include filter, recursive subfolders and
 skipped symbolic links. Types are recognized from contents rather than filename
 extensions. This copy does not change filtering. Android wording remains queued.
 
-## Desktop: optional GitHub release updates
+## Desktop: GitHub release updates — completed for beta.2
 
 Owner request (24 October 2026):
 
@@ -40,5 +40,8 @@ Owner request (24 October 2026):
 - Verify downloaded packages against published integrity information. Explain
   how to install the update and preserve settings, accounts and recovery data;
   do not install or restart without the user's agreement.
-- Keep this queued outside the current beta completion baseline. Coordinate
-  shared release conventions with the separate Android updater work.
+- The owner promoted this into the beta scope on 26 October. Implementation,
+  signed packages and focused Linux/Windows upgrade acceptance are complete for
+  Desktop 0.7.0-beta.2. See [Desktop updates](../apps/desktop/docs/DESKTOP-UPDATES.md)
+  for the release contract and supported behavior. Public issue #7 tracks the
+  delivered work; this historical request is not a second live task list.
