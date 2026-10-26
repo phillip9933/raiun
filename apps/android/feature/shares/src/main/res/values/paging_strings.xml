@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="incoming_previous_page">Previous</string>
+    <string name="incoming_next_page">Next</string>
+    <string name="incoming_page_range">%1$d–%2$d of %3$d</string>
+</resources>

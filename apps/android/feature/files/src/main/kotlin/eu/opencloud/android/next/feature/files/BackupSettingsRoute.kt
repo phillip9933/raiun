@@ -185,6 +185,7 @@ fun BackupSettingsRoute(
                 onOpenFolder = viewModel::openBackupPickerFolder,
                 onNavigateUp = viewModel::navigateBackupPickerUp,
                 onCreateFolder = viewModel::createBackupPickerFolder,
+                onBackupPickerPage = viewModel::pageBackupPicker,
             )
         }
     }

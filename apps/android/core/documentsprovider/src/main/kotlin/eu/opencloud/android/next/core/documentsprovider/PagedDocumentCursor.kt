@@ -6,12 +6,21 @@ import android.database.AbstractCursor
 internal class PagedDocumentCursor(
     private val columns: Array<String>,
     private val total: Int,
+    private val pageSize: Int = 128,
+    private val validate: () -> Unit = {},
     private val load: (Int) -> List<Array<Any?>>,
 ) : AbstractCursor() {
     private var pageStart = -1
     private var rows = emptyList<Array<Any?>>()
 
-    override fun getCount(): Int = total
+    init {
+        require(pageSize > 0)
+    }
+
+    override fun getCount(): Int {
+        validate()
+        return total
+    }
 
     override fun getColumnNames(): Array<String> = columns
 
@@ -19,7 +28,8 @@ internal class PagedDocumentCursor(
         oldPosition: Int,
         newPosition: Int,
     ): Boolean {
-        val start = newPosition / 128 * 128
+        validate()
+        val start = newPosition / pageSize * pageSize
         if (start != pageStart) {
             rows = load(start)
             pageStart = start
@@ -28,6 +38,7 @@ internal class PagedDocumentCursor(
     }
 
     private fun value(column: Int): Any? {
+        validate()
         checkPosition()
         return rows[position - pageStart][column]
     }

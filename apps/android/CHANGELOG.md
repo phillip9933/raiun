@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Make the new-version popup clearer and check for updates when returning to the app, respecting automatic-check settings and the daily limit. Dismissed releases remain available in App updates.
+
+- Browse large personal and shared folders in pages, including backup destination selection, while keeping the previous verified cache when refresh fails.
+- Stream locked-folder discovery and shared metadata reads instead of keeping every ordinary child in memory. Shared Android file-picker cursors recheck access and invalidate when their listing changes.
+- Clarify published versus historical architecture/testing records and add a translation-review checklist.
+
 ## 1.1.0
 
 - Add automatic Android update checks, stable/beta channels and an App updates page in Settings. Optional unmetered-Wi-Fi downloads use updater 0.2.0's stricter release validation and open Android's installer for confirmation.

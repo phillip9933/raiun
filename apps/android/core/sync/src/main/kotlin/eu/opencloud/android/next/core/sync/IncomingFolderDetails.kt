@@ -43,7 +43,8 @@ class IncomingFolderDetailsLoader(
     suspend fun load(request: SharedFolderRequest): IncomingFolderDetails {
         val permit = AppLock(app).beginAppAction()
         val page = fresh(request)
-        val details = describeIncomingFolder(page, metadata(page), request.remoteId)
+        val details =
+            describeIncomingFolder(page, metadata(page), request.remoteId, browser.displayPage(page, 0).second)
         requireCurrent(page, permit)
         return details
     }
@@ -66,7 +67,7 @@ class IncomingFolderDetailsLoader(
 
     private suspend fun fresh(request: SharedFolderRequest): SharedFolderPage {
         if (!repository.refresh(request.account)) stale()
-        return browser.openFolder(request)
+        return browser.refreshFolder(request)
     }
 
     private fun metadata(page: SharedFolderPage): IncomingSharedItem =
@@ -87,6 +88,7 @@ internal fun describeIncomingFolder(
     page: SharedFolderPage,
     item: IncomingSharedItem,
     itemId: String,
+    visibleItems: Int = page.items.size,
 ): IncomingFolderDetails {
     val root = page.path == "/"
     val grants = item.remoteItem.permissions.orEmpty()
@@ -118,7 +120,7 @@ internal fun describeIncomingFolder(
         expiresAt = grants.mapNotNull { it.expirationDateTime }.distinct(),
         modifiedAt = if (root) item.lastModifiedDateTime else null,
         size = if (root) item.size?.takeIf { it >= 0 } else null,
-        visibleItems = page.items.size,
+        visibleItems = visibleItems,
         access = page.location.access,
         permanentLink = link,
         hidden = item.hidden,

@@ -16,13 +16,16 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 
 @RunWith(RobolectricTestRunner::class)
 class VaultPresentationDiscoveryTest {
+    @get:Rule val temporary = TemporaryFolder()
     private lateinit var server: MockWebServer
     private lateinit var database: FileBrowserDatabase
     private lateinit var store: FileBrowserStore
@@ -126,6 +129,48 @@ class VaultPresentationDiscoveryTest {
             assertEquals(3, server.requestCount)
         }
 
+    @Test fun largeOrdinaryChildrenUseDisposableDiskIdentitiesAndOnlyReturnVaults() =
+        runTest {
+            server.enqueue(graphPage())
+            val children =
+                (0 until 20_000).map { index ->
+                    entry(DavEntryFixture("/dav/files/file-$index", "file-$index", "file-$index", folder = false))
+                } + entry(DavEntryFixture("/dav/files/Secret.vault", "vault", "Secret.vault"))
+            server.enqueue(davListing(DavListingFixture("/dav/files/", "root", "files", children)))
+            val started = System.nanoTime()
+            val folders = repository().encryptedFolders(account.id, "drive")
+            assertEquals(listOf("vault"), folders.map { it.remoteVaultId })
+            assertTrue(
+                java.io
+                    .File(temporary.root, "discovery-stage")
+                    .listFiles()
+                    .isNullOrEmpty(),
+            )
+            println(
+                "vault-marker-disk ordinary=20000 retainedVaults=1 elapsedMs=${(System.nanoTime() - started) / 1_000_000}",
+            )
+        }
+
+    @Test fun duplicateOrdinaryIdentityFailsDiscoveryAndDeletesStaging() =
+        runTest {
+            server.enqueue(graphPage())
+            val children =
+                listOf(
+                    entry(DavEntryFixture("/dav/files/one", "same", "one")),
+                    entry(DavEntryFixture("/dav/files/two", "same", "two")),
+                )
+            server.enqueue(davListing(DavListingFixture("/dav/files/", "root", "files", children)))
+            assertThrows(
+                OpenCloudException::class.java,
+            ) { runBlocking { repository().encryptedFolders(account.id, "drive") } }
+            assertTrue(
+                java.io
+                    .File(temporary.root, "discovery-stage")
+                    .listFiles()
+                    .isNullOrEmpty(),
+            )
+        }
+
     private fun repository() =
         VaultRepository(
             store = store,
@@ -133,6 +178,7 @@ class VaultPresentationDiscoveryTest {
             clientFor = { OkHttpClient() },
             endpointPolicy = EndpointPolicy(true),
             permitFor = { { true } },
+            spoolDirectory = temporary.root,
         )
 
     private fun graphPage(): MockResponse {

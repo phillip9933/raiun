@@ -443,6 +443,41 @@ class SharedFolderBrowserTest {
             }
         }
 
+    @Test fun `picker permission check reuses metadata page and preserves read only display revision`() =
+        runBlocking {
+            var refreshes = 0
+            val browser =
+                SharedFolderBrowser(
+                    access = access,
+                    cache = SharedFolderPageCache(SharedFolderCacheStore(database)),
+                    fetchSnapshot = { _, _, _ ->
+                        refreshes++
+                        RemoteFolderSnapshot(emptyList(), emptySet())
+                    },
+                    fetch = { _, _, _ -> error("metadata snapshot should be used") },
+                )
+            val root = browser.open("a", "one").location
+            refreshes = 0
+            val request = SharedFolderRequest("a", "one", root.scopeId, root.rootItemId, "/")
+            val page = browser.openFolderMetadata(request)
+            val before = browser.captureDisplaySnapshot(page)
+            val resolver =
+                SharedUploadDestinationResolver(browser) { targetPage, remote ->
+                    SharedFolderResolution.Resolved(
+                        targetPage.location.serverDriveId,
+                        remote,
+                        targetPage.location.rootWebDavUrl,
+                        SharedFolderAccess(emptySet()),
+                    )
+                }
+
+            val denied =
+                assertThrows(OpenCloudException::class.java) { runBlocking { resolver.prepare(request, page) } }
+            assertEquals(OpenCloudError.AccessDenied, denied.error)
+            assertEquals(1, refreshes)
+            assertEquals(before, browser.captureDisplaySnapshot(page))
+        }
+
     @Test fun uploadDestinationRejectsRefreshDuringResolutionAndPreservesCancellation() =
         runBlocking {
             val browser = SharedFolderBrowser(access) { _, _, _ -> emptyList() }
@@ -781,6 +816,112 @@ class SharedFolderBrowserTest {
             assertEquals("https://example.test/f/child-id", childDetails.permanentLink)
             assertFalse(childDetails.canChangeVisibility)
             assertNull(childDetails.size)
+        }
+
+    @Test fun stagedSharedRefreshPublishesLargeSortedPagesAndPreservesSnapshotOnFailure() =
+        runBlocking {
+            val store = SharedFolderCacheStore(database)
+            var fail = false
+            var cancel = false
+            var duplicate = false
+            var malformed = false
+            var encrypted = false
+            var revoke = false
+            var count = 20_000
+            val browser =
+                SharedFolderBrowser(
+                    access = access,
+                    cache = SharedFolderPageCache(store),
+                    stagingDirectory = temporary.root,
+                    streamSnapshot = { _, _, _, sink ->
+                        repeat(count) { index ->
+                            if (index == 513 && cancel) throw CancellationException()
+                            if (index == 513 && fail) throw java.io.IOException("synthetic incomplete response")
+                            val id = index.toString().padStart(6, '0')
+                            val itemPath = if (malformed && index == count - 1) "/other/file-$id" else "/file-$id"
+                            val remote = RemoteResource(id, itemPath, "file-$id", false, "text/plain", 1, "v1", 0, 0)
+                            sink.onEntry(
+                                eu.opencloud.android.next.core.network
+                                    .RemoteFolderEntry(id, remote.path, remote),
+                            )
+                        }
+                        if (duplicate) {
+                            val item =
+                                RemoteResource("000000", "/duplicate", "duplicate", false, "text/plain", 1, "v1", 0, 0)
+                            sink.onEntry(
+                                eu.opencloud.android.next.core.network
+                                    .RemoteFolderEntry(item.id, item.path, item),
+                            )
+                        }
+                        if (revoke) discovery.refresh("a")
+                        RemoteFolderSnapshot(
+                            emptyList(),
+                            if (encrypted) setOf("/") else emptySet(),
+                            plainCollectionConfirmed = !encrypted,
+                        )
+                    },
+                    fetch = { _, _, _ -> error("List API must not run") },
+                )
+            val root = SharedFolderBrowser(access) { _, _, _ -> emptyList() }.open("a", "one").location
+            val request = SharedFolderRequest("a", "one", root.scopeId, root.rootItemId, "/")
+            val start = System.nanoTime()
+            val page = browser.refreshFolder(request)
+            assertTrue(page.items.isEmpty())
+            var offset = 0
+            var previous = ""
+            while (offset < count) {
+                val (entries, total) = browser.displayPage(page, offset)
+                assertEquals(count, total)
+                assertTrue(entries.size in 1..256)
+                entries.forEach { entry ->
+                    assertTrue(entry.remoteId > previous)
+                    previous = entry.remoteId
+                }
+                offset += entries.size
+            }
+            val stagedElapsed = (System.nanoTime() - start) / 1_000_000
+            val compatibilityStart = System.nanoTime()
+            val compatibilityRetained = browser.open("a", "one").items.size
+            println(
+                "shared-large-directory entries=$count maxPage=256 stagedRetained=${page.items.size} " +
+                    "stagedAndReadMs=$stagedElapsed compatibilityRetained=$compatibilityRetained " +
+                    "compatibilityMs=${(System.nanoTime() - compatibilityStart) / 1_000_000}",
+            )
+            fail = true
+            assertThrows(java.io.IOException::class.java) { runBlocking { browser.refreshFolder(request) } }
+            assertEquals(count, browser.displayPage(page, 0).second)
+            fail = false
+            cancel = true
+            assertThrows(CancellationException::class.java) { runBlocking { browser.refreshFolder(request) } }
+            assertEquals(count, browser.displayPage(page, 0).second)
+            cancel = false
+            duplicate = true
+            assertThrows(OpenCloudException::class.java) { runBlocking { browser.refreshFolder(request) } }
+            assertEquals(count, browser.displayPage(page, 0).second)
+            duplicate = false
+            malformed = true
+            assertThrows(IllegalArgumentException::class.java) { runBlocking { browser.refreshFolder(request) } }
+            assertEquals(count, browser.displayPage(page, 0).second)
+            malformed = false
+            count = 17
+            val refreshed = browser.refreshFolder(request)
+            assertEquals(17, browser.displayPage(refreshed, 0).second)
+            assertTrue(
+                java.io
+                    .File(temporary.root, "discovery-stage")
+                    .listFiles()
+                    .isNullOrEmpty(),
+            )
+            encrypted = true
+            assertThrows(OpenCloudException::class.java) { runBlocking { browser.refreshFolder(request) } }
+            assertThrows(OpenCloudException::class.java) { runBlocking { browser.displayPage(refreshed, 0) } }
+            encrypted = false
+            val restored = browser.refreshFolder(request)
+            assertEquals(17, browser.displayPage(restored, 0).second)
+            revoke = true
+            assertThrows(OpenCloudException::class.java) { runBlocking { browser.refreshFolder(request) } }
+            assertThrows(OpenCloudException::class.java) { runBlocking { browser.displayPage(restored, 0) } }
+            Unit
         }
 
     private fun item(id: String) =

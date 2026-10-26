@@ -1,4 +1,5 @@
 <resources>
+    <string name="updates_new_version_title">New version available</string>
     <string name="updates_title">App updates</string>
     <string name="updates_summary">Check for updates and choose stable or beta releases</string>
     <string name="updates_installed">Installed version: %1$s</string>

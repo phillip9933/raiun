@@ -67,6 +67,19 @@ data class SharedFolderListing(
     val plainCollectionConfirmed: Boolean = false,
 )
 
+/** Process-local staging reader. Implementations must reject duplicate IDs and paths before publication. */
+interface SharedFolderSnapshotReader {
+    fun page(afterSequence: Long): List<SharedFolderSnapshotRow>
+
+    fun find(remoteId: String): SharedFolderEntry?
+}
+
+data class SharedFolderSnapshotRow(
+    val sequence: Long,
+    val entry: SharedFolderEntry?,
+    val excludedPath: String?,
+)
+
 data class SharedFolderSaveResult(
     val accepted: Boolean,
     val cleanupNeeded: Boolean,
@@ -212,6 +225,13 @@ interface SharedFolderCacheDao {
         id: String,
     ): SharedFolderEntry?
 
+    @Query("SELECT * FROM shared_folder_entries WHERE accountId = :accountId AND scopeId = :scopeId AND path = :path")
+    suspend fun entryAtPath(
+        accountId: String,
+        scopeId: String,
+        path: String,
+    ): SharedFolderEntry?
+
     @Upsert suspend fun saveScope(scope: SharedFolderScopeEntity)
 
     @Query(
@@ -223,6 +243,39 @@ interface SharedFolderCacheDao {
         scopeId: String,
         path: String,
     ): List<SharedFolderEntry>
+
+    @Query(
+        "SELECT * FROM shared_folder_entries WHERE accountId = :accountId AND scopeId = :scopeId " +
+            "AND parentPath = :path AND remoteId > :afterId ORDER BY remoteId LIMIT 256",
+    )
+    suspend fun childrenPage(
+        accountId: String,
+        scopeId: String,
+        path: String,
+        afterId: String,
+    ): List<SharedFolderEntry>
+
+    @Query(
+        "SELECT * FROM shared_folder_entries WHERE accountId = :accountId AND scopeId = :scopeId " +
+            "AND parentPath = :path ORDER BY isFolder DESC, name COLLATE NOCASE, name, remoteId " +
+            "LIMIT 256 OFFSET :offset",
+    )
+    suspend fun displayPage(
+        accountId: String,
+        scopeId: String,
+        path: String,
+        offset: Int,
+    ): List<SharedFolderEntry>
+
+    @Query(
+        "SELECT COUNT(*) FROM shared_folder_entries WHERE accountId = :accountId AND scopeId = :scopeId " +
+            "AND parentPath = :path",
+    )
+    suspend fun childCount(
+        accountId: String,
+        scopeId: String,
+        path: String,
+    ): Int
 
     @Query(
         "DELETE FROM shared_folder_entries WHERE accountId = :accountId AND scopeId = :scopeId AND parentPath = :path",
@@ -349,6 +402,7 @@ class SharedFolderCacheStore(
     ): SharedFolderSaveResult =
         database.withTransaction {
             requireBinding(lease, scope)
+            ensureSharedFolderPageRevisionTracking(database.openHelper.writableDatabase)
             if (driveExcluded(scope) || deniedOutsideRootProbe(scope, path)) {
                 return@withTransaction SharedFolderSaveResult(false, false)
             }
@@ -372,6 +426,173 @@ class SharedFolderCacheStore(
             }
             SharedFolderSaveResult(true, cleanupNeeded)
         }
+
+    /**
+     * Validates first, then publishes and revokes stale state in one transaction with bounded pages.
+     * Snapshot identity and root evidence are independent transaction inputs.
+     */
+    @Suppress("LongParameterList", "ComplexCondition")
+    suspend fun saveStaged(
+        lease: IncomingShareLease,
+        token: SnapshotToken,
+        scope: SharedFolderScopeEntity,
+        path: String,
+        reader: SharedFolderSnapshotReader,
+        requestedCollectionExcluded: Boolean,
+        plainCollectionConfirmed: Boolean,
+    ): SharedFolderSaveResult =
+        database.withTransaction {
+            requireBinding(lease, scope)
+            ensureSharedFolderPageRevisionTracking(database.openHelper.writableDatabase)
+            if (driveExcluded(scope) || deniedOutsideRootProbe(scope, path)) {
+                return@withTransaction SharedFolderSaveResult(false, false)
+            }
+            val rootProbe =
+                path == "/" &&
+                    plainCollectionConfirmed &&
+                    exclusions.exactlyExcluded(scope.accountId, scope.scopeId, "/")
+            if (!stagedRootAllowed(scope, path, requestedCollectionExcluded, plainCollectionConfirmed)) {
+                return@withTransaction SharedFolderSaveResult(false, false)
+            }
+            validateStaged(scope, path, reader, requestedCollectionExcluded, rootProbe)
+            if (!acceptSnapshot(lease, token, scope, path)) return@withTransaction SharedFolderSaveResult(false, false)
+            val existing = dao.scope(scope.accountId, scope.scopeId)
+            require(existing == null || existing == scope)
+            dao.saveScope(scope)
+            var cleanupNeeded = false
+            if (requestedCollectionExcluded) {
+                exclusions.record(SharedVaultExclusion(scope.accountId, scope.scopeId, path))
+                revokeSubtree(scope, path)
+                cleanupNeeded = true
+            } else {
+                if (path == "/" &&
+                    plainCollectionConfirmed
+                ) {
+                    exclusions.confirmPlain(scope.accountId, scope.scopeId, "/")
+                }
+                cleanupNeeded = applyStagedEvidence(scope, reader)
+                cleanupNeeded = reconcileStagedChildren(scope, path, reader) || cleanupNeeded
+            }
+            dao.clearChildren(scope.accountId, scope.scopeId, path)
+            if (!requestedCollectionExcluded) {
+                insertStaged(reader)
+                dao.markPage(SharedFolderCachedPage(scope.accountId, scope.scopeId, path))
+            }
+            SharedFolderSaveResult(true, cleanupNeeded)
+        }
+
+    private suspend fun stagedRootAllowed(
+        scope: SharedFolderScopeEntity,
+        path: String,
+        requestedCollectionExcluded: Boolean,
+        plainCollectionConfirmed: Boolean,
+    ): Boolean {
+        if (path != "/" || requestedCollectionExcluded || plainCollectionConfirmed) return true
+        return !exclusions.exactlyExcluded(scope.accountId, scope.scopeId, "/")
+    }
+
+    private suspend fun insertStaged(reader: SharedFolderSnapshotReader) {
+        var after = 0L
+        while (true) {
+            val page = reader.page(after)
+            if (page.isEmpty()) break
+            require(page.size <= 256 && page.first().sequence > after)
+            after = page.last().sequence
+            dao.insert(page.mapNotNull { it.entry })
+        }
+    }
+
+    private suspend fun applyStagedEvidence(
+        scope: SharedFolderScopeEntity,
+        reader: SharedFolderSnapshotReader,
+    ): Boolean {
+        var cleanupNeeded = false
+        forEachStaged(reader) { row ->
+            val item = row.entry
+            if (item == null) {
+                val excluded = requireNotNull(row.excludedPath)
+                exclusions.record(SharedVaultExclusion(scope.accountId, scope.scopeId, excluded))
+                revokeSubtree(scope, excluded)
+                cleanupNeeded = true
+            } else {
+                exclusions.confirmPlain(scope.accountId, scope.scopeId, item.path)
+                val old = dao.entry(scope.accountId, scope.scopeId, item.remoteId)
+                if (old != null && !old.unchangedAs(item)) {
+                    revokeSubtree(scope, old.path)
+                    cleanupNeeded = true
+                }
+            }
+        }
+        return cleanupNeeded
+    }
+
+    private suspend fun reconcileStagedChildren(
+        scope: SharedFolderScopeEntity,
+        path: String,
+        reader: SharedFolderSnapshotReader,
+    ): Boolean {
+        var cleanupNeeded = false
+        var afterId = ""
+        while (true) {
+            val oldPage = dao.childrenPage(scope.accountId, scope.scopeId, path, afterId)
+            if (oldPage.isEmpty()) break
+            afterId = oldPage.last().remoteId
+            oldPage.forEach { old ->
+                if (!old.unchangedAs(reader.find(old.remoteId))) {
+                    revokeSubtree(scope, old.path)
+                    cleanupNeeded = true
+                }
+            }
+        }
+        return cleanupNeeded
+    }
+
+    private suspend fun validateStaged(
+        scope: SharedFolderScopeEntity,
+        path: String,
+        reader: SharedFolderSnapshotReader,
+        requestedCollectionExcluded: Boolean,
+        rootProbe: Boolean,
+    ) {
+        forEachStaged(reader) { row ->
+            val item = row.entry
+            if (item != null) {
+                require(!requestedCollectionExcluded)
+                require(
+                    item.accountId == scope.accountId && item.scopeId == scope.scopeId && item.parentPath == path,
+                )
+                require(
+                    item.remoteId.isNotBlank() &&
+                        item.path.isSharedVaultPath() &&
+                        item.path.substringBeforeLast('/').ifEmpty { "/" } == path,
+                )
+                require(
+                    !exclusions.denies(scope.accountId, scope.scopeId, item.path) ||
+                        exclusions.exactlyExcluded(scope.accountId, scope.scopeId, item.path) ||
+                        rootProbe,
+                )
+            } else {
+                require(requireNotNull(row.excludedPath).isImmediateOrRequestedExclusion(path))
+            }
+        }
+    }
+
+    private suspend fun forEachStaged(
+        reader: SharedFolderSnapshotReader,
+        action: suspend (SharedFolderSnapshotRow) -> Unit,
+    ) {
+        var after = 0L
+        while (true) {
+            val page = reader.page(after)
+            if (page.isEmpty()) return
+            require(page.size <= 256)
+            page.forEach { row ->
+                require(row.sequence > after && ((row.entry == null) != (row.excludedPath == null)))
+                after = row.sequence
+                action(row)
+            }
+        }
+    }
 
     private suspend fun validateListing(
         scope: SharedFolderScopeEntity,
@@ -435,6 +656,7 @@ class SharedFolderCacheStore(
         entries: List<SharedFolderEntry>,
     ): Boolean {
         val relocatedPaths = mutableSetOf<String>()
+        val replacements = entries.associateBy { it.remoteId }
         entries.forEach { item ->
             val previous = dao.entry(scope.accountId, scope.scopeId, item.remoteId)
             if (previous != null && !previous.unchangedAs(item)) {
@@ -444,7 +666,7 @@ class SharedFolderCacheStore(
         }
         var staleStateRevoked = relocatedPaths.isNotEmpty()
         dao.children(scope.accountId, scope.scopeId, path).forEach { old ->
-            val replacement = entries.singleOrNull { it.remoteId == old.remoteId }
+            val replacement = replacements[old.remoteId]
             if (old.path !in relocatedPaths && !old.unchangedAs(replacement)) {
                 revokeSubtree(scope, old.path)
                 staleStateRevoked = true
@@ -483,6 +705,120 @@ class SharedFolderCacheStore(
             } else {
                 null
             }
+        }
+
+    suspend fun readDisplayPage(
+        lease: IncomingShareLease,
+        scope: SharedFolderScopeEntity,
+        path: String,
+        offset: Int,
+    ): Pair<List<SharedFolderEntry>, Int>? =
+        database.withTransaction {
+            require(offset >= 0)
+            requireBinding(lease, scope)
+            if (driveExcluded(scope) ||
+                exclusions.denies(scope.accountId, scope.scopeId, path)
+            ) {
+                return@withTransaction null
+            }
+            if (!inventory.isCurrent(lease) ||
+                dao.scope(scope.accountId, scope.scopeId) != scope ||
+                !dao.hasPage(scope.accountId, scope.scopeId, path)
+            ) {
+                return@withTransaction null
+            }
+            dao.displayPage(scope.accountId, scope.scopeId, path, offset) to
+                dao.childCount(scope.accountId, scope.scopeId, path)
+        }
+
+    suspend fun captureDisplaySnapshot(
+        lease: IncomingShareLease,
+        scope: SharedFolderScopeEntity,
+        path: String,
+    ): SharedFolderDisplaySnapshot? =
+        database.withTransaction {
+            requireBinding(lease, scope)
+            val sql = database.openHelper.writableDatabase
+            ensureSharedFolderPageRevision(sql, scope.accountId, scope.scopeId, path)
+            if (!isAllowed(lease, scope, path, requireCachedPage = true)) {
+                return@withTransaction null
+            }
+            val revision =
+                readSharedFolderPageRevision(sql, scope.accountId, scope.scopeId, path) ?: return@withTransaction null
+            SharedFolderDisplaySnapshot(dao.childCount(scope.accountId, scope.scopeId, path), revision)
+        }
+
+    suspend fun readDisplayPageAtRevision(
+        lease: IncomingShareLease,
+        scope: SharedFolderScopeEntity,
+        path: String,
+        offset: Int,
+        expectedRevision: Long,
+    ): List<SharedFolderEntry>? =
+        database.withTransaction {
+            require(offset >= 0)
+            requireBinding(lease, scope)
+            val sql = database.openHelper.writableDatabase
+            ensureSharedFolderPageRevision(sql, scope.accountId, scope.scopeId, path)
+            if (!isAllowed(lease, scope, path, requireCachedPage = true) ||
+                readSharedFolderPageRevision(sql, scope.accountId, scope.scopeId, path) != expectedRevision
+            ) {
+                return@withTransaction null
+            }
+            dao.displayPage(scope.accountId, scope.scopeId, path, offset)
+        }
+
+    suspend fun isDisplayRevisionCurrent(
+        lease: IncomingShareLease,
+        scope: SharedFolderScopeEntity,
+        path: String,
+        expectedRevision: Long,
+    ): Boolean =
+        database.withTransaction {
+            requireBinding(lease, scope)
+            val sql = database.openHelper.writableDatabase
+            ensureSharedFolderPageRevision(sql, scope.accountId, scope.scopeId, path)
+            isAllowed(lease, scope, path, requireCachedPage = true) &&
+                readSharedFolderPageRevision(sql, scope.accountId, scope.scopeId, path) == expectedRevision
+        }
+
+    suspend fun readEntry(
+        lease: IncomingShareLease,
+        scope: SharedFolderScopeEntity,
+        id: String,
+    ): SharedFolderEntry? =
+        database.withTransaction {
+            requireBinding(lease, scope)
+            if (driveExcluded(scope) ||
+                !inventory.isCurrent(lease) ||
+                dao.scope(scope.accountId, scope.scopeId) != scope
+            ) {
+                return@withTransaction null
+            }
+            dao.entry(scope.accountId, scope.scopeId, id)?.takeUnless {
+                exclusions.denies(scope.accountId, scope.scopeId, it.path)
+            }
+        }
+
+    suspend fun readEntryAtPath(
+        lease: IncomingShareLease,
+        scope: SharedFolderScopeEntity,
+        parent: String,
+        path: String,
+    ): Pair<SharedFolderEntry?, Boolean>? =
+        database.withTransaction {
+            requireBinding(lease, scope)
+            if (driveExcluded(scope) ||
+                !inventory.isCurrent(lease) ||
+                dao.scope(scope.accountId, scope.scopeId) != scope
+            ) {
+                return@withTransaction null
+            }
+            if (!dao.hasPage(scope.accountId, scope.scopeId, parent)) return@withTransaction null
+            if (exclusions.denies(scope.accountId, scope.scopeId, path)) {
+                return@withTransaction null to true
+            }
+            dao.entryAtPath(scope.accountId, scope.scopeId, path)?.takeIf { it.parentPath == parent } to false
         }
 
     private fun requireBinding(

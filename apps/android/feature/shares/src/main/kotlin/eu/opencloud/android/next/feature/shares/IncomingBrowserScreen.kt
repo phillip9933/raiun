@@ -8,6 +8,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -28,6 +29,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -172,6 +174,7 @@ internal fun IncomingBrowserRoute(
         },
         onFileAction = fileActions,
         onFolderActions = { folderActions = it },
+        onPage = controller::page,
     )
 }
 
@@ -191,6 +194,7 @@ fun IncomingBrowserScreen(
     onLayout: (SettingsBrowserLayout) -> Unit = {},
     onFileAction: (IncomingBrowserItem.File, IncomingFileAction) -> Unit = { _, _ -> },
     onFolderActions: (IncomingBrowserItem.Folder) -> Unit = {},
+    onPage: (Boolean) -> Unit = {},
 ) {
     var showHidden by rememberSaveable(state.account) { mutableStateOf(false) }
     val displayedItems = state.items.filter { showHidden || !it.isHiddenFolder() }
@@ -224,19 +228,47 @@ fun IncomingBrowserScreen(
                 Text(stringResource(if (showHidden) R.string.incoming_hide_hidden else R.string.incoming_show_hidden))
             }
         }
+        IncomingPageNavigation(state, onPage)
         PullToRefreshBox(isRefreshing = state.loading, onRefresh = onRefresh, modifier = Modifier.fillMaxSize()) {
-            BrowserContent(
-                displayedItems,
-                ::incomingBrowserKey,
-                layout,
-                notice =
-                    if (showNotice) {
-                        { IncomingBrowserNotice(displayedState, openError, onRefresh) }
-                    } else {
-                        null
-                    },
-            ) { item ->
-                IncomingBrowserRow(item, onOpen, onCopyAction, onFileAction, layout, onFolderActions)
+            key(state.account, state.trail.lastOrNull()?.request, state.offset) {
+                BrowserContent(
+                    displayedItems,
+                    ::incomingBrowserKey,
+                    layout,
+                    notice =
+                        if (showNotice) {
+                            { IncomingBrowserNotice(displayedState, openError, onRefresh) }
+                        } else {
+                            null
+                        },
+                ) { item ->
+                    IncomingBrowserRow(item, onOpen, onCopyAction, onFileAction, layout, onFolderActions)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun IncomingPageNavigation(
+    state: IncomingBrowserState,
+    onPage: (Boolean) -> Unit,
+) {
+    if (state.trail.isNotEmpty() && state.total > 256) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TextButton(onClick = { onPage(false) }, enabled = !state.loading && state.offset > 0) {
+                Text(stringResource(R.string.incoming_previous_page))
+            }
+            Text(
+                stringResource(
+                    R.string.incoming_page_range,
+                    state.offset + 1,
+                    minOf(state.offset + 256, state.total),
+                    state.total,
+                ),
+            )
+            TextButton(onClick = { onPage(true) }, enabled = !state.loading && state.offset + 256 < state.total) {
+                Text(stringResource(R.string.incoming_next_page))
             }
         }
     }

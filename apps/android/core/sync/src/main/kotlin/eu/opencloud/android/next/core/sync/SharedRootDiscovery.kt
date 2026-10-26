@@ -55,7 +55,13 @@ class SharedRootDiscovery(
             return SharedRootDiscovery(inventory, discovery::refresh) { share ->
                 val checked = access.resolve(share.accountId, share.id) ?: staleRoots()
                 val resolved = checked.resolution as? SharedFolderResolution.Resolved
-                if (resolved?.access?.canBrowse == true) browser.open(share.accountId, share.id).location else null
+                if (resolved?.access?.canBrowse ==
+                    true
+                ) {
+                    browser.openMetadata(share.accountId, share.id).location
+                } else {
+                    null
+                }
             }
         }
     }

@@ -1,11 +1,11 @@
-# Raiun — Phase 0 Architecture Proposal
+# Raiun — Historical Phase 0 Architecture Proposal
 
-**Historical proposal:** This document records Phase 0 design intent from 2026-09-06. It is not a current implementation or acceptance checklist. See the [current repository layout](README.md#repository-layout) and [testing guide](TESTING.md) before using its proposed paths or phases.
+**Historical proposal:** This document records Phase 0 design intent from 2026-09-06. Its proposed phases are superseded by the published Android 1.1.0 application and must not be treated as a current roadmap, module inventory, acceptance checklist, or source of identity values. The proposal's `eu.opencloud.android.next` application ID is obsolete; the published package is `app.raiun.cloud`. For current modules, see the [repository layout](README.md#repository-layout); for current release status and limitations, see the [testing guide](TESTING.md) and [Android README](../README.md).
 
-**Status at time of writing:** Proposed for review
+**Status at time of writing:** Proposed for review; superseded by released Android 1.1.0 (version code 48)
 **Date:** 2026-09-06  
 **Scope:** Phase 0 analysis and architecture only. Phase 1 project initialization is intentionally out of scope.  
-**Application ID:** `eu.opencloud.android.next`  
+**Application ID at proposal time (obsolete):** `eu.opencloud.android.next`
 **Reference repositories (read-only):**
 
 - `C:\src\OpenCloud-Workspace\opencloud-web`
@@ -381,7 +381,9 @@ UI / DocumentsProvider / share intent
 - Use ETag/precondition headers for overwrite/conflict detection and preserve enough state to present a conflict-resolution UI later.
 - For downloads, retain partial data only when the server/range protocol and integrity rules make safe resume possible; otherwise delete invalid partials.
 
-### 10.5 Pre-1.0 implementation update (unreleased)
+### 10.5 Implementation baseline through Android 1.1.0
+
+This section records implemented behavior present in the published Android 1.1.0 baseline. It updates the earlier proposal with selected changes; it is not a complete module inventory or a claim about later uncommitted work.
 
 Backup scanning emits batches of at most 256 files and keeps its directory queue and visited identities in private temporary SQLite storage. It no longer builds the whole tree in memory or stops at 100,000 entries. Provider-declared loading/error states fail the scan instead of advancing its completion cursor. Active-upload detection uses an indexed existence query; startup transfer recovery also reads bounded pages.
 
@@ -393,36 +395,50 @@ Picked encrypted uploads first stage immutable ciphertext while unlocked. `Vault
 
 Errors exposed to users use typed descriptions and fixed diagnostic codes. Backup scan failures persist a safe code and timestamp tied to the saved configuration. Raw server bodies, credentials and exception strings are not diagnostics. See [TESTING.md](TESTING.md) for acceptance gates and verified results.
 
+### 10.6 Unreleased directory-paging follow-up
+
+The follow-up uses transactional SQL windows for the visible ordinary directory: at most 128 rows for Personal/Spaces and 256 for received shared folders. Locked-folder descriptors stay separate from ordinary resources. Temporary SQL sort keys merge them into the same global order without inserting them into the resource cache or running a count query per descriptor. Hidden-item and encrypted-root exclusions apply before counts and page offsets. SQLite NOCASE supplies a consistent order across resource and locked-root rows; it folds ASCII case, not every Unicode case pair. Explicit selections can span pages, and actions revalidate their source snapshots and account/location context.
+
+Received-share discovery streams into the same process-keyed encrypted staging mechanism before atomic publication. Shared downloads, backup destination lookup and provider metadata reads use indexed lookups or bounded pages. Provider cursors pin both count and cache revision; a committed refresh invalidates an old cursor, including its cached rows. TEMP revision bookkeeping rolls back with its page-marker transaction and requires no persistent schema change. Backup folder pickers use bounded windows, preserve destination permissions and exclude encrypted destinations.
+
+Ordinary-folder vault-marker discovery also streams. It validates all response identities through a temporary HMAC index, retaining only the requested root and actual vault descriptors. The wire limit remains 256 MiB and retained descriptor accounting uses the client's existing XML budget (2 MiB by default). A late root marker, duplicate identity or malformed response cannot publish a partial ordinary listing.
+
+These changes do not promise a fully paged Favorites/Offline inventory or decrypted vault directory. Existing traversal/queue limits and metadata abuse boundaries remain deliberate. Encrypted byte-offset upload continuation has not been enabled: its finalization capability and acceptance gates remain unresolved. Exact current test scope belongs in [TESTING.md](TESTING.md), separately from the published 1.1.0 evidence above.
+
 ## 11. Feature phases
 
-### Phase 0 — complete after this document is written
+### Historical plan only — phases are superseded
+
+The following phase descriptions preserve the original proposal and are not a statement of remaining implementation work. Raiun Android 1.1.0 is published. Use the current repository layout, release notes and testing evidence linked above for present-day facts.
+
+### Phase 0 — complete after this document is written (historical)
 
 - Architecture and module plan.
 - Mobile-web design-system extraction.
 - Legacy endpoint and persistence inventory.
 - Security, SAF, settings, and background-work decisions.
 
-### Phase 1 — repository initialization and foundation
+### Phase 1 — repository initialization and foundation (historical)
 
-- Kotlin DSL, version catalog, convention plugins, `applicationId = "eu.opencloud.android.next"`.
+- Kotlin DSL, version catalog, convention plugins, `applicationId = "eu.opencloud.android.next"` (proposed value; obsolete, see note above).
 - Single-activity Compose application and base core modules.
 - OpenCloud light theme and foundational component previews.
 - No auth/network/file implementation beyond static placeholders.
 - Baseline lint, unit tests, screenshot tests, and CI configuration.
 
-### Phase 2 — authentication and networking
+### Phase 2 — authentication and networking (historical)
 
 - Discovery, WebFinger, Basic/OIDC PKCE authentication, token management, capabilities, and custom-TLS trust UI.
 
-### Phase 3 — core file browsing
+### Phase 3 — core file browsing (historical)
 
 - Spaces, Room-backed resource browsing, file CRUD, selection/actions, mobile-web visual parity, and initial DocumentsProvider metadata integration.
 
-### Phase 4 — sync and uploads
+### Phase 4 — sync and uploads (historical)
 
 - Full WorkManager transfer pipeline, TUS, background sync, available-offline, folder/camera backup, DocumentsProvider content delivery, conflicts, retries, and cleanup.
 
-## 12. Acceptance gates and open risks
+## 12. Historical acceptance gates and open risks
 
 ### Phase 1 acceptance gate
 
@@ -443,7 +459,7 @@ Errors exposed to users use typed descriptions and fixed diagnostic codes. Backu
 6. **Protocol fixtures:** create server/MockWebServer fixtures for OCS, Graph, DAV XML, redirects, TUS, OIDC, and WebFinger before client implementation.
 7. **Database evolution:** export Room schemas and test every future migration from version 1; do not inherit legacy schema versions.
 
-## 13. Implementation constraints for subsequent phases
+## 13. Historical implementation constraints for subsequent phases
 
 - Rewrite business logic into suspendable use cases/repositories; do not copy legacy operation classes.
 - Keep all blocking I/O off the main thread and all database writes transactional.

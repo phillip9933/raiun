@@ -5,6 +5,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -296,6 +297,29 @@ class RemoteDiscoveryClientTest {
             )
         }
         assertEquals(1_001, delivered)
+    }
+
+    @Test fun `shared streaming reports encrypted requested collection after provisional children`() {
+        val child = response("/dav/child", "200 OK", "")
+        val collection =
+            response(
+                "/dav/",
+                "200 OK",
+                "<d:resourcetype><d:collection/></d:resourcetype>" +
+                    "<d:getcontenttype>application/vnd.opencloud.vault</d:getcontenttype>",
+            )
+        server.enqueue(MockResponse().setBody(envelope(child + collection)))
+        var delivered = 0
+        val snapshot =
+            client.streamSharedFolder(
+                server.url("dav/").toString(),
+                "/",
+                "Bearer test",
+                RemoteFolderSink({ true }, { true }, { delivered++ }),
+            )
+        assertEquals(1, delivered)
+        assertTrue(snapshot.resources.isEmpty())
+        assertEquals(setOf("/"), snapshot.excludedVaultPaths)
     }
 
     @Test fun `collection may appear last without publishing encrypted children`() {

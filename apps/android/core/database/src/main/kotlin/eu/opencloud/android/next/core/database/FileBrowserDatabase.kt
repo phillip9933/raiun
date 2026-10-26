@@ -516,6 +516,17 @@ interface SpaceDao {
 
 @Dao
 interface ResourceDao {
+    @androidx.room.RawQuery(
+        observedEntities = [ResourceEntity::class, VaultExclusion::class, AccountEntity::class, SpaceEntity::class],
+    )
+    fun observeDirectoryInvalidation(query: androidx.sqlite.db.SupportSQLiteQuery): Flow<Int>
+
+    @androidx.room.RawQuery
+    suspend fun directoryCount(query: androidx.sqlite.db.SupportSQLiteQuery): Int
+
+    @androidx.room.RawQuery
+    suspend fun directoryRows(query: androidx.sqlite.db.SupportSQLiteQuery): List<ResourceDirectoryRow>
+
     @Query(
         "UPDATE resources SET path = :newPath || substr(path, length(:oldPath) + 1) " +
             "WHERE accountId = :accountId AND spaceId = :spaceId " +

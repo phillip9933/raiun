@@ -54,7 +54,7 @@ class SharedFolderShortcuts(
         check(permit())
         check(IncomingShareRepository.create(context).refresh(target.request.account))
         val browser = SharedFolderBrowser.create(context)
-        val page = browser.openFolder(target.request)
+        val page = browser.refreshFolder(target.request)
         check(permit() && browser.isCurrent(page))
         return if (page.path == "/") page.location.name else page.path.substringAfterLast('/')
     }

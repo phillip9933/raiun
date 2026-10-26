@@ -6,6 +6,8 @@ Raiun keeps its Material settings/notice screens and translations in `feature/se
 
 Tap the version at the bottom of the navigation menu to open App updates directly, or use Settings → App updates. The page shows the installed version and links to the GitHub project and that version's release notes. Release links use validated Android tags; debug builds link to their corresponding release version. Back returns to Settings.
 
+When a newer compatible release is found, Raiun shows a **New version available** popup after the app is unlocked. It includes release notes and Download update, or Install update when a verified download is ready. **Later** dismisses the current offer; it remains available in App updates, and a different newer release can prompt again. The focused popup tests cover the button callback, but do not establish dismissal behavior across process death. Returning to the foreground requests a check through the library's existing daily throttle; the library respects Check automatically. No extra polling or automatic installation is added.
+
 The dependency is pinned as `io.github.phillip9933:android-updater:0.2.0` in `gradle/libs.versions.toml`. The independent library source is maintained outside this monorepo. Raiun consumes its exported Maven publication in `third_party/android-updater/`, including a complete corresponding source snapshot and license. Gradle verifies SHA-256 pins and the exact Maven file set during configuration; repository content filtering prevents falling back to a mutable local or remote copy. Builds do not follow a sibling source checkout or use `mavenLocal()`.
 
 Version 0.2.0 is published in [`phillip9933/android-app-updater`](https://github.com/phillip9933/android-app-updater/releases/tag/v0.2.0), at source revision `90367917ac451bb1b065d4a49044df23ed3138a6`. The library uses the neutral Kotlin package `io.github.phillip9933.appupdater`. The vendored artifact/source bundle allows a clean Raiun checkout to build without a sibling checkout. Verify the immutable release, corresponding source and artifact hashes for every pin update. This work does not change Kura's networking policy or manifest.
@@ -28,6 +30,10 @@ Only one update configuration per app process is supported. This library targets
 4. Run library tests and Raiun's quality/build gates. Repeat the signed Android installation/upgrade journey before release; host tests cannot prove platform installer behavior.
 
 See [release asset rules](RELEASING.md#in-app-android-updates), [privacy](../PRIVACY.md#app-update-checks), and [acceptance checks](TESTING.md#android-updater-acceptance).
+
+## Raiun 1.1.0 release status
+
+Android 1.1.0 (version code 48) is published at tag [`android-v1.1.0`](https://github.com/phillip9933/raiun/releases/tag/android-v1.1.0), source commit [`90540f3`](https://github.com/phillip9933/raiun/commit/90540f3363bd6aa16f06b12ee3b0334061e7bd85). Both release workflows passed: [quality](https://github.com/phillip9933/raiun/actions/runs/40203652287) and [API 26/API 35 emulator matrix](https://github.com/phillip9933/raiun/actions/runs/40203652384). The production-signed APK and SHA256SUMS were uploaded and verified. The later popup follow-up is not part of 1.1.0; its focused lifecycle, persistence and layout tests, plus remaining process/device limits, are recorded in [TESTING.md](TESTING.md#new-version-popup-follow-up).
 
 ## Public library adoption — 2026-10-24
 

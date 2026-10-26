@@ -353,4 +353,144 @@ class IncomingBrowserControllerTest {
             advanceUntilIdle()
             assertEquals(IncomingBrowserState(), controller.state.value)
         }
+
+    @Test fun pagingKeepsOnlyOnePageAndRefreshReturnsToBeginning() =
+        runTest {
+            val calls = mutableListOf<Pair<Int, Boolean>>()
+            val backend =
+                object : IncomingBrowserBackend {
+                    override suspend fun load(
+                        account: String,
+                        folder: SharedFolderRequest?,
+                    ) = IncomingBrowserPage(listOf(root)) { true }
+
+                    override suspend fun loadPage(
+                        account: String,
+                        folder: SharedFolderRequest?,
+                        offset: Int,
+                        refresh: Boolean,
+                    ): IncomingBrowserPage {
+                        if (folder == null) return load(account, folder)
+                        calls += offset to refresh
+                        val items =
+                            (offset until minOf(offset + 256, 600)).map { index ->
+                                root.copy(name = "child-$index")
+                            }
+                        return IncomingBrowserPage(items, offset = offset, total = 600) { true }
+                    }
+                }
+            val controller = IncomingBrowserController(this, backend, StandardTestDispatcher(testScheduler))
+            controller.load("a")
+            advanceUntilIdle()
+            controller.open(root)
+            advanceUntilIdle()
+            assertEquals(256, controller.state.value.items.size)
+            controller.page(true)
+            advanceUntilIdle()
+            assertEquals(256, controller.state.value.offset)
+            assertEquals(256, controller.state.value.items.size)
+            controller.page(true)
+            advanceUntilIdle()
+            assertEquals(88, controller.state.value.items.size)
+            controller.page(true)
+            advanceUntilIdle()
+            assertEquals(512, controller.state.value.offset)
+            controller.refresh()
+            advanceUntilIdle()
+            assertEquals(0, controller.state.value.offset)
+            assertEquals(listOf(0 to true, 256 to false, 512 to false, 0 to true), calls)
+            controller.clear()
+            assertTrue(
+                controller.state.value.items
+                    .isEmpty(),
+            )
+        }
+
+    @Test fun pageFailureRetainsCurrentRowsButRevocationClearsThem() =
+        runTest {
+            var valid = true
+            var fail = false
+            val backend =
+                object : IncomingBrowserBackend {
+                    override suspend fun load(
+                        account: String,
+                        folder: SharedFolderRequest?,
+                    ) = IncomingBrowserPage(listOf(root)) { valid }
+
+                    override suspend fun loadPage(
+                        account: String,
+                        folder: SharedFolderRequest?,
+                        offset: Int,
+                        refresh: Boolean,
+                    ): IncomingBrowserPage {
+                        if (folder == null) return load(account, folder)
+                        if (fail) throw java.io.IOException("synthetic")
+                        return IncomingBrowserPage(listOf(root.copy(name = "first")), total = 600) { valid }
+                    }
+                }
+            val controller = IncomingBrowserController(this, backend, StandardTestDispatcher(testScheduler))
+            controller.load("a")
+            advanceUntilIdle()
+            controller.open(root)
+            advanceUntilIdle()
+            val first = controller.state.value.items
+            fail = true
+            controller.page(true)
+            advanceUntilIdle()
+            assertEquals(first, controller.state.value.items)
+            assertEquals(0, controller.state.value.offset)
+            valid = false
+            controller.page(true)
+            advanceUntilIdle()
+            assertTrue(
+                controller.state.value.items
+                    .isEmpty(),
+            )
+            controller.clear()
+        }
+
+    @Test fun latePageCannotRestoreRowsAfterNavigationBack() =
+        runTest {
+            val delayed = CompletableDeferred<Unit>()
+            val backend =
+                object : IncomingBrowserBackend {
+                    override suspend fun load(
+                        account: String,
+                        folder: SharedFolderRequest?,
+                    ) = IncomingBrowserPage(listOf(root)) { true }
+
+                    override suspend fun loadPage(
+                        account: String,
+                        folder: SharedFolderRequest?,
+                        offset: Int,
+                        refresh: Boolean,
+                    ): IncomingBrowserPage {
+                        if (folder == null) return load(account, folder)
+                        if (offset > 0) withContext(NonCancellable) { delayed.await() }
+                        return IncomingBrowserPage(
+                            listOf(root.copy(name = "page-$offset")),
+                            offset = offset,
+                            total = 600,
+                        ) { true }
+                    }
+                }
+            val controller = IncomingBrowserController(this, backend, StandardTestDispatcher(testScheduler))
+            controller.load("a")
+            advanceUntilIdle()
+            controller.open(root)
+            advanceUntilIdle()
+            controller.page(true)
+            runCurrent()
+            controller.back()
+            runCurrent()
+            delayed.complete(Unit)
+            advanceUntilIdle()
+            assertTrue(
+                controller.state.value.trail
+                    .isEmpty(),
+            )
+            assertEquals(listOf(root), controller.state.value.items)
+            assertEquals(0, controller.state.value.offset)
+            controller.clear()
+        }
 }

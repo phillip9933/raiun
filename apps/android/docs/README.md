@@ -11,6 +11,7 @@ Start with [README](../README.md) for installation and current limitations, and 
 | [Screenshot testing](SCREENSHOT_TESTING.md) | Golden ownership and review |
 | [Release procedure](RELEASING.md) | Packaging, signing continuity and release checks |
 | [Android 1.1.0 release notes](RELEASE-NOTES-1.1.0.md) | Android 1.1.0 changes and update guidance |
+| [Translation review checklist](TRANSLATION-REVIEW.md) | Native-speaker, layout and acceptance record for locale review |
 | [Release notes](RELEASE-NOTES-0.9.3.md) | Historical 0.9.3 beta changes, limits and feedback |
 | [Changelog](../CHANGELOG.md) | Version history |
 | [Encrypted security review](ENCRYPTED-SECURITY-REVIEW.md) | Encryption compatibility, local key handling and explicit plaintext handoff boundaries |

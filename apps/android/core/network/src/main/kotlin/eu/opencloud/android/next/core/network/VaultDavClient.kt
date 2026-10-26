@@ -88,6 +88,97 @@ class VaultDavClient(
     ): VaultDavListing =
         listInternal(parentWebDavUrl, path, authorization, allowOrdinaryDirectory = true, recognizedVaultRoot = false)
 
+    /** Validates every child but retains only immediate vault markers and the requested collection. */
+    fun streamOrdinaryVaultMarkers(
+        parentWebDavUrl: String,
+        path: String = "",
+        authorization: String,
+        registerIdentity: (String, String) -> Boolean,
+    ): VaultDavListing {
+        requireAuthorization(authorization)
+        val root = validateRootUrl(parentWebDavUrl)
+        val requested = appendRelativePath(root, path)
+        val scope = responseScope(root, requested)
+        val identities = MutableVaultDavIdentities(registerIdentity)
+        val markers = mutableListOf<VaultDavEntry>()
+        var markerBytes = 0L
+        var self: ParsedVaultDavResponse? = null
+        val request =
+            Request
+                .Builder()
+                .url(requested)
+                .header("Authorization", authorization)
+                .header("Depth", "1")
+                .method("PROPFIND", PROPFIND_BODY)
+                .build()
+        readMarkerResponses(request) { element ->
+            val parsed = parseResponseResource(element, scope, identities)
+            if (parsed.isRequested) {
+                if (self != null) invalidVaultResponse()
+                self = parsed
+            } else if (isFolderVaultEntry(parsed.entry)) {
+                val entry = parsed.entry
+                markerBytes += markerStorageBytes(entry)
+                if (markerBytes > maxXmlBytes) throw OpenCloudException(OpenCloudError.DirectoryListingTooLarge)
+                markers += entry
+            }
+        }
+        val requestedEntry = self ?: invalidVaultResponse()
+        if (!requestedEntry.entry.isFolder) invalidVaultResponse()
+        val marker = isFolderVaultEntry(requestedEntry.entry)
+        return VaultDavListing(
+            requestedEntry.entry,
+            markers,
+            requestedEntry.integrityToken,
+            vaultEvidence = root.samePath(requested) && marker,
+            requestedIsVaultMarker = marker,
+        )
+    }
+
+    private fun markerStorageBytes(entry: VaultDavEntry): Long =
+        128L + 2L * (
+            entry.id.length + entry.relativePath.length + entry.rawName.length +
+                entry.href.length + (entry.strongETag?.length ?: 0)
+        )
+
+    // Preserve cancellation and sanitize parser/transport errors.
+    @Suppress("TooGenericExceptionCaught", "SwallowedException", "ThrowsCount")
+    private fun readMarkerResponses(
+        request: Request,
+        consume: (Element) -> Unit,
+    ) {
+        try {
+            client.newCall(request).execute().use { response ->
+                if (response.code != 207) throw TransferHttpException(response.code)
+                val body = response.body ?: invalidVaultResponse()
+                readDavResponses(body.byteStream(), STREAMING_XML_BYTES, consume)
+            }
+        } catch (cancelled: java.util.concurrent.CancellationException) {
+            throw cancelled
+        } catch (failure: OpenCloudException) {
+            throw failure
+        } catch (failure: IOException) {
+            throw OpenCloudException(failure.toOpenCloudError())
+        } catch (_: Exception) {
+            invalidVaultResponse()
+        }
+    }
+
+    private fun responseScope(
+        root: HttpUrl,
+        requested: HttpUrl,
+    ) = VaultDavResponseScope(
+        root = root,
+        requested = requested,
+        rootSegments = root.encodedPathSegments.dropLastWhile(String::isEmpty),
+        requestedSegments = requested.encodedPathSegments.dropLastWhile(String::isEmpty),
+        rootName =
+            root.encodedPathSegments
+                .dropLastWhile(String::isEmpty)
+                .lastOrNull()
+                ?.let(::decodePathSegment) ?: "",
+    )
+
     /** Creates a collection at a validated path below the advertised WebDAV root. */
     fun createCollection(
         rootWebDavUrl: String,
@@ -718,15 +809,20 @@ class VaultDavClient(
         val isVaultContentType: Boolean,
     )
 
-    private class MutableVaultDavIdentities {
-        private val ids = mutableSetOf<String>()
-        private val paths = mutableSetOf<String>()
+    private class MutableVaultDavIdentities(
+        private val register: ((String, String) -> Boolean)? = null,
+    ) {
+        private val ids = if (register == null) mutableSetOf<String>() else null
+        private val paths = if (register == null) mutableSetOf<String>() else null
 
         fun requireUnique(
             id: String,
             path: String,
         ) {
-            if (id.isBlank() || !ids.add(id) || !paths.add(path)) invalidVaultResponse()
+            if (id.isBlank()) invalidVaultResponse()
+            val accepted =
+                register?.invoke(id, path) ?: (requireNotNull(ids).add(id) && requireNotNull(paths).add(path))
+            if (!accepted) invalidVaultResponse()
         }
     }
 
@@ -756,6 +852,7 @@ class VaultDavClient(
     ): String? = directChild(namespace, name)?.textContent
 
     private companion object {
+        const val STREAMING_XML_BYTES = 256L * 1024 * 1024
         const val DAV = "DAV:"
         const val OC = "http://owncloud.org/ns"
         const val OCRCLONE = "ocrclone"

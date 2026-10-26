@@ -166,6 +166,28 @@ internal class StagedRemoteFolder private constructor(
         }
     }
 
+    fun findEntry(id: String): RemoteFolderEntry? {
+        check(finished)
+        return storageOperation {
+            database.rawQuery("SELECT payload FROM entries WHERE idDigest = ?", arrayOf(digest("id", id).toHex())).use {
+                if (!it.moveToFirst()) return@storageOperation null
+                val payload = it.getBlob(0)
+                require(payload.size <= MAX_ENTRY_BYTES + GCM_OVERHEAD_BYTES)
+                val plain =
+                    try {
+                        decrypt(payload)
+                    } finally {
+                        payload.fill(0)
+                    }
+                try {
+                    decode(plain).also { entry -> require(entry.id == id) }
+                } finally {
+                    plain.fill(0)
+                }
+            }
+        }
+    }
+
     fun page(after: Long): List<StagedEntry> {
         check(finished)
         val result = ArrayList<StagedEntry>(BATCH_SIZE)

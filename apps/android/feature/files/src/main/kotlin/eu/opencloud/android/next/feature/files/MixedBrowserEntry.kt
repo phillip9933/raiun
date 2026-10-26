@@ -54,10 +54,10 @@ internal fun mixedBrowserEntries(
             BrowserSortCriterion.Name -> byName
             BrowserSortCriterion.DateModified ->
                 compareBy<MixedBrowserEntry> {
-                    it.resource?.modifiedAtEpochMillis ?: 0
+                    it.resource?.modifiedAtEpochMillis ?: 0L
                 }
-            BrowserSortCriterion.DateOpened -> compareBy<MixedBrowserEntry> { it.resource?.createdAtEpochMillis ?: 0 }
-            BrowserSortCriterion.Size -> compareBy<MixedBrowserEntry> { it.resource?.sizeBytes ?: 0 }
+            BrowserSortCriterion.DateOpened -> compareBy<MixedBrowserEntry> { it.resource?.createdAtEpochMillis ?: 0L }
+            BrowserSortCriterion.Size -> compareBy<MixedBrowserEntry> { it.resource?.sizeBytes ?: 0L }
             BrowserSortCriterion.Type ->
                 compareBy(String.CASE_INSENSITIVE_ORDER) { entry: MixedBrowserEntry ->
                     entry.name.substringAfterLast('.', "").ifBlank { entry.resource?.mimeType.orEmpty() }
@@ -120,7 +120,7 @@ internal fun FileBrowserUiState.withEncryptedFolders(
     error: String?,
 ): FileBrowserUiState {
     val hiddenKeys =
-        (resources + searchResults + offlineResources)
+        (resources + searchResults + offlineResources + selectedResources)
             .filter { it.matchesEncryptedFolder(entries) }
             .map { it.selectionKey }
             .toSet()
