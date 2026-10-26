@@ -8066,11 +8066,12 @@ mod tests {
         // pin as current. The previous immutable blob remains retained.
         let replacement = tempfile::NamedTempFile::new_in(state.path()).unwrap();
         fs::write(replacement.path(), b"replacement revision").unwrap();
+        let replacement_path = replacement.into_temp_path();
         engine
             .put(
                 "space",
                 "/sync/item.txt",
-                replacement.path(),
+                replacement_path.as_ref(),
                 WriteCondition::Match(old_entry.etag.clone()),
             )
             .expect("verified overwrite");
@@ -8139,12 +8140,13 @@ mod tests {
         *cloud.fail_listing.lock().unwrap() = true;
         let another = tempfile::NamedTempFile::new_in(state.path()).unwrap();
         fs::write(another.path(), b"uncertain").unwrap();
+        let another_path = another.into_temp_path();
         assert!(
             engine
                 .put(
                     "space",
                     "/sync/uncertain.txt",
-                    another.path(),
+                    another_path.as_ref(),
                     WriteCondition::Absent
                 )
                 .is_err()

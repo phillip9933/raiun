@@ -45,11 +45,31 @@ fn job() -> MediaImportJob {
         enabled: true,
     }
 }
+// Windows recovery inspection requires the protected engine layout, including
+// its local drive-absolute private state and media-staging directories.
+fn open_fixture_engine(state_directory: &std::path::Path) -> Engine {
+    #[cfg(windows)]
+    {
+        use raiun_control_windows::{PinnedDirectory, PrivateDirectory};
+        let parent = PinnedDirectory::open(state_directory.parent().unwrap()).unwrap();
+        let directory = PrivateDirectory::create_or_open_under(
+            &parent,
+            state_directory.file_name().unwrap(),
+        )
+        .unwrap();
+        Engine::open_private_windows(directory, Arc::new(FakeCloud::default())).unwrap()
+    }
+    #[cfg(not(windows))]
+    {
+        Engine::open(state_directory, Arc::new(FakeCloud::default())).unwrap()
+    }
+}
+
 #[test]
 fn jobs_legacy_reopen_and_pair_pause_retirement_preserved() {
     let dir = tempfile::tempdir().unwrap();
     let state_directory = dir.path().join("state");
-    let engine = Engine::open(&state_directory, Arc::new(FakeCloud::default())).unwrap();
+    let engine = open_fixture_engine(&state_directory);
     let store = FolderPairsStore::new(engine.clone(), scope()).unwrap();
     let created = store.create(config()).unwrap();
     let old = created.encode().unwrap();
@@ -74,7 +94,7 @@ fn jobs_legacy_reopen_and_pair_pause_retirement_preserved() {
     drop(store);
     drop(engine);
     let store = FolderPairsStore::new(
-        Engine::open(&state_directory, Arc::new(FakeCloud::default())).unwrap(),
+        open_fixture_engine(&state_directory),
         scope(),
     )
     .unwrap();
@@ -94,12 +114,12 @@ fn job_updates_and_removal_reject_stale_and_invalid_without_overwrite() {
     let dir = tempfile::tempdir().unwrap();
     let state_directory = dir.path().join("state");
     let a = FolderPairsStore::new(
-        Engine::open(&state_directory, Arc::new(FakeCloud::default())).unwrap(),
+        open_fixture_engine(&state_directory),
         scope(),
     )
     .unwrap();
     let b = FolderPairsStore::new(
-        Engine::open(&state_directory, Arc::new(FakeCloud::default())).unwrap(),
+        open_fixture_engine(&state_directory),
         scope(),
     )
     .unwrap();
