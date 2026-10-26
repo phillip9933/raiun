@@ -1,0 +1,7 @@
+<resources>
+    <string name="browser_cancel_conflicts_action">Cancel all conflicting uploads</string>
+    <string name="browser_cancel_conflicts_title">Cancel conflicting uploads?</string>
+    <string name="browser_cancel_conflicts_confirmation">Cancel %1$d conflicting uploads for this account? Local and cloud files will not be deleted. Other transfers will continue.</string>
+    <string name="browser_keep_conflicts">Keep conflicts</string>
+    <string name="browser_cancelling_conflicts">Cancelling conflicting uploads…</string>
+</resources>

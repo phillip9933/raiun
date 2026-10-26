@@ -9,6 +9,7 @@ import eu.opencloud.android.next.core.network.DavOperationClient
 import eu.opencloud.android.next.core.network.RemoteDiscoveryClient
 import eu.opencloud.android.next.core.network.TransferClient
 import eu.opencloud.android.next.core.network.WebDavFeatureClient
+import eu.opencloud.android.next.core.security.AccountSessions
 import eu.opencloud.android.next.core.security.TlsPolicy
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
@@ -28,6 +29,7 @@ class ProviderFolderOperations(
     private val client: (String) -> OkHttpClient = {
         TlsPolicy(context).applyTo(OkHttpClient.Builder().callTimeout(30, TimeUnit.SECONDS).build(), it)
     },
+    private val accountLeaseFor: (String) -> () -> Boolean = { AccountSessions.get(context).beginLease(it) },
 ) {
     private val drafts = DocumentEditStore(context)
 
@@ -39,6 +41,7 @@ class ProviderFolderOperations(
     ) {
         check(allowed()) { "Document access is locked." }
         val account = requireNotNull(store.account(accountId)?.takeIf { it.isActive })
+        val accountLease = accountLeaseFor(accountId)
         val space = requireNotNull(store.space(accountId, spaceId))
         val parent = parentId?.let { requireNotNull(store.resource(accountId, spaceId, it)) }
         require(parent == null || parent.kind == ResourceKind.FOLDER)
@@ -54,6 +57,8 @@ class ProviderFolderOperations(
                 parentId,
                 parent?.path ?: "/",
                 token,
+                context.cacheDir,
+                { allowed() && accountLease() },
             ),
         )
         check(allowed() && store.account(accountId)?.isActive == true) { "Document access was revoked." }

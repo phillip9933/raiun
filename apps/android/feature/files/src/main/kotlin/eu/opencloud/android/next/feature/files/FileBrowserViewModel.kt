@@ -14,7 +14,9 @@ import eu.opencloud.android.next.core.database.FolderBackupEntity
 import eu.opencloud.android.next.core.database.IncomingShareStore
 import eu.opencloud.android.next.core.database.ResourceEntity
 import eu.opencloud.android.next.core.database.SpaceEntity
+import eu.opencloud.android.next.core.database.TransferDirection
 import eu.opencloud.android.next.core.database.TransferEntity
+import eu.opencloud.android.next.core.database.TransferState
 import eu.opencloud.android.next.core.datastore.FileDisplayOptions
 import eu.opencloud.android.next.core.datastore.SettingsBrowserLayout
 import eu.opencloud.android.next.core.datastore.SettingsRepository
@@ -252,6 +254,7 @@ class FileBrowserViewModel(
 
     fun load(accountId: String) {
         if (this.accountId == accountId) return
+        reduce { copy(transfers = emptyList(), bulkConflictCancelling = false) }
         backupPickerRevision++
         backupPickerLocation.value = null
         reduce {
@@ -303,7 +306,9 @@ class FileBrowserViewModel(
             }
             launch {
                 store.observeTransfers(accountId).collectLatest { transfers ->
-                    reduce { copy(transfers = transfers) }
+                    if (this@FileBrowserViewModel.accountId == accountId) {
+                        reduce { copy(transfers = transfers) }
+                    }
                 }
             }
             launch {
@@ -1144,6 +1149,7 @@ class FileBrowserViewModel(
         transfer: TransferEntity,
         decision: ConflictDecision,
     ) {
+        if (transfer.accountId != accountId || state.value.bulkConflictCancelling) return
         viewModelScope.launch {
             runCatching {
                 withContext(Dispatchers.IO) {
@@ -1159,6 +1165,34 @@ class FileBrowserViewModel(
                     }
                 }
             }.onFailure { reduce { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
+        }
+    }
+
+    fun cancelUploadConflicts() {
+        val account = accountId ?: return
+        if (account.isBlank()) return
+        val hasConflicts =
+            state.value.transfers.any {
+                it.accountId == account &&
+                    it.direction == TransferDirection.UPLOAD.name &&
+                    it.state == TransferState.CONFLICT.name
+            }
+        if (state.value.bulkConflictCancelling || !hasConflicts) return
+        reduce { copy(bulkConflictCancelling = true, error = null) }
+        viewModelScope.launch {
+            runCatching { withContext(Dispatchers.IO) { transfers.cancelUploadConflicts(account) } }
+                .onFailure { failure ->
+                    if (accountId == account) {
+                        reduce {
+                            copy(
+                                bulkConflictCancelling = false,
+                                error = failure.toOpenCloudError().safeMessage(getApplication()),
+                            )
+                        }
+                    }
+                }.onSuccess {
+                    if (accountId == account) reduce { copy(bulkConflictCancelling = false) }
+                }
         }
     }
 
@@ -1315,6 +1349,7 @@ data class FileBrowserUiState(
     val offlineBytes: Long = 0,
     val recentResources: List<ResourceEntity> = emptyList(),
     val transfers: List<TransferEntity> = emptyList(),
+    val bulkConflictCancelling: Boolean = false,
     val backups: List<FolderBackupEntity> = emptyList(),
     val backupPickerTrail: List<BackupFolderCrumb> = emptyList(),
     val backupPickerResources: List<ResourceEntity> = emptyList(),

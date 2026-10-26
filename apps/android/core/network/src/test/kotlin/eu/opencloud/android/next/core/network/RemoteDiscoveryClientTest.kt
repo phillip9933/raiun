@@ -229,6 +229,75 @@ class RemoteDiscoveryClientTest {
         assertEquals("file-11999", result.resources.last().name)
     }
 
+    @Test fun `streaming callback remains provisional until the final collection and closing XML`() {
+        val child = response("/dav/child", "200 OK", "")
+        val collection = response("/dav/", "200 OK", "<d:resourcetype><d:collection/></d:resourcetype>")
+        val observed = mutableListOf<RemoteFolderEntry>()
+        val paths = mutableSetOf<String>()
+        server.enqueue(MockResponse().setBody(envelope(child + collection)))
+        client.streamFolder(
+            server.url("dav/").toString(),
+            "/",
+            "Bearer test",
+            RemoteFolderSink(paths::add, { true }, { observed += it }),
+        )
+        assertEquals(listOf("/child"), observed.map { it.path })
+
+        server.enqueue(MockResponse().setBody(envelope(child + collection).dropLast(5)))
+        observed.clear()
+        paths.clear()
+        org.junit.Assert.assertThrows(OpenCloudException::class.java) {
+            client.streamFolder(
+                server.url("dav/").toString(),
+                "/",
+                "Bearer test",
+                RemoteFolderSink(paths::add, { true }, { observed += it }),
+            )
+        }
+        assertEquals(1, observed.size)
+    }
+
+    @Test fun `streaming encrypted collection last cannot validate staged children`() {
+        val child = response("/dav/child", "200 OK", "")
+        val encrypted =
+            response(
+                "/dav/",
+                "200 OK",
+                "<d:resourcetype><d:collection/></d:resourcetype>" +
+                    "<d:getcontenttype>application/vnd.opencloud.vault</d:getcontenttype>",
+            )
+        server.enqueue(MockResponse().setBody(envelope(child + encrypted)))
+        val failure =
+            org.junit.Assert.assertThrows(OpenCloudException::class.java) {
+                client.streamFolder(
+                    server.url("dav/").toString(),
+                    "/",
+                    "Bearer test",
+                    RemoteFolderSink({ true }, { true }, {}),
+                )
+            }
+        assertEquals(OpenCloudError.Unsupported, failure.error)
+    }
+
+    @Test fun `streaming cancellation during a large listing stops delivery`() {
+        val children = buildString { repeat(2_000) { append(response("/dav/file-$it", "200 OK", "")) } }
+        server.enqueue(MockResponse().setBody(envelope(rootResponse() + children)))
+        var delivered = 0
+        org.junit.Assert.assertThrows(java.util.concurrent.CancellationException::class.java) {
+            client.streamFolder(
+                server.url("dav/").toString(),
+                "/",
+                "Bearer test",
+                RemoteFolderSink(
+                    { true },
+                    { true },
+                    { if (++delivered == 1_001) throw java.util.concurrent.CancellationException("synthetic cancel") },
+                ),
+            )
+        }
+        assertEquals(1_001, delivered)
+    }
+
     @Test fun `collection may appear last without publishing encrypted children`() {
         val child = response("/dav/child", "200 OK", "")
         val collection =
@@ -244,6 +313,28 @@ class RemoteDiscoveryClientTest {
         assertEquals(setOf("/"), result.excludedVaultPaths)
     }
 
+    @Test fun `collection identity appearing last cannot be claimed by a child`() {
+        val child =
+            response(
+                "/dav/child",
+                "200 OK",
+                "<oc:fileid xmlns:oc=\"http://owncloud.org/ns\">root-id</oc:fileid>",
+            )
+        val collection =
+            response(
+                "/dav/",
+                "200 OK",
+                "<d:resourcetype><d:collection/></d:resourcetype>" +
+                    "<oc:fileid xmlns:oc=\"http://owncloud.org/ns\">root-id</oc:fileid>",
+            )
+        server.enqueue(MockResponse().setBody(envelope(child + collection)))
+        val failure =
+            org.junit.Assert.assertThrows(OpenCloudException::class.java) {
+                client.folderSnapshot(server.url("dav/").toString(), "/", "Bearer test")
+            }
+        assertEquals(OpenCloudError.InvalidResponse, failure.error)
+    }
+
     @Test fun `malformed ending after valid entries never returns a partial snapshot`() {
         val collection = response("/dav/", "200 OK", "<d:resourcetype><d:collection/></d:resourcetype>")
         val child = response("/dav/child", "200 OK", "")
@@ -254,6 +345,8 @@ class RemoteDiscoveryClientTest {
     }
 
     private fun envelope(responses: String) = """<d:multistatus xmlns:d="DAV:">$responses</d:multistatus>"""
+
+    private fun rootResponse() = response("/dav/", "200 OK", "<d:resourcetype><d:collection/></d:resourcetype>")
 
     private fun response(
         href: String,

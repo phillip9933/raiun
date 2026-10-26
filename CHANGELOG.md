@@ -2,6 +2,10 @@
 
 Android and desktop have independent versions and release pages.
 
+## Android 1.1.0 — 2026-10-25
+
+Add in-app updates, bulk cancellation of upload conflicts, encrypted upload recovery and safer large-folder refreshes. See the [Android release notes](apps/android/docs/RELEASE-NOTES-1.1.0.md). Desktop versions are unchanged.
+
 ## Coordinated release — 2026-10-21
 
 - Android **1.0.0**: Transfers filters, customizable drag-and-drop navigation,

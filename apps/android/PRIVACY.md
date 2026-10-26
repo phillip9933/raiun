@@ -19,3 +19,11 @@ Scanning runs locally through the bundled scanner SDK. Secure vault scanning use
 Avatars are fetched from your server, not Gravatar. Android may include or omit photo metadata; Raiun does not strip metadata or promise anonymization. Notifications may show filenames; Android notification settings control their visibility. Optional local diagnostics are disabled by default and use a bounded set of event types and timestamps. Disabling diagnostics clears their history.
 
 Explicitly opening or sharing files, handing files to another app, or opening browser links transfers data or control to the recipient you choose. Those recipients have their own policies. Please exclude private documents, passwords, tokens and server logs containing secrets from public bug reports.
+
+## App update checks
+
+By default, Raiun checks the public GitHub releases for this project about once a day, subject to Android background scheduling. Turn automatic checks off in Settings → App updates; manual checks remain available. The check uses a separate public HTTP client and sends no OpenCloud account credentials, tokens, file names or file contents. GitHub receives ordinary connection information such as the requesting IP address and HTTP headers.
+
+Automatic APK downloads on unmetered Wi-Fi are off by default. If enabled, GitHub and its release-asset hosting receive the APK download request. Downloads stay in the app-private update cache, separate from cloud files and vault credentials. Partial downloads are discarded on cancellation or failure; obsolete APKs are pruned. Android can also reclaim cache files.
+
+The updater checks the package ID, newer version code, supported Android version and installed signing identity. It verifies a published SHA-256 digest when available and records a local digest for subsequent rechecks. Android performs the final package-signature checks and installation. Only an explicit foreground Install action opens the system installer; background work never installs an APK. A permission or installer return is not treated as proof of installation.

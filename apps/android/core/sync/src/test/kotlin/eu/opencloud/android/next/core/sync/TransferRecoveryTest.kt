@@ -150,6 +150,20 @@ class TransferRecoveryTest {
             assertEquals("CANCELLED", store.transfer("cancelled")?.state)
         }
 
+    @Test fun `manager reports the number of upload conflicts cancelled for one account`() =
+        runTest {
+            val conflict = intent().copy(state = "CONFLICT", errorCode = "CONFLICT")
+            store.createTransfer(conflict)
+            store.createTransfer(conflict.copy(id = "other-account", accountId = "other"))
+            store.createTransfer(conflict.copy(id = "download", direction = "DOWNLOAD"))
+
+            assertEquals(1, manager.cancelUploadConflicts("account"))
+            assertEquals("CANCELLED", store.transfer(conflict.id)?.state)
+            assertEquals("CONFLICT", store.transfer("other-account")?.state)
+            assertEquals("CONFLICT", store.transfer("download")?.state)
+            assertEquals(0, manager.cancelUploadConflicts("account"))
+        }
+
     @Test fun `bulk upload retry continues after one candidate can no longer be retried`() =
         runTest {
             seedAccount()
@@ -319,7 +333,7 @@ class TransferRecoveryTest {
                 eu.opencloud.android.next.core.database.ResourceEntity(
                     "account",
                     "space",
-                    "root",
+                    "offline-root",
                     null,
                     "/root",
                     "root",

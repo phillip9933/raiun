@@ -82,12 +82,14 @@ fun TransfersRoute(
     LaunchedEffect(accountId) { viewModel.load(accountId) }
     TransfersScreen(
         state = state,
+        selectedAccountId = accountId,
         onNavigateBack = onNavigateBack,
         onRetry = viewModel::retry,
         onCancel = viewModel::cancel,
         onResolveConflict = viewModel::resolveConflict,
         onRetryAll = viewModel::retryAll,
         onClearAll = viewModel::clearAll,
+        onCancelUploadConflicts = viewModel::cancelUploadConflicts,
         onDismissError = viewModel::dismissError,
         modifier = modifier,
         onOpenFileActions = onOpenFileActions,
@@ -108,6 +110,14 @@ class TransfersViewModel(
     fun load(accountId: String) {
         if (loadedAccountId == accountId) return
         loadedAccountId = accountId
+        mutableState.update {
+            it.copy(
+                active = emptyList(),
+                failed = emptyList(),
+                history = emptyList(),
+                bulkConflictCancelling = false,
+            )
+        }
         viewModelScope.launch(Dispatchers.IO) {
             kotlinx.coroutines.flow
                 .combine(
@@ -116,6 +126,7 @@ class TransfersViewModel(
                 ) { transfers, spaces ->
                     categorizeTransfers(transfers).copy(spaceNames = spaces.associate { it.driveId to it.name })
                 }.collectLatest { snapshot ->
+                    if (loadedAccountId != accountId) return@collectLatest
                     mutableState.update { current ->
                         current.copy(
                             spaceNames = snapshot.spaceNames,
@@ -188,6 +199,33 @@ class TransfersViewModel(
         runAction { manager.clearAll(accountId, transfers) }
     }
 
+    fun cancelUploadConflicts() {
+        val accountId = loadedAccountId?.takeIf(String::isNotBlank) ?: return
+        if (state.value.bulkConflictCancelling ||
+            bulkUploadConflictTargets(state.value.failed, accountId).isEmpty()
+        ) {
+            return
+        }
+        mutableState.update { it.copy(bulkConflictCancelling = true, error = null) }
+        viewModelScope.launch {
+            runCatching { withContext(Dispatchers.IO) { manager.cancelUploadConflicts(accountId) } }
+                .onFailure {
+                    if (loadedAccountId == accountId) {
+                        mutableState.update {
+                            it.copy(
+                                bulkConflictCancelling = false,
+                                error = getApplication<Application>().localizedString(R.string.transfers_action_failed),
+                            )
+                        }
+                    }
+                }.onSuccess {
+                    if (loadedAccountId == accountId) {
+                        mutableState.update { it.copy(bulkConflictCancelling = false) }
+                    }
+                }
+        }
+    }
+
     fun dismissError() {
         mutableState.value = mutableState.value.copy(error = null, bulkRetryFeedback = null)
     }
@@ -215,6 +253,7 @@ data class TransfersUiState(
     val error: String? = null,
     val bulkRetryFeedback: String? = null,
     val bulkRetrying: Boolean = false,
+    val bulkConflictCancelling: Boolean = false,
 )
 
 enum class TransferConflictDecision { REPLACE, KEEP_BOTH, CANCEL }
@@ -230,6 +269,16 @@ internal fun bulkUploadRetryTargets(transfers: List<TransferEntity>): List<Trans
     transfers.filter {
         it.direction == TransferDirection.UPLOAD.name &&
             it.state in setOf(TransferState.FAILED.name, TransferState.RETRY.name)
+    }
+
+internal fun bulkUploadConflictTargets(
+    transfers: List<TransferEntity>,
+    accountId: String,
+): List<TransferEntity> =
+    transfers.filter {
+        it.accountId == accountId &&
+            it.direction == TransferDirection.UPLOAD.name &&
+            it.state == TransferState.CONFLICT.name
     }
 
 private val ACTIVE_STATES =
@@ -250,23 +299,39 @@ fun TransfersScreen(
     onClearAll: () -> Unit,
     onDismissError: () -> Unit,
     modifier: Modifier = Modifier,
+    onCancelUploadConflicts: () -> Unit = {},
+    selectedAccountId: String? = null,
     onOpenFileActions: (() -> Unit)? = null,
     onReviewEdits: (() -> Unit)? = null,
 ) {
     var confirmClearAll by remember { mutableStateOf(false) }
+    var confirmCancelConflicts by remember(selectedAccountId) { mutableStateOf(false) }
     var filters by rememberSaveable(stateSaver = transferFiltersSaver) { mutableStateOf(TransferFilters()) }
     val hasTransfers = state.active.isNotEmpty() || state.failed.isNotEmpty() || state.history.isNotEmpty()
+    val conflictCount =
+        state.failed.count {
+            (selectedAccountId == null || it.accountId == selectedAccountId) &&
+                it.direction == TransferDirection.UPLOAD.name &&
+                it.state == TransferState.CONFLICT.name
+        }
     Scaffold(
         modifier = modifier,
         floatingActionButton = {
-            onOpenFileActions?.let { openActions ->
-                FloatingActionButton(onClick = openActions) {
-                    Icon(Icons.Default.Add, contentDescription = stringResource(R.string.transfers_upload_files))
-                }
-            }
+            TransfersUploadButton(onOpenFileActions)
         },
         topBar = {
-            TransfersTopBar(onNavigateBack, onReviewEdits, hasTransfers, onClearAll = { confirmClearAll = true })
+            TransfersTopBar(
+                onNavigateBack,
+                onReviewEdits,
+                hasTransfers,
+                onCancelUploadConflicts =
+                    if (conflictCount > 0 && !state.bulkConflictCancelling) {
+                        { confirmCancelConflicts = true }
+                    } else {
+                        null
+                    },
+                onClearAll = { confirmClearAll = true },
+            )
         },
     ) { padding ->
         if (state.active.isEmpty() && state.failed.isEmpty() && state.history.isEmpty()) {
@@ -278,37 +343,89 @@ fun TransfersScreen(
                 onFiltersChange = { filters = it },
                 onRetry,
                 onCancel,
-                onResolveConflict,
+                { transfer, decision -> if (!state.bulkConflictCancelling) onResolveConflict(transfer, decision) },
                 onRetryAll,
+                state.bulkConflictCancelling,
                 Modifier.fillMaxSize().padding(padding),
             )
         }
     }
+    TransfersFeedbackDialogs(state, onDismissError)
+    TransfersClearAllDialog(
+        open = confirmClearAll,
+        onDismiss = { confirmClearAll = false },
+        onConfirm = {
+            confirmClearAll = false
+            onClearAll()
+        },
+    )
+    if (confirmCancelConflicts && conflictCount > 0) {
+        TransfersCancelConflictsDialog(
+            conflictCount,
+            state.bulkConflictCancelling,
+            onDismiss = { confirmCancelConflicts = false },
+            onConfirm = {
+                confirmCancelConflicts = false
+                onCancelUploadConflicts()
+            },
+        )
+    }
+}
+
+@Composable
+private fun TransfersUploadButton(onOpenFileActions: (() -> Unit)?) {
+    onOpenFileActions?.let { openActions ->
+        FloatingActionButton(onClick = openActions) {
+            Icon(Icons.Default.Add, contentDescription = stringResource(R.string.transfers_upload_files))
+        }
+    }
+}
+
+@Composable
+private fun TransfersFeedbackDialogs(
+    state: TransfersUiState,
+    onDismiss: () -> Unit,
+) {
     state.error?.let { error ->
         AlertDialog(
-            onDismissRequest = onDismissError,
+            onDismissRequest = onDismiss,
             title = { Text(stringResource(R.string.transfers_action_title)) },
             text = { Text(error) },
-            confirmButton = { TextButton(onClick = onDismissError) { Text(stringResource(R.string.transfers_ok)) } },
+            confirmButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.transfers_ok)) } },
         )
     }
     state.bulkRetryFeedback?.let { feedback ->
         AlertDialog(
-            onDismissRequest = onDismissError,
+            onDismissRequest = onDismiss,
             title = { Text(stringResource(R.string.transfers_bulk_retry_title)) },
             text = { Text(feedback) },
-            confirmButton = { TextButton(onClick = onDismissError) { Text(stringResource(R.string.transfers_ok)) } },
+            confirmButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.transfers_ok)) } },
         )
     }
-    if (confirmClearAll) {
-        TransfersClearAllDialog(
-            onDismiss = { confirmClearAll = false },
-            onConfirm = {
-                confirmClearAll = false
-                onClearAll()
-            },
-        )
-    }
+}
+
+@Composable
+private fun TransfersCancelConflictsDialog(
+    count: Int,
+    busy: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        title = { Text(stringResource(R.string.transfers_cancel_conflicts_title)) },
+        text = { Text(stringResource(R.string.transfers_cancel_conflicts_confirmation, count)) },
+        confirmButton = {
+            TextButton(enabled = !busy, onClick = onConfirm) {
+                Text(stringResource(R.string.transfers_cancel_conflicts_action))
+            }
+        },
+        dismissButton = {
+            TextButton(enabled = !busy, onClick = onDismiss) {
+                Text(stringResource(R.string.transfers_cancel))
+            }
+        },
+    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -317,6 +434,7 @@ private fun TransfersTopBar(
     onNavigateBack: () -> Unit,
     onReviewEdits: (() -> Unit)?,
     hasTransfers: Boolean,
+    onCancelUploadConflicts: (() -> Unit)?,
     onClearAll: () -> Unit,
 ) {
     var showActions by remember { mutableStateOf(false) }
@@ -348,6 +466,16 @@ private fun TransfersTopBar(
                         )
                     }
                     DropdownMenu(expanded = showActions, onDismissRequest = { showActions = false }) {
+                        onCancelUploadConflicts?.let { cancelConflicts ->
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.transfers_cancel_conflicts_action)) },
+                                leadingIcon = { Icon(Icons.Default.Cancel, contentDescription = null) },
+                                onClick = {
+                                    showActions = false
+                                    cancelConflicts()
+                                },
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text(stringResource(R.string.transfers_clear_all)) },
                             leadingIcon = { Icon(Icons.Default.Cancel, contentDescription = null) },
@@ -373,6 +501,7 @@ private fun FilteredTransferContent(
     onCancel: (TransferEntity) -> Unit,
     onResolveConflict: (TransferEntity, TransferConflictDecision) -> Unit,
     onRetryAll: () -> Unit,
+    conflictCancellationPending: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val visibleState = state.filtered(filters, java.time.ZoneId.systemDefault())
@@ -413,7 +542,7 @@ private fun FilteredTransferContent(
                 }
             }
             transferSection(needsAttentionTitle, visibleState.failed) { transfer ->
-                FailedTransferRow(transfer, onRetry, onResolveConflict)
+                FailedTransferRow(transfer, onRetry, onResolveConflict, conflictCancellationPending)
             }
             transferSection(historyTitle, visibleState.history) {
                 TransferRow(it, spaceName = state.spaceNames[it.spaceId])
@@ -424,9 +553,11 @@ private fun FilteredTransferContent(
 
 @Composable
 private fun TransfersClearAllDialog(
+    open: Boolean,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
+    if (!open) return
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.transfers_clear_all_title)) },
@@ -461,6 +592,7 @@ private fun FailedTransferRow(
     transfer: TransferEntity,
     onRetry: (TransferEntity) -> Unit,
     onResolveConflict: (TransferEntity, TransferConflictDecision) -> Unit,
+    conflictCancellationPending: Boolean,
 ) {
     TransferRow(
         transfer = transfer,
@@ -471,6 +603,7 @@ private fun FailedTransferRow(
             } else {
                 null
             },
+        conflictActionsEnabled = !conflictCancellationPending,
     )
 }
 
@@ -487,11 +620,13 @@ private fun TransferEmptyState(padding: PaddingValues) {
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
+@Suppress("LongParameterList")
 private fun TransferRow(
     transfer: TransferEntity,
     onRetry: (() -> Unit)? = null,
     onCancel: (() -> Unit)? = null,
     onConflict: ((TransferConflictDecision) -> Unit)? = null,
+    conflictActionsEnabled: Boolean = true,
     spaceName: String? = null,
 ) {
     val progress =
@@ -545,7 +680,7 @@ private fun TransferRow(
                 }
                 transfer.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
                 TransferFailureDetails(transfer)
-                onConflict?.let { TransferConflictActions(transfer.locationKind, it) }
+                onConflict?.let { TransferConflictActions(transfer.locationKind, conflictActionsEnabled, it) }
             }
         },
         leadingContent = {
@@ -581,22 +716,23 @@ private fun TransferRow(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun TransferConflictActions(
+internal fun TransferConflictActions(
     locationKind: String,
+    enabled: Boolean,
     onConflict: (TransferConflictDecision) -> Unit,
 ) {
     FlowRow(horizontalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs)) {
         if (locationKind !in setOf("SHARED_FOLDER", "VAULT")) {
-            TextButton(onClick = { onConflict(TransferConflictDecision.REPLACE) }) {
+            TextButton(onClick = { onConflict(TransferConflictDecision.REPLACE) }, enabled = enabled) {
                 Text(stringResource(R.string.transfers_replace))
             }
         }
         if (locationKind != "VAULT") {
-            TextButton(onClick = { onConflict(TransferConflictDecision.KEEP_BOTH) }) {
+            TextButton(onClick = { onConflict(TransferConflictDecision.KEEP_BOTH) }, enabled = enabled) {
                 Text(stringResource(R.string.transfers_keep_both))
             }
         }
-        TextButton(onClick = { onConflict(TransferConflictDecision.CANCEL) }) {
+        TextButton(onClick = { onConflict(TransferConflictDecision.CANCEL) }, enabled = enabled) {
             Text(stringResource(R.string.transfers_cancel))
         }
     }

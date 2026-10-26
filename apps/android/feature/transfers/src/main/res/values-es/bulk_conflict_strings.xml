@@ -1,0 +1,5 @@
+<resources>
+    <string name="transfers_cancel_conflicts_action">Cancelar todas las subidas en conflicto</string>
+    <string name="transfers_cancel_conflicts_title">¿Cancelar las subidas en conflicto?</string>
+    <string name="transfers_cancel_conflicts_confirmation">¿Cancelar %1$d subidas en conflicto de esta cuenta? No se eliminarán los archivos locales ni los de la nube. Las demás transferencias continuarán.</string>
+</resources>

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "source_inventory": "docs/release-audit/runtime-dependencies.json",
-  "dependency_count": 170,
+  "dependency_count": 171,
   "cache_root": "Gradle module cache at ~/.gradle/caches/modules-2/files-2.1",
   "scanner_reference": "https://github.com/phillip9933/open-android-doc-scanner/blob/v0.7.0/THIRD-PARTY-NOTICES.md",
   "missing_full_license_texts": [],
@@ -126,9 +126,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.annotation/annotation/1.9.1/7d1eff28a93c44697d9706b0b5fd63b8f50b034b/annotation-metadata-1.9.1.jar",
+      "artifact_sha256": "38322afa7345c37e29c65ec8852178ae1c26e23096a0634d07a4a3893931f58c",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/annotation/annotation/LICENSE.txt",
+          "path": "embedded/androidx_annotation_annotation/META-INF/androidx/annotation/annotation/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -599,9 +606,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.collection/collection/1.5.0/d66e9caa66ead0ba263710ff4c1af78c575f329f/collection-metadata-1.5.0.jar",
+      "artifact_sha256": "f5ffb8f461c4b5d6f2883a2c7047977773b31d5b23ef030c057514c0c9eceb47",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/collection/collection/LICENSE.txt",
+          "path": "embedded/androidx_collection_collection/META-INF/androidx/collection/collection/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -697,9 +711,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.compose.animation/animation/1.10.0/d05cab2f6fa192a624f8781bd79b6ea149d1d7a8/animation-metadata-1.10.0.jar",
+      "artifact_sha256": "e98112512a87229f9cfdd46295cde38594533659a6d4980f7d4039b653f94be2",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/compose/animation/animation/LICENSE.txt",
+          "path": "embedded/androidx_compose_animation_animation/META-INF/androidx/compose/animation/animation/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -760,9 +781,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.compose.animation/animation-core/1.10.0/94dea49c9a3a2ad812c3b0378d2ec99a707a6608/animation-core-metadata-1.10.0.jar",
+      "artifact_sha256": "51f0d393ccadef06b82c486958cdd1d7668376ffe0aa8e6acfd5a72fa1046683",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/compose/animation/animation-core/LICENSE.txt",
+          "path": "embedded/androidx_compose_animation_animation-core/META-INF/androidx/compose/animation/animation-core/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -823,9 +851,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.compose.foundation/foundation/1.10.0/b1c4b89cd8b13809c0d79a5c6ea6588a954b857b/foundation-metadata-1.10.0.jar",
+      "artifact_sha256": "7fef47f4260d3adff9a3ab4d0730be2a31f4dc92628e30ae586e1666ea3630a7",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/compose/foundation/foundation/LICENSE.txt",
+          "path": "embedded/androidx_compose_foundation_foundation/META-INF/androidx/compose/foundation/foundation/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -886,9 +921,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.compose.foundation/foundation-layout/1.10.0/a2143a5ed43904dda7d5b91dc79d3ea07900e084/foundation-layout-metadata-1.10.0.jar",
+      "artifact_sha256": "cde6b408694825f7ab9a91c91e88c1e3ae0bff42acf994d23f0e1e8b1e582723",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/compose/foundation/foundation-layout/LICENSE.txt",
+          "path": "embedded/androidx_compose_foundation_foundation-layout/META-INF/androidx/compose/foundation/foundation-layout/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -949,9 +991,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.compose.material3/material3/1.4.0/a0d1a1cbe08248dbb1e2dff23b97503905134b2d/material3-metadata-1.4.0.jar",
+      "artifact_sha256": "99f229e3030f7d11504177f1c15f9dbebc15b413fd910c6f18bfc12824600167",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/compose/material3/material3/LICENSE.txt",
+          "path": "embedded/androidx_compose_material3_material3/META-INF/androidx/compose/material3/material3/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -1012,8 +1061,8 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
+      "artifact": "Gradle module cache / androidx.compose.material/material-icons-core/1.7.8/32a0e6996da0950faefd49b848a3ea3d1df99342/material-icons-core-metadata-1.7.8.jar",
+      "artifact_sha256": "951f2a3a6c0913819dfaae7c69cb8cdf977f7c79bd53fef03e4faf459ee30a0f",
       "embedded_notice_files": [],
       "license_texts": [
         {
@@ -1068,8 +1117,8 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
+      "artifact": "Gradle module cache / androidx.compose.material/material-icons-extended/1.7.8/dc62b0482b48b733105221b084a2c4628fbcd77a/material-icons-extended-metadata-1.7.8.jar",
+      "artifact_sha256": "714e2bfc4095b291e0dbcbd7626bc0e420fc2f6a78f2416398596504debd9117",
       "embedded_notice_files": [],
       "license_texts": [
         {
@@ -1124,9 +1173,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.compose.material/material-ripple/1.10.0/6063fd1044ba0b9c44a687960af2b3c0c6210761/material-ripple-metadata-1.10.0.jar",
+      "artifact_sha256": "43daf1945465ac4e2df58a5aa56d324cce7a3de44c74baff81ba94a60169c05d",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/compose/material/material-ripple/LICENSE.txt",
+          "path": "embedded/androidx_compose_material_material-ripple/META-INF/androidx/compose/material/material-ripple/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -1187,9 +1243,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.compose.runtime/runtime/1.10.0/e9a1675b78e524ba17372e6a082e5de010b92065/runtime-metadata-1.10.0.jar",
+      "artifact_sha256": "393451f535d2194da58ea4b3bbda0da09bbc0de1d0415176abe01d56764a0ce3",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/compose/runtime/runtime/LICENSE.txt",
+          "path": "embedded/androidx_compose_runtime_runtime/META-INF/androidx/compose/runtime/runtime/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -1250,9 +1313,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.compose.runtime/runtime-annotation/1.10.0/c0314068c667cb3b8b559a01c5e5d206224d2359/runtime-annotation-metadata-1.10.0.jar",
+      "artifact_sha256": "5d4ce82699f501a0c8e1e672658f1f8089534e06989bf253bdfab11e2c730595",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/compose/runtime/runtime-annotation/LICENSE.txt",
+          "path": "embedded/androidx_compose_runtime_runtime-annotation/META-INF/androidx/compose/runtime/runtime-annotation/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -1313,9 +1383,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.compose.runtime/runtime-retain/1.10.0/56a704791340b5d3877647afb9cf255ddf459bf3/runtime-retain-metadata-1.10.0.jar",
+      "artifact_sha256": "af1635d56e849fcaee002d9da9e1de66ccb71542cba1d196764441194dc15443",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/compose/runtime/runtime-retain/LICENSE.txt",
+          "path": "embedded/androidx_compose_runtime_runtime-retain/META-INF/androidx/compose/runtime/runtime-retain/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -1376,9 +1453,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.compose.runtime/runtime-saveable/1.10.0/e6ea5599aa2c947b7a7759322d1915d4416b08c7/runtime-saveable-metadata-1.10.0.jar",
+      "artifact_sha256": "fa2be3ec83c4b129bcb7a9b15ce1fcb0d1d76334e7eddb7b8f35ce9adf7b0811",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/compose/runtime/runtime-saveable/LICENSE.txt",
+          "path": "embedded/androidx_compose_runtime_runtime-saveable/META-INF/androidx/compose/runtime/runtime-saveable/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -1439,9 +1523,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.compose.ui/ui/1.10.0/8e43d1135592099df2a3e1ae1ae32bc508edd7dc/ui-metadata-1.10.0.jar",
+      "artifact_sha256": "1d3de76ca7982665e31055561d3c723c32f5110175b60c426f0dbff2a4cf91e1",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/compose/ui/ui/LICENSE.txt",
+          "path": "embedded/androidx_compose_ui_ui/META-INF/androidx/compose/ui/ui/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -1502,9 +1593,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.compose.ui/ui-geometry/1.10.0/d95ee1d985fa0d63de9df03411c0a314294a5333/ui-geometry-metadata-1.10.0.jar",
+      "artifact_sha256": "e29f3c194db2dd9fffa0b6dd304f7f7df7ba17b341b08e8f1655a889f624e58e",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/compose/ui/ui-geometry/LICENSE.txt",
+          "path": "embedded/androidx_compose_ui_ui-geometry/META-INF/androidx/compose/ui/ui-geometry/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -1565,9 +1663,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.compose.ui/ui-graphics/1.10.0/4d0f4ef1c7e7ed83a1ed000e1bf2b6639030574b/ui-graphics-metadata-1.10.0.jar",
+      "artifact_sha256": "0cae0912c5d4d2009dd59d4064ae8786b34b5724be433d5d5138d6ec8aa12609",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/compose/ui/ui-graphics/LICENSE.txt",
+          "path": "embedded/androidx_compose_ui_ui-graphics/META-INF/androidx/compose/ui/ui-graphics/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -1628,9 +1733,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.compose.ui/ui-text/1.10.0/9dedd567781c7e0a2c0c51fd167e80357a4ab788/ui-text-metadata-1.10.0.jar",
+      "artifact_sha256": "383c7e6aeee37b896071e7c22f3f54db49332d43cd44b4f8e19576c3143c74dd",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/compose/ui/ui-text/LICENSE.txt",
+          "path": "embedded/androidx_compose_ui_ui-text/META-INF/androidx/compose/ui/ui-text/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -1691,9 +1803,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.compose.ui/ui-tooling-preview/1.10.0/5b6b626322095d4c3e9381eea091d6d01904694d/ui-tooling-preview-metadata-1.10.0.jar",
+      "artifact_sha256": "fafcf1088d2f65b51f65a9806a79b6ec97289dcb3938c34211d13599e5dd0d10",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/compose/ui/ui-tooling-preview/LICENSE.txt",
+          "path": "embedded/androidx_compose_ui_ui-tooling-preview/META-INF/androidx/compose/ui/ui-tooling-preview/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -1754,9 +1873,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.compose.ui/ui-unit/1.10.0/123ae8c02e94be3b7dfd9d5cbe0d4c4415780645/ui-unit-metadata-1.10.0.jar",
+      "artifact_sha256": "54e052bdd08ce99266917ef427070221ff067c2b10b2299518ed337185f36da8",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/compose/ui/ui-unit/LICENSE.txt",
+          "path": "embedded/androidx_compose_ui_ui-unit/META-INF/androidx/compose/ui/ui-unit/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -1817,9 +1943,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.compose.ui/ui-util/1.10.0/a60017b98fa05aa72eb37f15c3c1465feb71a113/ui-util-metadata-1.10.0.jar",
+      "artifact_sha256": "f9672bfc0ebcbc8d2a613dd1b2363acf48ef50ad02ae321f8d96a76158a0bc19",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/compose/ui/ui-util/LICENSE.txt",
+          "path": "embedded/androidx_compose_ui_ui-util/META-INF/androidx/compose/ui/ui-util/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -2153,8 +2286,8 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
+      "artifact": "Gradle module cache / androidx.datastore/datastore/1.1.7/30513e515d8f76bce1f40cdfaf083a132c9eb56a/datastore-metadata-1.1.7.jar",
+      "artifact_sha256": "4ab4086b6359ea81eb359451f0f005c78bc508d75c070555154cdf6313b0e1cb",
       "embedded_notice_files": [],
       "license_texts": [
         {
@@ -2209,8 +2342,8 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
+      "artifact": "Gradle module cache / androidx.datastore/datastore-core/1.1.7/9b37c9db5bdc14fd36cbbc024e901a09c8512407/datastore-core-metadata-1.1.7.jar",
+      "artifact_sha256": "749fa5e6aa1999c4210d9b33ed2a09fc8fab48ab4c4fb9549720e052526b6e85",
       "embedded_notice_files": [],
       "license_texts": [
         {
@@ -2265,8 +2398,8 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
+      "artifact": "Gradle module cache / androidx.datastore/datastore-core-okio/1.1.7/5f1d75f519a8807dbc8009d9139b986dd64de54a/datastore-core-okio-metadata-1.1.7.jar",
+      "artifact_sha256": "117beb462cad6a885864fe0296ed8cfee509da08d064c44d226efbd60538599b",
       "embedded_notice_files": [],
       "license_texts": [
         {
@@ -2608,9 +2741,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.lifecycle/lifecycle-common/2.9.4/ce3d041078964ff3bdf190199759d70f5fb974b4/lifecycle-common-metadata-2.9.4.jar",
+      "artifact_sha256": "c7a6e835da0712d15efeae0d72df91e6631042df4fcf0f9c20ceca740638c685",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/lifecycle/lifecycle-common/LICENSE.txt",
+          "path": "embedded/androidx_lifecycle_lifecycle-common/META-INF/androidx/lifecycle/lifecycle-common/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -2846,9 +2986,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.lifecycle/lifecycle-runtime/2.9.4/e2ab0349b31fcea72c0d0d15eab3583d35a53b22/lifecycle-runtime-metadata-2.9.4.jar",
+      "artifact_sha256": "ba566d0f46dc01c2169778d27238789ecebaa00655642e02c24e4e83e7dc5905",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/lifecycle/lifecycle-runtime/LICENSE.txt",
+          "path": "embedded/androidx_lifecycle_lifecycle-runtime/META-INF/androidx/lifecycle/lifecycle-runtime/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -2909,9 +3056,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.lifecycle/lifecycle-runtime-compose/2.9.4/b9e5c5f27d37dd2aa1841cd4df876b1375a8d69e/lifecycle-runtime-compose-metadata-2.9.4.jar",
+      "artifact_sha256": "8835416ac59a23f7152eb0f217bdab742a377e985462307639c12bafc1408e41",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/lifecycle/lifecycle-runtime-compose/LICENSE.txt",
+          "path": "embedded/androidx_lifecycle_lifecycle-runtime-compose/META-INF/androidx/lifecycle/lifecycle-runtime-compose/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -2972,9 +3126,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.lifecycle/lifecycle-runtime-ktx/2.9.4/fb55f05d0fa494c4cbb84d7814fcd16e55c2319f/lifecycle-runtime-ktx-metadata-2.9.4.jar",
+      "artifact_sha256": "5d74d1e9c45d538aafc48b2313e598eff9b4a13bfee9f2f3d776f5274d5cde22",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/lifecycle/lifecycle-runtime-ktx/LICENSE.txt",
+          "path": "embedded/androidx_lifecycle_lifecycle-runtime-ktx/META-INF/androidx/lifecycle/lifecycle-runtime-ktx/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -3140,9 +3301,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.lifecycle/lifecycle-viewmodel-compose/2.9.4/3fd6bbc50302fc128cdf211ea9a205bd81609094/lifecycle-viewmodel-compose-metadata-2.9.4.jar",
+      "artifact_sha256": "73b5e68cbb713cc0bc5cc0b1bee3570624e3ddff664c00acf108a8fd4f3050eb",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/lifecycle/lifecycle-viewmodel-compose/LICENSE.txt",
+          "path": "embedded/androidx_lifecycle_lifecycle-viewmodel-compose/META-INF/androidx/lifecycle/lifecycle-viewmodel-compose/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -3455,9 +3623,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.room/room-common/2.7.2/29115c3f3b19e5abe29801ed9d2538384d3507a1/room-common-metadata-2.7.2.jar",
+      "artifact_sha256": "37a82a2dfcd131c150bfaae869be7cfc25daec3b135f42be170b28e4d96f8999",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/room/room-common/LICENSE.txt",
+          "path": "embedded/androidx_room_room-common/META-INF/androidx/room/room-common/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -3553,9 +3728,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.room/room-runtime/2.7.2/ec7f9eec5037ed4f04ca67b5538bb8c6745b227f/room-runtime-metadata-2.7.2.jar",
+      "artifact_sha256": "b55ad84daa43a2b1ffb4f44f01619b1023e577cc643780d8ce416a74c3fbbab4",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/room/room-runtime/LICENSE.txt",
+          "path": "embedded/androidx_room_room-runtime/META-INF/androidx/room/room-runtime/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -3616,9 +3798,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.savedstate/savedstate/1.3.2/68cebd3dbc9fc58b1f753fa12cb4decdb5eb8042/savedstate-metadata-1.3.2.jar",
+      "artifact_sha256": "84a7b7c75a3bed96f5b1345247a7a07bebefb50168e4ced654bf290d990e17b7",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/savedstate/savedstate/LICENSE.txt",
+          "path": "embedded/androidx_savedstate_savedstate/META-INF/androidx/savedstate/savedstate/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -3679,9 +3868,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.savedstate/savedstate-compose/1.3.2/8f5051f8d3e234f5dba19e0bbe457de1df626182/savedstate-compose-metadata-1.3.2.jar",
+      "artifact_sha256": "9a8d6197b3eb23452add1aa1e6d2c3dc7711f07e32d72199906de12cdb553e50",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/savedstate/savedstate-compose/LICENSE.txt",
+          "path": "embedded/androidx_savedstate_savedstate-compose/META-INF/androidx/savedstate/savedstate-compose/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -3777,9 +3973,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.sqlite/sqlite/2.5.1/7c3759c8260b9a8d559fce87eed5adc467f40492/sqlite-metadata-2.5.1.jar",
+      "artifact_sha256": "cbb309763b5fe5ac5b1ecdd510e38c75d0bc97f145a9dca32324ffb58c3ce9ae",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/sqlite/sqlite/LICENSE.txt",
+          "path": "embedded/androidx_sqlite_sqlite/META-INF/androidx/sqlite/sqlite/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -3840,9 +4043,16 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
-      "embedded_notice_files": [],
+      "artifact": "Gradle module cache / androidx.sqlite/sqlite-framework/2.5.1/204af1b7f92f34c8c5bc800c6dcb091458f78f92/sqlite-framework-metadata-2.5.1.jar",
+      "artifact_sha256": "69859dc22be411215e587a6f84593c2488c522ecbbb700ed9df39c2b63f7700b",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "META-INF/androidx/sqlite/sqlite-framework/LICENSE.txt",
+          "path": "embedded/androidx_sqlite_sqlite-framework/META-INF/androidx/sqlite/sqlite-framework/LICENSE.txt",
+          "sha256": "809fa1ed21450f59827d1e9aec720bbc4b687434fa22283c6cb5dd82a47ab9c0",
+          "size_bytes": 10175
+        }
+      ],
       "license_texts": [
         {
           "name": "The Apache Software License, Version 2.0",
@@ -4405,7 +4615,7 @@
           "name": "BSD-3-Clause",
           "url": "https://opensource.org/licenses/BSD-3-Clause",
           "path": "license-texts/BSD-3-Clause.txt",
-          "source": "https://raw.githubusercontent.com/protocolbuffers/protobuf/v25.8/LICENSE",
+          "source": "preserved vetted release text (original source: https://raw.githubusercontent.com/protocolbuffers/protobuf/v25.8/LICENSE)",
           "sha256": "6e5e117324afd944dcf67f36cf329843bc1a92229a8cd9bb573d7a83130fea7d"
         }
       ]
@@ -4433,7 +4643,7 @@
           "name": "Mozilla Public License, Version 2.0",
           "url": "http://www.mozilla.org/MPL/2.0/index.txt",
           "path": "license-texts/Mozilla_Public_License_Version_2.0.txt",
-          "source": "https://www.mozilla.org/MPL/2.0/index.txt",
+          "source": "preserved vetted release text (original source: https://www.mozilla.org/MPL/2.0/index.txt)",
           "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
         }
       ]
@@ -4516,8 +4726,8 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
+      "artifact": "Gradle module cache / com.squareup.okio/okio/3.6.0/564fbb1b15e8bef07e10ecf8648591917d80eeb9/okio-metadata-3.6.0-all.jar",
+      "artifact_sha256": "2bbd3f0645a3ada7e6532b2e6db471af4861464e1a140f95f807dfd16aa049e3",
       "embedded_notice_files": [],
       "license_texts": [
         {
@@ -4777,6 +4987,41 @@
       ]
     },
     {
+      "coordinate": "io.github.phillip9933:android-updater",
+      "version": "0.2.0",
+      "pom_source": "bundled updater / maven/io/github/phillip9933/android-updater/0.2.0/android-updater-0.2.0.pom",
+      "pom_chain": [
+        "bundled updater / maven/io/github/phillip9933/android-updater/0.2.0/android-updater-0.2.0.pom"
+      ],
+      "pom_sha256": "3bf5bdbf5dba0dbb8d2b68f513ab784ef3fa3b507d5f696eb9c44bfa872cfc38",
+      "license_status": "declared",
+      "licenses": [
+        {
+          "name": "GNU Affero General Public License version 3",
+          "url": "https://www.gnu.org/licenses/agpl-3.0.html"
+        }
+      ],
+      "artifact": "bundled updater / maven/io/github/phillip9933/android-updater/0.2.0/android-updater-0.2.0.aar",
+      "artifact_sha256": "ede8c4b3660654918b15004b17d0633bc8c7e1989c1548786671b98be9ea4854",
+      "embedded_notice_files": [
+        {
+          "archive_entry": "assets/android-app-updater/LICENSE",
+          "path": "embedded/io_github_phillip9933_android-updater/assets/android-app-updater/LICENSE",
+          "sha256": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef",
+          "size_bytes": 34523
+        }
+      ],
+      "license_texts": [
+        {
+          "name": "GNU Affero General Public License version 3",
+          "url": "https://www.gnu.org/licenses/agpl-3.0.html",
+          "path": "license-texts/GNU_Affero_General_Public_License_version_3.txt",
+          "source": "bundled updater / LICENSE",
+          "sha256": "8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef"
+        }
+      ]
+    },
+    {
       "coordinate": "net.java.dev.jna:jna",
       "version": "5.17.0",
       "pom_source": "Gradle module cache / net.java.dev.jna/jna/5.17.0/bf690bbd2f47bae28b4c348de5f7d4b8fc899be9/jna-5.17.0.pom",
@@ -4800,18 +5045,18 @@
       "embedded_notice_files": [],
       "license_texts": [
         {
+          "name": "LGPL-2.1-or-later",
+          "url": "https://www.gnu.org/licenses/old-licenses/lgpl-2.1",
+          "path": "license-texts/LGPL-2.1-or-later.txt",
+          "source": "preserved vetted release text (original source: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt)",
+          "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95"
+        },
+        {
           "name": "Apache-2.0",
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt",
           "path": "license-texts/Apache-2.0.txt",
           "source": "scanner SDK 0.7.0 Maven ZIP / LICENSE",
           "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
-        },
-        {
-          "name": "LGPL-2.1-or-later",
-          "url": "https://www.gnu.org/licenses/old-licenses/lgpl-2.1",
-          "path": "license-texts/LGPL-2.1-or-later.txt",
-          "source": "https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt",
-          "sha256": "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95"
         }
       ]
     },
@@ -4851,7 +5096,7 @@
           "name": "Bouncy Castle Licence",
           "url": "https://www.bouncycastle.org/licence.html",
           "path": "license-texts/Bouncy_Castle_Licence.txt",
-          "source": "https://raw.githubusercontent.com/bcgit/bc-java/r1rv85v2/LICENSE.md",
+          "source": "preserved vetted release text (original source: https://raw.githubusercontent.com/bcgit/bc-java/r1rv85v2/LICENSE.md)",
           "sha256": "0e01f1549c9022f406392ac2947d32223b7c2e977d21ea2f8c182fdeb4dae5fd"
         }
       ]
@@ -4927,8 +5172,8 @@
           "url": "http://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": "Gradle module cache / org.jetbrains.kotlin/kotlin-stdlib/2.2.20/5380b19fa1924399b62ce3a1faffebb2b4f82272/kotlin-stdlib-2.2.20.jar",
-      "artifact_sha256": "8836ccffd3585fadda9901244b20d42901d2f3cd581058d8434e2ffabcf3a3e7",
+      "artifact": "Gradle module cache / org.jetbrains.kotlin/kotlin-stdlib/2.2.20/60a0940e504374fe89029a3a8ab449eb0fecdb89/kotlin-stdlib-2.2.20-all.jar",
+      "artifact_sha256": "555cdb4c884a584c1b5d59f696fb76cd660917fab36b8ae8032bcd62c750efe5",
       "embedded_notice_files": [],
       "license_texts": [
         {
@@ -5095,8 +5340,8 @@
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
+      "artifact": "Gradle module cache / org.jetbrains.kotlinx/kotlinx-coroutines-core/1.10.2/98c822b26e7e596cb9a9d95bb5bab18ba65e6074/kotlinx-coroutines-core-metadata-1.10.2.jar",
+      "artifact_sha256": "319b653009d49c70982f98df29cc84fc7025b092cb0571c8e7532e3ad4366dae",
       "embedded_notice_files": [],
       "license_texts": [
         {
@@ -5179,8 +5424,8 @@
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
+      "artifact": "Gradle module cache / org.jetbrains.kotlinx/kotlinx-serialization-core/1.8.1/46e82d7b117c844a352f9abaa476fdf070e75f5b/kotlinx-serialization-core-metadata-1.8.1.jar",
+      "artifact_sha256": "d99859ff8cc49ae769f948af823f46947b3e5617fec2683fde951d4d0e0a7749",
       "embedded_notice_files": [],
       "license_texts": [
         {
@@ -5235,8 +5480,8 @@
           "url": "https://www.apache.org/licenses/LICENSE-2.0.txt"
         }
       ],
-      "artifact": null,
-      "artifact_sha256": null,
+      "artifact": "Gradle module cache / org.jetbrains.kotlinx/kotlinx-serialization-json/1.8.1/4b72d1f15cf899bc751c5d7d9d8c93797e9001fb/kotlinx-serialization-json-metadata-1.8.1.jar",
+      "artifact_sha256": "58adf3358a0f99dd8d66a550fbe19064d395e0d5f7f1e46515cd3470a56fbbb0",
       "embedded_notice_files": [],
       "license_texts": [
         {

@@ -63,6 +63,7 @@ fun OpenCloudNextApp(
     var encryptedCleanupFailed by remember { mutableStateOf(false) }
     val state = viewModel.state.collectAsStateWithLifecycle()
     var destination by rememberSaveable(state.value.activeAccountId) { mutableStateOf(AppDestination.Files) }
+    var settingsOpenUpdates by rememberSaveable(state.value.activeAccountId) { mutableStateOf(false) }
     var nextBrowserAddRequest by remember(state.value.activeAccountId) { mutableIntStateOf(0) }
     var pendingBrowserAddRequest by remember(state.value.activeAccountId) { mutableIntStateOf(0) }
     var trashSpaceId by rememberSaveable(state.value.activeAccountId) { mutableStateOf<String?>(null) }
@@ -152,7 +153,14 @@ fun OpenCloudNextApp(
                                             trashSpaceId = null
                                             destination = AppDestination.DeletedFiles
                                         },
-                                        onOpenSettings = { destination = AppDestination.Settings },
+                                        onOpenSettings = {
+                                            settingsOpenUpdates = false
+                                            destination = AppDestination.Settings
+                                        },
+                                        onOpenAppUpdates = {
+                                            settingsOpenUpdates = true
+                                            destination = AppDestination.Settings
+                                        },
                                         onOpenAccount = { destination = AppDestination.Account },
                                         onOpenEncryptedOffline = { destination = AppDestination.Vaults },
                                         onOpenEncryptedLocation = { location ->
@@ -311,7 +319,11 @@ fun OpenCloudNextApp(
                     AppDestination.Settings ->
                         SettingsRoute(
                             accountId = accountId,
-                            onNavigateBack = { destination = AppDestination.Files },
+                            openUpdatesInitially = settingsOpenUpdates,
+                            onNavigateBack = {
+                                settingsOpenUpdates = false
+                                destination = AppDestination.Files
+                            },
                             onOpenBackupSettings = { destination = AppDestination.BackupSettings },
                         )
                     AppDestination.Security ->

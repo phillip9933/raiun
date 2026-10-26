@@ -17,6 +17,7 @@ import eu.opencloud.android.next.core.model.ResourceKind
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.RemoteDiscoveryClient
 import eu.opencloud.android.next.core.network.toOpenCloudError
+import eu.opencloud.android.next.core.security.AccountSessions
 import eu.opencloud.android.next.core.security.TlsPolicy
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -91,6 +92,7 @@ class OfflineTraversalWorker(
                 val traversal =
                     OfflineTraversal(queue, store, { resource ->
                         val account = requireNotNull(store.account(resource.accountId))
+                        val accountLease = AccountSessions.get(applicationContext).beginLease(account.id)
                         val space = requireNotNull(store.space(resource.accountId, resource.spaceId))
                         val client = TlsPolicy(applicationContext).applyTo(OkHttpClient(), account.serverUrl)
                         refreshFolder(
@@ -102,6 +104,8 @@ class OfflineTraversalWorker(
                                 resource.remoteId,
                                 resource.path,
                                 WorkerAuthorizationProvider(applicationContext).authorization(account),
+                                applicationContext.cacheDir,
+                                accountLease,
                             ),
                         )
                         schedulePendingExcludedCache(applicationContext)

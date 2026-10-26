@@ -8,7 +8,7 @@ class SnapshotToken internal constructor(
     internal val scopeGeneration: String? = null,
 )
 
-internal data class FolderSnapshotScope(
+data class FolderSnapshotScope(
     val spaceId: String,
     val parentId: String?,
 )

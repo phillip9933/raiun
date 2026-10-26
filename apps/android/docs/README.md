@@ -1,17 +1,18 @@
 # Android documentation index
 
-Start with [README](../README.md) for installation and current beta limits, and [Contributing](../CONTRIBUTING.md) for setup and change expectations.
+Start with [README](../README.md) for installation and current limitations, and [Contributing](../CONTRIBUTING.md) for setup and change expectations.
 
 | Document | Purpose |
 | --- | --- |
 | [Product backlog](../../../docs/PRODUCT-BACKLOG.md) | Queued Android and shared product improvements |
 | [Testing](TESTING.md) | Quality commands, device requirements and validation limits |
 | [Linux development](LINUX-DEVELOPMENT.md) | Installed local toolchain, commands and validation evidence |
-| [Encrypted vault plan](ENCRYPTED-VAULTS-PLAN.md) | Web-compatible encryption, biometric key access and phased delivery |
+| [Encrypted vault guide](ENCRYPTED-VAULTS-PLAN.md) | Android 1.0.0 encrypted-vault features, boundaries and interoperability |
 | [Scanner SDK](OFFLINE-SCANNER-SDK.md) | Pinned dependency setup and host ownership |
 | [Screenshot testing](SCREENSHOT_TESTING.md) | Golden ownership and review |
 | [Release procedure](RELEASING.md) | Packaging, signing continuity and release checks |
-| [Release notes](RELEASE-NOTES-0.9.3.md) | Current beta changes, limits and feedback |
+| [Android 1.1.0 release notes](RELEASE-NOTES-1.1.0.md) | Android 1.1.0 changes and update guidance |
+| [Release notes](RELEASE-NOTES-0.9.3.md) | Historical 0.9.3 beta changes, limits and feedback |
 | [Changelog](../CHANGELOG.md) | Version history |
 | [Encrypted security review](ENCRYPTED-SECURITY-REVIEW.md) | Encryption compatibility, local key handling and explicit plaintext handoff boundaries |
 | [Security](../../../SECURITY.md) and [Privacy](../PRIVACY.md) | Reporting and data-handling boundaries |

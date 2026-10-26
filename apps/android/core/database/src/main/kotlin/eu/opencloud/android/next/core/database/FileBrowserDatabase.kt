@@ -628,6 +628,17 @@ interface ResourceDao {
     ): List<ResourceEntity>
 
     @Query(
+        "SELECT * FROM resources WHERE accountId = :accountId AND spaceId = :spaceId " +
+            "AND parentId IS :parentId AND remoteId > :afterId ORDER BY remoteId LIMIT 128",
+    )
+    suspend fun childrenAfterId(
+        accountId: String,
+        spaceId: String,
+        parentId: String?,
+        afterId: String,
+    ): List<ResourceEntity>
+
+    @Query(
         "SELECT COUNT(*) FROM resources WHERE accountId = :accountId AND spaceId = :spaceId AND parentId IS :parentId",
     )
     suspend fun countChildren(
@@ -744,6 +755,16 @@ private val PENDING_TRANSFER_STATES = setOf("QUEUED", "RUNNING", "RETRY")
 
 @Dao
 interface TransferDao {
+    @Query(
+        "UPDATE transfers SET state = 'CANCELLED', error = NULL, errorCode = NULL, " +
+            "notBeforeEpochMillis = 0, attemptCount = 0, updatedAtEpochMillis = :now " +
+            "WHERE accountId = :accountId AND direction = 'UPLOAD' AND state = 'CONFLICT'",
+    )
+    suspend fun cancelUploadConflicts(
+        accountId: String,
+        now: Long,
+    ): Int
+
     @Query(
         "UPDATE transfers SET state = 'CANCELLED', error = NULL, errorCode = NULL " +
             "WHERE accountId = :accountId AND spaceId = :spaceId AND state IN ('QUEUED', 'RUNNING', 'RETRY') " +
@@ -1293,6 +1314,11 @@ class FileBrowserStore(
 
     suspend fun cancelTransfer(id: String) = transfers.cancel(id)
 
+    suspend fun cancelUploadConflicts(
+        accountId: String,
+        now: Long,
+    ): Int = transfers.cancelUploadConflicts(accountId, now)
+
     suspend fun activeAccounts(): List<AccountEntity> = database.accountDao().findActive()
 
     suspend fun setFavorite(
@@ -1625,7 +1651,15 @@ class FileBrowserStore(
         snapshot: List<SpaceEntity>,
         token: SnapshotToken? = null,
         excludedVaultIds: Set<String> = emptySet(),
-    ): Boolean = RemoteSnapshotStore(database).replaceRemoteSpaces(accountId, snapshot, token, excludedVaultIds)
+        publicationGuard: () -> Unit = {},
+    ): Boolean =
+        RemoteSnapshotStore(database).replaceRemoteSpaces(
+            accountId,
+            snapshot,
+            token,
+            excludedVaultIds,
+            publicationGuard,
+        )
 
     suspend fun replaceFolderSnapshot(
         accountId: String,
@@ -1648,6 +1682,21 @@ class FileBrowserStore(
             parentId,
             discovered,
             token,
+        )
+
+    suspend fun replaceStagedFolderSnapshot(
+        accountId: String,
+        scope: FolderSnapshotScope,
+        source: FolderSnapshotReader,
+        token: SnapshotToken? = null,
+        publicationGuard: () -> Unit = {},
+    ): Boolean =
+        RemoteSnapshotStore(database).replaceStagedFolderSnapshot(
+            accountId,
+            scope,
+            source,
+            token,
+            publicationGuard,
         )
 
     @Suppress("UNUSED_PARAMETER", "UnusedParameter") // Unsafe local-only operation is contained pending server support.

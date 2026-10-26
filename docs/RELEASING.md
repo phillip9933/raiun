@@ -1,10 +1,10 @@
 # Raiun coordinated releases
 
-Each app has an independent version, build and acceptance gate. The coordinated launch is Android 1.0.0 and Linux Desktop 0.7.0-beta.1. Desktop has been imported with its Git history under `apps/desktop`. Signing and publication remain explicit maintainer actions.
+Each app has an independent version, build and acceptance gate. The first coordinated launch paired Android 1.0.0 with Linux Desktop 0.7.0-beta.1; Android 1.1.0 is an independent follow-up. Desktop has been imported with its Git history under `apps/desktop`. Signing and publication remain explicit maintainer actions.
 
 ## Versions and tags
 
-Android version name/code remain in `apps/android/app/build.gradle.kts`. Set the final 1.0 version at release freeze and increase its code above every previously distributed build. Preserve `app.raiun.cloud` and the original certificate for compatible updates.
+Android version name/code remain in `apps/android/app/build.gradle.kts`. Set the final version at release freeze and increase its code above every previously distributed build. Preserve `app.raiun.cloud` and the original certificate for compatible updates.
 
 Desktop retains its own authoritative package versions and platform identities after import. Verify Cargo, UI and package versions together using its actual packaging procedure.
 
@@ -19,7 +19,7 @@ Tags may point to the same validated commit for a coordinated launch. Separate r
 
 ## Release checks
 
-1. Freeze a revision after desktop import. Review each changelog, limitations, privacy notice and notices. Write short, plain-language release notes and describe supported platforms honestly.
+1. Freeze the intended platform release revision. Review each changelog, limitations, privacy notice and notices. Write short, plain-language release notes and describe supported platforms honestly.
 2. Run Android's [quality and API 26/API 35 emulator gates](../apps/android/docs/TESTING.md) and [packaging/signing checks](../apps/android/docs/RELEASING.md) on that exact source. Owner device/server acceptance remains required. Historical checks on the old layout are not migration results.
 3. Run the relevant desktop source gates, Linux packaging and focused exact-package isolated checks on the candidate. Reuse unchanged validated safety evidence and disclose the beta's unverified workflows; whole-category certification is not required for this beta. Desktop CI is `.github/workflows/desktop-ci.yml`; only Linux x86_64 is shipped in this beta.
 4. Build and verify exact distributables. CI produces Android debug and unsigned release APKs; production signing remains local with the original identity. Keep credentials outside source and CI logs. Source relocation never authorizes a new identity.

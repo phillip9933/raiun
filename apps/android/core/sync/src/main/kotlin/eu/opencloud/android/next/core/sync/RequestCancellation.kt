@@ -29,7 +29,7 @@ internal suspend fun <T> withRequestCancellation(
                     if (isOwned == null) awaitCancellation()
                     while (true) {
                         delay(250)
-                        if (isOwned != null && !isOwned()) {
+                        if (!isOwned()) {
                             scope.cancel(CancellationException("Work ownership revoked"))
                         }
                     }

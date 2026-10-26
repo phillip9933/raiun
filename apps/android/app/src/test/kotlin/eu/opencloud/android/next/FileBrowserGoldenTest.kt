@@ -395,6 +395,14 @@ class FileBrowserGoldenTest {
             composeRule.onNodeWithText("Version 0.1.0").fetchSemanticsNode()
         }
 
+    @Test fun drawerVersionOpensAppUpdates() {
+        var opens = 0
+        render(browserState(), onOpenAppUpdates = { opens++ })
+        composeRule.onNodeWithContentDescription("Open navigation drawer").performClick()
+        composeRule.onNodeWithText("Version 0.1.0").performClick()
+        assertEquals(1, opens)
+    }
+
     @Test fun customizedDockKeepsUnpinnedDestinationsReachable() {
         var openedTransfers = false
         render(
@@ -617,6 +625,7 @@ class FileBrowserGoldenTest {
         onRemoveLocalSelection: () -> Unit = {},
         onScan: () -> Unit = {},
         onOpenEncryptedOffline: () -> Unit = {},
+        onOpenAppUpdates: () -> Unit = {},
         pinnedNavigationItems: List<eu.opencloud.android.next.core.datastore.NavigationItem> =
             eu.opencloud.android.next.core.datastore.DEFAULT_PINNED_NAVIGATION_ITEMS,
     ) {
@@ -656,6 +665,7 @@ class FileBrowserGoldenTest {
                     onOpenTransfers = onOpenTransfers,
                     onOpenDeletedFiles = {},
                     onOpenSettings = {},
+                    onOpenAppUpdates = onOpenAppUpdates,
                     onOpenAccount = onOpenAccount,
                     onOpenEncryptedOffline = onOpenEncryptedOffline,
                     onShareResource = {},

@@ -150,6 +150,7 @@
   "dev.offlinescan:scanner-export": "0.7.0",
   "dev.offlinescan:scanner-processing-opencv": "0.7.0",
   "dev.offlinescan:scanner-ui-compose": "0.7.0",
+  "io.github.phillip9933:android-updater": "0.2.0",
   "net.java.dev.jna:jna": "5.17.0",
   "org.bouncycastle:bcprov-jdk18on": "1.85.2",
   "org.jetbrains.kotlin:kotlin-android-extensions-runtime": "1.9.22",

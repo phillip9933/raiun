@@ -20,8 +20,7 @@ class SharedFolderLocation private constructor(
     val name get() = share.name
     val access get() = server.access
     val hidden: Boolean get() =
-        kotlinx.serialization.json
-            .Json { ignoreUnknownKeys = true }
+        metadataJson
             .decodeFromString<eu.opencloud.android.next.core.network.IncomingSharedItem>(share.metadataJson)
             .hidden
 
@@ -31,6 +30,8 @@ class SharedFolderLocation private constructor(
     }
 
     companion object {
+        private val metadataJson = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+
         internal fun from(checked: CheckedShareAccess): SharedFolderLocation {
             val resolved =
                 checked.resolution as? SharedFolderResolution.Resolved

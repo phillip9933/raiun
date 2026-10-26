@@ -1,5 +1,6 @@
 name: Bug report
 description: Report a reproducible problem in a Raiun app.
+labels: ["type:bug"]
 body:
   - type: markdown
     attributes:
@@ -33,3 +34,21 @@ body:
     id: evidence
     attributes:
       label: Redacted screenshots or additional context
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and exclusions
+      description: What is affected, and what is outside this report?
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Done when
+      description: Observable acceptance criteria; maintainers may refine these during triage.
+      placeholder: "- [ ] The reported behavior is corrected without losing existing data."
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Related issues or prerequisites; write None if unknown.

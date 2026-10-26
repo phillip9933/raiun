@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.0
+
+- Add automatic Android update checks, stable/beta channels and an App updates page in Settings. Optional unmetered-Wi-Fi downloads use updater 0.2.0's stricter release validation and open Android's installer for confirmation.
+- Cancel all conflicting uploads for the current account from the conflict popup or Transfers, without deleting files or stopping other transfers.
+- Improve encrypted upload recovery when the server takes time to show a completed file, verifying uncertain uploads before marking them complete or retrying.
+- Refresh large ordinary folders through temporary encrypted storage and publish the complete listing in batches, keeping the previous listing if refresh fails.
+- Clean up failed sign-in credentials, prevent stale discovery after account access is revoked, and verify dependency checksums during builds.
+
 ## 1.0.0 — 2026-10-21
 
 - Move the Android project into `apps/android` while preserving app identity and existing data compatibility.

@@ -16,8 +16,10 @@ import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import okio.Buffer
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -42,6 +44,10 @@ class VaultUploadExecutionTest {
     private var puts = 0
     private var revoked = false
     private var revokeOnPut = false
+    private var hiddenDestinationListings = 0
+    private var missingParentListings = 0
+    private var noETagListings = 0
+    private var rejectExistingOnPut = false
 
     @Before fun prepare() {
         server.start()
@@ -82,6 +88,7 @@ class VaultUploadExecutionTest {
                         puts++
                         if (revokeOnPut) revoked = true
                         assertEquals("*", request.getHeader("If-None-Match"))
+                        if (rejectExistingOnPut && remote != null) return MockResponse().setResponseCode(412)
                         remote = request.body.readByteArray()
                         return MockResponse().setResponseCode(201)
                     }
@@ -111,6 +118,14 @@ class VaultUploadExecutionTest {
                                 entry("/dav/files/", "root", "files", true) +
                                     entry("/dav/files/public.vault/", "vault-id", "public.vault", true)
                             } else {
+                                if (remote != null && missingParentListings > 0) {
+                                    missingParentListings--
+                                    return MockResponse().setResponseCode(404)
+                                }
+                                val hidden = remote != null && hiddenDestinationListings > 0
+                                if (hidden) hiddenDestinationListings--
+                                val noETag = remote != null && noETagListings > 0
+                                if (noETag) noETagListings--
                                 entry(
                                     "/dav/files/public.vault/",
                                     "vault-id",
@@ -118,12 +133,16 @@ class VaultUploadExecutionTest {
                                     true,
                                     "<ocrclone:integrity-id>$token</ocrclone:integrity-id>",
                                 ) +
-                                    if (remote ==
-                                        null
-                                    ) {
+                                    if (remote == null || hidden) {
                                         ""
                                     } else {
-                                        entry("/dav/files/public.vault/enc-name", "file-id", "enc-name", false)
+                                        entry(
+                                            "/dav/files/public.vault/enc-name",
+                                            "file-id",
+                                            "enc-name",
+                                            false,
+                                            includeETag = !noETag,
+                                        )
                                     }
                             }
                         return MockResponse().setResponseCode(207).setBody(
@@ -159,6 +178,78 @@ class VaultUploadExecutionTest {
             repository.executePreparedUpload(job, payloads, { true }, true, {}, {})
             assertEquals(0, puts)
         }
+
+    @Test fun missingDestinationAfterPutWaitsForVisibilityThenVerifiesWithoutReplay() =
+        runBlocking {
+            val job = job()
+            hiddenDestinationListings = 3
+            val pending =
+                assertThrows(OpenCloudException::class.java) {
+                    runBlocking { repository.executePreparedUpload(job, payloads, { true }, false, {}, {}) }
+                }
+            assertTrue(pending.error is OpenCloudError.NotReady)
+            assertEquals(1, puts)
+
+            assertEquals("\"tag-file-id\"", repository.executePreparedUpload(job, payloads, { true }, true, {}, {}))
+            assertEquals(1, puts)
+        }
+
+    @Test fun missingParentAfterPutWaitsForServerProcessing() =
+        runBlocking {
+            val job = job()
+            missingParentListings = 2
+            val pending =
+                assertThrows(OpenCloudException::class.java) {
+                    runBlocking { repository.executePreparedUpload(job, payloads, { true }, false, {}, {}) }
+                }
+            assertTrue(pending.error is OpenCloudError.NotReady)
+            val stillPending =
+                assertThrows(OpenCloudException::class.java) {
+                    runBlocking { repository.executePreparedUpload(job, payloads, { true }, true, {}, {}) }
+                }
+            assertTrue(stillPending.error is OpenCloudError.NotReady)
+            assertEquals(1, puts)
+            assertEquals("\"tag-file-id\"", repository.executePreparedUpload(job, payloads, { true }, true, {}, {}))
+            assertEquals(1, puts)
+        }
+
+    @Test fun missingETagAfterPutWaitsForStrongVersion() =
+        runBlocking {
+            val job = job()
+            noETagListings = 3
+            val pending =
+                assertThrows(OpenCloudException::class.java) {
+                    runBlocking { repository.executePreparedUpload(job, payloads, { true }, false, {}, {}) }
+                }
+            assertTrue(pending.error is OpenCloudError.NotReady)
+            assertEquals("\"tag-file-id\"", repository.executePreparedUpload(job, payloads, { true }, true, {}, {}))
+            assertEquals(1, puts)
+        }
+
+    @Test fun conditionalRetryCollisionAcceptsOnlyIdenticalCommittedCiphertext() =
+        runBlocking {
+            val job = job()
+            remote = bytes.copyOf()
+            hiddenDestinationListings = 3
+            rejectExistingOnPut = true
+            assertEquals("\"tag-file-id\"", repository.executePreparedUpload(job, payloads, { true }, true, {}, {}))
+            assertEquals(1, puts)
+        }
+
+    @Test fun conditionalRetryCollisionNeverAcceptsDifferentCiphertext() {
+        val job = job()
+        val other = ByteArray(bytes.size) { 42 }
+        remote = other.copyOf()
+        hiddenDestinationListings = 3
+        rejectExistingOnPut = true
+        val failure =
+            assertThrows(OpenCloudException::class.java) {
+                runBlocking { repository.executePreparedUpload(job, payloads, { true }, true, {}, {}) }
+            }
+        assertEquals(OpenCloudError.Conflict, failure.error)
+        assertEquals(1, puts)
+        assertArrayEquals(other, remote)
+    }
 
     @Test fun changedEncryptionProofFailsBeforeAnyMutation() {
         val job = job()
@@ -271,12 +362,14 @@ class VaultUploadExecutionTest {
                 it.write(bytes)
             }.also { check(payloads.finishPrepared(it.id) { true }) }
 
+    @Suppress("LongParameterList") // DAV fixture needs explicit identity, type, proof, and version fields.
     private fun entry(
         path: String,
         id: String,
         name: String,
         folder: Boolean,
         proof: String = "",
+        includeETag: Boolean = true,
     ): String =
-        """<d:response><d:href>$path</d:href><d:propstat><d:prop><d:resourcetype>${if (folder) "<d:collection/>" else ""}</d:resourcetype><d:getcontentlength>${if (folder) 0 else bytes.size}</d:getcontentlength><d:getetag>"tag-$id"</d:getetag><oc:fileid>$id</oc:fileid><oc:name>$name</oc:name>$proof</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"""
+        """<d:response><d:href>$path</d:href><d:propstat><d:prop><d:resourcetype>${if (folder) "<d:collection/>" else ""}</d:resourcetype><d:getcontentlength>${if (folder) 0 else bytes.size}</d:getcontentlength>${if (includeETag) "<d:getetag>\"tag-$id\"</d:getetag>" else ""}<oc:fileid>$id</oc:fileid><oc:name>$name</oc:name>$proof</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"""
 }

@@ -1,0 +1,5 @@
+<resources>
+    <string name="transfers_cancel_conflicts_action">Cancelar todos os envios em conflito</string>
+    <string name="transfers_cancel_conflicts_title">Cancelar os envios em conflito?</string>
+    <string name="transfers_cancel_conflicts_confirmation">Cancelar %1$d envios em conflito desta conta? Os ficheiros locais e na nuvem não serão eliminados. As outras transferências continuarão.</string>
+</resources>

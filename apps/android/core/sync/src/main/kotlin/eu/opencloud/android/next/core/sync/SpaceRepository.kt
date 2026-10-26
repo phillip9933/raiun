@@ -36,7 +36,9 @@ class SpaceRepository(
         serverUrl: String,
         authorization: String,
         includeAllSpaces: Boolean = false,
+        publicationGuard: () -> Unit = {},
     ): List<SpaceEntity> {
+        publicationGuard()
         val token = store.beginSnapshot(accountId)
         val discovery =
             requireNotNull(remote) { "The Libre Graph Spaces client is unavailable." }
@@ -65,7 +67,14 @@ class SpaceRepository(
                     quotaState = space.quotaState,
                 )
             }.also {
-                if (!store.replaceRemoteSpaces(accountId, it, token, discovery.excludedVaultIds)) {
+                if (!store.replaceRemoteSpaces(
+                        accountId,
+                        it,
+                        token,
+                        discovery.excludedVaultIds,
+                        publicationGuard,
+                    )
+                ) {
                     throw SupersededDiscovery()
                 }
             }

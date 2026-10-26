@@ -42,6 +42,9 @@ class MainActivity : AppCompatActivity() {
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION_REQUEST)
         }
+        eu.opencloud.android.next.feature.settings.RaiunUpdates
+            .get(this)
+            .initialize()
         acceptLaunchIntent(intent)
 
         setContent {
@@ -86,6 +89,8 @@ class MainActivity : AppCompatActivity() {
                         folderShortcut = folderShortcut,
                         onConsumeFolderShortcut = { folderShortcut = null },
                     )
+                    eu.opencloud.android.next.feature.settings
+                        .AppUpdateNotice()
                 }
             }
         }

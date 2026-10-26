@@ -127,6 +127,7 @@ fun SettingsRoute(
     onNavigateBack: () -> Unit,
     onOpenBackupSettings: () -> Unit,
     modifier: Modifier = Modifier,
+    openUpdatesInitially: Boolean = false,
     viewModel: SettingsViewModel = viewModel(),
     accountId: String? = null,
 ) {
@@ -138,6 +139,7 @@ fun SettingsRoute(
         onOpenBackupSettings,
         viewModel::setRetention,
         modifier,
+        openUpdatesInitially = openUpdatesInitially,
         diagnostics =
             SettingsDiagnostics(
                 diagnostics,
@@ -172,6 +174,7 @@ fun SettingsScreen(
     onOpenBackupSettings: () -> Unit,
     onSetRetention: (Int) -> Unit,
     modifier: Modifier = Modifier,
+    openUpdatesInitially: Boolean = false,
     diagnostics: SettingsDiagnostics = SettingsDiagnostics(),
     onSetAppearance: (Appearance) -> Unit = {},
     onFileDisplay: (eu.opencloud.android.next.core.datastore.FileDisplayOptions) -> Unit = {},
@@ -186,8 +189,10 @@ fun SettingsScreen(
     var openingFiles by rememberSaveable { mutableStateOf(false) }
     var temporaryFilesOpen by rememberSaveable { mutableStateOf(false) }
     var encryptedPreferencesOpen by rememberSaveable { mutableStateOf(false) }
+    var updatesOpen by rememberSaveable(openUpdatesInitially) { mutableStateOf(openUpdatesInitially) }
     var permissionsOpen by rememberSaveable { mutableStateOf(false) }
-    BackHandler {
+    BackHandler(enabled = updatesOpen) { updatesOpen = false }
+    BackHandler(enabled = !updatesOpen) {
         when {
             openingFiles -> openingFiles = false
             appearanceOpen -> appearanceOpen = false
@@ -199,6 +204,7 @@ fun SettingsScreen(
     }
     Box(modifier = modifier.fillMaxSize()) {
         when {
+            updatesOpen -> AppUpdatesRoute(onNavigateBack = { updatesOpen = false })
             openingFiles -> OpeningFilesScreen(state.fileOpening, onFileOpening) { openingFiles = false }
             appearanceOpen ->
                 AppearanceSettingsScreen(
@@ -251,22 +257,28 @@ fun SettingsScreen(
                             { permissionsOpen = true },
                             { temporaryFilesOpen = true },
                             { openingFiles = true },
+                            { updatesOpen = true },
                         )
                     }
                 }
-                diagnostics.text?.let { text ->
-                    AlertDialog(
-                        onDismissRequest = diagnostics.onDismiss,
-                        title = { Text(stringResource(R.string.settings_title)) },
-                        text = { Text(text, modifier = Modifier.verticalScroll(rememberScrollState())) },
-                        confirmButton = {
-                            TextButton(
-                                onClick = diagnostics.onDismiss,
-                            ) { Text(stringResource(R.string.settings_close)) }
-                        },
-                    )
-                }
+                SettingsDiagnosticsDialog(diagnostics)
             }
         }
+    }
+}
+
+@Composable
+private fun SettingsDiagnosticsDialog(diagnostics: SettingsDiagnostics) {
+    diagnostics.text?.let { text ->
+        AlertDialog(
+            onDismissRequest = diagnostics.onDismiss,
+            title = { Text(stringResource(R.string.settings_title)) },
+            text = { Text(text, modifier = Modifier.verticalScroll(rememberScrollState())) },
+            confirmButton = {
+                TextButton(
+                    onClick = diagnostics.onDismiss,
+                ) { Text(stringResource(R.string.settings_close)) }
+            },
+        )
     }
 }
