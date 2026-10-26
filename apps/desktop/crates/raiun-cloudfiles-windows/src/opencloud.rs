@@ -1150,6 +1150,42 @@ impl OpenCloudPlaceholderBackend {
         }
     }
 
+    /// Current exact-route capability only; it does not grant a caller native
+    /// mutation authority or change any previously published file attributes.
+    #[cfg(windows)]
+    pub fn vault_existing_file_saves_active(
+        &self,
+        expected_root: crate::ConfiguredRootIdentity,
+        space: &str,
+        root_id: &str,
+        root_path: &str,
+    ) -> Result<bool, BackendError> {
+        let _lease = self
+            .lease_gate
+            .read()
+            .map_err(|_| BackendError::Unavailable)?;
+        self.ensure_active()?;
+        if self.local_root_identity != Some(expected_root) {
+            return Err(BackendError::Unavailable);
+        }
+        let Some(route) = self
+            .vault_routes
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?
+            .exact_root(space, root_path, root_id)?
+        else {
+            return Ok(false);
+        };
+        if route.local_root() != expected_root {
+            return Err(BackendError::Unavailable);
+        }
+        route
+            .backend()
+            .binding()
+            .with_publication(|| Ok(route.backend().existing_file_saves_active()))
+            .map_err(|_| BackendError::Unavailable)
+    }
+
     pub fn scope(&self) -> &ProviderScope {
         &self.scope
     }

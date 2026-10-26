@@ -86,7 +86,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
@@ -416,7 +416,9 @@ struct ProviderManager {
     recovery_cursor_nonce: Option<[u8; 32]>,
     offline_jobs: Arc<windows_offline_jobs::OfflineJobs>,
     worker: Mutex<Option<JoinHandle<()>>>,
-    fresh_close_source: Mutex<Option<windows_vault_close_worker::VaultClosePublisherSource>>,
+    fresh_close_source: Mutex<Option<FreshClosePublication>>,
+    existing_save_owner: Mutex<Weak<WindowsAgent>>,
+    existing_save_admission: AtomicBool,
     folder_generation: Arc<AtomicU64>,
     folder_revocation: Arc<Mutex<Option<raiun_engine::SyncRevocationHandle>>>,
     folder_error: Arc<Mutex<Option<String>>>,
@@ -438,6 +440,73 @@ struct ActiveProviderBinding {
     identity: raiun_cloudfiles_windows::ConfiguredRootIdentity,
     personal_space_id: String,
     personal_root_resource_id: String,
+}
+
+// Immutable source admission metadata; not a restored publication capability.
+struct FreshClosePublication {
+    source: windows_vault_close_worker::VaultClosePublisherSource,
+    binding: Option<ActiveProviderBinding>,
+    original_active: Option<Arc<AtomicBool>>,
+}
+impl FreshClosePublication {
+    #[cfg(all(test, debug_assertions))]
+    fn private(source: windows_vault_close_worker::VaultClosePublisherSource) -> Self {
+        Self {
+            source,
+            binding: None,
+            original_active: None,
+        }
+    }
+    fn cancel(&self) {
+        self.source.cancel();
+    }
+    fn publisher(
+        &self,
+        generation: u64,
+    ) -> Option<windows_vault_close_worker::VaultClosePublisher> {
+        if self
+            .binding
+            .as_ref()
+            .is_some_and(|binding| binding.generation != generation)
+        {
+            return None;
+        }
+        self.source.publisher(generation)
+    }
+    fn marker(&self, binding: &ActiveProviderBinding) -> Option<Arc<AtomicBool>> {
+        if self.binding.as_ref() != Some(binding) {
+            return None;
+        }
+        let active = self.source.existing_file_save_marker(binding.generation)?;
+        self.original_active
+            .as_ref()
+            .filter(|original| Arc::ptr_eq(original, &active))?;
+        Some(active)
+    }
+}
+
+// The atomic gate is finite admission serialization, never a mutex held through
+// a worker join or native command. Failure cancels only this exact source.
+struct ExistingSaveWorkerAdmission {
+    owner: Arc<WindowsAgent>,
+    binding: ActiveProviderBinding,
+    original_active: Option<Arc<AtomicBool>>,
+    connection_current: bool,
+    committed: bool,
+}
+impl Drop for ExistingSaveWorkerAdmission {
+    fn drop(&mut self) {
+        if !self.committed
+            && let Some(active) = self.original_active.as_ref()
+        {
+            self.owner
+                .abort_existing_file_save_admission(&self.binding, active);
+        }
+        self.owner
+            .provider
+            .existing_save_admission
+            .store(false, Ordering::Release);
+    }
 }
 
 // Pure admission check used before any native parent-population operation.
@@ -1442,6 +1511,8 @@ impl ProviderManager {
             },
             worker: Mutex::new(Some(worker)),
             fresh_close_source: Mutex::new(None),
+            existing_save_owner: Mutex::new(Weak::new()),
+            existing_save_admission: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions))]
             lifecycle_test_activation: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions))]
@@ -1702,6 +1773,119 @@ impl ProviderManager {
         result
             .recv()
             .map_err(|_| "Windows Cloud Files connection manager stopped unexpectedly")?
+    }
+
+    fn existing_vault_save_worker_marker(
+        &self,
+        binding: &ActiveProviderBinding,
+    ) -> Result<Option<Arc<AtomicBool>>, String> {
+        if !self.connection_matches(binding.clone())? {
+            return Ok(None);
+        }
+        let marker = self
+            .fresh_close_source
+            .lock()
+            .map_err(|_| "Existing-file save admission unavailable")?
+            .as_ref()
+            .and_then(|source| source.marker(binding));
+        if self.authorized_generation.load(Ordering::Acquire) != binding.generation
+            || !self.connection_matches(binding.clone())?
+        {
+            return Ok(None);
+        }
+        Ok(marker.filter(|active| active.load(Ordering::Acquire)))
+    }
+
+    fn prepare_existing_file_save_worker(
+        self: &Arc<Self>,
+        binding: &ActiveProviderBinding,
+        state: &Arc<Mutex<AccountState>>,
+        store: &Arc<dyn SessionStore>,
+        connection_current: bool,
+    ) -> Result<Option<ExistingSaveWorkerAdmission>, String> {
+        let owner = self
+            .existing_save_owner
+            .lock()
+            .map_err(|_| "Existing-file save owner unavailable")?
+            .upgrade();
+        let Some(owner) = owner else {
+            return Ok(None);
+        };
+        if !Arc::ptr_eq(&owner.provider, self)
+            || !Arc::ptr_eq(&owner.state, state)
+            || !Arc::ptr_eq(&owner.session_store, store)
+        {
+            return Err("Existing-file save owner does not match this drive".into());
+        }
+        self.existing_save_admission
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "Existing-file save admission is already in progress")?;
+        let mut admission = ExistingSaveWorkerAdmission {
+            owner: Arc::clone(&owner),
+            binding: binding.clone(),
+            original_active: None,
+            connection_current: false,
+            committed: false,
+        };
+        let existing = self
+            .fresh_close_source
+            .lock()
+            .map_err(|_| "Existing-file save admission unavailable")?
+            .as_ref()
+            .and_then(|source| source.marker(binding));
+        admission.original_active = existing.clone();
+        owner.check_existing_file_save_account(binding)?;
+        if connection_current && let Some(active) = existing {
+            admission.original_active = Some(active);
+            admission.connection_current = true;
+            return Ok(Some(admission));
+        }
+        // Cancel first, take ownership, then join with no source/worker/auth/
+        // provider mutex held. The consumer keeps its ORIGINAL active Arc.
+        owner.stop_fresh_close_worker()?;
+        admission.original_active = None;
+        if self.connected.load(Ordering::Acquire) {
+            // Any retained old native connection must drain before a fresh
+            // source is installed; an exact-binding mismatch is not absence.
+            self.disconnect()?;
+        }
+        owner.check_existing_file_save_account(binding)?;
+        let worker = windows_vault_close_worker::FreshCloseWorker::start_for_existing_file_saves(
+            Arc::downgrade(&owner),
+            Arc::clone(&self.authorized_generation),
+            binding.generation,
+        )?;
+        let source = worker.source();
+        let active = source
+            .existing_file_save_marker(binding.generation)
+            .ok_or("Existing-file save worker changed during admission")?;
+        owner.check_existing_file_save_account(binding)?;
+        {
+            let mut slot = owner
+                .fresh_close_worker
+                .lock()
+                .map_err(|_| "Existing-file save worker unavailable")?;
+            let mut publication = self
+                .fresh_close_source
+                .lock()
+                .map_err(|_| "Existing-file save source unavailable")?;
+            if slot.is_some()
+                || publication.is_some()
+                || self.connected.load(Ordering::Acquire)
+                || self.authorized_generation.load(Ordering::Acquire) != binding.generation
+                || !active.load(Ordering::Acquire)
+            {
+                return Err("The drive changed during existing-file save admission".into());
+            }
+            *publication = Some(FreshClosePublication {
+                source,
+                binding: Some(binding.clone()),
+                original_active: Some(Arc::clone(&active)),
+            });
+            *slot = Some(worker);
+        }
+        admission.original_active = Some(active);
+        Ok(Some(admission))
     }
 
     fn cancel_fresh_close(&self) {
@@ -2066,6 +2250,106 @@ fn valid_runtime_profile(profile: &str) -> bool {
 }
 
 impl WindowsAgent {
+    fn attach_existing_file_save_owner(self: &Arc<Self>) -> Result<(), String> {
+        let mut owner = self
+            .provider
+            .existing_save_owner
+            .lock()
+            .map_err(|_| "Existing-file save owner unavailable")?;
+        if let Some(current) = owner.upgrade()
+            && !Arc::ptr_eq(&current, self)
+        {
+            return Err("A different existing-file save owner is attached".into());
+        }
+        *owner = Arc::downgrade(self);
+        Ok(())
+    }
+
+    fn check_existing_file_save_account(
+        &self,
+        binding: &ActiveProviderBinding,
+    ) -> Result<(), String> {
+        let state = self.state.lock().map_err(|_| "Account state unavailable")?;
+        let configuration = state
+            .root_configuration
+            .as_ref()
+            .ok_or("Choose a drive before enabling existing-file saves")?;
+        let session = state
+            .session
+            .as_ref()
+            .ok_or("Connect the account before enabling existing-file saves")?;
+        let owner = configuration
+            .registration_ownership
+            .as_ref()
+            .ok_or("The drive owner is unverified")?;
+        if !state.online_authenticated
+            || state.authenticating
+            || state.refreshing
+            || state.logout_pending
+            || state.needs_refresh
+            || state.session_cleanup_uncertain
+            || binding.generation == 0
+            || self.generation.load(Ordering::Acquire) != binding.generation
+            || session.expires_at <= unix_time_now().saturating_add(30)
+            || state.active_generation != binding.generation
+            || self.provider.authorized_generation.load(Ordering::Acquire) != binding.generation
+            || !configuration.valid
+            || configuration.profile_scope != self.profile_scope
+            || configuration.server != session.server
+            || configuration.client_id != session.client_id
+            || Path::new(&configuration.path) != binding.path.as_path()
+            || configuration.volume_serial != binding.identity.volume_serial
+            || configuration.file_index != binding.identity.file_index
+            || owner.personal_drive_id != binding.personal_space_id
+            || owner.personal_root_resource_id.as_deref()
+                != Some(binding.personal_root_resource_id.as_str())
+        {
+            return Err("The account or root changed before existing-file save admission".into());
+        }
+        Ok(())
+    }
+
+    fn abort_existing_file_save_admission(
+        &self,
+        binding: &ActiveProviderBinding,
+        active: &Arc<AtomicBool>,
+    ) {
+        let worker = {
+            let mut slot = self
+                .fresh_close_worker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut source = self
+                .provider
+                .fresh_close_source
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let exact_source = source.as_ref().is_some_and(|source| {
+                source.binding.as_ref() == Some(binding)
+                    && source
+                        .original_active
+                        .as_ref()
+                        .is_some_and(|original| Arc::ptr_eq(original, active))
+            });
+            let cancelled_exact_worker = source.is_none()
+                && slot.as_ref().is_some_and(|worker| {
+                    worker.owns_existing_file_save_marker(binding.generation, active)
+                });
+            if exact_source || cancelled_exact_worker {
+                active.store(false, Ordering::Release);
+                if let Some(source) = source.take() {
+                    source.cancel();
+                }
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some(worker) = worker {
+            let _ = worker.stop();
+        }
+    }
+
     // Not present in normal production activation or IPC/configuration. Call
     // after authenticating the fixture's generation and before provider install.
     #[cfg(all(test, debug_assertions))]
@@ -2089,7 +2373,7 @@ impl WindowsAgent {
             Arc::downgrade(self),
             Arc::clone(&self.provider.authorized_generation),
         )?;
-        *source = Some(worker.source());
+        *source = Some(FreshClosePublication::private(worker.source()));
         *slot = Some(worker);
         Ok(())
     }
@@ -2120,7 +2404,7 @@ impl WindowsAgent {
                 Arc::downgrade(self),
                 Arc::clone(&self.provider.authorized_generation),
             )?;
-        *source = Some(worker.source());
+        *source = Some(FreshClosePublication::private(worker.source()));
         *slot = Some(worker);
         Ok(())
     }
@@ -3632,7 +3916,18 @@ impl WindowsAgent {
             personal_space_id: owner.personal_drive_id.clone(),
             personal_root_resource_id: personal_root_resource_id.clone(),
         };
-        if provider.connection_matches(binding)? {
+        let connection_current = provider.connection_matches(binding.clone())?;
+        let mut save_admission = provider.prepare_existing_file_save_worker(
+            &binding,
+            state_mutex,
+            session_store,
+            connection_current,
+        )?;
+        if connection_current
+            && save_admission
+                .as_ref()
+                .is_none_or(|admission| admission.connection_current)
+        {
             let state = state_mutex
                 .lock()
                 .map_err(|_| "Account state is unavailable")?;
@@ -3651,6 +3946,11 @@ impl WindowsAgent {
             }
             // The worker confirmed the exact active binding. Repeated hooks
             // must not overwrite its committed registration with pending.
+            drop(state);
+            if let Some(admission) = save_admission.as_mut() {
+                admission.owner.check_existing_file_save_account(&binding)?;
+                admission.committed = true;
+            }
             return Ok(());
         }
 
@@ -3860,6 +4160,10 @@ impl WindowsAgent {
         if let Err(error) = persist_result {
             let _ = provider.disconnect();
             return Err(error);
+        }
+        if let Some(admission) = save_admission.as_mut() {
+            admission.owner.check_existing_file_save_account(&binding)?;
+            admission.committed = true;
         }
         Ok(())
     }
@@ -5647,6 +5951,7 @@ fn serve(session_store: impl SessionStore + 'static) -> Result<(), String> {
 }
 
 fn serve_agent(agent: Arc<WindowsAgent>) -> Result<(), String> {
+    agent.attach_existing_file_save_owner()?;
     let stopping = Arc::new(AtomicBool::new(false));
     while !stopping.load(Ordering::Acquire) {
         // Do not classify bind errors as disconnected clients: claiming the
@@ -8645,6 +8950,159 @@ mod tests {
 
     #[cfg(all(windows, debug_assertions))]
     #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser/fresh child appdata; normal admitted worker and fresh writable publication complete two same-live in-place saves then Lock"]
+    fn native_broker_vault_normal_existing_file_two_saves_automatically_complete_and_lock() {
+        broker_remembered_lifecycle_fixture_with_modes(
+            true,
+            true,
+            true,
+            true,
+            false,
+            true,
+            WritableCleanupFixtureMode::NormalExisting,
+        );
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser/fresh child appdata; normal writable publication full clean read and same-connection reunlock/Lock without any edit"]
+    fn native_broker_vault_normal_clean_read_reunlock_and_lock_without_edits() {
+        broker_remembered_lifecycle_fixture_with_modes(
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            WritableCleanupFixtureMode::NormalCleanRead,
+        );
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    fn normal_existing_save_owner_is_weak_and_failed_admission_releases_gate() {
+        let agent = Arc::new(WindowsAgent::new(MemoryStore::default()));
+        let owners = Arc::strong_count(&agent);
+        agent.attach_existing_file_save_owner().unwrap();
+        agent.attach_existing_file_save_owner().unwrap();
+        assert_eq!(
+            Arc::strong_count(&agent),
+            owners,
+            "owner attachment cannot create a cycle"
+        );
+        let binding = ActiveProviderBinding {
+            generation: agent.generation.load(Ordering::Acquire),
+            path: PathBuf::from(r"C:\SyntheticRoot"),
+            identity: raiun_cloudfiles_windows::ConfiguredRootIdentity {
+                volume_serial: 9,
+                file_index: 42,
+            },
+            personal_space_id: "space".into(),
+            personal_root_resource_id: "root".into(),
+        };
+        assert!(
+            agent
+                .provider
+                .prepare_existing_file_save_worker(
+                    &binding,
+                    &agent.state,
+                    &agent.session_store,
+                    false
+                )
+                .is_err(),
+            "an unattested account cannot mint a save source"
+        );
+        assert!(
+            !agent
+                .provider
+                .existing_save_admission
+                .load(Ordering::Acquire)
+        );
+        assert!(agent.provider.fresh_close_source.lock().unwrap().is_none());
+        assert!(agent.fresh_close_worker.lock().unwrap().is_none());
+        // Busy admission must not release another caller's finite gate.
+        agent
+            .provider
+            .existing_save_admission
+            .store(true, Ordering::Release);
+        assert!(
+            agent
+                .provider
+                .prepare_existing_file_save_worker(
+                    &binding,
+                    &agent.state,
+                    &agent.session_store,
+                    false
+                )
+                .is_err()
+        );
+        assert!(
+            agent
+                .provider
+                .existing_save_admission
+                .load(Ordering::Acquire)
+        );
+        agent
+            .provider
+            .existing_save_admission
+            .store(false, Ordering::Release);
+        let weak = Arc::downgrade(&agent);
+        drop(agent);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    fn normal_existing_save_source_is_exact_binding_and_cancelled_identity_only() {
+        let agent = Arc::new(WindowsAgent::new(MemoryStore::default()));
+        let generation = agent.provider.authorized_generation.load(Ordering::Acquire);
+        let worker =
+            super::windows_vault_close_worker::FreshCloseWorker::start_for_existing_file_saves(
+                Arc::downgrade(&agent),
+                Arc::clone(&agent.provider.authorized_generation),
+                generation,
+            )
+            .unwrap();
+        let source = worker.source();
+        let active = source.existing_file_save_marker(generation).unwrap();
+        let binding = ActiveProviderBinding {
+            generation,
+            path: PathBuf::from(r"C:\SyntheticRoot"),
+            identity: raiun_cloudfiles_windows::ConfiguredRootIdentity {
+                volume_serial: 9,
+                file_index: 42,
+            },
+            personal_space_id: "space".into(),
+            personal_root_resource_id: "root".into(),
+        };
+        let publication = super::FreshClosePublication {
+            source,
+            binding: Some(binding.clone()),
+            original_active: Some(Arc::clone(&active)),
+        };
+        assert!(publication.marker(&binding).is_some());
+        let mut foreign = binding.clone();
+        foreign.identity.file_index += 1;
+        assert!(publication.marker(&foreign).is_none());
+        foreign = binding.clone();
+        foreign.path = PathBuf::from(r"C:\OtherRoot");
+        assert!(publication.marker(&foreign).is_none());
+        publication.cancel();
+        assert!(publication.marker(&binding).is_none());
+        assert!(!active.load(Ordering::Acquire));
+        assert!(worker.owns_existing_file_save_marker(generation, &active));
+        assert!(
+            !worker.owns_existing_file_save_marker(
+                generation,
+                &Arc::new(std::sync::atomic::AtomicBool::new(true))
+            ),
+            "a replacement active Arc cannot adopt the cancelled original"
+        );
+        worker.stop().unwrap();
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
     fn vault_readiness_binding_refuses_stale_missing_or_foreign_root() {
         use super::vault_worker_binding_current;
         let binding = ActiveProviderBinding {
@@ -8761,6 +9219,8 @@ mod tests {
         MissingReceipt,
         NormalCleanup,
         FreshNative,
+        NormalExisting,
+        NormalCleanRead,
     }
 
     #[cfg(all(windows, debug_assertions))]
@@ -8773,11 +9233,26 @@ mod tests {
         automatic: bool,
         writable_mode: WritableCleanupFixtureMode,
     ) {
-        let writable_bytes = !matches!(writable_mode, WritableCleanupFixtureMode::Disabled);
-        let fresh_native = matches!(writable_mode, WritableCleanupFixtureMode::FreshNative);
+        let normal_clean_read =
+            matches!(writable_mode, WritableCleanupFixtureMode::NormalCleanRead);
+        let writable_bytes = !matches!(
+            writable_mode,
+            WritableCleanupFixtureMode::Disabled | WritableCleanupFixtureMode::NormalCleanRead
+        );
+        let normal_existing = matches!(
+            writable_mode,
+            WritableCleanupFixtureMode::NormalExisting
+                | WritableCleanupFixtureMode::NormalCleanRead
+        );
+        let fresh_native = matches!(
+            writable_mode,
+            WritableCleanupFixtureMode::FreshNative | WritableCleanupFixtureMode::NormalExisting
+        );
         let writable_cleanup = matches!(
             writable_mode,
-            WritableCleanupFixtureMode::NormalCleanup | WritableCleanupFixtureMode::FreshNative
+            WritableCleanupFixtureMode::NormalCleanup
+                | WritableCleanupFixtureMode::FreshNative
+                | WritableCleanupFixtureMode::NormalExisting
         );
         assert!(!fresh_native || automatic);
         assert!(
@@ -8874,6 +9349,14 @@ mod tests {
             state.needs_refresh = false;
         }
         runtime.provider.authorize_generation(generation);
+        if normal_existing {
+            runtime.attach_existing_file_save_owner().unwrap();
+            runtime
+                .provider
+                .lifecycle_test_activation
+                .store(true, Ordering::Release);
+        }
+
         let drive = fixture.join("drive");
         std::fs::create_dir(&drive).unwrap();
         runtime
@@ -8881,7 +9364,7 @@ mod tests {
                 &json!({"action":"configure_root","profile_id":profile,"cloud_root":drive}),
             )
             .unwrap();
-        if automatic {
+        if automatic && !normal_existing {
             if fresh_native {
                 runtime
                     .start_fresh_close_worker_with_writable_completion_for_test()
@@ -8897,12 +9380,26 @@ mod tests {
                 0
             );
         }
-        WindowsAgent::connect_verified_root(
-            &runtime.session_store,
-            &runtime.state,
-            &runtime.provider,
-        )
-        .unwrap();
+        if normal_existing {
+            WindowsAgent::maybe_connect_provider(
+                &runtime.session_store,
+                &runtime.state,
+                &runtime.provider,
+            )
+            .unwrap();
+            let admitted = runtime.fresh_close_observation_for_test().unwrap();
+            assert_eq!(
+                admitted.attempted, 0,
+                "normal startup admits an idle worker before any child save"
+            );
+        } else {
+            WindowsAgent::connect_verified_root(
+                &runtime.session_store,
+                &runtime.state,
+                &runtime.provider,
+            )
+            .unwrap();
+        }
         assert!(
             child_process_directory_matches(&drive, &["Personal", "Spaces"])
                 .unwrap()
@@ -8934,6 +9431,12 @@ mod tests {
         assert_eq!(unlocked["remembered_status"], "known_saved");
         assert_eq!(unlocked["root_resource_id"], "synthetic-vault-root");
         assert_eq!(unlocked["vault_mount_ready"], true);
+        if normal_existing {
+            assert_eq!(unlocked["vault_mount_existing_file_in_place"], true);
+            assert_eq!(unlocked["vault_mount_writable"], false);
+            assert_eq!(unlocked["vault_mount_existing_file_overwrite"], false);
+        }
+
         assert!(sessions.is_unlocked(&scope).unwrap());
         let mut lock = target();
         lock["action"] = json!("vault_lock");
@@ -8979,6 +9482,311 @@ mod tests {
                 "bounded conditional ciphertext download"
             );
             println!("C06_SAVED_PAYLOAD_READ_VERIFIED=true");
+        }
+        if normal_clean_read {
+            use sha2::Digest as _;
+            use std::os::windows::fs::MetadataExt as _;
+            let file = drive.join("Personal/Travel.vault/1");
+            let expected = (0..65537).map(|i| (i * 31 + 7) as u8).collect::<Vec<_>>();
+            let hash = format!("{:x}", sha2::Sha256::digest(&expected));
+            let (configuration, root_pin) = runtime
+                .confirm_windows_vault_readiness(&scope, "/Travel.vault")
+                .unwrap();
+            let owner = configuration.registration_ownership.as_ref().unwrap();
+            let active = ActiveProviderBinding {
+                generation,
+                path: PathBuf::from(&configuration.path),
+                identity: raiun_cloudfiles_windows::ConfiguredRootIdentity {
+                    volume_serial: configuration.volume_serial,
+                    file_index: configuration.file_index,
+                },
+                personal_space_id: owner.personal_drive_id.clone(),
+                personal_root_resource_id: owner.personal_root_resource_id.clone().unwrap(),
+            };
+            assert!(runtime.provider.connection_matches(active.clone()).unwrap());
+            let original_source = runtime
+                .provider
+                .existing_vault_save_worker_marker(&active)
+                .unwrap()
+                .expect("normal admitted existing-file worker");
+            let verified = runtime
+                .provider
+                .verified_vault_backend(active.clone())
+                .unwrap();
+            let before = verified
+                .custody
+                .inspect_capture_for_test(&scope, "/Travel.vault")
+                .unwrap();
+            assert!(
+                before.captures.is_empty(),
+                "ordinary hydration is not edit capture/NativeCompleted authority"
+            );
+            let original = before
+                .entries
+                .iter()
+                .find(|entry| !entry.is_directory() && entry.root_relative_path() == "/1")
+                .unwrap()
+                .clone();
+            assert_eq!(original.length(), expected.len() as u64);
+            let first_epoch = sessions
+                .capture_session_epoch(&scope)
+                .unwrap()
+                .historical_generation();
+            let initial_native = runtime
+                .provider
+                .read_only_placeholder_observation(NativeRestartProbePath::VaultCapturedFile)
+                .unwrap()
+                .2
+                .unwrap();
+            assert_eq!(
+                initial_native.0 & 1,
+                0,
+                "fresh eligible normal publication remains writable without fixture attribute changes"
+            );
+            assert_ne!(
+                initial_native.2 & 8,
+                0,
+                "full clean hydration must be native in-sync"
+            );
+            assert_eq!(initial_native.3, expected.len() as u64);
+            assert_eq!(std::fs::metadata(&file).unwrap().file_attributes() & 1, 0);
+            assert!(
+                !runtime
+                    .provider
+                    .vault_cleanup_fixture(active.clone(), None)
+                    .unwrap(),
+                "ordinary full read must have real ONDISK bytes before Lock"
+            );
+            let first_gets = remote.native_reads.lock().unwrap().vault_get_count;
+            assert!((1..=16).contains(&first_gets));
+            let closes = runtime.provider.close_observation().unwrap();
+            assert_eq!(
+                (closes.0, closes.1, closes.4, closes.5, closes.7),
+                (0, 0, 0, 0, 0)
+            );
+            let observed = runtime.fresh_close_observation_for_test().unwrap();
+            assert_eq!(
+                (observed.attempted, observed.completed, observed.failed),
+                (0, 0, 0)
+            );
+            assert!(!observed.local_completed && !observed.remote_verified);
+            assert_eq!(observed.native_confirmation, None);
+            println!(
+                "C06_VAULT_NORMAL_CLEAN_READ_FULL_VERIFIED=true;bytes=65537;GET={first_gets};readonly=false;edits=0;captures=0;NativeCompleted=0;PUT=0;DELETE=0"
+            );
+            let mut first_lock = target();
+            first_lock["action"] = json!("vault_lock");
+            let locked = broker
+                .handle_isolated_lifecycle_session(first_lock)
+                .expect("fresh acknowledged clean-read provenance permits current same-live Lock")
+                .0;
+            assert_eq!(locked["unlocked"], false);
+            assert_eq!(locked["vault_lock_cleanup_status"], "complete");
+            assert!(!sessions.is_unlocked(&scope).unwrap());
+            assert!(sessions.capture_session_epoch(&scope).is_err());
+            assert!(
+                runtime
+                    .provider
+                    .vault_cleanup_fixture(active.clone(), None)
+                    .unwrap()
+            );
+            let empty_native = runtime
+                .provider
+                .read_only_placeholder_observation(NativeRestartProbePath::VaultCapturedFile)
+                .unwrap()
+                .2
+                .unwrap();
+            assert_eq!(empty_native.0 & 1, 0);
+            assert_eq!(empty_native.3, expected.len() as u64);
+            assert!(
+                !broker_vault_read_in_child(&file, expected.len(), &hash).unwrap(),
+                "ordinary reader cannot restore plaintext after clean-read Lock"
+            );
+            assert!(
+                runtime
+                    .provider
+                    .vault_cleanup_fixture(active.clone(), None)
+                    .unwrap()
+            );
+            assert_eq!(
+                remote.native_reads.lock().unwrap().vault_get_count,
+                first_gets,
+                "locked read cannot perform authenticated GET"
+            );
+            let after_first_lock = verified
+                .custody
+                .inspect_capture_for_test(&scope, "/Travel.vault")
+                .unwrap();
+            assert!(after_first_lock.captures.is_empty());
+            assert!(
+                after_first_lock
+                    .entries
+                    .iter()
+                    .any(|entry| entry == &original),
+                "read/Lock never promotes protected original metadata"
+            );
+            println!(
+                "C06_VAULT_NORMAL_CLEAN_READ_FIRST_LOCK_VERIFIED=true;keys_locked=true;on_disk_empty=true;locked_read_refused=true;noGET=true;captures=0;NativeCompleted=0"
+            );
+            // One same-connection manual reunlock, not remembered/history adoption.
+            let mut reunlock = target();
+            reunlock["action"] = json!("vault_unlock");
+            reunlock["password"] = json!("potato"); // public synthetic fixture only
+            reunlock["remember"] = json!(false);
+            let unlocked = broker
+                .handle_isolated_lifecycle_session(reunlock)
+                .unwrap()
+                .0;
+            assert_eq!(unlocked["unlocked"], true);
+            assert_eq!(unlocked["vault_mount_ready"], true);
+            assert_eq!(unlocked["vault_mount_existing_file_in_place"], true);
+            assert_eq!(unlocked["vault_mount_writable"], false);
+            assert!(runtime.provider.connection_matches(active.clone()).unwrap());
+            let current_source = runtime
+                .provider
+                .existing_vault_save_worker_marker(&active)
+                .unwrap()
+                .unwrap();
+            assert!(
+                Arc::ptr_eq(&original_source, &current_source),
+                "reunlock cannot replace or adopt a new worker source"
+            );
+            let current = runtime
+                .provider
+                .verified_vault_backend(active.clone())
+                .unwrap();
+            assert!(
+                Arc::ptr_eq(&verified.backend, &current.backend),
+                "same native connection/root backend spans both Locks"
+            );
+            let second_epoch = sessions
+                .capture_session_epoch(&scope)
+                .unwrap()
+                .historical_generation();
+            assert_ne!(
+                first_epoch, second_epoch,
+                "new crypto epoch label is diagnostic; fresh binding authority is enforced by native provenance"
+            );
+            assert!(
+                runtime
+                    .provider
+                    .vault_cleanup_fixture(active.clone(), None)
+                    .unwrap(),
+                "confirmed-evicted cache remains empty before second ordinary full read"
+            );
+            assert!(broker_vault_read_in_child(&file, expected.len(), &hash).unwrap());
+            assert!(
+                !runtime
+                    .provider
+                    .vault_cleanup_fixture(active.clone(), None)
+                    .unwrap(),
+                "second bound full hydration must create current native cache bytes"
+            );
+            let full_again = runtime
+                .provider
+                .read_only_placeholder_observation(NativeRestartProbePath::VaultCapturedFile)
+                .unwrap()
+                .2
+                .unwrap();
+            assert_eq!(full_again.0 & 1, 0);
+            assert_ne!(full_again.2 & 8, 0);
+            assert_eq!(full_again.3, expected.len() as u64);
+            let second_gets = remote.native_reads.lock().unwrap().vault_get_count;
+            assert!(
+                second_gets >= first_gets && second_gets - first_gets <= 16,
+                "fresh native read may use authenticated private stage cache; HTTP delta remains bounded"
+            );
+            println!(
+                "C06_VAULT_NORMAL_CLEAN_READ_REUNLOCK_FULL_VERIFIED=true;same_connection=true;same_worker=true;new_epoch_label=true;native_empty_to_full=true;first_GET={first_gets};second_GET={second_gets};delta={};captures=0;NativeCompleted=0",
+                second_gets - first_gets
+            );
+            let mut second_lock = target();
+            second_lock["action"] = json!("vault_lock");
+            let locked = broker.handle_isolated_lifecycle_session(second_lock).expect("fresh new-binding clean read can roll confirmed eviction forward and Lock again").0;
+            assert_eq!(locked["unlocked"], false);
+            assert_eq!(locked["vault_lock_cleanup_status"], "complete");
+            assert!(!sessions.is_unlocked(&scope).unwrap());
+            assert!(sessions.capture_session_epoch(&scope).is_err());
+            assert!(
+                runtime
+                    .provider
+                    .vault_cleanup_fixture(active.clone(), None)
+                    .unwrap()
+            );
+            assert!(!broker_vault_read_in_child(&file, expected.len(), &hash).unwrap());
+            assert!(
+                runtime
+                    .provider
+                    .vault_cleanup_fixture(active.clone(), None)
+                    .unwrap()
+            );
+            assert_eq!(
+                remote.native_reads.lock().unwrap().vault_get_count,
+                second_gets
+            );
+            let final_snapshot = current
+                .custody
+                .inspect_capture_for_test(&scope, "/Travel.vault")
+                .unwrap();
+            assert!(
+                final_snapshot.captures.is_empty(),
+                "reads never create edit capture/NativeCompleted rows"
+            );
+            assert!(
+                final_snapshot
+                    .entries
+                    .iter()
+                    .any(|entry| entry == &original)
+            );
+            let final_closes = runtime.provider.close_observation().unwrap();
+            assert_eq!(
+                (
+                    final_closes.0,
+                    final_closes.1,
+                    final_closes.4,
+                    final_closes.5,
+                    final_closes.7
+                ),
+                (0, 0, 0, 0, 0)
+            );
+            let final_worker = runtime.fresh_close_observation_for_test().unwrap();
+            assert_eq!(
+                (
+                    final_worker.attempted,
+                    final_worker.completed,
+                    final_worker.failed
+                ),
+                (0, 0, 0)
+            );
+            assert!(!final_worker.local_completed && !final_worker.remote_verified);
+            assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+            assert_eq!(
+                remote.native_reads.lock().unwrap().mutation_attempt_count,
+                0
+            );
+            assert!(
+                remote.vault_upload.is_none(),
+                "default read-only HTTP fixture has no opt-in upload state"
+            );
+            broker
+                .stop_all()
+                .expect("two acknowledged clean-read Locks permit normal provider stop");
+            assert_eq!(
+                remote.native_reads.lock().unwrap().vault_get_count,
+                second_gets
+            );
+            drop(root_pin);
+            drop(verified);
+            drop(current);
+            drop(broker);
+            drop(runtime);
+            drop(sessions);
+            remote.join().unwrap();
+            appdata_pin.verify_path().unwrap();
+            println!(
+                "C06_VAULT_NORMAL_CLEAN_READ_REUNLOCK_LOCK_VERIFIED=true;normal_owner=true;normal_worker=true;readonly=false;ordinary_full_reads=2;clean_locks=2;same_connection=true;same_worker=true;fresh_reunlock_binding=true;keys_locked=true;on_disk_empty=true;locked_read_refused=true;noGET_afterLocks=true;PUT=0;DELETE=0;edits=0;captures=0;NativeCompleted=0;original_entry_unchanged=true;private_worker_start=false;readonly_clear=false;manual_upload=false;late_probe=false;partial_cache_claim=false;package_acceptance=false"
+            );
+            return;
         }
         if capture_edit {
             let (configuration, root_pin) = runtime
@@ -9056,18 +9864,48 @@ mod tests {
                 assert!(!state.enabled);
                 assert_eq!(state.put_count, 0);
                 assert_eq!(state.body_get_count, 0);
+                if normal_existing {
+                    state.max_successful_puts = 2;
+                }
                 state.enabled = true;
             }
             // Exact fresh fixture path only. Open existing preserves the native
             // file ID/reparse point; only read-only is cleared for this forced
             // synthetic edit. Production vault publication remains read-only.
             use std::process::{Command, Stdio};
+            if normal_existing {
+                assert_eq!(
+                    std::fs::metadata(&file).unwrap().file_attributes() & 1,
+                    0,
+                    "actual fresh eligible publication must already be writable without fixture metadata mutation"
+                );
+                assert!(
+                    runtime
+                        .provider
+                        .existing_vault_save_worker_marker(&active)
+                        .unwrap()
+                        .is_some()
+                );
+            }
+            let edit_command = if normal_existing {
+                "$ErrorActionPreference='Stop'; $p=$env:RAIUN_SYNTHETIC_EDIT_FILE; $b=New-Object byte[] 65553; for($i=0;$i -lt $b.Length;$i++){$b[$i]=[byte](($i*13+11)-band 255)}; $f=[IO.File]::Open($p,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::Read); try{$f.SetLength($b.Length); $f.Write($b,0,$b.Length); $f.Flush($true)}finally{$f.Dispose()}"
+            } else {
+                "$ErrorActionPreference='Stop'; $p=$env:RAIUN_SYNTHETIC_EDIT_FILE; $a=[IO.File]::GetAttributes($p); [IO.File]::SetAttributes($p,($a -band (-bnot [IO.FileAttributes]::ReadOnly))); $b=New-Object byte[] 65553; for($i=0;$i -lt $b.Length;$i++){$b[$i]=[byte](($i*13+11)-band 255)}; $f=[IO.File]::Open($p,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::Read); try{$f.SetLength($b.Length); $f.Write($b,0,$b.Length); $f.Flush($true)}finally{$f.Dispose()}"
+            };
             let mut writer = Command::new("powershell.exe")
-                .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-                    "$ErrorActionPreference='Stop'; $p=$env:RAIUN_SYNTHETIC_EDIT_FILE; $a=[IO.File]::GetAttributes($p); [IO.File]::SetAttributes($p,($a -band (-bnot [IO.FileAttributes]::ReadOnly))); $b=New-Object byte[] 65553; for($i=0;$i -lt $b.Length;$i++){$b[$i]=[byte](($i*13+11)-band 255)}; $f=[IO.File]::Open($p,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::Read); try{$f.SetLength($b.Length); $f.Write($b,0,$b.Length); $f.Flush($true)}finally{$f.Dispose()}"])
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    edit_command,
+                ])
                 .env("RAIUN_SYNTHETIC_EDIT_FILE", &file)
-                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
-                .spawn().unwrap();
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
             let deadline = Instant::now() + Duration::from_secs(20);
             loop {
                 if let Some(status) = writer.try_wait().unwrap() {
@@ -9542,6 +10380,329 @@ mod tests {
                             .vault_file_pending_for_test(original.opaque())
                             .unwrap()
                     );
+                    if normal_existing {
+                        // First save above used only fresh per-child publication and the
+                        // normal authenticated connection hook. No private start/upload.
+                        let first_ids = verified
+                            .custody
+                            .retained_capture_ids(&trusted, &scope, "/Travel.vault")
+                            .unwrap();
+                        assert_eq!(first_ids.len(), 1);
+                        let second_baseline = (*entry).clone();
+                        assert_eq!(second_baseline.etag(), "\"child-rev-2\"");
+                        assert_eq!(second_baseline.length(), edited.len() as u64);
+                        assert!(
+                            runtime
+                                .provider
+                                .existing_vault_save_worker_marker(&active)
+                                .unwrap()
+                                .is_some()
+                        );
+                        let second_bytes =
+                            (0..65569).map(|i| (i * 17 + 3) as u8).collect::<Vec<_>>();
+                        let before_second = runtime.provider.close_observation().unwrap();
+                        assert_eq!(std::fs::metadata(&file).unwrap().file_attributes() & 1, 0);
+                        let mut second_writer = Command::new("powershell.exe")
+                            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                                "$ErrorActionPreference='Stop'; $b=New-Object byte[] 65569; for($i=0;$i -lt $b.Length;$i++){$b[$i]=[byte](($i*17+3)-band 255)}; $f=[IO.File]::Open($env:RAIUN_SYNTHETIC_EDIT_FILE,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::Read); try{$f.SetLength($b.Length); $f.Write($b,0,$b.Length); $f.Flush($true)}finally{$f.Dispose()}"])
+                            .env("RAIUN_SYNTHETIC_EDIT_FILE", &file)
+                            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+                        let deadline = Instant::now() + Duration::from_secs(20);
+                        loop {
+                            if let Some(status) = second_writer.try_wait().unwrap() {
+                                assert_eq!(
+                                    status.code(),
+                                    Some(0),
+                                    "second normal in-place writer failed; preserve fixture"
+                                );
+                                break;
+                            }
+                            assert!(
+                                Instant::now() < deadline,
+                                "second normal writer timed out; preserve process and fixture"
+                            );
+                            thread::sleep(Duration::from_millis(20));
+                        }
+                        let deadline = Instant::now() + Duration::from_secs(30);
+                        loop {
+                            if runtime.provider.close_observation().unwrap().0 > before_second.0 {
+                                break;
+                            }
+                            assert!(
+                                Instant::now() < deadline,
+                                "second normal modified close not observed"
+                            );
+                            thread::sleep(Duration::from_millis(25));
+                        }
+                        // Do not hold a protected inspector against the second CAS.
+                        let deadline = Instant::now() + Duration::from_secs(60);
+                        let completed = loop {
+                            let value = runtime.fresh_close_observation_for_test().unwrap();
+                            if value.completed >= 2 {
+                                break value;
+                            }
+                            assert!(
+                                Instant::now() < deadline,
+                                "second automatic native save did not finish"
+                            );
+                            thread::sleep(Duration::from_millis(25));
+                        };
+                        assert_eq!(completed.attempted, 2);
+                        assert_eq!(completed.completed, 2);
+                        assert_eq!(completed.failed, 0);
+                        assert!(completed.remote_verified && completed.local_completed);
+                        assert_eq!(completed.native_confirmation, Some(true));
+                        let provider_thread = runtime
+                            .provider
+                            .worker
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .unwrap()
+                            .thread()
+                            .id();
+                        assert_ne!(completed.thread, Some(provider_thread));
+                        assert_ne!(completed.thread, Some(thread::current().id()));
+                        let after_second_close = runtime.provider.close_observation().unwrap();
+                        assert!(
+                            after_second_close.0 >= 2,
+                            "historical modified telemetry must not be reset"
+                        );
+                        assert_eq!(
+                            (
+                                after_second_close.1,
+                                after_second_close.4,
+                                after_second_close.5,
+                                after_second_close.7
+                            ),
+                            (0, 0, 0, 0)
+                        );
+                        assert!(
+                            !runtime
+                                .provider
+                                .vault_file_pending_for_test(original.opaque())
+                                .unwrap()
+                        );
+                        let second_snapshot = verified
+                            .custody
+                            .inspect_capture_for_test(&scope, "/Travel.vault")
+                            .unwrap();
+                        assert_eq!(second_snapshot.captures.len(), 2);
+                        let old_capture = second_snapshot
+                            .captures
+                            .iter()
+                            .find(|(capture, _)| {
+                                capture.encoded_frame_ref() == retained.encoded_frame_ref()
+                            })
+                            .unwrap();
+                        assert_eq!(old_capture.0.bytes_for_recovery(), edited.as_slice());
+                        assert!(old_capture.1 == original);
+                        let (second_capture, second_original) = second_snapshot
+                            .captures
+                            .iter()
+                            .find(|(capture, _)| {
+                                capture.encoded_frame_ref() != retained.encoded_frame_ref()
+                            })
+                            .unwrap();
+                        assert_eq!(second_capture.bytes_for_recovery(), second_bytes.as_slice());
+                        assert!(
+                            second_original == &second_baseline,
+                            "second capture must bind promoted first-save baseline"
+                        );
+                        let second_historical =
+                            serde_json::to_value(second_capture.historical_baseline()).unwrap();
+                        assert_eq!(second_historical["strong_etag"], second_baseline.etag());
+                        assert_eq!(second_historical["native_file"], baseline["native_file"]);
+                        assert_eq!(second_historical["unlock_epoch"], original_epoch);
+                        assert_eq!(
+                            second_historical["token_generation"],
+                            trusted.token_generation()
+                        );
+                        let all_ids = verified
+                            .custody
+                            .retained_capture_ids(&trusted, &scope, "/Travel.vault")
+                            .unwrap();
+                        assert_eq!(all_ids.len(), 2);
+                        let second_id = all_ids.iter().find(|id| !first_ids.contains(id)).unwrap();
+                        let second_ledger = verified
+                            .custody
+                            .upload_ledger(&trusted, &scope, "/Travel.vault", second_id)
+                            .unwrap();
+                        let second_attempt = second_ledger.reopen_attempt().unwrap();
+                        let readback = second_attempt.readback_evidence().unwrap().unwrap();
+                        assert_eq!(readback.resource_id(), original.remote_id());
+                        assert_eq!(readback.etag(), "\"child-rev-3\"");
+                        assert_eq!(readback.body_len(), second_bytes.len());
+                        use sha2::Digest as _;
+                        assert_eq!(
+                            readback.body_sha256(),
+                            <[u8; 32]>::from(sha2::Sha256::digest(&second_bytes))
+                        );
+                        let second_status = second_ledger.local_disposition().unwrap().unwrap();
+                        assert!(second_status.is_native_completed());
+                        assert!(second_status.reference().entry() == second_original);
+                        assert!(
+                            second_status.reference().frame() == second_capture.encoded_frame_ref()
+                        );
+                        assert_eq!(second_status.verified_entry().etag(), "\"child-rev-3\"");
+                        assert_eq!(
+                            second_status.verified_entry().length(),
+                            second_bytes.len() as u64
+                        );
+                        assert_eq!(
+                            second_status.promoted_hydration().file_index(),
+                            hydration.file_index()
+                        );
+                        assert_eq!(
+                            second_status.promoted_hydration().components(),
+                            components.as_slice()
+                        );
+                        assert_eq!(
+                            second_status.promoted_hydration().length(),
+                            second_bytes.len() as u64
+                        );
+                        let current = second_snapshot
+                            .entries
+                            .iter()
+                            .find(|entry| entry.opaque() == original.opaque())
+                            .unwrap();
+                        assert_eq!(current.etag(), "\"child-rev-3\"");
+                        assert_eq!(current.length(), second_bytes.len() as u64);
+                        assert_eq!(current.remote_id(), original.remote_id());
+                        let native = runtime
+                            .provider
+                            .read_only_placeholder_observation(
+                                NativeRestartProbePath::VaultCapturedFile,
+                            )
+                            .unwrap()
+                            .2
+                            .unwrap();
+                        assert_eq!(native.0 & 1, 0);
+                        assert_ne!(native.2 & 8, 0);
+                        assert_eq!(native.3, second_bytes.len() as u64);
+                        assert_eq!(std::fs::read(&file).unwrap(), second_bytes);
+                        let gets_after_two = remote.native_reads.lock().unwrap().vault_get_count;
+                        assert_eq!(gets_after_two, gets + 2);
+                        {
+                            let state = remote.vault_upload.as_ref().unwrap().lock().unwrap();
+                            assert_eq!(
+                                (
+                                    state.put_attempt_count,
+                                    state.put_count,
+                                    state.body_get_count
+                                ),
+                                (2, 2, 2)
+                            );
+                            assert_eq!(state.last_put_if_match.as_deref(), Some("\"child-rev-2\""));
+                            assert_eq!(
+                                state.last_read_if_match.as_deref(),
+                                Some("\"child-rev-3\"")
+                            );
+                            assert_eq!(state.resource_id, original.remote_id());
+                            assert_eq!(state.forbidden_mutation_count, 0);
+                        }
+                        assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
+                        assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+                        println!(
+                            "C06_VAULT_NORMAL_EXISTING_FILE_TWO_SAVES_COMPLETED=true;vaultPUT=2;authenticatedBodyGET=2;firstIfMatch=child-rev-1;secondIfMatch=child-rev-2;currentETag=child-rev-3;captures=2;native_completed=2;dirty_resolved=true;manual_upload=false;readonly_clear=false"
+                        );
+                        let mut lock = target();
+                        lock["action"] = json!("vault_lock");
+                        let locked = broker
+                            .handle_isolated_lifecycle_session(lock)
+                            .expect("normal two-save current native state permits clean Lock")
+                            .0;
+                        assert_eq!(locked["unlocked"], false);
+                        assert_eq!(locked["vault_lock_cleanup_status"], "complete");
+                        assert!(!sessions.is_unlocked(&scope).unwrap());
+                        assert!(sessions.capture_session_epoch(&scope).is_err());
+                        assert!(
+                            runtime
+                                .provider
+                                .vault_cleanup_fixture(active.clone(), None)
+                                .unwrap()
+                        );
+                        let locked_native = runtime
+                            .provider
+                            .read_only_placeholder_observation(
+                                NativeRestartProbePath::VaultCapturedFile,
+                            )
+                            .unwrap()
+                            .2
+                            .unwrap();
+                        assert_eq!(locked_native.0 & 1, 0);
+                        assert_eq!(locked_native.3, second_bytes.len() as u64);
+                        let hash = format!("{:x}", sha2::Sha256::digest(&second_bytes));
+                        assert!(
+                            !broker_vault_read_in_child(&file, second_bytes.len(), &hash).unwrap()
+                        );
+                        assert!(
+                            runtime
+                                .provider
+                                .vault_cleanup_fixture(active.clone(), None)
+                                .unwrap()
+                        );
+                        assert_eq!(
+                            remote.native_reads.lock().unwrap().vault_get_count,
+                            gets_after_two
+                        );
+                        let after_lock = verified
+                            .custody
+                            .inspect_capture_for_test(&scope, "/Travel.vault")
+                            .unwrap();
+                        assert_eq!(after_lock.captures.len(), 2);
+                        for (capture, entry) in &after_lock.captures {
+                            if capture.encoded_frame_ref() == retained.encoded_frame_ref() {
+                                assert_eq!(capture.bytes_for_recovery(), edited.as_slice());
+                                assert!(entry == &original);
+                            } else {
+                                assert!(
+                                    capture.encoded_frame_ref()
+                                        == second_capture.encoded_frame_ref()
+                                );
+                                assert_eq!(capture.bytes_for_recovery(), second_bytes.as_slice());
+                                assert!(entry == second_original);
+                            }
+                        }
+                        let final_worker = runtime.fresh_close_observation_for_test().unwrap();
+                        assert_eq!(
+                            (
+                                final_worker.attempted,
+                                final_worker.completed,
+                                final_worker.failed
+                            ),
+                            (2, 2, 0)
+                        );
+                        broker
+                            .stop_all()
+                            .expect("normal two-save locked provider stops without force");
+                        assert_eq!(
+                            remote.native_reads.lock().unwrap().vault_get_count,
+                            gets_after_two
+                        );
+                        {
+                            let state = remote.vault_upload.as_ref().unwrap().lock().unwrap();
+                            assert_eq!(
+                                (
+                                    state.put_attempt_count,
+                                    state.put_count,
+                                    state.body_get_count
+                                ),
+                                (2, 2, 2)
+                            );
+                        }
+                        drop(root_pin);
+                        drop(verified);
+                        drop(broker);
+                        drop(runtime);
+                        drop(sessions);
+                        remote.join().unwrap();
+                        appdata_pin.verify_path().unwrap();
+                        println!(
+                            "C06_VAULT_NORMAL_EXISTING_FILE_TWO_SAVE_LOCK_VERIFIED=true;normal_owner=true;normal_worker=true;fresh_writable_publication=true;vaultPUT=2;authenticatedBodyGET=2;native_completed=2;captures_retained=2;dirty_resolved=true;keys_locked=true;on_disk_empty=true;locked_read_refused=true;noGET_afterLock=true;manual_upload=false;readonly_clear=false;late_probe=false;namespace_writable=false;DELETE=0;package_acceptance=false"
+                        );
+                        return;
+                    }
                     if writable_cleanup {
                         let mut lock = target();
                         lock["action"] = json!("vault_lock");
@@ -14366,6 +15527,7 @@ mod tests {
         resource_id: &'static str,
         put_attempt_count: usize,
         put_count: usize,
+        max_successful_puts: usize,
         body_get_count: usize,
         last_put_if_match: Option<String>,
         last_read_if_match: Option<String>,
@@ -14558,6 +15720,7 @@ mod tests {
                 resource_id: "child-resource-id",
                 put_attempt_count: 0,
                 put_count: 0,
+                max_successful_puts: 1,
                 body_get_count: 0,
                 last_put_if_match: None,
                 last_read_if_match: None,
@@ -14686,7 +15849,11 @@ mod tests {
                         .find(|(name, _)| name == "if-match")
                         .map(|(_, value)| value.as_str());
                     if condition != Some(remote.etag.as_str())
-                        || remote.etag != "\"child-rev-1\""
+                        || remote.put_count >= remote.max_successful_puts
+                        || (remote.etag != "\"child-rev-1\""
+                            && !(remote.max_successful_puts == 2
+                                && remote.put_count == 1
+                                && remote.etag == "\"child-rev-2\""))
                         || headers.iter().any(|(name, _)| name == "if-none-match")
                         || body.is_empty()
                         || body.len() > 1024 * 1024
@@ -14697,7 +15864,7 @@ mod tests {
                     remote.last_put_if_match = condition.map(str::to_owned);
                     remote.put_count += 1;
                     remote.ciphertext = body;
-                    remote.etag = "\"child-rev-2\"".into();
+                    remote.etag = format!("\"child-rev-{}\"", remote.put_count + 1);
                     write!(request_stream, "HTTP/1.1 204 No Content\r\nETag: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", remote.etag).unwrap();
                     continue;
                 }

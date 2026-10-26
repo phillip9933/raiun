@@ -16,7 +16,6 @@ const CAPACITY: usize = 32;
 #[derive(Clone, Copy)]
 pub(super) enum FreshCloseCompletionPolicy {
     RemoteOnly,
-    #[cfg(all(test, debug_assertions))]
     WritableBytes,
 }
 #[cfg(any(windows, test))]
@@ -24,7 +23,6 @@ impl FreshCloseCompletionPolicy {
     pub(super) fn writable_bytes(self) -> bool {
         match self {
             Self::RemoteOnly => false,
-            #[cfg(all(test, debug_assertions))]
             Self::WritableBytes => true,
         }
     }
@@ -32,6 +30,21 @@ impl FreshCloseCompletionPolicy {
         let requested = self.writable_bytes();
         complete_local == requested && writable_bytes == requested
     }
+}
+
+#[cfg(any(windows, test))]
+fn existing_file_source_current(
+    policy: FreshCloseCompletionPolicy,
+    admitted: Option<u64>,
+    expected: u64,
+    current: u64,
+    active: bool,
+) -> bool {
+    policy.writable_bytes()
+        && admitted == Some(expected)
+        && expected != 0
+        && current == expected
+        && active
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -233,16 +246,39 @@ mod agent {
         }
     }
     #[derive(Clone)]
-    pub(in crate::agent_windows) struct VaultClosePublisherSource(Source<FreshVaultCloseJob>);
+    pub(in crate::agent_windows) struct VaultClosePublisherSource {
+        source: Source<FreshVaultCloseJob>,
+        policy: FreshCloseCompletionPolicy,
+        admission_generation: Option<u64>,
+    }
     impl VaultClosePublisherSource {
         pub(in crate::agent_windows) fn cancel(&self) {
-            self.0.cancel();
+            self.source.cancel();
         }
         pub(in crate::agent_windows) fn publisher(
             &self,
             generation: u64,
         ) -> Option<VaultClosePublisher> {
-            self.0.publisher(generation).map(VaultClosePublisher)
+            if self
+                .admission_generation
+                .is_some_and(|expected| expected != generation)
+            {
+                return None;
+            }
+            self.source.publisher(generation).map(VaultClosePublisher)
+        }
+        pub(in crate::agent_windows) fn existing_file_save_marker(
+            &self,
+            expected: u64,
+        ) -> Option<Arc<AtomicBool>> {
+            existing_file_source_current(
+                self.policy,
+                self.admission_generation,
+                expected,
+                self.source.current_generation.load(Ordering::Acquire),
+                self.source.active.load(Ordering::Acquire),
+            )
+            .then(|| Arc::clone(&self.source.active))
         }
     }
     #[cfg(all(test, debug_assertions))]
@@ -258,6 +294,8 @@ mod agent {
     }
     pub(in crate::agent_windows) struct FreshCloseWorker {
         worker: Worker<FreshVaultCloseJob>,
+        policy: FreshCloseCompletionPolicy,
+        admission_generation: Option<u64>,
         #[cfg(all(test, debug_assertions))]
         observation: Arc<std::sync::Mutex<FreshCloseObservation>>,
     }
@@ -266,19 +304,50 @@ mod agent {
             owner: Weak<WindowsAgent>,
             generation: Arc<AtomicU64>,
         ) -> Result<Self, String> {
-            Self::start_with_policy(owner, generation, FreshCloseCompletionPolicy::RemoteOnly)
+            Self::start_with_policy(
+                owner,
+                generation,
+                FreshCloseCompletionPolicy::RemoteOnly,
+                None,
+            )
         }
         #[cfg(all(test, debug_assertions))]
         pub(in crate::agent_windows) fn start_with_writable_completion_for_test(
             owner: Weak<WindowsAgent>,
             generation: Arc<AtomicU64>,
         ) -> Result<Self, String> {
-            Self::start_with_policy(owner, generation, FreshCloseCompletionPolicy::WritableBytes)
+            Self::start_with_policy(
+                owner,
+                generation,
+                FreshCloseCompletionPolicy::WritableBytes,
+                None,
+            )
+        }
+        pub(in crate::agent_windows) fn start_for_existing_file_saves(
+            owner: Weak<WindowsAgent>,
+            generation: Arc<AtomicU64>,
+            expected: u64,
+        ) -> Result<Self, String> {
+            if expected == 0 || generation.load(Ordering::Acquire) != expected {
+                return Err("The existing-file save generation is no longer current".into());
+            }
+            let worker = Self::start_with_policy(
+                owner,
+                Arc::clone(&generation),
+                FreshCloseCompletionPolicy::WritableBytes,
+                Some(expected),
+            )?;
+            if generation.load(Ordering::Acquire) != expected {
+                worker.stop()?;
+                return Err("The existing-file save generation changed during admission".into());
+            }
+            Ok(worker)
         }
         fn start_with_policy(
             owner: Weak<WindowsAgent>,
             generation: Arc<AtomicU64>,
             policy: FreshCloseCompletionPolicy,
+            admission_generation: Option<u64>,
         ) -> Result<Self, String> {
             #[cfg(all(test, debug_assertions))]
             let observation = Arc::new(std::sync::Mutex::new(FreshCloseObservation::default()));
@@ -318,12 +387,27 @@ mod agent {
             )?;
             Ok(Self {
                 worker,
+                policy,
+                admission_generation,
                 #[cfg(all(test, debug_assertions))]
                 observation,
             })
         }
+        pub(in crate::agent_windows) fn owns_existing_file_save_marker(
+            &self,
+            expected: u64,
+            active: &Arc<AtomicBool>,
+        ) -> bool {
+            self.policy.writable_bytes()
+                && self.admission_generation == Some(expected)
+                && Arc::ptr_eq(&self.worker.source.active, active)
+        }
         pub(in crate::agent_windows) fn source(&self) -> VaultClosePublisherSource {
-            VaultClosePublisherSource(self.worker.source.clone())
+            VaultClosePublisherSource {
+                source: self.worker.source.clone(),
+                policy: self.policy,
+                admission_generation: self.admission_generation,
+            }
         }
         pub(in crate::agent_windows) fn stop(self) -> Result<(), String> {
             self.worker.stop()
@@ -364,6 +448,77 @@ mod tests {
             assert!(!FreshCloseCompletionPolicy::WritableBytes.permits_mode(true, false));
             assert!(!FreshCloseCompletionPolicy::WritableBytes.permits_mode(false, false));
         }
+    }
+
+    #[test]
+    fn existing_file_admission_requires_fixed_policy_generation_and_uncancelled_source() {
+        use FreshCloseCompletionPolicy::{RemoteOnly, WritableBytes};
+        assert!(!existing_file_source_current(
+            RemoteOnly,
+            Some(7),
+            7,
+            7,
+            true
+        ));
+        assert!(!existing_file_source_current(
+            WritableBytes,
+            None,
+            7,
+            7,
+            true
+        ));
+        assert!(!existing_file_source_current(
+            WritableBytes,
+            Some(7),
+            0,
+            7,
+            true
+        ));
+        assert!(!existing_file_source_current(
+            WritableBytes,
+            Some(7),
+            8,
+            8,
+            true
+        ));
+        assert!(!existing_file_source_current(
+            WritableBytes,
+            Some(7),
+            7,
+            8,
+            true
+        ));
+        let (old, _old_receiver) = channel(Arc::new(AtomicU64::new(7)), generation);
+        let old_publisher = old.publisher(7).unwrap();
+        assert!(existing_file_source_current(
+            WritableBytes,
+            Some(7),
+            7,
+            7,
+            old.active.load(Ordering::Acquire)
+        ));
+        old.cancel();
+        let (replacement, _replacement_receiver) = channel(Arc::new(AtomicU64::new(7)), generation);
+        assert!(!Arc::ptr_eq(&old.active, &replacement.active));
+        assert!(!existing_file_source_current(
+            WritableBytes,
+            Some(7),
+            7,
+            7,
+            old.active.load(Ordering::Acquire)
+        ));
+        assert_eq!(
+            old_publisher.try_send(Job(7)),
+            Err(FreshVaultClosePublishError::Cancelled)
+        );
+        assert!(existing_file_source_current(
+            WritableBytes,
+            Some(7),
+            7,
+            7,
+            replacement.active.load(Ordering::Acquire)
+        ));
+        replacement.publisher(7).unwrap().try_send(Job(7)).unwrap();
     }
 
     #[test]

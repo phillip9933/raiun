@@ -790,3 +790,99 @@ forget helper deletes only a matching volatile receipt so history-alone denial
 can be tested. It grants no cleanup capability. Normal writable publication,
 public upload RPC and automatic fresh-worker activation remain disabled. Source
 checks do not qualify actual Windows cache eviction or the final key boundary.
+
+### Scoped existing-file publication policy
+
+The original vault backend constructor remains readonly. The explicit
+`new_with_existing_file_saves` constructor captures immutable ORIGINAL worker
+activity and provider-generation Arcs with a nonzero expected generation. It
+checks that gate before construction I/O, inside the existing exact authenticated
+publication fence and before returning. Preparation checks it before/after remote
+listing and protected catalogue commit; begin-publish checks before and after the
+existing route/token/opaque-epoch publication permit. There is no gate setter or
+adoption of a replacement worker. `existing_file_saves_active` reports only this
+current worker/generation mode plus route revocation; its caller still supplies
+exact authenticated account/root/epoch readiness. It never reacquires auth locks.
+
+A prepared vault enumeration owns eligible opaque IDs and the exact original
+child tuple derived from its already-persisted catalogue/listing. Only existing
+nondirectory files with admitted original metadata, bounded ID/path, a strong
+quoted ETag and size at most 512 KiB are eligible. Invalid, unknown, oversized,
+weak-baseline or forged child tuples remain readonly. Authenticated RemoteEntry
+fields (including writable/encrypted presentation fields), original resource,
+ETag/path and protected custody records are never rewritten to grant this mode.
+The existing broker checks and full native capture/upload proof still apply.
+
+PreparedEnumeration's per-file readonly default delegates to its old listing
+policy. Thus existing ordinary adapters and readonly vault callers retain their
+attributes. Both the successful directory callback and initial root population
+ask the per-child policy while existing publication permits are held; directory
+attributes remain unchanged. The old native bool wrapper remains for error and
+compatibility callers. No filesystem metadata overwrite, post-publication
+READONLY clearing or new unsafe/native syscall is introduced. Previously
+published readonly stubs remain readonly.
+
+This is bounded same-file in-place publication, not namespace write support.
+Initial size eligibility cannot prevent an editor growing past the capture
+bound; existing overflow/unknown/dirty handling must preserve native bytes and
+refuse automatic upload/cleanup. Creation, replacement-by-rename, deletion and
+folder operations gain no cloud mutation route. Their OS denial is not claimed;
+existing encrypted exclusions and retained/unknown handling remain intact.
+Capture, byte completion, two-phase key-clear cleanup and historical recovery
+rules are unchanged. Repeated saves must use the freshly promoted protected and
+runtime baseline, not a replayed capture. Full combined source/native normal
+workflow and package acceptance remain separate from focused policy tests.
+
+### Fresh clean-read provenance and confirmed-empty re-enrollment
+
+Existing eligible writable files that were read but never edited now use a
+separate, process-local Hydration origin. Durable hydration intent/inventory is
+still recorded BEFORE transfer and is never treated as successful delivery. The
+existing authenticated immutable private stage is re-read locally in zeroized
+bounded chunks for a full SHA-256 only at sizes <=512 KiB, with exact file length,
+private identity checks and final actual binding/revision admission. No extra
+HTTP, Control-store API, private path/handle, key or retained plaintext escapes.
+
+The default PreparedFetch hook returns None. Only the exact vault prepared
+fetch, current original worker/generation gate and authenticated original entry
+can create an opaque non-Clone/non-serializable capsule before first CfExecute.
+It binds the original Weak read binding/revision and exact pinned native
+root/file/opaque/components/length/full-stage SHA. Native reserves a bounded
+Hydration-origin row before plaintext. Only execute_transfer S_OK AND successful
+commit_transfer_result for the final slice of that requested callback range,
+under the SAME backend/request/token/opaque-epoch permits, can acknowledge and
+publish it. The posthook uses pure Weak/atomic checks and local memory only:
+no hashing, filesystem/DPAPI, auth/registry/coordinator reacquisition or network.
+An error invalidates the known receipt/reservation; no read heals dirty,
+Invalidated, uncertain or editor-Ready state. Read acknowledgement is not a full
+native-body proof, capture, upload, NativeCompleted or historical authority.
+
+A confirmed Evicted receipt can be re-enrolled only for the same connection and
+exact native context/body SHA with a freshly admitted NEW binding. The model
+snapshot is dropped before current pinned EMPTY ONDISK/in-sync/no-MODIFIED,
+positive stable USN/basic/snapshot and global-clean checks; no missing native
+bytes are read. A strict old-owner/generation/phase CAS then creates a NEW
+Hydration reservation before plaintext. EvictedUnconfirmed/invalidated history
+cannot take this path. Original logical version is retained and compared by
+resource ID/path/strong ETag/size/directory, with writable=false separately.
+Encrypted/modified-time presentation differences on protected restoration grant
+no authority and are not equality predicates; originals are not normalized.
+Successful Edit completion receipts also retain this exact promoted tuple,
+derived locally from their immutable original plus already-verified new ETag
+and size before the receipt lock, without auth or catalogue lookup. This keeps
+normal Edit -> Lock -> fresh unlock -> read compatible without history adoption.
+
+For the NEW Hydration origin, cleanup requires bounded ONDISK coverage of the
+ENTIRE independently verified logical file before any full native read. Empty,
+malformed, noncontiguous or insufficient cache ranges refuse; nonempty partial
+caches stay incomplete and Lock never requests missing plaintext. Then the
+existing exclusive referenced no-follow file/current full-body SHA, stable
+positive USN/basic/native identity/in-sync/no-MODIFIED proof precedes the same
+single byte-only VERIFY eviction. ALL writable references/pins still span key
+clear and final empty-range confirmation. Existing Edit cleanup guards, readonly
+helper and native completion ordering are preserved; no metadata write, Mark,
+READONLY clearing, force or cloud deletion is added. Retirement cleanup uses the
+pure original Weak identity rather than reacquiring keys or requiring a retired
+publication revision to remain current. Missing/recovered provenance fails
+closed. Synthetic markers expose only enrollment/acknowledgement stage names;
+actual Windows full-read/re-unlock/Lock qualification remains a separate gate.

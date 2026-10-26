@@ -2895,3 +2895,50 @@ explicit per-file publication eligibility and generation-bound worker rearming,
 without rewriting protected metadata or broadening unsupported operations. No
 new package, host installation or publication occurred; r117 remains installed
 and closed, with the test VM shut down and cold.
+
+
+### Normal bounded in-place saves and clean-read Lock (26 October)
+
+Normal Windows source startup now admits the generation-bound save worker and
+publishes individual eligible existing vault files as writable. Eligibility is
+limited to the current verified original entry, strong ETag and at most 512 KiB.
+The capability/UI path reports that limited in-place access. Protected catalogue
+metadata is preserved; no broad namespace writing, public upload RPC, offline
+editing or atomic-replacement support is advertised.
+
+Clean reads now carry a one-use, connection-local fingerprint of the full
+bounded authenticated stage. Native cleanup authority is reserved before the
+first plaintext transfer and acknowledged only after successful CfExecute and
+exact request commitment under the original publication permits. Transfer of a
+requested range does not prove full residency: Lock independently verifies
+current complete ONDISK coverage before reading the native body, then verifies
+its full fingerprint, identity, USN, in-sync and clean state. Existing referenced
+handles remain held through key clear and empty-cache confirmation. A confirmed
+empty receipt can be enrolled for a fresh unlock binding only after exact logical
+and native context checks, current empty proof and a new-generation CAS. Reads
+never create an edit capture or NativeCompleted record. Nonempty partial caches
+and uncertain data remain fail-closed; Lock does not hydrate missing bytes.
+
+The exact combined source archive `86f26d85…` passes formatting, strict Linux
+workspace/all-target lint, 1,109 tests (14 ignored), and current GNU Windows
+binary/test and Cloud Files strict checks without warnings. Ordinary-user MSVC
+native R31 passed full read, Lock, same-connection re-unlock/full read and second
+Lock with zero PUT, DELETE, edit captures or NativeCompleted records. Fresh
+missing-reservation/acknowledgement and confirmed-empty re-enrollment/acknowledgement
+were observed. Both Locks left keys locked and native cache empty; ordinary reads
+were refused without further GET. Native R32 passed two automatic conditional
+encrypted saves and authenticated readbacks, promoted ETags, two distinct retained
+captures and NativeCompleted records, dirty resolution and clean Lock. Both runs
+had native/wrapper exits and owned process counts zero, normal guest shutdown
+and cold preservation. Parent review independently verified all 153 raw evidence
+files and the source/artifact/authorization/ordinary-user chains.
+
+Evidence: `windows-vault-clean-read-r1/` under `outputs/desktop-next-20261021/`;
+native evidence is `agent-vault-clean-read-r31/` and `agent-vault-normal-save-r32/`
+under `outputs/local-windows-native-20261023-r1/`. R30's earlier scoped two-save
+pass and its clean-read limitation remain preserved. This closes that observed
+full-read Lock gap in source/native tests. Restart/recovery adoption, partial-cache
+cleanup, unsupported namespace operations and whole-category completion are not
+established by these cases. Exact-package/installed-app acceptance remains
+pending. No new package, installation, signing or publication occurred; r117
+remains installed and closed, with both test VMs shut down and cold.

@@ -401,6 +401,13 @@ pub trait PreparedEnumeration {
         false
     }
 
+    /// Per-file projection policy under the same publication permit. Existing
+    /// adapters keep their listing-wide policy unless explicitly overridden.
+    /// This does not change authenticated remote metadata or directory rights.
+    fn file_read_only(&self, _child: &PlaceholderChild) -> bool {
+        self.read_only()
+    }
+
     fn children(&self) -> &[PlaceholderChild];
 
     /// Hold the relevant scope/revocation guard through one native publication.
@@ -441,6 +448,17 @@ pub trait PreparedFetch {
         _intent: &crate::vault_custody::VaultHydrationIntent,
     ) -> Result<(), BackendError> {
         Err(BackendError::Unavailable)
+    }
+
+    /// Opaque authenticated full-stage provenance before first plaintext transfer.
+    /// Ordinary/readonly adapters supply None. Native acknowledgement, never the
+    /// durable hydration intent, decides whether a receipt becomes ready.
+    #[cfg(windows)]
+    fn prepare_fresh_vault_hydration(
+        &self,
+        _intent: &crate::vault_custody::VaultHydrationIntent,
+    ) -> Result<Option<crate::FreshVaultHydration>, BackendError> {
+        Ok(None)
     }
 
     /// Recheck cancellation, authorization generation, and revocation before
@@ -904,6 +922,34 @@ pub fn next_chunk_len(remaining: u64) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn per_file_readonly_default_preserves_the_existing_listing_policy() {
+        use super::*;
+        let child = PlaceholderChild {
+            name: "file".into(),
+            identity: vec![1; 16],
+            metadata: PlaceholderMetadata {
+                is_directory: false,
+                length: 4,
+            },
+            last_write_time: 0,
+        };
+        let ordinary = StagedEnumeration {
+            children: vec![child.clone()],
+        };
+        assert!(!ordinary.file_read_only(&child));
+        struct ReadOnly(Vec<PlaceholderChild>);
+        impl PreparedEnumeration for ReadOnly {
+            fn read_only(&self) -> bool {
+                true
+            }
+            fn children(&self) -> &[PlaceholderChild] {
+                &self.0
+            }
+        }
+        assert!(ReadOnly(vec![child.clone()]).file_read_only(&child));
+    }
+
     use super::{BackendError, MAX_RANGE_BYTES, checked_fetch_range, next_chunk_len};
 
     #[test]

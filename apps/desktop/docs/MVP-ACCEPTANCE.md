@@ -3174,3 +3174,37 @@ overnight automation was deleted after handoff so it does not reopen those
 cycles. The package has not been published; whole-category completion remains
 unclaimed. Candidate notes and local-beta-handoff-state.json under
 `outputs/linux-release-candidate-20261021-r200/` record the current boundaries.
+
+
+## Windows normal in-place vault source/native acceptance — 26 October
+
+Combined source `86f26d85…` enables normal generation-bound worker admission,
+per-file writable eligibility and limited in-place capability/UI reporting for
+verified existing vault files up to 512 KiB. Required source gates passed:
+formatting, strict Linux workspace/all-target lint, 1,109 tests with 14 ignored,
+and current GNU Windows binary/test/Cloud Files strict checks without warnings.
+Unchanged UI evidence from the normal-save candidate is reused; the new fix does
+not change that UI.
+
+- R31: full ordinary clean read, Lock, same-connection password re-unlock/read,
+  then Lock again. Both native caches were empty and keys locked; locked reads
+  failed without GET. Fresh hydration provenance was observed twice, with zero
+  edits, captures, NativeCompleted, PUT or DELETE.
+- R32: two changed-body in-place saves automatically completed conditional
+  encrypted PUT/readback, promoted ETags and two retained protected captures;
+  NativeCompleted and exact dirty resolution preceded clean Lock. Initial fresh
+  hydration authority and the subsequent edit authority both ran on this source.
+
+Both isolated ordinary-user MSVC cases passed with native/wrapper exit 0, owned
+counts 0, actual normal guest shutdown and cold preservation. Parent verification
+joined all 153 raw evidence files to exact source, build artifact, private task
+rendering/readback, SID/session and closure evidence. Source archive, reviews and
+parent acceptance receipts are in `outputs/desktop-next-20261021/windows-vault-clean-read-r1/`;
+raw runs are `agent-vault-clean-read-r31/` and `agent-vault-normal-save-r32/` under
+`outputs/local-windows-native-20261023-r1/`.
+
+Result: these focused source/native workflows pass. This is not exact-package
+or installed-application acceptance, broad namespace/offline/atomic-replacement
+support, partial-cache cleanup or whole C05/C10 completion. Nonempty partial or
+uncertain data remains retained and fail-closed. Installed r117 remains unchanged
+and closed; the test VMs are cold. No signing or publication is authorized here.

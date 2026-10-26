@@ -62,15 +62,14 @@ impl WindowsProfiles {
         let mut runtimes = BTreeMap::new();
         for id in ids {
             let store = DpapiStore::for_profile(&id)?;
-            runtimes.insert(
-                id.clone(),
-                Arc::new(WindowsAgent::new_for_profile_with_services(
-                    &id,
-                    store,
-                    Some(source_admissions.clone()),
-                    vault_sessions.clone(),
-                )?),
-            );
+            let runtime = Arc::new(WindowsAgent::new_for_profile_with_services(
+                &id,
+                store,
+                Some(source_admissions.clone()),
+                vault_sessions.clone(),
+            )?);
+            runtime.attach_existing_file_save_owner()?;
+            runtimes.insert(id.clone(), runtime);
         }
         Ok(Self {
             source_admissions,
@@ -415,6 +414,7 @@ impl WindowsProfiles {
                     Some(self.source_admissions.clone()),
                     self.vault_sessions.clone(),
                 )?);
+                runtime.attach_existing_file_save_owner()?;
                 self.persist(&next)?;
                 state.registry = next;
                 state.runtimes.insert(id.clone(), runtime);

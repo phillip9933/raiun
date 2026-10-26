@@ -5,7 +5,7 @@ import vm from 'node:vm';
 import ts from 'typescript';
 const source=await readFile(new URL('../src/main.ts',import.meta.url),'utf8');
 const parsed=ts.createSourceFile('main.ts',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TS);
-const names=['nativeVaultLockIncomplete','nativeVaultAccess','vaultAppFeaturesAvailable','nativeVaultActionAllowed','request','vaultSecretRequest','openEncryptedAccess','loadCachedVaultRoots','loadVaultPath','loadVaultPins','startVaultOfflinePin','startVaultEditRetry','createEncryptedVault','useVaultFolder','savePair','nativeVaultDrivePanel','openNativeVaultDrive','vaultOfflinePinPanel','vaultEditRetryPanel','encryptedEditRecoveryCard','copyVerifyBindingCurrent','interruptedCreateRetryContextCurrent','currentCopyProducerContext','verifyCopyOperation','pollCopyVerification','checkCopyVerificationStatus','cancelCopyVerification','retryInterruptedFileCreate','pollInterruptedCreateRetry','pollCopyProducer','scheduleCopyVerifyPoll','scheduleInterruptedCreateRetryPoll','scheduleCopyProducerPoll'];
+const names=['nativeExistingFileSaveMessage','nativeVaultLockIncomplete','nativeVaultAccess','vaultAppFeaturesAvailable','nativeVaultActionAllowed','request','vaultSecretRequest','openEncryptedAccess','loadCachedVaultRoots','loadVaultPath','loadVaultPins','startVaultOfflinePin','startVaultEditRetry','createEncryptedVault','useVaultFolder','savePair','nativeVaultDrivePanel','openNativeVaultDrive','vaultOfflinePinPanel','vaultEditRetryPanel','encryptedEditRecoveryCard','copyVerifyBindingCurrent','interruptedCreateRetryContextCurrent','currentCopyProducerContext','verifyCopyOperation','pollCopyVerification','checkCopyVerificationStatus','cancelCopyVerification','retryInterruptedFileCreate','pollInterruptedCreateRetry','pollCopyProducer','scheduleCopyVerifyPoll','scheduleInterruptedCreateRetryPoll','scheduleCopyProducerPoll'];
 const functions=parsed.statements.filter(n=>ts.isFunctionDeclaration(n)&&names.includes(n.name?.text)).map(n=>n.getFullText(parsed)).join('\n');
 const compiled=ts.transpileModule(functions,{compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.None}}).outputText;
 function harness(native=true){
@@ -50,4 +50,29 @@ test('native mode suppresses stale/programmatic copy and retry handlers and time
   h.context.scheduleCopyVerifyPoll(job);h.context.scheduleInterruptedCreateRetryPoll({});h.context.scheduleCopyProducerPoll({},1);
   assert.equal(timers,0);assert.deepEqual(cleared,[11,22,33]);assert.equal(job.timer,0);assert.equal(h.context.interruptedCreateRetryUi.timer,0);assert.deepEqual(h.calls,[]);
   assert.match(h.context.nativeVaultDrivePanel({vaultMountReady:false},false),/Close and reopen this dialog/);
+});
+
+
+test('limited native saves never enable namespace actions or stale capability copy',async()=>{
+  const h=harness();const flow=h.state.vaultDialog;
+  flow.vaultMountExistingFileInPlace=true;
+  const panel=h.context.nativeVaultDrivePanel(flow,false);
+  assert.match(panel,/supported file saves/);
+  assert.match(panel,/512 KiB/);
+  assert.match(panel,/Editors that replace files/);
+  assert.match(panel,/offline edits are not supported/);
+  assert.doesNotMatch(panel,/can queue supported file edits/);
+  await assert.rejects(h.context.request('vault_create'),/unavailable/);
+  await assert.rejects(h.context.request('vault_move'),/unavailable/);
+  flow.statusUnknown=true;
+  assert.doesNotMatch(h.context.nativeVaultDrivePanel(flow,false),/512 KiB/);
+  flow.statusUnknown=false;flow.unlocked=false;
+  assert.doesNotMatch(h.context.nativeVaultDrivePanel(flow,false),/512 KiB/);
+  flow.unlocked=true;h.state.status.connected=false;
+  assert.doesNotMatch(h.context.nativeVaultDrivePanel(flow,false),/512 KiB/);
+  h.state.status.connected=true;h.state.status.mounted=false;
+  assert.doesNotMatch(h.context.nativeVaultDrivePanel(flow,false),/512 KiB/);
+  h.state.status.mounted=true;flow.vaultMountExistingFileInPlace=false;
+  assert.match(h.context.nativeVaultDrivePanel(flow,false),/Files cannot be edited here/);
+  assert.deepEqual(h.calls,[]);
 });

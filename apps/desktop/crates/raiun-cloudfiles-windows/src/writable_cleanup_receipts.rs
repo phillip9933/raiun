@@ -17,10 +17,16 @@ pub(crate) struct Ticket {
     identity: [u8; 16],
     generation: u64,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    Edit,
+    Hydration,
+}
 struct Row<T> {
     generation: u64,
     phase: Phase,
     value: Option<Arc<T>>,
+    origin: Origin,
 }
 pub(crate) struct Receipts<T> {
     owner: Arc<()>,
@@ -40,6 +46,20 @@ impl<T> Default for Receipts<T> {
 }
 impl<T> Receipts<T> {
     pub fn reserve(&mut self, identity: [u8; 16]) -> Result<Ticket, ()> {
+        self.reserve_origin(identity, Origin::Edit)
+    }
+    /// A read cannot overwrite any existing edit, uncertainty or tombstone.
+    /// Only the separate confirmed-eviction CAS may start another generation.
+    pub fn reserve_hydration(&mut self, identity: [u8; 16]) -> Result<Option<Ticket>, ()> {
+        if self.poisoned || identity == [0; 16] {
+            return Err(());
+        }
+        if self.rows.contains_key(&identity) {
+            return Ok(None);
+        }
+        self.reserve_origin(identity, Origin::Hydration).map(Some)
+    }
+    fn reserve_origin(&mut self, identity: [u8; 16], origin: Origin) -> Result<Ticket, ()> {
         if self.poisoned
             || identity == [0; 16]
             || (!self.rows.contains_key(&identity) && self.rows.len() >= MAX_RECEIPTS)
@@ -56,6 +76,7 @@ impl<T> Receipts<T> {
                 generation,
                 phase: Phase::Reserved,
                 value: None,
+                origin,
             },
         );
         Ok(Ticket {
@@ -77,13 +98,59 @@ impl<T> Receipts<T> {
             .ok_or(())
     }
     pub fn publish(&mut self, ticket: Ticket, value: T) -> Result<(), ()> {
+        self.publish_origin(ticket, value, Origin::Edit)
+    }
+    /// Called only after the native transfer and exact request commit succeed.
+    pub fn publish_hydration(&mut self, ticket: Ticket, value: T) -> Result<(), ()> {
+        self.publish_origin(ticket, value, Origin::Hydration)
+    }
+    fn publish_origin(&mut self, ticket: Ticket, value: T, origin: Origin) -> Result<(), ()> {
         let row = self.row_mut(&ticket)?;
-        if row.phase != Phase::Reserved {
+        if row.phase != Phase::Reserved || row.origin != origin {
             return Err(());
         }
         row.value = Some(Arc::new(value));
         row.phase = Phase::Ready;
         Ok(())
+    }
+    /// Snapshot only confirmed eviction. The caller drops the book mutex before
+    /// proving the current native file empty under its fresh read admission.
+    /// The predicate is structural only: no native I/O, dirty or auth locks.
+    pub fn confirmed_evicted(
+        &self,
+        identity: &[u8; 16],
+        mut matches: impl FnMut(&T) -> bool,
+    ) -> Result<(Ticket, Arc<T>), ()> {
+        if self.poisoned {
+            return Err(());
+        }
+        let row = self.rows.get(identity).ok_or(())?;
+        let value = row.value.as_ref().ok_or(())?;
+        if row.phase != Phase::Evicted || !matches(value) {
+            return Err(());
+        }
+        Ok((
+            Ticket {
+                owner: Arc::downgrade(&self.owner),
+                identity: *identity,
+                generation: row.generation,
+            },
+            Arc::clone(value),
+        ))
+    }
+    /// The native caller must first prove exact current-empty, in-sync and
+    /// unmodified state for a freshly admitted original binding. This CAS only
+    /// consumes the same confirmed generation; it cannot heal uncertain state.
+    pub fn reenroll_evicted_hydration(
+        &mut self,
+        ticket: &Ticket,
+        mut matches: impl FnMut(&T) -> bool,
+    ) -> Result<Ticket, ()> {
+        let row = self.row_mut(ticket)?;
+        if row.phase != Phase::Evicted || !matches(row.value.as_deref().ok_or(())?) {
+            return Err(());
+        }
+        self.reserve_origin(ticket.identity, Origin::Hydration)
     }
     /// Predicate checks the private full native context and existing Weak binding.
     pub fn admitted(
@@ -166,6 +233,88 @@ impl<T> Receipts<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn confirmed(r: &mut Receipts<u8>, id: [u8; 16]) -> Ticket {
+        let (ticket, _, _) = r.admitted(&id, |_| true).unwrap();
+        r.evicted_unconfirmed(&ticket).unwrap();
+        r.confirm(&[&ticket]).unwrap();
+        r.confirmed_evicted(&id, |_| true).unwrap().0
+    }
+    #[test]
+    fn hydration_needs_its_own_ack_and_cannot_publish_an_edit_ticket() {
+        let mut r = Receipts::default();
+        let h = r.reserve_hydration([1; 16]).unwrap().unwrap();
+        assert!(r.admitted(&[1; 16], |_| true).is_err());
+        assert!(r.reserve_hydration([1; 16]).unwrap().is_none());
+        assert!(r.publish(h, 9).is_err());
+        assert!(r.admitted(&[1; 16], |_| true).is_err());
+        let edit = r.reserve([2; 16]).unwrap();
+        assert!(r.publish_hydration(edit, 9).is_err());
+        let h = r.reserve_hydration([3; 16]).unwrap().unwrap();
+        r.publish_hydration(h, 9).unwrap();
+        assert!(r.admitted(&[3; 16], |v| *v == 9).is_ok());
+        assert!(r.incomplete());
+    }
+    #[test]
+    fn hydration_never_heals_existing_edit_or_uncertain_states() {
+        let mut r = Receipts::default();
+        let edit = r.reserve([1; 16]).unwrap();
+        assert!(r.reserve_hydration([1; 16]).unwrap().is_none());
+        r.publish(edit, 7).unwrap();
+        assert!(r.reserve_hydration([1; 16]).unwrap().is_none());
+        assert!(r.confirmed_evicted(&[1; 16], |_| true).is_err());
+        let (ticket, _, _) = r.admitted(&[1; 16], |_| true).unwrap();
+        r.evicted_unconfirmed(&ticket).unwrap();
+        assert!(r.reserve_hydration([1; 16]).unwrap().is_none());
+        assert!(r.confirmed_evicted(&[1; 16], |_| true).is_err());
+        r.invalidate(&[1; 16]);
+        assert!(r.reserve_hydration([1; 16]).unwrap().is_none());
+        assert!(r.confirmed_evicted(&[1; 16], |_| true).is_err());
+        let h = r.reserve_hydration([2; 16]).unwrap().unwrap();
+        r.invalidate(&[2; 16]);
+        assert!(r.publish_hydration(h, 7).is_err());
+        assert!(r.reserve_hydration([2; 16]).unwrap().is_none());
+    }
+    #[test]
+    fn confirmed_eviction_rollover_is_new_and_never_restores_old_authority() {
+        let mut r = Receipts::default();
+        let edit = r.reserve([1; 16]).unwrap();
+        r.publish(edit, 7).unwrap();
+        let old = confirmed(&mut r, [1; 16]);
+        assert!(!r.incomplete());
+        assert!(r.reenroll_evicted_hydration(&old, |v| *v == 8).is_err());
+        assert!(!r.incomplete());
+        let h = r.reenroll_evicted_hydration(&old, |v| *v == 7).unwrap();
+        assert!(r.incomplete());
+        assert!(r.admitted(&[1; 16], |_| true).is_err());
+        assert!(r.confirm(&[&old]).is_err());
+        assert!(r.reenroll_evicted_hydration(&old, |_| true).is_err());
+        r.publish_hydration(h, 7).unwrap();
+        let old = confirmed(&mut r, [1; 16]);
+        let _abandoned = r.reenroll_evicted_hydration(&old, |_| true).unwrap();
+        assert!(r.confirmed_evicted(&[1; 16], |_| true).is_err());
+        assert!(r.incomplete());
+    }
+    #[test]
+    fn hydration_rollover_rejects_invalidation_replacement_and_foreign_book() {
+        let mut a = Receipts::default();
+        let edit = a.reserve([1; 16]).unwrap();
+        a.publish(edit, 7).unwrap();
+        let old = confirmed(&mut a, [1; 16]);
+        a.invalidate(&[1; 16]);
+        assert!(a.reenroll_evicted_hydration(&old, |_| true).is_err());
+        let replacement = a.reserve([1; 16]).unwrap();
+        a.publish(replacement, 7).unwrap();
+        let current = confirmed(&mut a, [1; 16]);
+        assert!(a.reenroll_evicted_hydration(&old, |_| true).is_err());
+        let mut b = Receipts::default();
+        let edit = b.reserve([1; 16]).unwrap();
+        b.publish(edit, 7).unwrap();
+        let _own = confirmed(&mut b, [1; 16]);
+        assert!(b.reenroll_evicted_hydration(&current, |_| true).is_err());
+        drop(a);
+        assert!(b.reenroll_evicted_hydration(&current, |_| true).is_err());
+        assert!(!b.incomplete());
+    }
     #[test]
     fn exact_context_generation_and_invalidation() {
         let mut r = Receipts::default();

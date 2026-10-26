@@ -22,6 +22,10 @@ mod vault_completion;
 #[cfg(any(windows, test))]
 mod vault_dirty;
 #[cfg(any(windows, test))]
+mod vault_hydration;
+#[cfg(windows)]
+pub use vault_hydration::FreshVaultHydration;
+#[cfg(any(windows, test))]
 mod writable_cleanup_receipts;
 #[cfg(windows)]
 pub use vault_completion::{

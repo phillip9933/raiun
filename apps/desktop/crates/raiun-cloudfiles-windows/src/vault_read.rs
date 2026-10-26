@@ -76,10 +76,14 @@ pub struct UnpublishedVaultStage {
     metadata: RemoteEntry,
     binding_identity: Arc<()>,
     publication_revision: u64,
+    full_sha256: Option<[u8; 32]>,
 }
 impl UnpublishedVaultStage {
     pub fn metadata(&self) -> &RemoteEntry {
         &self.metadata
+    }
+    pub(crate) fn full_sha256(&self) -> Option<[u8; 32]> {
+        self.full_sha256
     }
 }
 impl WindowsVaultReadBinding {
@@ -286,7 +290,7 @@ impl WindowsVaultReadBinding {
                 }
             }
         });
-        let (reader, mut metadata) = staged.map_err(|_| {
+        let (mut reader, mut metadata) = staged.map_err(|_| {
             original_error.unwrap_or_else(|| {
                 CloudError::new(
                     ErrorKind::InvalidResponse,
@@ -294,6 +298,23 @@ impl WindowsVaultReadBinding {
                 )
             })
         })?;
+        let full_sha256 = if expected.size <= crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64 {
+            reader.verify().map_err(|_| refused())?;
+            if reader.metadata().map_err(|_| refused())?.len() != expected.size {
+                return Err(refused());
+            }
+            reader.seek(SeekFrom::Start(0)).map_err(|_| refused())?;
+            let digest = crate::vault_hydration::bounded_stage_sha(&mut reader, expected.size)
+                .map_err(|_| refused())?;
+            reader.verify().map_err(|_| refused())?;
+            if reader.metadata().map_err(|_| refused())?.len() != expected.size {
+                return Err(refused());
+            }
+            reader.seek(SeekFrom::Start(0)).map_err(|_| refused())?;
+            Some(digest)
+        } else {
+            None
+        };
         self.check_current()?; // failure drops the exact owned stage here
         self.with_publication_revision(revision, || Ok(()))?;
         metadata.writable = false;
@@ -302,6 +323,7 @@ impl WindowsVaultReadBinding {
             metadata,
             binding_identity: Arc::clone(&self.identity),
             publication_revision: revision,
+            full_sha256,
         })
     }
 

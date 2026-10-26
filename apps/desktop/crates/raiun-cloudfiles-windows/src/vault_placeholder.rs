@@ -118,6 +118,88 @@ impl Catalogue {
     }
 }
 
+// Immutable original worker identity; neither a key nor a mutable mode switch.
+#[derive(Clone)]
+struct ExistingFileSaveGate {
+    active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    expected: u64,
+}
+impl ExistingFileSaveGate {
+    fn current(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.expected != 0
+            && self.active.load(Ordering::Acquire)
+            && self.generation.load(Ordering::Acquire) == self.expected
+    }
+}
+#[derive(Default)]
+struct VaultChildPublication {
+    gate: Option<ExistingFileSaveGate>,
+    eligible: HashMap<[u8; 16], PlaceholderChild>,
+}
+impl VaultChildPublication {
+    fn from_catalogue(
+        gate: Option<ExistingFileSaveGate>,
+        catalogue: &Catalogue,
+        children: &[PlaceholderChild],
+    ) -> Self {
+        let mut eligible = HashMap::new();
+        if gate.as_ref().is_some_and(ExistingFileSaveGate::current) {
+            for child in children {
+                let Ok(identity) = <[u8; 16]>::try_from(child.identity.as_slice()) else {
+                    continue;
+                };
+                if identity != [0; 16]
+                    && catalogue.get(&identity).is_some_and(|entry| {
+                        eligible_existing_file(&entry)
+                            && metadata(&entry) == child.metadata
+                            && entry.path.rsplit('/').next() == Some(child.name.as_str())
+                    })
+                {
+                    eligible.insert(identity, child.clone());
+                }
+            }
+        }
+        Self { gate, eligible }
+    }
+    fn file_read_only(&self, child: &PlaceholderChild) -> bool {
+        let Ok(identity) = <[u8; 16]>::try_from(child.identity.as_slice()) else {
+            return true;
+        };
+        !self
+            .gate
+            .as_ref()
+            .is_some_and(ExistingFileSaveGate::current)
+            || self.eligible.get(&identity) != Some(child)
+    }
+    fn check(&self) -> Result<(), BackendError> {
+        if self.gate.as_ref().is_some_and(|gate| !gate.current()) {
+            Err(BackendError::Unavailable)
+        } else {
+            Ok(())
+        }
+    }
+}
+fn eligible_existing_file(entry: &RemoteEntry) -> bool {
+    let etag = entry.etag.as_bytes();
+    !entry.directory
+        && !entry.writable
+        && !entry.id.is_empty()
+        && entry.id.len() <= 4096
+        && entry.size <= crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64
+        && entry.path != "/"
+        && entry.path.len() <= 4096
+        && raiun_core::validate_remote_path(&entry.path).is_ok()
+        && entry.path[1..].split('/').all(valid_windows_component)
+        && (2..=4096).contains(&etag.len())
+        && etag.first() == Some(&b'"')
+        && etag.last() == Some(&b'"')
+        && etag[1..etag.len() - 1]
+            .iter()
+            .all(|b| *b == 0x21 || (0x23..=0x7e).contains(b))
+}
+
 #[cfg(windows)]
 mod runtime {
     use super::*;
@@ -156,6 +238,7 @@ mod runtime {
         catalogue: Mutex<Catalogue>,
         root: [u8; 16],
         custody: Arc<dyn crate::vault_custody::VaultPublicationCustody>,
+        existing_saves: Option<ExistingFileSaveGate>,
     }
     impl WindowsVaultPlaceholderBackend {
         pub fn new(
@@ -164,6 +247,38 @@ mod runtime {
             maximum_stage_bytes: u64,
             custody: Arc<dyn crate::vault_custody::VaultPublicationCustody>,
         ) -> Result<Self, BackendError> {
+            Self::new_with_gate(binding, private, maximum_stage_bytes, custody, None)
+        }
+        /// Explicit in-place publication bound to the ORIGINAL worker/generation.
+        pub fn new_with_existing_file_saves(
+            binding: Arc<WindowsVaultReadBinding>,
+            private: Arc<PrivateDirectory>,
+            maximum_stage_bytes: u64,
+            custody: Arc<dyn crate::vault_custody::VaultPublicationCustody>,
+            active: Arc<std::sync::atomic::AtomicBool>,
+            generation: Arc<std::sync::atomic::AtomicU64>,
+            expected: u64,
+        ) -> Result<Self, BackendError> {
+            let gate = ExistingFileSaveGate {
+                active,
+                generation,
+                expected,
+            };
+            if !gate.current() {
+                return Err(BackendError::Unavailable);
+            }
+            Self::new_with_gate(binding, private, maximum_stage_bytes, custody, Some(gate))
+        }
+        fn new_with_gate(
+            binding: Arc<WindowsVaultReadBinding>,
+            private: Arc<PrivateDirectory>,
+            maximum_stage_bytes: u64,
+            custody: Arc<dyn crate::vault_custody::VaultPublicationCustody>,
+            existing_saves: Option<ExistingFileSaveGate>,
+        ) -> Result<Self, BackendError> {
+            if existing_saves.as_ref().is_some_and(|gate| !gate.current()) {
+                return Err(BackendError::Unavailable);
+            }
             let root = binding.stat("/").map_err(|_| BackendError::Unavailable)?;
             if !root.directory || root.path != "/" {
                 return Err(BackendError::Unavailable);
@@ -173,6 +288,9 @@ mod runtime {
                 .map_err(|_| BackendError::Unavailable)?;
             let (catalogue, identity) = binding
                 .with_publication(|| {
+                    if existing_saves.as_ref().is_some_and(|gate| !gate.current()) {
+                        return Err(refused());
+                    }
                     binding
                         .verify_custody_context(custody.as_ref())
                         .map_err(|_| refused())?;
@@ -191,6 +309,9 @@ mod runtime {
                     Ok((catalogue, identity))
                 })
                 .map_err(|_| BackendError::Unavailable)?;
+            if existing_saves.as_ref().is_some_and(|gate| !gate.current()) {
+                return Err(BackendError::Unavailable);
+            }
             Ok(Self {
                 binding,
                 private,
@@ -198,7 +319,28 @@ mod runtime {
                 catalogue: Mutex::new(catalogue),
                 root: identity,
                 custody,
+                existing_saves,
             })
+        }
+        /// Current mode only; exact authenticated route/epoch checks remain
+        /// the caller's responsibility. Never reacquires auth locks.
+        pub fn existing_file_saves_active(&self) -> bool {
+            !self.binding.is_revoked()
+                && self
+                    .existing_saves
+                    .as_ref()
+                    .is_some_and(ExistingFileSaveGate::current)
+        }
+        fn check_existing_saves(&self) -> Result<(), BackendError> {
+            if self
+                .existing_saves
+                .as_ref()
+                .is_some_and(|gate| !gate.current())
+            {
+                Err(BackendError::Unavailable)
+            } else {
+                Ok(())
+            }
         }
         /// Early local freshness check only. No body, HTTP or live permit
         /// escapes; the upload path still performs full custody validation.
@@ -345,6 +487,7 @@ mod runtime {
             cancellation: &CancellationToken,
         ) -> Result<Box<dyn PreparedEnumeration + 'static>, BackendError> {
             check(cancellation)?;
+            self.check_existing_saves()?;
             let revision = self.binding.publication_revision();
             let parent = self.saved(identity)?;
             if !parent.directory {
@@ -369,26 +512,36 @@ mod runtime {
                 return Err(BackendError::NotFound);
             }
             check(cancellation)?;
+            self.check_existing_saves()?;
             // Publication/route -> token -> session -> catalogue is the only
             // catalogue commit order; no catalogue guard survives network I/O.
-            let children = self
+            let (children, publication) = self
                 .binding
                 .with_publication_revision(revision, || {
                     check(cancellation).map_err(|_| refused())?;
+                    self.check_existing_saves().map_err(|_| refused())?;
                     let mut catalogue = self.catalogue.lock().map_err(|_| refused())?;
                     let (next, children) = catalogue
                         .stage_listing(&parent, entries)
                         .map_err(|_| refused())?;
                     persist_catalogue(self.custody.as_ref(), &next).map_err(|_| refused())?;
+                    let publication = VaultChildPublication::from_catalogue(
+                        self.existing_saves.clone(),
+                        &next,
+                        &children,
+                    );
+                    publication.check().map_err(|_| refused())?;
                     *catalogue = next;
-                    Ok(children)
+                    Ok((children, publication))
                 })
                 .map_err(|_| BackendError::Unavailable)?;
             check(cancellation)?;
+            self.check_existing_saves()?;
             Ok(Box::new(VaultEnumeration {
                 binding: self.binding.clone(),
                 revision,
                 children,
+                publication,
             }))
         }
 
@@ -462,6 +615,12 @@ mod runtime {
                 custody: self.custody.clone(),
                 identity: identity.try_into().map_err(|_| BackendError::Unavailable)?,
                 metadata: metadata(&expected),
+                full_sha256: stage.full_sha256(),
+                save_gate: self
+                    .existing_saves
+                    .clone()
+                    .filter(|_| eligible_existing_file(&expected)),
+                original: expected,
                 stage: Mutex::new(stage),
             })
         }
@@ -488,10 +647,14 @@ mod runtime {
         binding: Arc<WindowsVaultReadBinding>,
         revision: u64,
         children: Vec<PlaceholderChild>,
+        publication: VaultChildPublication,
     }
     impl PreparedEnumeration for VaultEnumeration {
         fn read_only(&self) -> bool {
             true
+        }
+        fn file_read_only(&self, child: &PlaceholderChild) -> bool {
+            self.publication.file_read_only(child)
         }
         fn children(&self) -> &[PlaceholderChild] {
             &self.children
@@ -500,8 +663,12 @@ mod runtime {
             &'a self,
             cancellation: &CancellationToken,
         ) -> Result<Box<dyn PublishPermit + 'a>, BackendError> {
-            self.binding
-                .try_begin_publish_revision(self.revision, cancellation)
+            self.publication.check()?;
+            let permit = self
+                .binding
+                .try_begin_publish_revision(self.revision, cancellation)?;
+            self.publication.check()?;
+            Ok(permit)
         }
     }
     struct VaultFetch {
@@ -511,6 +678,9 @@ mod runtime {
         identity: [u8; 16],
         metadata: PlaceholderMetadata,
         bytes: Zeroizing<Vec<u8>>,
+        full_sha256: Option<[u8; 32]>,
+        save_gate: Option<ExistingFileSaveGate>,
+        original: RemoteEntry,
     }
     impl PreparedFetch for VaultFetch {
         fn persist_vault_hydration(
@@ -525,6 +695,35 @@ mod runtime {
                 return Err(BackendError::Unavailable);
             }
             self.custody.persist_hydration(intent)
+        }
+        fn prepare_fresh_vault_hydration(
+            &self,
+            intent: &crate::vault_custody::VaultHydrationIntent,
+        ) -> Result<Option<crate::FreshVaultHydration>, BackendError> {
+            let Some(gate) = &self.save_gate else {
+                return Ok(None);
+            };
+            if intent.identity != self.identity
+                || intent.length != self.metadata.length
+                || self.metadata.is_directory
+                || intent.root != self.custody.root_identity()
+                || !eligible_existing_file(&self.original)
+            {
+                return Err(BackendError::Unavailable);
+            }
+            crate::FreshVaultHydration::from_prepared(
+                &self.binding,
+                self.revision,
+                (
+                    Arc::clone(&gate.active),
+                    Arc::clone(&gate.generation),
+                    gate.expected,
+                ),
+                self.original.clone(),
+                self.full_sha256.ok_or(BackendError::Unavailable)?,
+                intent,
+            )
+            .map(Some)
         }
         fn metadata(&self) -> PlaceholderMetadata {
             self.metadata
@@ -546,6 +745,9 @@ mod runtime {
         custody: Arc<dyn crate::vault_custody::VaultPublicationCustody>,
         identity: [u8; 16],
         metadata: PlaceholderMetadata,
+        full_sha256: Option<[u8; 32]>,
+        save_gate: Option<ExistingFileSaveGate>,
+        original: RemoteEntry,
         stage: Mutex<UnpublishedVaultStage>,
     }
     impl VaultFetchSession {
@@ -591,6 +793,9 @@ mod runtime {
                 identity: self.identity,
                 metadata: self.metadata,
                 bytes,
+                full_sha256: self.full_sha256,
+                save_gate: self.save_gate.clone(),
+                original: self.original.clone(),
             })
         }
     }
@@ -1757,6 +1962,99 @@ mod tests {
             encrypted: false,
         }
     }
+    fn publication_gate() -> ExistingFileSaveGate {
+        ExistingFileSaveGate {
+            active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(7)),
+            expected: 7,
+        }
+    }
+    #[test]
+    fn existing_file_publication_is_exact_bounded_and_readonly_by_default() {
+        let mut catalogue = Catalogue::default();
+        let root = entry("/", "root", true, "", 0);
+        catalogue.insert(root.clone()).unwrap();
+        let original = entry(
+            "/ok",
+            "file",
+            false,
+            "\"etag\"",
+            crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64,
+        );
+        let oversized = entry(
+            "/big",
+            "large",
+            false,
+            "\"etag\"",
+            crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64 + 1,
+        );
+        let (catalogue, children) = catalogue
+            .stage_listing(
+                &root,
+                vec![
+                    original.clone(),
+                    oversized,
+                    entry("/dir", "dir", true, "", 0),
+                    entry("/weak", "weak", false, "W/\"etag\"", 4),
+                ],
+            )
+            .unwrap();
+        let plain = VaultChildPublication::from_catalogue(None, &catalogue, &children);
+        assert!(children.iter().all(|child| plain.file_read_only(child)));
+        assert!(plain.check().is_ok());
+        let policy =
+            VaultChildPublication::from_catalogue(Some(publication_gate()), &catalogue, &children);
+        assert!(!policy.file_read_only(&children[0]));
+        assert!(
+            children[1..]
+                .iter()
+                .all(|child| policy.file_read_only(child))
+        );
+        let mut forged = children[0].clone();
+        forged.identity = vec![9; 16];
+        assert!(policy.file_read_only(&forged));
+        forged = children[0].clone();
+        forged.metadata.length += 1;
+        assert!(policy.file_read_only(&forged));
+        forged = children[0].clone();
+        forged.name = "different".into();
+        assert!(policy.file_read_only(&forged));
+        assert_eq!(catalogue.get(&children[0].identity).unwrap(), original);
+        for bad in [
+            entry("/ok", "", false, "\"e\"", 4),
+            entry("/CON", "file", false, "\"e\"", 4),
+            entry("/ok", "file", false, "bare", 4),
+        ] {
+            assert!(!eligible_existing_file(&bad));
+        }
+    }
+    #[test]
+    fn publication_gate_never_adopts_replacement_or_stale_generation() {
+        use std::sync::atomic::Ordering;
+        let mut catalogue = Catalogue::default();
+        let root = entry("/", "root", true, "", 0);
+        catalogue.insert(root.clone()).unwrap();
+        let (catalogue, children) = catalogue
+            .stage_listing(&root, vec![entry("/ok", "file", false, "\"e\"", 4)])
+            .unwrap();
+        let gate = publication_gate();
+        let policy =
+            VaultChildPublication::from_catalogue(Some(gate.clone()), &catalogue, &children);
+        assert!(!policy.file_read_only(&children[0]));
+        gate.generation.store(8, Ordering::Release);
+        assert!(policy.file_read_only(&children[0]));
+        assert!(policy.check().is_err());
+        gate.generation.store(7, Ordering::Release);
+        gate.active.store(false, Ordering::Release);
+        let replacement = publication_gate();
+        assert!(replacement.current());
+        assert!(policy.check().is_err());
+        assert!(policy.file_read_only(&children[0]));
+        let mut zero = publication_gate();
+        zero.expected = 0;
+        assert!(!zero.current());
+    }
+
     #[test]
     fn catalogue_opaque_ids_preserve_exact_file_version_and_directory_identity() {
         let mut catalogue = Catalogue::default();

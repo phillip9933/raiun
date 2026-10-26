@@ -861,6 +861,8 @@ struct WritableCleanupReceipt {
     components: Vec<String>,
     length: u64,
     sha256: [u8; 32],
+    clean_hydration: bool,
+    original: Option<raiun_core::backend::RemoteEntry>,
 }
 impl WritableCleanupReceipt {
     fn matches_row(&self, root: RootIdentity, row: &hydration_inventory::HydratedFileRow) -> bool {
@@ -873,6 +875,43 @@ impl WritableCleanupReceipt {
             && self.components == row.components()
     }
 }
+fn hydration_full_on_disk(handle: Handle, length: u64) -> Result<bool, Error> {
+    if length > crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64 {
+        return Err(Error::EditRecoveryUnavailable);
+    }
+    let mut ranges = [CfFileRange {
+        starting_offset: 0,
+        length: 0,
+    }; 64];
+    let mut returned = 0;
+    // SAFETY: bounded aligned ONDISK query on the same exclusive referenced
+    // file. No native data read/hydration or mutation is performed by this query.
+    let hr = unsafe {
+        CfGetPlaceholderRangeInfo(
+            handle,
+            1,
+            0,
+            -1,
+            ranges.as_mut_ptr().cast(),
+            size_of_val(&ranges) as u32,
+            &mut returned,
+        )
+    };
+    if hr < 0
+        || returned as usize > size_of_val(&ranges)
+        || returned as usize % size_of::<CfFileRange>() != 0
+    {
+        return Err(Error::EditRecoveryUnavailable);
+    }
+    Ok(crate::vault_hydration::ranges_cover_file(
+        ranges
+            .iter()
+            .take(returned as usize / size_of::<CfFileRange>())
+            .map(|range| (range.starting_offset, range.length)),
+        length,
+    ))
+}
+
 fn placeholder_on_disk_empty(handle: Handle) -> Result<bool, Error> {
     let mut ranges = [CfFileRange {
         starting_offset: 0,
@@ -1917,6 +1956,12 @@ impl ConfiguredRootConnection {
                 {
                     return Err(Error::EditRecoveryUnavailable);
                 }
+                // Only this NEW origin can originate from a partial requested
+                // range. Prove complete ONDISK coverage before reading any bytes;
+                // Lock must never request missing plaintext after retirement.
+                if receipt.clean_hydration && !hydration_full_on_disk(file.raw, receipt.length)? {
+                    return Err(Error::EditRecoveryUnavailable);
+                }
                 let mut bytes = Zeroizing::new(vec![0u8; receipt.length as usize]);
                 file.read_complete(&mut bytes)?;
                 if <[u8; 32]>::from(Sha256::digest(&bytes)) != receipt.sha256 {
@@ -2925,6 +2970,12 @@ impl ConfiguredRootConnection {
                     .map_err(|_| Error::EditRecoveryUnavailable)?;
                 upload.check_current()?;
                 if let Some(ticket) = cleanup_reservation {
+                    // Exact already-committed runtime catalogue promotion: keep
+                    // original ID/path/flags; only verified new ETag/size change.
+                    // Derive locally BEFORE receipt mutex, no auth or lookup.
+                    let mut cleanup_original = upload.target.original().clone();
+                    cleanup_original.etag = upload.remote_evidence().entry().etag.clone();
+                    cleanup_original.size = length;
                     self.state
                         .writable_cleanup
                         .lock()
@@ -2939,6 +2990,8 @@ impl ConfiguredRootConnection {
                                 components: target.components().to_vec(),
                                 length,
                                 sha256: sha,
+                                clean_hydration: false,
+                                original: Some(cleanup_original),
                             },
                         )
                         .map_err(|_| Error::EditRecoveryUnavailable)?;
@@ -5398,6 +5451,122 @@ impl CallbackState {
         }
     }
 
+    fn reserve_fresh_hydration(
+        &self,
+        capsule: &crate::FreshVaultHydration,
+        pinned: &CallbackPathGuard,
+        components: &[String],
+        identity: &[u8],
+    ) -> Result<Option<crate::writable_cleanup_receipts::Ticket>, BackendError> {
+        let ctx = capsule.context();
+        let root = self.root_identity.ok_or(BackendError::Unavailable)?;
+        if ctx.root.volume_serial != root.volume_serial
+            || ctx.root.file_index != root.file_index
+            || ctx.identity.as_slice() != identity
+            || ctx.file.volume_serial != root.volume_serial
+            || ctx.file.file_index != pinned.snapshot.identity.file_index
+            || ctx.length != pinned.snapshot.file_size
+            || ctx.components != components
+            || ctx.original.directory
+            || ctx.original.size != ctx.length
+            || ctx.original.id.is_empty()
+            || ctx.original.etag.is_empty()
+        {
+            return Err(BackendError::Unavailable);
+        }
+        capsule.check_current()?;
+        let (missing, confirmed) = {
+            let mut receipts = self
+                .writable_cleanup
+                .lock()
+                .map_err(|_| BackendError::Unavailable)?;
+            let missing = receipts
+                .reserve_hydration(ctx.identity)
+                .map_err(|_| BackendError::Unavailable)?;
+            let confirmed = if missing.is_none() {
+                receipts.confirmed_evicted(&ctx.identity, |_| true).ok()
+            } else {
+                None
+            };
+            (missing, confirmed)
+        };
+        if missing.is_some() {
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!("synthetic_vault_hydration_stage=reserved_missing");
+            return Ok(missing);
+        }
+        let Some((old_ticket, old)) = confirmed else {
+            // Existing edit/dirty/uncertain/read authority is never healed or
+            // replaced by a read; fresh receipt enrollment simply does not occur.
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!("synthetic_vault_hydration_stage=existing_receipt_untouched");
+            return Ok(None);
+        };
+        let matches = |old: &WritableCleanupReceipt| {
+            old.root == ctx.root
+                && old.identity == ctx.identity
+                && old.file == ctx.file
+                && old.components == ctx.components
+                && old.length == ctx.length
+                && old.sha256 == ctx.sha256
+                && old.original.as_ref().is_some_and(|original| {
+                    crate::vault_hydration::same_original(original, &ctx.original)
+                })
+        };
+        if !matches(&old)
+            || !capsule.is_new_binding(&old.dispatch)?
+            || self.has_unresolved_placeholder_data()
+        {
+            return Err(BackendError::Unavailable);
+        }
+        // Receipt mutex is DROPPED. Before any plaintext, prove CURRENT empty
+        // native state on the same nofollow pinned file. Never read missing data
+        // or compare current revoked publication revisions during later cleanup.
+        let usn = completion_usn(pinned.entry.0, ctx.file.file_index)
+            .map_err(|_| BackendError::Unavailable)?;
+        let before = root_snapshot(pinned.entry.0).map_err(|_| BackendError::Unavailable)?;
+        let basic = completion_basic_info(pinned.entry.0).map_err(|_| BackendError::Unavailable)?;
+        if !same_edit_snapshot(pinned.snapshot, before)
+            || before.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+            || !cleanup_cloud_reparse_tag(before.reparse_tag)
+            || before.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC == 0
+        {
+            return Err(BackendError::Unavailable);
+        }
+        clean_dehydrate_identity(
+            pinned.entry.0,
+            root.file_index,
+            ctx.file.file_index,
+            &ctx.identity,
+        )
+        .map_err(|_| BackendError::Unavailable)?;
+        if !placeholder_on_disk_empty(pinned.entry.0).map_err(|_| BackendError::Unavailable)?
+            || modified_ranges_for_handle(pinned.entry.0).map_err(|_| BackendError::Unavailable)?
+            || !same_edit_snapshot(
+                before,
+                root_snapshot(pinned.entry.0).map_err(|_| BackendError::Unavailable)?,
+            )
+            || completion_basic_info(pinned.entry.0).map_err(|_| BackendError::Unavailable)?
+                != basic
+            || completion_usn(pinned.entry.0, ctx.file.file_index)
+                .map_err(|_| BackendError::Unavailable)?
+                != usn
+            || self.has_unresolved_placeholder_data()
+        {
+            return Err(BackendError::Unavailable);
+        }
+        capsule.check_current()?;
+        let ticket = self
+            .writable_cleanup
+            .lock()
+            .map_err(|_| BackendError::Unavailable)?
+            .reenroll_evicted_hydration(&old_ticket, matches)
+            .map_err(|_| BackendError::Unavailable)?;
+        #[cfg(feature = "synthetic-agent-integration")]
+        eprintln!("synthetic_vault_hydration_stage=reenrolled_confirmed_empty");
+        Ok(Some(ticket))
+    }
+
     fn invalidate_writable_cleanup(&self) {
         if let Ok(mut receipts) = self.writable_cleanup.lock() {
             receipts.invalidate_all();
@@ -6404,7 +6573,6 @@ unsafe extern "system" fn fetch_placeholders_callback(
                 execute_transfer_placeholders(info, &[], STATUS_UNSUCCESSFUL, false);
                 return;
             }
-            let read_only = prepared.read_only();
             let publish_permit = match prepared.begin_publish(&fetch_permit.cancellation) {
                 Ok(permit) => permit,
                 Err(BackendError::Cancelled) => {
@@ -6437,7 +6605,12 @@ unsafe extern "system" fn fetch_placeholders_callback(
             }
             let children = prepared.children();
             let count = children.len();
-            let outcome = execute_transfer_placeholders(info, children, STATUS_SUCCESS, read_only);
+            let outcome = execute_transfer_placeholders_with_policy(
+                info,
+                children,
+                STATUS_SUCCESS,
+                &|child| prepared.file_read_only(child),
+            );
             #[cfg(test)]
             eprintln!(
                 "synthetic directory CfExecute outcome: hresult={:#x} processed={} expected={} complete={} entry_failure={:?}",
@@ -6530,7 +6703,6 @@ fn populate_initial_sync_root(
     let prepared = backend
         .prepare_enumeration(root_identity, &cancellation)
         .map_err(|_| Error::ProviderUnavailable)?;
-    let read_only = prepared.read_only();
     let children = prepared.children();
     if children.is_empty() || !valid_placeholder_children(children) {
         return Err(Error::ProviderUnavailable);
@@ -6567,7 +6739,7 @@ fn populate_initial_sync_root(
                         FILE_ATTRIBUTE_DIRECTORY
                     } else {
                         FILE_ATTRIBUTE_ARCHIVE
-                            | if read_only {
+                            | if prepared.file_read_only(child) {
                                 FILE_ATTRIBUTE_READONLY
                             } else {
                                 0
@@ -7016,6 +7188,14 @@ fn execute_transfer_placeholders(
     completion_status: i32,
     read_only: bool,
 ) -> PlaceholderExecutionOutcome {
+    execute_transfer_placeholders_with_policy(info, children, completion_status, &|_| read_only)
+}
+fn execute_transfer_placeholders_with_policy(
+    info: &CfCallbackInfo,
+    children: &[crate::PlaceholderChild],
+    completion_status: i32,
+    file_read_only: &dyn Fn(&crate::PlaceholderChild) -> bool,
+) -> PlaceholderExecutionOutcome {
     let names = children
         .iter()
         .map(|child| wide_literal(&child.name))
@@ -7039,7 +7219,7 @@ fn execute_transfer_placeholders(
                         FILE_ATTRIBUTE_DIRECTORY
                     } else {
                         FILE_ATTRIBUTE_ARCHIVE
-                            | if read_only {
+                            | if file_read_only(child) {
                                 FILE_ATTRIBUTE_READONLY
                             } else {
                                 0
@@ -7314,6 +7494,9 @@ unsafe extern "system" fn fetch_data_callback(
     };
     observe_fetch!(8);
     let mut tracked = false;
+    let mut hydration_capsule: Option<crate::FreshVaultHydration> = None;
+    let mut hydration_ticket: Option<crate::writable_cleanup_receipts::Ticket> = None;
+    let mut hydration_identity: Option<[u8; 16]> = None;
     // The deadline starts before waiting for one of the two callback-wide
     // staging permits, so backpressure is part of the same bounded request.
     let staged_fetch_started = Instant::now();
@@ -7354,27 +7537,46 @@ unsafe extern "system" fn fetch_data_callback(
                         error: BackendError::Unavailable,
                         transfer_refused: false,
                     })?;
-                    prepared
-                        .persist_vault_hydration(&crate::vault_custody::VaultHydrationIntent {
-                            root: crate::ConfiguredRootIdentity {
-                                volume_serial: info.volume_serial_number,
-                                file_index: info.sync_root_file_id as u64,
-                            },
-                            identity: id,
-                            file_index: pinned.snapshot.identity.file_index,
-                            length: info.file_size as u64,
-                            components: components.clone(),
-                        })
-                        .map_err(|error| {
-                            if let Ok(mut inventory) = guard.0.hydrated_files.lock() {
-                                inventory.mark_incomplete();
-                            }
-                            WindowStreamError {
+                    let intent = crate::vault_custody::VaultHydrationIntent {
+                        root: crate::ConfiguredRootIdentity {
+                            volume_serial: info.volume_serial_number,
+                            file_index: info.sync_root_file_id as u64,
+                        },
+                        identity: id,
+                        file_index: pinned.snapshot.identity.file_index,
+                        length: info.file_size as u64,
+                        components: components.clone(),
+                    };
+                    prepared.persist_vault_hydration(&intent).map_err(|error| {
+                        if let Ok(mut inventory) = guard.0.hydrated_files.lock() {
+                            inventory.mark_incomplete();
+                        }
+                        WindowStreamError {
+                            offset,
+                            error,
+                            transfer_refused: false,
+                        }
+                    })?;
+                    if let Some(capsule) =
+                        prepared
+                            .prepare_fresh_vault_hydration(&intent)
+                            .map_err(|error| WindowStreamError {
                                 offset,
                                 error,
                                 transfer_refused: false,
-                            }
-                        })?;
+                            })?
+                    {
+                        hydration_identity = Some(id);
+                        hydration_ticket = guard
+                            .0
+                            .reserve_fresh_hydration(&capsule, pinned, components, identity)
+                            .map_err(|error| WindowStreamError {
+                                offset,
+                                error,
+                                transfer_refused: false,
+                            })?;
+                        hydration_capsule = Some(capsule);
+                    }
                     // The stream's backend publication permit and request
                     // permit are both held here. Store BEFORE CfExecute and
                     // release the inventory mutex before calling Windows. Keep
@@ -7402,6 +7604,13 @@ unsafe extern "system" fn fetch_data_callback(
                 }
                 tracked = true;
             }
+            if let Some(capsule) = &hydration_capsule {
+                capsule.check_current().map_err(|error| WindowStreamError {
+                    offset,
+                    error,
+                    transfer_refused: false,
+                })?;
+            }
             observe_fetch!(12);
             let execute_result = execute_transfer(
                 info,
@@ -7427,6 +7636,61 @@ unsafe extern "system" fn fetch_data_callback(
                     error: BackendError::Unavailable,
                     transfer_refused: true,
                 })?;
+            if hydration_capsule.is_some() && execute_result != 0 {
+                return Err(WindowStreamError {
+                    offset,
+                    error: BackendError::Unavailable,
+                    transfer_refused: true,
+                });
+            }
+            if offset.checked_add(slice.len() as u64) == Some(range.end) {
+                if let Some(ticket) = hydration_ticket.take() {
+                    let ack = hydration_capsule
+                        .take()
+                        .ok_or(WindowStreamError {
+                            offset,
+                            error: BackendError::Unavailable,
+                            transfer_refused: false,
+                        })?
+                        .acknowledge()
+                        .map_err(|error| WindowStreamError {
+                            offset,
+                            error,
+                            transfer_refused: false,
+                        })?;
+                    let ctx = ack.context;
+                    guard
+                        .0
+                        .writable_cleanup
+                        .lock()
+                        .map_err(|_| WindowStreamError {
+                            offset,
+                            error: BackendError::Unavailable,
+                            transfer_refused: false,
+                        })?
+                        .publish_hydration(
+                            ticket,
+                            WritableCleanupReceipt {
+                                dispatch: ack.dispatch,
+                                root: ctx.root,
+                                identity: ctx.identity,
+                                file: ctx.file,
+                                components: ctx.components,
+                                length: ctx.length,
+                                sha256: ctx.sha256,
+                                clean_hydration: true,
+                                original: Some(ctx.original),
+                            },
+                        )
+                        .map_err(|_| WindowStreamError {
+                            offset,
+                            error: BackendError::Unavailable,
+                            transfer_refused: false,
+                        })?;
+                    #[cfg(feature = "synthetic-agent-integration")]
+                    eprintln!("synthetic_vault_hydration_stage=acknowledged_range");
+                }
+            }
             Ok(())
         },
     );
@@ -7439,6 +7703,11 @@ unsafe extern "system" fn fetch_data_callback(
         .0
         .record_staged_duration(staged_fetch_started.elapsed());
     if let Err(error) = result {
+        if let Some(identity) = hydration_identity {
+            if let Ok(mut receipts) = guard.0.writable_cleanup.lock() {
+                receipts.invalidate(&identity);
+            }
+        }
         if !error.transfer_refused {
             let status = if error.error == BackendError::Cancelled {
                 STATUS_CANCELLED

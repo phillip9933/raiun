@@ -15,6 +15,7 @@ struct PreparedWindowsVaultUnlock {
     remembered_scope: windows_vault_credentials::Scope,
     remember_password: Option<zeroize::Zeroizing<Vec<u8>>>,
     used_saved_password: bool,
+    existing_file_in_place_admitted: bool,
 }
 impl Drop for PreparedWindowsVaultUnlock {
     fn drop(&mut self) {
@@ -164,6 +165,16 @@ impl WindowsAgent {
         } else {
             None
         };
+        let existing_file_in_place = match readiness.as_ref() {
+            Some((configuration, _)) => self.windows_vault_existing_file_in_place(
+                &vault,
+                inspected["root_path"]
+                    .as_str()
+                    .ok_or("The vault root path is unavailable")?,
+                configuration,
+            )?,
+            None => false,
+        };
         if self
             .provider
             .bandwidth
@@ -189,6 +200,7 @@ impl WindowsAgent {
                 || state.logout_pending
                 || state.needs_refresh
                 || state.session_cleanup_uncertain
+                || session.expires_at <= unix_time_now().saturating_add(30)
                 || state.session.as_ref().is_none_or(|current| {
                     current.server != session.server
                         || current.client_id != session.client_id
@@ -211,7 +223,94 @@ impl WindowsAgent {
         });
         inspected["vault_mount_ready"] = json!(readiness.is_some());
         inspected["vault_mount_writable"] = json!(false);
+        inspected["vault_mount_existing_file_in_place"] = json!(existing_file_in_place);
+        inspected["vault_access_mode"] = json!(if existing_file_in_place {
+            "native_existing_file_in_place"
+        } else {
+            "native_read_only"
+        });
         Ok(inspected)
+    }
+
+    fn windows_vault_existing_file_in_place(
+        &self,
+        scope: &raiun_vault::session::VaultSessionScope,
+        root_path: &str,
+        configuration: &RootConfiguration,
+    ) -> Result<bool, String> {
+        let generation = self.generation.load(Ordering::Acquire);
+        {
+            let state = self.state.lock().map_err(|_| "Account state unavailable")?;
+            if !state.online_authenticated
+                || state.authenticating
+                || state.refreshing
+                || state.logout_pending
+                || state.needs_refresh
+                || state.session_cleanup_uncertain
+                || state.active_generation != generation
+                || state.root_configuration.as_ref() != Some(configuration)
+                || state.session.as_ref().is_none_or(|session| {
+                    session.server != configuration.server
+                        || session.client_id != configuration.client_id
+                        || session.expires_at <= unix_time_now().saturating_add(30)
+                })
+            {
+                return Ok(false);
+            }
+        }
+        let owner = configuration
+            .registration_ownership
+            .as_ref()
+            .ok_or("The Windows drive owner is unavailable")?;
+        if generation == 0
+            || configuration.profile_scope != self.profile_scope
+            || scope.account_id() != self.profile_scope
+            || owner.state != "registered"
+            || url::Url::parse(&configuration.server)
+                .map_err(|_| "The vault account is invalid")?
+                .origin()
+                .ascii_serialization()
+                != scope.server_origin()
+        {
+            return Ok(false);
+        }
+        let active = ActiveProviderBinding {
+            generation,
+            path: PathBuf::from(&configuration.path),
+            identity: raiun_cloudfiles_windows::ConfiguredRootIdentity {
+                volume_serial: configuration.volume_serial,
+                file_index: configuration.file_index,
+            },
+            personal_space_id: owner.personal_drive_id.clone(),
+            personal_root_resource_id: owner
+                .personal_root_resource_id
+                .clone()
+                .ok_or("The drive root is unverified")?,
+        };
+        let Some(marker) = self.provider.existing_vault_save_worker_marker(&active)? else {
+            return Ok(false);
+        };
+        let verified = self.provider.verified_vault_backend(active.clone())?;
+        let (_, trusted) = verified
+            .backend
+            .vault_read_context(active.identity)
+            .map_err(|_| "The connected drive changed")?;
+        if trusted.profile_id() != self.profile_scope || trusted.account_id() != owner.account_id {
+            return Err("The connected drive belongs to another account".into());
+        }
+        let enabled = verified
+            .backend
+            .vault_existing_file_saves_active(
+                active.identity,
+                scope.space_id(),
+                scope.resource_id(),
+                root_path,
+            )
+            .map_err(|_| "The current vault save capability is unavailable")?;
+        Ok(enabled
+            && marker.load(Ordering::Acquire)
+            && generation == self.generation.load(Ordering::Acquire)
+            && generation == self.provider.authorized_generation.load(Ordering::Acquire))
     }
 
     /// Confirms only a current exact route and accepted pinned-parent population
@@ -521,7 +620,7 @@ impl WindowsAgent {
         self.provider.finish_lock_vault_route(binding, ticket)?;
         Ok(
             json!({"unlocked":false,"vault_lock_cleanup_status":"complete","vault_mount_ready":false,"vault_mount_writable":false,
-            "vault_mount_existing_file_overwrite":false,"vault_mount_write_unavailable_reason":"route_not_installed"}),
+            "vault_mount_existing_file_overwrite":false,"vault_mount_existing_file_in_place":false,"vault_mount_write_unavailable_reason":"route_not_installed"}),
         )
     }
     fn check_vault_preparation(&self, prepared: &PreparedWindowsVaultUnlock) -> Result<(), String> {
@@ -545,6 +644,9 @@ impl WindowsAgent {
                     || session.access_token != prepared.session.access_token
             })
             || prepared.backend.is_revoked()
+            || prepared.session.expires_at <= unix_time_now().saturating_add(30)
+            || (prepared.existing_file_in_place_admitted
+                && !prepared.adapter.existing_file_saves_active())
         {
             return Err("The account changed during vault preparation".into());
         }
@@ -617,7 +719,7 @@ impl WindowsAgent {
                 .clone()
                 .ok_or("The drive root is unverified")?,
         };
-        let verified = self.provider.verified_vault_backend(active)?;
+        let verified = self.provider.verified_vault_backend(active.clone())?;
         let backend = verified.backend;
         let custody = verified.custody;
         let (client, trusted) = backend
@@ -739,6 +841,7 @@ impl WindowsAgent {
         self.vault_sessions
             .unlock(&scope, material, token)
             .map_err(|_| "Could not verify the vault password")?;
+        let mut existing_file_in_place_admitted = false;
         // Every failure after verified insertion must clear this new session.
         let result = (|| {
             let custody_view = custody.view(&trusted, &scope, &root_path)?;
@@ -768,16 +871,27 @@ impl WindowsAgent {
                 )
                 .map_err(|_| "Private vault staging could not be admitted")?,
             );
-            let adapter = Arc::new(
-                raiun_cloudfiles_windows::vault_placeholder::WindowsVaultPlaceholderBackend::new(
+            let marker = self.provider.existing_vault_save_worker_marker(&active)?;
+            existing_file_in_place_admitted = marker.is_some();
+            let adapter = match marker {
+                Some(marker) => raiun_cloudfiles_windows::vault_placeholder::WindowsVaultPlaceholderBackend::new_with_existing_file_saves(
                     binding,
                     private,
                     raiun_cloudfiles_windows::MAX_REQUEST_BYTES,
                     custody_view,
-                )
-                .map_err(|_| "Could not prepare the verified vault adapter")?,
-            );
-            Ok(adapter)
+                    marker,
+                    Arc::clone(&self.provider.authorized_generation),
+                    generation,
+                ),
+                None => raiun_cloudfiles_windows::vault_placeholder::WindowsVaultPlaceholderBackend::new(
+                    binding,
+                    private,
+                    raiun_cloudfiles_windows::MAX_REQUEST_BYTES,
+                    custody_view,
+                ),
+            }
+            .map_err(|_| "Could not prepare the verified vault adapter")?;
+            Ok(Arc::new(adapter))
         })();
         let adapter = match result {
             Ok(adapter) => adapter,
@@ -801,6 +915,7 @@ impl WindowsAgent {
             remembered_scope,
             remember_password,
             used_saved_password,
+            existing_file_in_place_admitted,
         };
         self.check_vault_preparation(&prepared)?;
         Ok(prepared)
@@ -892,10 +1007,35 @@ impl WindowsAgent {
             let _ = self.provider.disconnect();
             return Err(error);
         }
+        let existing_file_in_place = if prepared.adapter.existing_file_saves_active() {
+            match self.windows_vault_existing_file_in_place(
+                &prepared.scope,
+                &prepared.root_path,
+                &prepared.configuration,
+            ) {
+                Ok(enabled) => enabled,
+                Err(error) => {
+                    let _ = self.provider.disconnect();
+                    return Err(error);
+                }
+            }
+        } else {
+            false
+        };
+        if prepared.existing_file_in_place_admitted && !existing_file_in_place {
+            let _ = self.provider.disconnect();
+            return Err("The vault save worker changed during unlock".into());
+        }
+        if let Err(error) = self.check_vault_preparation(&prepared) {
+            let _ = self.provider.disconnect();
+            return Err(error);
+        }
         prepared.published = true;
         Ok(json!({"unlocked":true,"root_path":prepared.root_path,
             "root_resource_id":prepared.scope.resource_id(),"vault_mount_ready":true,
             "vault_mount_writable":false,"vault_mount_existing_file_overwrite":false,
+            "vault_mount_existing_file_in_place":existing_file_in_place,
+            "vault_access_mode":if existing_file_in_place {"native_existing_file_in_place"} else {"native_read_only"},
             "vault_mount_write_unavailable_reason":"route_read_only",
             "remembered":remembered,"remembered_status":remembered_status}))
     }
