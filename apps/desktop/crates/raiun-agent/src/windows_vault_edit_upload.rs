@@ -425,7 +425,7 @@ impl WindowsAgent {
             completion: Option<FreshVaultUpload>,
         }
         enum UploadResult {
-            Verified(VerifiedResult),
+            Verified(Box<VerifiedResult>),
             NeedsReconciliation,
         }
         let outcome = if complete_local {
@@ -459,11 +459,11 @@ impl WindowsAgent {
                 .map(|result| match result {
                     VaultLiveUploadOutcome::Verified(capability) => {
                         let receipt = capability.remote_evidence();
-                        UploadResult::Verified(VerifiedResult {
+                        UploadResult::Verified(Box::new(VerifiedResult {
                             entry: receipt.entry().clone(),
                             digest: receipt.plaintext_sha256(),
                             completion: Some(capability),
-                        })
+                        }))
                     }
                     VaultLiveUploadOutcome::NeedsReconciliation { .. } => {
                         UploadResult::NeedsReconciliation
@@ -482,11 +482,11 @@ impl WindowsAgent {
                 )
                 .map(|result| match result {
                     VaultExistingOverwriteOutcome::Verified(receipt) => {
-                        UploadResult::Verified(VerifiedResult {
+                        UploadResult::Verified(Box::new(VerifiedResult {
                             entry: receipt.entry().clone(),
                             digest: receipt.plaintext_sha256(),
                             completion: None,
-                        })
+                        }))
                     }
                     VaultExistingOverwriteOutcome::NeedsReconciliation { .. } => {
                         UploadResult::NeedsReconciliation

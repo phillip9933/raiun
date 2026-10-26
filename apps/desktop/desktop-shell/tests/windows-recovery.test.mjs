@@ -10,6 +10,14 @@ const compiled = ts.transpileModule(source, {
 const { validateWindowsRecoveryPage, windowsRecoveryEligibility, WINDOWS_RECOVERY_PAGE_LIMIT } = await import(
   `data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`
 );
+const mainSource = await readFile(new URL('../src/main.ts', import.meta.url), 'utf8');
+const validatorStart = mainSource.indexOf('function validateProtectedVaultCapturePage(');
+const validatorEnd = mainSource.indexOf('/* END protected vault recovery wire validator */', validatorStart);
+assert.ok(validatorStart >= 0 && validatorEnd > validatorStart, 'protected capture page validator must remain an isolated testable function');
+const validatorJs = ts.transpileModule(`${mainSource.slice(validatorStart, validatorEnd)}\nexport { validateProtectedVaultCapturePage };`, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 }
+}).outputText;
+const { validateProtectedVaultCapturePage } = await import(`data:text/javascript;base64,${Buffer.from(validatorJs).toString('base64')}`);
 
 const status = {
   profile_id: 'default',
@@ -140,6 +148,42 @@ test('fixes the page request bound at 50 and rejects a space ID over the journal
 
 test('rejects unsafe auth generations', () => {
   assert.throws(() => validateWindowsRecoveryPage(page(), { ...expectation, authGeneration: Number.MAX_SAFE_INTEGER + 1 }));
+});
+
+test('protected vault capture pages bind exact profile and generation and reject malformed rows', () => {
+  const expected = { profileId: 'default', authGeneration: 7 };
+  const item = { item_token: 'a'.repeat(48), file_name: 'notes.txt', body_length: 17 };
+  const page = { schema_version: 1, profile_id: 'default', auth_generation: 7, items: [item], next_cursor: 'b'.repeat(48), read_only: true };
+  assert.deepEqual(validateProtectedVaultCapturePage(page, expected), page);
+  for (const malformed of [
+    { ...page, profile_id: 'profile-' + 'c'.repeat(32) },
+    { ...page, auth_generation: 8 },
+    { ...page, read_only: false },
+    { ...page, unexpected: true },
+    { ...page, next_cursor: 'not-a-token' },
+    { ...page, items: [{ ...item, file_name: '../notes.txt' }] },
+    { ...page, items: [{ ...item, item_token: 'short' }] },
+    { ...page, items: [{ ...item, body_length: Number.MAX_SAFE_INTEGER + 1 }] },
+    { ...page, items: [item, item] },
+    { ...page, items: Array.from({ length: 101 }, (_, i) => ({ ...item, item_token: i.toString(16).padStart(48, '0') })) }
+  ]) assert.throws(() => validateProtectedVaultCapturePage(malformed, expected));
+});
+
+test('protected vault recovery UI keeps plaintext disclosure and routes list/save through the intended RPCs', async () => {
+  assert.match(mainSource, /windows_vault_capture_recovery_list/);
+  assert.match(mainSource, /save_protected_vault_capture_copy/);
+  const panelStart = mainSource.indexOf('function protectedVaultRecoveryPanel(');
+  const panelEnd = mainSource.indexOf('\nfunction syncWindowsRecoveryContext', panelStart);
+  const panelSource = mainSource.slice(panelStart, panelEnd);
+  assert.match(panelSource, /Save Copy creates a readable plaintext file/);
+  assert.match(panelSource, /role="alert"/);
+  assert.doesNotMatch(panelSource, /nativeVaultLockIncomplete/);
+  const shellSource = await readFile(new URL('../src-tauri/src/main.rs', import.meta.url), 'utf8');
+  assert.match(shellSource, /fn save_protected_vault_capture_copy/);
+  assert.match(shellSource, /fn validate_selected_profile/);
+  assert.match(shellSource, /validate_protected_recovery_binding/);
+  assert.match(shellSource, /"destination":destination/);
+  assert.match(shellSource, /"body_length":expected_body_length/);
 });
 
 test('added profile eligibility and recovery pages stay bound to the exact selected profile', () => {

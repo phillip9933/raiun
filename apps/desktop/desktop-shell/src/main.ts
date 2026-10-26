@@ -30,6 +30,7 @@ import raiunLogo from '../src-tauri/icons/raiun.svg';
 type OfflineCacheSummary = { available: boolean; quota_bytes: number; used_bytes: number; pinned_bytes: number; protected_bytes: number; over_quota: boolean; unavailable_reason?: string | null };
 type Status = { connected: boolean; offline_namespace?: boolean; server?: string | null; client_id?: string | null; paused?: boolean; paused_space_ids?: string[]; mounted?: boolean; cloud_root?: string | null; error?: string | null; autostart?: boolean | null; recovery_folder?: string | null; encrypted_edit_recovery_available?: boolean; offline_cache?: OfflineCacheSummary | null; profile_id?: string | null; profile_label?: string | null; auth_generation?: number; root_configuration?: { valid: boolean; identity_bound: boolean; registration_state: string | null; recovery_scope_token?: unknown } | null; stopped?: boolean; authenticating?: boolean; provider_supported?: boolean; folder_sync_supported?: boolean; media_jobs_supported?: boolean; vaults_supported?: boolean; vault_access_mode?: 'native_read_only'; account_switch_supported?: boolean; account_setup_requires_sign_in?: boolean; pause_supported?: boolean; bandwidth_limits_supported?: boolean; network_proxy_supported?: boolean; proxy_edit_requires_sign_out?: boolean; session_cleanup_uncertain?: boolean };
 type Account = { id: string; label: string; status: Status };
+type DesktopUpdateStatus = { state: 'idle' | 'current' | 'available' | 'unavailable' | 'downloaded' | 'dismissed' | 'error'; version: string | null; tag: string | null; release_url: string | null; notes: string | null; error: string | null; automatic_checks: boolean; channel: 'stable' | 'beta'; dismissed_tag: string | null; last_check_unix: number | null; key_configured: boolean; downloaded: boolean };
 type AccountsResult = { selected: string | null; items: Account[] };
 type ShellUnlockIntent = { profile_id: string; space_id: string; root_resource_id: string };
 type ResolvedUnlockTarget = { resolved: boolean; profile_id: string; space_id: string; root_resource_id: string; root_path: string; display_name: string; pin_id?: string | null; pin_generation?: number | null };
@@ -116,7 +117,10 @@ const windowsRecoveryController = new WindowsRecoveryController();
 const windowsOfflineFileController = new WindowsOfflineFileController();
 const windowsDeviceCacheUi = { usage: null as WindowsDeviceCacheUsage | null, contextKey: '', sequence: 0, loading: false, error: '' };
 type WindowsOfflineFilesPage = { profile_id: string; auth_generation: number; recovery_scope_token: string; items: WindowsOfflineFileRow[]; next_cursor: string | null; unavailable_rows: number; read_only: true; last_observed: true; atomic_snapshot: false };
+type ProtectedVaultCaptureItem = { item_token: string; file_name: string; body_length: number };
+type ProtectedVaultCapturePage = { schema_version: 1; profile_id: string; auth_generation: number; items: ProtectedVaultCaptureItem[]; next_cursor: string | null; read_only: true };
 const windowsOfflineFilesUi = { items: [] as WindowsOfflineFileRow[], nextCursor: null as string | null, unavailableRows: 0, loaded: false, loading: false, error: '', selectedKey: '', generation: 0, contextKey: '', pollTimer: 0 as number };
+const protectedVaultRecoveryUi: { contextKey: string; page: ProtectedVaultCapturePage | null; loading: boolean; savingToken: string; error: string; message: string; generation: number } = { contextKey: '', page: null, loading: false, savingToken: '', error: '', message: '', generation: 0 };
 let windowsOfflineFolderPollTimer = 0;
 const windowsOfflineFoldersPanel = new WindowsOfflineFolderPanel({
   getContext: currentWindowsOfflineFolderContext,
@@ -133,6 +137,7 @@ const copyVerifyUi = { jobs: new Map<string, CopyVerifyJobUi>(), active: new Set
 const copyProducerUi: CopyProducerUi = { source: null, generation: 0, flowGeneration: 0, context: null, destination: null, jobId: null, status: null, busy: false, admissionUncertain: false, error: '', timer: 0, pollError: '' };
 const proxyUi = { config: { mode: 'system' } as ProxyConfig, revision: 0, accountId: null as string | null, scopeToken: undefined as string | undefined, loadedEpoch: -1, loading: false, saving: false, error: '', draftMode: 'system' as ProxyMode, draftUrl: '', generation: 0 };
 const bandwidthUi = { upload: '', download: '', revision: 0, accountId: null as string | null, scopeToken: undefined as string | undefined, loadedEpoch: -1, loading: false, saving: false, error: '', generation: 0 };
+const desktopUpdateUi: { status: DesktopUpdateStatus | null; busy: boolean; error: string } = { status: null, busy: false, error: '' };
 type InterruptedCreateRetryUi = { key: string; spaceId: string; rootResourceId: string; writeId: string; revision: number; retryGeneration: number; retryState: 'attempting' | 'recovery_attempting' | 'recovery_retrying'; jobId: string; profileId: string; accountEpoch: number; generation: number; busy: boolean; status: VaultEditReconcileStatus | null; error: string };
 const interruptedCreateRetryUi: { job: InterruptedCreateRetryUi | null; timer: number; generation: number } = { job: null, timer: 0, generation: 0 };
 const cachedVaultRootsUi = { roots: [] as CachedVaultRoot[], nextAfter: null as CachedVaultRootsPage['next_after'], truncated: false, loading: false, error: '', selected: '', generation: 0, accountEpoch: -1 };
@@ -254,6 +259,172 @@ function windowsRecoveryBinding() {
       cloudRoot: state.status?.cloud_root || null
     }
   );
+}
+/* BEGIN protected vault recovery wire validator */
+function validateProtectedVaultCapturePage(value: unknown, expected: { profileId: string; authGeneration: number }): ProtectedVaultCapturePage {
+  const exactKeys = (candidate: Record<string, unknown>, keys: string[]) => {
+    const actual = Object.keys(candidate).sort();
+    const sorted = [...keys].sort();
+    return actual.length === sorted.length && actual.every((key, index) => key === sorted[index]);
+  };
+  const token = (candidate: unknown): candidate is string => typeof candidate === 'string' && /^[0-9a-f]{48}$/.test(candidate);
+  const pageKeys = ['schema_version', 'profile_id', 'auth_generation', 'items', 'next_cursor', 'read_only'];
+  const itemKeys = ['item_token', 'file_name', 'body_length'];
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Saved vault edits returned an invalid page.');
+  const page = value as Record<string, unknown>;
+  let encodedLength = 0;
+  try { encodedLength = new TextEncoder().encode(JSON.stringify(page)).length; } catch { throw new Error('Saved vault edits returned an invalid page.'); }
+  if (!exactKeys(page, pageKeys) || encodedLength > 64 * 1024 || page.schema_version !== 1 ||
+      page.profile_id !== expected.profileId || page.auth_generation !== expected.authGeneration ||
+      page.read_only !== true || !Array.isArray(page.items) || page.items.length > 100 ||
+      !(page.next_cursor === null || token(page.next_cursor))) {
+    throw new Error('Saved vault edits returned an invalid or stale page.');
+  }
+  const seen = new Set<string>();
+  const items: ProtectedVaultCaptureItem[] = page.items.map(candidate => {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) throw new Error('Saved vault edits returned an invalid item.');
+    const row = candidate as Record<string, unknown>;
+    const name = row.file_name;
+    if (!exactKeys(row, itemKeys) || !token(row.item_token) || seen.has(row.item_token) ||
+        typeof name !== 'string' || !name || name === '.' || name === '..' ||
+        new TextEncoder().encode(name).length > 96 || /[\\/\u0000-\u001f\u007f-\u009f]/u.test(name) ||
+        typeof row.body_length !== 'number' || !Number.isSafeInteger(row.body_length) || row.body_length < 0) {
+      throw new Error('Saved vault edits returned an invalid item.');
+    }
+    seen.add(row.item_token);
+    return { item_token: row.item_token, file_name: name, body_length: row.body_length };
+  });
+  return { schema_version: 1, profile_id: expected.profileId, auth_generation: expected.authGeneration, items, next_cursor: page.next_cursor as string | null, read_only: true };
+}
+/* END protected vault recovery wire validator */
+function protectedVaultRecoveryScope(flow: VaultDialogState) {
+  if (flow.intent === 'create' || !flow.spaceId || !flow.rootResourceId || !flow.rootPath) return null;
+  const { context } = windowsRecoveryBinding();
+  if (!context || context.accountEpoch !== flow.accountEpoch || !isCurrentAccount(flow.accountEpoch, context.profileId)) return null;
+  const key = JSON.stringify([context.accountEpoch, context.profileId, context.server, context.clientId, context.cloudRoot,
+    context.authGeneration, context.recoveryScopeToken, state.vaultGeneration, flow.spaceId, flow.rootResourceId, flow.rootPath]);
+  return { context, spaceId: flow.spaceId, rootResourceId: flow.rootResourceId, remoteRoot: flow.rootPath, key };
+}
+function syncProtectedVaultRecoveryScope(key: string) {
+  if (protectedVaultRecoveryUi.contextKey === key) return;
+  protectedVaultRecoveryUi.contextKey = key;
+  protectedVaultRecoveryUi.page = null;
+  protectedVaultRecoveryUi.loading = false;
+  protectedVaultRecoveryUi.savingToken = '';
+  protectedVaultRecoveryUi.error = '';
+  protectedVaultRecoveryUi.message = '';
+  protectedVaultRecoveryUi.generation++;
+}
+function protectedVaultRecoveryScopeIsCurrent(flow: VaultDialogState, key: string, generation: number) {
+  const current = protectedVaultRecoveryScope(flow);
+  return state.vaultDialog === flow && state.vaultGeneration === flow.generation &&
+    protectedVaultRecoveryUi.generation === generation && !!current && current.key === key;
+}
+async function loadProtectedVaultCaptures(reset: boolean) {
+  const flow = state.vaultDialog;
+  if (!flow || protectedVaultRecoveryUi.loading) return;
+  const scope = protectedVaultRecoveryScope(flow);
+  if (!scope) {
+    protectedVaultRecoveryUi.error = 'Connect the current account and verify its registered Windows drive before checking saved vault edits.';
+    render();
+    return;
+  }
+  syncProtectedVaultRecoveryScope(scope.key);
+  const after = reset ? null : protectedVaultRecoveryUi.page?.next_cursor || null;
+  if (!reset && !after) return;
+  if (reset) protectedVaultRecoveryUi.page = null;
+  protectedVaultRecoveryUi.loading = true;
+  protectedVaultRecoveryUi.error = '';
+  protectedVaultRecoveryUi.message = '';
+  const generation = protectedVaultRecoveryUi.generation;
+  render();
+  try {
+    const response = await request<unknown>('windows_vault_capture_recovery_list', {
+      profile_id: scope.context.profileId,
+      expected_generation: scope.context.authGeneration,
+      expected_recovery_scope_token: scope.context.recoveryScopeToken,
+      space_id: scope.spaceId,
+      root_resource_id: scope.rootResourceId,
+      remote_root: scope.remoteRoot,
+      limit: 50,
+      ...(after ? { cursor: after } : {})
+    });
+    if (!protectedVaultRecoveryScopeIsCurrent(flow, scope.key, generation)) return;
+    const page = validateProtectedVaultCapturePage(response, { profileId: scope.context.profileId, authGeneration: scope.context.authGeneration });
+    const previous = reset ? [] : protectedVaultRecoveryUi.page?.items || [];
+    const tokens = new Set(previous.map(item => item.item_token));
+    if (page.items.some(item => tokens.has(item.item_token))) throw new Error('Saved vault edits returned a duplicate item. Refresh the list before continuing.');
+    protectedVaultRecoveryUi.page = { ...page, items: [...previous, ...page.items] };
+  } catch (error) {
+    if (protectedVaultRecoveryScopeIsCurrent(flow, scope.key, generation) && !isStaleAccountRequest(error)) {
+      protectedVaultRecoveryUi.error = messageOf(error);
+    }
+  } finally {
+    if (protectedVaultRecoveryScopeIsCurrent(flow, scope.key, generation)) {
+      protectedVaultRecoveryUi.loading = false;
+      render();
+    }
+  }
+}
+async function saveProtectedVaultCaptureCopy(itemToken: string) {
+  const flow = state.vaultDialog;
+  if (!flow || !itemToken || state.nativeDialogBusy || state.accountSwitching || protectedVaultRecoveryUi.savingToken) return;
+  const scope = protectedVaultRecoveryScope(flow);
+  const item = protectedVaultRecoveryUi.page?.items.find(row => row.item_token === itemToken);
+  if (!scope || protectedVaultRecoveryUi.contextKey !== scope.key || !item) {
+    protectedVaultRecoveryUi.error = 'This saved vault edit selection expired. Refresh the list and choose it again.';
+    render();
+    return;
+  }
+  const generation = protectedVaultRecoveryUi.generation;
+  protectedVaultRecoveryUi.error = '';
+  protectedVaultRecoveryUi.message = '';
+  protectedVaultRecoveryUi.savingToken = itemToken;
+  state.nativeDialogBusy = true;
+  render();
+  try {
+    const result = await invoke<{ cancelled?: boolean; saved?: boolean; body_length?: number }>('save_protected_vault_capture_copy', { request: {
+      profileId: scope.context.profileId,
+      expectedGeneration: scope.context.authGeneration,
+      expectedRecoveryScopeToken: scope.context.recoveryScopeToken,
+      spaceId: scope.spaceId,
+      rootResourceId: scope.rootResourceId,
+      remoteRoot: scope.remoteRoot,
+      itemToken,
+      expectedBodyLength: item.body_length,
+      suggestedName: item.file_name
+    } });
+    if (!protectedVaultRecoveryScopeIsCurrent(flow, scope.key, generation)) return;
+    if (result?.cancelled === true) return;
+    if (result?.saved !== true || result.body_length !== item.body_length) {
+      throw new Error('Raiun could not confirm the saved plaintext copy. The protected history item remains unchanged.');
+    }
+    protectedVaultRecoveryUi.message = 'Plaintext copy saved. The protected history item remains stored in Raiun.';
+  } catch (error) {
+    if (protectedVaultRecoveryScopeIsCurrent(flow, scope.key, generation) && !isStaleAccountRequest(error)) {
+      protectedVaultRecoveryUi.error = messageOf(error);
+    }
+  } finally {
+    state.nativeDialogBusy = false;
+    if (protectedVaultRecoveryScopeIsCurrent(flow, scope.key, generation)) {
+      protectedVaultRecoveryUi.savingToken = '';
+      render();
+    }
+  }
+}
+function protectedVaultRecoveryPanel(flow: VaultDialogState, busy: boolean) {
+  if (flow.intent === 'create' || copyProducerUi.source) return '';
+  const scope = protectedVaultRecoveryScope(flow);
+  syncProtectedVaultRecoveryScope(scope?.key || '');
+  const ui = protectedVaultRecoveryUi;
+  const page = ui.page;
+  const rows = page?.items.length
+    ? `<div class="encrypted-edit-list">${page.items.map(item => `<article class="encrypted-edit-item"><div><b>${esc(item.file_name)}</b><small>${esc(formatBytes(item.body_length))} · saved in protected local history</small></div><button class="small-action" data-vault-capture-save="${esc(item.item_token)}" ${busy || ui.loading || !!ui.savingToken || !scope ? 'disabled' : ''}>${ui.savingToken === item.item_token ? 'Saving…' : 'Save plaintext copy…'}</button></article>`).join('')}</div>`
+    : page ? '<div class="recovery-empty" role="status">No completed saved edits were found for this encrypted location.</div>' : '';
+  const unavailable = !scope
+    ? '<p class="vault-hint" role="status">Connect this account and verify its registered Windows drive to check saved edits.</p>'
+    : '';
+  return `<section class="vault-pin-panel protected-vault-recovery-panel" aria-label="Saved encrypted-file edits"><div class="vault-pin-heading"><div><b>Saved encrypted-file edits</b><small>Read-only history for this encrypted location</small></div><button class="button subtle" data-vault-capture-refresh ${busy || ui.loading || !scope ? 'disabled' : ''}>${ui.loading ? 'Checking…' : page ? 'Refresh list' : 'Check saved edits'}</button></div><p class="vault-pin-note">Save Copy creates a readable plaintext file on this computer. It does not unlock, upload, retry, or remove the protected history item. Existing files are never replaced; choose a new destination name if needed.</p>${unavailable}${ui.error ? `<div class="vault-error" role="alert">${esc(ui.error)}</div>` : ''}${ui.message ? `<div class="vault-state" role="status">${esc(ui.message)}</div>` : ''}${ui.loading && !page ? '<div class="vault-pin-empty" role="status"><span class="spinner"></span> Checking protected history…</div>' : ''}${rows}${page?.next_cursor ? `<div class="vault-pin-more"><button class="small-action quiet" data-vault-capture-more ${busy || ui.loading || !scope ? 'disabled' : ''}>${ui.loading ? 'Loading…' : 'Load more'}</button></div>` : ''}</section>`;
 }
 function syncWindowsRecoveryContext() {
   syncWindowsDeviceCacheContext();
@@ -600,6 +771,7 @@ function render() {
         <section class="content">${pageMarkup()}</section>
       </main>
     </div>
+    ${desktopUpdateNotification()}
     ${(state.error || (state.status?.error && state.status.error !== state.statusErrorDismissed)) ? `<div class="toast error-toast" role="alert"><span>${svg('alert')}</span><div>${esc(state.error || state.status?.error || '')}</div><button data-dismiss-error aria-label="Dismiss">${svg('close')}</button></div>` : ''}
     ${state.message ? `<div class="toast success-toast" role="status"><span>${svg('check')}</span><div>${esc(state.message)}</div><button data-dismiss-message aria-label="Dismiss">${svg('close')}</button></div>` : ''}
     ${state.addOpen ? addModal() : ''}
@@ -2095,12 +2267,54 @@ function settingsPage() {
     <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('folder')}</span><div><h2>Cloud drive</h2><p>${providerEnabled ? 'This account’s OpenCloud location in the computer’s file manager. Save files inside Personal or a writable Space; the top-level folder is read-only.' : 'Windows cloud drive support is not enabled. Choosing a folder saves its setup, but does not mount or sync files.'}</p></div></div><div class="settings-row"><div><b>Mount status</b><small>${!providerEnabled ? state.status?.cloud_root ? `Configured but disconnected at ${esc(state.status.cloud_root)}` : 'Windows cloud drive is not mounted' : (connected || connection === 'offline_reconnecting') && state.status?.cloud_root ? `${state.status.mounted ? 'Mounted at' : 'Configured at'} ${esc(state.status.cloud_root)}` : 'No cloud drive location reported for this account'}</small></div><div class="button-group"><button class="button subtle" data-action="mount" ${providerEnabled && connected ? '' : 'disabled'}>Mount</button><button class="button subtle" data-action="unmount" ${providerEnabled && connected ? '' : 'disabled'}>Unmount</button></div></div><div class="settings-row"><div><b>Choose location</b><small>Pick this account’s directory for the OpenCloud drive.</small></div><button class="button subtle" data-action="configure-root" ${state.agentReachable && connected ? '' : 'disabled'}>Choose folder</button></div></section>
     ${networkProxySettingsCard(connected, connection)}
     ${bandwidthSettingsCard()}
+    ${desktopUpdatesSettingsCard()}
     <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('lock')}</span><div><h2>Encrypted files</h2><p>${featureAvailable('vaults_supported') ? nativeVaultAccess() ? 'Unlock an encrypted Space or folder through the Windows drive. Supported existing-file saves are shown after unlock.' : 'Unlock an encrypted Space or folder to browse it. This does not add a sync folder; use Synced Folders to set up syncing.' : 'Encrypted file browsing is unavailable for this agent.'}</p></div></div><div class="settings-row"><div><b>Browse encrypted files</b><small>${nativeVaultAccess() ? 'Choose a Space, then unlock a location in the Windows drive. Save availability depends on the file and current connection. Encrypted offline copies are unavailable here.' : 'Choose a Space, then unlock an encrypted location. Offline edits, when available, apply only to supported operations in this unlocked location.'}</small></div><button class="button primary" data-action="open-encrypted-access" ${featureAvailable('vaults_supported') && state.agentReachable && !accountSwitchDisabled() ? '' : 'disabled'}>Unlock encrypted files</button></div></section>
     ${windowsAgent ? windowsRecoverySettingsCard() : `<section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('folder')}</span><div><h2>Saved upload copies</h2><p>Raiun keeps local copies while uploads are pending or in progress.</p></div></div><div class="settings-row"><div><b>Saved copies</b><small>Review the local and OpenCloud paths. Viewing does not restore, upload, or delete files.</small></div><div class="button-group"><button class="button subtle" data-action="open-recovery" ${canOpenRecoveryFolder ? '' : 'disabled'}>Open folder</button><button class="button primary" data-action="load-recoveries" ${canInspectRecoveries && !state.recoveryLoading ? '' : 'disabled'}>${state.recoveryLoading ? 'Checking…' : recoveryPage ? 'Refresh list' : 'View saved copies'}</button></div></div>${!state.agentReachable ? `<p class="recovery-hint">Raiun is not connected.</p>` : !state.status?.recovery_folder ? `<p class="recovery-hint">No upload-copy folder is linked to this account yet. You can still check for saved copies; sign in to associate future copies with this account.</p>` : ''}${state.recoveryError ? `<div class="recovery-warning" role="alert">${esc(state.recoveryError)}</div>` : ''}${state.recoveryLoading ? `<div class="recovery-loading" role="status" aria-live="polite"><span class="spinner"></span> Checking saved copies…</div>` : ''}${recoveryNotice}${recoveryRows}${recoveryPage?.next_after && !state.recoveryLoading ? `<div class="recovery-more"><button class="button subtle" data-action="more-recoveries">Load more</button></div>` : ''}</section>${nativeVaultAccess() ? '' : encryptedEditRecoveryCard()}`}
     <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('play')}</span><div><h2>Startup</h2><p>Start Raiun when you sign in to this computer.</p></div></div><div class="settings-row"><div><b>Launch at login</b><small>${!providerEnabled ? 'Startup setting is unavailable for this Windows agent' : state.autostart == null ? 'Current setting is not reported by the agent' : state.autostart ? 'Raiun will start at login' : 'Raiun will not start at login'}</small></div><button class="button ${state.autostart ? 'subtle' : 'primary'}" data-action="toggle-autostart" ${providerEnabled && connected && typeof state.autostart === 'boolean' ? '' : 'disabled'}>${state.autostart ? 'Disable' : 'Enable'}</button></div></section>
     <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('pause')}</span><div><h2>Sync activity</h2><p>Pause background work across your folder pairs.</p></div></div><div class="settings-row"><div><b>${!featureAvailable('pause_supported') ? 'Windows folder sync is unavailable' : connection === 'offline_reconnecting' ? 'Working offline' : !connected ? 'Sign in to enable sync' : state.status?.paused ? 'Sync is paused' : 'Sync is enabled'}</b><small>${!featureAvailable('pause_supported') ? 'This agent does not support pausing folder sync.' : connection === 'offline_reconnecting' ? 'Raiun will retry the server connection; no new sign-in is needed.' : 'The current file may finish first. Opening cloud files can still use the network.'}</small></div><button class="button subtle" data-action="toggle-pause" ${featureAvailable('pause_supported') && connected ? '' : 'disabled'}>${state.status?.paused ? 'Resume sync' : 'Pause sync'}</button></div></section>
     <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('alert')}</span><div><h2>Diagnostics</h2><p>Export a redacted summary for the selected account with app version, platform, configuration counts, and connection status. It omits account identifiers, folder paths, credentials, and logs.</p></div></div><div class="settings-row"><div><b>Local support report</b><small>Choose a new file location. Existing files are never replaced.</small></div><button class="button subtle" data-action="export-diagnostics" ${!isTauri() || state.nativeDialogBusy ? 'disabled' : ''}>${state.nativeDialogBusy ? 'Preparing…' : 'Export report'}</button></div></section></div>`;
 }
+function desktopUpdateNotification() {
+  const update = desktopUpdateUi.status;
+  if (!update || !desktopUpdateNotificationVisible(update)) return '';
+  const action = update.state === 'downloaded'
+    ? `<button class="button primary" data-action="install-desktop-update" ${desktopUpdateUi.busy ? 'disabled' : ''}>Install update</button>`
+    : update.state === 'available' && update.key_configured
+      ? `<button class="button primary" data-action="download-desktop-update" ${desktopUpdateUi.busy ? 'disabled' : ''}>Download update</button>`
+      : `<button class="button subtle" data-action="open-desktop-release" ${desktopUpdateUi.busy ? 'disabled' : ''}>Open release page</button>`;
+  return `<aside class="toast success-toast" role="status" aria-live="polite"><span>${svg('refresh')}</span><div><b>Raiun Desktop ${esc(update.version)} is available.</b>${update.error ? `<small>${esc(update.error)}</small>` : '<small>Choose when to download and install this update.</small>'}</div>${action}<button data-action="later-desktop-update" aria-label="Later" title="Later">${svg('close')}</button></aside>`;
+}
+
+function desktopUpdateNotificationVisible(update: DesktopUpdateStatus | null | undefined) {
+  return Boolean(update?.tag && update.version && update.dismissed_tag !== update.tag && ['available', 'unavailable', 'downloaded'].includes(update.state));
+}
+
+function desktopUpdateManualControls(update: DesktopUpdateStatus | null | undefined, busy: boolean) {
+  if (!update?.version || !update.tag || !update.release_url) return '';
+  const updateAction = update.state === 'downloaded'
+    ? `<button class="button primary" data-action="install-desktop-update" ${busy ? 'disabled' : ''}>${busy ? 'Preparing…' : 'Install update'}</button>`
+    : (update.state === 'available' || update.state === 'dismissed') && update.key_configured
+      ? `<button class="button primary" data-action="download-desktop-update" ${busy ? 'disabled' : ''}>${busy ? 'Checking and downloading…' : 'Download update'}</button>`
+      : `<button class="button subtle" data-action="open-desktop-release" ${busy ? 'disabled' : ''}>Open release page</button>`;
+  const stateDetail = update.state === 'unavailable'
+    ? 'Automatic installation is not available for this release. The release page has the published downloads.'
+    : update.key_configured ? 'The signed update package will be checked before it can be installed.'
+      : 'This build has no embedded update verification key. Use the release page for manual downloads.';
+  const notes = update.notes ? `<details class="update-notes"><summary>Release notes</summary><pre>${esc(update.notes)}</pre></details>` : '';
+  return `<div class="settings-row"><div><b>Version ${esc(update.version)}</b><small>${stateDetail}</small></div><div class="button-group">${updateAction}<button class="button subtle" data-action="later-desktop-update">Later</button></div></div>${notes}`;
+}
+
+function desktopUpdatesSettingsCard() {
+  const update = desktopUpdateUi.status;
+  const stateLabel = !update ? 'Checking update settings…'
+    : update.state === 'current' ? 'Raiun Desktop is up to date.'
+      : update.state === 'downloaded' ? `Version ${update.version} is downloaded and signature-verified.`
+        : update.state === 'available' || update.state === 'unavailable' || update.state === 'dismissed'
+          ? `Version ${update.version || ''} is available.` : update.state === 'error'
+            ? 'The update check needs attention.' : 'Ready to check for updates.';
+  return `<section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('refresh')}</span><div><h2>App updates</h2><p>Check GitHub for Raiun Desktop releases. Updates are downloaded only when you choose Download and installed only after you choose Install.</p></div></div><div class="settings-row"><div><b>${esc(stateLabel)}</b><small>${desktopUpdateUi.busy ? 'Checking release and signature…' : update?.error ? esc(update.error) : update?.last_check_unix ? `Last checked ${new Date(update.last_check_unix * 1000).toLocaleString()}` : 'Automatic checks run at most once a day.'}</small></div><div class="button-group"><button class="button subtle" data-action="check-desktop-update" ${desktopUpdateUi.busy ? 'disabled' : ''}>${desktopUpdateUi.busy ? 'Checking…' : 'Check now'}</button></div></div><div class="settings-row"><label for="desktop-update-auto"><b>Automatic checks</b><small>Check once a day while Raiun Desktop is open.</small></label><input id="desktop-update-auto" type="checkbox" ${update?.automatic_checks !== false ? 'checked' : ''} ${desktopUpdateUi.busy ? 'disabled' : ''}/></div><div class="settings-row"><label for="desktop-update-channel"><b>Release channel</b><small>Beta includes preview releases. Stable includes general releases only.</small></label><select id="desktop-update-channel" ${desktopUpdateUi.busy ? 'disabled' : ''}><option value="stable" ${update?.channel === 'stable' ? 'selected' : ''}>Stable</option><option value="beta" ${!update || update.channel === 'beta' ? 'selected' : ''}>Beta</option></select></div>${desktopUpdateManualControls(update, desktopUpdateUi.busy)}${desktopUpdateUi.error ? `<div class="recovery-warning" role="alert">${esc(desktopUpdateUi.error)}</div>` : ''}</section>`;
+}
+
 function windowsRecoverySettingsCard() {
   const { eligibility, context } = windowsRecoveryBinding();
   const recovery = windowsRecoveryController.state;
@@ -2501,6 +2715,7 @@ function vaultDialog() {
   const copyPanel = !nativeVaultAccess() && copyProducerUi.source
     ? `<section class="copy-producer-panel" role="group" aria-label="Copy encrypted file"><b>${copyActive ? 'Copying encrypted file' : copyProducerUi.jobId ? 'Copy result' : copyChoosingDestination ? 'Choose a destination folder' : 'Choose where to copy this file'}</b><small>${esc(copyProducerUi.source.expectation.path)} · ${esc(formatBytes(copyProducerUi.source.size))}</small>${copyProducerUi.status ? `<span role="status" aria-live="polite">${esc(copyProducerStatusMessage(copyProducerUi.status))}</span>` : copyChoosingDestination ? '<span role="status">Choose another unlocked writable encrypted location. Raiun keeps the original file in place.</span>' : ''}${copyProducerUi.error ? `<span role="alert">${esc(copyProducerUi.error)}</span>` : ''}${copyProducerUi.pollError ? `<span role="alert">${esc(copyProducerUi.pollError)}</span>` : ''}${copyProducerUi.jobId && (!copyActive || !!copyProducerUi.pollError) ? `<button class="small-action" data-action="copy-producer-check" ${copyProducerUi.busy ? 'disabled' : ''}>${copyActive ? 'Retry status check' : 'Check copy status'}</button>` : ''}${copyActive ? `<button class="small-action" data-action="copy-producer-cancel" ${copyProducerUi.busy ? 'disabled' : ''}>${copyProducerUi.busy ? 'Checking…' : 'Cancel copy'}</button>` : ''}${!copyActive ? `<button class="small-action" data-action="copy-producer-close">${copyProducerUi.admissionUncertain ? 'Close copy flow' : copyProducerUi.jobId ? 'Close copy status' : 'Cancel copy'}</button>` : ''}</section>`
     : '';
+  const protectedRecoveryPanel = typeof protectedVaultRecoveryPanel === 'function' ? protectedVaultRecoveryPanel(flow, busy) : '';
   const destinationAction = copyChoosingDestination && copyProducerUi.admissionUncertain
     ? '<div class="vault-hint" role="alert">Raiun could not confirm whether the copy was accepted. Do not start it again yet. Check the destination and pending operations, then close this copy flow before deciding what to do next.</div>'
     : copyChoosingDestination && flow.unlocked && !flow.statusUnknown && canUseVaultCopyDestination(flow)
@@ -2508,7 +2723,7 @@ function vaultDialog() {
     : copyChoosingDestination && flow.unlocked && !flow.statusUnknown
       ? `<div class="vault-hint" role="status">${flow.writable ? 'A stable folder version is unavailable here, or this is the source location. Choose a different folder.' : 'This location is read-only. Choose an unlocked writable encrypted location.'}</div>`
       : '';
-  return `<div class="modal-backdrop" data-backdrop="vault"><section class="modal vault-modal" role="dialog" aria-modal="true" aria-labelledby="vault-title" tabindex="-1"><div class="modal-top"><div><div class="eyebrow">END-TO-END ENCRYPTION</div><h2 id="vault-title">${copyChoosingDestination ? 'Choose copy destination' : title}</h2></div><button class="icon-button" data-vault-action="close" aria-label="Close" ${closeDisabled || copyActive ? 'disabled' : ''}>${svg('close')}</button></div><p class="modal-lede">${copyChoosingDestination ? 'Choose an unlocked writable encrypted folder. Raiun creates a new file there and keeps the original in place.' : browseExplanation}</p><div class="vault-root">${svg('lock')}<code>${esc(flow.offlineUnlockOnly ? opaqueOfflineLabel : rootDisplay)}</code></div>${flow.error ? `<div class="vault-error" ${passwordErrorActive ? 'id="vault-password-error" ' : ''}role="alert">${svg('alert')}<span>${esc(flow.error)}</span></div>` : ''}${flow.closeBlockedNotice ? `<div class="vault-state" role="status" aria-live="polite" aria-atomic="true">${esc(flow.closeBlockedNotice)}</div>` : ''}${flow.intent !== 'create'? `<div class="vault-state ${flow.unlocked && !flow.statusUnknown ? 'unlocked' : ''}" role="status" aria-live="polite" aria-atomic="true">${liveLockState}</div>` : ''}${createForm}${rememberedNote}${flow.unlocked && !flow.statusUnknown ? nativeVaultAccess() ? nativeVaultDrivePanel(flow, busy) : `<div class="vault-browse-label">${copyChoosingDestination ? 'Destination folder' : 'Folders inside this encrypted location'} <code>${esc(flow.path)}</code></div>${flow.loading ? '<div class="vault-empty" role="status"><span class="spinner"></span> Loading encrypted folder…</div>' : directoryRows}${destinationAction}${copyPanel}${!copyChoosingDestination ? `${vaultOfflinePinPanel(flow)}${vaultEditRetryPanel(flow)}` : ''}` : copyPanel}<div class="helper-note">Raiun never saves a vault password unless you opt in. Locking a vault does not remove a saved key; use “Forget saved key” separately. If a vault password is lost, its encrypted cloud contents cannot be recovered by Raiun.</div>${flow.intent !== 'create' ? `<div class="helper-note">${esc(mountedAvailability)}</div>` : ''}<div class="modal-actions"><button class="button subtle" data-vault-action="close" ${closeDisabled || copyActive ? 'disabled' : ''}>Close</button>${unlockButton}${savedUnlockButton}${lockButton}${flow.offlineUnlockOnly ? '' : forgetButton}${statusButton}${useButton}${!nativeVaultAccess() && flow.intent === 'create' ? `<button class="button primary" data-vault-action="create" ${busy ? 'disabled' : ''}>${busy ? 'Creating…' : 'Create vault'}</button>` : ''}</div></section></div>`;
+  return `<div class="modal-backdrop" data-backdrop="vault"><section class="modal vault-modal" role="dialog" aria-modal="true" aria-labelledby="vault-title" tabindex="-1"><div class="modal-top"><div><div class="eyebrow">END-TO-END ENCRYPTION</div><h2 id="vault-title">${copyChoosingDestination ? 'Choose copy destination' : title}</h2></div><button class="icon-button" data-vault-action="close" aria-label="Close" ${closeDisabled || copyActive ? 'disabled' : ''}>${svg('close')}</button></div><p class="modal-lede">${copyChoosingDestination ? 'Choose an unlocked writable encrypted folder. Raiun creates a new file there and keeps the original in place.' : browseExplanation}</p><div class="vault-root">${svg('lock')}<code>${esc(flow.offlineUnlockOnly ? opaqueOfflineLabel : rootDisplay)}</code></div>${flow.error ? `<div class="vault-error" ${passwordErrorActive ? 'id="vault-password-error" ' : ''}role="alert">${svg('alert')}<span>${esc(flow.error)}</span></div>` : ''}${flow.closeBlockedNotice ? `<div class="vault-state" role="status" aria-live="polite" aria-atomic="true">${esc(flow.closeBlockedNotice)}</div>` : ''}${flow.intent !== 'create'? `<div class="vault-state ${flow.unlocked && !flow.statusUnknown ? 'unlocked' : ''}" role="status" aria-live="polite" aria-atomic="true">${liveLockState}</div>` : ''}${createForm}${rememberedNote}${flow.unlocked && !flow.statusUnknown ? nativeVaultAccess() ? nativeVaultDrivePanel(flow, busy) : `<div class="vault-browse-label">${copyChoosingDestination ? 'Destination folder' : 'Folders inside this encrypted location'} <code>${esc(flow.path)}</code></div>${flow.loading ? '<div class="vault-empty" role="status"><span class="spinner"></span> Loading encrypted folder…</div>' : directoryRows}${destinationAction}${copyPanel}${!copyChoosingDestination ? `${vaultOfflinePinPanel(flow)}${vaultEditRetryPanel(flow)}` : ''}` : copyPanel}${protectedRecoveryPanel}<div class="helper-note">Raiun never saves a vault password unless you opt in. Locking a vault does not remove a saved key; use “Forget saved key” separately. If a vault password is lost, its encrypted cloud contents cannot be recovered by Raiun.</div>${flow.intent !== 'create' ? `<div class="helper-note">${esc(mountedAvailability)}</div>` : ''}<div class="modal-actions"><button class="button subtle" data-vault-action="close" ${closeDisabled || copyActive ? 'disabled' : ''}>Close</button>${unlockButton}${savedUnlockButton}${lockButton}${flow.offlineUnlockOnly ? '' : forgetButton}${statusButton}${useButton}${!nativeVaultAccess() && flow.intent === 'create' ? `<button class="button primary" data-vault-action="create" ${busy ? 'disabled' : ''}>${busy ? 'Creating…' : 'Create vault'}</button>` : ''}</div></section></div>`;
 }
 
 function bind() {
@@ -2529,6 +2744,12 @@ function bind() {
   });
   app.querySelector<HTMLInputElement>('#download-limit-kib')?.addEventListener('input', event => {
     bandwidthUi.download = (event.target as HTMLInputElement).value;
+  });
+  app.querySelector<HTMLInputElement>('#desktop-update-auto')?.addEventListener('change', event => {
+    void saveDesktopUpdatePreferences((event.target as HTMLInputElement).checked, desktopUpdateUi.status?.channel || 'beta');
+  });
+  app.querySelector<HTMLSelectElement>('#desktop-update-channel')?.addEventListener('change', event => {
+    void saveDesktopUpdatePreferences(desktopUpdateUi.status?.automatic_checks !== false, (event.target as HTMLSelectElement).value as 'stable' | 'beta');
   });
   app.querySelectorAll<HTMLElement>('[data-vault-edit-latest-cancel]').forEach(el => el.addEventListener('click', () => void cancelEncryptedRetryLatest(el)));
   app.querySelectorAll<HTMLElement>('[data-filter]').forEach(el => el.addEventListener('click', () => { state.transferFilter = el.dataset.filter || 'active'; render(); }));
@@ -2619,6 +2840,9 @@ function bind() {
     else if (action === 'create') void createEncryptedVault();
     else if (action === 'copy-use-destination') void startVaultCopyToCurrentFolder();
   }));
+  app.querySelector<HTMLButtonElement>('[data-vault-capture-refresh]')?.addEventListener('click', () => void loadProtectedVaultCaptures(true));
+  app.querySelector<HTMLButtonElement>('[data-vault-capture-more]')?.addEventListener('click', () => void loadProtectedVaultCaptures(false));
+  app.querySelectorAll<HTMLButtonElement>('[data-vault-capture-save]').forEach(el => el.addEventListener('click', () => void saveProtectedVaultCaptureCopy(el.dataset.vaultCaptureSave || '')));
   app.querySelectorAll<HTMLButtonElement>('[data-vault-pin-start]').forEach(el => el.addEventListener('click', () => void startVaultOfflinePin(el.dataset.vaultPinStart || undefined)));
   app.querySelector<HTMLButtonElement>('[data-vault-pin-cancel]')?.addEventListener('click', () => void cancelVaultOfflinePin());
   app.querySelectorAll<HTMLButtonElement>('[data-vault-pin-remove]').forEach(el => el.addEventListener('click', () => void removeVaultOfflinePin(el.dataset.vaultPinRemove || '')));
@@ -2941,6 +3165,11 @@ async function handleAction(action: string, element?: HTMLElement) {
       await run('set_autostart', { enabled });
       if (isCurrentAccount(epoch)) { if (!state.error) state.autostart = enabled; render(); } break;
     }
+    case 'check-desktop-update': await refreshDesktopUpdate(true); break;
+    case 'download-desktop-update': await downloadDesktopUpdate(); break;
+    case 'install-desktop-update': await installDesktopUpdate(); break;
+    case 'later-desktop-update': await laterDesktopUpdate(); break;
+    case 'open-desktop-release': await openDesktopRelease(); break;
     default: void element;
   }
 }
@@ -5411,6 +5640,95 @@ async function consumeShellUnlockIntent() {
     if (unlockIntentDrain === run) unlockIntentDrain = null;
   }
 }
+async function refreshDesktopUpdate(manual: boolean) {
+  if (!isTauri() || desktopUpdateUi.busy) return;
+  desktopUpdateUi.busy = true;
+  desktopUpdateUi.error = '';
+  render();
+  try {
+    desktopUpdateUi.status = await invoke<DesktopUpdateStatus>('check_desktop_update', { manual });
+  } catch (error) {
+    desktopUpdateUi.error = `Could not check for Raiun Desktop updates: ${messageOf(error)}`;
+  } finally {
+    desktopUpdateUi.busy = false;
+    render();
+  }
+}
+
+async function saveDesktopUpdatePreferences(automaticChecks: boolean, channel: 'stable' | 'beta') {
+  if (!isTauri()) return;
+  const channelChanged = desktopUpdateUi.status?.channel != null && desktopUpdateUi.status.channel !== channel;
+  let saved = false;
+  try {
+    desktopUpdateUi.status = await invoke<DesktopUpdateStatus>('set_desktop_update_preferences', { automaticChecks, channel });
+    desktopUpdateUi.error = '';
+    saved = true;
+  } catch (error) {
+    desktopUpdateUi.error = `Could not save update preferences: ${messageOf(error)}`;
+  }
+  if (saved && channelChanged) await refreshDesktopUpdate(true);
+  else render();
+}
+
+async function downloadDesktopUpdate() {
+  if (!isTauri() || desktopUpdateUi.busy) return;
+  desktopUpdateUi.busy = true;
+  desktopUpdateUi.error = '';
+  render();
+  try {
+    const expectedTag = desktopUpdateUi.status?.tag;
+    if (!expectedTag) throw new Error('No selected release is available to download. Check for updates again.');
+    desktopUpdateUi.status = await invoke<DesktopUpdateStatus>('download_desktop_update', { expectedTag });
+    if (desktopUpdateUi.status.error) desktopUpdateUi.error = desktopUpdateUi.status.error;
+  } catch (error) {
+    desktopUpdateUi.error = `Could not download a verified Desktop update: ${messageOf(error)}`;
+  } finally {
+    desktopUpdateUi.busy = false;
+    render();
+  }
+}
+
+async function installDesktopUpdate() {
+  if (!isTauri() || desktopUpdateUi.busy) return;
+  desktopUpdateUi.busy = true;
+  desktopUpdateUi.error = '';
+  render();
+  try {
+    await invoke('install_desktop_update');
+    if (navigator.platform.toLowerCase().includes('linux')) {
+      desktopUpdateUi.error = 'The update was installed. Raiun Desktop is restarting.';
+    }
+  } catch (error) {
+    desktopUpdateUi.error = `Could not safely install the update: ${messageOf(error)}`;
+  } finally {
+    desktopUpdateUi.busy = false;
+    render();
+  }
+}
+
+async function laterDesktopUpdate() {
+  const tag = desktopUpdateUi.status?.tag;
+  if (!isTauri() || !tag) return;
+  try {
+    desktopUpdateUi.status = await invoke<DesktopUpdateStatus>('dismiss_desktop_update', { tag });
+    desktopUpdateUi.error = '';
+  } catch (error) {
+    desktopUpdateUi.error = `Could not save this update reminder: ${messageOf(error)}`;
+  }
+  render();
+}
+
+async function openDesktopRelease() {
+  const tag = desktopUpdateUi.status?.tag;
+  if (!isTauri() || !tag) return;
+  try {
+    await invoke('open_desktop_release', { tag });
+  } catch (error) {
+    desktopUpdateUi.error = `Could not open the Desktop release page: ${messageOf(error)}`;
+    render();
+  }
+}
+
 async function initialize() {
   if (isTauri()) {
     try {
@@ -5423,6 +5741,10 @@ async function initialize() {
   const accountChanged = await syncAccounts();
   if (!accountChanged) await refresh(false);
   if (isTauri()) {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') void refreshDesktopUpdate(false);
+    });
+    void refreshDesktopUpdate(false);
     try {
       const destination = await invoke<string | null>('take_shell_navigation');
       if (destination === 'folders' || destination === 'transfers') {
@@ -5571,6 +5893,7 @@ if (isTauri()) {
   });
 }
 void initialize();
+setInterval(() => { if (isTauri()) void refreshDesktopUpdate(false); }, 60 * 60 * 1000);
 setInterval(() => { const waitingForAccountSetup = state.addAccountOpen && state.addAccountStep === 'waiting' && !state.addAccountBusy; if (shouldRunPeriodicPassiveRefresh(passiveRefreshBlockers(), waitingForAccountSetup)) { void syncAccounts().then(changed => { if (!changed) void refresh(false); }); } }, 15_000);
 function editingControlFocused() {
   return document.activeElement instanceof HTMLInputElement || document.activeElement instanceof HTMLTextAreaElement || document.activeElement instanceof HTMLSelectElement;

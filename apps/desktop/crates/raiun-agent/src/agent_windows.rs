@@ -21,6 +21,8 @@ mod vault_edit_disposition;
 mod vault_edit_retention;
 #[path = "vault_edit_upload.rs"]
 mod vault_edit_upload;
+#[path = "windows_vault_capture_recovery.rs"]
+mod windows_vault_capture_recovery;
 #[path = "windows_vault_credentials.rs"]
 mod windows_vault_credentials;
 #[path = "windows_vault_custody.rs"]
@@ -59,6 +61,11 @@ mod windows_vault_requests;
 mod windows_profile_registry;
 #[path = "windows_profiles.rs"]
 mod windows_profiles;
+
+type ProtectedCapturePage = (
+    Vec<windows_vault_custody::RecoveryCaptureMetadata>,
+    Option<String>,
+);
 
 // Focused native broker acceptance passed. Enable candidate account routing;
 // Folder/media source receipts bind the exact authenticated scope and source identity.
@@ -219,6 +226,19 @@ trait SessionStore: Send + Sync {
         _record: &[u8],
     ) -> Result<(), String> {
         Err("Protected vault capture is unavailable".into())
+    }
+    fn load_vault_completed_history_segment(
+        &self,
+        _binding: &[u8],
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
+        Err("Protected completed vault history is unavailable".into())
+    }
+    fn put_new_vault_completed_history_segment(
+        &self,
+        _binding: &[u8],
+        _record: &[u8],
+    ) -> Result<(), String> {
+        Err("Protected completed vault history is unavailable".into())
     }
     fn before_publish(&self) {}
 }
@@ -392,8 +412,17 @@ struct WindowsAgent {
     fresh_close_worker: Mutex<Option<windows_vault_close_worker::FreshCloseWorker>>,
     folder_lifecycle: Mutex<()>,
     vault_credential_operation: Mutex<()>,
+    protected_recovery_tokens: Mutex<windows_vault_capture_recovery::Tokens>,
     #[cfg(all(test, debug_assertions))]
     synthetic_vault_completion_writer_probe: bool,
+}
+
+struct ProtectedRecoveryContext {
+    generation: u64,
+    session: auth::Session,
+    configuration: RootConfiguration,
+    binding: ActiveProviderBinding,
+    context_token: String,
 }
 
 #[derive(Clone)]
@@ -606,6 +635,22 @@ enum ProviderCommand {
     InspectVaultBackend {
         binding: ActiveProviderBinding,
         response: std::sync::mpsc::SyncSender<Result<VerifiedVaultBackend, String>>,
+    },
+    ListProtectedVaultCaptures {
+        binding: ActiveProviderBinding,
+        scope: windows_vault_capture_recovery::RecoveryScope,
+        after_capture_id: Option<String>,
+        limit: usize,
+        response: std::sync::mpsc::SyncSender<Result<ProtectedCapturePage, String>>,
+    },
+    SaveProtectedVaultCaptureCopy {
+        binding: ActiveProviderBinding,
+        scope: windows_vault_capture_recovery::RecoveryScope,
+        capture_id: String,
+        destination: PathBuf,
+        response: std::sync::mpsc::SyncSender<
+            Result<windows_vault_capture_recovery::CopyReceipt, String>,
+        >,
     },
     CompleteVaultUpload {
         writable_bytes: bool,
@@ -1041,6 +1086,105 @@ impl ProviderManager {
                             } else {
                                 Err("A different Windows drive connection is already active".to_owned())
                             };
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::ListProtectedVaultCaptures {
+                            binding,
+                            scope,
+                            after_capture_id,
+                            limit,
+                            response,
+                        } => {
+                            // Read-only history discovery is tied to the current
+                            // root owner. Retired vault cleanup state is not a
+                            // gate here: it grants no authority and does not
+                            // prevent local protected-history inspection.
+                            let result = (|| {
+                                if !vault_worker_binding_current(
+                                    worker_generation.load(Ordering::Acquire),
+                                    &binding,
+                                    active_binding.as_ref(),
+                                ) || connection.is_none()
+                                {
+                                    return Err("The account or Windows drive changed".to_owned());
+                                }
+                                let custody = vault_custody
+                                    .as_ref()
+                                    .ok_or("Protected vault history is unavailable")?;
+                                let owner = backend
+                                    .as_ref()
+                                    .filter(|backend| !backend.is_revoked())
+                                    .ok_or("The connected account root is unavailable")?
+                                    .scope();
+                                let page = windows_vault_capture_recovery::page_from_custody(
+                                    custody,
+                                    owner,
+                                    &scope,
+                                    after_capture_id.as_deref(),
+                                    limit,
+                                )?;
+                                if !vault_worker_binding_current(
+                                    worker_generation.load(Ordering::Acquire),
+                                    &binding,
+                                    active_binding.as_ref(),
+                                ) {
+                                    return Err("The account or Windows drive changed".to_owned());
+                                }
+                                Ok(page)
+                            })();
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::SaveProtectedVaultCaptureCopy {
+                            binding,
+                            scope,
+                            capture_id,
+                            destination,
+                            response,
+                        } => {
+                            let result = (|| {
+                                if !vault_worker_binding_current(
+                                    worker_generation.load(Ordering::Acquire),
+                                    &binding,
+                                    active_binding.as_ref(),
+                                ) || connection.is_none()
+                                {
+                                    return Err("The account or Windows drive changed".to_owned());
+                                }
+                                let custody = vault_custody
+                                    .as_ref()
+                                    .ok_or("Protected vault history is unavailable")?;
+                                let owner = backend
+                                    .as_ref()
+                                    .filter(|backend| !backend.is_revoked())
+                                    .ok_or("The connected account root is unavailable")?
+                                    .scope();
+                                let receipt = windows_vault_capture_recovery::save_copy(
+                                    custody,
+                                    owner,
+                                    &scope,
+                                    &capture_id,
+                                    windows_vault_capture_recovery::SaveCopyDestination {
+                                        root_path: &binding.path,
+                                        root_identity: binding.identity,
+                                        destination: &destination,
+                                    },
+                                    || {
+                                        vault_worker_binding_current(
+                                            worker_generation.load(Ordering::Acquire),
+                                            &binding,
+                                            active_binding.as_ref(),
+                                        ) && connection.is_some()
+                                    },
+                                )?;
+                                if !vault_worker_binding_current(
+                                    worker_generation.load(Ordering::Acquire),
+                                    &binding,
+                                    active_binding.as_ref(),
+                                ) {
+                                    return Err("The account changed; inspect the chosen destination".to_owned());
+                                }
+                                Ok(receipt)
+                            })();
                             let _ = response.send(result);
                         }
                         ProviderCommand::CompleteVaultUpload { writable_bytes, binding, expected_backend, upload, mut store, response } => {
@@ -1675,6 +1819,50 @@ impl ProviderManager {
         result
             .recv()
             .map_err(|_| "Windows Cloud Files connection manager stopped unexpectedly")?
+    }
+
+    fn list_protected_vault_captures(
+        &self,
+        binding: ActiveProviderBinding,
+        scope: windows_vault_capture_recovery::RecoveryScope,
+        after_capture_id: Option<String>,
+        limit: usize,
+    ) -> Result<ProtectedCapturePage, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::ListProtectedVaultCaptures {
+                binding,
+                scope,
+                after_capture_id,
+                limit,
+                response,
+            })
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|_| "Protected vault history did not respond within its bound".to_owned())?
+    }
+
+    fn save_protected_vault_capture_copy(
+        &self,
+        binding: ActiveProviderBinding,
+        scope: windows_vault_capture_recovery::RecoveryScope,
+        capture_id: String,
+        destination: PathBuf,
+    ) -> Result<windows_vault_capture_recovery::CopyReceipt, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::SaveProtectedVaultCaptureCopy {
+                binding,
+                scope,
+                capture_id,
+                destination,
+                response,
+            })
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result.recv_timeout(Duration::from_secs(30)).map_err(|_| {
+            "Save Copy did not respond within its bound; inspect the chosen destination".to_owned()
+        })?
     }
 
     fn complete_vault_upload(
@@ -2488,6 +2676,7 @@ impl WindowsAgent {
             fresh_close_worker: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
             vault_credential_operation: Mutex::new(()),
+            protected_recovery_tokens: Mutex::new(windows_vault_capture_recovery::Tokens::default()),
             #[cfg(all(test, debug_assertions))]
             synthetic_vault_completion_writer_probe: true,
         };
@@ -2640,6 +2829,13 @@ impl WindowsAgent {
                 Ok((self.windows_offline_file_request(request, "cancel")?, false))
             }
             "windows_recovery_list" => Ok((self.list_recovered_edits(request)?, false)),
+            "windows_vault_capture_recovery_list" => {
+                Ok((self.list_protected_vault_captures_request(request)?, false))
+            }
+            "windows_vault_capture_save_copy" => Ok((
+                self.save_protected_vault_capture_copy_request(request)?,
+                false,
+            )),
             "set_autostart" => {
                 let enabled = request
                     .get("enabled")
@@ -2948,6 +3144,253 @@ impl WindowsAgent {
             status["vault_access_mode"] = json!("native_read_only");
         }
         Ok(status)
+    }
+
+    fn protected_recovery_context(
+        &self,
+        request: &Value,
+    ) -> Result<ProtectedRecoveryContext, String> {
+        if request
+            .get("profile_id")
+            .is_some_and(|value| value.as_str() != Some(self.profile_scope.as_str()))
+        {
+            return Err("Select the current Windows account".into());
+        }
+        let expected_generation = request
+            .get("expected_generation")
+            .and_then(Value::as_u64)
+            .filter(|generation| *generation != 0)
+            .ok_or("Reopen saved vault edits for the current account")?;
+        let expected_scope_token = request
+            .get("expected_recovery_scope_token")
+            .and_then(Value::as_str)
+            .filter(|token| {
+                token.len() == 64
+                    && token
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            .ok_or("Refresh the Windows drive status before checking saved vault edits")?;
+        let (session, generation, configuration) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if !state.online_authenticated
+                || state.authenticating
+                || state.refreshing
+                || state.logout_pending
+                || state.needs_refresh
+                || state.session_cleanup_uncertain
+            {
+                return Err("Connect the current account before opening saved vault edits".into());
+            }
+            let session = state
+                .session
+                .clone()
+                .ok_or("Connect the current account before opening saved vault edits")?;
+            let configuration = state
+                .root_configuration
+                .clone()
+                .ok_or("The registered Windows drive folder is unavailable")?;
+            (session, state.active_generation, configuration)
+        };
+        if generation != expected_generation
+            || self.generation.load(Ordering::Acquire) != generation
+            || self.provider.authorized_generation.load(Ordering::Acquire) != generation
+            || !self.provider.is_connected()
+        {
+            return Err("The account or Windows drive changed; refresh saved vault edits".into());
+        }
+        if !configuration.valid
+            || configuration.profile_scope != self.profile_scope
+            || configuration.server != session.server
+            || configuration.client_id != session.client_id
+            || session.expires_at <= unix_time_now().saturating_add(30)
+        {
+            return Err("Saved vault edits do not match the connected account and drive".into());
+        }
+        let registration = configuration
+            .registration_ownership
+            .as_ref()
+            .filter(|owner| owner.state == "registered")
+            .ok_or("The Windows drive has no verified registered owner")?;
+        validate_registration_ownership(
+            registration,
+            &session.server,
+            configuration.volume_serial,
+            configuration.file_index,
+        )?;
+        let root_identity = raiun_cloudfiles_windows::ConfiguredRootIdentity {
+            volume_serial: configuration.volume_serial,
+            file_index: configuration.file_index,
+        };
+        pin_registered_configured_root(Path::new(&configuration.path), root_identity)
+            .map_err(root_error_text)?;
+        let binding = ActiveProviderBinding {
+            generation,
+            path: PathBuf::from(&configuration.path),
+            identity: root_identity,
+            personal_space_id: registration.personal_drive_id.clone(),
+            personal_root_resource_id: registration
+                .personal_root_resource_id
+                .clone()
+                .ok_or("The registered drive root identity is incomplete")?,
+        };
+        let context_token = self
+            .provider
+            .configuration_recovery_scope_token(&configuration, generation)?;
+        if context_token != expected_scope_token {
+            return Err("The account or Windows drive changed; refresh saved vault edits".into());
+        }
+        Ok(ProtectedRecoveryContext {
+            generation,
+            session,
+            configuration,
+            binding,
+            context_token,
+        })
+    }
+
+    fn revalidate_protected_recovery_context(
+        &self,
+        context: &ProtectedRecoveryContext,
+    ) -> Result<(), String> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?;
+        let same_session = state.session.as_ref().is_some_and(|current| {
+            current.server == context.session.server
+                && current.client_id == context.session.client_id
+                && current.access_token == context.session.access_token
+                && current.expires_at > unix_time_now().saturating_add(30)
+        });
+        if !state.online_authenticated
+            || state.authenticating
+            || state.refreshing
+            || state.logout_pending
+            || state.needs_refresh
+            || state.session_cleanup_uncertain
+            || state.active_generation != context.generation
+            || self.generation.load(Ordering::Acquire) != context.generation
+            || self.provider.authorized_generation.load(Ordering::Acquire) != context.generation
+            || !same_session
+            || state.root_configuration.as_ref() != Some(&context.configuration)
+            || !self
+                .provider
+                .configuration_recovery_scope_token(&context.configuration, context.generation)
+                .is_ok_and(|token| token == context.context_token)
+        {
+            return Err(
+                "The account or Windows drive changed during saved vault edit access".into(),
+            );
+        }
+        pin_registered_configured_root(
+            Path::new(&context.configuration.path),
+            context.binding.identity,
+        )
+        .map_err(root_error_text)?;
+        Ok(())
+    }
+
+    fn parse_protected_recovery_scope(
+        request: &Value,
+    ) -> Result<windows_vault_capture_recovery::RecoveryScope, String> {
+        let required = |name: &str| -> Result<String, String> {
+            let value = request
+                .get(name)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty() && value.len() <= 4096)
+                .ok_or_else(|| format!("Saved vault edit request has an invalid {name}"))?;
+            Ok(value.to_owned())
+        };
+        Ok(windows_vault_capture_recovery::RecoveryScope {
+            space_id: required("space_id")?,
+            root_resource_id: required("root_resource_id")?,
+            remote_root: required("remote_root")?,
+        })
+    }
+
+    fn list_protected_vault_captures_request(&self, request: &Value) -> Result<Value, String> {
+        let context = self.protected_recovery_context(request)?;
+        let scope = Self::parse_protected_recovery_scope(request)?;
+        let limit = match request.get("limit") {
+            None => 100,
+            Some(value) => value
+                .as_u64()
+                .filter(|limit| (1..=100).contains(limit))
+                .ok_or("Saved vault edit page size must be between 1 and 100")?
+                as usize,
+        };
+        let cursor = request.get("cursor").and_then(Value::as_str);
+        if request.get("cursor").is_some() && cursor.is_none() {
+            return Err("Saved vault edit cursor is invalid".into());
+        }
+        let after = self
+            .protected_recovery_tokens
+            .lock()
+            .map_err(|_| "Saved vault edit pagination is unavailable")?
+            .after(cursor, context.generation, &context.context_token, &scope)?;
+        let (rows, next_after) = self.provider.list_protected_vault_captures(
+            context.binding.clone(),
+            scope.clone(),
+            after,
+            limit,
+        )?;
+        self.revalidate_protected_recovery_context(&context)?;
+        let page = self
+            .protected_recovery_tokens
+            .lock()
+            .map_err(|_| "Saved vault edit pagination is unavailable")?
+            .page(
+                &self.profile_scope,
+                context.generation,
+                &context.context_token,
+                scope,
+                rows,
+                next_after,
+            )?;
+        let encoded =
+            serde_json::to_vec(&page).map_err(|_| "Saved vault edit page could not be encoded")?;
+        if encoded.len() > windows_vault_capture_recovery::MAX_RESPONSE_BYTES {
+            return Err("Saved vault edit page exceeds the response limit".into());
+        }
+        serde_json::from_slice(&encoded)
+            .map_err(|_| "Saved vault edit page could not be decoded".into())
+    }
+
+    fn save_protected_vault_capture_copy_request(&self, request: &Value) -> Result<Value, String> {
+        let context = self.protected_recovery_context(request)?;
+        let scope = Self::parse_protected_recovery_scope(request)?;
+        let item_token = request
+            .get("item_token")
+            .and_then(Value::as_str)
+            .ok_or("Choose one saved vault edit to copy")?;
+        let capture_id = self
+            .protected_recovery_tokens
+            .lock()
+            .map_err(|_| "Saved vault edit selection is unavailable")?
+            .item(
+                item_token,
+                context.generation,
+                &context.context_token,
+                &scope,
+            )?;
+        let destination = request
+            .get("destination")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty() && path.len() <= 32768)
+            .ok_or("Choose one fresh local destination for Save Copy")?;
+        self.revalidate_protected_recovery_context(&context)?;
+        let receipt = self.provider.save_protected_vault_capture_copy(
+            context.binding.clone(),
+            scope,
+            capture_id,
+            PathBuf::from(destination),
+        )?;
+        self.revalidate_protected_recovery_context(&context)?;
+        serde_json::to_value(receipt).map_err(|_| "Save Copy receipt could not be encoded".into())
     }
 
     /// Authenticated read-only discovery. No upload approval, dispatch or
@@ -5688,6 +6131,23 @@ impl SessionStore for DpapiStore {
         self.store
             .put_new_vault_existing_edit_capture(binding, record)
             .map_err(|_| "Vault capture publication is uncertain".into())
+    }
+    fn load_vault_completed_history_segment(
+        &self,
+        binding: &[u8],
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
+        self.store
+            .load_vault_completed_history_segment(binding)
+            .map_err(|_| "Protected completed vault history is unavailable".into())
+    }
+    fn put_new_vault_completed_history_segment(
+        &self,
+        binding: &[u8],
+        record: &[u8],
+    ) -> Result<(), String> {
+        self.store
+            .put_new_vault_completed_history_segment(binding, record)
+            .map_err(|_| "Completed vault history publication is uncertain".into())
     }
     fn load_vault_custody(
         &self,
@@ -16458,6 +16918,9 @@ mod tests {
             fresh_close_worker: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
             vault_credential_operation: Mutex::new(()),
+            protected_recovery_tokens: Mutex::new(
+                super::windows_vault_capture_recovery::Tokens::default(),
+            ),
             #[cfg(all(test, debug_assertions))]
             synthetic_vault_completion_writer_probe: true,
         });
@@ -16532,6 +16995,9 @@ mod tests {
             fresh_close_worker: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
             vault_credential_operation: Mutex::new(()),
+            protected_recovery_tokens: Mutex::new(
+                super::windows_vault_capture_recovery::Tokens::default(),
+            ),
             #[cfg(all(test, debug_assertions))]
             synthetic_vault_completion_writer_probe: true,
         });
@@ -17196,6 +17662,9 @@ mod tests {
             fresh_close_worker: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
             vault_credential_operation: Mutex::new(()),
+            protected_recovery_tokens: Mutex::new(
+                super::windows_vault_capture_recovery::Tokens::default(),
+            ),
             #[cfg(all(test, debug_assertions))]
             synthetic_vault_completion_writer_probe: true,
         });
@@ -17250,6 +17719,9 @@ mod tests {
             fresh_close_worker: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
             vault_credential_operation: Mutex::new(()),
+            protected_recovery_tokens: Mutex::new(
+                super::windows_vault_capture_recovery::Tokens::default(),
+            ),
             #[cfg(all(test, debug_assertions))]
             synthetic_vault_completion_writer_probe: true,
         });
@@ -17288,6 +17760,9 @@ mod tests {
             fresh_close_worker: Mutex::new(None),
             folder_lifecycle: Mutex::new(()),
             vault_credential_operation: Mutex::new(()),
+            protected_recovery_tokens: Mutex::new(
+                super::windows_vault_capture_recovery::Tokens::default(),
+            ),
             #[cfg(all(test, debug_assertions))]
             synthetic_vault_completion_writer_probe: true,
         });

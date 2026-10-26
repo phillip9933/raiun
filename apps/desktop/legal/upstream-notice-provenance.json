@@ -437,8 +437,116 @@
         }
       ],
       "vcs_commit": "5878605364af97a3358368a6eaef02104af2e016"
+    },
+    {
+      "crate_sha256": "67fb21a77e8f94e8beb3325e583102488659365af0a3948b7ea244c5b779c291",
+      "package": "tauri-plugin@2.7.2",
+      "path_in_vcs": "crates/tauri-plugin",
+      "registry_archive_download_url": "https://crates.io/api/v1/crates/tauri-plugin/2.7.2/download",
+      "registry_metadata_files": [
+        {
+          "bytes": 1048,
+          "path": "legal/registry-provenance/tauri-plugin@2.7.2/Cargo.toml.orig",
+          "sha256": "cb30dc2f52ac90b211120773913ad6622f0254a59a9a57b0733c66abd4bf6e3a"
+        },
+        {
+          "bytes": 113,
+          "path": "legal/registry-provenance/tauri-plugin@2.7.2/cargo-vcs-info.json",
+          "sha256": "91a4a696cdb5667e1655da9e50d18cb193bc15bf97d51b53cd8e4f5c52692a9c"
+        }
+      ],
+      "repository": "https://github.com/tauri-apps/tauri",
+      "repository_basis": "registry Cargo metadata repository and checksum-verified archive cargo_vcs_info commit",
+      "resolution": "exact upstream commit license/copyright texts",
+      "supplemental_notices": [
+        {
+          "bytes": 1090,
+          "path": "legal/upstream-retrieval/tauriplugin-59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE-MIT",
+          "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d",
+          "url": "https://raw.githubusercontent.com/tauri-apps/tauri/59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE-MIT"
+        },
+        {
+          "bytes": 10174,
+          "path": "legal/upstream-retrieval/tauriplugin-59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE-APACHE-2.0",
+          "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594",
+          "url": "https://raw.githubusercontent.com/tauri-apps/tauri/59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE-APACHE-2.0"
+        },
+        {
+          "bytes": 889,
+          "path": "legal/upstream-retrieval/tauriplugin-59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE.spdx",
+          "sha256": "5e834fe9788c524210deda859c46a550ffa5aa0cba9ea0572f0d81120e97c008",
+          "url": "https://raw.githubusercontent.com/tauri-apps/tauri/59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE.spdx"
+        }
+      ],
+      "vcs_commit": "59b63ab500da9859f12d8888c3298bc29bba0b92"
+    },
+    {
+      "crate_sha256": "8adfa1c298912827b8a28b223b3b874357397ae706e6190acd9bf28cee99114d",
+      "package": "selectors@0.38.0",
+      "path_in_vcs": "selectors",
+      "registry_archive_download_url": "https://crates.io/api/v1/crates/selectors/0.38.0/download",
+      "registry_metadata_files": [
+        {
+          "bytes": 868,
+          "path": "legal/registry-provenance/selectors@0.38.0/Cargo.toml.orig",
+          "sha256": "26a19ba53c3dfff3f572e04f72ed224dca7b03a76a8e0593fc48b458ec6ab535"
+        },
+        {
+          "bytes": 103,
+          "path": "legal/registry-provenance/selectors@0.38.0/cargo-vcs-info.json",
+          "sha256": "1ddc4845786a1b1ebc7fb2f940878d9b923c4385d7d66841f25c765d1312fe74"
+        }
+      ],
+      "repository": "https://github.com/servo/stylo",
+      "repository_basis": "registry Cargo metadata repository and checksum-verified archive cargo_vcs_info commit",
+      "resolution": "verified current registry archive source license header plus retained official Mozilla MPL-2.0 text; original primary-source retrieval hash unchanged",
+      "supplemental_notices": [
+        {
+          "bytes": 206,
+          "path": "legal/registry-provenance/selectors@0.38.0/source-license-header.txt",
+          "sha256": "766674381e88a468d55e07de3596987391cf0e8beebe51baf4fddf11078785b3",
+          "source": "verified registry archive lib.rs leading license comment; references official MPL text"
+        },
+        {
+          "bytes": 16726,
+          "path": "legal/upstream-retrieval/selectors-635e1a19d02960588a00e189bd4bd5bdb150ec3d/MPL-2.0.txt",
+          "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
+          "url": "https://www.mozilla.org/media/MPL/2.0/index.txt"
+        }
+      ],
+      "vcs_commit": "572ecba2d1600e7c3d490586692a209faf703baa"
+    },
+    {
+      "crate_sha256": "0b5c1865780388bfa186411ab5f247819487fc4864c6e9c3106611fa347586e1",
+      "package": "alloc-stdlib@0.3.0",
+      "path_in_vcs": "alloc-stdlib",
+      "registry_archive_download_url": "https://crates.io/api/v1/crates/alloc-stdlib/0.3.0/download",
+      "registry_metadata_files": [
+        {
+          "bytes": 697,
+          "path": "legal/registry-provenance/alloc-stdlib@0.3.0/Cargo.toml.orig",
+          "sha256": "13c6e8d5ec2e75ae6b66542498e049e1100e71ef25e29ccb9cb083b40d6279ea"
+        },
+        {
+          "bytes": 106,
+          "path": "legal/registry-provenance/alloc-stdlib@0.3.0/cargo-vcs-info.json",
+          "sha256": "2bfc044805e0e75273a7e4d06c9d72f4e029a6cb926e4645c382bde160ecfd95"
+        }
+      ],
+      "repository": "https://github.com/dropbox/rust-alloc-no-stdlib",
+      "repository_basis": "registry Cargo metadata repository and checksum-verified archive cargo_vcs_info commit",
+      "resolution": "exact upstream commit license/copyright texts",
+      "supplemental_notices": [
+        {
+          "bytes": 1483,
+          "path": "legal/upstream-retrieval/alloc-0a81fd6928ea3b33c8cd484aa4575d50ffb98012/LICENSE",
+          "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae",
+          "url": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/0a81fd6928ea3b33c8cd484aa4575d50ffb98012/LICENSE"
+        }
+      ],
+      "vcs_commit": "0a81fd6928ea3b33c8cd484aa4575d50ffb98012"
     }
   ],
   "schema": "raiun-exact-registry-commit-notice-supplements-v1",
-  "scope": "11 cached distribution text gaps resolved without changing dependency source/locks"
+  "scope": "Retained historical and current exact-registry notice supplements; collector identifies those applicable to the current resolved graph"
 }

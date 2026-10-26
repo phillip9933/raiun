@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import ts from 'typescript';
 
 const helperSource = await readFile(new URL('../src/windows-recovery.ts', import.meta.url), 'utf8');
+const mainSource = await readFile(new URL('../src/main.ts', import.meta.url), 'utf8');
 const helperJs = ts.transpileModule(helperSource, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 }
 }).outputText;
@@ -177,4 +178,13 @@ test('actual main offline contexts accept only matching selected/status added-pr
   state.selectedAccount = profile; state.accountSwitching = true;
   assert.equal(contexts.folder(), null);
   assert.equal(contexts.file(), null);
+});
+
+test('protected vault recovery request and completion stay bound to the selected account, drive, vault and UI generation', () => {
+  assert.match(mainSource, /expected_generation: scope\.context\.authGeneration/);
+  assert.match(mainSource, /expected_recovery_scope_token: scope\.context\.recoveryScopeToken/);
+  assert.match(mainSource, /space_id: scope\.spaceId,[\s\S]*root_resource_id: scope\.rootResourceId,[\s\S]*remote_root: scope\.remoteRoot/);
+  assert.match(mainSource, /protectedVaultRecoveryScopeIsCurrent\(flow, scope\.key, generation\)/);
+  assert.match(mainSource, /state\.vaultGeneration, flow\.spaceId, flow\.rootResourceId, flow\.rootPath/);
+  assert.match(mainSource, /context\.accountEpoch, context\.profileId, context\.server, context\.clientId, context\.cloudRoot/);
 });

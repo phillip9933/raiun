@@ -289,12 +289,17 @@ mod tests {
         cell::{Cell, RefCell},
         collections::BTreeMap,
     };
+    type SegmentKey = (Vec<u8>, [u8; 32]);
+    type SegmentMap = BTreeMap<SegmentKey, Zeroizing<Vec<u8>>>;
     #[derive(Default)]
     struct Memory {
         child: RefCell<Option<Zeroizing<Vec<u8>>>>,
         roots: RefCell<BTreeMap<Vec<u8>, Zeroizing<Vec<u8>>>>,
         bodies: RefCell<BTreeMap<Vec<u8>, Zeroizing<Vec<u8>>>>,
+        segments: RefCell<SegmentMap>,
         uncertain: Cell<bool>,
+        fail_segment_readback: Cell<bool>,
+        fail_index_before_write: Cell<bool>,
     }
     impl custody::Store for Memory {
         fn load(
@@ -309,12 +314,67 @@ mod tests {
             old: Option<&[u8]>,
             new: &[u8],
         ) -> std::result::Result<(), custody::Error> {
+            if self.fail_index_before_write.replace(false) {
+                return Err(custody::Error::Conflict);
+            }
             if self.child.borrow().as_ref().map(|v| v.as_slice()) != old {
                 return Err(custody::Error::Conflict);
             }
             *self.child.borrow_mut() = Some(Zeroizing::new(new.to_vec()));
             if self.uncertain.get() {
                 return Err(custody::Error::Persistence);
+            }
+            Ok(())
+        }
+        fn load_completed_segment(
+            &self,
+            scope: &Scope,
+            digest: &[u8; 32],
+        ) -> std::result::Result<Option<Zeroizing<Vec<u8>>>, custody::Error> {
+            if self.fail_segment_readback.get() {
+                return Ok(None);
+            }
+            let key = (scope.authenticated_store_binding()?.to_vec(), *digest);
+            Ok(self.segments.borrow().get(&key).cloned())
+        }
+        fn put_new_completed_segment(
+            &self,
+            scope: &Scope,
+            digest: &[u8; 32],
+            record: &[u8],
+        ) -> std::result::Result<(), custody::Error> {
+            let key = (scope.authenticated_store_binding()?.to_vec(), *digest);
+            let mut segments = self.segments.borrow_mut();
+            if let Some(existing) = segments.get(&key) {
+                return if existing.as_slice() == record {
+                    Ok(())
+                } else {
+                    Err(custody::Error::Conflict)
+                };
+            }
+            segments.insert(key, Zeroizing::new(record.to_vec()));
+            Ok(())
+        }
+        fn validate_completed_capture(
+            &self,
+            scope: &Scope,
+            row: &custody::completed_history::CompletedRow,
+        ) -> std::result::Result<(), custody::Error> {
+            let id = CaptureId::new(row.capture.id()).map_err(|_| custody::Error::Invalid)?;
+            let retained = capture::reopen_for_recovery(self, scope, &id)
+                .map_err(|_| custody::Error::Persistence)?;
+            if retained.encoded_frame_ref() != row.capture.frame() {
+                return Err(custody::Error::Foreign);
+            }
+            let descriptor = DispositionDescriptor::from_capture(
+                scope,
+                &row.capture,
+                row.disposition.descriptor().hydration(),
+                &retained,
+            )
+            .map_err(|_| custody::Error::Invalid)?;
+            if &descriptor != row.disposition.descriptor() {
+                return Err(custody::Error::Foreign);
             }
             Ok(())
         }
@@ -454,6 +514,275 @@ mod tests {
             child.disposition_descriptor(&reference, &retained).unwrap(),
             entry(etag, body.len() as u64),
         )
+    }
+    fn capture_input(scope: &Scope, id: &str, old: &Entry, body: &[u8]) -> PreparedCapture {
+        PreparedCapture::new(
+            scope,
+            &CaptureId::new(id).unwrap(),
+            Baseline::new(old.opaque(), old.etag(), 3, 11, 7, 90).unwrap(),
+            Zeroizing::new(body.to_vec()),
+        )
+        .unwrap()
+    }
+    fn complete_capture(
+        store: &Memory,
+        scope: &Scope,
+        child: &mut Custody,
+        id: &str,
+        old: &Entry,
+        body: &[u8],
+        next_etag: &str,
+    ) -> (DispositionDescriptor, Entry) {
+        let (descriptor, next) = captured(store, scope, child, id, old, body, next_etag);
+        let ticket = child
+            .prepare_disposition_for_test(store, &descriptor, next.clone())
+            .unwrap();
+        child.complete_disposition_for_test(store, ticket).unwrap();
+        (descriptor, next)
+    }
+
+    #[test]
+    fn completed_batch_rolls_over_preserving_prepared_row_and_admits_next_capture() {
+        let (store, scope, mut child) = fixture();
+        let body = b"edit-00000";
+        let mut current = entry("\"rev-000\"", body.len() as u64);
+        for index in 0..127 {
+            let id = format!("capture-{index:03}");
+            let etag = format!("\"rev-{:03}\"", index + 1);
+            let (_, next) =
+                complete_capture(&store, &scope, &mut child, &id, &current, body, &etag);
+            current = next;
+        }
+        let prepared_id = "capture-prepared";
+        let (prepared_descriptor, prepared_next) = captured(
+            &store,
+            &scope,
+            &mut child,
+            prepared_id,
+            &current,
+            body,
+            "\"rev-128\"",
+        );
+        let prepared_ref = prepared_descriptor.reference().clone();
+        let ticket = child
+            .prepare_disposition_for_test(&store, &prepared_descriptor, prepared_next.clone())
+            .unwrap();
+        drop(ticket);
+        assert_eq!(
+            child.captures_for_reconciliation().len(),
+            custody::MAX_CAPTURE_REFS
+        );
+
+        let (_, admitted) = captured(
+            &store,
+            &scope,
+            &mut child,
+            "capture-after-rollover",
+            &prepared_next,
+            body,
+            "\"rev-129\"",
+        );
+        assert_eq!(admitted.length(), body.len() as u64);
+        assert_eq!(child.completed_history_count_for_test(), 127);
+        assert_eq!(child.captures_for_reconciliation().len(), 2);
+        assert_eq!(child.all_captures_for_reconciliation().len(), 129);
+        assert!(
+            !child
+                .local_disposition(&prepared_ref)
+                .unwrap()
+                .unwrap()
+                .is_native_completed()
+        );
+        assert!(child.publication_history().is_err());
+
+        let reopened = Custody::reopen(&store, &scope).unwrap();
+        assert_eq!(reopened.completed_history_count_for_test(), 127);
+        assert_eq!(reopened.all_captures_for_reconciliation().len(), 129);
+        assert!(reopened.local_disposition(&prepared_ref).unwrap().is_some());
+        let duplicate = capture_input(&scope, "capture-000", &prepared_next, b"different");
+        assert!(
+            matches!(
+                child.enroll_capture(
+                    &store,
+                    &duplicate,
+                    &["Personal".into(), "Travel.vault".into(), "1".into()],
+                ),
+                Err(custody::Error::Conflict)
+            ),
+            "an archived capture ID cannot be re-enrolled as fresh"
+        );
+
+        let root = RootBinding::from_scope(&scope).unwrap();
+        let listed = upload::load_capture_references(&store, &root, &scope).unwrap();
+        assert_eq!(
+            listed.len(),
+            129,
+            "root-member lookup includes archived refs"
+        );
+        let archived = upload::load_capture_reference(&store, &root, &scope, "capture-000")
+            .expect("archived frame remains discoverable under root membership");
+        assert!(archived == listed[0]);
+        let ledger = upload::CustodyLedger::admit(&store, &root, &scope, &archived).unwrap();
+        let mut historical_attempt =
+            UploadAttempt::reopen(&ledger, &store, &scope, &archived, archived.entry()).unwrap();
+        assert!(historical_attempt.readback_evidence().unwrap().is_some());
+        assert!(historical_attempt.begin_attempt(&ledger).is_err());
+        let mut historical_child = Custody::reopen(&store, &scope).unwrap();
+        let old_attempt = historical_child
+            .load_upload_attempt(&archived)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            historical_child.compare_exchange_upload_attempt(
+                &store,
+                &archived,
+                Some(old_attempt.as_slice()),
+                b"forged-transition",
+            ),
+            Err(custody::Error::Foreign)
+        ));
+        let archived_body =
+            capture::reopen_for_recovery(&store, &scope, &CaptureId::new(archived.id()).unwrap())
+                .unwrap();
+        let archived_descriptor = historical_child
+            .disposition_descriptor(&archived, &archived_body)
+            .unwrap();
+        assert!(
+            historical_child
+                .prepare_disposition_for_test(
+                    &store,
+                    &archived_descriptor,
+                    archived_descriptor.reference().entry().clone(),
+                )
+                .is_err()
+        );
+
+        let segment = store.segments.borrow_mut().pop_first().unwrap();
+        assert!(
+            Custody::reopen(&store, &scope).is_err(),
+            "missing linked segment refuses"
+        );
+        store.segments.borrow_mut().insert(segment.0, segment.1);
+        let key = store.segments.borrow().keys().next().unwrap().clone();
+        store.segments.borrow_mut().get_mut(&key).unwrap().push(0);
+        assert!(
+            Custody::reopen(&store, &scope).is_err(),
+            "corrupt linked segment refuses"
+        );
+    }
+
+    #[test]
+    fn interrupted_segment_publication_leaves_all_rows_active_and_no_tip() {
+        let (store, scope, mut child) = fixture();
+        let body = b"edit-00000";
+        let mut current = entry("\"rev-000\"", body.len() as u64);
+        for index in 0..custody::MAX_CAPTURE_REFS {
+            let id = format!("capture-{index:03}");
+            let etag = format!("\"rev-{:03}\"", index + 1);
+            let (_, next) =
+                complete_capture(&store, &scope, &mut child, &id, &current, body, &etag);
+            current = next;
+        }
+        let prepared = capture_input(&scope, "after-interruption", &current, body);
+        child.record_entry(&store, current.clone()).unwrap();
+        child
+            .persist_hydration_intent(
+                &store,
+                current.opaque(),
+                90,
+                current.length(),
+                vec!["Personal".into(), "Travel.vault".into(), "1".into()],
+            )
+            .unwrap();
+        store.fail_segment_readback.set(true);
+        assert!(matches!(
+            child.enroll_capture(
+                &store,
+                &prepared,
+                &["Personal".into(), "Travel.vault".into(), "1".into()],
+            ),
+            Err(custody::Error::Persistence)
+        ));
+        store.fail_segment_readback.set(false);
+        let raw: serde_json::Value =
+            serde_json::from_slice(store.child.borrow().as_ref().unwrap()).unwrap();
+        assert!(raw.get("history_tip").is_none());
+        let reopened = Custody::reopen(&store, &scope).unwrap();
+        assert_eq!(
+            reopened.captures_for_reconciliation().len(),
+            custody::MAX_CAPTURE_REFS
+        );
+        assert_eq!(
+            reopened.all_captures_for_reconciliation().len(),
+            custody::MAX_CAPTURE_REFS
+        );
+        assert_eq!(
+            store.segments.borrow().len(),
+            1,
+            "unreachable immutable orphan is inert"
+        );
+        let mut retry = reopened;
+        store.fail_index_before_write.set(true);
+        assert!(matches!(
+            retry.enroll_capture(
+                &store,
+                &prepared,
+                &["Personal".into(), "Travel.vault".into(), "1".into()],
+            ),
+            Err(custody::Error::Persistence)
+        ));
+        assert_eq!(retry.completed_history_count_for_test(), 0);
+        assert_eq!(
+            retry.all_captures_for_reconciliation().len(),
+            custody::MAX_CAPTURE_REFS
+        );
+        let after_cas_conflict = Custody::reopen(&store, &scope).unwrap();
+        assert_eq!(
+            after_cas_conflict.captures_for_reconciliation().len(),
+            custody::MAX_CAPTURE_REFS
+        );
+        assert_eq!(
+            after_cas_conflict.all_captures_for_reconciliation().len(),
+            custody::MAX_CAPTURE_REFS
+        );
+
+        // Continue the ordinary save lifecycle after the successful rollover:
+        // the next capture must upload, prepare and complete without downgrading
+        // the child schema or losing the reachable history chain.
+        let mut next_save = Custody::reopen(&store, &scope).unwrap();
+        let (descriptor, updated) = captured(
+            &store,
+            &scope,
+            &mut next_save,
+            "after-interruption",
+            &current,
+            body,
+            "\"rev-129\"",
+        );
+        let ticket = next_save
+            .prepare_disposition_for_test(&store, &descriptor, updated.clone())
+            .unwrap();
+        next_save
+            .complete_disposition_for_test(&store, ticket)
+            .unwrap();
+        assert_eq!(
+            next_save.publication_history().unwrap()[0].length(),
+            updated.length()
+        );
+        let raw: serde_json::Value =
+            serde_json::from_slice(store.child.borrow().as_ref().unwrap()).unwrap();
+        assert_eq!(raw["version"], 5);
+        assert!(raw.get("history_tip").is_some());
+        let reopened = Custody::reopen(&store, &scope).unwrap();
+        assert_eq!(
+            reopened.completed_history_count_for_test(),
+            custody::MAX_CAPTURE_REFS
+        );
+        assert_eq!(reopened.all_captures_for_reconciliation().len(), 129);
+        assert_eq!(
+            reopened.publication_history().unwrap()[0].length(),
+            updated.length()
+        );
     }
     #[test]
     fn preparation_promotes_atomically_and_only_fresh_ticket_completes_exact_native_result() {
@@ -688,7 +1017,7 @@ mod tests {
         assert!(s.child.borrow().as_ref().unwrap().as_slice() == old.as_slice());
     }
     #[test]
-    fn strict_v4_null_empty_duplicate_unknown_and_broken_chain_refuse_without_repair() {
+    fn strict_v4_v5_tip_null_empty_duplicate_unknown_and_broken_chain_refuse_without_repair() {
         let (s, scope, mut child) = fixture();
         let (descriptor, new) = captured(
             &s,
@@ -726,6 +1055,19 @@ mod tests {
             assert!(Custody::reopen(&s, &scope).is_err());
             assert!(s.child.borrow().as_ref().unwrap().as_slice() == raw.as_slice());
         }
+        let mut explicit_null = good.clone();
+        explicit_null["history_tip"] = serde_json::Value::Null;
+        let raw = Zeroizing::new(serde_json::to_vec(&explicit_null).unwrap());
+        *s.child.borrow_mut() = Some(raw.clone());
+        assert!(Custody::reopen(&s, &scope).is_err());
+        assert!(s.child.borrow().as_ref().unwrap().as_slice() == raw.as_slice());
+
+        let mut missing_v5_tip = good;
+        missing_v5_tip["version"] = 5.into();
+        let raw = Zeroizing::new(serde_json::to_vec(&missing_v5_tip).unwrap());
+        *s.child.borrow_mut() = Some(raw.clone());
+        assert!(Custody::reopen(&s, &scope).is_err());
+        assert!(s.child.borrow().as_ref().unwrap().as_slice() == raw.as_slice());
     }
     #[test]
     fn reconstructed_body_rejects_native_or_digest_tuple_internally_consistent_on_wire() {

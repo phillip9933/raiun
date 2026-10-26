@@ -428,6 +428,9 @@ pub(super) use agent::{
     FreshCloseWorker, FreshVaultCloseJob, VaultClosePublisher, VaultClosePublisherSource,
 };
 
+#[cfg(all(windows, test, debug_assertions))]
+pub(super) use agent::FreshCloseObservation;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -744,6 +747,3 @@ mod tests {
         );
     }
 }
-
-#[cfg(all(windows, test, debug_assertions))]
-pub(super) use agent::FreshCloseObservation;

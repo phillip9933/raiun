@@ -298,8 +298,7 @@ pub(crate) fn load_capture_references<
     let (mut manifest, child) = reopen_member(store, root, scope)?;
     let references = child
         .capture_references_for_lookup()
-        .map_err(|_| Error::Persistence)?
-        .to_vec();
+        .map_err(|_| Error::Persistence)?;
     manifest
         .verify_current(store)
         .map_err(|_| Error::Persistence)?;
@@ -320,9 +319,8 @@ pub(crate) fn load_capture_reference<
     let reference = child
         .capture_references_for_lookup()
         .map_err(|_| Error::Persistence)?
-        .iter()
+        .into_iter()
         .find(|reference| reference.id() == id)
-        .cloned()
         .ok_or(Error::Missing)?;
     // This also refuses a sticky/incomplete child, even with a valid row.
     child

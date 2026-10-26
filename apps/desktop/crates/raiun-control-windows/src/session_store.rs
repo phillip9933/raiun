@@ -419,6 +419,27 @@ impl DpapiSessionStore {
         )
     }
 
+    /// Immutable completed-history segment, addressable only through the
+    /// authenticated per-vault child tip. This store never enumerates segments.
+    pub fn load_vault_completed_history_segment(
+        &self,
+        binding: &[u8],
+    ) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+        self.load_vault_document(VaultDocumentKind::CompletedHistorySegment, binding)
+    }
+    pub fn put_new_vault_completed_history_segment(
+        &self,
+        binding: &[u8],
+        next: &[u8],
+    ) -> io::Result<()> {
+        self.compare_exchange_vault_document(
+            VaultDocumentKind::CompletedHistorySegment,
+            binding,
+            None,
+            next,
+        )
+    }
+
     /// Private protected document read. The caller validates embedded authority;
     /// these bytes alone never authorize a session, history, or native cleanup.
     fn load_vault_document(
@@ -1421,6 +1442,7 @@ enum VaultDocumentKind {
     Credentials,
     Custody,
     ExistingEditCapture,
+    CompletedHistorySegment,
 }
 impl VaultDocumentKind {
     fn directory(self) -> &'static str {
@@ -1428,6 +1450,7 @@ impl VaultDocumentKind {
             Self::Credentials => "vault-credentials",
             Self::Custody => "vault-custody",
             Self::ExistingEditCapture => "vault-existing-edit-captures",
+            Self::CompletedHistorySegment => "vault-completed-history-segments",
         }
     }
     fn file_name(self) -> &'static str {
@@ -1435,6 +1458,7 @@ impl VaultDocumentKind {
             Self::Credentials => "credentials.bin",
             Self::Custody => "custody.bin",
             Self::ExistingEditCapture => "existing-edit-capture.bin",
+            Self::CompletedHistorySegment => "completed-history-segment.bin",
         }
     }
     fn lock_name(self) -> &'static str {
@@ -1442,6 +1466,7 @@ impl VaultDocumentKind {
             Self::Credentials => "credentials.lock",
             Self::Custody => "custody.lock",
             Self::ExistingEditCapture => "existing-edit-capture.lock",
+            Self::CompletedHistorySegment => "completed-history-segment.lock",
         }
     }
     fn envelope(self) -> &'static [u8] {
@@ -1449,6 +1474,7 @@ impl VaultDocumentKind {
             Self::Credentials => VAULT_CREDENTIALS_ENVELOPE,
             Self::Custody => b"RAIUN-VAULT-CUSTODY-DPAPI\0\x01",
             Self::ExistingEditCapture => b"RAIUN-VAULT-EXISTING-EDIT-CAPTURE-DPAPI\0\x01",
+            Self::CompletedHistorySegment => b"RAIUN-VAULT-COMPLETED-HISTORY-SEGMENT-DPAPI\0\x01",
         }
     }
     fn digest(self, scope: &[u8]) -> io::Result<[u8; 32]> {
@@ -1478,6 +1504,18 @@ impl VaultDocumentKind {
                 }
                 let mut hash = Sha256::new();
                 hash.update(b"raiun-vault-existing-edit-capture-dpapi-v1\0");
+                hash.update(scope);
+                Ok(hash.finalize().into())
+            }
+            Self::CompletedHistorySegment => {
+                if scope.is_empty() || scope.len() > 64 * 1024 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Invalid completed-history segment binding",
+                    ));
+                }
+                let mut hash = Sha256::new();
+                hash.update(b"raiun-vault-completed-history-segment-dpapi-v1\0");
                 hash.update(scope);
                 Ok(hash.finalize().into())
             }

@@ -46,13 +46,18 @@ def main():
  # collector stays offline. Verify exact registry checksums and VCS commits
  # again before applying supplements to the cached-text gaps.
  provenance_path=out/'upstream-notice-provenance.json'
- resolved=[]
+ resolved=[];retained_outside_graph=[]
  if provenance_path.is_file():
   provenance=json.loads(provenance_path.read_bytes())
   locked={(r['name'],r['version']):r.get('checksum') for f in [ROOT/'Cargo.lock',ROOT/'desktop-shell/src-tauri/Cargo.lock'] for r in tomllib.loads(f.read_text())['package']}
   cargo_home=Path(os.environ.get('CARGO_HOME',Path.home()/'.cargo'))
   for supplement in provenance['packages']:
    name,version=supplement['package'].rsplit('@',1)
+   row=next((r for r in rows.values() if r['name']==name and r['version']==version),None)
+   if row is None:
+    # Preserve historical provenance/texts without treating an obsolete package
+    # as part of this release or requiring its removed Cargo.lock entry.
+    retained_outside_graph.append(supplement['package']);continue
    expected=locked[(name,version)]
    if expected!=supplement['crate_sha256']:raise RuntimeError('upstream supplement lock mismatch')
    archives=list((cargo_home/'registry/cache').glob('*/'+name+'-'+version+'.crate'))
@@ -60,7 +65,6 @@ def main():
    with tarfile.open(archives[0]) as archive:
     vcs=json.load(archive.extractfile(name+'-'+version+'/.cargo_vcs_info.json'))
    if vcs['git']['sha1']!=supplement['vcs_commit']:raise RuntimeError('upstream supplement commit mismatch')
-   row=next(r for r in rows.values() if r['name']==name and r['version']==version)
    for notice in supplement['supplemental_notices']+supplement['registry_metadata_files']:
     body=(ROOT/notice['path']).read_bytes()
     if len(body)!=notice['bytes'] or digest(body)!=notice['sha256']:raise RuntimeError('retained upstream notice changed')
@@ -107,6 +111,6 @@ def main():
   if f.is_file():runtime.append(put(f,Path('rust-toolchain/licenses')/f.name))
  if not runtime:gaps.append({'package':'Rust standard library/runtime','reason':'toolchain copyright/license files unavailable'})
  locks={str(f.relative_to(ROOT)):digest(f.read_bytes()) for f in [ROOT/'Cargo.lock',ROOT/'desktop-shell/src-tauri/Cargo.lock',ROOT/'package-lock.json',ROOT/'desktop-shell/package-lock.json']}
- result={'schema':'raiun-desktop-offline-linux-notice-inventory-v1','target':'x86_64-unknown-linux-gnu','scope':'Locked non-dev dependency closure from raiun-agent, raiun-cli and raiun-desktop-shell/custom-protocol; includes build/proc-macro dependencies conservatively; not exact linked-binary audit','lock_sha256':locks,'rust_packages':sorted(rows.values(),key=lambda r:(r['name'],r['version'])),'production_ui_packages':npm,'eme_notice':eme,'rust_toolchain_notices':runtime,'supplemental_build_tool_notices':tool_notices,'gaps':gaps,'cached_notice_gaps_resolved_from_verified_upstream':resolved,'system_libraries':'GTK/WebKitGTK/AppIndicator/FUSE/Secret Service/Zenity and other distribution libraries are runtime prerequisites, not copied by this collector; distribution packages retain their licenses.'}
+ result={'schema':'raiun-desktop-offline-linux-notice-inventory-v1','target':'x86_64-unknown-linux-gnu','scope':'Locked non-dev dependency closure from raiun-agent, raiun-cli and raiun-desktop-shell/custom-protocol; includes build/proc-macro dependencies conservatively; not exact linked-binary audit','lock_sha256':locks,'rust_packages':sorted(rows.values(),key=lambda r:(r['name'],r['version'])),'production_ui_packages':npm,'eme_notice':eme,'rust_toolchain_notices':runtime,'supplemental_build_tool_notices':tool_notices,'gaps':gaps,'cached_notice_gaps_resolved_from_verified_upstream':resolved,'retained_upstream_supplements_outside_current_graph':retained_outside_graph,'system_libraries':'GTK/WebKitGTK/AppIndicator/FUSE/Secret Service/Zenity and other distribution libraries are runtime prerequisites, not copied by this collector; distribution packages retain their licenses.'}
  (out/'dependency-inventory.json').write_text(json.dumps(result,sort_keys=True,indent=2)+'\n');print(json.dumps({'rust_packages':len(rows),'ui_packages':len(npm),'gaps':gaps},indent=2))
 if __name__=='__main__':main()

@@ -10,6 +10,27 @@ below are historical engineering evidence, not semantic release versions or
 claims that each workflow is verified on this beta. Local evidence/output paths
 refer to maintainer archives that are not part of this public source tree.
 
+## Isolated Desktop updater source — 26 October 2026
+
+The isolated updater source adds daily and manual checks for strict
+`desktop-v<SemVer>` GitHub releases, a beta/stable preference, a per-tag Later
+choice, release notes displayed as plain text, and explicit Download and Install
+actions. It validates the selected release's bounded `desktop-update.json`,
+requires an exact OS/architecture/bundle target and asset URL, and uses Tauri's
+version-bound signature verification. Install waits for the existing agent
+shutdown, socket-removal, and owned-process-exit checks before invoking Tauri.
+The release protocol and setup limits are in
+[Desktop app updates](DESKTOP-UPDATES.md).
+
+Linux verification passed for rustfmt, strict all-target Clippy, 36 Tauri tests,
+210 shell tests, and the TypeScript/Vite build. An offline Windows-target
+type-check stopped in `aws-lc-sys` before reaching app source because the host
+does not have `x86_64-w64-mingw32-gcc`; no toolchain was installed. The published
+`desktop-v0.7.0-beta.1` assets have no updater manifest or signed update package,
+and this isolated source has no public key configured. Therefore no signed
+download/install or package-upgrade claim is made. The active repository,
+installed apps, and public releases remain unchanged.
+
 ## Latest local source work — 25 October 2026 JST
 
 Windows vault access remains disabled in production. The isolated native broker
@@ -2982,3 +3003,91 @@ source to defer save support to the capability shown after unlock. Its isolated
 TypeScript/Vite build passed with unchanged package/lock files. This wording-only
 change is not included in the installer above; no runtime capability changes.
 No signing, publication, Android changes or whole-category completion occurred.
+
+## 26 October 2026 — integrated next-beta candidate
+
+The development candidate now combines completed-save history rollover,
+read-only Windows encrypted-save recovery with explicit Save Copy, and Desktop
+GitHub update discovery, download and installation controls. Completed history
+rollover retains original saved bodies and uncertain or pending work; it does
+not increase the active-index limit, delete cloud files or replay uploads.
+
+Update notices can be dismissed per release while App updates retains manual
+controls. Startup, visibility and hourly triggers use the daily check policy.
+Downloading and installing remain separate explicit actions. Installation
+requires a shell-owned agent, normal shutdown and a successful process exit;
+unproven shutdown or invalid signatures prevent installation.
+
+Integrated source checks passed: core formatting and strict Clippy, 1,124 core
+tests with 14 ignored, shell formatting and strict Clippy, 42 shell Rust tests,
+211 interface tests, the frontend production build, nine update-metadata tests,
+eight release-packaging checks and the existing Windows packaging dry-run.
+The earlier temporary-directory symlink test failure is retained in development
+evidence; the corrected real-directory run passed without a product-code change.
+
+The 0.7.0-beta.2 Linux AppImage and Windows NSIS update archive are built and
+signed with the owner-authorized dedicated Desktop update key. The private key
+stays outside Git and build VMs; only its public verification key is in source.
+Independent verification accepts the signed Windows archive and rejects altered
+bytes and an incorrect announced version. The Windows installer itself has no
+Authenticode signature; updater archive verification is a separate trust check.
+
+The exact Linux AppImage passed an isolated native update installation, actual
+beta.2 GUI and App updates checks, synthetic document retention and normal
+shutdown. This used an offline future-release fixture, not a live GitHub offer.
+The candidate remains unpublished. The exact Windows signed archive now passed
+native signature and signed-version checks, tamper and wrong-version refusal,
+and the NSIS installation adapter. The retained installer process exited 0;
+its passive completion UI was not captured. Installed shell and resource hashes,
+beta.2 version, synthetic settings/document retention and same-user DPAPI
+round-trip passed. The actual signed-out beta.2 app displayed App updates and
+quit normally with no owned app or installer processes remaining. Public receipt
+preservation completed as one bounded, field-projected public JSON export
+(SHA256 `86b5e6382b9687c2329b77a962286bb70242ecdcbaddff8483e7944a4ad1e85e`).
+The ordinary updater test process exited normally with code 0. The isolated
+The final ordinary test session exited normally with numeric 0 after corrected-package acceptance; its installed app and synthetic data are preserved.
+
+The corrected sustained-save run completed all 129 saves, verified history
+rollover, rejected file reads after Lock, and listed protected recovery in two
+pages of 100 and 29 unique tokens. The complete case still failed: final Save
+Copy tried to pin the valid registered Cloud Files root using the generic
+plain-directory API, which rejects its legitimate cloud reparse state. The
+129-save profile and failure evidence are preserved. A narrow production fix
+uses the existing exact-identity registered-root lease and repeats registration
+validation while retaining strict no-reparse destination checks. Formatting and
+strict source gates pass; required portable coverage completed with 1,124 passed
+and 14 ignored after exact retries of two retained unchanged fixture failures.
+The original complete native case remains exit 101. Focused R9 continuation now
+passes under the same ordinary SID and preserved locked custody: 129 edits stay
+unchanged, pages remain 100+29, Save Copy matches all 65,553 bytes (SHA256
+`7408ec79a798c5afd39d2c0bec9e91e0eaa53a8fc277b0742fdcdfeb91aad978`),
+no-clobber is enforced, and both registered-root/destination negative tests pass.
+The continuation process and both negative-test processes have retained handles
+and numeric exit 0. This directly exercises production Save Copy, paired with
+the earlier public RPC listing and Lock evidence; no public RPC was replayed.
+The three bounded public receipts are preserved in maintainer-local evidence
+`outputs/desktop-next-20261021/windows-recovery-continuation-r9b/actual-native-public-r1/`
+(result SHA256 `96492421212f16b09a99efc174a5a61a44cddb957e1acfc0b2fc8b98b4c5a155`).
+
+The corrected Windows production archive is
+`c393e9a11b9f7bdd6a03632ffbf137940293f783b1578f84d3f1bb9dbec0f66a`;
+its rebuilt updater ZIP
+`f4babbc5ecc396182e971d0741e0f21360e7aee3cba66a8e8d9d313e078f9926`
+and signature `c7440cfdfe7dc0ccda66afc0751a67c12a2fe6914fe814ce0f79f7208d90aaf5`
+pass independent verification and exact-package native upgrade acceptance.
+The fresh ordinary Lab3 identity retained its two settings files, synthetic
+document and same-user DPAPI canary across the real beta.1-to-beta.2 upgrade.
+Baseline installation and app launch exited 0. The updater harness (PID 984)
+and exact NSIS installer (PID 2004) both exited 0 with retained handles.
+Installed beta.2 shell, Agent and CLI hashes match the admitted package; the
+signed-out GUI displays beta.2 and App updates, then quits normally with exit 0.
+The passive NSIS finish UI was not observed and remains recorded as false.
+The public receipt is maintainer-local
+`outputs/desktop-next-20261021/windows-corrected-updater-media-r4/actual-native-upgrade-public-r1/acceptance-public-r3.json`,
+state `WINDOWS_SIGNED_BETA2_NATIVE_UPGRADE_PASS`.
+
+Linux and Windows practical beta acceptance gates are met. Final public
+candidate packaging, exact metadata checks and parent evidence review are complete;
+this evidence update does not publish a release. Earlier setup, observer and
+original whole-case failures remain failures, paired with the focused passing
+recovery evidence rather than retroactively relabeled.

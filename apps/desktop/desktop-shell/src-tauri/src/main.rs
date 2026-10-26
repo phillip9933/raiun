@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod desktop_updates;
+mod desktop_updates_policy;
 mod lifecycle;
 
 #[cfg(target_os = "linux")]
@@ -188,6 +190,33 @@ impl ShellState {
             .lock()
             .map_err(|_| "Raiun process state is unavailable".to_string())?;
         Ok(!self.shutting_down.swap(true, Ordering::AcqRel))
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn begin_agent_update_shutdown(&self) -> Result<(), String> {
+        let mut agent = self
+            .agent
+            .lock()
+            .map_err(|_| "Raiun process state is unavailable".to_string())?;
+        let child = require_owned_agent(agent.as_mut())?;
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("Could not verify the Raiun agent before shutdown: {error}"))?
+        {
+            *agent = None;
+            return Err(format!(
+                "The owned Raiun agent had already exited ({status}); its shutdown cannot be tied to this update"
+            ));
+        }
+        if self.shutting_down.swap(true, Ordering::AcqRel) {
+            return Err("Raiun is already shutting down".into());
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    fn begin_agent_update_shutdown(&self) -> Result<(), String> {
+        Err("Desktop updates are supported on Linux and Windows only".into())
     }
 
     fn clear_agent_shutdown_after_failure(&self) {
@@ -418,24 +447,22 @@ fn take_shell_unlock_intent(app: AppHandle) -> Option<Value> {
 }
 
 fn navigate_window(app: &AppHandle, page: &str) {
-    if let Some(state) = app.try_state::<ShellState>() {
-        if !state.main_window_open.load(Ordering::Acquire) {
-            if let Ok(mut pending) = state.pending_navigation.lock() {
-                *pending = Some(page.to_owned());
-            }
-        }
+    if let Some(state) = app.try_state::<ShellState>()
+        && !state.main_window_open.load(Ordering::Acquire)
+        && let Ok(mut pending) = state.pending_navigation.lock()
+    {
+        *pending = Some(page.to_owned());
     }
     show_window(app);
     let _ = app.emit("navigate", page);
 }
 
 fn report_tray_error(app: &AppHandle, error: String) {
-    if let Some(state) = app.try_state::<ShellState>() {
-        if !state.main_window_open.load(Ordering::Acquire) {
-            if let Ok(mut pending) = state.pending_error.lock() {
-                *pending = Some(error.clone());
-            }
-        }
+    if let Some(state) = app.try_state::<ShellState>()
+        && !state.main_window_open.load(Ordering::Acquire)
+        && let Ok(mut pending) = state.pending_error.lock()
+    {
+        *pending = Some(error.clone());
     }
     show_window(app);
     let _ = app.emit("raiun:tray-error", error);
@@ -489,6 +516,200 @@ async fn save_saved_edit_copy(
         suggested_name,
     )
     .await
+}
+
+fn validate_protected_recovery_binding(
+    response: Value,
+    profile_id: &str,
+    expected_generation: u64,
+    expected_scope: &str,
+) -> Result<(), String> {
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(
+            "Could not verify the current account and Windows drive before saving the copy".into(),
+        );
+    }
+    let status = response
+        .get("data")
+        .filter(|value| value.is_object())
+        .ok_or("The Windows agent returned an invalid drive status")?;
+    let root = status
+        .get("root_configuration")
+        .filter(|value| value.is_object())
+        .ok_or("The registered Windows drive folder is unavailable")?;
+    if status.get("profile_id").and_then(Value::as_str) != Some(profile_id)
+        || status.get("connected").and_then(Value::as_bool) != Some(true)
+        || status.get("auth_generation").and_then(Value::as_u64) != Some(expected_generation)
+        || root.get("valid").and_then(Value::as_bool) != Some(true)
+        || root.get("identity_bound").and_then(Value::as_bool) != Some(true)
+        || root.get("registration_state").and_then(Value::as_str) != Some("registered")
+        || root.get("recovery_scope_token").and_then(Value::as_str) != Some(expected_scope)
+    {
+        return Err("The account or registered Windows drive changed. Refresh saved vault edits before saving.".into());
+    }
+    Ok(())
+}
+
+fn validate_selected_profile(response: Value, expected_profile: &str) -> Result<(), String> {
+    if response.get("ok").and_then(Value::as_bool) != Some(true)
+        || response.pointer("/data/selected").and_then(Value::as_str) != Some(expected_profile)
+    {
+        return Err(
+            "The selected account changed. Reopen the saved vault edits list before saving.".into(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_protected_copy_receipt(
+    response: &Value,
+    expected_body_length: u64,
+) -> Result<(), String> {
+    let receipt = response
+        .get("data")
+        .filter(|value| has_exact_keys(value, &["schema_version", "body_length", "read_only"]))
+        .ok_or("Raiun returned an invalid Save Copy receipt")?;
+    if receipt.get("schema_version").and_then(Value::as_u64) != Some(1)
+        || receipt.get("body_length").and_then(Value::as_u64) != Some(expected_body_length)
+        || receipt.get("read_only").and_then(Value::as_bool) != Some(true)
+    {
+        return Err("Raiun could not confirm the saved plaintext copy. Check the destination before trying again.".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn save_protected_vault_capture_copy(
+    app: AppHandle,
+    request: Value,
+) -> Result<Value, String> {
+    if !has_exact_keys(
+        &request,
+        &[
+            "profileId",
+            "expectedGeneration",
+            "expectedRecoveryScopeToken",
+            "spaceId",
+            "rootResourceId",
+            "remoteRoot",
+            "itemToken",
+            "expectedBodyLength",
+            "suggestedName",
+        ],
+    ) {
+        return Err(
+            "The selected saved vault edit is invalid. Refresh the list and choose it again."
+                .into(),
+        );
+    }
+    let required_string = |name: &str| -> Result<String, String> {
+        request
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                "The selected saved vault edit is invalid. Refresh the list and choose it again."
+                    .to_owned()
+            })
+    };
+    let profile_id = required_string("profileId")?;
+    let expected_recovery_scope_token = required_string("expectedRecoveryScopeToken")?;
+    let space_id = required_string("spaceId")?;
+    let root_resource_id = required_string("rootResourceId")?;
+    let remote_root = required_string("remoteRoot")?;
+    let item_token = required_string("itemToken")?;
+    let suggested_name = required_string("suggestedName")?;
+    let expected_generation = request
+        .get("expectedGeneration")
+        .and_then(Value::as_u64)
+        .ok_or("The selected saved vault edit is invalid. Refresh the list and choose it again")?;
+    let expected_body_length = request
+        .get("expectedBodyLength")
+        .and_then(Value::as_u64)
+        .ok_or("The selected saved vault edit is invalid. Refresh the list and choose it again")?;
+    if !valid_unlock_profile_id(&profile_id)
+        || expected_generation == 0
+        || expected_recovery_scope_token.len() != 64
+        || !expected_recovery_scope_token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || item_token.len() != 48
+        || !item_token.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || [
+            space_id.as_str(),
+            root_resource_id.as_str(),
+            remote_root.as_str(),
+        ]
+        .iter()
+        .any(|value| value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control))
+        || suggested_name.is_empty()
+        || suggested_name.len() > 96
+        || suggested_name == "."
+        || suggested_name == ".."
+        || suggested_name
+            .chars()
+            .any(|character| matches!(character, '/' | '\\' | ':'))
+        || suggested_name.chars().any(char::is_control)
+    {
+        return Err(
+            "The selected saved vault edit is invalid. Refresh the list and choose it again."
+                .into(),
+        );
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri_plugin_dialog::DialogExt;
+
+        validate_selected_profile(request_agent(json!({"action":"accounts"}))?, &profile_id)?;
+        validate_protected_recovery_binding(
+            request_agent(json!({"action":"status","profile_id":profile_id}))?,
+            &profile_id,
+            expected_generation,
+            &expected_recovery_scope_token,
+        )?;
+        let selected = app
+            .dialog()
+            .file()
+            .set_title("Save a readable plaintext copy of this encrypted-file edit")
+            .set_file_name(&suggested_name)
+            .blocking_save_file()
+            .map(|path| {
+                path.into_path()
+                    .map_err(|_| "Choose a local file path for Save Copy".to_owned())
+            })
+            .transpose()?;
+        let Some(destination) = selected else {
+            return Ok(json!({"cancelled":true}));
+        };
+        validate_selected_profile(request_agent(json!({"action":"accounts"}))?, &profile_id)?;
+        validate_protected_recovery_binding(
+            request_agent(json!({"action":"status","profile_id":profile_id}))?,
+            &profile_id,
+            expected_generation,
+            &expected_recovery_scope_token,
+        )?;
+        let response = request_agent(json!({
+            "action":"windows_vault_capture_save_copy",
+            "profile_id":profile_id,
+            "expected_generation":expected_generation,
+            "expected_recovery_scope_token":expected_recovery_scope_token,
+            "space_id":space_id,
+            "root_resource_id":root_resource_id,
+            "remote_root":remote_root,
+            "item_token":item_token,
+            "destination":destination,
+        }))?;
+        if response.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Err(response
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("Raiun could not confirm Save Copy")
+                .to_owned());
+        }
+        validate_protected_copy_receipt(&response, expected_body_length)?;
+        Ok(json!({"saved":true,"body_length":expected_body_length}))
+    })
+    .await
+    .map_err(|_| "The protected recovery Save Copy worker stopped unexpectedly".to_string())?
 }
 
 async fn save_local_edit_copy(
@@ -1137,10 +1358,9 @@ fn show_window(app: &AppHandle) {
         .maximized(preferences.maximized)
         .build()
         .is_ok()
+        && let Some(state) = app.try_state::<ShellState>()
     {
-        if let Some(state) = app.try_state::<ShellState>() {
-            state.main_window_open.store(true, Ordering::Release);
-        }
+        state.main_window_open.store(true, Ordering::Release);
     }
 }
 
@@ -1523,7 +1743,7 @@ fn run_quit_action(app: &AppHandle) {
             }
             wait_for_agent_socket_removal()?;
             #[cfg(any(target_os = "linux", target_os = "windows"))]
-            wait_for_owned_agent_exit(&app)?;
+            wait_for_owned_agent_exit(&app, false)?;
             Ok(())
         })();
         match result {
@@ -1555,6 +1775,67 @@ fn run_quit_action(app: &AppHandle) {
     });
 }
 
+#[tauri::command]
+async fn install_desktop_update(app: AppHandle) -> Result<(), String> {
+    let install_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _update_busy = desktop_updates::begin_install(&install_app)?;
+        let update_state = install_app
+            .try_state::<desktop_updates::DesktopUpdateState>()
+            .ok_or_else(|| "Desktop update settings are unavailable".to_string())?;
+        let _update_transition = update_state.lock_transition()?;
+        let (update, bytes, _tag) = desktop_updates::cached_for_install(&install_app)?;
+        let state = install_app
+            .try_state::<ShellState>()
+            .ok_or_else(|| "Raiun Desktop process state is unavailable".to_string())?;
+        state.begin_agent_update_shutdown()?;
+        stop_tray_status_poller(&install_app);
+        let stop_result = (|| {
+            let response = tray_action("shutdown", Value::Null)?;
+            if response.get("stopping").and_then(Value::as_bool) != Some(true) {
+                return Err("Raiun did not confirm that shutdown started".to_string());
+            }
+            wait_for_agent_socket_removal()?;
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            wait_for_owned_agent_exit(&install_app, true)?;
+            Ok(())
+        })();
+        if let Err(error) = stop_result {
+            state.clear_agent_shutdown_after_failure();
+            start_tray_status_poller(&install_app);
+            return Err(format!(
+                "Raiun could not stop safely; the update was not started: {error}"
+            ));
+        }
+
+        match update.install(bytes) {
+            Ok(()) => {
+                #[cfg(target_os = "linux")]
+                {
+                    install_app.restart()
+                }
+                #[cfg(windows)]
+                {
+                    Ok(())
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                {
+                    Err("Desktop updates are supported on Linux and Windows only".into())
+                }
+            }
+            Err(error) => {
+                state.clear_agent_shutdown_after_failure();
+                start_tray_status_poller(&install_app);
+                Err(format!(
+                    "The signed Desktop update could not be installed: {error}"
+                ))
+            }
+        }
+    })
+    .await
+    .map_err(|_| "The Desktop update installer worker stopped unexpectedly".to_string())?
+}
+
 #[cfg(target_os = "linux")]
 fn wait_for_agent_socket_removal() -> Result<(), String> {
     use std::os::unix::net::UnixStream;
@@ -1570,25 +1851,41 @@ fn wait_for_agent_socket_removal() -> Result<(), String> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
-fn wait_for_owned_agent_exit(app: &AppHandle) -> Result<(), String> {
+fn require_owned_agent<T>(process: Option<&mut T>) -> Result<&mut T, String> {
+    process.ok_or_else(|| {
+        "Raiun Desktop does not own a provable agent process; the update was not started".into()
+    })
+}
+
+fn validate_owned_agent_exit(
+    status: std::process::ExitStatus,
+    require_success: bool,
+) -> Result<(), String> {
+    if require_success && !status.success() {
+        return Err(format!(
+            "Raiun agent exited unsuccessfully ({status}); the update was not started"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn wait_for_owned_agent_exit(app: &AppHandle, require_success: bool) -> Result<(), String> {
     let Some(state) = app.try_state::<ShellState>() else {
-        return Ok(());
+        return Err("Raiun process state is unavailable; agent exit cannot be proven".into());
     };
     let mut agent = state
         .agent
         .lock()
         .map_err(|_| "Raiun agent process state is unavailable".to_string())?;
-    let Some(child) = agent.as_mut() else {
-        return Ok(());
-    };
+    let child = require_owned_agent(agent.as_mut())?;
     for _ in 0..150 {
-        if child
+        if let Some(status) = child
             .try_wait()
             .map_err(|error| format!("Could not confirm Raiun agent exit: {error}"))?
-            .is_some()
         {
             *agent = None;
-            return Ok(());
+            return validate_owned_agent_exit(status, require_success);
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -1657,7 +1954,8 @@ fn main() {
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![request, vault_secret, save_conflict_copy, save_saved_edit_copy, export_diagnostics, open_cloud_folder, open_recovery_folder, open_encrypted_edit_recovery_folder, take_shell_error, take_shell_navigation, take_shell_unlock_intent, preview_media_scan])
+        .plugin(desktop_updates::updater_plugin())
+        .invoke_handler(tauri::generate_handler![request, vault_secret, save_conflict_copy, save_saved_edit_copy, save_protected_vault_capture_copy, export_diagnostics, open_cloud_folder, open_recovery_folder, open_encrypted_edit_recovery_folder, take_shell_error, take_shell_navigation, take_shell_unlock_intent, preview_media_scan, desktop_updates::desktop_update_status, desktop_updates::set_desktop_update_preferences, desktop_updates::dismiss_desktop_update, desktop_updates::open_desktop_release, desktop_updates::check_desktop_update, desktop_updates::download_desktop_update, install_desktop_update])
         .on_window_event(|window, event| {
             if window.label() != "main" {
                 return;
@@ -1695,6 +1993,7 @@ fn main() {
                 eprintln!("Raiun agent startup: {error}");
             }
             app.manage(state);
+            app.manage(desktop_updates::DesktopUpdateState::load(app.handle()));
             if let Some(window) = app.get_webview_window("main") {
                 restore_window_preferences(&window);
             }
@@ -1756,11 +2055,11 @@ fn main() {
                 .build(app);
             let tray_available = match tray {
                 Ok(tray) => {
-                    if let Some(state) = app.try_state::<ShellState>() {
-                        if let Ok(mut stored_tray) = state.tray.lock() {
-                            *stored_tray = Some(tray);
-                            state.tray_available.store(true, Ordering::Release);
-                        }
+                    if let Some(state) = app.try_state::<ShellState>()
+                        && let Ok(mut stored_tray) = state.tray.lock()
+                    {
+                        *stored_tray = Some(tray);
+                        state.tray_available.store(true, Ordering::Release);
                     }
                     true
                 }
@@ -1807,10 +2106,163 @@ fn tray_logo_image() -> tauri::image::Image<'static> {
 mod shell_tests {
     use super::{
         DEFAULT_WINDOW_SIZE, MIN_WINDOW_SIZE, WindowPreferences, diagnostics_agent_data,
-        parse_unlock_intent, restored_window_size, sanitize_diagnostics_report,
+        parse_unlock_intent, require_owned_agent, restored_window_size,
+        sanitize_diagnostics_report, validate_protected_copy_receipt,
+        validate_protected_recovery_binding, validate_selected_profile,
         validate_vault_secret_request,
     };
     use serde_json::json;
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn update_shutdown_requires_a_shell_owned_agent_handle() {
+        use super::ShellState;
+        use std::sync::atomic::Ordering;
+
+        let mut no_process: Option<u8> = None;
+        assert!(require_owned_agent(no_process.as_mut()).is_err());
+
+        let mut owned_process = Some(7_u8);
+        assert_eq!(*require_owned_agent(owned_process.as_mut()).unwrap(), 7);
+
+        let shell = ShellState::default();
+        assert!(shell.begin_agent_update_shutdown().is_err());
+        assert!(!shell.shutting_down.load(Ordering::Acquire));
+    }
+
+    #[cfg(any(target_os = "linux", windows))]
+    #[test]
+    fn updater_requires_a_successful_owned_agent_exit() {
+        use super::validate_owned_agent_exit;
+        use std::process::Command;
+
+        #[cfg(target_os = "linux")]
+        let mut successful_child = Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn successful synthetic child");
+        #[cfg(windows)]
+        let mut successful_child = Command::new("cmd")
+            .args(["/C", "exit 0"])
+            .spawn()
+            .expect("spawn successful synthetic child");
+        let successful_status = successful_child.wait().expect("wait for child");
+        assert!(successful_status.success());
+        assert!(validate_owned_agent_exit(successful_status, true).is_ok());
+
+        #[cfg(target_os = "linux")]
+        let mut unsuccessful_child = Command::new("sh")
+            .args(["-c", "exit 1"])
+            .spawn()
+            .expect("spawn unsuccessful synthetic child");
+        #[cfg(windows)]
+        let mut unsuccessful_child = Command::new("cmd")
+            .args(["/C", "exit 1"])
+            .spawn()
+            .expect("spawn unsuccessful synthetic child");
+        let unsuccessful_status = unsuccessful_child.wait().expect("wait for child");
+        assert!(!unsuccessful_status.success());
+        let error = validate_owned_agent_exit(unsuccessful_status, true)
+            .expect_err("installer must not run after failed agent shutdown");
+        assert!(error.contains("exited unsuccessfully"));
+
+        #[cfg(target_os = "linux")]
+        let mut ordinary_quit_child = Command::new("sh")
+            .args(["-c", "exit 1"])
+            .spawn()
+            .expect("spawn ordinary quit child");
+        #[cfg(windows)]
+        let mut ordinary_quit_child = Command::new("cmd")
+            .args(["/C", "exit 1"])
+            .spawn()
+            .expect("spawn ordinary quit child");
+        let ordinary_status = ordinary_quit_child.wait().expect("wait for child");
+        assert!(validate_owned_agent_exit(ordinary_status, false).is_ok());
+    }
+
+    fn protected_recovery_status() -> serde_json::Value {
+        json!({
+            "ok": true,
+            "data": {
+                "profile_id": "default",
+                "connected": true,
+                "auth_generation": 7,
+                "root_configuration": {
+                    "valid": true,
+                    "identity_bound": true,
+                    "registration_state": "registered",
+                    "recovery_scope_token": "b".repeat(64)
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn protected_copy_requires_the_exact_live_registered_root_binding() {
+        validate_protected_recovery_binding(
+            protected_recovery_status(),
+            "default",
+            7,
+            &"b".repeat(64),
+        )
+        .expect("matching current registered root is valid");
+
+        for (field, value) in [
+            ("profile_id", json!("profile-".to_owned() + &"c".repeat(32))),
+            ("connected", json!(false)),
+            ("auth_generation", json!(8)),
+        ] {
+            let mut response = protected_recovery_status();
+            response["data"][field] = value;
+            assert!(
+                validate_protected_recovery_binding(response, "default", 7, &"b".repeat(64))
+                    .is_err()
+            );
+        }
+        for (field, value) in [
+            ("valid", json!(false)),
+            ("identity_bound", json!(false)),
+            ("registration_state", json!("prepared_not_registered")),
+            ("recovery_scope_token", json!("c".repeat(64))),
+        ] {
+            let mut response = protected_recovery_status();
+            response["data"]["root_configuration"][field] = value;
+            assert!(
+                validate_protected_recovery_binding(response, "default", 7, &"b".repeat(64))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn protected_copy_requires_selected_profile_to_remain_current() {
+        validate_selected_profile(json!({"ok":true,"data":{"selected":"default"}}), "default")
+            .expect("selected account matches");
+        assert!(
+            validate_selected_profile(json!({"ok":true,"data":{"selected":"other"}}), "default")
+                .is_err()
+        );
+        assert!(
+            validate_selected_profile(json!({"ok":false,"data":{"selected":"default"}}), "default")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn protected_copy_receipt_must_confirm_exact_body_length_and_read_only_shape() {
+        validate_protected_copy_receipt(
+            &json!({"ok":true,"data":{"schema_version":1,"body_length":17,"read_only":true}}),
+            17,
+        )
+        .expect("exact read-only receipt matches the selected row");
+        for response in [
+            json!({"ok":true,"data":{"schema_version":1,"body_length":18,"read_only":true}}),
+            json!({"ok":true,"data":{"schema_version":1,"body_length":17,"read_only":false}}),
+            json!({"ok":true,"data":{"schema_version":1,"body_length":17,"read_only":true,"destination":"private-path"}}),
+        ] {
+            assert!(validate_protected_copy_receipt(&response, 17).is_err());
+        }
+    }
 
     #[cfg(target_os = "linux")]
     struct SidecarTestCleanup {

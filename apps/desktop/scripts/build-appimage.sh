@@ -9,8 +9,45 @@ cd "$(dirname "$0")/.."
 root=$PWD
 out="$root/target/appimage"
 work="$root/target/appimage-work"
+# BEGIN default updater public key
+load_updater_public_key() {
+  if [[ -z "${RAIUN_DESKTOP_UPDATE_PUBKEY:-}" ]]; then
+    local public_key_file="$root/desktop-shell/update-public-key.pub"
+    [[ -f "$public_key_file" ]] || {
+      echo "Updater artifact packaging requires the public key file: $public_key_file" >&2
+      return 1
+    }
+    RAIUN_DESKTOP_UPDATE_PUBKEY=$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' "$public_key_file")
+  fi
+  [[ -n "${RAIUN_DESKTOP_UPDATE_PUBKEY:-}" && "$RAIUN_DESKTOP_UPDATE_PUBKEY" =~ [^[:space:]] ]] || {
+    echo 'RAIUN_DESKTOP_UPDATE_PUBKEY must contain a nonempty public key.' >&2
+    return 1
+  }
+  export RAIUN_DESKTOP_UPDATE_PUBKEY
+}
+# END default updater public key
+load_updater_public_key || exit 1
+updater_release="${RAIUN_DESKTOP_UPDATER_RELEASE:-0}"
+updater_artifacts="${RAIUN_DESKTOP_UPDATER_ARTIFACTS:-0}"
+for setting in updater_release updater_artifacts; do
+  value="${!setting}"
+  [[ "$value" == 0 || "$value" == 1 ]] || {
+    echo "${setting^^} must be 0 or 1." >&2
+    exit 1
+  }
+done
+if [[ "$updater_release" == 1 ]]; then updater_artifacts=1; fi
+if [[ "$updater_release" == 1 ]]; then
+  [[ -n "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" && -f "$TAURI_SIGNING_PRIVATE_KEY_PATH" ]] || {
+    echo 'Updater release signing requires TAURI_SIGNING_PRIVATE_KEY_PATH to name a key file.' >&2
+    exit 1
+  }
+  TAURI_SIGNING_PRIVATE_KEY_PATH=$(realpath -- "$TAURI_SIGNING_PRIVATE_KEY_PATH")
+  export TAURI_SIGNING_PRIVATE_KEY_PATH
+fi
 mkdir -p "$out" "$work"
-for tool in cargo npm python3 curl sha256sum desktop-file-edit readelf; do command -v "$tool" >/dev/null; done
+for tool in cargo node npm python3 curl sha256sum desktop-file-edit readelf; do command -v "$tool" >/dev/null; done
+node scripts/check-tauri-versions.mjs
 cargo build --release --locked -p raiun-agent -p raiun-cli
 python3 - "$root" "$work/tauri-appimage.json" <<'PY'
 import json,sys
@@ -22,7 +59,12 @@ for n in ('LICENSE','NOTICE','THIRD-PARTY-NOTICES.md','PRIVACY.md','CHANGELOG.md
  files['/usr/share/doc/raiun-desktop/'+n]=str(r/n)
 Path(sys.argv[2]).write_text(json.dumps({'mainBinaryName':'raiun-desktop','bundle':{'targets':['appimage'],'linux':{'appimage':{'files':files}}}}))
 PY
-(cd desktop-shell && npm ci && npm run tauri -- build --bundles appimage --features custom-protocol --config "$work/tauri-appimage.json")
+tauri_args=(build --bundles appimage --features custom-protocol --config "$work/tauri-appimage.json")
+if [[ "$updater_artifacts" == 1 ]]; then
+  # Produce the updater-format AppImage without signing inside this build step.
+  tauri_args+=(--config src-tauri/tauri.updater-release.conf.json --no-sign)
+fi
+(cd desktop-shell && npm ci && npm run tauri -- "${tauri_args[@]}")
 appdir=$(find desktop-shell/src-tauri/target/release/bundle/appimage -maxdepth 1 -type d -name '*.AppDir' -print)
 [[ -n "$appdir" && "$appdir" != *$'\n'* ]]
 appdir=$(realpath "$appdir")
@@ -64,12 +106,39 @@ PYMETA
 # separate from native dpkg origins; the collector refuses unaccounted ELF files.
 python3 scripts/collect-appimage-notices.py --appdir "$appdir" --output "$appdir/usr/share/doc/raiun-desktop/native" --first-party-manifest "$work/first-party.json" --runtime-metadata "$work/runtime-metadata.json"
 version=$(python3 -c 'import json; print(json.load(open("desktop-shell/package.json"))["version"])')
+if [[ "$updater_artifacts" == 1 ]]; then
+  versions=$(python3 - <<'PY'
+import json, tomllib
+from pathlib import Path
+frontend = json.loads(Path('desktop-shell/package.json').read_text())['version']
+tauri = json.loads(Path('desktop-shell/src-tauri/tauri.conf.json').read_text())['version']
+cargo = tomllib.loads(Path('desktop-shell/src-tauri/Cargo.toml').read_text())['package']['version']
+print(frontend, tauri, cargo)
+PY
+)
+  [[ "$versions" == "$version $version $version" ]] || {
+    echo 'Updater artifact packaging requires package.json, tauri.conf.json, and Cargo.toml versions to match.' >&2
+    exit 1
+  }
+fi
 artifact="$out/raiun-desktop-${version}-linux-x86_64.AppImage"
+if [[ "$updater_artifacts" == 1 && ( -e "$artifact" || -L "$artifact" || -e "$artifact.sig" || -L "$artifact.sig" ) ]]; then
+  echo "Refusing to overwrite an existing updater package or signature: $artifact" >&2
+  exit 1
+fi
 ARCH=x86_64 VERSION="$version" "$work/appimagetool" --appimage-extract-and-run --runtime-file "$work/runtime-x86_64" "$appdir" "$artifact"
-python3 - "$appdir" "$artifact" "$out" <<'PYAUDIT'
+if [[ "$updater_release" == 1 ]]; then
+  # Tauri's pre-repack signature would bind the wrong bytes. Sign only the
+  # final AppImage written by appimagetool, with the exact embedded version.
+  (cd desktop-shell && npm run tauri -- signer sign --app-version "$version" "$artifact")
+  [[ -s "$artifact.sig" ]] || { echo 'Tauri signer did not create the final AppImage .sig.' >&2; exit 1; }
+elif [[ "$updater_artifacts" == 1 ]]; then
+  echo 'Updater AppImage staged without a signature; host signing is required before release.'
+fi
+python3 - "$appdir" "$artifact" "$out" "$updater_artifacts" "$updater_release" <<'PYAUDIT'
 import hashlib,json,re,subprocess,sys
 from pathlib import Path
-app,artifact,out=map(Path,sys.argv[1:]); rows=[]
+app,artifact,out=map(Path,sys.argv[1:4]); updater_artifacts=sys.argv[4]=='1'; updater_signed=sys.argv[5]=='1'; rows=[]
 for p in sorted(app.rglob('*')):
  if not p.is_file() or p.is_symlink(): continue
  b=p.read_bytes()
@@ -88,9 +157,18 @@ try:
 except subprocess.CalledProcessError:
  source='unknown'; dirty=True
 (out/'source-commit.txt').write_text(source+'\n')
-(out/'build-provenance.json').write_text(json.dumps({'source_commit':source,'dirty':dirty,'baseline':'Ubuntu 24.04 x86_64 / glibc 2.39','artifact_sha256':hashlib.sha256(artifact.read_bytes()).hexdigest(),'elf_files':rows,'url_handler':'Optional AppImageLauncher integration required; no automatic host installation','host_services':['Secret Service','D-Bus','fusermount3','system TLS trust']},indent=2)+'\n')
+provenance={'source_commit':source,'dirty':dirty,'baseline':'Ubuntu 24.04 x86_64 / glibc 2.39','artifact_sha256':hashlib.sha256(artifact.read_bytes()).hexdigest(),'elf_files':rows,'url_handler':'Optional AppImageLauncher integration required; no automatic host installation','host_services':['Secret Service','D-Bus','fusermount3','system TLS trust']}
+if updater_artifacts:
+ provenance['updater_artifact_signature_status']='signed' if updater_signed else 'not_signed'
+ if updater_signed:
+  signature=Path(str(artifact)+'.sig')
+  provenance['updater_signature_sha256']=hashlib.sha256(signature.read_bytes()).hexdigest()
+ else:
+  provenance['updater_signature_availability']='host_signing_required_before_update_install'
+(out/'build-provenance.json').write_text(json.dumps(provenance,indent=2)+'\n')
 PYAUDIT
 sha256sum "$artifact" > "$artifact.sha256"
+if [[ "$updater_release" == 1 ]]; then sha256sum "$artifact.sig" > "$artifact.sig.sha256"; fi
 cp "$work/first-party.json" "$out/first-party.json"
 cp "$work/runtime-metadata.json" "$out/runtime-metadata.json"
 printf 'Built %s\n' "$artifact"

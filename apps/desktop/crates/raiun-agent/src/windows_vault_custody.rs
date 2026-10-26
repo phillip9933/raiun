@@ -45,6 +45,12 @@ trait Storage: Send + Sync {
     fn put_new_capture(&self, _key: &[u8], _record: &[u8]) -> Result<()> {
         Err(refused())
     }
+    fn load_completed_segment(&self, _key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        Err(refused())
+    }
+    fn put_new_completed_segment(&self, _key: &[u8], _record: &[u8]) -> Result<()> {
+        Err(refused())
+    }
 }
 struct SessionStorage(Arc<dyn SessionStore>);
 impl Storage for SessionStorage {
@@ -53,6 +59,25 @@ impl Storage for SessionStorage {
     }
     fn put_new_capture(&self, key: &[u8], record: &[u8]) -> Result<()> {
         self.0.put_new_vault_existing_edit_capture(key, record)
+    }
+    fn load_completed_segment(&self, key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        self.0.load_vault_completed_history_segment(key)
+    }
+    fn put_new_completed_segment(&self, key: &[u8], record: &[u8]) -> Result<()> {
+        if let Some(existing) = self.0.load_vault_completed_history_segment(key)? {
+            return if existing.as_slice() == record {
+                Ok(())
+            } else {
+                Err(refused())
+            };
+        }
+        match self.0.put_new_vault_completed_history_segment(key, record) {
+            Ok(()) => Ok(()),
+            Err(_) => match self.0.load_vault_completed_history_segment(key)? {
+                Some(existing) if existing.as_slice() == record => Ok(()),
+                _ => Err(refused()),
+            },
+        }
     }
     fn load(&self, key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>> {
         self.0.load_vault_custody(key)
@@ -127,6 +152,25 @@ fn child_key(scope: &Scope) -> std::result::Result<Vec<u8>, vault_custody::Error
     key.extend_from_slice(&Sha256::digest(full.as_slice()));
     Ok(key)
 }
+/// Read-only test observer key. Reuse the production child namespace exactly.
+#[cfg(test)]
+pub(crate) fn child_store_key_for_test(
+    scope: &Scope,
+) -> std::result::Result<Vec<u8>, vault_custody::Error> {
+    child_key(scope)
+}
+
+fn completed_segment_key(
+    scope: &Scope,
+    digest: &[u8; 32],
+) -> std::result::Result<Vec<u8>, vault_custody::Error> {
+    let full = scope.authenticated_store_binding()?;
+    let mut key = b"raiun-vault-completed-history-segment-v1\0".to_vec();
+    key.extend_from_slice(&(full.len() as u32).to_be_bytes());
+    key.extend_from_slice(full.as_slice());
+    key.extend_from_slice(digest);
+    Ok(key)
+}
 impl vault_custody::Store for ProtectedStore {
     fn load(
         &self,
@@ -145,6 +189,49 @@ impl vault_custody::Store for ProtectedStore {
         self.0
             .cas(&child_key(scope)?, old, next)
             .map_err(|_| vault_custody::Error::Persistence)
+    }
+    fn load_completed_segment(
+        &self,
+        scope: &Scope,
+        digest: &[u8; 32],
+    ) -> std::result::Result<Option<Zeroizing<Vec<u8>>>, vault_custody::Error> {
+        self.0
+            .load_completed_segment(&completed_segment_key(scope, digest)?)
+            .map_err(|_| vault_custody::Error::Persistence)
+    }
+    fn put_new_completed_segment(
+        &self,
+        scope: &Scope,
+        digest: &[u8; 32],
+        record: &[u8],
+    ) -> std::result::Result<(), vault_custody::Error> {
+        self.0
+            .put_new_completed_segment(&completed_segment_key(scope, digest)?, record)
+            .map_err(|_| vault_custody::Error::Persistence)
+    }
+    fn validate_completed_capture(
+        &self,
+        scope: &Scope,
+        row: &vault_custody::completed_history::CompletedRow,
+    ) -> std::result::Result<(), vault_custody::Error> {
+        let id =
+            capture::CaptureId::new(row.capture.id()).map_err(|_| vault_custody::Error::Invalid)?;
+        let retained = capture::reopen_for_recovery(&CaptureStore(Arc::clone(&self.0)), scope, &id)
+            .map_err(|_| vault_custody::Error::Persistence)?;
+        if retained.encoded_frame_ref() != row.capture.frame() {
+            return Err(vault_custody::Error::Foreign);
+        }
+        let descriptor = disposition::DispositionDescriptor::from_capture(
+            scope,
+            &row.capture,
+            row.disposition.descriptor().hydration(),
+            &retained,
+        )
+        .map_err(|_| vault_custody::Error::Invalid)?;
+        if &descriptor != row.disposition.descriptor() {
+            return Err(vault_custody::Error::Foreign);
+        }
+        Ok(())
     }
 }
 #[derive(Deserialize)]
@@ -210,6 +297,12 @@ pub(super) struct WindowsVaultCustody {
     failed: Arc<std::sync::atomic::AtomicBool>,
     fresh_close_publisher: Option<VaultClosePublisher>,
 }
+pub(super) struct RecoveryCaptureMetadata {
+    pub(super) capture_id: String,
+    pub(super) remote_path: String,
+    pub(super) body_len: usize,
+}
+
 impl WindowsVaultCustody {
     pub(super) fn prepare(
         store: Arc<dyn SessionStore>,
@@ -356,6 +449,184 @@ impl WindowsVaultCustody {
             .iter()
             .map(|reference| reference.id().to_owned())
             .collect())
+    }
+
+    /// Read-only recovery metadata under an already admitted exact scope.
+    /// Every returned body is reopened and its complete frame reference checked.
+    pub(super) fn recovery_capture_page(
+        &self,
+        owner: &ProviderScope,
+        space_id: &str,
+        root_resource_id: &str,
+        remote_root: &str,
+        after_capture_id: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<RecoveryCaptureMetadata>, Option<String>)> {
+        if *owner != self.owner || limit == 0 || limit > 100 {
+            return Err(refused());
+        }
+        let vault = VaultSessionScope::new(
+            owner.profile_id(),
+            owner.server_origin(),
+            space_id,
+            root_resource_id,
+        )
+        .map_err(|_| refused())?;
+        let scope = Scope::new(
+            &self.account,
+            &vault,
+            remote_root,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(|_| refused())?;
+        let references = self.recovery_references(owner, &scope)?;
+        let mut references = references;
+        references.sort_by(|left, right| left.id().cmp(right.id()));
+        if references
+            .windows(2)
+            .any(|pair| pair[0].id() == pair[1].id())
+        {
+            return Err(refused());
+        }
+        if let Some(after) = after_capture_id {
+            if !references.iter().any(|reference| reference.id() == after) {
+                return Err(refused());
+            }
+        }
+        let start = after_capture_id.map_or(0, |after| {
+            references
+                .iter()
+                .position(|reference| reference.id() == after)
+                .unwrap_or(0)
+                + 1
+        });
+        let selected = references.iter().skip(start).take(limit + 1);
+        let mut page = Vec::with_capacity(limit);
+        let mut has_more = false;
+        for reference in selected {
+            if page.len() == limit {
+                has_more = true;
+                break;
+            }
+            let id = capture::CaptureId::new(reference.id()).map_err(|_| refused())?;
+            let retained =
+                capture::reopen_for_recovery(&CaptureStore(Arc::clone(&self.store.0)), &scope, &id)
+                    .map_err(|_| refused())?;
+            if retained.encoded_frame_ref() != reference.frame() {
+                return Err(refused());
+            }
+            page.push(RecoveryCaptureMetadata {
+                capture_id: reference.id().to_owned(),
+                remote_path: reference.entry().root_relative_path().to_owned(),
+                body_len: retained.bytes_for_recovery().len(),
+            });
+        }
+        self.recovery_references(owner, &scope)?;
+        let next = has_more
+            .then(|| page.last().map(|item| item.capture_id.clone()))
+            .flatten();
+        Ok((page, next))
+    }
+
+    /// Reopen exactly one retained frame. This returns protected historical
+    /// content only; it does not produce a ticket, upload permit or mutation.
+    pub(super) fn recovery_capture_body(
+        &self,
+        owner: &ProviderScope,
+        space_id: &str,
+        root_resource_id: &str,
+        remote_root: &str,
+        capture_id: &str,
+    ) -> Result<capture::RetainedEdit> {
+        if *owner != self.owner {
+            return Err(refused());
+        }
+        let vault = VaultSessionScope::new(
+            owner.profile_id(),
+            owner.server_origin(),
+            space_id,
+            root_resource_id,
+        )
+        .map_err(|_| refused())?;
+        let scope = Scope::new(
+            &self.account,
+            &vault,
+            remote_root,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(|_| refused())?;
+        let references = self.recovery_references(owner, &scope)?;
+        let mut matching = references
+            .iter()
+            .filter(|reference| reference.id() == capture_id);
+        let reference = matching.next().ok_or_else(refused)?;
+        if matching.next().is_some() {
+            return Err(refused());
+        }
+        let id = capture::CaptureId::new(capture_id).map_err(|_| refused())?;
+        let retained =
+            capture::reopen_for_recovery(&CaptureStore(Arc::clone(&self.store.0)), &scope, &id)
+                .map_err(|_| refused())?;
+        if retained.encoded_frame_ref() != reference.frame() {
+            return Err(refused());
+        }
+        self.recovery_references(owner, &scope)?;
+        Ok(retained)
+    }
+
+    fn recovery_references(
+        &self,
+        owner: &ProviderScope,
+        scope: &Scope,
+    ) -> Result<Vec<vault_custody::CaptureRef>> {
+        if *owner != self.owner || self.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(refused());
+        }
+        let root = RootBinding::new(
+            &self.account,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(|_| refused())?;
+        let mut manifest = RootManifest::reopen(&self.store, &root).map_err(|_| refused())?;
+        if !manifest
+            .scopes_for_reconciliation()
+            .map_err(|_| refused())?
+            .iter()
+            .any(|member| member == scope)
+        {
+            return Err(refused());
+        }
+        let key = scope.authenticated_store_binding().map_err(|_| refused())?;
+        let child = {
+            let state = self.state.lock().map_err(|_| refused())?;
+            if state.failed {
+                return Err(refused());
+            }
+            Arc::clone(state.children.get(key.as_slice()).ok_or_else(refused)?)
+        };
+        let _guard = child.custody.lock().map_err(|_| refused())?;
+        if child.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(refused());
+        }
+        let fresh = Custody::reopen(&self.store, scope).map_err(|_| refused())?;
+        let references = fresh
+            .capture_references_for_lookup()
+            .map_err(|_| refused())?;
+        manifest
+            .verify_current(&self.store)
+            .map_err(|_| refused())?;
+        if self.failed.load(std::sync::atomic::Ordering::Acquire)
+            || child.failed.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(refused());
+        }
+        Ok(references)
     }
     /// Discover only an existing protected capture under this admitted exact
     /// account/provider/root. No root membership or child is created here.
@@ -535,7 +806,7 @@ impl WindowsVaultCustody {
         }
         let child = Custody::reopen(&self.store, &scope).map_err(|_| refused())?;
         let mut captures = Vec::new();
-        for reference in child.captures_for_reconciliation() {
+        for reference in child.all_captures_for_reconciliation() {
             let id = capture::CaptureId::new(reference.id()).map_err(|_| refused())?;
             let retained =
                 capture::reopen_for_recovery(&CaptureStore(Arc::clone(&self.store.0)), &scope, &id)
@@ -607,7 +878,7 @@ impl VaultPublishedHistorySource for WindowsVaultCustody {
                 // Promoted v4 history still retains every immutable capture.
                 // Authenticate each full frame sequentially before returning
                 // reconstructed intents. Missing/corrupt history is never healed.
-                for reference in child.captures_for_reconciliation() {
+                for reference in child.all_captures_for_reconciliation() {
                     let id = capture::CaptureId::new(reference.id()).map_err(|_| refused())?;
                     let retained = capture::reopen_for_recovery(
                         &CaptureStore(Arc::clone(&self.store.0)),
@@ -616,7 +887,7 @@ impl VaultPublishedHistorySource for WindowsVaultCustody {
                     )
                     .map_err(|_| refused())?;
                     child
-                        .validate_reconstructed_disposition(reference, &retained)
+                        .validate_reconstructed_disposition(&reference, &retained)
                         .map_err(|_| refused())?;
                 }
                 for row in history {
@@ -1311,6 +1582,34 @@ mod tests {
                 .unwrap();
         (store, service, owner, vault)
     }
+    #[test]
+    fn native_observer_key_reads_production_child_not_raw_scope() {
+        let (store, service, owner, vault) = fixture();
+        let view = service.view(&owner, &vault, "/Travel.vault").unwrap();
+        view.persist_catalogue(&[entry(1)]).unwrap();
+        let scope = Scope::new(
+            &service.account,
+            &vault,
+            "/Travel.vault",
+            7,
+            42,
+            "registration",
+        )
+        .unwrap();
+        let canonical = scope.authenticated_store_binding().unwrap();
+        assert!(store.load(canonical.as_slice()).unwrap().is_none());
+        let raw = store
+            .load(&child_store_key_for_test(&scope).unwrap())
+            .unwrap()
+            .expect("observer must read the child persisted by the production adapter");
+        let production = vault_custody::Store::load(&service.store, &scope)
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw.as_slice(), production.as_slice());
+        let document: serde_json::Value = serde_json::from_slice(raw.as_slice()).unwrap();
+        assert_eq!(document["catalogue"].as_array().unwrap().len(), 1);
+    }
+
     #[test]
     fn fresh_origin_is_exact_broker_instance_owner_root_and_never_revives_failure() {
         let (_, service, _, _) = fixture();

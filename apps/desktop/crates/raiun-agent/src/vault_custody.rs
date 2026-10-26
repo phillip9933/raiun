@@ -6,9 +6,13 @@ use super::vault_edit_capture::{CaptureId, EncodedFrameRef, PreparedCapture};
 use raiun_engine::folder_pairs::AccountScope;
 use raiun_vault::session::VaultSessionScope;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::io::{self, Write};
 use zeroize::Zeroizing;
+
+#[path = "vault_completed_history.rs"]
+pub(super) mod completed_history;
 
 pub const MAX_BYTES: usize = 1024 * 1024;
 pub const MAX_CATALOGUE: usize = 1024;
@@ -17,6 +21,7 @@ const VERSION: u32 = 1;
 const CAPTURE_VERSION: u32 = 2;
 const UPLOAD_VERSION: u32 = 3;
 const DISPOSITION_VERSION: u32 = 4;
+const HISTORY_VERSION: u32 = 5;
 pub(crate) const MAX_CAPTURE_REFS: usize = 128;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -374,7 +379,7 @@ fn decode_capture_refs<'de, D: serde::Deserializer<'de>>(
 }
 /// Mutable attempt bytes stay outside immutable CaptureRef equality/frame.
 #[derive(Clone)]
-struct AttemptBytes(Zeroizing<Vec<u8>>);
+pub(super) struct AttemptBytes(Zeroizing<Vec<u8>>);
 impl Serialize for AttemptBytes {
     fn serialize<S: serde::Serializer>(
         &self,
@@ -415,9 +420,9 @@ impl<'de> Deserialize<'de> for AttemptBytes {
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct UploadAttemptRow {
-    capture_id: String,
-    record: AttemptBytes,
+pub(super) struct UploadAttemptRow {
+    pub capture_id: String,
+    pub record: AttemptBytes,
 }
 fn decode_upload_attempts<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -428,6 +433,11 @@ fn decode_dispositions<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> std::result::Result<Option<Vec<super::vault_edit_disposition::DispositionRow>>, D::Error> {
     Vec::<super::vault_edit_disposition::DispositionRow>::deserialize(d).map(Some)
+}
+fn decode_history_tip<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<completed_history::SegmentRef>, D::Error> {
+    completed_history::SegmentRef::deserialize(deserializer).map(Some)
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -456,6 +466,12 @@ struct Document {
         deserialize_with = "decode_dispositions"
     )]
     dispositions: Option<Vec<super::vault_edit_disposition::DispositionRow>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "decode_history_tip"
+    )]
+    history_tip: Option<completed_history::SegmentRef>,
 }
 impl Document {
     fn capture_entry_known(&self, entry: &Entry) -> bool {
@@ -469,8 +485,8 @@ impl Document {
         if &self.scope != scope {
             return Err(Error::Foreign);
         }
-        if self.revision == 0
-            || !matches!(
+        let legacy_schema = self.history_tip.is_none()
+            && matches!(
                 (
                     self.version,
                     &self.capture_refs,
@@ -481,7 +497,23 @@ impl Document {
                     | (CAPTURE_VERSION, Some(_), None, None)
                     | (UPLOAD_VERSION, Some(_), Some(_), None)
                     | (DISPOSITION_VERSION, Some(_), Some(_), Some(_))
-            )
+            );
+        let history_schema = self.version == HISTORY_VERSION
+            && self.history_tip.is_some()
+            && self
+                .capture_refs
+                .as_ref()
+                .is_none_or(|rows| !rows.is_empty() && rows.len() <= MAX_CAPTURE_REFS)
+            && self
+                .upload_attempts
+                .as_ref()
+                .is_none_or(|rows| !rows.is_empty() && rows.len() <= MAX_CAPTURE_REFS)
+            && self
+                .dispositions
+                .as_ref()
+                .is_none_or(|rows| !rows.is_empty() && rows.len() <= MAX_CAPTURE_REFS);
+        if self.revision == 0
+            || !(legacy_schema || history_schema)
             || self
                 .capture_refs
                 .as_ref()
@@ -512,7 +544,7 @@ impl Document {
             if capture.entry.directory
                 || !super::vault_edit_capture::strong_etag(&capture.entry.etag)
                 || !capture_ids.insert(&capture.capture_id)
-                || !self.capture_entry_known(&capture.entry)
+                || (self.version < HISTORY_VERSION && !self.capture_entry_known(&capture.entry))
                 || !self
                     .pending
                     .iter()
@@ -647,6 +679,170 @@ fn decode(bytes: &[u8], scope: &Scope) -> Result<Document> {
     d.validate(scope)?;
     Ok(d)
 }
+
+fn keep_non_archived<T>(
+    rows: Option<Vec<T>>,
+    archived_ids: &BTreeSet<String>,
+    id: impl Fn(&T) -> &str,
+) -> Option<Vec<T>> {
+    let kept = rows?
+        .into_iter()
+        .filter(|row| !archived_ids.contains(id(row)))
+        .collect::<Vec<_>>();
+    (!kept.is_empty()).then_some(kept)
+}
+
+/// Removal is authorized by the exact completed triples, never IDs alone. A
+/// normal pending proposal must retain those bytes unchanged before rebasing.
+fn remove_completed_rows(
+    document: &mut Document,
+    rows: &[completed_history::CompletedRow],
+) -> Result<()> {
+    for row in rows {
+        if !document
+            .capture_refs
+            .iter()
+            .flatten()
+            .any(|r| r == &row.capture)
+            || !document.upload_attempts.iter().flatten().any(|r| {
+                r.capture_id == row.attempt.capture_id
+                    && r.capture_id == row.capture.id()
+                    && r.record.0.as_slice() == row.attempt.record.0.as_slice()
+            })
+            || !document
+                .dispositions
+                .iter()
+                .flatten()
+                .any(|r| r == &row.disposition)
+        {
+            return Err(Error::Conflict);
+        }
+    }
+    let ids = rows
+        .iter()
+        .map(|r| r.capture.id().to_owned())
+        .collect::<BTreeSet<_>>();
+    document.capture_refs = keep_non_archived(document.capture_refs.take(), &ids, |r| r.id());
+    document.upload_attempts =
+        keep_non_archived(document.upload_attempts.take(), &ids, |r| &r.capture_id);
+    document.dispositions =
+        keep_non_archived(document.dispositions.take(), &ids, |r| r.reference().id());
+    Ok(())
+}
+
+fn load_completed_history(
+    store: &impl Store,
+    scope: &Scope,
+    mut tip: Option<completed_history::SegmentRef>,
+) -> Result<Vec<completed_history::CompletedRow>> {
+    let mut chain = Vec::new();
+    let mut seen = BTreeSet::new();
+    while let Some(reference) = tip {
+        if !seen.insert(reference.digest) {
+            return Err(Error::Conflict);
+        }
+        let raw = store
+            .load_completed_segment(scope, &reference.digest)?
+            .ok_or(Error::Missing)?;
+        if <[u8; 32]>::from(Sha256::digest(raw.as_slice())) != reference.digest {
+            return Err(Error::Invalid);
+        }
+        let segment =
+            completed_history::Segment::decode(&raw, scope).map_err(|_| Error::Invalid)?;
+        tip = segment.previous();
+        chain.push(segment);
+    }
+    chain.reverse();
+    let rows = chain
+        .into_iter()
+        .flat_map(|segment| segment.rows().to_vec())
+        .collect::<Vec<_>>();
+    for row in &rows {
+        store.validate_completed_capture(scope, row)?;
+    }
+    Ok(rows)
+}
+
+fn validate_history(
+    document: &Document,
+    scope: &Scope,
+    completed: &[completed_history::CompletedRow],
+) -> Result<()> {
+    let mut capture_ids = BTreeSet::new();
+    let mut latest = std::collections::BTreeMap::<
+        [u8; 16],
+        &super::vault_edit_disposition::DispositionRow,
+    >::new();
+    for row in completed {
+        let reference = &row.capture;
+        CaptureId::new(reference.id()).map_err(|_| Error::Invalid)?;
+        reference.frame().validate().map_err(|_| Error::Invalid)?;
+        reference.entry().validate_in_scope(scope)?;
+        if !capture_ids.insert(reference.id())
+            || reference.entry().is_directory()
+            || !super::vault_edit_capture::strong_etag(reference.entry().etag())
+        {
+            return Err(Error::Conflict);
+        }
+        super::vault_edit_upload::validate_bound_record(&row.attempt.record.0, scope, reference)
+            .map_err(|_| Error::Invalid)?;
+        let evidence = super::vault_edit_upload::bound_readback_evidence(
+            &row.attempt.record.0,
+            scope,
+            reference,
+        )
+        .map_err(|_| Error::Invalid)?
+        .ok_or(Error::Invalid)?;
+        row.disposition
+            .validate_bound(scope, reference, &evidence)
+            .map_err(|_| Error::Invalid)?;
+        if let Some(previous) = latest.insert(reference.entry().opaque(), &row.disposition) {
+            if !previous.is_native_completed()
+                || previous.verified_entry() != row.disposition.descriptor().original_entry()
+                || previous.promoted_hydration() != row.disposition.descriptor().hydration()
+            {
+                return Err(Error::Conflict);
+            }
+        }
+    }
+    for reference in document.capture_refs.iter().flatten() {
+        if !capture_ids.insert(reference.id())
+            || (!document.catalogue.contains(reference.entry())
+                && !completed.iter().any(|row| {
+                    row.disposition.descriptor().original_entry() == reference.entry()
+                        || row.disposition.verified_entry() == reference.entry()
+                })
+                && !document.dispositions.iter().flatten().any(|row| {
+                    row.descriptor().original_entry() == reference.entry()
+                        || row.verified_entry() == reference.entry()
+                }))
+            || !document
+                .pending
+                .iter()
+                .any(|row| row.opaque() == reference.entry().opaque())
+        {
+            return Err(Error::Conflict);
+        }
+    }
+    for row in document.dispositions.iter().flatten() {
+        if let Some(previous) = latest.insert(row.reference().entry().opaque(), row) {
+            if !previous.is_native_completed()
+                || previous.verified_entry() != row.descriptor().original_entry()
+                || previous.promoted_hydration() != row.descriptor().hydration()
+            {
+                return Err(Error::Conflict);
+            }
+        }
+    }
+    for row in latest.values() {
+        if !document.catalogue.contains(row.verified_entry())
+            || !document.pending.contains(row.promoted_hydration())
+        {
+            return Err(Error::Conflict);
+        }
+    }
+    Ok(())
+}
 /// Implementations must use a dedicated protected domain/private fixed path,
 /// authenticate the complete scope and bytes, serialize cross-process CAS, and
 /// return Ok ONLY after write-through publication + exact readback. Err can be
@@ -656,6 +852,28 @@ fn decode(bytes: &[u8], scope: &Scope) -> Result<Document> {
 pub trait Store {
     fn load(&self, scope: &Scope) -> Result<Option<Zeroizing<Vec<u8>>>>;
     fn compare_exchange(&self, scope: &Scope, expected: Option<&[u8]>, next: &[u8]) -> Result<()>;
+    fn load_completed_segment(
+        &self,
+        _scope: &Scope,
+        _digest: &[u8; 32],
+    ) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        Err(Error::Persistence)
+    }
+    fn put_new_completed_segment(
+        &self,
+        _scope: &Scope,
+        _digest: &[u8; 32],
+        _record: &[u8],
+    ) -> Result<()> {
+        Err(Error::Persistence)
+    }
+    fn validate_completed_capture(
+        &self,
+        _scope: &Scope,
+        _row: &completed_history::CompletedRow,
+    ) -> Result<()> {
+        Err(Error::Persistence)
+    }
 }
 /// Per-vault evidence only. A separate root-wide durable manifest must cover
 /// every vault scope before any publication. This document cannot establish
@@ -674,6 +892,7 @@ impl PreparedDisposition {
 pub struct Custody {
     document: Document,
     raw: Zeroizing<Vec<u8>>,
+    completed: Vec<completed_history::CompletedRow>,
     failed: bool,
 }
 impl Custody {
@@ -696,6 +915,7 @@ impl Custody {
             capture_refs: None,
             upload_attempts: None,
             dispositions: None,
+            history_tip: None,
         };
         let raw = encode(&document)?;
         store
@@ -704,6 +924,7 @@ impl Custody {
         Ok(Self {
             document,
             raw,
+            completed: Vec::new(),
             failed: false,
         })
     }
@@ -714,9 +935,12 @@ impl Custody {
             .map_err(|_| Error::Persistence)?
             .ok_or(Error::Missing)?;
         let document = decode(&raw, scope)?;
+        let completed = load_completed_history(store, scope, document.history_tip)?;
+        validate_history(&document, scope, &completed)?;
         Ok(Self {
             document,
             raw,
+            completed,
             failed: false,
         })
     }
@@ -733,13 +957,54 @@ impl Custody {
     pub fn pending_count(&self) -> usize {
         self.document.pending.len()
     }
-    fn commit(&mut self, store: &impl Store, mut next: Document) -> Result<()> {
+    fn commit(&mut self, store: &impl Store, next: Document) -> Result<()> {
+        self.commit_with_completed(store, next, None)
+    }
+    fn commit_with_completed(
+        &mut self,
+        store: &impl Store,
+        mut next: Document,
+        completed: Option<&[completed_history::CompletedRow]>,
+    ) -> Result<()> {
         if self.failed || self.document.incomplete {
             return Err(Error::Incomplete);
         }
         next.revision = next.revision.checked_add(1).ok_or(Error::Capacity)?;
         next.validate(&self.document.scope)?;
-        let raw = match encode(&next) {
+        validate_history(
+            &next,
+            &self.document.scope,
+            completed.unwrap_or(&self.completed),
+        )?;
+        let mut encoded = encode(&next);
+        if matches!(encoded, Err(Error::Capacity)) && completed.is_none() && !next.incomplete {
+            // Only the previously acknowledged NativeCompleted rows are
+            // eligible. The current proposal (including a consumed fresh
+            // disposition ticket) is kept and rebased, not replayed.
+            if let Ok(rows) = self.completed_batch() {
+                let mut rebased = next.clone();
+                if remove_completed_rows(&mut rebased, &rows).is_ok() {
+                    match self.seal_completed_batch(store) {
+                        Ok(()) => {
+                            rebased.history_tip = self.document.history_tip;
+                            rebased.version = rebased.version.max(self.document.version);
+                            rebased.revision = self
+                                .document
+                                .revision
+                                .checked_add(1)
+                                .ok_or(Error::Capacity)?;
+                            rebased.validate(&self.document.scope)?;
+                            validate_history(&rebased, &self.document.scope, &self.completed)?;
+                            next = rebased;
+                            encoded = encode(&next);
+                        }
+                        Err(Error::Capacity) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+        }
+        let raw = match encoded {
             Ok(raw) => raw,
             Err(error) => {
                 // The rejected oversized proposal must not replace old rows.
@@ -848,6 +1113,116 @@ impl Custody {
     pub(crate) fn captures_for_reconciliation(&self) -> &[CaptureRef] {
         self.document.capture_refs.as_deref().unwrap_or(&[])
     }
+    pub(crate) fn all_captures_for_reconciliation(&self) -> Vec<CaptureRef> {
+        let mut captures = self
+            .completed
+            .iter()
+            .map(|row| row.capture.clone())
+            .collect::<Vec<_>>();
+        captures.extend(self.captures_for_reconciliation().iter().cloned());
+        captures
+    }
+    #[cfg(test)]
+    pub(crate) fn completed_history_count_for_test(&self) -> usize {
+        self.completed.len()
+    }
+    fn active_capture(&self, reference: &CaptureRef) -> bool {
+        self.captures_for_reconciliation().contains(reference)
+    }
+    fn completed_batch(&self) -> Result<Vec<completed_history::CompletedRow>> {
+        let mut rows = Vec::new();
+        for reference in self.captures_for_reconciliation() {
+            let Some(disposition) = self
+                .document
+                .dispositions
+                .iter()
+                .flatten()
+                .find(|row| row.reference() == reference && row.is_native_completed())
+            else {
+                continue;
+            };
+            let attempt = self
+                .document
+                .upload_attempts
+                .iter()
+                .flatten()
+                .find(|row| row.capture_id == reference.id())
+                .cloned()
+                .ok_or(Error::Incomplete)?;
+            rows.push(completed_history::CompletedRow {
+                capture: reference.clone(),
+                attempt,
+                disposition: disposition.clone(),
+            });
+        }
+        if rows.is_empty() {
+            return Err(Error::Capacity);
+        }
+        Ok(rows)
+    }
+    fn seal_completed_batch(&mut self, store: &impl Store) -> Result<()> {
+        let rows = self.completed_batch()?;
+        for row in &rows {
+            if store
+                .validate_completed_capture(&self.document.scope, row)
+                .is_err()
+            {
+                self.failed = true;
+                return Err(Error::Persistence);
+            }
+        }
+        let planned = completed_history::encode_bounded_chain(
+            &self.document.scope,
+            self.document.history_tip,
+            &rows,
+        )
+        .map_err(|_| Error::Capacity)?;
+        for segment in &planned {
+            let digest = segment.reference.digest;
+            let raw = &segment.bytes;
+            if store
+                .put_new_completed_segment(&self.document.scope, &digest, raw)
+                .is_err()
+            {
+                self.failed = true;
+                return Err(Error::Persistence);
+            }
+            let stored = match store.load_completed_segment(&self.document.scope, &digest) {
+                Ok(Some(stored)) => stored,
+                _ => {
+                    self.failed = true;
+                    return Err(Error::Persistence);
+                }
+            };
+            if stored.as_slice() != raw.as_slice()
+                || <[u8; 32]>::from(Sha256::digest(stored.as_slice())) != digest
+                || completed_history::Segment::decode(&stored, &self.document.scope).is_err()
+            {
+                self.failed = true;
+                return Err(Error::Persistence);
+            }
+        }
+        let mut next = self.document.clone();
+        next.version = HISTORY_VERSION;
+        next.history_tip = Some(planned.last().ok_or(Error::Capacity)?.reference);
+        remove_completed_rows(&mut next, &rows)?;
+        let mut candidate_completed = self.completed.clone();
+        candidate_completed.extend(rows);
+        if let Err(error) = self.commit_with_completed(store, next, Some(&candidate_completed)) {
+            self.failed = true;
+            return Err(error);
+        }
+        match Self::reopen(store, &self.document.scope) {
+            Ok(fresh) if fresh.raw == self.raw => {
+                self.completed = fresh.completed;
+                Ok(())
+            }
+            _ => {
+                self.failed = true;
+                Err(Error::Persistence)
+            }
+        }
+    }
     /// Enroll the exact prepared frame before its body can be persisted. Existing
     /// rows yield no fresh ticket, even when their protected body is missing.
     pub(crate) fn enroll_capture(
@@ -890,19 +1265,27 @@ impl Custody {
             frame: prepared.encoded_frame_ref(),
         };
         if let Some(existing) = self
-            .captures_for_reconciliation()
-            .iter()
+            .all_captures_for_reconciliation()
+            .into_iter()
             .find(|existing| existing.capture_id == reference.capture_id)
         {
-            return if existing == &reference {
-                Ok(CaptureEnrollment::Existing(existing.clone()))
+            return if existing == reference {
+                Ok(CaptureEnrollment::Existing(existing))
             } else {
                 Err(Error::Conflict)
             };
         }
         if self.captures_for_reconciliation().len() == MAX_CAPTURE_REFS {
-            self.refuse_conflict(store, Error::Capacity)?;
-            return Err(Error::Capacity);
+            if let Err(error) = self.seal_completed_batch(store) {
+                if error == Error::Capacity {
+                    self.refuse_conflict(store, Error::Capacity)?;
+                }
+                return Err(error);
+            }
+            if self.captures_for_reconciliation().len() == MAX_CAPTURE_REFS {
+                self.refuse_conflict(store, Error::Capacity)?;
+                return Err(Error::Capacity);
+            }
         }
         let mut next = self.document.clone();
         next.version = next.version.max(CAPTURE_VERSION);
@@ -928,19 +1311,31 @@ impl Custody {
             reference,
         }))
     }
-    pub(crate) fn capture_references_for_lookup(&self) -> Result<&[CaptureRef]> {
+    pub(crate) fn capture_references_for_lookup(&self) -> Result<Vec<CaptureRef>> {
         if self.failed || self.document.incomplete {
             return Err(Error::Incomplete);
         }
-        Ok(self.captures_for_reconciliation())
+        Ok(self.all_captures_for_reconciliation())
     }
     fn require_capture(&self, reference: &CaptureRef) -> Result<()> {
         if self.failed || self.document.incomplete {
             return Err(Error::Incomplete);
         }
-        if !self.captures_for_reconciliation().contains(reference)
+        if !self.active_capture(reference)
+            && !self.completed.iter().any(|row| row.capture == *reference)
             || !self.document.capture_entry_known(reference.entry())
+                && !self.completed.iter().any(|row| {
+                    row.disposition.descriptor().original_entry() == reference.entry()
+                        || row.disposition.verified_entry() == reference.entry()
+                })
         {
+            return Err(Error::Foreign);
+        }
+        Ok(())
+    }
+    fn require_active_capture(&self, reference: &CaptureRef) -> Result<()> {
+        self.require_capture(reference)?;
+        if !self.active_capture(reference) {
             return Err(Error::Foreign);
         }
         Ok(())
@@ -952,12 +1347,18 @@ impl Custody {
     ) -> Result<Option<Zeroizing<Vec<u8>>>> {
         self.require_capture(reference)?;
         Ok(self
-            .document
-            .upload_attempts
+            .completed
             .iter()
-            .flatten()
-            .find(|row| row.capture_id == reference.id())
-            .map(|row| row.record.0.clone()))
+            .find(|row| row.capture == *reference)
+            .map(|row| row.attempt.record.0.clone())
+            .or_else(|| {
+                self.document
+                    .upload_attempts
+                    .iter()
+                    .flatten()
+                    .find(|row| row.capture_id == reference.id())
+                    .map(|row| row.record.0.clone())
+            }))
     }
     /// Full old subrecord byte comparison plus the existing whole-child CAS.
     /// Only absent-to-NeverAttempted initialization upgrades v2 to strict v3.
@@ -969,6 +1370,7 @@ impl Custody {
         old: Option<&[u8]>,
         next: &[u8],
     ) -> Result<()> {
+        self.require_active_capture(reference)?;
         let current = self.load_upload_attempt(reference)?;
         if current.as_ref().map(|raw| raw.as_slice()) != old {
             return Err(Error::Conflict);
@@ -1004,7 +1406,13 @@ impl Custody {
             .iter()
             .flatten()
             .find(|row| row.reference() == reference)
-            .cloned())
+            .cloned()
+            .or_else(|| {
+                self.completed
+                    .iter()
+                    .find(|row| row.capture == *reference)
+                    .map(|row| row.disposition.clone())
+            }))
     }
     pub(crate) fn disposition_descriptor(
         &self,
@@ -1012,24 +1420,27 @@ impl Custody {
         retained: &super::vault_edit_capture::RetainedEdit,
     ) -> Result<super::vault_edit_disposition::DispositionDescriptor> {
         self.require_capture(reference)?;
-        let hydration = if self.document.catalogue.contains(reference.entry()) {
-            self.document
-                .pending
-                .iter()
-                .find(|row| row.opaque() == reference.entry().opaque())
-                .cloned()
-        } else {
-            self.document.dispositions.iter().flatten().find_map(|row| {
-                if row.descriptor().original_entry() == reference.entry() {
-                    Some(row.descriptor().hydration().clone())
-                } else if row.verified_entry() == reference.entry() {
-                    Some(row.promoted_hydration().clone())
-                } else {
-                    None
-                }
-            })
-        }
-        .ok_or(Error::Foreign)?;
+        let hydration =
+            if let Some(archived) = self.completed.iter().find(|row| row.capture == *reference) {
+                Some(archived.disposition.descriptor().hydration().clone())
+            } else if self.document.catalogue.contains(reference.entry()) {
+                self.document
+                    .pending
+                    .iter()
+                    .find(|row| row.opaque() == reference.entry().opaque())
+                    .cloned()
+            } else {
+                self.document.dispositions.iter().flatten().find_map(|row| {
+                    if row.descriptor().original_entry() == reference.entry() {
+                        Some(row.descriptor().hydration().clone())
+                    } else if row.verified_entry() == reference.entry() {
+                        Some(row.promoted_hydration().clone())
+                    } else {
+                        None
+                    }
+                })
+            }
+            .ok_or(Error::Foreign)?;
         super::vault_edit_disposition::DispositionDescriptor::from_capture(
             &self.document.scope,
             reference,
@@ -1052,6 +1463,12 @@ impl Custody {
             .iter()
             .flatten()
             .find(|row| row.reference() == reference)
+            .or_else(|| {
+                self.completed
+                    .iter()
+                    .find(|row| row.capture == *reference)
+                    .map(|row| &row.disposition)
+            })
             .ok_or(Error::Foreign)?;
         if !row.is_native_completed() || row.descriptor() != &descriptor {
             return Err(Error::Foreign);
@@ -1064,7 +1481,7 @@ impl Custody {
         descriptor: &super::vault_edit_disposition::DispositionDescriptor,
         verified: Entry,
     ) -> Result<PreparedDisposition> {
-        self.require_capture(descriptor.reference())?;
+        self.require_active_capture(descriptor.reference())?;
         if descriptor.scope() != &self.document.scope
             || !self
                 .document
@@ -1096,7 +1513,15 @@ impl Custody {
         row.validate_bound(&self.document.scope, descriptor.reference(), &evidence)
             .map_err(|_| Error::Invalid)?;
         let mut next = self.document.clone();
-        next.version = DISPOSITION_VERSION;
+        // A child with completed-history segments must keep the v5 envelope.
+        // Rewriting it as v4 would make the durable history tip invalid on the
+        // next reopen, despite a successful normal save completion.
+        let required_version = if next.history_tip.is_some() {
+            HISTORY_VERSION
+        } else {
+            DISPOSITION_VERSION
+        };
+        next.version = next.version.max(required_version);
         let entry = next
             .catalogue
             .iter_mut()
@@ -1685,5 +2110,540 @@ mod tests {
         assert!(Scope::new(&scope.account, &v, "/Travel.vault", 7, 42, "registration").is_err());
         assert!(Entry::new([1; 16], "id", "/../outside", "etag", false, 1).is_err());
         assert!(!format!("{scope:?}").contains("subject"));
+    }
+}
+
+#[cfg(test)]
+mod byte_pressure_tests {
+    use super::super::vault_edit_capture as capture;
+    use super::super::vault_edit_disposition::DispositionDescriptor;
+    use super::super::{
+        root_manifest::{self, RootBinding, RootManifest},
+        vault_custody::{self as custody, Custody},
+        vault_edit_capture::{Baseline, CaptureId, PreparedCapture},
+        vault_edit_upload::{self as upload, UploadAttempt},
+    };
+    use super::*;
+    use raiun_engine::folder_pairs::AccountScope;
+    use raiun_vault::session::VaultSessionScope;
+    use std::{
+        cell::{Cell, RefCell},
+        collections::BTreeMap,
+    };
+    type SegmentKey = (Vec<u8>, [u8; 32]);
+    type SegmentMap = BTreeMap<SegmentKey, Zeroizing<Vec<u8>>>;
+    #[derive(Default)]
+    struct Memory {
+        child: RefCell<Option<Zeroizing<Vec<u8>>>>,
+        roots: RefCell<BTreeMap<Vec<u8>, Zeroizing<Vec<u8>>>>,
+        bodies: RefCell<BTreeMap<Vec<u8>, Zeroizing<Vec<u8>>>>,
+        segments: RefCell<SegmentMap>,
+        uncertain: Cell<bool>,
+        fail_segment_readback: Cell<bool>,
+        fail_index_before_write: Cell<bool>,
+        calls: Cell<usize>,
+        interfere_on_call: Cell<Option<usize>>,
+    }
+    impl custody::Store for Memory {
+        fn load(
+            &self,
+            _: &Scope,
+        ) -> std::result::Result<Option<Zeroizing<Vec<u8>>>, custody::Error> {
+            Ok(self.child.borrow().clone())
+        }
+        fn compare_exchange(
+            &self,
+            _: &Scope,
+            old: Option<&[u8]>,
+            new: &[u8],
+        ) -> std::result::Result<(), custody::Error> {
+            self.calls.set(self.calls.get() + 1);
+            if self.interfere_on_call.get() == Some(self.calls.get()) {
+                let mut competing: Document =
+                    serde_json::from_slice(self.child.borrow().as_ref().unwrap()).unwrap();
+                competing.revision += 1;
+                *self.child.borrow_mut() = Some(encode(&competing).unwrap());
+            }
+            if self.fail_index_before_write.replace(false) {
+                return Err(custody::Error::Conflict);
+            }
+            if self.child.borrow().as_ref().map(|v| v.as_slice()) != old {
+                return Err(custody::Error::Conflict);
+            }
+            *self.child.borrow_mut() = Some(Zeroizing::new(new.to_vec()));
+            if self.uncertain.get() {
+                return Err(custody::Error::Persistence);
+            }
+            Ok(())
+        }
+        fn load_completed_segment(
+            &self,
+            scope: &Scope,
+            digest: &[u8; 32],
+        ) -> std::result::Result<Option<Zeroizing<Vec<u8>>>, custody::Error> {
+            if self.fail_segment_readback.get() {
+                return Ok(None);
+            }
+            let key = (scope.authenticated_store_binding()?.to_vec(), *digest);
+            Ok(self.segments.borrow().get(&key).cloned())
+        }
+        fn put_new_completed_segment(
+            &self,
+            scope: &Scope,
+            digest: &[u8; 32],
+            record: &[u8],
+        ) -> std::result::Result<(), custody::Error> {
+            let key = (scope.authenticated_store_binding()?.to_vec(), *digest);
+            let mut segments = self.segments.borrow_mut();
+            if let Some(existing) = segments.get(&key) {
+                return if existing.as_slice() == record {
+                    Ok(())
+                } else {
+                    Err(custody::Error::Conflict)
+                };
+            }
+            segments.insert(key, Zeroizing::new(record.to_vec()));
+            Ok(())
+        }
+        fn validate_completed_capture(
+            &self,
+            scope: &Scope,
+            row: &custody::completed_history::CompletedRow,
+        ) -> std::result::Result<(), custody::Error> {
+            let id = CaptureId::new(row.capture.id()).map_err(|_| custody::Error::Invalid)?;
+            let retained = capture::reopen_for_recovery(self, scope, &id)
+                .map_err(|_| custody::Error::Persistence)?;
+            if retained.encoded_frame_ref() != row.capture.frame() {
+                return Err(custody::Error::Foreign);
+            }
+            let descriptor = DispositionDescriptor::from_capture(
+                scope,
+                &row.capture,
+                row.disposition.descriptor().hydration(),
+                &retained,
+            )
+            .map_err(|_| custody::Error::Invalid)?;
+            if &descriptor != row.disposition.descriptor() {
+                return Err(custody::Error::Foreign);
+            }
+            Ok(())
+        }
+    }
+    impl root_manifest::Store for Memory {
+        fn load(
+            &self,
+            key: &[u8],
+        ) -> std::result::Result<Option<Zeroizing<Vec<u8>>>, custody::Error> {
+            Ok(self.roots.borrow().get(key).cloned())
+        }
+        fn compare_exchange(
+            &self,
+            key: &[u8],
+            old: Option<&[u8]>,
+            new: &[u8],
+        ) -> std::result::Result<(), custody::Error> {
+            if self.roots.borrow().get(key).map(|v| v.as_slice()) != old {
+                return Err(custody::Error::Conflict);
+            }
+            self.roots
+                .borrow_mut()
+                .insert(key.to_vec(), Zeroizing::new(new.to_vec()));
+            Ok(())
+        }
+    }
+    impl capture::Store for Memory {
+        fn load(
+            &self,
+            _: &[u8],
+            key: &[u8],
+        ) -> std::result::Result<Option<Zeroizing<Vec<u8>>>, capture::Error> {
+            Ok(self.bodies.borrow().get(key).cloned())
+        }
+        fn put_new(
+            &self,
+            _: &[u8],
+            key: &[u8],
+            record: &[u8],
+        ) -> std::result::Result<capture::PutNew, capture::Error> {
+            if self.bodies.borrow().contains_key(key) {
+                return Ok(capture::PutNew::AlreadyExists);
+            }
+            self.bodies
+                .borrow_mut()
+                .insert(key.to_vec(), Zeroizing::new(record.to_vec()));
+            Ok(capture::PutNew::Created)
+        }
+    }
+    fn scope(subject: &str) -> Scope {
+        let account = AccountScope::new(
+            "default".into(),
+            "https://example.test/".into(),
+            "client".into(),
+            None,
+            subject.into(),
+        )
+        .unwrap();
+        let vault =
+            VaultSessionScope::new("default", "https://example.test", "space", "vault-root")
+                .unwrap();
+        Scope::new(
+            &serde_json::to_vec(&account).unwrap(),
+            &vault,
+            "/Travel.vault",
+            7,
+            42,
+            "registration",
+        )
+        .unwrap()
+    }
+    fn entry(etag: &str, len: u64) -> Entry {
+        Entry::new([1; 16], "remote-file", "/1", etag, false, len).unwrap()
+    }
+    fn fixture() -> (Memory, Scope, Custody) {
+        let store = Memory::default();
+        let scope = scope("subject");
+        let root = RootBinding::from_scope(&scope).unwrap();
+        let mut manifest = RootManifest::initialize_new_registration(&store, &root).unwrap();
+        manifest.register(&store, &scope).unwrap();
+        let child = Custody::initialize_new_scope(&store, scope.clone()).unwrap();
+        (store, scope, child)
+    }
+    fn captured(
+        store: &Memory,
+        scope: &Scope,
+        child: &mut Custody,
+        id: &str,
+        old: &Entry,
+        body: &[u8],
+        etag: &str,
+    ) -> (DispositionDescriptor, Entry) {
+        child.record_entry(store, old.clone()).unwrap();
+        child
+            .persist_hydration_intent(
+                store,
+                [1; 16],
+                90,
+                old.length(),
+                vec!["Personal".into(), "Travel.vault".into(), "1".into()],
+            )
+            .unwrap();
+        let prepared = PreparedCapture::new(
+            scope,
+            &CaptureId::new(id).unwrap(),
+            Baseline::new([1; 16], old.etag(), 3, 11, 7, 90).unwrap(),
+            Zeroizing::new(body.to_vec()),
+        )
+        .unwrap();
+        let custody::CaptureEnrollment::New(ticket) = child
+            .enroll_capture(
+                store,
+                &prepared,
+                &["Personal".into(), "Travel.vault".into(), "1".into()],
+            )
+            .unwrap()
+        else {
+            panic!("fresh capture")
+        };
+        let retained = capture::persist_prepared_new(store, prepared, ticket).unwrap();
+        let reference = child
+            .captures_for_reconciliation()
+            .iter()
+            .find(|reference| reference.id() == id)
+            .unwrap()
+            .clone();
+        let root = RootBinding::from_scope(scope).unwrap();
+        let ledger = upload::CustodyLedger::admit(store, &root, scope, &reference).unwrap();
+        let mut attempt =
+            UploadAttempt::initialize(&ledger, store, scope, &reference, old).unwrap();
+        let ticket = attempt.begin_attempt(&ledger).unwrap();
+        attempt
+            .record_readback_evidence(&ledger, ticket, old.remote_id(), etag, etag, body)
+            .unwrap();
+        *child = Custody::reopen(store, scope).unwrap();
+        (
+            child.disposition_descriptor(&reference, &retained).unwrap(),
+            entry(etag, body.len() as u64),
+        )
+    }
+
+    fn pad_readback(store: &Memory, child: &mut Custody, reference: &CaptureRef, count: usize) {
+        let mut next = child.document.clone();
+        let attempt = next
+            .upload_attempts
+            .as_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|a| a.capture_id == reference.id())
+            .unwrap();
+        attempt.record.0.extend(std::iter::repeat_n(b' ', count));
+        upload::validate_bound_record(&attempt.record.0, &next.scope, reference).unwrap();
+        child.commit(store, next).unwrap();
+    }
+    fn complete_large(
+        store: &Memory,
+        scope: &Scope,
+        child: &mut Custody,
+        id: &str,
+        current: &Entry,
+        etag: &str,
+    ) -> Entry {
+        let (descriptor, updated) = captured(store, scope, child, id, current, b"edit-00000", etag);
+        pad_readback(store, child, descriptor.reference(), 120 * 1024);
+        let ticket = child
+            .prepare_disposition_for_test(store, &descriptor, updated.clone())
+            .unwrap();
+        child.complete_disposition_for_test(store, ticket).unwrap();
+        updated
+    }
+    struct NearByteLimit {
+        store: Memory,
+        scope: Scope,
+        child: Custody,
+        ticket: PreparedDisposition,
+        uncertain: CaptureRef,
+        updated: Entry,
+    }
+    fn near_byte_limit() -> NearByteLimit {
+        let (store, scope, mut child) = fixture();
+        let mut current = entry("\"rev-000\"", 10);
+        for index in 0..2 {
+            current = complete_large(
+                &store,
+                &scope,
+                &mut child,
+                &format!("large-{index}"),
+                &current,
+                &format!("\"rev-{}\"", index + 1),
+            );
+        }
+        let pending_entry = Entry::new(
+            [2; 16],
+            "uncertain-file",
+            "/2",
+            "\"uncertain-old\"",
+            false,
+            10,
+        )
+        .unwrap();
+        child.record_entry(&store, pending_entry.clone()).unwrap();
+        let components = vec!["Personal".into(), "Travel.vault".into(), "2".into()];
+        child
+            .persist_hydration_intent(&store, [2; 16], 91, 10, components.clone())
+            .unwrap();
+        let input = PreparedCapture::new(
+            &scope,
+            &CaptureId::new("uncertain-other-file").unwrap(),
+            Baseline::new([2; 16], pending_entry.etag(), 3, 11, 7, 91).unwrap(),
+            Zeroizing::new(b"edit-00000".to_vec()),
+        )
+        .unwrap();
+        let custody::CaptureEnrollment::New(enrollment) =
+            child.enroll_capture(&store, &input, &components).unwrap()
+        else {
+            panic!("new pending capture")
+        };
+        capture::persist_prepared_new(&store, input, enrollment).unwrap();
+        let uncertain = child
+            .captures_for_reconciliation()
+            .iter()
+            .find(|r| r.id() == "uncertain-other-file")
+            .unwrap()
+            .clone();
+        let root = RootBinding::from_scope(&scope).unwrap();
+        let ledger = upload::CustodyLedger::admit(&store, &root, &scope, &uncertain).unwrap();
+        let mut attempt =
+            UploadAttempt::initialize(&ledger, &store, &scope, &uncertain, &pending_entry).unwrap();
+        let fresh = attempt.begin_attempt(&ledger).unwrap();
+        attempt.record_uncertain(&ledger, fresh).unwrap();
+        child = Custody::reopen(&store, &scope).unwrap();
+        let (descriptor, updated) = captured(
+            &store,
+            &scope,
+            &mut child,
+            "prepared-near-byte-limit",
+            &current,
+            b"edit-00000",
+            "\"rev-3\"",
+        );
+        // Measure a valid Prepared proposal only to select a boundary fixture.
+        // NativeCompleted adds seven bytes, so that transition must reclaim
+        // earlier completed metadata while its original fresh ticket is live.
+        let row = super::super::vault_edit_disposition::DispositionRow::prepared(
+            descriptor.clone(),
+            updated.clone(),
+        )
+        .unwrap();
+        let mut preview = child.document.clone();
+        preview.version = DISPOSITION_VERSION;
+        preview.revision += 2; // padding commit, then actual preparation commit
+        *preview
+            .catalogue
+            .iter_mut()
+            .find(|e| *e == descriptor.original_entry())
+            .unwrap() = updated.clone();
+        *preview
+            .pending
+            .iter_mut()
+            .find(|h| *h == descriptor.hydration())
+            .unwrap() = row.promoted_hydration().clone();
+        preview.dispositions.get_or_insert_with(Vec::new).push(row);
+        let plain_len = serde_json::to_vec(&preview).unwrap().len();
+        let pad = (MAX_BYTES - 4 - plain_len) / 3;
+        pad_readback(&store, &mut child, descriptor.reference(), pad);
+        assert_eq!(child.completed.len(), 0);
+        let ticket = child
+            .prepare_disposition_for_test(&store, &descriptor, updated.clone())
+            .unwrap();
+        assert!((MAX_BYTES - 6..=MAX_BYTES - 4).contains(&child.raw.len()));
+        assert!(ticket.expected == child.raw);
+        let mut completion = child.document.clone();
+        let row = completion
+            .dispositions
+            .as_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|r| r.reference() == descriptor.reference())
+            .unwrap();
+        *row = row.completed();
+        assert!(matches!(encode(&completion), Err(Error::Capacity)));
+        NearByteLimit {
+            store,
+            scope,
+            child,
+            ticket,
+            uncertain,
+            updated,
+        }
+    }
+    fn assert_retained(store: &Memory, scope: &Scope, uncertain: &CaptureRef, old_attempt: &[u8]) {
+        let child = Custody::reopen(store, scope).unwrap();
+        assert!(child.captures_for_reconciliation().contains(uncertain));
+        assert!(
+            child
+                .load_upload_attempt(uncertain)
+                .unwrap()
+                .unwrap()
+                .as_slice()
+                == old_attempt
+        );
+        assert_eq!(child.all_captures_for_reconciliation().len(), 4);
+        assert!(child.publication_history().is_err());
+    }
+    #[test]
+    fn byte_pressure_preserves_fresh_ticket_pending_rows_and_bounded_chain_order() {
+        let NearByteLimit {
+            store,
+            scope,
+            mut child,
+            ticket,
+            uncertain,
+            updated,
+        } = near_byte_limit();
+        let pending = child.load_upload_attempt(&uncertain).unwrap().unwrap();
+        let bodies = store.bodies.borrow().clone();
+        let original_revision = child.document.revision;
+        child.complete_disposition_for_test(&store, ticket).unwrap();
+        assert_eq!(child.document.revision, original_revision + 2);
+        assert_eq!(child.completed.len(), 2);
+        assert_eq!(child.captures_for_reconciliation().len(), 2);
+        assert!(bodies == *store.bodies.borrow());
+        assert_retained(&store, &scope, &uncertain, &pending);
+        complete_large(
+            &store,
+            &scope,
+            &mut child,
+            "large-after-byte-rollover",
+            &updated,
+            "\"rev-4\"",
+        );
+        let mut rows = child.completed.clone();
+        rows.extend(child.completed_batch().unwrap());
+        assert_eq!(rows.len(), 4);
+        assert!(
+            completed_history::Segment::new(scope.clone(), None, rows.clone())
+                .encode()
+                .is_err()
+        );
+        let old_child = store.child.borrow().clone();
+        let plans = completed_history::encode_bounded_chain(&scope, None, &rows).unwrap();
+        assert!(plans.len() > 1);
+        let mut previous = None;
+        let mut ids = Vec::new();
+        for segment in plans {
+            assert!(segment.bytes.len() <= MAX_BYTES);
+            let decoded = completed_history::Segment::decode(&segment.bytes, &scope).unwrap();
+            assert!(decoded.previous() == previous);
+            ids.extend(decoded.rows().iter().map(|r| r.capture.id().to_owned()));
+            previous = Some(segment.reference);
+        }
+        assert!(
+            ids == rows
+                .iter()
+                .map(|r| r.capture.id().to_owned())
+                .collect::<Vec<_>>()
+        );
+        assert!(old_child == *store.child.borrow());
+    }
+    #[test]
+    fn byte_pressure_postpublication_uncertainty_keeps_prepared_and_uncertain_records() {
+        let NearByteLimit {
+            store,
+            scope,
+            mut child,
+            ticket,
+            uncertain,
+            ..
+        } = near_byte_limit();
+        let reference = ticket.reference().clone();
+        let pending = child.load_upload_attempt(&uncertain).unwrap().unwrap();
+        let bodies = store.bodies.borrow().clone();
+        store.uncertain.set(true);
+        assert!(matches!(
+            child.complete_disposition_for_test(&store, ticket),
+            Err(Error::Persistence)
+        ));
+        assert!(child.failed && child.publication_history().is_err());
+        assert!(bodies == *store.bodies.borrow());
+        assert_retained(&store, &scope, &uncertain, &pending);
+        let reopened = Custody::reopen(&store, &scope).unwrap();
+        assert_eq!(reopened.completed.len(), 2);
+        assert!(
+            !reopened
+                .local_disposition(&reference)
+                .unwrap()
+                .unwrap()
+                .is_native_completed()
+        );
+    }
+    #[test]
+    fn byte_pressure_proposal_cas_cannot_overwrite_a_competing_postseal_revision() {
+        let NearByteLimit {
+            store,
+            scope,
+            mut child,
+            ticket,
+            uncertain,
+            ..
+        } = near_byte_limit();
+        let reference = ticket.reference().clone();
+        let pending = child.load_upload_attempt(&uncertain).unwrap().unwrap();
+        let bodies = store.bodies.borrow().clone();
+        store.interfere_on_call.set(Some(store.calls.get() + 2));
+        assert!(matches!(
+            child.complete_disposition_for_test(&store, ticket),
+            Err(Error::Persistence)
+        ));
+        assert!(child.failed && child.publication_history().is_err());
+        assert!(child.raw.as_slice() != store.child.borrow().as_ref().unwrap().as_slice());
+        assert!(bodies == *store.bodies.borrow());
+        assert_retained(&store, &scope, &uncertain, &pending);
+        let reopened = Custody::reopen(&store, &scope).unwrap();
+        assert!(
+            !reopened
+                .local_disposition(&reference)
+                .unwrap()
+                .unwrap()
+                .is_native_completed()
+        );
     }
 }
