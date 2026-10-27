@@ -2,14 +2,14 @@
 
 Android and desktop have independent versions and release pages.
 
-## Desktop 0.7.4 Beta — prepared; publication pending final package gates
+## Desktop 0.7.4 Beta — 2026-10-27
 
-The prepared Linux and Windows Desktop Beta uses numeric versioning. It brings a
+The Linux and Windows Desktop Beta uses numeric versioning. It brings a
 unified Sync Folders workspace, editable sync filters/exclusions, grouped Settings,
 per-account appearance, retained-account controls and the Windows in-place
 installer. The Windows reconnect fix was owner-verified with both the Default and
-a newly added account. Final package gates remain pending; this entry does not
-announce a published release. Android remains on 1.2.0. See the [Desktop
+a newly added account. Focused package/upgrade and data-retention checks passed; broader beta limits
+remain documented. Android remains on 1.2.0. See the [Desktop
 changelog](apps/desktop/CHANGELOG.md) and [Sync Folders guide](apps/desktop/docs/SYNC-FOLDERS.md).
 
 ## Coordinated release — 2026-10-27

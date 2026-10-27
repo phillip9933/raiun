@@ -101,8 +101,9 @@ users of that build must install the first updater-capable release manually.
 That release also has no updater manifest or signed updater package, so the
 new candidate cannot offer it as an installable update. Signed-package
 verification and native package upgrade checks remain necessary before release. The owner-authorized dedicated
-Desktop key is stored outside Git and build VMs; matching signed packages and
-metadata have not yet been published.
+Desktop key is stored outside Git and build VMs; Desktop 0.7.4 publishes matching version-bound signed packages and metadata
+for Linux and Windows. Earlier withdrawn Windows beta.2/beta.3 assets remain
+unavailable; use the current Windows setup installer for a manual in-place update when needed.
 
 ## Preparing release metadata
 
