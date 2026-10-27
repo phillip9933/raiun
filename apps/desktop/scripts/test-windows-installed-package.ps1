@@ -18,6 +18,7 @@ if (Test-Path -LiteralPath $OutputDirectory) { throw 'output_directory_already_e
 $script:events = [System.Collections.Generic.List[object]]::new()
 $script:phase = 'preflight'
 $script:failure = $null
+$script:lastControlFailure = $null
 $script:agent = $null
 $script:agentPath = $null
 $script:baseline = $null
@@ -39,6 +40,7 @@ $script:finalFiles = $null
 $script:startupAppData = $env:APPDATA
 $script:startupLocalAppData = $env:LOCALAPPDATA
 $script:sidHash = $null
+$script:tokenFacts = $null
 $script:result = 'failed'
 
 function Add-Event([string] $Name, [string] $Result, [hashtable] $Details = @{}) {
@@ -169,6 +171,51 @@ function Start-Agent([string] $AgentPath) {
     $script:agentErrTask = $process.StandardError.ReadToEndAsync()
 }
 
+function Get-ControlFailureInfo([string] $Action, [string] $Text, [int] $ExitCode, [bool] $JsonParsed, $ResponseOk) {
+    $message = ([string]$Text).Trim()
+    if ($message.StartsWith('Raiun: ', [StringComparison]::Ordinal)) { $message = $message.Substring(7).Trim() }
+    $known = @{
+        'Account changes are unavailable' = 'Account changes are unavailable'
+        'Account state is unavailable' = 'Account state is unavailable'
+        'Account storage is unavailable' = 'Account storage is unavailable'
+        'Could not allocate an account ID' = 'Could not allocate an account ID'
+        'Could not save the account registry' = 'Could not save the account registry'
+        'Invalid new profile id' = 'Invalid new profile id'
+        'Profile limit reached' = 'Profile limit reached'
+        'Profile label must contain 1 to 256 non-control bytes' = 'Profile label must contain 1 to 256 non-control bytes'
+        'Add the Windows account first, then sign in and choose its drive folder' = 'Add the Windows account first, then sign in and choose its drive folder'
+        'Invalid control request' = 'Invalid control request'
+        'Raiun agent is not running for this Windows user' = 'Raiun agent is not running for this Windows user'
+        'Could not send control request' = 'Could not send control request'
+        'Could not read the agent response' = 'Could not read the agent response'
+        'Agent response exceeded the control limit' = 'Agent response exceeded the control limit'
+        'Agent response is not UTF-8' = 'Agent response is not UTF-8'
+    }
+    $info = [ordered]@{
+        action = if (@('status','accounts','account_add','shutdown','pair_update') -ccontains $Action) { $Action } else { 'other' }
+        childExitCode = $ExitCode
+        responseJsonParsed = $JsonParsed
+        responseOk = $ResponseOk
+    }
+    if ($known.ContainsKey($message)) {
+        $info.errorCategory = 'public_static'
+        $info.publicStaticError = $known[$message]
+    } else {
+        $lower = $message.ToLowerInvariant()
+        $category = if ($lower -match 'access|permission|denied') { 'access' }
+            elseif ($lower -match 'owner|dacl|acl') { 'owner_acl' }
+            elseif ($lower -match 'pipe|connect|send|read the agent response') { 'pipe' }
+            elseif ($lower -match 'argument|request|json|utf-8') { 'cli_argument_or_protocol' }
+            elseif ($lower -match 'label') { 'label' }
+            elseif ($lower -match 'registry|profile|account storage') { 'registry_or_profile' }
+            elseif ([string]::IsNullOrEmpty($message)) { 'no_error_text' }
+            else { 'unclassified' }
+        $info.errorCategory = $category
+        if (-not [string]::IsNullOrEmpty($message)) { $info.errorSha256 = Hash-Bytes ([Text.Encoding]::UTF8.GetBytes($message)) }
+    }
+    return $info
+}
+
 function Invoke-Control([string] $AgentPath, [System.Collections.IDictionary] $Request) {
     $json = ConvertTo-Json -InputObject $Request -Compress -Depth 8
     $info = [Diagnostics.ProcessStartInfo]::new()
@@ -189,10 +236,21 @@ function Invoke-Control([string] $AgentPath, [System.Collections.IDictionary] $R
     if ($null -eq $process.ExitCode) { throw 'agent_request_exit_code_missing' }
     $exitCode = [int]$process.ExitCode
     $raw = $outTask.GetAwaiter().GetResult()
-    $null = $errTask.GetAwaiter().GetResult()
+    $stderr = $errTask.GetAwaiter().GetResult()
     $process.Dispose()
-    if ($exitCode -ne 0) { throw 'agent_request_nonzero_exit' }
-    try { return ($raw | ConvertFrom-Json) } catch { throw 'agent_response_invalid_json' }
+    $action = if ($Request.Contains('action')) { [string]$Request['action'] } else { 'other' }
+    if ($exitCode -ne 0) {
+        $script:lastControlFailure = Get-ControlFailureInfo -Action $action -Text $stderr -ExitCode $exitCode -JsonParsed $false -ResponseOk $null
+        throw 'agent_request_nonzero_exit'
+    }
+    try { $response = $raw | ConvertFrom-Json } catch {
+        $script:lastControlFailure = Get-ControlFailureInfo -Action $action -Text 'Invalid control response JSON' -ExitCode $exitCode -JsonParsed $false -ResponseOk $null
+        throw 'agent_response_invalid_json'
+    }
+    if ($response.ok -ne $true) {
+        $script:lastControlFailure = Get-ControlFailureInfo -Action $action -Text ([string]$response.error) -ExitCode $exitCode -JsonParsed $true -ResponseOk $false
+    }
+    return $response
 }
 
 function Stop-Agent {
@@ -308,6 +366,15 @@ try {
     New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $script:sidHash = Hash-Bytes ([Text.Encoding]::UTF8.GetBytes($sid))
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+    $script:tokenFacts = [ordered]@{
+        ownerMatchesUser = ($identity.Owner.Value -ceq $identity.User.Value)
+        administratorRole = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        sessionId = [int](Get-Process -Id $PID).SessionId
+        userInteractive = [bool][Environment]::UserInteractive
+    }
+    Add-Event 'runner_token_context' 'diagnostic' $script:tokenFacts
     $script:phase = 'artifact_manifest_validation'
     $script:baseline = Read-Candidate -Root $BaselineArtifactRoot -SourceCommit '1c60b4e6d7084ff5c3ba3f96b547d028e4c171cc'
     $script:final = Read-Candidate -Root $FinalArtifactRoot -SourceCommit '26ccf130b3274d1f3ae9661b62bc19cb7cfd33b4'
@@ -491,6 +558,7 @@ try {
         busyAttemptExitCode = $script:busyInstallExit
         finalInstallerExitCode = $script:finalInstallExit
         sameUserSidSha256 = $script:sidHash
+        runnerTokenContext = $script:tokenFacts
         baselineFiles = $script:baselineFiles
         finalFiles = $script:finalFiles
         busyGuard = ($null -ne $script:busyInstallExit -and $script:busyInstallExit -ne 0)
@@ -502,6 +570,7 @@ try {
         baselineAgentStatus = $script:baselineStatus
         finalAgentStatus = $script:finalStatus
         incompletePairUpdateRejected = $script:invalidPairRejected
+        lastControlFailure = $script:lastControlFailure
         baselineAgentExitCode = $script:baselineAgentExit
         finalAgentExitCode = $script:finalAgentExit
         artifacts = [ordered]@{
