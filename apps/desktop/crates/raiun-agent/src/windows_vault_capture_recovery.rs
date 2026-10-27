@@ -645,16 +645,45 @@ mod tests {
                 .page("profile", 0, "root-context", scope(), Vec::new(), None)
                 .is_err()
         );
+        let empty_continuation = tokens
+            .page(
+                "profile",
+                4,
+                "root-context",
+                scope(),
+                Vec::new(),
+                Some("last".into()),
+            )
+            .unwrap();
+        let empty_cursor = empty_continuation.next_cursor.as_deref().unwrap();
+        assert_eq!(
+            tokens
+                .after(Some(empty_cursor), 4, "root-context", &scope())
+                .unwrap()
+                .as_deref(),
+            Some("last")
+        );
         assert!(
             tokens
-                .page(
-                    "profile",
-                    4,
-                    "root-context",
-                    scope(),
-                    Vec::new(),
-                    Some("last".into())
-                )
+                .after(Some(empty_cursor), 4, "other-context", &scope())
+                .is_err()
+        );
+        assert!(
+            tokens
+                .after(Some(empty_cursor), 5, "root-context", &scope())
+                .is_err()
+        );
+
+        let oversized_rows = (0..=MAX_PAGE)
+            .map(|index| RecoveryCaptureMetadata {
+                capture_id: format!("capture_{index}"),
+                remote_path: format!("/file-{index}.txt"),
+                body_len: 1,
+            })
+            .collect();
+        assert!(
+            tokens
+                .page("profile", 4, "root-context", scope(), oversized_rows, None,)
                 .is_err()
         );
     }

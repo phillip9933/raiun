@@ -16880,7 +16880,7 @@ mod tests {
     }
 
     #[test]
-    fn folder_control_dispatch_reaches_account_guard_before_worker_admission() {
+    fn folder_control_dispatch_rejects_foreign_profile_before_worker_admission() {
         let agent = Arc::new(WindowsAgent::new(MemoryStore::default()));
         for action in [
             "windows_offline_folders",
@@ -16897,10 +16897,15 @@ mod tests {
             }));
             assert_eq!(
                 result.unwrap_err(),
-                "Select the current Windows account",
+                "The selected Windows profile does not own this request",
                 "{action}"
             );
         }
+        #[cfg(debug_assertions)]
+        assert_eq!(
+            agent.provider.disconnect_test_calls.load(Ordering::SeqCst),
+            0
+        );
         let status = agent.status().unwrap();
         assert_eq!(status["connected"], false);
         assert_eq!(status["mounted"], false);
