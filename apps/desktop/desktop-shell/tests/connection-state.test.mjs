@@ -25,3 +25,13 @@ test('an ordinary disconnected account still gets the sign-in state', () => {
 test('an unreachable agent takes precedence over account state', () => {
   assert.equal(connectionMode(false, { connected: false, offline_namespace: true }), 'unavailable');
 });
+
+
+test('a retained Windows session reconnects without asking for another sign-in', () => {
+  const retained = { connected: false, offline: true, offline_namespace: false };
+  assert.equal(connectionMode(true, retained), 'offline_reconnecting');
+  assert.equal(retained.offline_namespace, false, 'connection copy does not grant cached namespace authority');
+  assert.equal(connectionMode(true, { connected: true, offline: true }), 'connected');
+  assert.equal(connectionMode(false, retained), 'unavailable');
+  assert.equal(connectionMode(true, { connected: false, offline: false }), 'sign_in');
+});

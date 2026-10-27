@@ -1,5 +1,22 @@
 # Raiun Desktop changelog
 
+## 0.7.0-beta.3 — 2026-10-27
+
+Focused Linux and Windows sign-in and encrypted Space fixes.
+
+- Linux: retry saved sign-in when the keyring or network is not ready at startup,
+  preserving refreshed credentials across a temporary connection failure. A
+  sign-out or account change cancels the old restore attempt.
+- Windows: show a retained sign-in as reconnecting and retry temporary failures
+  even when the saved token is still fresh. A repeated Sign in request no longer
+  disconnects the existing drive before rejecting the duplicate request.
+- Refresh the selected account status after a failed sign-in attempt.
+- Allow an encrypted Space display name to differ from its exact server resource
+  identifier. Folder and child location checks remain strict.
+
+This patch does not include the planned navigation, appearance or CLI changes.
+Existing beta.2 upgrade/recovery limits continue to apply.
+
 ## 0.7.0-beta.2 — 2026-10-27
 
 Linux and Windows x86_64 beta, with matching Desktop versions.

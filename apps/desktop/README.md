@@ -10,11 +10,11 @@ OpenCloud/
     Team space/
 ```
 
-**Desktop 0.7.0-beta.2 for Linux and Windows x86_64.** Source and packages are part of the Raiun
+**Desktop 0.7.0-beta.3 for Linux and Windows x86_64.** Source and packages are part of the Raiun
 monorepo at `apps/desktop`, alongside Android at `apps/android`. Each app has its
 own version and build. Linux and Windows share the same Desktop version;
 macOS is not released. Download the AppImage or Windows setup installer from the
-[Desktop beta release](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.0-beta.2).
+[Desktop beta release](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.0-beta.3).
 
 Beta.1 users must install beta.2 manually once. Beta.2 adds automatic or manual
 GitHub release checks with dismissible notices and explicit signed Download/Install
@@ -85,7 +85,7 @@ Commit plus dirty status is not a reproducible identity for uncommitted source.
 
 ## AppImage
 
-An additional x86_64 AppImage is available from the [Linux beta release](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.0-beta.2). It targets Ubuntu 24.04-era systems (glibc 2.39 or newer), bundles the interface and background agent, and uses the same existing account/settings locations. Cloud-drive mounting still needs system FUSE 3; persistent sign-in needs a desktop keyring. See [AppImage setup](docs/APPIMAGE.md) for launch, startup and integration details.
+An additional x86_64 AppImage is available from the [Linux beta release](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.0-beta.3). It targets Ubuntu 24.04-era systems (glibc 2.39 or newer), bundles the interface and background agent, and uses the same existing account/settings locations. Cloud-drive mounting still needs system FUSE 3; persistent sign-in needs a desktop keyring. See [AppImage setup](docs/APPIMAGE.md) for launch, startup and integration details.
 
 ## Development operation
 
