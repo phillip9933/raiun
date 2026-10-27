@@ -54,7 +54,7 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or -not $installation) { throw 'MSVC installation not found.' }
           & (Join-Path $installation 'Common7/Tools/Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
           if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) { throw 'MSVC environment was not initialized.' }
-          ./scripts/build-windows-package.ps1
+          ./scripts/build-windows-package.ps1 -UpdaterArtifacts
       - name: Upload candidate and provenance
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -62,6 +62,7 @@ jobs:
           path: |
             apps/desktop/desktop-shell/src-tauri/target/**/bundle/nsis/*-setup.exe
             apps/desktop/desktop-shell/src-tauri/target/**/bundle/nsis/*-setup.exe.manifest.json
+            apps/desktop/target/updater-release-assets/**/*.nsis.zip
           if-no-files-found: error
       - name: Save compilation work for retries
         if: always()
