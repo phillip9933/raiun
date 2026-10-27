@@ -44,12 +44,19 @@ pub struct MediaUtcMonth {
 }
 
 /// The caller's requested media filter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MediaFilter {
     Photos,
     Videos,
+    #[default]
     All,
+}
+
+impl MediaFilter {
+    pub const fn is_all(&self) -> bool {
+        matches!(self, Self::All)
+    }
 }
 
 /// Optional destination layout. Date layout groups by the explicit UTC month

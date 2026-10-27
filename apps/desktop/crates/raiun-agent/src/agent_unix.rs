@@ -2463,6 +2463,7 @@ impl Runtime {
                 Ok(json!({
                     "agent_version": env!("CARGO_PKG_VERSION"),
                     "auth_generation": generation,
+                    "folder_settings_supported": true,
                     "connected": connected,
                     "offline_namespace": offline_namespace,
                     "session_expires_at": session_expires_at,
@@ -2882,6 +2883,117 @@ impl Runtime {
                 self.wake.store(true, Ordering::Release);
                 self.clear_pending_space_syncs()?;
                 Ok(json!({"pair_id":id,"excluded_paths":updated.excluded_paths}))
+            }
+            "pair_update" => {
+                let generation = self.operation_generation()?;
+                let expected_generation = request
+                    .get("expected_auth_generation")
+                    .and_then(Value::as_u64)
+                    .ok_or("expected_auth_generation must be an unsigned integer")?;
+                if generation != expected_generation {
+                    return Err(
+                        "Folder settings changed with the active account; refresh and retry".into(),
+                    );
+                }
+                let id = text("id")?;
+                let expected: FolderPair = serde_json::from_value(
+                    request
+                        .get("expected_pair")
+                        .cloned()
+                        .ok_or("Missing expected_pair")?,
+                )
+                .map_err(|_| "expected_pair is invalid")?;
+                if expected.id != id {
+                    return Err("expected_pair ID does not match the requested pair".into());
+                }
+                let original = self
+                    .settings
+                    .lock()
+                    .map_err(|_| "Settings poisoned")?
+                    .config
+                    .pairs
+                    .iter()
+                    .find(|pair| pair.id == id)
+                    .cloned()
+                    .ok_or("Folder pair was not found")?;
+                if original != expected {
+                    return Err(
+                        "Folder pair changed before settings were saved; refresh and retry".into(),
+                    );
+                }
+                let mut updated = original.clone();
+                updated.mode =
+                    serde_json::from_value(request.get("mode").cloned().ok_or("Missing mode")?)
+                        .map_err(|_| "mode is invalid")?;
+                updated.content_filter = serde_json::from_value(
+                    request
+                        .get("content_filter")
+                        .cloned()
+                        .ok_or("Missing content_filter")?,
+                )
+                .map_err(|_| "content_filter is invalid")?;
+                updated.exclusions = serde_json::from_value(
+                    request
+                        .get("exclusions")
+                        .cloned()
+                        .ok_or("Missing exclusions")?,
+                )
+                .map_err(|_| "exclusions must be an array")?;
+                updated.excluded_paths = serde_json::from_value(
+                    request
+                        .get("excluded_paths")
+                        .cloned()
+                        .ok_or("Missing excluded_paths")?,
+                )
+                .map_err(|_| "excluded_paths must be an array")?;
+                updated
+                    .validate_exclusions()
+                    .map_err(|error| format!("Invalid exclusions: {error}"))?;
+                let engine = self.engine_for_pair(&updated)?;
+                let _sync = self.sync_gate.lock().map_err(|_| "Sync state poisoned")?;
+                if self.auth_transition.load(Ordering::Acquire)
+                    || self.auth_generation.load(Ordering::Acquire) != generation
+                {
+                    return Err("Folder settings update was canceled by an account change".into());
+                }
+                let publication = engine
+                    .prepare_pair_policy(&updated)
+                    .map_err(|error| error.to_string())?;
+                self.update_with_wake(
+                    |settings| {
+                        if self.auth_transition.load(Ordering::Acquire)
+                            || self.auth_generation.load(Ordering::Acquire) != generation
+                        {
+                            return Err(
+                                "Folder settings update was canceled by an account change".into()
+                            );
+                        }
+                        let pair = settings
+                            .config
+                            .pairs
+                            .iter_mut()
+                            .find(|pair| pair.id == id)
+                            .ok_or("Folder pair was removed")?;
+                        if pair != &expected {
+                            return Err(
+                                "Folder pair changed before settings were saved; refresh and retry"
+                                    .into(),
+                            );
+                        }
+                        *pair = updated.clone();
+                        let errors = validate_config(&settings.config);
+                        if errors.is_empty() {
+                            Ok(())
+                        } else {
+                            Err(errors.join("; "))
+                        }
+                    },
+                    false,
+                )?;
+                publication.publish();
+                self.wake.store(true, Ordering::Release);
+                self.clear_pending_space_syncs()?;
+                Ok(json!({"pair":updated}))
             }
             "pair_remove" => {
                 let generation = self.operation_generation()?;
@@ -4868,6 +4980,8 @@ mod tests {
         );
         let updated = FolderPair {
             excluded_paths: vec!["archive".into(), "private/notes.txt".into()],
+            content_filter: raiun_core::MediaFilter::All,
+            exclusions: Vec::new(),
             ..pair
         };
         runtime
@@ -4879,6 +4993,51 @@ mod tests {
             raiun_core::backend::ErrorKind::Conflict,
             "a stale snapshot cannot reactivate a retired ID"
         );
+    }
+
+    #[test]
+    fn pair_update_cas_replaces_full_policy_and_rejects_stale_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pair = test_pair("pair-update", "space-a");
+        pair.local_path = dir.path().join("pair");
+        fs::create_dir(&pair.local_path).unwrap();
+        let runtime = Arc::new(runtime_for_mount_test(
+            dir.path().to_path_buf(),
+            false,
+            None,
+        ));
+        *runtime.settings.lock().unwrap() = test_settings(vec![pair.clone()]);
+        runtime.settings.lock().unwrap().save(dir.path()).unwrap();
+        let engine =
+            Engine::open(&dir.path().join("engine"), Arc::new(OfflineCacheFixture)).unwrap();
+        runtime.auth_state.lock().unwrap().engine = Some(engine.clone());
+        engine.publish_pair_policy(&pair).unwrap();
+        let expected_pair = serde_json::to_value(&pair).unwrap();
+
+        let response = runtime
+            .handle(json!({
+                "action":"pair_update", "id":pair.id, "expected_pair":expected_pair,
+                "expected_auth_generation":0, "mode":"upload_only", "content_filter":"photos",
+                "exclusions":[{"kind":"path","pattern":"private/**/secret?.dat"}],
+                "excluded_paths":["archive"]
+            }))
+            .unwrap();
+        assert_eq!(response["pair"]["mode"], "upload_only");
+        assert_eq!(response["pair"]["content_filter"], "photos");
+        assert_eq!(response["pair"]["excluded_paths"], json!(["archive"]));
+        let saved = Settings::load(dir.path()).unwrap().config.pairs.remove(0);
+        assert_eq!(saved.mode, raiun_core::SyncMode::UploadOnly);
+        assert_eq!(saved.content_filter, raiun_core::MediaFilter::Photos);
+        assert_eq!(saved.exclusions[0].pattern, "private/**/secret?.dat");
+
+        let stale = runtime.handle(json!({
+            "action":"pair_update", "id":pair.id, "expected_pair":expected_pair,
+            "expected_auth_generation":0, "mode":"two_way", "content_filter":"all",
+            "exclusions":[], "excluded_paths":[]
+        }));
+        assert!(stale.is_err());
+        let after_stale = Settings::load(dir.path()).unwrap().config.pairs.remove(0);
+        assert_eq!(after_stale, saved);
     }
 
     #[test]
@@ -5059,6 +5218,8 @@ mod tests {
             remote_path: "/Documents".into(),
             mode: raiun_core::SyncMode::TwoWay,
             excluded_paths: Vec::new(),
+            content_filter: raiun_core::MediaFilter::All,
+            exclusions: Vec::new(),
         }
     }
 
@@ -5282,6 +5443,7 @@ mod tests {
                 destination_root: "/Photos".into(),
                 destination_root_resource_id: "same-folder-id".into(),
                 filter: raiun_core::MediaFilter::Photos,
+                exclusions: Vec::new(),
                 organization: raiun_core::MediaOrganization::PreserveRelativePath,
                 filesystem_mtime_utc: false,
                 interval_seconds: 3600,
@@ -5355,6 +5517,7 @@ mod tests {
             destination_root: "/folder".into(),
             destination_root_resource_id: "folder".into(),
             filter: raiun_core::MediaFilter::Photos,
+            exclusions: Vec::new(),
             organization: raiun_core::MediaOrganization::PreserveRelativePath,
             filesystem_mtime_utc: false,
             interval_seconds: 3600,
@@ -5411,6 +5574,7 @@ mod tests {
             destination_root: "/Photos".into(),
             destination_root_resource_id: "photos-folder".into(),
             filter: raiun_core::MediaFilter::Photos,
+            exclusions: Vec::new(),
             organization: raiun_core::MediaOrganization::PreserveRelativePath,
             filesystem_mtime_utc: false,
             interval_seconds: 3600,
@@ -5459,6 +5623,7 @@ mod tests {
             destination_root: "/Photos".into(),
             destination_root_resource_id: "photos-folder".into(),
             filter: raiun_core::MediaFilter::Photos,
+            exclusions: Vec::new(),
             organization: raiun_core::MediaOrganization::PreserveRelativePath,
             filesystem_mtime_utc: false,
             interval_seconds: 3_600,
@@ -6759,6 +6924,8 @@ mod tests {
                 remote_path: "/Documents".into(),
                 mode: raiun_core::SyncMode::TwoWay,
                 excluded_paths: Vec::new(),
+                content_filter: raiun_core::MediaFilter::All,
+                exclusions: Vec::new(),
             });
             settings.save(dir.path()).unwrap();
         }

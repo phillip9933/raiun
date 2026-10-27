@@ -1,5 +1,5 @@
 //! Pure existing folder RPC decoding. Profile authentication is caller-owned.
-use raiun_core::{FolderPair, validate_remote_path};
+use raiun_core::{FolderExclusion, FolderPair, MediaFilter, SyncMode, validate_remote_path};
 use serde_json::{Map, Value};
 
 pub enum FolderRequest {
@@ -20,6 +20,15 @@ pub enum FolderRequest {
         path: String,
     },
     Add(FolderPair),
+    Update {
+        id: String,
+        expected_pair: FolderPair,
+        expected_auth_generation: u64,
+        mode: SyncMode,
+        content_filter: MediaFilter,
+        exclusions: Vec<FolderExclusion>,
+        excluded_paths: Vec<String>,
+    },
     Exclusions {
         id: String,
         excluded_paths: Vec<String>,
@@ -105,6 +114,46 @@ pub fn decode(request: &Value) -> Result<FolderRequest, String> {
             fields.clear();
             FolderRequest::Add(pair)
         }
+        "pair_update" => {
+            let id = text(&mut fields, "id", 128)?;
+            let expected_auth_generation = fields
+                .remove("expected_auth_generation")
+                .and_then(|value| value.as_u64())
+                .ok_or_else(invalid)?;
+            let expected_pair: FolderPair =
+                serde_json::from_value(fields.remove("expected_pair").ok_or_else(invalid)?)
+                    .map_err(|_| invalid())?;
+            let mode: SyncMode = serde_json::from_value(fields.remove("mode").ok_or_else(invalid)?)
+                .map_err(|_| invalid())?;
+            let content_filter: MediaFilter =
+                serde_json::from_value(fields.remove("content_filter").ok_or_else(invalid)?)
+                    .map_err(|_| invalid())?;
+            let exclusions: Vec<FolderExclusion> =
+                serde_json::from_value(fields.remove("exclusions").ok_or_else(invalid)?)
+                    .map_err(|_| invalid())?;
+            let excluded_paths: Vec<String> =
+                serde_json::from_value(fields.remove("excluded_paths").ok_or_else(invalid)?)
+                    .map_err(|_| invalid())?;
+            let candidate = FolderPair {
+                mode,
+                content_filter,
+                exclusions: exclusions.clone(),
+                excluded_paths: excluded_paths.clone(),
+                ..expected_pair.clone()
+            };
+            if candidate.id != id || candidate.validate_exclusions().is_err() {
+                return Err(invalid());
+            }
+            FolderRequest::Update {
+                id,
+                expected_pair,
+                expected_auth_generation,
+                mode,
+                content_filter,
+                exclusions,
+                excluded_paths,
+            }
+        }
         "pair_exclusions_set" => {
             let id = text(&mut fields, "id", 128)?;
             let excluded_paths: Vec<String> =
@@ -119,6 +168,8 @@ pub fn decode(request: &Value) -> Result<FolderRequest, String> {
                 mode: raiun_core::SyncMode::TwoWay,
                 vault: None,
                 excluded_paths,
+                content_filter: raiun_core::MediaFilter::All,
+                exclusions: Vec::new(),
             };
             pair.validate_exclusions().map_err(|_| invalid())?;
             FolderRequest::Exclusions {
@@ -205,7 +256,22 @@ mod tests {
             assert!(decode(&Value::Object(fields)).is_ok());
         }
         let add = json!({"action":"pair_add","profile_id":"default","id":"pair","space_id":"space","local_path":"Z:\\offline","remote_path":"/","mode":"two_way","vault":null});
-        assert!(matches!(decode(&add), Ok(FolderRequest::Add(_))));
+        match decode(&add).unwrap() {
+            FolderRequest::Add(pair) => {
+                assert_eq!(pair.content_filter, MediaFilter::All);
+                assert!(pair.exclusions.is_empty());
+            }
+            _ => panic!("pair_add should decode as Add"),
+        }
+        let expected_pair = json!({"id":"pair","local_path":"Z:\\offline","space_id":"space","vault":null,"remote_path":"/","mode":"two_way","excluded_paths":[],"content_filter":"all","exclusions":[]});
+        let update = json!({"action":"pair_update","id":"pair","expected_pair":expected_pair,"expected_auth_generation":7,"mode":"upload_only","content_filter":"photos","exclusions":[{"kind":"path","pattern":"private/"}],"excluded_paths":["legacy"]});
+        assert!(matches!(
+            decode(&update),
+            Ok(FolderRequest::Update {
+                expected_auth_generation: 7,
+                ..
+            })
+        ));
         assert!(matches!(
             decode(&json!({"action":"space_sync_now","space_id":"s"})),
             Ok(FolderRequest::Sync { space_id: Some(_) })

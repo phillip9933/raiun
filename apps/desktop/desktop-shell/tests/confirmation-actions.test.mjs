@@ -28,11 +28,11 @@ function harness() {
   };
   const map = () => new Map();
   const context = {
-    state, confirmDialog: (message, options) => { prompts.push({ message, options }); return dialog.promise; },
+    state, accountAvatarUi: { clearProfile() {}, cancelPendingExceptEpoch() {} }, discardPairSettingsDraft: (drafts, id) => drafts.delete(id), confirmDialog: (message, options) => { prompts.push({ message, options }); return dialog.promise; },
     render() {}, providerAvailable: x => x !== false, featureAvailable: field => state.status.provider_supported !== false && state.status[field] !== false, spaceName: () => 'R196 Synthetic Space A',
     selectedAccountLabel: () => 'Synthetic profile', lastPath: path => path.split('/').at(-1),
     messageOf: error => String(error.message || error), isStaleAccountRequest: () => false,
-    pairExclusionsUi: { open: new Set(), drafts: map(), errors: map(), busy: map() },
+    pairExclusionsUi: { open: new Set(), edits: map(), drafts: map(), kinds: map(), errors: map(), busy: map() },
     refresh: async () => { state.status = { ...state.status }; }, syncAccounts: async () => {}, accountSwitchDisabled: () => false, loadConflictPage: async () => {}, isStaleConflictError: () => false,
     forgetVaultOperationsScope() {}, clearVaultPinUi() {}, clearVaultEditRetryUi() {},
     safeVaultExistingOverwriteReason: () => null, safeVaultMountWriteReason: () => null,

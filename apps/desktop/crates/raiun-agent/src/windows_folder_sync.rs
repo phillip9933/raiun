@@ -359,6 +359,49 @@ impl Runtime {
                 self.roots.insert(pair.id, pin);
                 Ok(json!({}))
             }
+            FolderRequest::Update {
+                id,
+                expected_pair,
+                expected_auth_generation,
+                mode,
+                content_filter,
+                exclusions,
+                excluded_paths,
+            } => {
+                if expected_auth_generation != self.generation {
+                    return Err(
+                        "Folder settings changed with the active account; refresh and retry".into(),
+                    );
+                }
+                let Some(index) = config.pairs.iter().position(|pair| pair.id == id) else {
+                    return Err("Folder connection not found".into());
+                };
+                if config.pairs[index] != expected_pair {
+                    return Err(
+                        "Folder connection changed before settings were saved; refresh and retry"
+                            .into(),
+                    );
+                }
+                let mut updated = expected_pair.clone();
+                updated.mode = mode;
+                updated.content_filter = content_filter;
+                updated.exclusions = exclusions;
+                updated.excluded_paths = excluded_paths;
+                updated
+                    .validate_exclusions()
+                    .map_err(|_| "Folder exclusions are invalid")?;
+                let policy = self
+                    .engine
+                    .prepare_pair_policy(&updated)
+                    .map_err(store_error)?;
+                config.pairs[index] = updated.clone();
+                self.check(authorized)?;
+                self.store
+                    .replace(document.revision(), config)
+                    .map_err(store_error)?;
+                policy.publish();
+                Ok(json!({"pair":updated}))
+            }
             FolderRequest::Exclusions { id, excluded_paths } => {
                 let pair = config
                     .pairs
@@ -680,6 +723,7 @@ mod source_overlap_tests {
             destination_root: "/backup".into(),
             destination_root_resource_id: "synthetic-destination".into(),
             filter: raiun_core::MediaFilter::All,
+            exclusions: Vec::new(),
             organization: raiun_core::MediaOrganization::PreserveRelativePath,
             filesystem_mtime_utc: false,
             interval_seconds: 3600,

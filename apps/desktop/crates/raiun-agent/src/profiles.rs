@@ -163,6 +163,7 @@ impl ProfileManager {
             "account_add" => self.add_account(&request),
             "account_select" => self.select_account(&request),
             "account_rename" => self.rename_account(&request),
+            "account_avatar" => self.account_avatar(&request),
             "account_remove" => self.remove_account(&request),
             "account_restore" => self.restore_account(&request),
             "shutdown" => self.request_shutdown(),
@@ -175,7 +176,7 @@ impl ProfileManager {
                 let (id, runtime) = self.resolve_runtime(&request)?;
                 self.profile_status(&id, &runtime)
             }
-            "configure" | "pair_add" | "pair_exclusions_set" | "media_job_set" => {
+            "configure" | "pair_add" | "pair_exclusions_set" | "pair_update" | "media_job_set" => {
                 let _gate = self
                     .mutation_gate
                     .lock()
@@ -188,7 +189,7 @@ impl ProfileManager {
                     "media_job_set" => self.check_media_source_overlap(&id, &request)?,
                     // Exclusions change only which pair-relative paths are
                     // scanned; root overlap validation is unchanged.
-                    "pair_exclusions_set" => {}
+                    "pair_exclusions_set" | "pair_update" => {}
                     _ => unreachable!(),
                 }
                 runtime.handle(strip_profile_id(request))
@@ -604,6 +605,30 @@ impl ProfileManager {
         } else {
             Ok(())
         }
+    }
+
+    fn account_avatar(&self, request: &Value) -> Result<Value, String> {
+        self.ensure_running()?;
+        let (id, runtime) = self.resolve_runtime(request)?;
+        let expected = request.get("expected_auth_generation").and_then(Value::as_u64)
+            .ok_or("Refresh the account before loading its photo")?;
+        let client = {
+            let state = runtime.auth_state.lock().map_err(|_| "Account state is unavailable")?;
+            if runtime.retiring.load(Ordering::Acquire) || runtime.shutdown.load(Ordering::Acquire)
+                || runtime.auth_transition.load(Ordering::Acquire)
+                || runtime.auth_generation.load(Ordering::Acquire) != expected {
+                return Err("The account changed while loading its photo".into());
+            }
+            state.client.clone().ok_or("Connect this account to load its photo")?
+        };
+        let image = client.account_avatar().map_err(|_| "The account photo is unavailable")?;
+        let _state = runtime.auth_state.lock().map_err(|_| "Account state is unavailable")?;
+        if runtime.retiring.load(Ordering::Acquire) || runtime.shutdown.load(Ordering::Acquire)
+            || runtime.auth_transition.load(Ordering::Acquire)
+            || runtime.auth_generation.load(Ordering::Acquire) != expected {
+            return Err("The account changed while loading its photo".into());
+        }
+        crate::account_avatar_wire::response(&id, expected, image)
     }
 
     fn profile_status(&self, id: &str, runtime: &Arc<Runtime>) -> Result<Value, String> {
@@ -1794,6 +1819,7 @@ mod tests {
             destination_root: "/Photos".into(),
             destination_root_resource_id: "folder-a".into(),
             filter: raiun_core::MediaFilter::Photos,
+            exclusions: Vec::new(),
             organization: raiun_core::MediaOrganization::PreserveRelativePath,
             filesystem_mtime_utc: false,
             interval_seconds: 3_600,
@@ -1882,6 +1908,7 @@ mod tests {
             destination_root: "/Photos".into(),
             destination_root_resource_id: "folder-a".into(),
             filter: raiun_core::MediaFilter::Photos,
+            exclusions: Vec::new(),
             organization: raiun_core::MediaOrganization::PreserveRelativePath,
             filesystem_mtime_utc: false,
             interval_seconds: 3_600,
@@ -1974,4 +2001,6 @@ mod tests {
         symlink(&actual, state_dir.join(PROFILES_DIR)).expect("symlink");
         assert!(ensure_profiles_root(&state_dir).is_err());
     }
+    include!("avatar_profile_tests.rs");
+
 }

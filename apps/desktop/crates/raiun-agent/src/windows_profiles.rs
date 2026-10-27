@@ -896,7 +896,7 @@ impl WindowsProfiles {
                     .map_err(|_| "The source changed; settings and recovery were preserved")?;
                 result
             }
-            "pair_exclusions_set" => {
+            "pair_exclusions_set" | "pair_update" => {
                 if !WINDOWS_FOLDER_SYNC_ENABLED {
                     return Err("Cross-account folder setup is not enabled yet".into());
                 }

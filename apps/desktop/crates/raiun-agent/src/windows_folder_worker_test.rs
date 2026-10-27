@@ -108,6 +108,8 @@ fn ordinary_folder_worker_download_upload_exclude_remove_and_reopen() {
         remote_path: "/RecoveryRoot".into(),
         mode: SyncMode::TwoWay,
         excluded_paths: vec![],
+        content_filter: raiun_core::MediaFilter::All,
+        exclusions: Vec::new(),
     };
     manager
         .folder_request(generation, FolderRequest::Add(pair.clone()))
