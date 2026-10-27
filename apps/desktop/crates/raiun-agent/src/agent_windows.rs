@@ -2676,7 +2676,12 @@ impl WindowsAgent {
             vault_sessions,
             profile_scope: profile.into(),
             session_store: Arc::new(session_store),
-            state: Arc::new(Mutex::new(AccountState::default())),
+            // Signed-out status and lifecycle fences must share the initial
+            // generation; otherwise a new account cannot be retired safely.
+            state: Arc::new(Mutex::new(AccountState {
+                active_generation: 1,
+                ..AccountState::default()
+            })),
             generation: Arc::new(AtomicU64::new(1)),
             provider: Arc::new(ProviderManager::new()),
             auth_thread: Mutex::new(None),
