@@ -384,6 +384,8 @@ fn pair(local_path: PathBuf) -> FolderPair {
         remote_path: "/".into(),
         mode: SyncMode::TwoWay,
         excluded_paths: Vec::new(),
+        content_filter: raiun_core::MediaFilter::All,
+        exclusions: Vec::new(),
     }
 }
 

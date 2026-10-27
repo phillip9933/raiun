@@ -717,6 +717,7 @@ impl Engine {
             &source_root,
             MediaScanOptions {
                 filesystem_mtime_utc: job.filesystem_mtime_utc,
+                exclusions: job.exclusions.clone(),
             },
         )
         .map_err(|error| media_error(ErrorKind::Io, error.to_string()))?;

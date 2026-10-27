@@ -4561,6 +4561,8 @@ fn engine_syncs_plaintext_through_vault_backend_and_resolves_conflicts_safely() 
         remote_path: "/".to_owned(),
         mode: SyncMode::TwoWay,
         excluded_paths: Vec::new(),
+        content_filter: raiun_core::MediaFilter::All,
+        exclusions: Vec::new(),
     };
 
     std::fs::write(local_path.join("shared.txt"), b"initial local version").unwrap();

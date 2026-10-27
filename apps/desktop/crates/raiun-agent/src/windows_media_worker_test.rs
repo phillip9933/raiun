@@ -128,6 +128,8 @@ fn ordinary_media_worker_observes_uploads_pauses_and_reads_local_recovery() {
                 remote_path: "/RecoveryRoot".into(),
                 mode: SyncMode::DownloadOnly,
                 excluded_paths: vec![],
+                content_filter: raiun_core::MediaFilter::All,
+                exclusions: Vec::new(),
             }),
         )
         .unwrap();

@@ -10,10 +10,15 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub mod backend;
+pub mod folder_policy;
 pub mod media_jobs;
 pub mod media_plan;
 pub mod media_scan;
 pub mod windows_compatibility;
+pub use folder_policy::{
+    FolderExclusion, FolderExclusionKind, folder_path_excluded, folder_path_rule_excluded,
+    media_filter_includes_path, validate_folder_exclusions,
+};
 pub use media_jobs::{
     DEFAULT_MEDIA_SCAN_INTERVAL_SECONDS, MAX_MEDIA_IMPORT_JOBS, MAX_MEDIA_SCAN_INTERVAL_SECONDS,
     MAX_MEDIA_SOURCE_PATH_BYTES, MIN_MEDIA_SCAN_INTERVAL_SECONDS, MediaImportJob,
@@ -31,6 +36,8 @@ pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 pub const MAX_EXCLUDED_PATHS: usize = 256;
 /// Maximum aggregate UTF-8 bytes in one folder pair's exclusion list.
 pub const MAX_EXCLUDED_PATH_BYTES: usize = 32 * 1024;
+pub const MAX_FOLDER_EXCLUSIONS: usize = 100;
+pub const MAX_FOLDER_EXCLUSION_CHARS: usize = 8_192;
 const MAX_EXCLUDED_PATH_LENGTH: usize = 4096;
 
 /// Application configuration for a single OS-provided cloud root.
@@ -59,6 +66,13 @@ pub struct FolderPair {
     /// Directories also exclude descendants at slash-separated boundaries.
     #[serde(default)]
     pub excluded_paths: Vec<String>,
+    /// Include all files, supported photos, or supported videos.
+    #[serde(default, skip_serializing_if = "MediaFilter::is_all")]
+    pub content_filter: MediaFilter,
+    /// Typed filename and relative-path patterns. Legacy `excluded_paths`
+    /// remains supported independently.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclusions: Vec<FolderExclusion>,
 }
 
 impl FolderPair {
@@ -71,12 +85,32 @@ impl FolderPair {
                 || path
                     .strip_prefix(excluded)
                     .is_some_and(|suffix| suffix.starts_with('/'))
-        })
+        }) || folder_path_rule_excluded(&self.exclusions, path)
+    }
+
+    /// Whether a file path is outside the selected content filter or typed /
+    /// legacy exclusions. Directories are always eligible for traversal.
+    pub fn excludes_file_path(&self, path: &str) -> bool {
+        self.excludes_relative_path(path)
+            || folder_path_excluded(&self.exclusions, path, false)
+            || !media_filter_includes_path(self.content_filter, path, false)
+    }
+
+    /// Whether a directory is excluded by an exact legacy path or typed path
+    /// glob. File-type rules and media filters never exclude directories.
+    pub fn excludes_directory_path(&self, path: &str) -> bool {
+        self.excluded_paths.iter().any(|excluded| {
+            path == excluded
+                || path
+                    .strip_prefix(excluded)
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        }) || folder_path_excluded(&self.exclusions, path, true)
     }
 
     /// Validate the bounded canonical representation used by sync engines.
     pub fn validate_exclusions(&self) -> Result<(), String> {
-        let errors = validate_excluded_paths(&self.excluded_paths);
+        let mut errors = validate_excluded_paths(&self.excluded_paths);
+        errors.extend(validate_folder_exclusions(&self.exclusions));
         if errors.is_empty() {
             Ok(())
         } else {
@@ -247,6 +281,11 @@ pub fn validate_pair(pair: &FolderPair, existing: &[FolderPair], cloud_root: &Pa
         validate_excluded_paths(&pair.excluded_paths)
             .into_iter()
             .map(|problem| format!("pair '{}' exclusions are invalid: {problem}", pair.id)),
+    );
+    errors.extend(
+        validate_folder_exclusions(&pair.exclusions)
+            .into_iter()
+            .map(|problem| format!("pair '{}' typed exclusions are invalid: {problem}", pair.id)),
     );
 
     if let Some(binding) = &pair.vault {
@@ -700,6 +739,8 @@ mod tests {
             remote_path: remote_path.to_string(),
             mode: SyncMode::TwoWay,
             excluded_paths: Vec::new(),
+            content_filter: MediaFilter::All,
+            exclusions: Vec::new(),
         }
     }
 
@@ -717,9 +758,27 @@ mod tests {
         let pair: FolderPair = serde_json::from_str(legacy).expect("legacy pair");
         assert!(pair.vault.is_none());
         assert!(pair.excluded_paths.is_empty());
+        let serialized = serde_json::to_value(&pair).unwrap();
+        assert!(serialized.get("content_filter").is_none());
+        assert!(serialized.get("exclusions").is_none());
         assert_eq!(
             serde_json::from_str::<FolderPair>(&serde_json::to_string(&pair).unwrap()).unwrap(),
             pair
+        );
+        let opted_in = FolderPair {
+            content_filter: MediaFilter::Photos,
+            exclusions: vec![FolderExclusion {
+                kind: FolderExclusionKind::FileType,
+                pattern: "*.tar.gz".into(),
+            }],
+            ..pair
+        };
+        let opted_in_json = serde_json::to_value(&opted_in).unwrap();
+        assert_eq!(opted_in_json["content_filter"], "photos");
+        assert_eq!(opted_in_json["exclusions"][0]["pattern"], "*.tar.gz");
+        assert_eq!(
+            serde_json::from_value::<FolderPair>(opted_in_json).unwrap(),
+            opted_in
         );
     }
 

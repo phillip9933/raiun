@@ -281,6 +281,8 @@ fn run(cli: Cli) -> Result<(), String> {
                     remote_path: args.remote,
                     mode: args.mode.into(),
                     excluded_paths: Vec::new(),
+                    content_filter: raiun_core::MediaFilter::All,
+                    exclusions: Vec::new(),
                 },
             ),
             PairCommand::Remove(args) => remove_pair(&config_path, args.id),
@@ -422,6 +424,7 @@ fn media_scan(
         source_root,
         MediaScanOptions {
             filesystem_mtime_utc,
+            exclusions: Vec::new(),
         },
     )
     .map_err(display)?;

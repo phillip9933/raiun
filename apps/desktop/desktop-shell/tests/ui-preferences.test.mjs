@@ -26,7 +26,7 @@ test('theme defaults safely when storage is unavailable or has invalid values', 
   storage.setItem(themeStorageKey(), 'auto-dark');
   storage.setItem(appearanceStorageKey('invalid-profile'), JSON.stringify({ theme: 'dark', accent: 'url(javascript:alert(1))' }));
   assert.deepEqual(readAppearance(storage, 'invalid-profile'), { theme: 'system', accent: 'ocean' });
-  assert.deepEqual(Object.keys(ACCENT_COLORS).sort(), ['amber', 'ocean', 'rose', 'teal', 'violet']);
+  assert.deepEqual(Object.keys(ACCENT_COLORS).sort(), ['amber', 'forest', 'indigo', 'ocean', 'plum', 'rose', 'teal', 'violet']);
 });
 
 test('global theme is readable and writable before a profile is selected', () => {

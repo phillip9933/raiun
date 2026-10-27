@@ -23,6 +23,8 @@ fn config() -> Config {
             mode: SyncMode::TwoWay,
             vault: None,
             excluded_paths: vec![],
+            content_filter: raiun_core::MediaFilter::All,
+            exclusions: Vec::new(),
         }],
     }
 }

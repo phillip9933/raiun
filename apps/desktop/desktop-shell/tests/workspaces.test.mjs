@@ -20,7 +20,7 @@ test('offline and encrypted files are first-class workspaces with their existing
 });
 
 test('folder workspace combines sync settings and media imports without separate navigation', () => {
-  assert.match(main, /\['folders', 'Folders', 'folders'\]/);
+  assert.match(main, /\['folders', 'Sync Folders', 'folders'\]/);
   assert.doesNotMatch(main, /data-sync-section=/);
   assert.match(main, /groups\.map\(group => spacePairGroup\(group\.spaceId, group\.pairs\)\)/);
   assert.match(main, /mediaJobs\.rowsForSpace\(spaceId\)/);
@@ -39,7 +39,7 @@ test('workspace navigation uses guarded loaders and avoids replacing identical r
   assert.match(main, /main\.scrollTop = previousMainScroll/);
   assert.match(main, /replacement\.focus\(\{ preventScroll: true \}\)/);
   assert.doesNotMatch(main, /data-action="manage-windows-offline-files"/);
-  assert.match(styles, /\.workspace-tabs/);
+  assert.match(styles, /\.settings-section-label/);
   assert.match(styles, /\.offline-workspace-browser/);
   assert.match(styles, /\.encrypted-workspace/);
 });

@@ -2746,6 +2746,57 @@ impl WindowsAgent {
         }
     }
 
+    fn account_avatar(&self, request: &Value) -> Result<Value, String> {
+        let expected = request
+            .get("expected_auth_generation")
+            .and_then(Value::as_u64)
+            .ok_or("Refresh the account before loading its photo")?;
+        let session = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if state.retiring
+                || state.logout_pending
+                || state.authenticating
+                || state.refreshing
+                || !state.online_authenticated
+                || state.active_generation != expected
+                || self.generation.load(Ordering::Acquire) != expected
+            {
+                return Err("The account changed while loading its photo".into());
+            }
+            state
+                .session
+                .clone()
+                .filter(|session| session.expires_at > unix_time_now())
+                .ok_or("Connect this account to load its photo")?
+        };
+        let client = OpenCloudClient::new_with_proxy(
+            &session.server,
+            session.access_token.clone(),
+            &session.proxy,
+        )
+        .map_err(|_| "The account photo is unavailable")?;
+        let image = client
+            .account_avatar()
+            .map_err(|_| "The account photo is unavailable")?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?;
+        if state.retiring
+            || state.logout_pending
+            || state.authenticating
+            || !state.online_authenticated
+            || state.active_generation != expected
+            || self.generation.load(Ordering::Acquire) != expected
+        {
+            return Err("The account changed while loading its photo".into());
+        }
+        crate::account_avatar_wire::response(&self.profile_scope, expected, image)
+    }
+
     fn handle_request(self: &Arc<Self>, request: &Value) -> Result<(Value, bool), String> {
         if request
             .get("profile_id")
@@ -2769,6 +2820,7 @@ impl WindowsAgent {
         }
         match action {
             "status" => Ok((self.status()?, false)),
+            "account_avatar" => Ok((self.account_avatar(request)?, false)),
             "network_proxy" => Ok((self.proxy_settings(None)?, false)),
             "network_proxy_set" => Ok((self.proxy_settings(Some(request))?, false)),
             "bandwidth_limits" => Ok((self.bandwidth_settings(None)?, false)),
@@ -2779,6 +2831,7 @@ impl WindowsAgent {
             | "list"
             | "pair_add"
             | "pair_exclusions_set"
+            | "pair_update"
             | "pair_remove"
             | "space_disconnect"
             | "space_sync_now"
@@ -3158,6 +3211,7 @@ impl WindowsAgent {
             "auth_generation": state.active_generation,
             "provider_supported": provider_supported,
             "folder_sync_supported": WINDOWS_FOLDER_SYNC_ENABLED,
+            "folder_settings_supported": WINDOWS_FOLDER_SYNC_ENABLED,
             "bandwidth_limits_supported": true,
             "network_proxy_supported": true,
             "proxy_edit_requires_sign_out": state.session.is_some(),

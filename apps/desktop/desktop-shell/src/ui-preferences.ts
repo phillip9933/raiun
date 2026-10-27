@@ -1,5 +1,5 @@
 export type AppearanceTheme = 'system' | 'light' | 'dark';
-export type AccentName = 'ocean' | 'teal' | 'violet' | 'rose' | 'amber';
+export type AccentName = 'ocean' | 'teal' | 'violet' | 'rose' | 'amber' | 'indigo' | 'forest' | 'plum';
 export type AppearanceSettings = { theme: AppearanceTheme; accent: AccentName };
 
 export const DEFAULT_APPEARANCE: AppearanceSettings = { theme: 'system', accent: 'ocean' };
@@ -8,7 +8,10 @@ export const ACCENT_COLORS: Record<AccentName, string> = {
   teal: '#267a68',
   violet: '#7057a5',
   rose: '#a94f6d',
-  amber: '#9a6416'
+  amber: '#9a6416',
+  indigo: '#345b9e',
+  forest: '#34634d',
+  plum: '#843e75'
 };
 
 const PREFIX = 'raiun.ui-preferences.v1:';
