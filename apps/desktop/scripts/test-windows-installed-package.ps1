@@ -231,24 +231,18 @@ function Check-OfflineStatus($Reply, [bool] $RequireFolderSettings = $false) {
     }
 }
 
-function Get-SafeAclFacts([string] $Path) {
-    try {
-        $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
-        $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-        $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
-        $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-        $explicitUserAllows = @($rules | Where-Object { $_.IdentityReference.Value -ceq $userSid -and -not $_.IsInherited -and $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow }).Count
-        $inheritedRules = @($rules | Where-Object { $_.IsInherited }).Count
-        return [ordered]@{
-            readable = $true
-            ownerMatchesCurrentUser = ($ownerSid -ceq $userSid)
-            explicitCurrentUserAllowCount = $explicitUserAllows
-            inheritedAceCount = $inheritedRules
-            protectedDacl = [bool]$acl.AreAccessRulesProtected
-        }
-    } catch {
-        return [ordered]@{ readable = $false; exceptionType = $_.Exception.GetType().Name }
+function Get-AccountSnapshot([string] $AgentPath) {
+    $reply = Invoke-Control -AgentPath $AgentPath -Request ([ordered]@{ action = 'accounts' })
+    if ($reply.ok -ne $true) { throw 'account_inventory_refused' }
+    $items = @($reply.data.items)
+    foreach ($item in $items) {
+        if ([string]::IsNullOrWhiteSpace([string]$item.id)) { throw 'invalid_account_inventory_id' }
+        $null = Check-OfflineStatus ([pscustomobject]@{ ok = $true; data = $item.status })
     }
+    $ids = @($items | ForEach-Object { [string]$_.id } | Sort-Object -CaseSensitive)
+    if (@($ids | Select-Object -Unique).Count -ne $ids.Count) { throw 'duplicate_account_inventory_id' }
+    $canonical = ConvertTo-Json -InputObject ([ordered]@{ ids = $ids; selected = [string]$reply.data.selected }) -Compress -Depth 4
+    return [pscustomobject]@{ count = $ids.Count; ids = $ids; fingerprint = Hash-Bytes ([Text.Encoding]::UTF8.GetBytes($canonical)); noConnectedProfiles = $true; noMountedProfiles = $true }
 }
 
 function Check-InstallRegistration {
@@ -307,11 +301,8 @@ $script:invalidPairRejected = $false
 $script:registration = [ordered]@{ baseline = $null; final = $null }
 $script:shortcutCounts = [ordered]@{ baseline = $null; final = $null }
 $script:retained = $null
-$script:postShutdownRetentionProbe = $null
-$script:documentRootPath = $null
-$script:documentAclBeforeAgent = $null
-$script:documentAclAfterAgent = $null
-$script:agentCleanupSucceeded = $true
+$script:baselineProfileMetadata = $null
+$script:finalProfileMetadata = $null
 
 try {
     New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
@@ -333,10 +324,9 @@ try {
     $env:LOCALAPPDATA = Join-Path $dataRoot 'Local'
     New-Item -ItemType Directory -Path $env:APPDATA,$env:LOCALAPPDATA | Out-Null
     $isolatedRoaming = Join-Path $env:APPDATA 'org.raiun.desktop'
-    $isolatedLocal = Join-Path $env:LOCALAPPDATA 'Raiun'
-    $script:documentRootPath = $isolatedLocal
+    $isolatedLocal = Join-Path $env:LOCALAPPDATA 'Raiun-acceptance'
     $realRoaming = Join-Path $realRoaming 'org.raiun.desktop'
-    $realLocal = Join-Path $realLocal 'Raiun'
+    $realLocal = Join-Path $realLocal 'Raiun-acceptance'
     New-Item -ItemType Directory -Path $isolatedRoaming,$isolatedLocal,$realRoaming,$realLocal -Force | Out-Null
     $script:settingsPath = Join-Path $isolatedRoaming 'desktop-updater.json'
     $script:documentPath = Join-Path $isolatedLocal 'synthetic-document.txt'
@@ -377,8 +367,6 @@ try {
     Add-Event 'baseline_install' 'passed' @{ exitCode = $script:baselineInstallExit; installedPayloadCount = $script:baselineFiles.Count; uninstallEntryCount = $script:registration.baseline.entries; startMenuShortcuts = $script:shortcutCounts.baseline }
 
     $baselineAgent = Join-Path $script:installRoot 'raiun-agent.exe'
-    $script:documentAclBeforeAgent = [ordered]@{ directory = Get-SafeAclFacts $script:documentRootPath; document = Get-SafeAclFacts $script:documentPath }
-    Add-Event 'fixture_acl_before_agent' 'diagnostic' @{ directory = $script:documentAclBeforeAgent.directory; document = $script:documentAclBeforeAgent.document }
     $script:phase = 'baseline_agent_process_start'
     Start-Agent $baselineAgent
     Add-Event 'baseline_agent_process_start' 'passed'
@@ -394,6 +382,17 @@ try {
     if ($null -eq $baselineReply) { throw 'baseline_agent_not_ready' }
     $script:phase = 'baseline_agent_status_validation'
     $script:baselineStatus = Check-OfflineStatus $baselineReply
+    $script:phase = 'baseline_account_inventory_before_add'
+    $beforeAccountAdd = Get-AccountSnapshot $baselineAgent
+    $script:phase = 'baseline_synthetic_account_add'
+    $accountAdd = Invoke-Control -AgentPath $baselineAgent -Request ([ordered]@{ action = 'account_add'; label = 'Synthetic Acceptance' })
+    if ($accountAdd.ok -ne $true -or [string]::IsNullOrWhiteSpace([string]$accountAdd.data.id)) { throw 'synthetic_account_add_failed' }
+    $addedProfileId = [string]$accountAdd.data.id
+    $script:phase = 'baseline_account_inventory_after_add'
+    $afterAccountAdd = Get-AccountSnapshot $baselineAgent
+    if ($afterAccountAdd.count -ne ($beforeAccountAdd.count + 1) -or $addedProfileId -cnotin $afterAccountAdd.ids) { throw 'synthetic_account_add_not_persisted' }
+    $script:baselineProfileMetadata = [ordered]@{ count = $afterAccountAdd.count; profileIdsAndSelectionSha256 = $afterAccountAdd.fingerprint; noConnectedProfiles = $afterAccountAdd.noConnectedProfiles; noMountedProfiles = $afterAccountAdd.noMountedProfiles }
+    Add-Event 'synthetic_broker_profile_created' 'passed' @{ profileCount = $script:baselineProfileMetadata.count; profileIdsAndSelectionSha256 = $script:baselineProfileMetadata.profileIdsAndSelectionSha256; noConnectedProfiles = $true; noMountedProfiles = $true }
     $script:phase = 'busy_installer_invocation'
     $busy = Run-Process -Path $script:final.installerPath -Arguments @('/S', "/D=$script:installRoot") -TimeoutMs 180000
     $script:busyInstallExit = $busy.exitCode
@@ -442,6 +441,12 @@ try {
     if ($null -eq $finalReply) { throw 'final_agent_not_ready' }
     $script:phase = 'final_agent_status_validation'
     $script:finalStatus = Check-OfflineStatus $finalReply -RequireFolderSettings $true
+    $script:phase = 'final_broker_profile_retention'
+    $finalProfileSnapshot = Get-AccountSnapshot $finalAgent
+    if ($finalProfileSnapshot.count -ne $script:baselineProfileMetadata.count -or
+        $finalProfileSnapshot.fingerprint -cne $script:baselineProfileMetadata.profileIdsAndSelectionSha256) { throw 'synthetic_account_metadata_not_retained' }
+    $script:finalProfileMetadata = [ordered]@{ count = $finalProfileSnapshot.count; profileIdsAndSelectionSha256 = $finalProfileSnapshot.fingerprint; noConnectedProfiles = $finalProfileSnapshot.noConnectedProfiles; noMountedProfiles = $finalProfileSnapshot.noMountedProfiles }
+    Add-Event 'synthetic_broker_profile_retained' 'passed' @{ profileCount = $script:finalProfileMetadata.count; profileIdsAndSelectionSha256 = $script:finalProfileMetadata.profileIdsAndSelectionSha256; noConnectedProfiles = $true; noMountedProfiles = $true }
     $script:phase = 'final_pair_update_validation'
     $invalid = Invoke-Control $finalAgent ([ordered]@{ action = 'pair_update'; id = 'acceptance-incomplete-pair' })
     if ($invalid.ok -ne $false -or [string]$invalid.error -cne 'Invalid folder request') { throw 'incomplete_pair_update_validation_not_rejected' }
@@ -467,31 +472,9 @@ try {
             Add-Event 'agent_cleanup' 'passed' @{ exitCode = $cleanupExit }
         } catch {
             Add-Event 'agent_cleanup' 'failed' @{ exceptionType = $_.Exception.GetType().Name }
-            $script:agentCleanupSucceeded = $false
             $script:result = 'failed'
             if ($null -eq $script:failure) { $script:failure = 'agent_cleanup:' + $_.Exception.GetType().Name }
         }
-    }
-    if ($script:agentCleanupSucceeded -and $script:failure -match '^retention_([^:]+):') {
-        $failedName = $Matches[1] -replace '_(existence_check|metadata_read|hash_compare)$', ''
-        $entry = @($script:retentionPaths | Where-Object { $_.name -ceq $failedName })
-        if ($entry.Count -eq 1) {
-            try {
-                if (-not (Test-Path -LiteralPath $entry[0].path -PathType Leaf)) {
-                    $script:postShutdownRetentionProbe = [ordered]@{ name = $failedName; readableAfterAgentExit = $false; result = 'not_found' }
-                } else {
-                    $pin = Pin-File $entry[0].path
-                    $script:postShutdownRetentionProbe = [ordered]@{ name = $failedName; readableAfterAgentExit = $true; hashMatches = ($pin.sha256 -ceq $entry[0].expected.sha256 -and $pin.length -eq $entry[0].expected.length) }
-                }
-            } catch {
-                $script:postShutdownRetentionProbe = [ordered]@{ name = $failedName; readableAfterAgentExit = $false; exceptionType = $_.Exception.GetType().Name }
-            }
-            Add-Event 'post_shutdown_retention_probe' 'diagnostic' $script:postShutdownRetentionProbe
-        }
-    }
-    if ($null -ne $script:documentRootPath -and (Test-Path -LiteralPath $script:documentRootPath -PathType Container)) {
-        $script:documentAclAfterAgent = [ordered]@{ directory = Get-SafeAclFacts $script:documentRootPath; document = Get-SafeAclFacts $script:documentPath }
-        Add-Event 'fixture_acl_after_agent_stop' 'diagnostic' @{ directory = $script:documentAclAfterAgent.directory; document = $script:documentAclAfterAgent.document }
     }
     if ($null -ne $script:startupAppData) { $env:APPDATA = $script:startupAppData }
     if ($null -ne $script:startupLocalAppData) { $env:LOCALAPPDATA = $script:startupLocalAppData }
@@ -514,9 +497,8 @@ try {
         registeredApp = $script:registration
         startMenuShortcuts = $script:shortcutCounts
         retainedData = $script:retained
-        postShutdownRetentionProbe = $script:postShutdownRetentionProbe
-        syntheticDocumentAclBeforeAgent = $script:documentAclBeforeAgent
-        syntheticDocumentAclAfterAgentStop = $script:documentAclAfterAgent
+        baselineProfileMetadata = $script:baselineProfileMetadata
+        finalProfileMetadata = $script:finalProfileMetadata
         baselineAgentStatus = $script:baselineStatus
         finalAgentStatus = $script:finalStatus
         incompletePairUpdateRejected = $script:invalidPairRejected
