@@ -3,7 +3,10 @@
 //! This module defines configuration only. The engine owns durable attempts
 //! and receipts; it never treats a configured job or queued item as uploaded.
 
-use crate::{MediaFilter, MediaOrganization, validate_remote_path};
+use crate::{
+    FolderExclusion, MediaFilter, MediaOrganization, validate_folder_exclusions,
+    validate_remote_path,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, PathBuf};
 
@@ -40,6 +43,9 @@ pub struct MediaImportJob {
     /// A same-path replacement is not silently adopted by an existing job.
     pub destination_root_resource_id: String,
     pub filter: MediaFilter,
+    /// Additional typed source exclusions, evaluated before planning.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclusions: Vec<FolderExclusion>,
     pub organization: MediaOrganization,
     /// Filesystem mtime is an explicit UTC organization input; it is never
     /// inferred as capture time and is ignored for `PreserveRelativePath`.
@@ -124,6 +130,14 @@ pub fn validate_media_import_jobs(jobs: &[MediaImportJob]) -> Result<(), String>
         }
         validate_remote_path(&job.destination_root)
             .map_err(|_| format!("media job '{}' destination path is invalid", job.id))?;
+        let exclusion_errors = validate_folder_exclusions(&job.exclusions);
+        if !exclusion_errors.is_empty() {
+            return Err(format!(
+                "media job '{}' exclusions are invalid: {}",
+                job.id,
+                exclusion_errors.join("; ")
+            ));
+        }
         if job.destination_root == "/" {
             return Err(format!(
                 "media job '{}' must select a destination folder below the Space root",
@@ -170,6 +184,7 @@ mod tests {
             destination_root: "/Personal/Photos".into(),
             destination_root_resource_id: "photos-folder-id".into(),
             filter: MediaFilter::Photos,
+            exclusions: Vec::new(),
             organization: MediaOrganization::PreserveRelativePath,
             filesystem_mtime_utc: false,
             interval_seconds: DEFAULT_MEDIA_SCAN_INTERVAL_SECONDS,
@@ -196,6 +211,21 @@ mod tests {
             PathBuf::from("/Volumes/temporarily-unmounted/Pictures")
         };
         assert!(validate_media_import_jobs(&[candidate]).is_ok());
+    }
+
+    #[test]
+    fn legacy_media_job_omits_default_exclusions_and_opted_in_rules_round_trip() {
+        let candidate = job();
+        let mut encoded = serde_json::to_value(&candidate).unwrap();
+        assert!(encoded.get("exclusions").is_none());
+        encoded["exclusions"] = serde_json::json!([{"kind":"file_type","pattern":"*.tar.gz"}]);
+        let decoded: MediaImportJob = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.exclusions[0].pattern, "*.tar.gz");
+        assert_eq!(
+            serde_json::from_value::<MediaImportJob>(serde_json::to_value(&decoded).unwrap())
+                .unwrap(),
+            decoded
+        );
     }
 
     #[test]

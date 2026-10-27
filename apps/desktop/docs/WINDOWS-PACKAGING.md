@@ -22,6 +22,13 @@ the [Tauri CLI 2.12.1 NSIS template](https://github.com/tauri-apps/tauri/blob/ta
 pinned in `package-lock.json`: its install section copies mapped resources
 under `$INSTDIR`, and its uninstall section deletes those same target paths.
 
+The pinned template defaults a first-time version upgrade to the existing
+installation instead of selecting the uninstall option. Before copying any
+executable, the installer checks whether the installed shell, agent, or CLI
+still has its files open. If so, it asks the user to quit Raiun normally and
+retry or cancel; it does not terminate processes automatically. The in-app
+updater continues to use its existing verified handoff.
+
 Set `CARGO_TARGET_DIR` to retain build artifacts across filtered source copies.
 The helper uses that target for both the Agent/CLI build and payload lookup,
 and resolves a relative setting against the desktop repository root before

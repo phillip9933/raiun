@@ -1283,7 +1283,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "raiun-agent"
-version = "0.7.0-beta.3"
+version = "0.7.4"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -1310,7 +1310,7 @@ dependencies = [
 
 [[package]]
 name = "raiun-cache"
-version = "0.7.0-beta.3"
+version = "0.7.4"
 dependencies = [
  "fs2",
  "getrandom 0.4.3",
@@ -1325,7 +1325,7 @@ dependencies = [
 
 [[package]]
 name = "raiun-cli"
-version = "0.7.0-beta.3"
+version = "0.7.4"
 dependencies = [
  "clap",
  "raiun-core",
@@ -1336,7 +1336,7 @@ dependencies = [
 
 [[package]]
 name = "raiun-cloudfiles-windows"
-version = "0.7.0-beta.3"
+version = "0.7.4"
 dependencies = [
  "fs2",
  "getrandom 0.4.3",
@@ -1354,7 +1354,7 @@ dependencies = [
 
 [[package]]
 name = "raiun-control"
-version = "0.7.0-beta.3"
+version = "0.7.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -1363,7 +1363,7 @@ dependencies = [
 
 [[package]]
 name = "raiun-control-windows"
-version = "0.7.0-beta.3"
+version = "0.7.4"
 dependencies = [
  "fs2",
  "raiun-control",
@@ -1375,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "raiun-core"
-version = "0.7.0-beta.3"
+version = "0.7.4"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
@@ -1389,7 +1389,7 @@ dependencies = [
 
 [[package]]
 name = "raiun-engine"
-version = "0.7.0-beta.3"
+version = "0.7.4"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
@@ -1408,7 +1408,7 @@ dependencies = [
 
 [[package]]
 name = "raiun-fuse"
-version = "0.7.0-beta.3"
+version = "0.7.4"
 dependencies = [
  "fuser",
  "libc",
@@ -1425,7 +1425,7 @@ dependencies = [
 
 [[package]]
 name = "raiun-opencloud"
-version = "0.7.0-beta.3"
+version = "0.7.4"
 dependencies = [
  "bytes",
  "futures-util",
@@ -1447,7 +1447,7 @@ dependencies = [
 
 [[package]]
 name = "raiun-sqlite-windows"
-version = "0.7.0-beta.3"
+version = "0.7.4"
 dependencies = [
  "raiun-control-windows",
  "rusqlite",
@@ -1456,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "raiun-vault"
-version = "0.7.0-beta.3"
+version = "0.7.4"
 dependencies = [
  "aes",
  "base64 0.22.1",

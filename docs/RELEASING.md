@@ -1,6 +1,6 @@
 # Raiun coordinated releases
 
-Each app has an independent version, build and acceptance gate. The first coordinated launch paired Android 1.0.0 with Linux Desktop 0.7.0-beta.1; Android 1.1.0 was an independent follow-up. The next coordinated launch pairs Android 1.2.0 with Linux and Windows Desktop 0.7.0-beta.2. Desktop has been imported with its Git history under `apps/desktop`. Signing and publication remain explicit maintainer actions.
+Each app has an independent version, build and acceptance gate. The first coordinated launch paired Android 1.0.0 with Linux Desktop 0.7.0-beta.1; Android 1.1.0 was an independent follow-up. Android 1.2.0 and Desktop 0.7.0-beta.2 were published together. Desktop 0.7.4 is a subsequent numeric Beta for Linux and Windows; future releases need not change the other app. Desktop has been imported with its Git history under `apps/desktop`. Signing and publication remain explicit maintainer actions.
 
 ## Versions and tags
 
@@ -13,7 +13,7 @@ Use platform-specific tags for future releases:
 | App | Example tag | GitHub release |
 | --- | --- | --- |
 | Android | `android-v1.0.0` | Raiun Android 1.0.0 |
-| Desktop | `desktop-v0.7.0-beta.2` | Raiun Desktop 0.7.0 beta 2 for Linux and Windows; marked prerelease |
+| Desktop | `desktop-v0.7.4` | Raiun Desktop 0.7.4 Beta for Linux and Windows; marked prerelease |
 
 Tags may point to the same validated commit for a coordinated launch. Separate release pages distinguish downloads, notes, beta status and app updates. Future patches need not change the other app's version. Preserve existing tags and assets; never rename historical Android tags.
 

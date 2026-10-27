@@ -26,6 +26,8 @@ fn config() -> Config {
             mode: SyncMode::TwoWay,
             vault: None,
             excluded_paths: vec![],
+            content_filter: raiun_core::MediaFilter::All,
+            exclusions: Vec::new(),
         }],
     }
 }
@@ -39,6 +41,7 @@ fn job() -> MediaImportJob {
         destination_root: "/Photos".into(),
         destination_root_resource_id: "destination".into(),
         filter: MediaFilter::Photos,
+        exclusions: Vec::new(),
         organization: MediaOrganization::PreserveRelativePath,
         filesystem_mtime_utc: false,
         interval_seconds: 3600,
@@ -52,11 +55,9 @@ fn open_fixture_engine(state_directory: &std::path::Path) -> Engine {
     {
         use raiun_control_windows::{PinnedDirectory, PrivateDirectory};
         let parent = PinnedDirectory::open(state_directory.parent().unwrap()).unwrap();
-        let directory = PrivateDirectory::create_or_open_under(
-            &parent,
-            state_directory.file_name().unwrap(),
-        )
-        .unwrap();
+        let directory =
+            PrivateDirectory::create_or_open_under(&parent, state_directory.file_name().unwrap())
+                .unwrap();
         Engine::open_private_windows(directory, Arc::new(FakeCloud::default())).unwrap()
     }
     #[cfg(not(windows))]
@@ -93,11 +94,7 @@ fn jobs_legacy_reopen_and_pair_pause_retirement_preserved() {
     store.replace(2, empty.clone()).unwrap();
     drop(store);
     drop(engine);
-    let store = FolderPairsStore::new(
-        open_fixture_engine(&state_directory),
-        scope(),
-    )
-    .unwrap();
+    let store = FolderPairsStore::new(open_fixture_engine(&state_directory), scope()).unwrap();
     let saved = store.load().unwrap().unwrap();
     assert_eq!(saved.retired_pair_ids(), &["pair"]);
     assert_eq!(saved.media_jobs().len(), 1);
@@ -113,16 +110,8 @@ fn jobs_legacy_reopen_and_pair_pause_retirement_preserved() {
 fn job_updates_and_removal_reject_stale_and_invalid_without_overwrite() {
     let dir = tempfile::tempdir().unwrap();
     let state_directory = dir.path().join("state");
-    let a = FolderPairsStore::new(
-        open_fixture_engine(&state_directory),
-        scope(),
-    )
-    .unwrap();
-    let b = FolderPairsStore::new(
-        open_fixture_engine(&state_directory),
-        scope(),
-    )
-    .unwrap();
+    let a = FolderPairsStore::new(open_fixture_engine(&state_directory), scope()).unwrap();
+    let b = FolderPairsStore::new(open_fixture_engine(&state_directory), scope()).unwrap();
     a.create(config()).unwrap();
     a.set_media_job(0, 0, job()).unwrap();
     assert!(b.set_media_job(0, 0, job()).is_err());

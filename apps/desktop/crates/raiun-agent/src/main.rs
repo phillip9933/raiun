@@ -2,6 +2,9 @@
 // native Windows Cloud Files provider is available. Windows builds use the
 // separate named-pipe entry point, which reports the missing provider instead
 // of simulating a drive.
+#[cfg(any(unix, windows))]
+mod account_avatar_wire;
+
 #[cfg(unix)]
 include!("agent_unix.rs");
 

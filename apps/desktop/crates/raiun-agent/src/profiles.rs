@@ -9,7 +9,7 @@ use raiun_core::{CONFIG_SCHEMA_VERSION, Config, FolderPair, MediaImportJob, vali
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{Read, Write},
     path::{Component, Path, PathBuf},
@@ -38,6 +38,8 @@ struct ProfileRecord {
 struct Registry {
     version: u32,
     selected: String,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    removed: BTreeSet<String>,
     profiles: BTreeMap<String, ProfileRecord>,
 }
 
@@ -76,6 +78,11 @@ impl ProfileManager {
             }
             let scope = (id != DEFAULT_ID).then(|| id.clone());
             let runtime = new_runtime(dir, scope, vaults.clone())?;
+            if registry.removed.contains(id) {
+                runtime.retiring.store(true, Ordering::Release);
+                runtime.shutdown.store(true, Ordering::Release);
+                runtime.restoring.store(false, Ordering::Release);
+            }
             runtimes.insert(id.clone(), runtime);
         }
         validate_profile_separation(&profile_paths(&ManagerState {
@@ -98,7 +105,9 @@ impl ProfileManager {
             .cloned()
             .collect::<Vec<_>>();
         for runtime in runtimes {
-            start_runtime(runtime);
+            if !runtime.retiring.load(Ordering::Acquire) {
+                start_runtime(runtime);
+            }
         }
         Ok(manager)
     }
@@ -153,12 +162,21 @@ impl ProfileManager {
             }
             "account_add" => self.add_account(&request),
             "account_select" => self.select_account(&request),
+            "account_rename" => self.rename_account(&request),
+            "account_avatar" => self.account_avatar(&request),
+            "account_remove" => self.remove_account(&request),
+            "account_restore" => self.restore_account(&request),
             "shutdown" => self.request_shutdown(),
             "status" => {
+                if request.get("profile_id").is_none() && self.selected_profile()?.is_none() {
+                    return Ok(
+                        json!({"connected":false,"mounted":false,"account_switch_supported":true,"accounts_empty":true,"agent_version":env!("CARGO_PKG_VERSION")}),
+                    );
+                }
                 let (id, runtime) = self.resolve_runtime(&request)?;
                 self.profile_status(&id, &runtime)
             }
-            "configure" | "pair_add" | "pair_exclusions_set" | "media_job_set" => {
+            "configure" | "pair_add" | "pair_exclusions_set" | "pair_update" | "media_job_set" => {
                 let _gate = self
                     .mutation_gate
                     .lock()
@@ -171,7 +189,7 @@ impl ProfileManager {
                     "media_job_set" => self.check_media_source_overlap(&id, &request)?,
                     // Exclusions change only which pair-relative paths are
                     // scanned; root overlap validation is unchanged.
-                    "pair_exclusions_set" => {}
+                    "pair_exclusions_set" | "pair_update" => {}
                     _ => unreachable!(),
                 }
                 runtime.handle(strip_profile_id(request))
@@ -189,12 +207,17 @@ impl ProfileManager {
     }
 
     fn accounts(&self) -> Result<Value, String> {
+        let _gate = self
+            .mutation_gate
+            .lock()
+            .map_err(|_| "Profile mutation gate poisoned")?;
         let (selected, profiles) = {
             let state = self.state.lock().map_err(|_| "Profile state poisoned")?;
             let profiles = state
                 .registry
                 .profiles
                 .iter()
+                .filter(|(id, _)| !state.registry.removed.contains(*id))
                 .map(|(id, record)| {
                     (
                         id.clone(),
@@ -213,7 +236,14 @@ impl ProfileManager {
             };
             items.push(json!({"id":id,"label":label,"status":status}));
         }
-        Ok(json!({"selected":selected,"items":items}))
+        let state = self.state.lock().map_err(|_| "Profile state poisoned")?;
+        let removed_items = state.registry.removed.iter().map(|id| {
+            json!({"id":id,"label":state.registry.profiles[id].label,"local_data_preserved":true})
+        }).collect::<Vec<_>>();
+        let selected = (!state.registry.removed.contains(&selected)).then_some(selected);
+        Ok(
+            json!({"selected":selected,"items":items,"removed_items":removed_items,"account_removal_supported":true}),
+        )
     }
 
     fn diagnostics(&self, runtime: &Arc<Runtime>) -> Result<Value, String> {
@@ -318,6 +348,9 @@ impl ProfileManager {
                 label: label.trim().to_owned(),
             },
         );
+        if next.removed.contains(&next.selected) {
+            next.selected = id.clone();
+        }
         validate_registry(&next)?;
         save_registry(&self.state_dir.join(REGISTRY_FILE), &next)?;
         state.registry = next;
@@ -338,14 +371,169 @@ impl ProfileManager {
             .and_then(Value::as_str)
             .ok_or("Missing profile_id")?;
         let mut state = self.state.lock().map_err(|_| "Profile state poisoned")?;
-        if !state.registry.profiles.contains_key(id) {
-            return Err("Unknown profile_id".into());
+        if !state.registry.profiles.contains_key(id) || state.registry.removed.contains(id) {
+            return Err("Unknown or removed profile_id".into());
         }
         let mut next = state.registry.clone();
         next.selected = id.to_owned();
         save_registry(&self.state_dir.join(REGISTRY_FILE), &next)?;
         state.registry = next;
         Ok(json!({}))
+    }
+
+    fn rename_account(&self, request: &Value) -> Result<Value, String> {
+        let _gate = self
+            .mutation_gate
+            .lock()
+            .map_err(|_| "Profile mutation gate poisoned")?;
+        self.ensure_running()?;
+        let id = request
+            .get("profile_id")
+            .and_then(Value::as_str)
+            .ok_or("Missing profile_id")?;
+        let expected = request
+            .get("expected_label")
+            .and_then(Value::as_str)
+            .ok_or("Missing expected_label")?;
+        let label = request
+            .get("label")
+            .and_then(Value::as_str)
+            .ok_or("Missing label")?;
+        validate_label(label)?;
+        let mut state = self.state.lock().map_err(|_| "Profile state poisoned")?;
+        if state.registry.selected != id || state.registry.removed.contains(id) {
+            return Err("The selected account changed; review its name again".into());
+        }
+        let current = state
+            .registry
+            .profiles
+            .get(id)
+            .ok_or("Unknown profile_id")?;
+        if current.label != expected {
+            return Err("The account name changed; refresh and try again".into());
+        }
+        let mut next = state.registry.clone();
+        next.profiles.get_mut(id).ok_or("Unknown profile_id")?.label = label.trim().to_owned();
+        save_registry(&self.state_dir.join(REGISTRY_FILE), &next)?;
+        state.registry = next;
+        Ok(json!({"renamed_profile_id":id,"label":label.trim(),"selected":id}))
+    }
+
+    fn selected_profile(&self) -> Result<Option<String>, String> {
+        let state = self.state.lock().map_err(|_| "Profile state poisoned")?;
+        Ok((!state.registry.removed.contains(&state.registry.selected))
+            .then(|| state.registry.selected.clone()))
+    }
+
+    fn remove_account(&self, request: &Value) -> Result<Value, String> {
+        let _gate = self
+            .mutation_gate
+            .lock()
+            .map_err(|_| "Profile mutation gate poisoned")?;
+        self.ensure_running()?;
+        if request.get("confirm").and_then(Value::as_bool) != Some(true) {
+            return Err("Confirm account removal before continuing".into());
+        }
+        let id = request
+            .get("profile_id")
+            .and_then(Value::as_str)
+            .ok_or("Missing profile_id")?;
+        let generation = request
+            .get("expected_auth_generation")
+            .and_then(Value::as_u64)
+            .ok_or("Refresh the account before removing it")?;
+        let runtime = {
+            let state = self.state.lock().map_err(|_| "Profile state poisoned")?;
+            if state.registry.selected != id || state.registry.removed.contains(id) {
+                return Err("The selected account changed; review removal again".into());
+            }
+            state
+                .runtimes
+                .get(id)
+                .cloned()
+                .ok_or("Unknown profile_id")?
+        };
+        if runtime.retiring.swap(true, Ordering::AcqRel) {
+            return Err("Account removal is already in progress".into());
+        }
+        let result = (|| {
+            runtime.logout_for_removal(Some(generation))?;
+            // Successful logout durably revokes the saved-password authority.
+            // Secret Service cannot prove physical deletion of locked items;
+            // that separate uncertainty must not undo account retirement.
+            let vault_password_cleanup_uncertain =
+                runtime.vault_cleanup_uncertain.load(Ordering::Acquire);
+            runtime.shutdown_safely()?;
+            let mut state = self.state.lock().map_err(|_| "Profile state poisoned")?;
+            let mut next = state.registry.clone();
+            next.removed.insert(id.to_owned());
+            if let Some(replacement) = next
+                .profiles
+                .keys()
+                .find(|other| !next.removed.contains(*other))
+            {
+                next.selected = replacement.clone();
+            }
+            save_registry(&self.state_dir.join(REGISTRY_FILE), &next)?;
+            let selected = (!next.removed.contains(&next.selected)).then(|| next.selected.clone());
+            state.registry = next;
+            Ok(
+                json!({"removed_profile_id":id,"selected":selected,"local_data_preserved":true,"credentials_revoked":true,"vault_password_cleanup_uncertain":vault_password_cleanup_uncertain}),
+            )
+        })();
+        if result.is_err() {
+            runtime.retiring.store(false, Ordering::Release);
+        }
+        result
+    }
+
+    fn restore_account(&self, request: &Value) -> Result<Value, String> {
+        let _gate = self
+            .mutation_gate
+            .lock()
+            .map_err(|_| "Profile mutation gate poisoned")?;
+        self.ensure_running()?;
+        if request.get("confirm").and_then(Value::as_bool) != Some(true) {
+            return Err("Confirm restoring the removed account".into());
+        }
+        let id = request
+            .get("profile_id")
+            .and_then(Value::as_str)
+            .ok_or("Missing profile_id")?;
+        let mut state = self.state.lock().map_err(|_| "Profile state poisoned")?;
+        if !state.registry.removed.contains(id) {
+            return Err("Unknown removed profile_id".into());
+        }
+        let dir = profile_dir(&self.state_dir, id);
+        let runtime = new_runtime(
+            dir,
+            (id != DEFAULT_ID).then(|| id.to_owned()),
+            self.vaults.clone(),
+        )?;
+        if runtime
+            .settings
+            .lock()
+            .map_err(|_| "Settings poisoned")?
+            .server
+            .is_some()
+        {
+            return Err(
+                "Removed account sign-out state is uncertain; it cannot be restored automatically"
+                    .into(),
+            );
+        }
+        let mut next = state.registry.clone();
+        next.removed.remove(id);
+        if next.removed.contains(&next.selected) {
+            next.selected = id.to_owned();
+        }
+        save_registry(&self.state_dir.join(REGISTRY_FILE), &next)?;
+        let selected = next.selected.clone();
+        state.registry = next;
+        state.runtimes.insert(id.to_owned(), runtime.clone());
+        drop(state);
+        start_runtime(runtime);
+        Ok(json!({"restored_profile_id":id,"selected":selected,"sign_in_required":true}))
     }
 
     /// Stop every profile. The process-level flag changes only after all stop.
@@ -371,6 +559,9 @@ impl ProfileManager {
         };
         let mut errors = Vec::new();
         for (id, runtime) in runtimes {
+            if runtime.retiring.load(Ordering::Acquire) {
+                continue;
+            }
             if let Err(error) = runtime.handle(json!({"action":"shutdown"})) {
                 let label = labels
                     .get(&id)
@@ -397,6 +588,9 @@ impl ProfileManager {
             Some(Value::String(id)) => id.clone(),
             Some(_) => return Err("profile_id must be a string".into()),
         };
+        if state.registry.removed.contains(&id) {
+            return Err("This account has been removed; restore it before signing in".into());
+        }
         let runtime = state
             .runtimes
             .get(&id)
@@ -413,6 +607,30 @@ impl ProfileManager {
         }
     }
 
+    fn account_avatar(&self, request: &Value) -> Result<Value, String> {
+        self.ensure_running()?;
+        let (id, runtime) = self.resolve_runtime(request)?;
+        let expected = request.get("expected_auth_generation").and_then(Value::as_u64)
+            .ok_or("Refresh the account before loading its photo")?;
+        let client = {
+            let state = runtime.auth_state.lock().map_err(|_| "Account state is unavailable")?;
+            if runtime.retiring.load(Ordering::Acquire) || runtime.shutdown.load(Ordering::Acquire)
+                || runtime.auth_transition.load(Ordering::Acquire)
+                || runtime.auth_generation.load(Ordering::Acquire) != expected {
+                return Err("The account changed while loading its photo".into());
+            }
+            state.client.clone().ok_or("Connect this account to load its photo")?
+        };
+        let image = client.account_avatar().map_err(|_| "The account photo is unavailable")?;
+        let _state = runtime.auth_state.lock().map_err(|_| "Account state is unavailable")?;
+        if runtime.retiring.load(Ordering::Acquire) || runtime.shutdown.load(Ordering::Acquire)
+            || runtime.auth_transition.load(Ordering::Acquire)
+            || runtime.auth_generation.load(Ordering::Acquire) != expected {
+            return Err("The account changed while loading its photo".into());
+        }
+        crate::account_avatar_wire::response(&id, expected, image)
+    }
+
     fn profile_status(&self, id: &str, runtime: &Arc<Runtime>) -> Result<Value, String> {
         let label = self
             .state
@@ -424,12 +642,12 @@ impl ProfileManager {
             .map(|profile| profile.label.clone())
             .ok_or("Unknown profile_id")?;
         let mut status = if runtime.shutdown.load(Ordering::Acquire) {
-            json!({"stopped":true,"connected":false,"mounted":false})
+            json!({"stopped":true,"connected":false,"mounted":false,"agent_version":env!("CARGO_PKG_VERSION"),"auth_generation":runtime.auth_generation.load(Ordering::Acquire)})
         } else {
             match runtime.handle(json!({"action":"status"})) {
                 Ok(status) => status,
                 Err(_) if runtime.shutdown.load(Ordering::Acquire) => {
-                    json!({"stopped":true,"connected":false,"mounted":false})
+                    json!({"stopped":true,"connected":false,"mounted":false,"agent_version":env!("CARGO_PKG_VERSION"),"auth_generation":runtime.auth_generation.load(Ordering::Acquire)})
                 }
                 Err(error) => return Err(error),
             }
@@ -632,6 +850,7 @@ fn load_registry(path: &Path) -> Result<Registry, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let registry = Registry {
                 version: REGISTRY_VERSION,
+                removed: BTreeSet::new(),
                 selected: DEFAULT_ID.into(),
                 profiles: BTreeMap::from([(
                     DEFAULT_ID.into(),
@@ -704,6 +923,21 @@ fn validate_registry(registry: &Registry) -> Result<(), String> {
     }
     if !registry.profiles.contains_key(&registry.selected) {
         return Err("Selected profile is missing from the registry".into());
+    }
+    if registry
+        .removed
+        .iter()
+        .any(|id| !registry.profiles.contains_key(id))
+    {
+        return Err("Removed account is missing its retained profile".into());
+    }
+    if registry.removed.contains(&registry.selected)
+        && registry
+            .profiles
+            .keys()
+            .any(|id| !registry.removed.contains(id))
+    {
+        return Err("Selected account must be active".into());
     }
     for (id, record) in &registry.profiles {
         if id != DEFAULT_ID && !valid_profile_id(id) {
@@ -1065,10 +1299,259 @@ mod tests {
     use crate::storage::Settings;
     use tempfile::tempdir;
 
+    struct RemovalStore {
+        removed: Arc<Mutex<Vec<String>>>,
+        fail: bool,
+    }
+    impl super::super::SessionStore for RemovalStore {
+        fn save(&self, _: &super::super::auth::Session) -> Result<(), String> {
+            Ok(())
+        }
+        fn load(&self, _: &str, _: &str) -> Result<Option<super::super::auth::Session>, String> {
+            Ok(None)
+        }
+        fn remove(&self, server: &str, _: &str) -> Result<(), String> {
+            if self.fail {
+                return Err("synthetic credential store failure".into());
+            }
+            self.removed.lock().unwrap().push(server.into());
+            Ok(())
+        }
+    }
+
+    // No runtime is started: synthetic settings and fake credential stores keep
+    // account-removal tests independent of the host keyring, cloud and mounts.
+    fn removal_fixture(root: &Path, fail: bool) -> (Arc<ProfileManager>, Arc<Mutex<Vec<String>>>) {
+        let dir = root.join("state");
+        fs::create_dir_all(&dir).unwrap();
+        let mut settings = Settings::load(&dir).unwrap();
+        settings.config.cloud_root = root.join("cloud");
+        fs::create_dir_all(&settings.config.cloud_root).unwrap();
+        settings.server = Some("https://synthetic.example.test".into());
+        settings.mount_enabled = false;
+        settings.save(&dir).unwrap();
+        let vaults = Arc::new(raiun_vault::session::VaultSessionCoordinator::new());
+        let mut runtime = new_runtime(dir.clone(), None, vaults.clone()).unwrap();
+        let removed = Arc::new(Mutex::new(Vec::new()));
+        Arc::get_mut(&mut runtime).unwrap().session_store = Arc::new(RemovalStore {
+            removed: removed.clone(),
+            fail,
+        });
+        runtime.restoring.store(false, Ordering::Release);
+        let registry = load_registry(&dir.join(REGISTRY_FILE)).unwrap();
+        let manager = Arc::new(ProfileManager {
+            state_dir: dir,
+            vaults,
+            state: Mutex::new(ManagerState {
+                registry,
+                runtimes: BTreeMap::from([(DEFAULT_ID.into(), runtime)]),
+            }),
+            mutation_gate: Mutex::new(()),
+            shutdown_requested: AtomicBool::new(false),
+        });
+        (manager, removed)
+    }
+
+    #[test]
+    fn removal_preserves_legacy_data_and_reservations_across_restart_and_restore() {
+        let temp = tempdir().unwrap();
+        let (manager, credentials) = removal_fixture(temp.path(), false);
+        let dir = manager.state_dir.clone();
+        let canary = dir.join("retained-recovery-canary");
+        fs::write(&canary, b"unuploaded synthetic edit").unwrap();
+        let old_runtime = manager.state.lock().unwrap().runtimes[DEFAULT_ID].clone();
+        let result = manager.handle(json!({"action":"account_remove","profile_id":"default","expected_auth_generation":0,"confirm":true})).unwrap();
+        assert!(result["selected"].is_null());
+        assert_eq!(
+            credentials.lock().unwrap().as_slice(),
+            &["https://synthetic.example.test"]
+        );
+        assert_eq!(fs::read(&canary).unwrap(), b"unuploaded synthetic edit");
+        assert!(old_runtime.handle(json!({"action":"pairs"})).is_err());
+        assert!(
+            manager
+                .handle(json!({"action":"status","profile_id":"default"}))
+                .is_err()
+        );
+        let accounts = manager.accounts().unwrap();
+        assert!(accounts["items"].as_array().unwrap().is_empty());
+        assert_eq!(accounts["removed_items"][0]["id"], "default");
+        assert!(
+            manager.handle(json!({"action":"status"})).unwrap()["accounts_empty"]
+                .as_bool()
+                .unwrap()
+        );
+        let reopened = ProfileManager::open(dir).unwrap();
+        let retained = reopened.state.lock().unwrap().runtimes[DEFAULT_ID].clone();
+        assert!(retained.shutdown.load(Ordering::Acquire));
+        assert!(retained.retiring.load(Ordering::Acquire));
+        assert!(reopened.accounts().unwrap()["selected"].is_null());
+        // Retired roots remain exclusion reservations for future account setup.
+        let paths = profile_paths(&reopened.state.lock().unwrap()).unwrap();
+        assert!(reject_root_overlaps(&temp.path().join("cloud"), &paths).is_err());
+        let restored = reopened
+            .handle(json!({"action":"account_restore","profile_id":"default","confirm":true}))
+            .unwrap();
+        assert_eq!(restored["selected"], "default");
+        assert_eq!(restored["sign_in_required"], true);
+        assert!(
+            reopened.state.lock().unwrap().runtimes[DEFAULT_ID]
+                .settings
+                .lock()
+                .unwrap()
+                .server
+                .is_none()
+        );
+        assert_eq!(fs::read(&canary).unwrap(), b"unuploaded synthetic edit");
+        reopened.request_shutdown().unwrap();
+    }
+
+    #[test]
+    fn removal_rejects_stale_generation_and_failed_credentials_without_hiding_profile() {
+        let temp = tempdir().unwrap();
+        let (manager, _) = removal_fixture(temp.path(), true);
+        assert!(manager.handle(json!({"action":"account_remove","profile_id":"default","expected_auth_generation":99,"confirm":true})).unwrap_err().contains("account changed"));
+        assert!(manager.handle(json!({"action":"account_remove","profile_id":"default","expected_auth_generation":0,"confirm":true})).unwrap_err().contains("credential store"));
+        assert_eq!(manager.accounts().unwrap()["items"][0]["id"], "default");
+        assert!(
+            manager.accounts().unwrap()["removed_items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !manager.state.lock().unwrap().runtimes[DEFAULT_ID]
+                .retiring
+                .load(Ordering::Acquire)
+        );
+        assert!(
+            manager
+                .handle(json!({"action":"account_remove","profile_id":"default","confirm":false}))
+                .is_err()
+        );
+        manager.request_shutdown().unwrap();
+    }
+
+    #[test]
+    fn removal_persistence_failure_keeps_visible_profile_and_can_retry_without_data_loss() {
+        let temp = tempdir().unwrap();
+        let (manager, _) = removal_fixture(temp.path(), false);
+        let path = manager.state_dir.join(REGISTRY_FILE);
+        let saved = fs::read(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(manager.handle(json!({"action":"account_remove","profile_id":"default","expected_auth_generation":0,"confirm":true})).is_err());
+        assert_eq!(manager.accounts().unwrap()["items"][0]["id"], "default");
+        assert!(
+            manager.accounts().unwrap()["removed_items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        fs::remove_dir(&path).unwrap();
+        fs::write(&path, saved).unwrap();
+        let generation = manager.accounts().unwrap()["items"][0]["status"]["auth_generation"]
+            .as_u64()
+            .unwrap();
+        manager.handle(json!({"action":"account_remove","profile_id":"default","expected_auth_generation":generation,"confirm":true})).unwrap();
+        assert!(manager.accounts().unwrap()["selected"].is_null());
+    }
+
+    #[test]
+    fn removal_selects_peer_and_keeps_removed_roots_reserved() {
+        let temp = tempdir().unwrap();
+        let (manager, credentials) = removal_fixture(temp.path(), false);
+        let peer = manager.handle(json!({"action":"account_add","label":"Team","cloud_root":temp.path().join("peer-cloud")})).unwrap()["id"].as_str().unwrap().to_owned();
+        assert!(manager.handle(json!({"action":"account_remove","profile_id":peer,"expected_auth_generation":0,"confirm":true})).is_err());
+        let removed = manager.handle(json!({"action":"account_remove","profile_id":"default","expected_auth_generation":0,"confirm":true})).unwrap();
+        assert_eq!(removed["selected"], peer);
+        assert_eq!(
+            manager.accounts().unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(credentials.lock().unwrap().len(), 1);
+        assert_eq!(
+            manager.state.lock().unwrap().runtimes[&peer]
+                .auth_generation
+                .load(Ordering::Acquire),
+            0
+        );
+        assert!(manager.handle(json!({"action":"account_add","label":"Unsafe reuse","cloud_root":temp.path().join("cloud")})).is_err());
+        let restored = manager
+            .handle(json!({"action":"account_restore","profile_id":"default","confirm":true}))
+            .unwrap();
+        assert_eq!(restored["selected"], peer);
+        assert_eq!(
+            manager.accounts().unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        manager.request_shutdown().unwrap();
+    }
+
+    #[test]
+    fn removal_preserves_physical_cleanup_uncertainty_after_authority_revocation() {
+        let temp = tempdir().unwrap();
+        let (manager, credentials) = removal_fixture(temp.path(), false);
+        manager.state.lock().unwrap().runtimes[DEFAULT_ID]
+            .vault_cleanup_uncertain
+            .store(true, Ordering::Release);
+        let removed = manager.handle(json!({"action":"account_remove","profile_id":"default","expected_auth_generation":0,"confirm":true})).unwrap();
+        assert_eq!(removed["credentials_revoked"], true);
+        assert_eq!(removed["vault_password_cleanup_uncertain"], true);
+        assert_eq!(credentials.lock().unwrap().len(), 1);
+        assert!(manager.accounts().unwrap()["items"].as_array().unwrap().is_empty());
+        assert_eq!(manager.accounts().unwrap()["removed_items"][0]["id"], "default");
+        let restored = manager.handle(json!({"action":"account_restore","profile_id":"default","confirm":true})).unwrap();
+        assert_eq!(restored["sign_in_required"], true);
+        assert!(manager.state.lock().unwrap().runtimes[DEFAULT_ID].settings.lock().unwrap().server.is_none());
+        manager.request_shutdown().unwrap();
+    }
+
+    #[test]
+    fn rename_changes_label_only_and_rejects_stale_labels_and_invalid_names() {
+        let temp = tempdir().unwrap();
+        let (manager, credentials) = removal_fixture(temp.path(), false);
+        let runtime = manager.state.lock().unwrap().runtimes[DEFAULT_ID].clone();
+        let settings = fs::read(manager.state_dir.join("settings.json")).unwrap();
+        let result = manager.handle(json!({"action":"account_rename","profile_id":"default","expected_label":"Default","label":"  Personal  "})).unwrap();
+        assert_eq!(result["label"], "Personal");
+        assert_eq!(result["renamed_profile_id"], "default");
+        assert_eq!(manager.accounts().unwrap()["items"][0]["label"], "Personal");
+        assert!(Arc::ptr_eq(
+            &runtime,
+            &manager.state.lock().unwrap().runtimes[DEFAULT_ID]
+        ));
+        assert_eq!(runtime.auth_generation.load(Ordering::Acquire), 0);
+        assert_eq!(
+            fs::read(manager.state_dir.join("settings.json")).unwrap(),
+            settings
+        );
+        assert!(credentials.lock().unwrap().is_empty());
+        assert!(manager.handle(json!({"action":"account_rename","profile_id":"default","expected_label":"Default","label":"Stale overwrite"})).is_err());
+        for label in ["", "bad\nname"] {
+            assert!(manager.handle(json!({"action":"account_rename","profile_id":"default","expected_label":"Personal","label":label})).is_err());
+        }
+        assert_eq!(
+            load_registry(&manager.state_dir.join(REGISTRY_FILE))
+                .unwrap()
+                .profiles[DEFAULT_ID]
+                .label,
+            "Personal"
+        );
+        manager.request_shutdown().unwrap();
+    }
+
     #[test]
     fn registry_rejects_unknown_or_missing_profile_ids() {
         let registry = Registry {
             version: REGISTRY_VERSION,
+            removed: BTreeSet::new(),
             selected: "missing".into(),
             profiles: BTreeMap::from([(
                 DEFAULT_ID.into(),
@@ -1199,6 +1682,7 @@ mod tests {
         );
         let registry = Registry {
             version: REGISTRY_VERSION,
+            removed: BTreeSet::new(),
             selected: DEFAULT_ID.into(),
             profiles,
         };
@@ -1335,6 +1819,7 @@ mod tests {
             destination_root: "/Photos".into(),
             destination_root_resource_id: "folder-a".into(),
             filter: raiun_core::MediaFilter::Photos,
+            exclusions: Vec::new(),
             organization: raiun_core::MediaOrganization::PreserveRelativePath,
             filesystem_mtime_utc: false,
             interval_seconds: 3_600,
@@ -1423,6 +1908,7 @@ mod tests {
             destination_root: "/Photos".into(),
             destination_root_resource_id: "folder-a".into(),
             filter: raiun_core::MediaFilter::Photos,
+            exclusions: Vec::new(),
             organization: raiun_core::MediaOrganization::PreserveRelativePath,
             filesystem_mtime_utc: false,
             interval_seconds: 3_600,
@@ -1515,4 +2001,6 @@ mod tests {
         symlink(&actual, state_dir.join(PROFILES_DIR)).expect("symlink");
         assert!(ensure_profiles_root(&state_dir).is_err());
     }
+    include!("avatar_profile_tests.rs");
+
 }

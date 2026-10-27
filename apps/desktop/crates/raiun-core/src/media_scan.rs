@@ -19,6 +19,7 @@ use std::path::Path;
 use time::OffsetDateTime;
 
 use crate::media_plan::{MediaKind, MediaSource, MediaUtcMonth};
+use crate::{FolderExclusion, folder_path_excluded};
 
 /// Maximum directory depth below the chosen source root.
 pub const MAX_MEDIA_SCAN_DEPTH: usize = 64;
@@ -32,9 +33,10 @@ pub const MAX_MEDIA_SCAN_SNIFF_BYTES: usize = 64 * 1024;
 pub const MAX_MEDIA_SCAN_WARNINGS: usize = 256;
 
 /// Scanner choices. Filesystem dates are opt-in and always interpreted as UTC.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MediaScanOptions {
     pub filesystem_mtime_utc: bool,
+    pub exclusions: Vec<FolderExclusion>,
 }
 
 /// Bounded results from a single local folder scan.
@@ -139,7 +141,7 @@ pub fn scan_media_dir(
         truncated: false,
     };
     let mut stop = false;
-    visit_directory(root, "", 0, options, &mut report, &mut stop);
+    visit_directory(root, "", 0, &options, &mut report, &mut stop);
     report
         .sources
         .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
@@ -174,7 +176,7 @@ fn visit_directory(
     dir: &Dir,
     relative_dir: &str,
     depth: usize,
-    options: MediaScanOptions,
+    options: &MediaScanOptions,
     report: &mut MediaScanReport,
     stop: &mut bool,
 ) {
@@ -293,6 +295,9 @@ fn visit_directory(
             continue;
         }
         if file_type.is_dir() {
+            if folder_path_excluded(&options.exclusions, &relative_string, true) {
+                continue;
+            }
             let next_depth = depth + 1;
             if next_depth > MAX_MEDIA_SCAN_DEPTH {
                 mark_truncated(
@@ -359,6 +364,9 @@ fn visit_directory(
                 "Non-regular filesystem entry was skipped.",
                 true,
             );
+            continue;
+        }
+        if folder_path_excluded(&options.exclusions, &relative_string, false) {
             continue;
         }
 
@@ -601,10 +609,45 @@ mod tests {
             temp.path(),
             MediaScanOptions {
                 filesystem_mtime_utc: true,
+                exclusions: Vec::new(),
             },
         )
         .unwrap();
         assert!(report.sources[0].utc_date.is_some());
+    }
+
+    #[test]
+    fn typed_exclusions_prune_before_signature_reads_without_truncating_scan() {
+        let temp = TempDir::new().unwrap();
+        fs::create_dir(temp.path().join("private")).unwrap();
+        fs::write(temp.path().join("private/unsupported.jpg"), b"not an image").unwrap();
+        fs::write(temp.path().join("keep.jpg"), [0xff, 0xd8, 0xff, 0xd9]).unwrap();
+        let report = scan_media_folder(
+            temp.path(),
+            MediaScanOptions {
+                exclusions: vec![FolderExclusion {
+                    kind: crate::FolderExclusionKind::Path,
+                    pattern: "private/".into(),
+                }],
+                ..MediaScanOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(report.complete);
+        assert_eq!(
+            report
+                .sources
+                .iter()
+                .map(|s| s.relative_path.as_str())
+                .collect::<Vec<_>>(),
+            ["keep.jpg"]
+        );
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|warning| warning.relative_path.as_deref() == Some("private/unsupported.jpg"))
+        );
     }
 
     #[cfg(unix)]

@@ -1,7 +1,5 @@
 # Raiun Desktop
 
-> **Windows beta withdrawn — 27 October 2026.** Windows beta.2 and beta.3 installers and updater packages have been removed while a reported sign-in/reconnection failure affecting both Default and newly added accounts is investigated. Linux downloads and Linux update support remain available. Earlier Windows acceptance notes describe synthetic checks and do not establish resolution of this deployment issue.
-
 An OpenCloud desktop client for Linux and Windows with a Rust background engine, a Tauri
 tray/settings UI, and a separate filesystem root per account:
 
@@ -12,26 +10,11 @@ OpenCloud/
     Team space/
 ```
 
-**Desktop 0.7.0-beta.3 for Linux and Windows x86_64.** Source and packages are part of the Raiun
-monorepo at `apps/desktop`, alongside Android at `apps/android`. Each app has its
-own version and build. Linux and Windows share the same Desktop version;
-macOS is not released. Download the AppImage or Windows setup installer from the
-[Desktop beta release](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.0-beta.3).
+**Desktop 0.7.4 Beta for Linux and Windows x86_64.** Source is in the Raiun monorepo at `apps/desktop`, alongside Android at `apps/android`; each app has its own version and build. Linux and Windows share the Desktop version. Download the AppImage or Windows setup installer from the [Desktop 0.7.4 Beta page](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.4). macOS is not released.
 
-Beta.1 users must install beta.2 manually once. Beta.2 adds automatic or manual
-GitHub release checks with dismissible notices and explicit signed Download/Install
-controls. See [Desktop updates](docs/DESKTOP-UPDATES.md) for channels and trust.
-Beta.3 bridges the legacy version format to future numeric Beta releases such as
-`0.7.4`; numeric `0.x` releases remain on the Beta channel.
+The 0.7.4 numeric version remains on the Beta update channel. Compatible installed clients can check for releases and explicitly download/install verified updates; see [Desktop updates](docs/DESKTOP-UPDATES.md) for channels and trust.
 
-The app provides an OpenCloud drive, folder sync, offline caching, encrypted
-file access, account controls, transfers and recovery UI. Focused tests cover
-account-scoped dirty-edit recovery/reconciliation, selected filesystem paths,
-startup settings and package installation. Native account-selector/file-manager
-workflows, disconnect confirmation, media upload/deduplication/restart and some
-advanced encrypted/offline controls remain unverified. Media preview and backup
-job creation were observed; a click alone is not proof of an upload. See the
-[beta changelog](CHANGELOG.md) and [acceptance records](docs/MVP-ACCEPTANCE.md).
+The app provides an OpenCloud drive, folder sync, offline caching, encrypted file access, account controls, transfers and recovery. The Sync Folders workspace presents ordinary sync folders and upload-only media folders together; Sync Folders supports two-way and one-way directions, Photos/Videos filters and editable exclusions. Settings include Light/Dark/System themes, per-account colors, account rename/removal/restore and grouped storage, network and security controls. Windows uses an in-place installer upgrade by default. The owner verified the reconnect fix with both the Default and a newly added Windows account. These checks do not certify every native account/file-manager workflow or all advanced encrypted/offline behavior. Media import runs remain bounded by documented stability, file-size and conflict rules; source files stay in place and older cloud versions are not automatically retained. See the [beta changelog](CHANGELOG.md), [Sync Folders guide](docs/SYNC-FOLDERS.md) and [acceptance records](docs/MVP-ACCEPTANCE.md).
 
 ## Screenshots
 
@@ -51,8 +34,8 @@ Browser layout previews of the Desktop interface; no account connected. These sh
 - `raiun-cli`: offline configuration commands and bounded media-destination
   preview from an explicit JSON manifest, plus a bounded local `media-scan`
   command. Neither imports, renames, or uploads files.
-- `desktop-shell`: Tauri 2 native tray with TypeScript account settings, folder-pair,
-  conflict-review, saved-copy recovery, transfers, and media-backup UI.
+- `desktop-shell`: Tauri 2 native tray with account settings, the unified Sync Folders
+  workspace, conflict review, saved-copy recovery and transfers.
 - `raiun-vault`: streaming vault encryption/decryption, scoped unlock lifecycle,
   and portable directory validation. Explicit encrypted folder pairs use a
   separate verified backend; ordinary sync and the on-demand mount retain
@@ -89,7 +72,7 @@ Commit plus dirty status is not a reproducible identity for uncommitted source.
 
 ## AppImage
 
-An additional x86_64 AppImage is available from the [Linux beta release](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.0-beta.3). It targets Ubuntu 24.04-era systems (glibc 2.39 or newer), bundles the interface and background agent, and uses the same existing account/settings locations. Cloud-drive mounting still needs system FUSE 3; persistent sign-in needs a desktop keyring. See [AppImage setup](docs/APPIMAGE.md) for launch, startup and integration details.
+An x86_64 AppImage is provided with the [Desktop 0.7.4 Beta release](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.4). It targets Ubuntu 24.04-era systems (glibc 2.39 or newer), bundles the interface and background agent, and uses the same existing account/settings locations. Cloud-drive mounting still needs system FUSE 3; persistent sign-in needs a desktop keyring. See [AppImage setup](docs/APPIMAGE.md) for launch, startup and integration details.
 
 ## Development operation
 
@@ -102,9 +85,7 @@ control diagnostic; never send credentials through it.
 
 Folder-pair deletion propagation is currently conservative: missing baseline
 items and conflicting edits require attention. The cloud mount is a separate
-projection; local folder pairs cannot overlap it. `media-preview` is a bounded offline CLI planner. The UI also configures
-recurring upload-only media jobs; full native upload/deduplication/restart
-acceptance remains unverified for this beta.
+projection; local folder pairs cannot overlap it. `media-preview` is a bounded offline CLI planner. The unified Sync Folders workspace also configures recurring upload-only media jobs. Each source stays in place; staged stability checks and explicit conflict review govern uploads. Full native media restart acceptance remains outside the claims made here.
 
 Read [architecture](docs/ARCHITECTURE.md),
 [language decision](docs/LANGUAGE-DECISION.md), and
@@ -112,3 +93,18 @@ Read [architecture](docs/ARCHITECTURE.md),
 See the [desktop feature roadmap](docs/DESKTOP-FEATURE-ROADMAP.md),
 [media design](docs/MEDIA-SYNC-DESIGN.md), and
 [encryption interoperability limits](docs/ENCRYPTION-INTEROP.md) for planned work.
+
+
+### Desktop 0.7.4 Beta
+
+This numeric `0.7.4` release is a Beta for Linux and Windows. The release includes
+Windows in-place upgrades, dedicated Offline files and Encrypted files
+workspaces, one combined Sync Folders workspace, account-scoped appearance and
+controls, and the reconnect fixes verified with Default and newly added Windows
+accounts. The older beta.2/beta.3 Windows downloads remain withdrawn.
+
+Account removal preserves local files and recovery copies while revoking saved
+sign-in and remembered vault-password access; the profile can be restored and
+must be signed in again. Permanent deletion of Raiun-managed local copies is not
+included. Native workflow gaps and broader advanced encrypted/offline acceptance
+remain documented in [MVP acceptance](docs/MVP-ACCEPTANCE.md).

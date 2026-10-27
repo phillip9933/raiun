@@ -226,6 +226,7 @@ struct Runtime {
     restoring: AtomicBool,
     shutdown: Arc<AtomicBool>,
     auth_transition: Arc<AtomicBool>,
+    retiring: AtomicBool,
     offline_namespace: AtomicBool,
     offline_namespace_probe_unix: AtomicU64,
     session_store: Arc<dyn SessionStore>,
@@ -334,7 +335,10 @@ impl Runtime {
         // transition must then invalidate this snapshot even if it completes
         // before the operation acquires its execution gate.
         let generation = self.auth_generation.load(Ordering::Acquire);
-        if self.auth_transition.load(Ordering::Acquire) || self.shutdown.load(Ordering::Acquire) {
+        if self.auth_transition.load(Ordering::Acquire)
+            || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
+        {
             return Err("An account transition is in progress".into());
         }
         Ok(generation)
@@ -375,6 +379,7 @@ impl Runtime {
         if self.auth_generation.load(Ordering::Acquire) != expected_generation
             || self.auth_transition.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
         {
             return Err("Agent is shutting down".into());
         }
@@ -399,6 +404,7 @@ impl Runtime {
         if self.auth_generation.load(Ordering::Acquire) != expected_generation
             || self.auth_transition.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
         {
             return Err(RestoreFailure::Permanent(
                 "Saved-session restore was canceled".into(),
@@ -468,6 +474,7 @@ impl Runtime {
             || self.auth_generation.load(Ordering::Acquire) != expected_generation
             || self.auth_transition.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
         {
             return Err("Saved-session restore was canceled".into());
         }
@@ -480,6 +487,7 @@ impl Runtime {
             || self.auth_generation.load(Ordering::Acquire) != expected_generation
             || self.auth_transition.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
         {
             return Err("Saved-session restore was canceled".into());
         }
@@ -522,6 +530,7 @@ impl Runtime {
         if self.auth_generation.load(Ordering::Acquire) != expected_generation
             || self.auth_transition.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
         {
             return Err("Agent is shutting down".into());
         }
@@ -843,7 +852,16 @@ impl Runtime {
     }
 
     fn logout(&self) -> Result<(), String> {
+        self.logout_for_removal(None)
+    }
+
+    fn logout_for_removal(&self, expected_generation: Option<u64>) -> Result<(), String> {
         let _transition = AuthTransition::begin(&self.auth_transition)?;
+        if expected_generation
+            .is_some_and(|expected| self.auth_generation.load(Ordering::Acquire) != expected)
+        {
+            return Err("The account changed; review removal again".into());
+        }
         self.auth_generation.fetch_add(1, Ordering::AcqRel);
         let mut transfer_fence = self.fence_transfer_admission()?;
         self.vault_edit_reconcile_jobs.cancel_all_and_wait()?;
@@ -1494,6 +1512,7 @@ impl Runtime {
         let current = || -> Result<(), String> {
             if self.auth_transition.load(Ordering::Acquire)
                 || self.shutdown.load(Ordering::Acquire)
+                || self.retiring.load(Ordering::Acquire)
                 || self.offline_namespace.load(Ordering::Acquire)
                 || self.auth_generation.load(Ordering::Acquire) != generation
             {
@@ -1562,6 +1581,7 @@ impl Runtime {
         let _sync = self.sync_gate.lock().map_err(|_| "Sync state poisoned")?;
         if self.auth_transition.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
             || self.auth_generation.load(Ordering::Acquire) != generation
         {
             return Err("Media job update was canceled by an account change".into());
@@ -1994,6 +2014,7 @@ impl Runtime {
             || self.authenticating.load(Ordering::Acquire)
             || self.restoring.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
         {
             return Err("Disconnect and reconnect before changing proxy settings".into());
         }
@@ -2099,6 +2120,7 @@ impl Runtime {
             || self.authenticating.load(Ordering::Acquire)
             || self.restoring.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
         {
             return Err(
                 "Wait for the current account connection before changing bandwidth limits".into(),
@@ -2134,6 +2156,7 @@ impl Runtime {
             || self.auth_transition.load(Ordering::Acquire)
             || self.restoring.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
         {
             return Err(
                 "Wait for the current account connection before changing bandwidth limits".into(),
@@ -2244,6 +2267,9 @@ impl Runtime {
     }
 
     fn handle(self: &Arc<Self>, request: Value) -> Result<Value, String> {
+        if self.retiring.load(Ordering::Acquire) {
+            return Err("This account is being removed or has been removed".into());
+        }
         if request
             .get("action")
             .and_then(Value::as_str)
@@ -2435,7 +2461,9 @@ impl Runtime {
                     return Err("Status was canceled by an account change".into());
                 }
                 Ok(json!({
+                    "agent_version": env!("CARGO_PKG_VERSION"),
                     "auth_generation": generation,
+                    "folder_settings_supported": true,
                     "connected": connected,
                     "offline_namespace": offline_namespace,
                     "session_expires_at": session_expires_at,
@@ -2529,6 +2557,7 @@ impl Runtime {
                     let info = flow.public_info();
                     if self.auth_transition.load(Ordering::Acquire)
                         || self.shutdown.load(Ordering::Acquire)
+                        || self.retiring.load(Ordering::Acquire)
                     {
                         return Err("Sign-in was canceled by an account transition".into());
                     }
@@ -2688,6 +2717,7 @@ impl Runtime {
                 let _sync = self.sync_gate.lock().map_err(|_| "Sync state poisoned")?;
                 if self.auth_generation.load(Ordering::Acquire) != generation
                     || self.shutdown.load(Ordering::Acquire)
+                    || self.retiring.load(Ordering::Acquire)
                     || self.auth_transition.load(Ordering::Acquire)
                 {
                     return Err("Conflict operation was canceled".into());
@@ -2853,6 +2883,117 @@ impl Runtime {
                 self.wake.store(true, Ordering::Release);
                 self.clear_pending_space_syncs()?;
                 Ok(json!({"pair_id":id,"excluded_paths":updated.excluded_paths}))
+            }
+            "pair_update" => {
+                let generation = self.operation_generation()?;
+                let expected_generation = request
+                    .get("expected_auth_generation")
+                    .and_then(Value::as_u64)
+                    .ok_or("expected_auth_generation must be an unsigned integer")?;
+                if generation != expected_generation {
+                    return Err(
+                        "Folder settings changed with the active account; refresh and retry".into(),
+                    );
+                }
+                let id = text("id")?;
+                let expected: FolderPair = serde_json::from_value(
+                    request
+                        .get("expected_pair")
+                        .cloned()
+                        .ok_or("Missing expected_pair")?,
+                )
+                .map_err(|_| "expected_pair is invalid")?;
+                if expected.id != id {
+                    return Err("expected_pair ID does not match the requested pair".into());
+                }
+                let original = self
+                    .settings
+                    .lock()
+                    .map_err(|_| "Settings poisoned")?
+                    .config
+                    .pairs
+                    .iter()
+                    .find(|pair| pair.id == id)
+                    .cloned()
+                    .ok_or("Folder pair was not found")?;
+                if original != expected {
+                    return Err(
+                        "Folder pair changed before settings were saved; refresh and retry".into(),
+                    );
+                }
+                let mut updated = original.clone();
+                updated.mode =
+                    serde_json::from_value(request.get("mode").cloned().ok_or("Missing mode")?)
+                        .map_err(|_| "mode is invalid")?;
+                updated.content_filter = serde_json::from_value(
+                    request
+                        .get("content_filter")
+                        .cloned()
+                        .ok_or("Missing content_filter")?,
+                )
+                .map_err(|_| "content_filter is invalid")?;
+                updated.exclusions = serde_json::from_value(
+                    request
+                        .get("exclusions")
+                        .cloned()
+                        .ok_or("Missing exclusions")?,
+                )
+                .map_err(|_| "exclusions must be an array")?;
+                updated.excluded_paths = serde_json::from_value(
+                    request
+                        .get("excluded_paths")
+                        .cloned()
+                        .ok_or("Missing excluded_paths")?,
+                )
+                .map_err(|_| "excluded_paths must be an array")?;
+                updated
+                    .validate_exclusions()
+                    .map_err(|error| format!("Invalid exclusions: {error}"))?;
+                let engine = self.engine_for_pair(&updated)?;
+                let _sync = self.sync_gate.lock().map_err(|_| "Sync state poisoned")?;
+                if self.auth_transition.load(Ordering::Acquire)
+                    || self.auth_generation.load(Ordering::Acquire) != generation
+                {
+                    return Err("Folder settings update was canceled by an account change".into());
+                }
+                let publication = engine
+                    .prepare_pair_policy(&updated)
+                    .map_err(|error| error.to_string())?;
+                self.update_with_wake(
+                    |settings| {
+                        if self.auth_transition.load(Ordering::Acquire)
+                            || self.auth_generation.load(Ordering::Acquire) != generation
+                        {
+                            return Err(
+                                "Folder settings update was canceled by an account change".into()
+                            );
+                        }
+                        let pair = settings
+                            .config
+                            .pairs
+                            .iter_mut()
+                            .find(|pair| pair.id == id)
+                            .ok_or("Folder pair was removed")?;
+                        if pair != &expected {
+                            return Err(
+                                "Folder pair changed before settings were saved; refresh and retry"
+                                    .into(),
+                            );
+                        }
+                        *pair = updated.clone();
+                        let errors = validate_config(&settings.config);
+                        if errors.is_empty() {
+                            Ok(())
+                        } else {
+                            Err(errors.join("; "))
+                        }
+                    },
+                    false,
+                )?;
+                publication.publish();
+                self.wake.store(true, Ordering::Release);
+                self.clear_pending_space_syncs()?;
+                Ok(json!({"pair":updated}))
             }
             "pair_remove" => {
                 let generation = self.operation_generation()?;
@@ -3194,6 +3335,7 @@ impl Runtime {
                 if self.auth_transition.load(Ordering::Acquire)
                     || self.auth_generation.load(Ordering::Acquire) != generation
                     || self.shutdown.load(Ordering::Acquire)
+                    || self.retiring.load(Ordering::Acquire)
                 {
                     return Err("Space sync request was canceled by an account change".into());
                 }
@@ -4337,6 +4479,7 @@ fn new_runtime(
         restoring: AtomicBool::new(true),
         shutdown: Arc::new(AtomicBool::new(false)),
         auth_transition: Arc::new(AtomicBool::new(false)),
+        retiring: AtomicBool::new(false),
         offline_namespace: AtomicBool::new(false),
         offline_namespace_probe_unix: AtomicU64::new(0),
         vault_account_id: scope.clone().unwrap_or_else(|| "default".into()),
@@ -4837,6 +4980,8 @@ mod tests {
         );
         let updated = FolderPair {
             excluded_paths: vec!["archive".into(), "private/notes.txt".into()],
+            content_filter: raiun_core::MediaFilter::All,
+            exclusions: Vec::new(),
             ..pair
         };
         runtime
@@ -4848,6 +4993,51 @@ mod tests {
             raiun_core::backend::ErrorKind::Conflict,
             "a stale snapshot cannot reactivate a retired ID"
         );
+    }
+
+    #[test]
+    fn pair_update_cas_replaces_full_policy_and_rejects_stale_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut pair = test_pair("pair-update", "space-a");
+        pair.local_path = dir.path().join("pair");
+        fs::create_dir(&pair.local_path).unwrap();
+        let runtime = Arc::new(runtime_for_mount_test(
+            dir.path().to_path_buf(),
+            false,
+            None,
+        ));
+        *runtime.settings.lock().unwrap() = test_settings(vec![pair.clone()]);
+        runtime.settings.lock().unwrap().save(dir.path()).unwrap();
+        let engine =
+            Engine::open(&dir.path().join("engine"), Arc::new(OfflineCacheFixture)).unwrap();
+        runtime.auth_state.lock().unwrap().engine = Some(engine.clone());
+        engine.publish_pair_policy(&pair).unwrap();
+        let expected_pair = serde_json::to_value(&pair).unwrap();
+
+        let response = runtime
+            .handle(json!({
+                "action":"pair_update", "id":pair.id, "expected_pair":expected_pair,
+                "expected_auth_generation":0, "mode":"upload_only", "content_filter":"photos",
+                "exclusions":[{"kind":"path","pattern":"private/**/secret?.dat"}],
+                "excluded_paths":["archive"]
+            }))
+            .unwrap();
+        assert_eq!(response["pair"]["mode"], "upload_only");
+        assert_eq!(response["pair"]["content_filter"], "photos");
+        assert_eq!(response["pair"]["excluded_paths"], json!(["archive"]));
+        let saved = Settings::load(dir.path()).unwrap().config.pairs.remove(0);
+        assert_eq!(saved.mode, raiun_core::SyncMode::UploadOnly);
+        assert_eq!(saved.content_filter, raiun_core::MediaFilter::Photos);
+        assert_eq!(saved.exclusions[0].pattern, "private/**/secret?.dat");
+
+        let stale = runtime.handle(json!({
+            "action":"pair_update", "id":pair.id, "expected_pair":expected_pair,
+            "expected_auth_generation":0, "mode":"two_way", "content_filter":"all",
+            "exclusions":[], "excluded_paths":[]
+        }));
+        assert!(stale.is_err());
+        let after_stale = Settings::load(dir.path()).unwrap().config.pairs.remove(0);
+        assert_eq!(after_stale, saved);
     }
 
     #[test]
@@ -5028,6 +5218,8 @@ mod tests {
             remote_path: "/Documents".into(),
             mode: raiun_core::SyncMode::TwoWay,
             excluded_paths: Vec::new(),
+            content_filter: raiun_core::MediaFilter::All,
+            exclusions: Vec::new(),
         }
     }
 
@@ -5251,6 +5443,7 @@ mod tests {
                 destination_root: "/Photos".into(),
                 destination_root_resource_id: "same-folder-id".into(),
                 filter: raiun_core::MediaFilter::Photos,
+                exclusions: Vec::new(),
                 organization: raiun_core::MediaOrganization::PreserveRelativePath,
                 filesystem_mtime_utc: false,
                 interval_seconds: 3600,
@@ -5324,6 +5517,7 @@ mod tests {
             destination_root: "/folder".into(),
             destination_root_resource_id: "folder".into(),
             filter: raiun_core::MediaFilter::Photos,
+            exclusions: Vec::new(),
             organization: raiun_core::MediaOrganization::PreserveRelativePath,
             filesystem_mtime_utc: false,
             interval_seconds: 3600,
@@ -5380,6 +5574,7 @@ mod tests {
             destination_root: "/Photos".into(),
             destination_root_resource_id: "photos-folder".into(),
             filter: raiun_core::MediaFilter::Photos,
+            exclusions: Vec::new(),
             organization: raiun_core::MediaOrganization::PreserveRelativePath,
             filesystem_mtime_utc: false,
             interval_seconds: 3600,
@@ -5428,6 +5623,7 @@ mod tests {
             destination_root: "/Photos".into(),
             destination_root_resource_id: "photos-folder".into(),
             filter: raiun_core::MediaFilter::Photos,
+            exclusions: Vec::new(),
             organization: raiun_core::MediaOrganization::PreserveRelativePath,
             filesystem_mtime_utc: false,
             interval_seconds: 3_600,
@@ -6444,6 +6640,7 @@ mod tests {
             restoring: AtomicBool::new(false),
             shutdown: Arc::new(AtomicBool::new(false)),
             auth_transition: Arc::new(AtomicBool::new(false)),
+            retiring: AtomicBool::new(false),
             offline_namespace: AtomicBool::new(false),
             offline_namespace_probe_unix: AtomicU64::new(0),
             vaults: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
@@ -6727,6 +6924,8 @@ mod tests {
                 remote_path: "/Documents".into(),
                 mode: raiun_core::SyncMode::TwoWay,
                 excluded_paths: Vec::new(),
+                content_filter: raiun_core::MediaFilter::All,
+                exclusions: Vec::new(),
             });
             settings.save(dir.path()).unwrap();
         }
@@ -7121,6 +7320,7 @@ mod tests {
             restoring: AtomicBool::new(false),
             shutdown: Arc::new(AtomicBool::new(false)),
             auth_transition: Arc::new(AtomicBool::new(false)),
+            retiring: AtomicBool::new(false),
             offline_namespace: AtomicBool::new(false),
             offline_namespace_probe_unix: AtomicU64::new(0),
             session_store,
@@ -7187,6 +7387,7 @@ mod tests {
             restoring: AtomicBool::new(true),
             shutdown: Arc::new(AtomicBool::new(false)),
             auth_transition: Arc::new(AtomicBool::new(false)),
+            retiring: AtomicBool::new(false),
             offline_namespace: AtomicBool::new(false),
             offline_namespace_probe_unix: AtomicU64::new(0),
             session_store,
@@ -8063,6 +8264,7 @@ mod tests {
             restoring: AtomicBool::new(false),
             shutdown: Arc::new(AtomicBool::new(false)),
             auth_transition: Arc::new(AtomicBool::new(false)),
+            retiring: AtomicBool::new(false),
             offline_namespace: AtomicBool::new(false),
             offline_namespace_probe_unix: AtomicU64::new(0),
             vaults: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),

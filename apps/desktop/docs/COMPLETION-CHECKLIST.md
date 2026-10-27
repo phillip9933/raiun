@@ -179,6 +179,26 @@ remain open. Subsequent Desktop releases use numeric Beta versions, beginning
 with planned `0.7.4`; this bridge remains available to older updaters.
 
 
+### Owner-approved 0.7.4 candidate scope — 27 October 2026
+
+Prepare items 1–7 from the agreed prioritization: Windows in-place upgrades
+([#25](https://github.com/phillip9933/raiun/issues/25)), storage/encrypted-file UI
+([#26](https://github.com/phillip9933/raiun/issues/26)), combined sync/media
+workspace ([#27](https://github.com/phillip9933/raiun/issues/27)), stable refresh
+([#28](https://github.com/phillip9933/raiun/issues/28)), safe account removal and
+same-ID restoration ([#29](https://github.com/phillip9933/raiun/issues/29)), and
+appearance/navigation ([#30](https://github.com/phillip9933/raiun/issues/30)).
+Headless/CLI and MSI packaging are excluded. The owner requested ready-for-publication
+candidates; this instruction does not publish 0.7.4.
+
+Source implementation and synthetic frontend/removal checks are in place. Linux
+and Windows exact-package build/upgrade, affected UI, retention and normal-quit
+checks remain required. The local browser preview was denied by automatic review;
+its unfinished interactive checks remain unverified and the preview was stopped.
+Existing unrelated completion gaps remain open; do not reinterpret whole-category
+checkboxes as a count of missing features or re-run unchanged acceptance matrices.
+
+
 ### Windows beta withdrawal — owner request, 27 October 2026
 
 Windows beta.2 and beta.3 installers, updater archives and sidecar signatures were
@@ -190,3 +210,46 @@ same reconnecting-saved-sign-in failure on a newly added account, and diagnostic
 export fails. The connection cause is not yet confirmed. Do not claim Windows
 public beta readiness from the earlier synthetic acceptance or restore these
 downloads without verified resolution and owner authorization.
+
+
+### Desktop 0.7.4 Beta preparation — 27 October 2026
+
+The prepared numeric Beta candidate targets Linux and Windows. The owner reports
+that the Windows reconnect issue was checked successfully for both the Default
+and a newly added account; this is scoped sign-in evidence, not certification of
+all native or advanced encrypted/offline workflows. The 0.7.4 candidate includes
+the Windows in-place installer, unified Sync Folders workspace, grouped settings,
+per-account appearance, and account removal/restoration. Its release documentation
+is prepared, but final package gates and publication are still pending. The
+previous beta.2/beta.3 Windows artifacts remain withdrawn. Permanent deletion of
+local copies is excluded. Whole C01–C10 completion remains unclaimed.
+
+
+### Desktop 0.7.4 Beta release — 27 October 2026
+
+Desktop 0.7.4 is released for Linux and Windows x86_64 with matching numeric
+versions and GitHub prerelease metadata. The owner accepted the installed Linux
+Sync Folders, exclusion layout and corrected Save flow. Windows contains the same
+interface and corresponding folder-edit backend. The affected Windows laptop's
+saved-sign-in and renewal evidence is reused where the auth code is unchanged.
+
+Application source `26ccf13` passes full Rust/Clippy gates, 257 frontend tests,
+48 shell tests and the independent Desktop checks. The final Windows MSVC build
+and package pipeline passed [run 40504819643](https://github.com/phillip9933/raiun/actions/runs/40504819643).
+The exact Linux agent passes capability/dispatch checks and a native isolated
+remove/empty-list/same-ID-restore sequence with preserved local/profile canaries,
+unavailable-keyring handling and normal exit 0.
+
+Focused Windows [installed-package acceptance](https://github.com/phillip9933/raiun/actions/runs/40515411949)
+passed the same-user 0.7.4 preview-to-final installation, busy refusal without
+forced termination, settings/document/profile retention, DPAPI decrypt, final
+payload hashes and normal agent shutdown. The disposable hosted runner uses
+current-user-owned fixture state; it does not certify elevated app launches or
+every historical installer/UI path. Earlier failed fixture runs remain retained.
+
+The final packages have cryptographically verified signatures bound to 0.7.4,
+platform-specific update metadata and checksums. See the
+[release assets and known limits](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.4).
+Older broken Windows assets stay withdrawn. Permanent local cleanup, CLI-only
+and MSI distribution are excluded; broader #5/#6 native recovery/history
+acceptance and whole C01–C10 certification remain open.

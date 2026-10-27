@@ -77,6 +77,7 @@ const WINDOWS_MEDIA_METADATA_ENABLED: bool = !cfg!(test);
 // Test builds keep public capability exposure disabled; direct fixtures cover
 // the same guarded implementation. Installed-package acceptance is separate.
 const WINDOWS_VAULT_SESSIONS_ENABLED: bool = !cfg!(test);
+const WINDOWS_REFRESH_LEAD_SECONDS: u64 = 30;
 include!("windows_vault_session_control.rs");
 include!("windows_vault_edit_upload.rs");
 
@@ -382,6 +383,7 @@ struct AccountState {
     active_generation: u64,
     error: Option<String>,
     session_cleanup_uncertain: bool,
+    retiring: bool,
 }
 
 struct WindowsRecoveryContext {
@@ -2674,7 +2676,12 @@ impl WindowsAgent {
             vault_sessions,
             profile_scope: profile.into(),
             session_store: Arc::new(session_store),
-            state: Arc::new(Mutex::new(AccountState::default())),
+            // Signed-out status and lifecycle fences must share the initial
+            // generation; otherwise a new account cannot be retired safely.
+            state: Arc::new(Mutex::new(AccountState {
+                active_generation: 1,
+                ..AccountState::default()
+            })),
             generation: Arc::new(AtomicU64::new(1)),
             provider: Arc::new(ProviderManager::new()),
             auth_thread: Mutex::new(None),
@@ -2739,6 +2746,57 @@ impl WindowsAgent {
         }
     }
 
+    fn account_avatar(&self, request: &Value) -> Result<Value, String> {
+        let expected = request
+            .get("expected_auth_generation")
+            .and_then(Value::as_u64)
+            .ok_or("Refresh the account before loading its photo")?;
+        let session = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if state.retiring
+                || state.logout_pending
+                || state.authenticating
+                || state.refreshing
+                || !state.online_authenticated
+                || state.active_generation != expected
+                || self.generation.load(Ordering::Acquire) != expected
+            {
+                return Err("The account changed while loading its photo".into());
+            }
+            state
+                .session
+                .clone()
+                .filter(|session| session.expires_at > unix_time_now())
+                .ok_or("Connect this account to load its photo")?
+        };
+        let client = OpenCloudClient::new_with_proxy(
+            &session.server,
+            session.access_token.clone(),
+            &session.proxy,
+        )
+        .map_err(|_| "The account photo is unavailable")?;
+        let image = client
+            .account_avatar()
+            .map_err(|_| "The account photo is unavailable")?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?;
+        if state.retiring
+            || state.logout_pending
+            || state.authenticating
+            || !state.online_authenticated
+            || state.active_generation != expected
+            || self.generation.load(Ordering::Acquire) != expected
+        {
+            return Err("The account changed while loading its photo".into());
+        }
+        crate::account_avatar_wire::response(&self.profile_scope, expected, image)
+    }
+
     fn handle_request(self: &Arc<Self>, request: &Value) -> Result<(Value, bool), String> {
         if request
             .get("profile_id")
@@ -2751,8 +2809,18 @@ impl WindowsAgent {
             .get("action")
             .and_then(Value::as_str)
             .ok_or("Control request must include a string action")?;
+        if self
+            .state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?
+            .retiring
+            && action != "status"
+        {
+            return Err("This account is being removed".into());
+        }
         match action {
             "status" => Ok((self.status()?, false)),
+            "account_avatar" => Ok((self.account_avatar(request)?, false)),
             "network_proxy" => Ok((self.proxy_settings(None)?, false)),
             "network_proxy_set" => Ok((self.proxy_settings(Some(request))?, false)),
             "bandwidth_limits" => Ok((self.bandwidth_settings(None)?, false)),
@@ -2763,6 +2831,7 @@ impl WindowsAgent {
             | "list"
             | "pair_add"
             | "pair_exclusions_set"
+            | "pair_update"
             | "pair_remove"
             | "space_disconnect"
             | "space_sync_now"
@@ -3084,7 +3153,14 @@ impl WindowsAgent {
     }
 
     fn status(&self) -> Result<Value, String> {
-        self.maybe_start_refresh()?;
+        let retiring = self
+            .state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?
+            .retiring;
+        if !retiring {
+            self.maybe_start_refresh()?;
+        }
         let mounted = self.provider.is_connected();
         let provider_supported = self.provider.activation_enabled();
         let folder_error = self
@@ -3109,6 +3185,7 @@ impl WindowsAgent {
             .provider
             .pause_snapshot(state.active_generation, state.online_authenticated);
         let mut status = json!({
+            "agent_version": env!("CARGO_PKG_VERSION"),
             "connected": session.is_some() && state.online_authenticated,
             "offline": session.is_some() && !state.online_authenticated,
             "server": session.map(|value| value.server.as_str()),
@@ -3134,6 +3211,7 @@ impl WindowsAgent {
             "auth_generation": state.active_generation,
             "provider_supported": provider_supported,
             "folder_sync_supported": WINDOWS_FOLDER_SYNC_ENABLED,
+            "folder_settings_supported": WINDOWS_FOLDER_SYNC_ENABLED,
             "bandwidth_limits_supported": true,
             "network_proxy_supported": true,
             "proxy_edit_requires_sign_out": state.session.is_some(),
@@ -3145,6 +3223,7 @@ impl WindowsAgent {
             "refreshing": state.refreshing,
             "session_expires_at": session.map(|value| value.expires_at),
             "session_cleanup_uncertain": state.session_cleanup_uncertain,
+            "account_removing": state.retiring,
         });
         if WINDOWS_VAULT_SESSIONS_ENABLED {
             status["vault_access_mode"] = json!("native_read_only");
@@ -4635,6 +4714,9 @@ impl WindowsAgent {
                 .state
                 .lock()
                 .map_err(|_| "Account state is unavailable")?;
+            if state.retiring {
+                return Ok(());
+            }
             let Some(session) = state.session.clone() else {
                 return Ok(());
             };
@@ -4642,7 +4724,8 @@ impl WindowsAgent {
             // Retry it after the existing backoff even when its token is fresh.
             let refresh_due = state.needs_refresh
                 || !state.online_authenticated
-                || session.expires_at <= unix_time_now().saturating_add(300);
+                || session.expires_at
+                    <= unix_time_now().saturating_add(WINDOWS_REFRESH_LEAD_SECONDS);
             if state.logout_pending
                 || !refresh_due
                 || state.authenticating
@@ -5164,6 +5247,47 @@ impl WindowsAgent {
                 .into()
         });
         Ok(json!({"logged_out":true,"session_cleanup_uncertain":cleanup_uncertain}))
+    }
+
+    fn begin_retirement(&self, expected_generation: u64) -> Result<(), String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?;
+        if state.active_generation != expected_generation
+            || self.generation.load(Ordering::Acquire) != expected_generation
+        {
+            return Err("The account changed; refresh and try again".into());
+        }
+        if state.session_cleanup_uncertain {
+            return Err("The saved sign-in state is uncertain; resolve sign-out first".into());
+        }
+        if state.retiring {
+            return Err("This account is already being removed".into());
+        }
+        // Close request admission before incrementing the generation. A late
+        // sign-in/refresh completion and queued provider commands become stale.
+        state.retiring = true;
+        match self.next_generation() {
+            Ok(generation) => {
+                state.active_generation = generation;
+                state.online_authenticated = false;
+                state.needs_refresh = false;
+                state.logout_pending = true;
+                Ok(())
+            }
+            Err(error) => {
+                state.retiring = false;
+                Err(error)
+            }
+        }
+    }
+
+    fn cancel_retirement(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.retiring = false;
+            state.logout_pending = false;
+        }
     }
 
     fn next_generation(&self) -> Result<u64, String> {
@@ -6475,7 +6599,7 @@ fn request_timeout(request: &Value) -> Duration {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     mod windows_media_worker_test {
         include!("windows_media_worker_test.rs");
     }
@@ -12487,7 +12611,7 @@ mod tests {
     type MemoryBandwidthSettings = HashMap<(String, Vec<u8>), Vec<u8>>;
 
     #[derive(Default)]
-    struct MemoryStore {
+    pub(super) struct MemoryStore {
         sessions: Mutex<HashMap<(String, String, String), auth::Session>>,
         root_configs: Mutex<HashMap<(String, String, String), Vec<u8>>>,
         bandwidth_settings: Mutex<MemoryBandwidthSettings>,
@@ -12498,6 +12622,31 @@ mod tests {
         fail_root_config_removes: Mutex<bool>,
         fail_revokes: Mutex<bool>,
         publication_gate: Mutex<Option<Arc<PublicationGate>>>,
+    }
+
+    pub(super) fn synthetic_profile_runtime(
+        profile: &str,
+        source_admissions: Option<super::SharedSourceAdmissions>,
+        vault_sessions: Arc<raiun_vault::session::VaultSessionCoordinator>,
+    ) -> (Arc<WindowsAgent>, Arc<MemoryStore>) {
+        let store = Arc::new(MemoryStore::default());
+        let runtime = Arc::new(
+            WindowsAgent::new_for_profile_with_services(
+                profile,
+                store.clone(),
+                source_admissions,
+                vault_sessions,
+            )
+            .expect("create synthetic account runtime"),
+        );
+        runtime
+            .attach_existing_file_save_owner()
+            .expect("attach synthetic account runtime");
+        (runtime, store)
+    }
+
+    pub(super) fn set_synthetic_revoke_failure(store: &MemoryStore, fail: bool) {
+        *store.fail_revokes.lock().expect("synthetic store lock") = fail;
     }
 
     impl SessionStore for MemoryStore {
@@ -17492,6 +17641,41 @@ mod tests {
     }
 
     #[test]
+    fn successful_refresh_with_five_minute_token_stays_connected_on_status() {
+        let (endpoint, fixture) = synthetic_refresh_server(
+            200,
+            r#"{"access_token":"rotated-access-token","refresh_token":"rotated-refresh-token","expires_in":300}"#,
+        );
+        let store = Arc::new(MemoryStore::default());
+        seed_active_session(
+            &store,
+            "default",
+            session_for_refresh(&endpoint, unix_time_now() + 25),
+        );
+
+        let agent = WindowsAgent::new(store.clone());
+        assert_eq!(agent.status().unwrap()["offline"], true);
+        let refreshed = wait_for_refresh(&agent);
+        assert_eq!(refreshed["connected"], true);
+        fixture.join().unwrap();
+
+        let generation = refreshed["auth_generation"].as_u64().unwrap();
+        let saved = store.sessions.lock().unwrap();
+        let session = saved.values().next().unwrap();
+        assert!(session.expires_at > unix_time_now() + 250);
+        assert!(session.last_refresh_at.is_some());
+        drop(saved);
+
+        let status = agent.status().unwrap();
+        assert_eq!(status["connected"], true);
+        assert_eq!(status["offline"], false);
+        assert_eq!(status["refreshing"], false);
+        assert_eq!(status["auth_generation"], generation);
+        assert_eq!(agent.generation.load(Ordering::Acquire), generation);
+        agent.stop_and_join().unwrap();
+    }
+
+    #[test]
     fn startup_rejects_a_pointer_for_a_different_profile() {
         let store = MemoryStore::default();
         seed_active_session(
@@ -18287,5 +18471,43 @@ mod tests {
             request_timeout(&json!({"action":"status"})),
             Duration::from_secs(30)
         );
+    }
+
+    #[test]
+    fn account_retirement_is_generation_bound_and_closes_runtime_admission() {
+        let agent = Arc::new(
+            WindowsAgent::new_for_profile("default", MemoryStore::default())
+                .expect("create synthetic signed-out runtime"),
+        );
+        let generation = agent.generation.load(Ordering::Acquire);
+        assert!(
+            agent
+                .begin_retirement(generation.saturating_add(1))
+                .is_err()
+        );
+        assert!(!agent.state.lock().unwrap().retiring);
+
+        agent
+            .begin_retirement(generation)
+            .expect("retire exact expected generation");
+        assert_eq!(
+            agent.generation.load(Ordering::Acquire),
+            generation.saturating_add(1)
+        );
+        assert!(agent.state.lock().unwrap().retiring);
+        assert!(
+            agent
+                .handle_request(&json!({"action":"network_proxy"}))
+                .is_err()
+        );
+
+        agent.cancel_retirement();
+        assert!(!agent.state.lock().unwrap().retiring);
+        assert!(
+            agent
+                .handle_request(&json!({"action":"network_proxy"}))
+                .is_ok()
+        );
+        agent.stop_and_join().expect("stop synthetic runtime");
     }
 }

@@ -10,7 +10,12 @@
     "windows": {
       "nsis": {
         "installMode": "currentUser",
-        "startMenuFolder": "Raiun"
+        "startMenuFolder": "Raiun",
+        "template": "./windows/installer.nsi",
+        "installerHooks": "./windows/installer-hooks.nsh",
+        "customLanguageFiles": {
+          "English": "./windows/English.nsh"
+        }
       }
     }
   }

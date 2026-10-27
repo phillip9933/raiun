@@ -321,6 +321,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         remote_path: REMOTE_ROOT.into(),
         mode: SyncMode::TwoWay,
         excluded_paths: Vec::new(),
+        content_filter: raiun_core::MediaFilter::All,
+        exclusions: Vec::new(),
     };
     let start = Instant::now();
     let report = engine.sync_pair(&pair)?;

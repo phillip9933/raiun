@@ -49,7 +49,10 @@ impl Runtime {
 
     fn offline_vault_context(&self) -> Result<(OpenCloudClient, String, u64), String> {
         let generation = self.operation_generation()?;
-        if self.auth_transition.load(Ordering::Acquire) || self.shutdown.load(Ordering::Acquire) {
+        if self.auth_transition.load(Ordering::Acquire)
+            || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
+        {
             return Err("An account transition is in progress".into());
         }
         let settings = self.settings.lock().map_err(|_| "Settings poisoned")?;
@@ -69,6 +72,7 @@ impl Runtime {
         drop(settings);
         if self.auth_transition.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
             || self.auth_generation.load(Ordering::Acquire) != generation
         {
             return Err("An account transition is in progress".into());
@@ -78,7 +82,10 @@ impl Runtime {
 
     fn vault_context(&self) -> Result<(OpenCloudClient, String, u64), String> {
         let generation = self.operation_generation()?;
-        if self.auth_transition.load(Ordering::Acquire) || self.shutdown.load(Ordering::Acquire) {
+        if self.auth_transition.load(Ordering::Acquire)
+            || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
+        {
             return Err("An account transition is in progress".into());
         }
         let auth = self
@@ -87,6 +94,7 @@ impl Runtime {
             .map_err(|_| "Authentication state poisoned")?;
         if self.auth_transition.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
             || self.auth_generation.load(Ordering::Acquire) != generation
         {
             return Err("An account transition is in progress".into());
@@ -947,7 +955,9 @@ impl Runtime {
                 .auth_state
                 .lock()
                 .map_err(|_| "Authentication state poisoned")?;
-            if self.auth_transition.load(Ordering::Acquire) || self.shutdown.load(Ordering::Acquire)
+            if self.auth_transition.load(Ordering::Acquire)
+                || self.shutdown.load(Ordering::Acquire)
+                || self.retiring.load(Ordering::Acquire)
             {
                 return Err("An account transition is in progress".into());
             }
@@ -984,6 +994,9 @@ impl Runtime {
         request: Value,
         password: Option<Zeroizing<String>>,
     ) -> Result<Value, String> {
+        if self.retiring.load(Ordering::Acquire) {
+            return Err("This account is being removed or has been removed".into());
+        }
         self.handle_vault_with_store(
             request,
             password,
@@ -1255,6 +1268,7 @@ impl Runtime {
             if expected_generation != generation
                 || self.auth_transition.load(Ordering::Acquire)
                 || self.shutdown.load(Ordering::Acquire)
+                || self.retiring.load(Ordering::Acquire)
             {
                 return Ok(reject("stale_generation"));
             }
@@ -1453,7 +1467,9 @@ impl Runtime {
             if !valid_copy_write_id(&write_id) || revision == 0 {
                 return Ok(reject("scope_changed"));
             }
-            if self.auth_transition.load(Ordering::Acquire) || self.shutdown.load(Ordering::Acquire)
+            if self.auth_transition.load(Ordering::Acquire)
+                || self.shutdown.load(Ordering::Acquire)
+                || self.retiring.load(Ordering::Acquire)
             {
                 return Ok(reject("stale_generation"));
             }
@@ -4192,6 +4208,7 @@ mod tests {
             restoring: AtomicBool::new(false),
             shutdown: Arc::new(AtomicBool::new(false)),
             auth_transition: Arc::new(AtomicBool::new(false)),
+            retiring: AtomicBool::new(false),
             offline_namespace: AtomicBool::new(false),
             offline_namespace_probe_unix: AtomicU64::new(0),
             session_store: Arc::new(NoopSessionStore),

@@ -389,6 +389,8 @@ impl Runtime {
             remote_path: job.destination_root.clone(),
             mode: SyncMode::UploadOnly,
             excluded_paths: vec![],
+            content_filter: raiun_core::MediaFilter::All,
+            exclusions: Vec::new(),
         };
         let pin = self.admit(&pair, config, None)?;
         self.check_source_admission(

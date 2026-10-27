@@ -1,5 +1,22 @@
 # Raiun Desktop changelog
 
+## 0.7.4 Beta — 2026-10-27
+
+- Windows installer upgrades existing same-user installations in place by default, without requiring a manual uninstall. Running program files block replacement with Retry/Cancel; the installer does not force Raiun to stop.
+- Dedicated Offline files and Encrypted files pages, clearer storage usage, and expandable help reduce clutter.
+- Ordinary sync folders and upload-only media folders share one Sync Folders workspace and list; direction, file filters, exclusions and existing-copy behavior remain explicit.
+- Sync Folders adds editable directions, All files/Photos/Videos filters, and multiple file-type or path-pattern exclusions. Existing literal exclusions keep their meaning; editing keeps source and destination locations fixed.
+- Account accents cover the selected card and header, with color swatches and authenticated server avatars where supported. Settings are grouped, with removed accounts at the bottom.
+- Periodic refresh preserves appropriate focus/scroll and avoids unchanged full-page redraws.
+- Explicit account removal signs out, revokes remembered vault-password access and stops the account while preserving local files, recovery and path reservations. Removed accounts can be restored to the same profile; sign-in and vault passwords are required again.
+- Light/Dark/System themes, per-account accents, consistent account selection, a standard settings icon and a compact account/Refresh strip.
+- Mount is unavailable when already mounted; encrypted-file help distinguishes Lock from forgetting a saved password.
+- Account display names can be edited without changing profile identity, credentials or data paths.
+- Windows refresh scheduling uses a 30-second lead instead of 300 seconds, avoiding an immediate repeated-refresh cycle for five-minute access tokens.
+- Reconnect failure details remain available inline after a toast is dismissed. Redacted diagnostics accept legitimate disconnected Windows status, omit cleanup extension data and report app/agent versions separately.
+
+This numeric `0.7.4` release remains on the Beta channel and retains the beta.3 sign-in/Space fixes. The owner verified Windows reconnect behavior with the Default and a newly added account. Exact package hashes and version-bound update signatures were verified. Focused native Windows preview-to-final installation preserved settings, profile metadata and same-user DPAPI data; the busy guard refused replacement without killing the agent. Headless/CLI distribution and MSI packaging are outside this release.
+
 ## 0.7.0-beta.3 — 2026-10-27
 
 Focused Linux and Windows sign-in and encrypted Space fixes.

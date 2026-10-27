@@ -1,0 +1,56 @@
+name: Desktop Windows installed-package acceptance
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - work/desktop-followup-ui
+    paths:
+      - .github/workflows/desktop-windows-acceptance.yml
+      - apps/desktop/scripts/test-windows-installed-package.ps1
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  installed-package-acceptance:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Download pinned baseline candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: raiun-desktop-windows-x86_64-candidate
+          repository: phillip9933/raiun
+          run-id: 40463700987
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/raiun-baseline-candidate
+
+      - name: Download pinned final candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: raiun-desktop-windows-x86_64-candidate
+          repository: phillip9933/raiun
+          run-id: 40504819643
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/raiun-final-candidate
+
+      - name: Run same-user install and retention acceptance
+        shell: pwsh
+        run: >-
+          ./apps/desktop/scripts/test-windows-installed-package.ps1
+          -BaselineArtifactRoot "${{ runner.temp }}/raiun-baseline-candidate"
+          -FinalArtifactRoot "${{ runner.temp }}/raiun-final-candidate"
+          -OutputDirectory "${{ github.workspace }}/windows-acceptance-output"
+
+      - name: Upload bounded acceptance receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: raiun-desktop-windows-installed-package-acceptance
+          path: ${{ github.workspace }}/windows-acceptance-output/*
+          if-no-files-found: warn
+          retention-days: 14

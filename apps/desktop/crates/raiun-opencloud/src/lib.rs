@@ -4,6 +4,7 @@
 //! It never follows redirects, and keeps authorization values out of Debug output.
 
 mod async_body;
+pub mod avatar;
 pub mod transfer_budget;
 pub mod vault;
 pub mod vault_backend;

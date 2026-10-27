@@ -12,7 +12,9 @@ use raiun_cache::{
 use raiun_core::backend::{
     CloudBackend, CloudError, CloudSpace, ErrorKind, RemoteEntry, WriteCondition,
 };
-use raiun_core::{FolderPair, SyncMode, VaultBinding, validate_remote_path};
+use raiun_core::{
+    FolderExclusion, FolderPair, MediaFilter, SyncMode, VaultBinding, validate_remote_path,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -74,7 +76,7 @@ impl SyncRevocationHandle {
 pub struct PairPolicyPublication<'a> {
     inner: &'a Inner,
     pair_id: String,
-    exclusions: Option<Vec<String>>,
+    policy: Option<PairSyncPolicy>,
     _execution: MutexGuard<'a, ()>,
 }
 
@@ -88,7 +90,7 @@ impl PairPolicyPublication<'_> {
             .pair_policies
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        policies.insert(self.pair_id.clone(), self.exclusions.clone());
+        policies.insert(self.pair_id.clone(), self.policy.clone());
     }
 }
 
@@ -211,9 +213,28 @@ struct Inner {
     /// Last published exclusion policy for each pair. `None` is a retired
     /// pair ID and prevents a stale scheduler snapshot from reactivating it.
     /// Access is serialized by `execution` with every sync dispatch.
-    pair_policies: Mutex<BTreeMap<String, Option<Vec<String>>>>,
+    pair_policies: Mutex<BTreeMap<String, Option<PairSyncPolicy>>>,
     metadata_gate: Mutex<()>,
     sync_paused: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PairSyncPolicy {
+    mode: SyncMode,
+    content_filter: MediaFilter,
+    excluded_paths: Vec<String>,
+    exclusions: Vec<FolderExclusion>,
+}
+
+impl From<&FolderPair> for PairSyncPolicy {
+    fn from(pair: &FolderPair) -> Self {
+        Self {
+            mode: pair.mode,
+            content_filter: pair.content_filter,
+            excluded_paths: pair.excluded_paths.clone(),
+            exclusions: pair.exclusions.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -3512,6 +3533,9 @@ impl Engine {
                     if local.directory || remote.directory {
                         continue;
                     }
+                    if pair.excludes_file_path(&rel) {
+                        continue;
+                    }
                     if remote.encrypted {
                         continue;
                     }
@@ -3566,7 +3590,7 @@ impl Engine {
         self.check_pair_policy(pair)?;
         let pair = self.normalize_pair_root(pair)?;
         validate_conflict_path(rel)?;
-        if pair.excludes_relative_path(rel) {
+        if pair.excludes_file_path(rel) {
             return Err(CloudError::new(
                 ErrorKind::Unsupported,
                 "excluded paths cannot be resolved through the folder conflict action",
@@ -3758,6 +3782,12 @@ impl Engine {
                 self.check_sync_paused()?;
                 let local = self.local_stage(&pair.id, &rel)?;
                 let remote = self.remote_stage(&pair.id, &rel)?;
+                if !local.as_ref().is_some_and(|entry| entry.directory)
+                    && !remote.as_ref().is_some_and(|entry| entry.directory)
+                    && pair.excludes_file_path(&rel)
+                {
+                    continue;
+                }
                 let baseline = self.baseline(&pair.id, &rel)?;
                 match (local, remote) {
                     (Some(l), Some(r)) if l.directory && r.directory => {
@@ -3836,7 +3866,7 @@ impl Engine {
         Ok(PairPolicyPublication {
             inner: &self.inner,
             pair_id: pair.id.clone(),
-            exclusions: Some(pair.excluded_paths.clone()),
+            policy: Some(PairSyncPolicy::from(pair)),
             _execution: guard,
         })
     }
@@ -3857,7 +3887,7 @@ impl Engine {
         Ok(PairPolicyPublication {
             inner: &self.inner,
             pair_id: pair_id.to_owned(),
-            exclusions: None,
+            policy: None,
             _execution: guard,
         })
     }
@@ -3908,8 +3938,9 @@ impl Engine {
             .pair_policies
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let policy = PairSyncPolicy::from(pair);
         match policies.get(&pair.id) {
-            Some(Some(exclusions)) if exclusions == &pair.excluded_paths => Ok(()),
+            Some(Some(current)) if current == &policy => Ok(()),
             Some(Some(_)) => Err(CloudError::new(
                 ErrorKind::Conflict,
                 "folder pair policy changed; refresh the profile snapshot before syncing",
@@ -3922,7 +3953,7 @@ impl Engine {
                 // Legacy callers and first startup establish the initial
                 // policy on first dispatch. Subsequent changes require the
                 // explicit publication API above.
-                policies.insert(pair.id.clone(), Some(pair.excluded_paths.clone()));
+                policies.insert(pair.id.clone(), Some(policy));
                 Ok(())
             }
         }
@@ -4079,6 +4110,12 @@ impl Engine {
                     )
                 })?;
                 let directory = meta.is_dir();
+                if directory && pair.excludes_directory_path(&rel) {
+                    continue;
+                }
+                if !directory && pair.excludes_file_path(&rel) {
+                    continue;
+                }
                 let (size, mtime, hash, fingerprint) = if directory {
                     (0, modified_unix(&meta), None, None)
                 } else if meta.is_file() {
@@ -4330,7 +4367,10 @@ impl Engine {
                         return Err(error);
                     }
                 };
-                if pair.excludes_relative_path(&relative) {
+                if pair.excludes_relative_path(&relative)
+                    || (entry.directory && pair.excludes_directory_path(&relative))
+                    || (!entry.directory && pair.excludes_file_path(&relative))
+                {
                     return Ok(());
                 }
                 match self.prepare_remote_entry(pair, &dir, entry) {
@@ -6412,6 +6452,8 @@ mod tests {
             remote_path: "/sync".into(),
             mode: SyncMode::TwoWay,
             excluded_paths: Vec::new(),
+            content_filter: raiun_core::MediaFilter::All,
+            exclusions: Vec::new(),
         };
         (state, local_parent, cloud, engine, pair)
     }
@@ -6425,6 +6467,11 @@ mod tests {
 
         let mut updated = pair.clone();
         updated.excluded_paths = vec!["private/cache".into()];
+        updated.content_filter = MediaFilter::Photos;
+        updated.exclusions = vec![FolderExclusion {
+            kind: raiun_core::FolderExclusionKind::Path,
+            pattern: "private/**/secret?.txt".into(),
+        }];
 
         // Dropping a prepared policy models settings persistence failure: no
         // new exclusion is published and the prior snapshot stays runnable.
@@ -6537,6 +6584,63 @@ mod tests {
             b"remote edit"
         );
         assert_eq!(*cloud.delete_calls.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn media_filter_preserves_filtered_files_and_their_reconciliation_baseline() {
+        let (_state, _parent, cloud, engine, mut pair) = setup();
+        let local_file = pair.local_path.join("notes.txt");
+        fs::write(&local_file, b"original").expect("write source");
+        engine.sync_pair(&pair).expect("initial upload");
+        assert_eq!(cloud.bytes("/sync/notes.txt").unwrap(), b"original");
+        let baseline = engine.baseline(&pair.id, "notes.txt").unwrap().unwrap();
+
+        fs::write(&local_file, b"local edit").expect("edit source");
+        cloud.replace_file("/sync/notes.txt", b"remote edit");
+        pair.content_filter = MediaFilter::Photos;
+        engine.publish_pair_policy(&pair).expect("publish filter");
+        let report = engine.sync_pair(&pair).expect("filtered sync");
+        assert_eq!(report.uploaded, 0);
+        assert_eq!(report.downloaded, 0);
+        assert_eq!(report.conflicts, 0);
+        assert_eq!(fs::read(&local_file).unwrap(), b"local edit");
+        assert_eq!(cloud.bytes("/sync/notes.txt").unwrap(), b"remote edit");
+        let retained = engine.baseline(&pair.id, "notes.txt").unwrap().unwrap();
+        assert_eq!(retained.local_hash, baseline.local_hash);
+        assert_eq!(retained.remote_etag, baseline.remote_etag);
+    }
+
+    #[test]
+    fn media_filters_keep_directories_traversable_in_both_directions() {
+        let (_state, _parent, cloud, engine, mut pair) = setup();
+        let photo_dir = pair.local_path.join("albums/2024");
+        fs::create_dir_all(&photo_dir).expect("create nested local folders");
+        fs::write(photo_dir.join("photo.JPG"), b"photo bytes").expect("write photo");
+        pair.content_filter = MediaFilter::Photos;
+        engine
+            .publish_pair_policy(&pair)
+            .expect("publish photo filter");
+        let upload = engine.sync_pair(&pair).expect("sync nested photo");
+        assert!(upload.uploaded >= 1);
+        assert_eq!(
+            cloud.bytes("/sync/albums/2024/photo.JPG").unwrap(),
+            b"photo bytes"
+        );
+
+        let (_state2, _parent2, cloud2, engine2, mut pair2) = setup();
+        cloud2.insert_dir("/sync/downloads");
+        cloud2.insert_dir("/sync/downloads/2026");
+        cloud2.insert_file("/sync/downloads/2026/clip.MP4", b"video bytes");
+        pair2.content_filter = MediaFilter::Videos;
+        engine2
+            .publish_pair_policy(&pair2)
+            .expect("publish video filter");
+        let download = engine2.sync_pair(&pair2).expect("sync nested video");
+        assert!(download.downloaded >= 1);
+        assert_eq!(
+            fs::read(pair2.local_path.join("downloads/2026/clip.MP4")).unwrap(),
+            b"video bytes"
+        );
     }
 
     #[test]
@@ -7085,6 +7189,8 @@ mod tests {
             remote_path: "/sync".into(),
             mode: SyncMode::TwoWay,
             excluded_paths: Vec::new(),
+            content_filter: raiun_core::MediaFilter::All,
+            exclusions: Vec::new(),
         };
         let sync_engine = engine.clone();
         let sync_pair = pair.clone();
@@ -8598,6 +8704,8 @@ mod tests {
             remote_path: "/sync".into(),
             mode: SyncMode::TwoWay,
             excluded_paths: Vec::new(),
+            content_filter: raiun_core::MediaFilter::All,
+            exclusions: Vec::new(),
         };
         assert_eq!(
             engine.sync_pair(&pair).unwrap_err().kind,
@@ -8632,6 +8740,8 @@ mod tests {
             remote_path: "/sync".into(),
             mode: SyncMode::DownloadOnly,
             excluded_paths: Vec::new(),
+            content_filter: raiun_core::MediaFilter::All,
+            exclusions: Vec::new(),
         };
 
         let report = engine.sync_pair(&pair).expect("cross-filesystem sync");
@@ -8885,6 +8995,9 @@ mod tests {
 
         let mut upload_only = pair.clone();
         upload_only.mode = SyncMode::UploadOnly;
+        engine
+            .publish_pair_policy(&upload_only)
+            .expect("publish upload-only conflict policy");
         let current = engine
             .conflicts(&upload_only, None, 10)
             .unwrap()
@@ -8910,6 +9023,9 @@ mod tests {
 
         let mut download_only = pair.clone();
         download_only.mode = SyncMode::DownloadOnly;
+        engine
+            .publish_pair_policy(&download_only)
+            .expect("publish download-only conflict policy");
         let current = engine
             .conflicts(&download_only, None, 10)
             .unwrap()
@@ -9086,6 +9202,8 @@ mod tests {
             remote_path: "/sync".into(),
             mode: SyncMode::TwoWay,
             excluded_paths: Vec::new(),
+            content_filter: raiun_core::MediaFilter::All,
+            exclusions: Vec::new(),
         };
         assert_eq!(
             engine.sync_pair(&pair).unwrap_err().kind,

@@ -66,7 +66,7 @@ test('actual explicit refresh sends only current scope and discards a reply afte
   assert.equal(view.card(), '');
 });
 
-test('actual Windows card labels shared last-observed totals and routes management to existing Transfers', async () => {
+test('actual Windows card labels shared last-observed totals and offline controls live in their workspace', async () => {
   const view = harness(async () => usage());
   assert.match(view.card(), /Device cache \(all accounts\)/);
   assert.match(view.card(), /not limited to the selected account/);
@@ -74,10 +74,9 @@ test('actual Windows card labels shared last-observed totals and routes manageme
   await view.refresh();
   const html = view.card();
   assert.match(html, /Last observed: 1200 B used of 1000 B/);
-  assert.match(html, /data-action="manage-windows-offline-files"/);
+  assert.doesNotMatch(html, /data-action="manage-windows-offline-files"/);
   assert.doesNotMatch(html, /data-action="open-offline-files"/);
-  const handler = transpile(functionText('handleAction'));
-  assert.match(handler, /case 'manage-windows-offline-files':[\s\S]*?state.page = 'transfers'/);
+  assert.match(functionText('offlineWorkspacePage'), /windowsDeviceCacheCard\(\).*windowsOfflineFilesCard\(\).*windowsOfflineFoldersCard\(\)/s);
   const card = functionText('offlineAvailabilityCard');
   assert.match(card, /if \(isWindowsAgentStatus\(state.status\)\) return windowsDeviceCacheCard\(\)/);
   assert.match(card, /state.status\?\.offline_cache/);

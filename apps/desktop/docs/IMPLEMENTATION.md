@@ -3092,3 +3092,62 @@ candidate packaging, exact metadata checks and parent evidence review are comple
 this evidence update does not publish a release. Earlier setup, observer and
 original whole-case failures remain failures, paired with the focused passing
 recovery evidence rather than retroactively relabeled.
+
+
+## 0.7.4 candidate acceptance — 27 October 2026
+
+The isolated candidate starts from published beta.3. It adds the approved desktop
+workspace/appearance changes, generation-bound account removal, same-ID restore,
+label-only account rename, and in-place Windows installer upgrades with a safe
+running-process guard. Removing an account revokes saved sign-in and remembered
+vault-password authority, stops its runtime and retains local/cloud files,
+protected recovery/history and root/source/vault reservations. Restore requires
+a new sign-in and each vault password again.
+
+Linux Secret Service revocation durably rotates the profile authority generation.
+It cannot prove physical removal of locked keyring items, even when clear reports
+success; such old-generation items are inaccessible to Raiun. Account retirement
+therefore depends on successful authority revocation, not on physical deletion.
+Authority read/write or sign-in revocation failures still stop retirement. The
+removal result retains `vault_password_cleanup_uncertain` separately and never
+claims that physical keyring erasure was confirmed. Native testing caught and
+retained the earlier incorrect gate that blocked every Linux removal. The Linux
+correction and its package acceptance are in progress; no physical-cleanup guard
+has been changed into an assumption that inaccessible keyrings are empty.
+
+Windows five-minute-token churn was confirmed on the affected deployment: beta.3
+refreshed when a token had at most 300 seconds left, so each successful 300-second
+refresh immediately triggered another. The candidate uses a 30-second lead. The
+Windows five-minute-token regression, account lifecycle tests and full MSVC
+workspace gates passed. The exact candidate at source `1c60b4e` was installed over
+beta.3 with exit 0 and all three installed executable hashes matching the package
+manifest. Both saved accounts restored without credential entry or reset and
+passed a 331-second observation: each had one normal renewal, no reported error
+and no rapid generation churn. A brief reconnecting state was observed during
+renewal; uninterrupted connectivity is not claimed. Cloud roots were not
+configured in that deployment test, so it does not establish mount/file-operation
+acceptance.
+
+The diagnostics sanitizer accepts the legitimate nullable Windows pause state
+and known cleanup extension, omits cleanup details from the exported report,
+rejects unexpected fields, and records bounded public shell/agent versions
+separately. Focused tests cover privacy canaries and older-agent metadata. Native
+agent diagnostics succeeded on both affected Windows accounts; the physical UI
+export button was not exercised there.
+
+The frozen cross-platform candidate passed independent Desktop checks run
+40463704146 and full Windows checks/package run 40463700987, with 245 frontend
+tests and production build passing locally. Its canonical Windows updater ZIP
+contains the exact admitted setup executable and was signed with the existing
+host-only Desktop updater key. The subsequent Linux-only authority-retirement
+correction changes no Windows runtime, installer, UI or update-policy source;
+Windows artifact/evidence reuse requires that explicit source comparison. Linux
+revalidation and focused native UI/package acceptance remain pending.
+
+Public Windows beta.2/beta.3 downloads remain withdrawn. PR #31 is a preparation
+candidate, not an app publication. The new stronger account colors, unified folder
+workflow and Android-style ignore rules are follow-up work in a separate checkout;
+they do not silently replace this tested candidate. The earlier browser preview
+was stopped after automatic approval denial; separate previously authorized
+packaged-app VM checks proceed independently. Test/harness failures are retained
+under the external task evidence directory rather than represented as passes.
