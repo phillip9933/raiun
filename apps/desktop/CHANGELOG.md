@@ -15,7 +15,7 @@
 - Windows refresh scheduling uses a 30-second lead instead of 300 seconds, avoiding an immediate repeated-refresh cycle for five-minute access tokens.
 - Reconnect failure details remain available inline after a toast is dismissed. Redacted diagnostics accept legitimate disconnected Windows status, omit cleanup extension data and report app/agent versions separately.
 
-This numeric `0.7.4` release remains on the Beta channel and retains the beta.3 sign-in/Space fixes. The owner verified Windows reconnect behavior with the Default and a newly added account. Exact package hashes and version-bound update signatures were verified. Focused native Windows preview-to-final installation preserved settings, profile metadata and same-user DPAPI data; the busy guard refused replacement without killing the agent. Headless/CLI distribution and MSI packaging are outside this release.
+This numeric `0.7.4` release remains on the Beta channel and retains the beta.3 sign-in/Space fixes. Headless/CLI distribution and MSI packaging are outside this release.
 
 ## 0.7.0-beta.3 — 2026-10-27
 
