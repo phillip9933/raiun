@@ -148,3 +148,32 @@ Owner numbering clarification, 27 October 2026: keep the current
 Its updater must recognize numeric `0.x.y` releases as Beta; future releases use
 that cleaner format. GitHub prerelease metadata and Stable-channel exclusion
 must follow the same classification. The bridge remains available for old clients.
+
+
+### Published hotfix evidence — 27 October 2026
+
+[Desktop 0.7.0-beta.3](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.0-beta.3)
+is published for Linux and Windows x86_64. [PR #24](https://github.com/phillip9933/raiun/pull/24)
+merged the urgent fixes and numeric-version bridge. Both [Desktop checks](https://github.com/phillip9933/raiun/actions/runs/40440925658)
+and the [full Windows native suite and build](https://github.com/phillip9933/raiun/actions/runs/40440920902)
+passed on final source `632c96b`. Packages were built from `d88645f`; final changes
+are test formatting, a bounded integration-test wait and a CI timeout only.
+Published build provenance records exact production-source equivalence.
+
+Both exact signed beta.2-to-beta.3 package upgrades passed signature tamper/version
+negatives, installed-file checks, synthetic data/settings retention, visible new
+version and App updates, and normal new-app exit code zero. Windows additionally
+retained a CurrentUser DPAPI canary. Its installer exit was zero; the installer
+finish page was not visually captured. The initial invalid synthetic release-list
+fixture was correctly rejected before updater construction, preserved and
+corrected before the successful continuation. All nine public assets were
+downloaded without authentication and matched the approved sizes and SHA256.
+Task VMs were normally shut down; original accounts/recovery fixtures remain.
+
+These checks use synthetic fixtures and do not establish organization-specific
+browser/IdP sign-in, a live GitHub offer/download from the installed GUI, or
+completion of the broader UI/CLI work. Android source is unchanged: its quality
+checks passed; a later emulator run had lock-screen/UI failures, retained and
+reported separately rather than treated as a passing run. Existing C01–C10 gaps
+remain open. Subsequent Desktop releases use numeric Beta versions, beginning
+with planned `0.7.4`; this bridge remains available to older updaters.
