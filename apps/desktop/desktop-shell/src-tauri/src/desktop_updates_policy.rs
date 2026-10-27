@@ -275,12 +275,7 @@ mod tests {
     fn numeric_zero_major_versions_are_beta_and_require_github_beta_flag() {
         let numeric_beta = Version::parse("0.7.4").unwrap();
         assert!(is_beta_version(&numeric_beta));
-        let correctly_marked = vec![release(
-            "desktop-v0.7.4",
-            true,
-            false,
-            "Next numeric beta",
-        )];
+        let correctly_marked = vec![release("desktop-v0.7.4", true, false, "Next numeric beta")];
         assert_eq!(
             parse(correctly_marked, "0.7.0-beta.2", Channel::Beta)
                 .unwrap()
@@ -293,7 +288,10 @@ mod tests {
             false,
             "Missing GitHub beta flag",
         )];
-        assert_eq!(parse(mismarked.clone(), "0.7.0-beta.2", Channel::Beta), None);
+        assert_eq!(
+            parse(mismarked.clone(), "0.7.0-beta.2", Channel::Beta),
+            None
+        );
         assert_eq!(parse(mismarked, "0.7.0-beta.2", Channel::Stable), None);
         assert_eq!(
             parse(
@@ -337,7 +335,12 @@ mod tests {
         ] {
             assert_eq!(
                 parse(
-                    vec![release(tag, github_prerelease, false, "mismatched metadata")],
+                    vec![release(
+                        tag,
+                        github_prerelease,
+                        false,
+                        "mismatched metadata"
+                    )],
                     "0.7.0-beta.2",
                     Channel::Beta
                 ),
