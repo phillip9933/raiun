@@ -197,3 +197,16 @@ checks remain required. The local browser preview was denied by automatic review
 its unfinished interactive checks remain unverified and the preview was stopped.
 Existing unrelated completion gaps remain open; do not reinterpret whole-category
 checkboxes as a count of missing features or re-run unchanged acceptance matrices.
+
+
+### Windows beta withdrawal — owner request, 27 October 2026
+
+Windows beta.2 and beta.3 installers, updater archives and sidecar signatures were
+withdrawn from both public Desktop releases. Their update manifests/inventories
+now contain Linux only; checksums and distribution notes were refreshed. Linux
+AppImages and signatures are unchanged. Original Windows artifacts and release
+metadata remain preserved in maintainer-local evidence. The owner reports the
+same reconnecting-saved-sign-in failure on a newly added account, and diagnostics
+export fails. The connection cause is not yet confirmed. Do not claim Windows
+public beta readiness from the earlier synthetic acceptance or restore these
+downloads without verified resolution and owner authorization.
