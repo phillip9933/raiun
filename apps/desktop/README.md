@@ -10,7 +10,7 @@ OpenCloud/
     Team space/
 ```
 
-**Desktop 0.7.4 Beta for Linux and Windows x86_64 is prepared for release.** Final package checks and publication are pending. Source is in the Raiun monorepo at `apps/desktop`, alongside Android at `apps/android`; each app has its own version and build. Linux and Windows share the Desktop version. The release will use the [Desktop 0.7.4 Beta page](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.4) after publication. macOS is not released.
+**Desktop 0.7.4 Beta for Linux and Windows x86_64.** Source is in the Raiun monorepo at `apps/desktop`, alongside Android at `apps/android`; each app has its own version and build. Linux and Windows share the Desktop version. Download the AppImage or Windows setup installer from the [Desktop 0.7.4 Beta page](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.4). macOS is not released.
 
 The 0.7.4 numeric version remains on the Beta update channel. Compatible installed clients can check for releases and explicitly download/install verified updates; see [Desktop updates](docs/DESKTOP-UPDATES.md) for channels and trust.
 
@@ -72,7 +72,7 @@ Commit plus dirty status is not a reproducible identity for uncommitted source.
 
 ## AppImage
 
-An x86_64 AppImage is provided with the [Desktop 0.7.4 Beta release](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.4) after publication. It targets Ubuntu 24.04-era systems (glibc 2.39 or newer), bundles the interface and background agent, and uses the same existing account/settings locations. Cloud-drive mounting still needs system FUSE 3; persistent sign-in needs a desktop keyring. See [AppImage setup](docs/APPIMAGE.md) for launch, startup and integration details.
+An x86_64 AppImage is provided with the [Desktop 0.7.4 Beta release](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.4). It targets Ubuntu 24.04-era systems (glibc 2.39 or newer), bundles the interface and background agent, and uses the same existing account/settings locations. Cloud-drive mounting still needs system FUSE 3; persistent sign-in needs a desktop keyring. See [AppImage setup](docs/APPIMAGE.md) for launch, startup and integration details.
 
 ## Development operation
 
@@ -95,10 +95,9 @@ See the [desktop feature roadmap](docs/DESKTOP-FEATURE-ROADMAP.md),
 [encryption interoperability limits](docs/ENCRYPTION-INTEROP.md) for planned work.
 
 
-### Desktop 0.7.4 Beta release preparation
+### Desktop 0.7.4 Beta
 
-This numeric `0.7.4` release is a Beta for Linux and Windows. The release page
-is prepared, but publication remains pending the final package gates. It includes
+This numeric `0.7.4` release is a Beta for Linux and Windows. The release includes
 Windows in-place upgrades, dedicated Offline files and Encrypted files
 workspaces, one combined Sync Folders workspace, account-scoped appearance and
 controls, and the reconnect fixes verified with Default and newly added Windows

@@ -223,3 +223,33 @@ per-account appearance, and account removal/restoration. Its release documentati
 is prepared, but final package gates and publication are still pending. The
 previous beta.2/beta.3 Windows artifacts remain withdrawn. Permanent deletion of
 local copies is excluded. Whole C01–C10 completion remains unclaimed.
+
+
+### Desktop 0.7.4 Beta release — 27 October 2026
+
+Desktop 0.7.4 is released for Linux and Windows x86_64 with matching numeric
+versions and GitHub prerelease metadata. The owner accepted the installed Linux
+Sync Folders, exclusion layout and corrected Save flow. Windows contains the same
+interface and corresponding folder-edit backend. The affected Windows laptop's
+saved-sign-in and renewal evidence is reused where the auth code is unchanged.
+
+Application source `26ccf13` passes full Rust/Clippy gates, 257 frontend tests,
+48 shell tests and the independent Desktop checks. The final Windows MSVC build
+and package pipeline passed [run 40504819643](https://github.com/phillip9933/raiun/actions/runs/40504819643).
+The exact Linux agent passes capability/dispatch checks and a native isolated
+remove/empty-list/same-ID-restore sequence with preserved local/profile canaries,
+unavailable-keyring handling and normal exit 0.
+
+Focused Windows [installed-package acceptance](https://github.com/phillip9933/raiun/actions/runs/40515411949)
+passed the same-user 0.7.4 preview-to-final installation, busy refusal without
+forced termination, settings/document/profile retention, DPAPI decrypt, final
+payload hashes and normal agent shutdown. The disposable hosted runner uses
+current-user-owned fixture state; it does not certify elevated app launches or
+every historical installer/UI path. Earlier failed fixture runs remain retained.
+
+The final packages have cryptographically verified signatures bound to 0.7.4,
+platform-specific update metadata and checksums. See the
+[release assets and known limits](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.4).
+Older broken Windows assets stay withdrawn. Permanent local cleanup, CLI-only
+and MSI distribution are excluded; broader #5/#6 native recovery/history
+acceptance and whole C01–C10 certification remain open.
