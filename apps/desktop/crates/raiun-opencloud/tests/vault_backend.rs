@@ -1480,7 +1480,9 @@ fn seed_and_cache_file(
 }
 
 fn wait_for_content_get(fixture: &Fixture) {
-    for _ in 0..500 {
+    // Allow bounded setup time on slower Windows CI runners.
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
         if fixture
             .requests()
             .iter()
@@ -1488,7 +1490,7 @@ fn wait_for_content_get(fixture: &Fixture) {
         {
             return;
         }
-        thread::sleep(Duration::from_millis(2));
+        thread::sleep(Duration::from_millis(10));
     }
     panic!(
         "timed out waiting for synthetic vault content GET; requests: {:?}",

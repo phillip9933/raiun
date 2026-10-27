@@ -28,6 +28,21 @@ owned agent process exited. If any check fails, the installer is not started and
 the app reports the error. Linux restarts only after Tauri reports installation
 success. Windows uses the standard Tauri NSIS updater bundle.
 
+## Version numbering and the compatibility bridge
+
+Desktop numeric versions beginning with `0` belong to the Beta channel: for
+example `0.7.4`. The second number identifies the beta revision and the third
+identifies its update. These releases must still have GitHub's prerelease flag
+set. Stable-channel checks exclude the entire `0.x` line; `1.x` numeric releases
+use the Stable channel. Legacy hyphenated prerelease tags remain recognized.
+GitHub's flag must agree with this classification.
+
+`0.7.0-beta.3` is the final legacy-format bridge release. Existing beta.2 clients
+require the GitHub prerelease flag to match a hyphenated SemVer suffix, so they
+can discover this bridge automatically. The bridge recognizes later numeric
+beta releases, such as `desktop-v0.7.4`, without a manual reinstall. Retain the
+bridge release so older clients can upgrade through it.
+
 ## Release asset contract
 
 Each supported Desktop release must publish `desktop-update.json` and its

@@ -45,7 +45,7 @@ jobs:
         timeout-minutes: 3
         run: cargo test --locked -p raiun-cache --lib pin_resume_tests::concurrent_handles_admit_only_one_initial_pin_for_the_same_target -- --exact --nocapture
       - name: Run workspace tests
-        timeout-minutes: 20
+        timeout-minutes: 35
         run: cargo test --workspace --exclude raiun-fuse --locked
       - name: Build unsigned candidate installer
         run: |

@@ -1,14 +1,15 @@
 # Desktop implementation status
 
-## Current release — Linux Desktop 0.7.0-beta.1, 21 October 2026
+## Current baseline and urgent patch — 27 October 2026
 
-The first public Linux beta is based on the R200 implementation, with coherent
-0.7.0-beta.1 package/binary versions and a history-preserving import into
-`apps/desktop`. See [the app changelog](../CHANGELOG.md) for features and known
-verification limits. Windows/macOS are not released. Earlier R-number entries
-below are historical engineering evidence, not semantic release versions or
-claims that each workflow is verified on this beta. Local evidence/output paths
-refer to maintainer archives that are not part of this public source tree.
+Linux and Windows Desktop 0.7.0-beta.2 were published together. The owner requested
+an immediate 0.7.0-beta.3 patch for saved-sign-in startup/reconnect failures and
+encrypted Space metadata rejection, separately from the broader UI and CLI work.
+The [changelog](../CHANGELOG.md) lists the focused patch scope. Release acceptance
+must distinguish synthetic fixture tests from an actual owner's server/reboot.
+
+Earlier entries below are historical snapshots. They do not describe the current
+publication/activation status. Local maintainer output paths are outside Git.
 
 ## Isolated Desktop updater source — 26 October 2026
 

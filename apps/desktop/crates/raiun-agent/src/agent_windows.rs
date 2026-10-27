@@ -460,6 +460,8 @@ struct ProviderManager {
     initial_save_test_activation: Arc<AtomicBool>,
     #[cfg(all(test, debug_assertions))]
     initial_save_test_observation: Arc<Mutex<Option<String>>>,
+    #[cfg(all(test, debug_assertions))]
+    disconnect_test_calls: AtomicU64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1663,6 +1665,8 @@ impl ProviderManager {
             initial_save_test_activation: initial_save_activation,
             #[cfg(all(test, debug_assertions))]
             initial_save_test_observation,
+            #[cfg(all(test, debug_assertions))]
+            disconnect_test_calls: AtomicU64::new(0),
         }
     }
 
@@ -2142,6 +2146,8 @@ impl ProviderManager {
     }
 
     fn disconnect(&self) -> Result<(), String> {
+        #[cfg(all(test, debug_assertions))]
+        self.disconnect_test_calls.fetch_add(1, Ordering::SeqCst);
         self.cancel_fresh_close();
         self.bandwidth.suspend();
         self.revoke_folders();
@@ -4632,8 +4638,11 @@ impl WindowsAgent {
             let Some(session) = state.session.clone() else {
                 return Ok(());
             };
-            let refresh_due =
-                state.needs_refresh || session.expires_at <= unix_time_now().saturating_add(300);
+            // A startup/transport failure leaves a retained session unverified.
+            // Retry it after the existing backoff even when its token is fresh.
+            let refresh_due = state.needs_refresh
+                || !state.online_authenticated
+                || session.expires_at <= unix_time_now().saturating_add(300);
             if state.logout_pending
                 || !refresh_due
                 || state.authenticating
@@ -4763,7 +4772,6 @@ impl WindowsAgent {
             .lock()
             .map_err(|_| "Vault credential changes are unavailable")?;
 
-        self.provider.disconnect()?;
         {
             let state = self
                 .state
@@ -4779,6 +4787,7 @@ impl WindowsAgent {
                 return Err("Sign-in is already in progress".into());
             }
         }
+        self.provider.disconnect()?;
         self.join_finished_auth()?;
         // A failed refresh may have cleared credentials without explicit logout.
         // New sign-in must never inherit the prior subject's preferences owner.
@@ -16871,7 +16880,7 @@ mod tests {
     }
 
     #[test]
-    fn folder_control_dispatch_reaches_account_guard_before_worker_admission() {
+    fn folder_control_dispatch_rejects_foreign_profile_before_worker_admission() {
         let agent = Arc::new(WindowsAgent::new(MemoryStore::default()));
         for action in [
             "windows_offline_folders",
@@ -16888,10 +16897,15 @@ mod tests {
             }));
             assert_eq!(
                 result.unwrap_err(),
-                "Select the current Windows account",
+                "The selected Windows profile does not own this request",
                 "{action}"
             );
         }
+        #[cfg(debug_assertions)]
+        assert_eq!(
+            agent.provider.disconnect_test_calls.load(Ordering::SeqCst),
+            0
+        );
         let status = agent.status().unwrap();
         assert_eq!(status["connected"], false);
         assert_eq!(status["mounted"], false);
@@ -16972,6 +16986,96 @@ mod tests {
         assert_eq!(agent.status().unwrap()["connected"], false);
         assert!(store.sessions.lock().unwrap().is_empty());
         assert!(store.active_identity.lock().unwrap().is_none());
+    }
+
+    #[cfg(all(test, debug_assertions))]
+    #[test]
+    fn rejected_auth_begin_preserves_existing_account_and_provider_admission() {
+        let provider = Arc::new(super::ProviderManager::new());
+        let store = Arc::new(MemoryStore::default());
+        let session = synthetic_session(
+            "https://existing.example",
+            "synthetic-client",
+            unix_time_now().saturating_add(3600),
+        );
+        let root_configuration = super::RootConfiguration {
+            profile_scope: "default".into(),
+            server: session.server.clone(),
+            client_id: session.client_id.clone(),
+            issuer: Some("https://existing.example".into()),
+            path: "C:\\RaiunSyntheticRoot".into(),
+            volume_serial: 17,
+            file_index: 29,
+            registration_ownership: Some(RegistrationOwnership {
+                state: "registered".into(),
+                account_id: "synthetic-account".into(),
+                personal_drive_id: "synthetic-drive".into(),
+                personal_root_resource_id: Some("synthetic-root".into()),
+                volume_serial: 17,
+                file_index: 29,
+            }),
+            valid: true,
+        };
+        let state = Arc::new(Mutex::new(AccountState {
+            session: Some(session.clone()),
+            root_configuration: Some(root_configuration.clone()),
+            online_authenticated: true,
+            active_generation: 41,
+            ..AccountState::default()
+        }));
+        let agent = Arc::new(WindowsAgent {
+            source_admissions: None,
+            vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
+            profile_scope: "default".into(),
+            session_store: store,
+            state: state.clone(),
+            generation: Arc::new(std::sync::atomic::AtomicU64::new(41)),
+            provider: provider.clone(),
+            auth_thread: Mutex::new(None),
+            refresh_thread: Mutex::new(None),
+            fresh_close_worker: Mutex::new(None),
+            folder_lifecycle: Mutex::new(()),
+            vault_credential_operation: Mutex::new(()),
+            protected_recovery_tokens: Mutex::new(
+                super::windows_vault_capture_recovery::Tokens::default(),
+            ),
+            #[cfg(all(test, debug_assertions))]
+            synthetic_vault_completion_writer_probe: true,
+        });
+
+        assert_eq!(
+            agent
+                .begin_auth(&json!({"server":"https://other.example","client_id":"other-client"}))
+                .unwrap_err(),
+            "This Windows account is already connected. Sign out before signing in again"
+        );
+        {
+            let state = state.lock().unwrap();
+            assert_eq!(state.session.as_ref().unwrap().server, session.server);
+            assert_eq!(state.session.as_ref().unwrap().client_id, session.client_id);
+            assert_eq!(state.root_configuration, Some(root_configuration));
+            assert!(state.online_authenticated);
+            assert!(!state.authenticating);
+            assert_eq!(state.active_generation, 41);
+        }
+        assert_eq!(agent.generation.load(Ordering::Acquire), 41);
+        assert_eq!(provider.disconnect_test_calls.load(Ordering::SeqCst), 0);
+
+        {
+            let mut state = state.lock().unwrap();
+            state.session = None;
+            state.root_configuration = None;
+            state.authenticating = true;
+        }
+        assert_eq!(
+            agent
+                .begin_auth(&json!({"server":"https://other.example","client_id":"other-client"}))
+                .unwrap_err(),
+            "Sign-in is already in progress"
+        );
+        assert!(state.lock().unwrap().authenticating);
+        assert_eq!(agent.generation.load(Ordering::Acquire), 41);
+        assert_eq!(provider.disconnect_test_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -17453,6 +17557,31 @@ mod tests {
         );
         assert!(store.active_identity.lock().unwrap().is_some());
         assert_eq!(store.sessions.lock().unwrap().len(), 1);
+
+        let failed_generation = agent.generation.load(Ordering::Acquire);
+        agent.maybe_start_refresh().unwrap();
+        assert_eq!(agent.generation.load(Ordering::Acquire), failed_generation);
+        {
+            let mut state = agent.state.lock().unwrap();
+            assert!(!state.needs_refresh);
+            assert!(state.session.as_ref().unwrap().expires_at > unix_time_now() + 300);
+            // Advance the retry gate without sleeping or changing the token.
+            state.refresh_retry_at = 0;
+        }
+        agent.maybe_start_refresh().unwrap();
+        assert!(agent.generation.load(Ordering::Acquire) > failed_generation);
+        agent
+            .refresh_thread
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap()
+            .join()
+            .unwrap();
+        let state = agent.state.lock().unwrap();
+        assert!(state.session.is_some());
+        assert!(!state.online_authenticated);
+        assert!(!state.refreshing);
     }
 
     #[test]

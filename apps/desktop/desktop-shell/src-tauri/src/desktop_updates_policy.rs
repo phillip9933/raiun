@@ -25,6 +25,12 @@ pub enum Channel {
     Beta,
 }
 
+/// Classify every 0.x release as beta, alongside all SemVer prereleases.
+/// This keeps the stable channel closed until the product reaches 1.0.0.
+pub fn is_beta_version(version: &Version) -> bool {
+    version.major == 0 || !version.pre.is_empty()
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReleaseOffer {
     pub tag: String,
@@ -98,10 +104,12 @@ pub fn select_release(
             Ok(version) => version,
             Err(_) => continue,
         };
-        if draft || prerelease != !version.pre.is_empty() {
+        // The product's 0.x line is beta-channel even for numeric SemVer
+        // tags, so GitHub's flag must agree with that release classification.
+        if draft || prerelease != is_beta_version(&version) {
             continue;
         }
-        if channel == Channel::Stable && !version.pre.is_empty() {
+        if channel == Channel::Stable && is_beta_version(&version) {
             continue;
         }
         if version.cmp_precedence(&installed) != Ordering::Greater {
@@ -238,17 +246,17 @@ mod tests {
     fn channel_and_prerelease_metadata_are_fail_closed() {
         let releases = vec![
             release("desktop-v0.8.0-beta.2", true, false, "Beta"),
-            release("desktop-v0.7.1", false, false, "Stable"),
+            release("desktop-v1.0.1", false, false, "Stable"),
         ];
         assert_eq!(
             parse(releases.clone(), "0.7.0-beta.1", Channel::Stable)
                 .unwrap()
                 .tag,
-            "desktop-v0.7.1"
+            "desktop-v1.0.1"
         );
         assert_eq!(
             parse(releases, "0.7.0-beta.1", Channel::Beta).unwrap().tag,
-            "desktop-v0.8.0-beta.2"
+            "desktop-v1.0.1"
         );
         let mismatch = serde_json::to_vec(&vec![release(
             "desktop-v1.0.0-beta.1",
@@ -261,6 +269,85 @@ mod tests {
             select_release(&mismatch, "0.9.0", Channel::Beta).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn numeric_zero_major_versions_are_beta_and_require_github_beta_flag() {
+        let numeric_beta = Version::parse("0.7.4").unwrap();
+        assert!(is_beta_version(&numeric_beta));
+        let correctly_marked = vec![release("desktop-v0.7.4", true, false, "Next numeric beta")];
+        assert_eq!(
+            parse(correctly_marked, "0.7.0-beta.2", Channel::Beta)
+                .unwrap()
+                .tag,
+            "desktop-v0.7.4"
+        );
+        let mismarked = vec![release(
+            "desktop-v0.7.4",
+            false,
+            false,
+            "Missing GitHub beta flag",
+        )];
+        assert_eq!(
+            parse(mismarked.clone(), "0.7.0-beta.2", Channel::Beta),
+            None
+        );
+        assert_eq!(parse(mismarked, "0.7.0-beta.2", Channel::Stable), None);
+        assert_eq!(
+            parse(
+                vec![release("desktop-v0.7.4", true, false, "Next numeric beta")],
+                "0.7.0-beta.2",
+                Channel::Stable
+            ),
+            None
+        );
+        assert!(numeric_beta > Version::parse("0.7.0-beta.2").unwrap());
+    }
+
+    #[test]
+    fn stable_channel_accepts_one_x_and_legacy_prerelease_metadata_stays_strict() {
+        let stable = Version::parse("1.2.0").unwrap();
+        assert!(!is_beta_version(&stable));
+        assert_eq!(
+            parse(
+                vec![release("desktop-v0.7.0-beta.2", true, false, "Legacy beta")],
+                "0.7.0-beta.1",
+                Channel::Beta
+            )
+            .unwrap()
+            .tag,
+            "desktop-v0.7.0-beta.2"
+        );
+        assert_eq!(
+            parse(
+                vec![release("desktop-v1.2.0", false, false, "Stable")],
+                "1.1.0",
+                Channel::Stable
+            )
+            .unwrap()
+            .tag,
+            "desktop-v1.2.0"
+        );
+        for (tag, github_prerelease) in [
+            ("desktop-v0.7.0-beta.3", false),
+            ("desktop-v1.2.0-beta.1", false),
+            ("desktop-v1.2.0", true),
+        ] {
+            assert_eq!(
+                parse(
+                    vec![release(
+                        tag,
+                        github_prerelease,
+                        false,
+                        "mismatched metadata"
+                    )],
+                    "0.7.0-beta.2",
+                    Channel::Beta
+                ),
+                None,
+                "{tag}"
+            );
+        }
     }
 
     #[test]

@@ -94,6 +94,25 @@ pub enum RefreshError {
     Other(String),
 }
 
+/// Classified failure while reading a saved OAuth session. Missing sessions
+/// remain `Ok(None)`; only Secret Service process/availability failures are
+/// retryable during startup restoration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(unix)]
+pub enum SessionLoadError {
+    Unavailable(String),
+    Invalid(String),
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for SessionLoadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable(message) | Self::Invalid(message) => formatter.write_str(message),
+        }
+    }
+}
+
 impl std::fmt::Display for RefreshError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -431,7 +450,8 @@ pub fn save_session_scoped(session: &Session, scope: Option<&str>) -> Result<(),
         let mut input = input;
         input.write_all(&secret).map_err(|_| ())
     });
-    let (status, _, _) = wait_bounded(child, Duration::from_secs(10))?;
+    let (status, _, _) =
+        wait_bounded(child, Duration::from_secs(10)).map_err(|error| error.to_string())?;
     if writer
         .join()
         .map_err(|_| "Could not write the session to Secret Service")?
@@ -446,25 +466,23 @@ pub fn save_session_scoped(session: &Session, scope: Option<&str>) -> Result<(),
     }
 }
 
-/// Load the session associated with the exact server and OAuth client.
 #[cfg(unix)]
-pub fn load_session(server: &str, client_id: &str) -> Result<Option<Session>, String> {
-    load_session_scoped(server, client_id, None)
-}
-
-#[cfg(unix)]
-pub fn load_session_scoped(
+pub fn load_session_scoped_classified(
     server: &str,
     client_id: &str,
     scope: Option<&str>,
-) -> Result<Option<Session>, String> {
-    let service = secret_service_name(scope)?;
-    let server_url = validate_url(server, true, "server")?;
+) -> Result<Option<Session>, SessionLoadError> {
+    let service = secret_service_name(scope).map_err(SessionLoadError::Invalid)?;
+    let server_url = validate_url(server, true, "server").map_err(SessionLoadError::Invalid)?;
     if server_url.query().is_some() {
-        return Err("Server URL must not contain a query string".into());
+        return Err(SessionLoadError::Invalid(
+            "Server URL must not contain a query string".into(),
+        ));
     }
     if client_id.trim().is_empty() || client_id.len() > 512 {
-        return Err("OAuth client ID is empty or too long".into());
+        return Err(SessionLoadError::Invalid(
+            "OAuth client ID is empty or too long".into(),
+        ));
     }
     let server = normalize_server(&server_url);
     let child = Command::new("secret-tool")
@@ -482,25 +500,30 @@ pub fn load_session_scoped(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|_| {
-            "Secret Service is unavailable; install or unlock a compatible keyring".to_string()
+            SessionLoadError::Unavailable(
+                "Secret Service is unavailable; install or unlock a compatible keyring".into(),
+            )
         })?;
-    let (status, output, stderr) = wait_bounded(child, Duration::from_secs(10))?;
+    let (status, output, stderr) =
+        wait_bounded(child, Duration::from_secs(10)).map_err(SessionLoadError::from)?;
     if !status.success() {
         return if status.code() == Some(1) && stderr.is_empty() {
             Ok(None)
         } else {
-            Err("Secret Service could not read the session; unlock the keyring and retry".into())
+            Err(SessionLoadError::Unavailable(
+                "Secret Service could not read the session; unlock the keyring and retry".into(),
+            ))
         };
     }
-    if output.len() > MAX_SECRET {
-        return Err("Stored session exceeds the secure storage size limit".into());
-    }
-    let session: Session = serde_json::from_slice(&output)
-        .map_err(|_| "Stored session is invalid; sign in again".to_string())?;
+    let session: Session = serde_json::from_slice(&output).map_err(|_| {
+        SessionLoadError::Invalid("Stored session is invalid; sign in again".into())
+    })?;
     if session.server != server || session.client_id != client_id {
-        return Err("Stored session does not match the requested account".into());
+        return Err(SessionLoadError::Invalid(
+            "Stored session does not match the requested account".into(),
+        ));
     }
-    validate_session(&session)?;
+    validate_session(&session).map_err(SessionLoadError::Invalid)?;
     Ok(Some(session))
 }
 
@@ -541,7 +564,8 @@ pub fn remove_session_scoped(
         .map_err(|_| {
             "Secret Service is unavailable; install or unlock a compatible keyring".to_string()
         })?;
-    let (status, _, _) = wait_bounded(child, Duration::from_secs(10))?;
+    let (status, _, _) =
+        wait_bounded(child, Duration::from_secs(10)).map_err(|error| error.to_string())?;
     if status.success() {
         Ok(())
     } else {
@@ -569,6 +593,35 @@ fn secret_service_name(scope: Option<&str>) -> Result<String, String> {
     }
 }
 
+#[cfg(unix)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SecretToolError {
+    Unavailable(String),
+    ResponseTooLarge,
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for SecretToolError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable(message) => formatter.write_str(message),
+            Self::ResponseTooLarge => {
+                formatter.write_str("Secret Service response exceeds the size limit")
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl From<SecretToolError> for SessionLoadError {
+    fn from(error: SecretToolError) -> Self {
+        match error {
+            SecretToolError::Unavailable(message) => Self::Unavailable(message),
+            SecretToolError::ResponseTooLarge => Self::Invalid(error.to_string()),
+        }
+    }
+}
+
 /// Run a Secret Service helper without allowing an unlocked/absent keyring to
 /// hang startup forever. Both pipes are drained on helper threads so a full
 /// pipe cannot prevent the timeout check. Diagnostic output is intentionally
@@ -577,15 +630,13 @@ fn secret_service_name(scope: Option<&str>) -> Result<String, String> {
 fn wait_bounded(
     mut child: Child,
     timeout: Duration,
-) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), String> {
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or("Could not read Secret Service output")?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or("Could not read Secret Service diagnostics")?;
+) -> Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>), SecretToolError> {
+    let stdout = child.stdout.take().ok_or_else(|| {
+        SecretToolError::Unavailable("Could not read Secret Service output".into())
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        SecretToolError::Unavailable("Could not read Secret Service diagnostics".into())
+    })?;
     let out_reader = thread::spawn(move || {
         let mut bytes = Vec::new();
         let _ = stdout.take((MAX_SECRET + 1) as u64).read_to_end(&mut bytes);
@@ -606,23 +657,27 @@ fn wait_bounded(
                 let _ = child.wait();
                 let _ = out_reader.join();
                 let _ = err_reader.join();
-                return Err("Secret Service timed out; unlock the keyring and retry".into());
+                return Err(SecretToolError::Unavailable(
+                    "Secret Service timed out; unlock the keyring and retry".into(),
+                ));
             }
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("Could not read the session from Secret Service".into());
+                return Err(SecretToolError::Unavailable(
+                    "Could not read the session from Secret Service".into(),
+                ));
             }
         }
     };
     let output = out_reader
         .join()
-        .map_err(|_| "Could not read Secret Service output")?;
-    let stderr = err_reader
-        .join()
-        .map_err(|_| "Could not read Secret Service diagnostics")?;
+        .map_err(|_| SecretToolError::Unavailable("Could not read Secret Service output".into()))?;
+    let stderr = err_reader.join().map_err(|_| {
+        SecretToolError::Unavailable("Could not read Secret Service diagnostics".into())
+    })?;
     if output.len() > MAX_SECRET || stderr.len() > 8192 {
-        return Err("Secret Service response exceeds the size limit".into());
+        return Err(SecretToolError::ResponseTooLarge);
     }
     Ok((status, output, stderr))
 }
@@ -1283,6 +1338,29 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader};
     use std::net::TcpListener;
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_service_oversized_response_is_permanent_corrupt_data() {
+        let child = Command::new("sh")
+            .args(["-c", "head -c 65537 /dev/zero"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn synthetic output fixture");
+
+        let error = wait_bounded(child, Duration::from_secs(3)).unwrap_err();
+
+        assert_eq!(
+            SessionLoadError::from(error),
+            SessionLoadError::Invalid("Secret Service response exceeds the size limit".into())
+        );
+        assert_eq!(
+            SessionLoadError::from(SecretToolError::Unavailable("timeout".into())),
+            SessionLoadError::Unavailable("timeout".into())
+        );
+    }
 
     #[cfg(feature = "synthetic-test-ca")]
     #[test]

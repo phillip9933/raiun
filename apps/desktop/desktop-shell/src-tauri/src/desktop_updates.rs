@@ -1,4 +1,6 @@
-use crate::desktop_updates_policy::{self, Channel, ReleaseOffer, should_check, should_offer};
+use crate::desktop_updates_policy::{
+    self, Channel, ReleaseOffer, is_beta_version, should_check, should_offer,
+};
 use reqwest::{Client, Response, Url, redirect};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -282,10 +284,9 @@ pub fn cached_for_install(app: &AppHandle) -> Result<(Update, Arc<[u8]>, String)
     }
     drop(status);
     let channel = parse_channel(&preferences.channel)?;
-    let offer_is_beta = !cached.offer.version.pre.is_empty();
     let installed = semver::Version::parse(env!("CARGO_PKG_VERSION"))
         .map_err(|_| "Installed Desktop version is invalid".to_string())?;
-    if (channel == Channel::Stable && offer_is_beta)
+    if !install_channel_allows_version(&cached.offer.version, channel)
         || cached.offer.version <= installed
         || !should_offer(&cached.offer, preferences.dismissed_tag.as_deref())
         || cached.update.version != cached.offer.version.to_string()
@@ -952,6 +953,10 @@ fn resume_dismissal_for_manual_request(preferences: &mut Preferences, manual: bo
     manual && preferences.dismissed_tag.take().is_some()
 }
 
+fn install_channel_allows_version(version: &semver::Version, channel: Channel) -> bool {
+    channel != Channel::Stable || !is_beta_version(version)
+}
+
 fn display_error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
@@ -960,6 +965,26 @@ fn display_error(error: impl std::fmt::Display) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn install_channel_recheck_uses_zero_major_beta_classification() {
+        assert!(!install_channel_allows_version(
+            &semver::Version::parse("0.7.4").unwrap(),
+            Channel::Stable
+        ));
+        assert!(install_channel_allows_version(
+            &semver::Version::parse("0.7.4").unwrap(),
+            Channel::Beta
+        ));
+        assert!(install_channel_allows_version(
+            &semver::Version::parse("1.2.0").unwrap(),
+            Channel::Stable
+        ));
+        assert!(!install_channel_allows_version(
+            &semver::Version::parse("1.2.0-beta.1").unwrap(),
+            Channel::Stable
+        ));
+    }
 
     #[test]
     fn later_suppresses_only_automatic_same_tag_and_manual_check_resumes_it() {

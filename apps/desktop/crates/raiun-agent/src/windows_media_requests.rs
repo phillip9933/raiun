@@ -162,7 +162,7 @@ mod tests {
             id: "job".into(),
             revision: 0,
             account_id: "account".into(),
-            source_root: "/missing-offline-media".into(),
+            source_root: std::env::temp_dir().join("raiun-synthetic-offline-media"),
             space_id: "space".into(),
             destination_root: "/Photos".into(),
             destination_root_resource_id: "destination-id".into(),

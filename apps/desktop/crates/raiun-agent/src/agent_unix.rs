@@ -143,6 +143,14 @@ impl MountedCloud for raiun_fuse::MountHandle {
 trait SessionStore: Send + Sync {
     fn save(&self, session: &auth::Session) -> Result<(), String>;
     fn load(&self, server: &str, client_id: &str) -> Result<Option<auth::Session>, String>;
+    fn load_classified(
+        &self,
+        server: &str,
+        client_id: &str,
+    ) -> Result<Option<auth::Session>, auth::SessionLoadError> {
+        self.load(server, client_id)
+            .map_err(auth::SessionLoadError::Invalid)
+    }
     fn remove(&self, server: &str, client_id: &str) -> Result<(), String>;
 }
 
@@ -159,9 +167,18 @@ impl SessionStore for SecretServiceStore {
     }
 
     fn load(&self, server: &str, client_id: &str) -> Result<Option<auth::Session>, String> {
+        self.load_classified(server, client_id)
+            .map_err(|error| error.to_string())
+    }
+
+    fn load_classified(
+        &self,
+        server: &str,
+        client_id: &str,
+    ) -> Result<Option<auth::Session>, auth::SessionLoadError> {
         match self.scope.as_deref() {
-            Some(scope) => auth::load_session_scoped(server, client_id, Some(scope)),
-            None => auth::load_session(server, client_id),
+            Some(scope) => auth::load_session_scoped_classified(server, client_id, Some(scope)),
+            None => auth::load_session_scoped_classified(server, client_id, None),
         }
     }
 
@@ -224,6 +241,29 @@ struct Runtime {
     vault_pin_jobs: Arc<vault_pin_jobs::VaultPinJobs>,
     cache_error: Mutex<Option<String>>,
     vault_cleanup_uncertain: AtomicBool,
+}
+
+#[derive(Clone, Debug)]
+struct RestoreBinding {
+    server: String,
+    client_id: String,
+    proxy: raiun_opencloud::ProxyConfig,
+    proxy_account_id: Option<String>,
+    account_id: Option<String>,
+}
+
+#[derive(Debug)]
+enum RestoreFailure {
+    Retryable(String),
+    Permanent(String),
+}
+
+impl std::fmt::Display for RestoreFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Retryable(message) | Self::Permanent(message) => formatter.write_str(message),
+        }
+    }
 }
 /// Reject new authentication/vault work throughout logout and shutdown,
 /// including requests arriving after the generation has been invalidated.
@@ -347,19 +387,22 @@ impl Runtime {
         let spaces = client
             .spaces()
             .map_err(|error| auth::graph_error_with_issuer_hint(&error.to_string(), &session))?;
-        self.install_session_with_spaces(session, expected_generation, client, spaces, false)
+        self.install_session_with_spaces(session, expected_generation, client, spaces, false, None)
     }
 
     fn install_restored_session(
         &self,
-        session: auth::Session,
+        session: &auth::Session,
         expected_generation: u64,
-    ) -> Result<(), String> {
+        binding: &RestoreBinding,
+    ) -> Result<(), RestoreFailure> {
         if self.auth_generation.load(Ordering::Acquire) != expected_generation
             || self.auth_transition.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
         {
-            return Err("Agent is shutting down".into());
+            return Err(RestoreFailure::Permanent(
+                "Saved-session restore was canceled".into(),
+            ));
         }
         // Startup must distinguish an unavailable server from revoked
         // authorization, but the ordinary OpenCloud client allows long body
@@ -372,26 +415,75 @@ impl Runtime {
             session.access_token.clone(),
             &session.proxy,
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| RestoreFailure::Permanent(error.to_string()))?;
         let (spaces, offline) = match probe_client.spaces() {
             Ok(spaces) => (spaces, false),
             Err(error) if error.kind == raiun_core::backend::ErrorKind::Offline => {
-                (self.load_account_namespace(&session)?, true)
+                let spaces = self.load_account_namespace(session).map_err(|error| {
+                    RestoreFailure::Retryable(format!(
+                        "OpenCloud is unavailable and no verified saved namespace can be loaded: {error}"
+                    ))
+                })?;
+                (spaces, true)
             }
             Err(error) => {
-                return Err(auth::graph_error_with_issuer_hint(
-                    &error.to_string(),
-                    &session,
+                return Err(RestoreFailure::Permanent(
+                    auth::graph_error_with_issuer_hint(&error.to_string(), session),
                 ));
             }
         };
+        if !restore_is_current(self, expected_generation, binding) {
+            return Err(RestoreFailure::Permanent(
+                "Saved-session restore was canceled or its account settings changed".into(),
+            ));
+        }
         let client = raiun_opencloud::OpenCloudClient::new_with_proxy(
             &session.server,
             session.access_token.clone(),
             &session.proxy,
         )
-        .map_err(|error| error.to_string())?;
-        self.install_session_with_spaces(session, expected_generation, client, spaces, offline)
+        .map_err(|error| RestoreFailure::Permanent(error.to_string()))?;
+        self.install_session_with_spaces(
+            session.clone(),
+            expected_generation,
+            client,
+            spaces,
+            offline,
+            Some(binding),
+        )
+        .map_err(RestoreFailure::Permanent)
+    }
+
+    /// Persist an OAuth refresh performed before Graph recovery. Hold the same
+    /// settings -> auth locks as session installation so logout cannot clear
+    /// the store and then have a stale restore write credentials back.
+    fn persist_restored_refresh(
+        &self,
+        session: &auth::Session,
+        expected_generation: u64,
+        binding: &RestoreBinding,
+    ) -> Result<(), String> {
+        let settings = self.settings.lock().map_err(|_| "Settings poisoned")?;
+        if !restore_binding_matches(&settings, binding)
+            || self.auth_generation.load(Ordering::Acquire) != expected_generation
+            || self.auth_transition.load(Ordering::Acquire)
+            || self.shutdown.load(Ordering::Acquire)
+        {
+            return Err("Saved-session restore was canceled".into());
+        }
+        let auth_state = self
+            .auth_state
+            .lock()
+            .map_err(|_| "Authentication state poisoned")?;
+        if auth_state.engine.is_some()
+            || auth_state.session.is_some()
+            || self.auth_generation.load(Ordering::Acquire) != expected_generation
+            || self.auth_transition.load(Ordering::Acquire)
+            || self.shutdown.load(Ordering::Acquire)
+        {
+            return Err("Saved-session restore was canceled".into());
+        }
+        self.session_store.save(session)
     }
 
     fn load_account_namespace(
@@ -425,6 +517,7 @@ impl Runtime {
         client: raiun_opencloud::OpenCloudClient,
         spaces: Vec<raiun_core::backend::CloudSpace>,
         offline: bool,
+        restore_binding: Option<&RestoreBinding>,
     ) -> Result<(), String> {
         if self.auth_generation.load(Ordering::Acquire) != expected_generation
             || self.auth_transition.load(Ordering::Acquire)
@@ -530,8 +623,9 @@ impl Runtime {
         if self.shutdown.load(Ordering::Acquire)
             || self.auth_generation.load(Ordering::Acquire) != expected_generation
             || self.auth_transition.load(Ordering::Acquire)
+            || restore_binding.is_some_and(|binding| !restore_binding_matches(&settings, binding))
         {
-            return Err("Sign-in was canceled".into());
+            return Err("Sign-in or saved-session restore was canceled".into());
         }
         if settings
             .account_id
@@ -2896,31 +2990,68 @@ impl Runtime {
                 {
                     return Err("Space disconnect was canceled by an account change".into());
                 }
-                let ids = self.settings.lock().map_err(|_| "Settings poisoned")?.config.pairs.iter()
-                    .filter(|pair| pair.space_id == space_id).map(|pair| pair.id.clone()).collect::<BTreeSet<_>>();
+                let ids = self
+                    .settings
+                    .lock()
+                    .map_err(|_| "Settings poisoned")?
+                    .config
+                    .pairs
+                    .iter()
+                    .filter(|pair| pair.space_id == space_id)
+                    .map(|pair| pair.id.clone())
+                    .collect::<BTreeSet<_>>();
                 let ids_vec = ids.iter().cloned().collect::<Vec<_>>();
                 let engine = self.engine().ok();
-                let retirement = engine.as_ref().map(|engine| engine.prepare_pair_retirements(&ids_vec))
-                    .transpose().map_err(|error| error.to_string())?;
-                self.update_with_wake(|settings| {
-                    if self.auth_transition.load(Ordering::Acquire)
-                        || self.auth_generation.load(Ordering::Acquire) != generation
-                    {
-                        return Err("Space disconnect was canceled by an account change".into());
-                    }
-                    let current = settings.config.pairs.iter().filter(|pair| pair.space_id == space_id)
-                        .map(|pair| pair.id.clone()).collect::<BTreeSet<_>>();
-                    if current != ids { return Err("Space connections changed; refresh before disconnecting".into()); }
-                    let mut retired = settings.retired_pair_ids.iter().cloned().collect::<BTreeSet<_>>();
-                    retired.extend(ids.iter().cloned());
-                    if retired.len() > 100_000 { return Err("Retired pair ID limit reached".into()); }
-                    settings.retired_pair_ids = retired.into_iter().collect();
-                    settings.config.pairs.retain(|pair| !ids.contains(&pair.id));
-                    Ok(())
-                }, false)?;
-                if let Some(retirement) = retirement { retirement.publish(); }
-                self.pending_space_syncs.lock().map_err(|_| "Pending Space sync state poisoned")?.remove(space_id);
-                self.pair_reports.lock().map_err(|_| "Pair report state poisoned")?.retain(|id, _| !ids.contains(id));
+                let retirement = engine
+                    .as_ref()
+                    .map(|engine| engine.prepare_pair_retirements(&ids_vec))
+                    .transpose()
+                    .map_err(|error| error.to_string())?;
+                self.update_with_wake(
+                    |settings| {
+                        if self.auth_transition.load(Ordering::Acquire)
+                            || self.auth_generation.load(Ordering::Acquire) != generation
+                        {
+                            return Err("Space disconnect was canceled by an account change".into());
+                        }
+                        let current = settings
+                            .config
+                            .pairs
+                            .iter()
+                            .filter(|pair| pair.space_id == space_id)
+                            .map(|pair| pair.id.clone())
+                            .collect::<BTreeSet<_>>();
+                        if current != ids {
+                            return Err(
+                                "Space connections changed; refresh before disconnecting".into()
+                            );
+                        }
+                        let mut retired = settings
+                            .retired_pair_ids
+                            .iter()
+                            .cloned()
+                            .collect::<BTreeSet<_>>();
+                        retired.extend(ids.iter().cloned());
+                        if retired.len() > 100_000 {
+                            return Err("Retired pair ID limit reached".into());
+                        }
+                        settings.retired_pair_ids = retired.into_iter().collect();
+                        settings.config.pairs.retain(|pair| !ids.contains(&pair.id));
+                        Ok(())
+                    },
+                    false,
+                )?;
+                if let Some(retirement) = retirement {
+                    retirement.publish();
+                }
+                self.pending_space_syncs
+                    .lock()
+                    .map_err(|_| "Pending Space sync state poisoned")?
+                    .remove(space_id);
+                self.pair_reports
+                    .lock()
+                    .map_err(|_| "Pair report state poisoned")?
+                    .retain(|id, _| !ids.contains(id));
                 Ok(json!({"space_id":space_id,"removed_pair_ids":ids_vec}))
             }
             "space_pause" => {
@@ -4226,55 +4357,47 @@ fn start_runtime(runtime: Arc<Runtime>) {
     let restore_generation = runtime.auth_generation.load(Ordering::Acquire);
     let restore = runtime.clone();
     std::thread::spawn(move || {
-        let result = (|| {
-            let settings = restore
-                .settings
-                .lock()
-                .map_err(|_| "Settings poisoned")?
-                .clone();
-            settings
-                .network_proxy
-                .validate()
-                .map_err(|_| "Saved proxy configuration is invalid")?;
-            if settings
-                .network_proxy_account_id
-                .as_deref()
-                .is_some_and(|bound| settings.account_id.as_deref() != Some(bound))
-            {
-                return Err("Proxy configuration is bound to a different account".into());
+        let binding = capture_restore_binding(&restore);
+        let mut session = None;
+        let mut refreshed_session_needs_persist = false;
+        let mut retry_number = 0u32;
+        let mut first_attempt = true;
+
+        loop {
+            let result = match &binding {
+                Ok(Some(binding)) => restore_saved_session_once(
+                    &restore,
+                    restore_generation,
+                    binding,
+                    &mut session,
+                    &mut refreshed_session_needs_persist,
+                ),
+                Ok(None) => Ok(()),
+                Err(error) => Err(RestoreFailure::Permanent(error.clone())),
+            };
+
+            // Sign-in remains available while a transient restore retries.
+            if first_attempt {
+                restore.restoring.store(false, Ordering::Release);
+                first_attempt = false;
             }
-            if let Some(server) = settings.server {
-                let Some(mut session) = restore.session_store.load(&server, &settings.client_id)?
-                else {
-                    return Err(
-                        "No saved session is available in the keyring; sign in again".into(),
-                    );
-                };
-                session.proxy = settings.network_proxy.clone();
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|_| "System clock is invalid")?
-                    .as_secs();
-                if session.expires_at <= now + 120 {
-                    match session.refresh_classified() {
-                        Ok(()) => {}
-                        // Continue to the authenticated Graph probe below.
-                        // Only its transport failure permits cached namespace
-                        // startup; an HTTP 401/403 must be observed and denied.
-                        Err(auth::RefreshError::Transport) => {}
-                        Err(error) => return Err(error.to_string()),
-                    }
+
+            match result {
+                Ok(()) => break,
+                Err(RestoreFailure::Permanent(error)) => {
+                    publish_restore_error(&restore, restore_generation, &binding, error);
+                    break;
                 }
-                restore.install_restored_session(session, restore_generation)?;
-            }
-            Ok::<(), String>(())
-        })();
-        if let Err(error) = result {
-            if restore.auth_generation.load(Ordering::Acquire) == restore_generation
-                && !restore.shutdown.load(Ordering::Acquire)
-            {
-                if let Ok(mut state) = restore.error.lock() {
-                    *state = Some(error);
+                Err(RestoreFailure::Retryable(error)) => {
+                    publish_restore_error(&restore, restore_generation, &binding, error);
+                    let Some(binding) = binding.as_ref().ok().and_then(Option::as_ref) else {
+                        break;
+                    };
+                    let delay = restore_retry_delay(retry_number);
+                    retry_number = retry_number.saturating_add(1);
+                    if !wait_for_restore_retry(&restore, restore_generation, binding, delay) {
+                        break;
+                    }
                 }
             }
         }
@@ -4282,6 +4405,171 @@ fn start_runtime(runtime: Arc<Runtime>) {
     });
     let scheduler = runtime.clone();
     std::thread::spawn(move || scheduler_loop(scheduler));
+}
+
+fn capture_restore_binding(runtime: &Runtime) -> Result<Option<RestoreBinding>, String> {
+    let settings = runtime.settings.lock().map_err(|_| "Settings poisoned")?;
+    let Some(server) = settings.server.clone() else {
+        return Ok(None);
+    };
+    settings
+        .network_proxy
+        .validate()
+        .map_err(|_| "Saved proxy configuration is invalid")?;
+    if settings
+        .network_proxy_account_id
+        .as_deref()
+        .is_some_and(|bound| settings.account_id.as_deref() != Some(bound))
+    {
+        return Err("Proxy configuration is bound to a different account".into());
+    }
+    Ok(Some(RestoreBinding {
+        server,
+        client_id: settings.client_id.clone(),
+        proxy: settings.network_proxy.clone(),
+        proxy_account_id: settings.network_proxy_account_id.clone(),
+        account_id: settings.account_id.clone(),
+    }))
+}
+
+fn restore_binding_matches(settings: &Settings, binding: &RestoreBinding) -> bool {
+    settings.server.as_deref() == Some(binding.server.as_str())
+        && settings.client_id == binding.client_id
+        && settings.network_proxy == binding.proxy
+        && settings.network_proxy_account_id == binding.proxy_account_id
+        && settings.account_id == binding.account_id
+}
+
+fn restore_is_current(runtime: &Runtime, generation: u64, binding: &RestoreBinding) -> bool {
+    if runtime.auth_generation.load(Ordering::Acquire) != generation
+        || runtime.auth_transition.load(Ordering::Acquire)
+        || runtime.shutdown.load(Ordering::Acquire)
+    {
+        return false;
+    }
+    runtime
+        .settings
+        .lock()
+        .is_ok_and(|settings| restore_binding_matches(&settings, binding))
+}
+
+fn restore_saved_session_once(
+    runtime: &Runtime,
+    generation: u64,
+    binding: &RestoreBinding,
+    retained_session: &mut Option<auth::Session>,
+    refreshed_session_needs_persist: &mut bool,
+) -> Result<(), RestoreFailure> {
+    if !restore_is_current(runtime, generation, binding) {
+        return Err(RestoreFailure::Permanent(
+            "Saved-session restore was canceled or its account settings changed".into(),
+        ));
+    }
+
+    if retained_session.is_none() {
+        let loaded = runtime
+            .session_store
+            .load_classified(&binding.server, &binding.client_id)
+            .map_err(|error| match error {
+                auth::SessionLoadError::Unavailable(message) => RestoreFailure::Retryable(message),
+                auth::SessionLoadError::Invalid(message) => RestoreFailure::Permanent(message),
+            })?;
+        if !restore_is_current(runtime, generation, binding) {
+            return Err(RestoreFailure::Permanent(
+                "Saved-session restore was canceled or its account settings changed".into(),
+            ));
+        }
+        let Some(session) = loaded else {
+            return Err(RestoreFailure::Permanent(
+                "No saved session is available in the keyring; sign in again".into(),
+            ));
+        };
+        if session.server != binding.server || session.client_id != binding.client_id {
+            return Err(RestoreFailure::Permanent(
+                "Stored session does not match the configured account".into(),
+            ));
+        }
+        *retained_session = Some(session);
+    }
+
+    let session = retained_session
+        .as_mut()
+        .ok_or_else(|| RestoreFailure::Permanent("Stored session is unavailable".into()))?;
+    session.proxy = binding.proxy.clone();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| RestoreFailure::Permanent("System clock is invalid".into()))?
+        .as_secs();
+    if session.expires_at <= now + 120 {
+        match session.refresh_classified() {
+            Ok(()) => *refreshed_session_needs_persist = true,
+            // A token-endpoint transport failure may be transient. The
+            // authenticated Graph probe still decides whether this token is
+            // accepted; its 401/403 is always terminal below.
+            Err(auth::RefreshError::Transport) => {}
+            Err(error) => return Err(RestoreFailure::Permanent(error.to_string())),
+        }
+    }
+
+    if !restore_is_current(runtime, generation, binding) {
+        return Err(RestoreFailure::Permanent(
+            "Saved-session restore was canceled or its account settings changed".into(),
+        ));
+    }
+    if *refreshed_session_needs_persist {
+        runtime
+            .persist_restored_refresh(session, generation, binding)
+            .map_err(RestoreFailure::Retryable)?;
+        *refreshed_session_needs_persist = false;
+    }
+
+    runtime.install_restored_session(session, generation, binding)
+}
+
+fn restore_retry_delay(retry_number: u32) -> Duration {
+    let multiplier = 1u64.checked_shl(retry_number.min(10)).unwrap_or(u64::MAX);
+    Duration::from_millis(500u64.saturating_mul(multiplier).min(300_000))
+}
+
+fn wait_for_restore_retry(
+    runtime: &Runtime,
+    generation: u64,
+    binding: &RestoreBinding,
+    delay: Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + delay;
+    loop {
+        if !restore_is_current(runtime, generation, binding) {
+            return false;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return true;
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(100)));
+    }
+}
+
+fn publish_restore_error(
+    runtime: &Runtime,
+    generation: u64,
+    binding: &Result<Option<RestoreBinding>, String>,
+    error: String,
+) {
+    if runtime.auth_generation.load(Ordering::Acquire) != generation
+        || runtime.auth_transition.load(Ordering::Acquire)
+        || runtime.shutdown.load(Ordering::Acquire)
+    {
+        return;
+    }
+    if let Ok(Some(binding)) = binding
+        && !restore_is_current(runtime, generation, binding)
+    {
+        return;
+    }
+    if let Ok(mut state) = runtime.error.lock() {
+        *state = Some(error);
+    }
 }
 
 #[cfg(unix)]
@@ -4643,33 +4931,59 @@ mod tests {
     #[test]
     fn space_disconnect_retires_only_target_connections_and_keeps_files() {
         let dir = tempfile::tempdir().unwrap();
-        let mut pairs = vec![test_pair("first", "space-a"), test_pair("second", "space-a"), test_pair("other", "space-b")];
+        let mut pairs = vec![
+            test_pair("first", "space-a"),
+            test_pair("second", "space-a"),
+            test_pair("other", "space-b"),
+        ];
         for pair in &mut pairs {
             pair.local_path = dir.path().join(&pair.id);
             fs::create_dir(&pair.local_path).unwrap();
             fs::write(pair.local_path.join("keep.txt"), pair.id.as_bytes()).unwrap();
         }
-        let runtime = Arc::new(runtime_for_mount_test(dir.path().to_path_buf(), false, None));
+        let runtime = Arc::new(runtime_for_mount_test(
+            dir.path().to_path_buf(),
+            false,
+            None,
+        ));
         *runtime.settings.lock().unwrap() = test_settings(pairs.clone());
         runtime.settings.lock().unwrap().save(dir.path()).unwrap();
-        let engine = Engine::open(&dir.path().join("engine"), Arc::new(OfflineCacheFixture)).unwrap();
-        for pair in &pairs { engine.publish_pair_policy(pair).unwrap(); }
+        let engine =
+            Engine::open(&dir.path().join("engine"), Arc::new(OfflineCacheFixture)).unwrap();
+        for pair in &pairs {
+            engine.publish_pair_policy(pair).unwrap();
+        }
         runtime.auth_state.lock().unwrap().engine = Some(engine.clone());
-        let response = runtime.handle(json!({"action":"space_disconnect","space_id":"space-a"})).unwrap();
-        assert_eq!(response["removed_pair_ids"], json!(["first","second"]));
+        let response = runtime
+            .handle(json!({"action":"space_disconnect","space_id":"space-a"}))
+            .unwrap();
+        assert_eq!(response["removed_pair_ids"], json!(["first", "second"]));
         let persisted = Settings::load(dir.path()).unwrap();
         assert_eq!(persisted.config.pairs.len(), 1);
         assert_eq!(persisted.config.pairs[0].id, "other");
         assert!(persisted.retired_pair_ids.contains(&"first".into()));
         assert!(persisted.retired_pair_ids.contains(&"second".into()));
         for pair in &pairs {
-            assert_eq!(fs::read(pair.local_path.join("keep.txt")).unwrap(), pair.id.as_bytes());
+            assert_eq!(
+                fs::read(pair.local_path.join("keep.txt")).unwrap(),
+                pair.id.as_bytes()
+            );
         }
         for pair in &pairs[..2] {
-            assert_eq!(engine.sync_pair(pair).unwrap_err().kind, raiun_core::backend::ErrorKind::Conflict);
+            assert_eq!(
+                engine.sync_pair(pair).unwrap_err().kind,
+                raiun_core::backend::ErrorKind::Conflict
+            );
         }
-        engine.publish_pair_policy(&pairs[2]).expect("other Space remains connected");
-        assert_eq!(runtime.handle(json!({"action":"space_disconnect","space_id":"space-a"})).unwrap()["removed_pair_ids"], json!([]));
+        engine
+            .publish_pair_policy(&pairs[2])
+            .expect("other Space remains connected");
+        assert_eq!(
+            runtime
+                .handle(json!({"action":"space_disconnect","space_id":"space-a"}))
+                .unwrap()["removed_pair_ids"],
+            json!([])
+        );
     }
 
     #[test]
@@ -4678,20 +4992,31 @@ mod tests {
         let mut pair = test_pair("retained", "space-a");
         pair.local_path = dir.path().join("local");
         fs::create_dir(&pair.local_path).unwrap();
-        let runtime = Arc::new(runtime_for_mount_test(dir.path().to_path_buf(), false, None));
+        let runtime = Arc::new(runtime_for_mount_test(
+            dir.path().to_path_buf(),
+            false,
+            None,
+        ));
         *runtime.settings.lock().unwrap() = test_settings(vec![pair.clone()]);
         runtime.settings.lock().unwrap().save(dir.path()).unwrap();
-        let engine = Engine::open(&dir.path().join("engine"), Arc::new(OfflineCacheFixture)).unwrap();
+        let engine =
+            Engine::open(&dir.path().join("engine"), Arc::new(OfflineCacheFixture)).unwrap();
         engine.publish_pair_policy(&pair).unwrap();
         runtime.auth_state.lock().unwrap().engine = Some(engine.clone());
         fs::remove_file(dir.path().join("settings.json")).unwrap();
         fs::create_dir(dir.path().join("settings.json")).unwrap();
-        assert!(runtime.handle(json!({"action":"space_disconnect","space_id":"space-a"})).is_err());
+        assert!(
+            runtime
+                .handle(json!({"action":"space_disconnect","space_id":"space-a"}))
+                .is_err()
+        );
         let settings = runtime.settings.lock().unwrap();
         assert_eq!(settings.config.pairs.len(), 1);
         assert!(settings.retired_pair_ids.is_empty());
         drop(settings);
-        engine.publish_pair_policy(&pair).expect("failed durable write must not publish retirement");
+        engine
+            .publish_pair_policy(&pair)
+            .expect("failed durable write must not publish retirement");
     }
 
     fn test_pair(id: &str, space_id: &str) -> FolderPair {
@@ -6554,7 +6879,7 @@ mod tests {
     use raiun_core::{CONFIG_SCHEMA_VERSION, Config};
     use std::{
         io::{Read, Write},
-        net::TcpListener,
+        net::{TcpListener, TcpStream},
         time::Instant,
     };
 
@@ -6562,6 +6887,9 @@ mod tests {
     struct FakeSecretService {
         sessions: Mutex<BTreeMap<(String, String), Vec<u8>>>,
         fail_next_save: AtomicBool,
+        fail_next_load: AtomicBool,
+        invalid_next_load: AtomicBool,
+        load_count: std::sync::atomic::AtomicUsize,
     }
 
     impl SessionStore for FakeSecretService {
@@ -6579,13 +6907,40 @@ mod tests {
         }
 
         fn load(&self, server: &str, client_id: &str) -> Result<Option<auth::Session>, String> {
+            self.load_classified(server, client_id)
+                .map_err(|error| error.to_string())
+        }
+
+        fn load_classified(
+            &self,
+            server: &str,
+            client_id: &str,
+        ) -> Result<Option<auth::Session>, auth::SessionLoadError> {
+            self.load_count.fetch_add(1, Ordering::AcqRel);
+            if self.invalid_next_load.swap(false, Ordering::AcqRel) {
+                return Err(auth::SessionLoadError::Invalid(
+                    "synthetic corrupt session".into(),
+                ));
+            }
+            if self.fail_next_load.swap(false, Ordering::AcqRel) {
+                return Err(auth::SessionLoadError::Unavailable(
+                    "synthetic locked keyring".into(),
+                ));
+            }
             self.sessions
                 .lock()
-                .map_err(|_| "fake Secret Service lock was poisoned")?
+                .map_err(|_| {
+                    auth::SessionLoadError::Unavailable(
+                        "fake Secret Service lock was poisoned".into(),
+                    )
+                })?
                 .get(&(server.to_owned(), client_id.to_owned()))
                 .map(|bytes| {
-                    serde_json::from_slice(bytes)
-                        .map_err(|_| "fake Secret Service stored invalid session data".into())
+                    serde_json::from_slice(bytes).map_err(|_| {
+                        auth::SessionLoadError::Invalid(
+                            "fake Secret Service stored invalid session data".into(),
+                        )
+                    })
                 })
                 .transpose()
         }
@@ -6595,6 +6950,78 @@ mod tests {
                 .lock()
                 .map_err(|_| "fake Secret Service lock was poisoned")?
                 .remove(&(server.to_owned(), client_id.to_owned()));
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct BlockingSessionStoreState {
+        load_started: bool,
+        released: bool,
+        session: Option<auth::Session>,
+        save_count: usize,
+    }
+
+    #[derive(Default)]
+    struct BlockingSessionStore {
+        state: Mutex<BlockingSessionStoreState>,
+        changed: std::sync::Condvar,
+    }
+
+    impl BlockingSessionStore {
+        fn wait_until_load_starts(&self) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            let mut state = self.state.lock().unwrap();
+            while !state.load_started && std::time::Instant::now() < deadline {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                let (next, _) = self.changed.wait_timeout(state, remaining).unwrap();
+                state = next;
+            }
+            assert!(state.load_started, "restore did not enter the keyring load");
+        }
+
+        fn release_load(&self) {
+            let mut state = self.state.lock().unwrap();
+            state.released = true;
+            self.changed.notify_all();
+        }
+    }
+
+    impl SessionStore for BlockingSessionStore {
+        fn save(&self, session: &auth::Session) -> Result<(), String> {
+            let mut state = self.state.lock().map_err(|_| "store lock poisoned")?;
+            state.save_count += 1;
+            state.session = Some(session.clone());
+            Ok(())
+        }
+
+        fn load(&self, server: &str, client_id: &str) -> Result<Option<auth::Session>, String> {
+            self.load_classified(server, client_id)
+                .map_err(|error| error.to_string())
+        }
+
+        fn load_classified(
+            &self,
+            _server: &str,
+            _client_id: &str,
+        ) -> Result<Option<auth::Session>, auth::SessionLoadError> {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| auth::SessionLoadError::Unavailable("store lock poisoned".into()))?;
+            state.load_started = true;
+            self.changed.notify_all();
+            while !state.released {
+                state = self.changed.wait(state).map_err(|_| {
+                    auth::SessionLoadError::Unavailable("store wait poisoned".into())
+                })?;
+            }
+            Ok(state.session.clone())
+        }
+
+        fn remove(&self, _server: &str, _client_id: &str) -> Result<(), String> {
+            let mut state = self.state.lock().map_err(|_| "store lock poisoned")?;
+            state.session = None;
             Ok(())
         }
     }
@@ -6795,6 +7222,78 @@ mod tests {
                 encrypted: false,
             },
         ]
+    }
+
+    fn read_fixture_request(stream: &mut TcpStream) -> Vec<u8> {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(4)))
+            .expect("set fixture read timeout");
+        let mut request = Vec::new();
+        let mut byte = [0];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).expect("read fixture request");
+            request.push(byte[0]);
+            assert!(request.len() < 16 * 1024, "bounded fixture request");
+        }
+        request
+    }
+
+    fn serve_graph_restore_responses(
+        listener: TcpListener,
+        server: String,
+        responses: Vec<bool>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            for respond in responses {
+                let (mut stream, _) = listener.accept().expect("Graph restore request");
+                let request = read_fixture_request(&mut stream);
+                assert!(request.starts_with(b"GET /graph/v1.0/me/drives"));
+                if respond {
+                    let body = format!(
+                        r#"{{"value":[{{"id":"personal-drive","name":"Personal","driveType":"personal","root":{{"id":"personal-root","webDavUrl":"{server}/remote.php/dav/personal/personal-drive"}}}},{{"id":"project-drive","name":"Projects","driveType":"project","root":{{"id":"project-root","webDavUrl":"{server}/remote.php/dav/spaces/project-drive"}}}}]}}"#
+                    );
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .expect("write Graph response");
+                }
+            }
+        })
+    }
+
+    fn wait_for_restored_engine(runtime: &Runtime) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(6);
+        while std::time::Instant::now() < deadline {
+            if runtime
+                .auth_state
+                .lock()
+                .is_ok_and(|state| state.engine.is_some())
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!(
+            "saved session was not restored; error={:?}",
+            *runtime.error.lock().unwrap()
+        );
+    }
+
+    fn saved_session(server: &str, token_endpoint: String, expires_at: u64) -> auth::Session {
+        auth::Session {
+            server: server.to_owned(),
+            client_id: "OpenCloudDesktop".into(),
+            access_token: "fixture-access".into(),
+            refresh_token: Some("fixture-old-refresh".into()),
+            expires_at,
+            token_endpoint,
+            expected_issuer: None,
+            last_refresh_at: None,
+            proxy: raiun_opencloud::ProxyConfig::System,
+        }
     }
 
     #[test]
@@ -7302,7 +7801,7 @@ mod tests {
         };
         store.save(&session).unwrap();
         let runtime =
-            runtime_for_namespace_restore(dir.path(), &session.server, &account_id, store);
+            runtime_for_namespace_restore(dir.path(), &session.server, &account_id, store.clone());
         start_runtime(runtime.clone());
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while runtime.restoring.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
@@ -7320,6 +7819,163 @@ mod tests {
         );
         assert!(runtime.auth_state.lock().unwrap().engine.is_none());
         assert!(!runtime.offline_namespace.load(Ordering::Acquire));
+        assert_eq!(store.load_count.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn startup_retries_transient_keyring_unavailability_without_requiring_sign_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind Graph fixture");
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let graph = serve_graph_restore_responses(listener, server.clone(), vec![true]);
+        let account_id = account_identity(&server, "personal-drive");
+        let store = Arc::new(FakeSecretService::default());
+        store
+            .save(&saved_session(
+                &server,
+                format!("{server}/token"),
+                now_unix().saturating_add(600),
+            ))
+            .unwrap();
+        store.fail_next_load.store(true, Ordering::Release);
+        let runtime =
+            runtime_for_namespace_restore(dir.path(), &server, &account_id, store.clone());
+
+        start_runtime(runtime.clone());
+        let initial_attempt_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while runtime.restoring.load(Ordering::Acquire)
+            && std::time::Instant::now() < initial_attempt_deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!runtime.restoring.load(Ordering::Acquire));
+        assert_eq!(store.load_count.load(Ordering::Acquire), 1);
+        wait_for_restored_engine(&runtime);
+        graph.join().unwrap();
+
+        assert_eq!(store.load_count.load(Ordering::Acquire), 2);
+        assert!(!runtime.restoring.load(Ordering::Acquire));
+        assert!(!runtime.offline_namespace.load(Ordering::Acquire));
+        assert!(runtime.error.lock().unwrap().is_none());
+        assert_eq!(
+            runtime.settings.lock().unwrap().server.as_deref(),
+            Some(server.as_str())
+        );
+    }
+
+    #[test]
+    fn startup_retries_graph_transport_and_persists_rotated_refresh_token_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind Graph fixture");
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let graph = serve_graph_restore_responses(listener, server.clone(), vec![false, true]);
+        let token_listener = TcpListener::bind("127.0.0.1:0").expect("bind token fixture");
+        let token_endpoint = format!("http://{}/token", token_listener.local_addr().unwrap());
+        let tokens = token_fixture(
+            token_listener,
+            vec![(
+                200,
+                r#"{"access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":3600}"#,
+            )],
+        );
+        let account_id = account_identity(&server, "personal-drive");
+        let store = Arc::new(FakeSecretService::default());
+        store
+            .save(&saved_session(
+                &server,
+                token_endpoint,
+                now_unix().saturating_sub(1),
+            ))
+            .unwrap();
+        let runtime =
+            runtime_for_namespace_restore(dir.path(), &server, &account_id, store.clone());
+
+        start_runtime(runtime.clone());
+        wait_for_restored_engine(&runtime);
+        graph.join().unwrap();
+        tokens.join().unwrap();
+
+        assert_eq!(store.load_count.load(Ordering::Acquire), 1);
+        let stored_bytes = store
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&(server.clone(), "OpenCloudDesktop".into()))
+            .cloned()
+            .expect("refreshed session persisted");
+        let stored: auth::Session = serde_json::from_slice(&stored_bytes).unwrap();
+        assert_eq!(stored.access_token, "rotated-access");
+        assert_eq!(stored.refresh_token.as_deref(), Some("rotated-refresh"));
+    }
+
+    #[test]
+    fn startup_does_not_retry_a_corrupt_saved_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = "http://127.0.0.1:1";
+        let account_id = account_identity(server, "personal-drive");
+        let store = Arc::new(FakeSecretService::default());
+        store.invalid_next_load.store(true, Ordering::Release);
+        let runtime = runtime_for_namespace_restore(dir.path(), server, &account_id, store.clone());
+
+        start_runtime(runtime.clone());
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while runtime.restoring.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(600));
+
+        assert!(!runtime.restoring.load(Ordering::Acquire));
+        assert_eq!(store.load_count.load(Ordering::Acquire), 1);
+        assert!(runtime.auth_state.lock().unwrap().engine.is_none());
+        assert!(
+            runtime
+                .error
+                .lock()
+                .unwrap()
+                .as_deref()
+                .is_some_and(|e| e.contains("corrupt"))
+        );
+    }
+
+    #[test]
+    fn logout_during_blocked_restore_prevents_session_or_credential_resurrection() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind unused Graph endpoint");
+        listener.set_nonblocking(true).unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let account_id = account_identity(&server, "personal-drive");
+        let store = Arc::new(BlockingSessionStore::default());
+        store.state.lock().unwrap().session = Some(saved_session(
+            &server,
+            format!("{server}/token"),
+            now_unix().saturating_add(600),
+        ));
+        let runtime =
+            runtime_for_namespace_restore(dir.path(), &server, &account_id, store.clone());
+
+        start_runtime(runtime.clone());
+        store.wait_until_load_starts();
+        runtime.handle(json!({"action":"logout"})).unwrap();
+        store.release_load();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while runtime.restoring.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+
+        assert!(!runtime.restoring.load(Ordering::Acquire));
+        assert!(runtime.settings.lock().unwrap().server.is_none());
+        let state = runtime.auth_state.lock().unwrap();
+        assert!(state.engine.is_none());
+        assert!(state.session.is_none());
+        drop(state);
+        assert_eq!(store.state.lock().unwrap().save_count, 0);
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "stale restore must not make a Graph request after logout"
+        );
     }
 
     #[test]

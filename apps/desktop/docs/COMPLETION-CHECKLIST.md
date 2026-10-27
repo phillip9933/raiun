@@ -129,5 +129,22 @@ settings/document/DPAPI retention, visible App updates and normal Quit. Harness
 and NSIS installer exits are both numeric 0 with retained handles; the passive
 installer finish UI was not observed. The Linux and Windows practical beta
 acceptance gates are met. Final signed candidate packaging, exact metadata checks and parent evidence
-review are complete; neither beta.2 candidate is published. Offline release-fixture checks
+review are complete. Both beta.2 candidates were published on 27 October 2026. Offline release-fixture checks
 do not establish a live GitHub update offer.
+
+
+## Urgent post-beta fixes — owner update, 27 October 2026
+
+Ship the Linux saved-sign-in startup recovery, Windows retained-session/retry and
+duplicate-sign-in repairs, and encrypted Space metadata correction separately
+from the broader UI/CLI feedback. The intended patch is Desktop 0.7.0-beta.3 on
+both Linux and Windows. Existing update verification, safe shutdown, account/root
+binding and recovery gates still apply. New navigation, appearance, sync/media
+workspace and CLI changes are explicitly outside this patch.
+
+
+Owner numbering clarification, 27 October 2026: keep the current
+`0.7.0-beta.3` compatibility bridge so installed beta.2 clients can discover it.
+Its updater must recognize numeric `0.x.y` releases as Beta; future releases use
+that cleaner format. GitHub prerelease metadata and Stable-channel exclusion
+must follow the same classification. The bridge remains available for old clients.

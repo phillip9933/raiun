@@ -575,7 +575,11 @@ fn build_listing(
             values.name.take().unwrap_or(href_name)
         };
         validate_raw_name(&raw_name)?;
+        // A Space endpoint is keyed by its resource identity, while oc:name is
+        // its display name. Only that exact Graph-selected root may differ;
+        // folder roots and children still have to match their href component.
         if is_root
+            && !(logical_path == "/" && requested_segments == root_segments)
             && requested_segments
                 .last()
                 .is_some_and(|requested_name| requested_name != &raw_name)
@@ -1358,6 +1362,77 @@ mod tests {
             listing.children[0]
                 .vault_evidence
                 .contains(&VaultEvidence::FolderNameSuffix)
+        );
+    }
+
+    #[test]
+    fn space_root_display_name_is_not_its_dav_identifier() {
+        let (server, root, requested) = urls("/");
+        let mut selected = space();
+        selected.personal = false;
+        selected.encrypted = true;
+        selected.name = "Secure Team".into();
+        let body = xml(
+            "/dav/spaces/space-id/",
+            "Secure Team",
+            "/dav/spaces/space-id/ciphertext",
+            "ciphertext",
+        );
+        let listing =
+            parse_listing(body.as_bytes(), &server, &selected, &root, &requested, "/").unwrap();
+        assert_eq!(listing.space_id, selected.id);
+        assert_eq!(listing.root.id, "root-id");
+        assert_eq!(listing.root.raw_name, "Secure Team");
+        assert_eq!(listing.root.path, "/");
+        assert_eq!(listing.root.href, root.as_str());
+    }
+
+    #[test]
+    fn space_display_name_exception_does_not_relax_folder_or_child_scope() {
+        let (server, root, requested) = urls("/folder.vault");
+        let folder = xml(
+            "/dav/spaces/space-id/folder.vault/",
+            "other.vault",
+            "/dav/spaces/space-id/folder.vault/ciphertext",
+            "ciphertext",
+        );
+        assert!(
+            parse_listing(
+                folder.as_bytes(),
+                &server,
+                &space(),
+                &root,
+                &requested,
+                "/folder.vault"
+            )
+            .is_err()
+        );
+        let (_, _, requested) = urls("/");
+        let foreign = xml(
+            "/dav/spaces/other-space/",
+            "Secure Team",
+            "/dav/spaces/other-space/ciphertext",
+            "ciphertext",
+        );
+        assert!(
+            parse_listing(
+                foreign.as_bytes(),
+                &server,
+                &space(),
+                &root,
+                &requested,
+                "/"
+            )
+            .is_err()
+        );
+        let child = xml(
+            "/dav/spaces/space-id/",
+            "Secure Team",
+            "/dav/spaces/space-id/ciphertext",
+            "different-name",
+        );
+        assert!(
+            parse_listing(child.as_bytes(), &server, &space(), &root, &requested, "/").is_err()
         );
     }
 
