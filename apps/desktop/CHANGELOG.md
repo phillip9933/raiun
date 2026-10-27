@@ -14,6 +14,10 @@ Focused Linux and Windows sign-in and encrypted Space fixes.
 - Allow an encrypted Space display name to differ from its exact server resource
   identifier. Folder and child location checks remain strict.
 
+- Prepare the updater for future numeric Beta versions (`0.x.y`) while keeping
+  Stable-channel filtering strict. This final `0.7.0-beta.3` bridge preserves the
+  automatic update path for existing beta.2 clients.
+
 This patch does not include the planned navigation, appearance or CLI changes.
 Existing beta.2 upgrade/recovery limits continue to apply.
 

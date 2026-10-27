@@ -19,6 +19,8 @@ macOS is not released. Download the AppImage or Windows setup installer from the
 Beta.1 users must install beta.2 manually once. Beta.2 adds automatic or manual
 GitHub release checks with dismissible notices and explicit signed Download/Install
 controls. See [Desktop updates](docs/DESKTOP-UPDATES.md) for channels and trust.
+Beta.3 bridges the legacy version format to future numeric Beta releases such as
+`0.7.4`; numeric `0.x` releases remain on the Beta channel.
 
 The app provides an OpenCloud drive, folder sync, offline caching, encrypted
 file access, account controls, transfers and recovery UI. Focused tests cover

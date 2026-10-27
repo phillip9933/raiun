@@ -141,3 +141,10 @@ from the broader UI/CLI feedback. The intended patch is Desktop 0.7.0-beta.3 on
 both Linux and Windows. Existing update verification, safe shutdown, account/root
 binding and recovery gates still apply. New navigation, appearance, sync/media
 workspace and CLI changes are explicitly outside this patch.
+
+
+Owner numbering clarification, 27 October 2026: keep the current
+`0.7.0-beta.3` compatibility bridge so installed beta.2 clients can discover it.
+Its updater must recognize numeric `0.x.y` releases as Beta; future releases use
+that cleaner format. GitHub prerelease metadata and Stable-channel exclusion
+must follow the same classification. The bridge remains available for old clients.
