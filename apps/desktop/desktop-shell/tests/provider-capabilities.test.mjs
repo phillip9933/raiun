@@ -86,3 +86,17 @@ test('Windows disconnected collection policy skips requests but connected and le
   assert.deepEqual(await loadProviderSyncData(undefined,false,request),{pairs:[{id:'pair'}],transfers:[]});
   assert.deepEqual(requests,['pairs'],'omitted policy preserves disconnected Linux/legacy pair reads');
 });
+
+test('new folder settings require explicit support from the running agent', async () => {
+  const { default: vm } = await import('node:vm');
+  const state = { status: { provider_supported: true } };
+  const context = { state, providerFeatureAvailable };
+  vm.runInNewContext(inert, context);
+  assert.equal(context.featureAvailable('folder_settings_supported'), false);
+  state.status.folder_settings_supported = false;
+  assert.equal(context.featureAvailable('folder_settings_supported'), false);
+  state.status.folder_settings_supported = true;
+  assert.equal(context.featureAvailable('folder_settings_supported'), true);
+  state.status.provider_supported = false;
+  assert.equal(context.featureAvailable('folder_settings_supported'), false);
+});

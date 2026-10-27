@@ -174,6 +174,7 @@ let renderedVaultDialog: VaultDialogState | null = null;
 class StaleAccountRequest extends Error {}
 function isCurrentAccount(epoch: number, profileId = state.selectedAccount) { return epoch === state.accountEpoch && profileId === state.selectedAccount; }
 function featureAvailable(feature: 'folder_sync_supported' | 'folder_settings_supported' | 'media_jobs_supported' | 'vaults_supported' | 'account_switch_supported' | 'pause_supported') {
+  if (feature === 'folder_settings_supported' && state.status?.folder_settings_supported !== true) return false;
   return providerFeatureAvailable(state.status?.provider_supported, state.status?.[feature]);
 }
 // Renderer-local failures survive dialog close/reopen only for this exact

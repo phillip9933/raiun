@@ -5,6 +5,7 @@ command -v cargo >/dev/null || { echo 'Rust/Cargo is required (add ~/.cargo/bin 
 command -v sha256sum >/dev/null || { echo 'sha256sum is required to verify the Linux bundle.' >&2; exit 1; }
 pkg-config --exists gtk+-3.0 webkit2gtk-4.1 || { echo 'Install GTK 3 and WebKitGTK 4.1 development packages first.' >&2; exit 1; }
 cargo build --release --locked -p raiun-agent -p raiun-cli
+python3 scripts/check-linux-agent.py target/release/raiun-agent
 (cd desktop-shell && npm ci && npm run build)
 cargo build --manifest-path desktop-shell/src-tauri/Cargo.toml --release --locked --features custom-protocol
 bundle=target/raiun-desktop-linux
