@@ -272,3 +272,13 @@ body{min-width:0}
 .account-avatar,.account-avatar-fallback{width:28px;height:28px;flex:0 0 28px;border-radius:50%;object-fit:cover}.account-avatar-fallback{display:grid;place-items:center;background:#ffffff24;color:#fff;font-size:16px}.topbar-account{display:flex;align-items:center;gap:9px}.account-option-mark .account-avatar{width:32px;height:32px}.account-option.selected .account-avatar-fallback{background:#ffffff24;color:#fff}
 .folder-filter-help{position:relative;display:inline-block;vertical-align:middle;margin-inline-start:7px}.folder-filter-help>summary{width:20px;height:20px;display:grid;place-items:center;border:1px solid var(--line);border-radius:50%;color:var(--muted);font-size:12px;font-weight:700;cursor:pointer;list-style:none}.folder-filter-help>summary::-webkit-details-marker{display:none}.folder-filter-help>summary:focus-visible{outline:2px solid var(--primary);outline-offset:2px}.folder-filter-help>p{position:absolute;z-index:30;top:calc(100% + 7px);left:0;width:min(360px,calc(100vw - 48px));margin:0;padding:12px;border:1px solid var(--line);border-radius:9px;background:var(--surface);color:var(--text);box-shadow:0 8px 24px #0002;font-size:12px;font-weight:400;line-height:1.5}.folder-filter-help[open]>summary{color:var(--primary);border-color:var(--primary)}
 .pair-filter-field,.media-filter-field{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:8px}.pair-filter-field>label,.media-filter-field>label{display:grid;gap:6px;color:var(--muted);font-size:12px;font-weight:650}.pair-filter-field select,.media-filter-field select{width:100%;min-width:0}
+
+/* Exclusion controls follow the editor width, including inside the sidebar layout. */
+.pair-exclusions,.folder-exclusion-settings,.media-exclusion-editor{container-type:inline-size}
+.exclusion-add,.media-exclusion-editor .exclusion-add{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.5fr) auto;align-items:center;gap:8px}
+.exclusion-add>label:not(.sr-only){display:block;min-width:0}
+.exclusion-add>select,.exclusion-add input{width:100%;min-width:0;max-width:100%}
+.exclusion-add>.button{justify-self:end;max-width:100%}
+@container(max-width:620px){.exclusion-add,.media-exclusion-editor .exclusion-add{grid-template-columns:minmax(0,1fr)}.exclusion-add>.button{justify-self:end}}
+
+.pair-edit-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
