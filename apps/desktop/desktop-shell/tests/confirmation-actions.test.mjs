@@ -6,7 +6,7 @@ import ts from 'typescript';
 
 const source = await readFile(new URL('../src/main.ts', import.meta.url), 'utf8');
 const tree = ts.createSourceFile('main.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-const wanted = new Set(['confirmAccountAction', 'isCurrentAccount', 'vaultPinContextCurrent', 'handleAction', 'run', 'removeVaultOfflinePin', 'lockVault', 'removePair', 'resolveConflict', 'disconnectSpaceFolderSync', 'nativeVaultAccess', 'vaultAppFeaturesAvailable']);
+const wanted = new Set(['confirmAccountAction', 'isCurrentAccount', 'vaultPinContextCurrent', 'handleAction', 'run', 'removeVaultOfflinePin', 'lockVault', 'removePair', 'resolveConflict', 'disconnectSpaceFolderSync', 'nativeVaultAccess', 'vaultAppFeaturesAvailable', 'removeSelectedAccount', 'restoreRemovedAccount']);
 const functions = new Map(tree.statements.filter(n => ts.isFunctionDeclaration(n) && n.name && wanted.has(n.name.text)).map(n => [n.name.text, n.getText(tree)]));
 assert.equal(functions.size, wanted.size, 'exercise actual production declarations');
 const compiled = ts.transpileModule(`${[...functions.values()].join('\n')}\nglobalThis.actions = { ${[...wanted].join(',')} };`, {
@@ -18,7 +18,9 @@ function harness() {
   const dialog = deferred(), calls = [], prompts = [];
   const state = {
     accountEpoch: 7, selectedAccount: 'profile-a', nativeDialogBusy: false, accountSwitching: false,
-    status: { connected: true, provider_supported: true }, agentReachable: true, mutationBusy: 0,
+    status: { connected: true, provider_supported: true, auth_generation: 7 }, agentReachable: true, mutationBusy: 0,
+    accountRemovalSupported: true, accounts: [{ id: 'profile-a', label: 'Synthetic profile' }],
+    removedAccounts: [{ id: 'profile-old', label: 'Synthetic removed profile', local_data_preserved: true }],
     spaceActionBusy: {}, pairs: [{ id: 'alpha-one', space_id: 'space-a' }, { id: 'alpha-two', space_id: 'space-a' }, { id: 'beta-one', space_id: 'space-b' }],
     error: '', message: '', resolvingConflict: false, conflicts: {}, page: 'folders', vaultGeneration: 11,
     vaultDialog: { generation: 11, pinGeneration: 12, accountEpoch: 7, spaceId: 'space-a', rootPath: '/Synthetic.vault', rootResourceId: 'root-a',
@@ -31,7 +33,7 @@ function harness() {
     selectedAccountLabel: () => 'Synthetic profile', lastPath: path => path.split('/').at(-1),
     messageOf: error => String(error.message || error), isStaleAccountRequest: () => false,
     pairExclusionsUi: { open: new Set(), drafts: map(), errors: map(), busy: map() },
-    refresh: async () => {}, loadConflictPage: async () => {}, isStaleConflictError: () => false,
+    refresh: async () => { state.status = { ...state.status }; }, syncAccounts: async () => {}, accountSwitchDisabled: () => false, loadConflictPage: async () => {}, isStaleConflictError: () => false,
     forgetVaultOperationsScope() {}, clearVaultPinUi() {}, clearVaultEditRetryUi() {},
     safeVaultExistingOverwriteReason: () => null, safeVaultMountWriteReason: () => null,
     refreshEncryptedRetryLatestStatuses: async () => {},
@@ -40,6 +42,8 @@ function harness() {
       if (action === 'space_disconnect') return { space_id: 'space-a', removed_pair_ids: ['alpha-one', 'alpha-two'] };
       if (action === 'vault_pin_remove') return { removed: true };
       if (action === 'resolve_conflict') return { recovery_path: '/synthetic-recovery' };
+      if (action === 'account_remove') return { removed_profile_id: 'profile-a', selected: null, local_data_preserved: true, credentials_revoked: true };
+      if (action === 'account_restore') return { restored_profile_id: 'profile-old', selected: 'profile-a', sign_in_required: true };
       return {};
     }
   };
@@ -52,9 +56,11 @@ const cases = [
   ['conflict', 'resolve_conflict', h => h.resolveConflict({ dataset: { resolveConflict: 'keep_local', pairId: 'alpha-one', path: '/synthetic.txt', localHash: 'hash-a', remoteEtag: 'etag-a' } })],
   ['offline pin', 'vault_pin_remove', h => h.removeVaultOfflinePin('pin-a')],
   ['vault lock', 'vault_lock', h => h.lockVault()],
-  ['logout actual handler', 'logout', h => h.handleAction('logout')]
+  ['logout actual handler', 'logout', h => h.handleAction('logout')],
+  ['account remove', 'account_remove', h => h.removeSelectedAccount()],
+  ['removed account restore', 'account_restore', h => h.restoreRemovedAccount('profile-old')]
 ];
-test('all six actual actions wait for explicit approval; Cancel emits no RPC and OK emits exactly one', async t => {
+test('all confirmed actions wait for explicit approval; Cancel emits no RPC and OK emits exactly one', async t => {
   for (const [name, action, start] of cases) await t.test(name, async () => {
     for (const approval of [false, true]) {
       const h = harness(); const pending = start(h);
@@ -66,7 +72,7 @@ test('all six actual actions wait for explicit approval; Cancel emits no RPC and
     }
   });
 });
-test('all six actions refuse rejected or nonboolean truthy approvals', async t => {
+test('all confirmed actions refuse rejected or nonboolean truthy approvals', async t => {
   for (const [name, , start] of cases) await t.test(name, async () => {
     for (const value of [1, 'yes', {}, []]) {
       const h = harness(), pending = start(h); h.dialog.resolve(value); await pending; assert.equal(h.calls.length, 0);
@@ -75,7 +81,7 @@ test('all six actions refuse rejected or nonboolean truthy approvals', async t =
     assert.equal(h.calls.length, 0); assert.match(h.state.error, /Could not show confirmation/); assert.equal(h.state.nativeDialogBusy, false);
   });
 });
-test('all six actions reject approval after account epoch or profile changes', async t => {
+test('all confirmed actions reject approval after account epoch or profile changes', async t => {
   for (const [name, , start] of cases) await t.test(name, async () => {
     for (const mutate of [h => h.state.accountEpoch++, h => { h.state.selectedAccount = 'profile-b'; }]) {
       const h = harness(), pending = start(h); mutate(h); h.dialog.resolve(true); await pending; assert.equal(h.calls.length, 0);
@@ -112,7 +118,7 @@ test('AST binds imported async dialog and every confirmation site awaits the com
     }
     ts.forEachChild(n, visit);
   }; visit(tree);
-  assert.equal(calls.length, 6); assert.equal(globals.length, 0);
+  assert.equal(calls.length, 8); assert.equal(globals.length, 0);
   for (const call of calls) assert.ok(ts.isAwaitExpression(call.parent), 'each handler must await confirmation');
   const helper = tree.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === 'confirmAccountAction');
   const helperCalls = [];

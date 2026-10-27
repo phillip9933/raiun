@@ -1,5 +1,18 @@
 # Raiun Desktop changelog
 
+## 0.7.4 — Unreleased candidate
+
+- Windows installer upgrades existing same-user installations in place by default, without requiring a manual uninstall. Running program files block replacement with Retry/Cancel; the installer does not force Raiun to stop.
+- Dedicated Offline files and Encrypted files pages, clearer storage usage, and expandable help reduce clutter.
+- Synced folders and upload-only media backups share one workspace with distinct tabs and unchanged transfer semantics.
+- Periodic refresh preserves appropriate focus/scroll and avoids unchanged full-page redraws.
+- Explicit account removal signs out, revokes remembered vault-password access and stops the account while preserving local files, recovery and path reservations. Removed accounts can be restored to the same profile; sign-in and vault passwords are required again.
+- Light/Dark/System themes, per-account accents, consistent account selection, a standard settings icon and a compact account/Refresh strip.
+- Mount is unavailable when already mounted; encrypted-file help distinguishes Lock from forgetting a saved password.
+- Reconnect failure details remain available inline after a toast is dismissed. Redacted diagnostics accept legitimate disconnected Windows status, omit cleanup extension data and report app/agent versions separately.
+
+This candidate retains the beta.3 sign-in/Space fixes and uses numeric Beta versioning. Exact-package acceptance is being prepared; no 0.7.4 release is published. Headless/CLI distribution and MSI packaging are outside this candidate.
+
 ## 0.7.0-beta.3 — 2026-10-27
 
 Focused Linux and Windows sign-in and encrypted Space fixes.

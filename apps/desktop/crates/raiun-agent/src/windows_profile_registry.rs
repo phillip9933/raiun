@@ -12,10 +12,16 @@ const MAX_LABEL_BYTES: usize = 256;
 const MAX_SOURCE_RESERVATIONS: usize = 128;
 const MAX_VAULT_RESERVATIONS: usize = 128;
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileRecord {
     label: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    removed: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     root_reservations: Vec<RootReservation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -35,6 +41,9 @@ impl ProfileRecord {
     }
     pub fn label(&self) -> &str {
         &self.label
+    }
+    pub fn removed(&self) -> bool {
+        self.removed
     }
 }
 
@@ -260,7 +269,7 @@ impl VaultReservation {
 #[serde(deny_unknown_fields)]
 pub struct Registry {
     version: u32,
-    selected: String,
+    selected: Option<String>,
     #[serde(deserialize_with = "unique_profiles")]
     profiles: BTreeMap<String, ProfileRecord>,
 }
@@ -299,11 +308,12 @@ impl Registry {
         let Some(bytes) = bytes else {
             return Ok(Self {
                 version: REGISTRY_VERSION,
-                selected: DEFAULT_ID.into(),
+                selected: Some(DEFAULT_ID.into()),
                 profiles: BTreeMap::from([(
                     DEFAULT_ID.into(),
                     ProfileRecord {
                         label: "Default".into(),
+                        removed: false,
                         root_reservations: Vec::new(),
                         source_reservations: Vec::new(),
                         vault_reservations: Vec::new(),
@@ -319,8 +329,8 @@ impl Registry {
         validate_registry(&registry)?;
         Ok(registry)
     }
-    pub fn selected(&self) -> &str {
-        &self.selected
+    pub fn selected(&self) -> Option<&str> {
+        self.selected.as_deref()
     }
     pub fn profiles(&self) -> &BTreeMap<String, ProfileRecord> {
         &self.profiles
@@ -348,11 +358,15 @@ impl Registry {
             id.into(),
             ProfileRecord {
                 label: label.trim().into(),
+                removed: false,
                 root_reservations: Vec::new(),
                 source_reservations: Vec::new(),
                 vault_reservations: Vec::new(),
             },
         );
+        if next.selected.is_none() {
+            next.selected = Some(id.into());
+        }
         validate_registry(&next)?;
         Ok(next)
     }
@@ -434,11 +448,64 @@ impl Registry {
     }
     pub fn with_selected(&self, id: &str) -> Result<Self, String> {
         validate_registry(self)?;
-        if !self.profiles.contains_key(id) {
+        if self.profiles.get(id).is_none_or(ProfileRecord::removed) {
             return Err("Unknown profile_id".into());
         }
         let mut next = self.clone();
-        next.selected = id.into();
+        next.selected = Some(id.into());
+        Ok(next)
+    }
+    pub fn with_retired(&self, id: &str, fallback: Option<&str>) -> Result<Self, String> {
+        validate_registry(self)?;
+        let record = self.profiles.get(id).ok_or("Unknown profile_id")?;
+        if record.removed {
+            return Err("Account is already removed".into());
+        }
+        if self.selected.as_deref() != Some(id) {
+            return Err("Only the selected account can be removed".into());
+        }
+        if fallback == Some(id) {
+            return Err("Removed account cannot remain selected".into());
+        }
+        if let Some(fallback) = fallback {
+            if fallback == id
+                || self
+                    .profiles
+                    .get(fallback)
+                    .is_none_or(ProfileRecord::removed)
+            {
+                return Err("Invalid fallback account".into());
+            }
+        } else if self
+            .profiles
+            .iter()
+            .any(|(other, row)| other != id && !row.removed)
+        {
+            return Err("An active account must be selected".into());
+        }
+        let mut next = self.clone();
+        next.profiles
+            .get_mut(id)
+            .expect("validated profile")
+            .removed = true;
+        if next.selected.as_deref() == Some(id) {
+            next.selected = fallback.map(str::to_owned);
+        }
+        next.encode()?;
+        Ok(next)
+    }
+    pub fn with_restored(&self, id: &str) -> Result<Self, String> {
+        validate_registry(self)?;
+        let mut next = self.clone();
+        let record = next.profiles.get_mut(id).ok_or("Unknown profile_id")?;
+        if !record.removed {
+            return Err("Account is not removed".into());
+        }
+        record.removed = false;
+        if next.selected.is_none() {
+            next.selected = Some(id.into());
+        }
+        next.encode()?;
         Ok(next)
     }
 }
@@ -452,8 +519,19 @@ fn validate_registry(registry: &Registry) -> Result<(), String> {
     if !registry.profiles.contains_key(DEFAULT_ID) {
         return Err("Profiles registry is missing the default profile".into());
     }
-    if !registry.profiles.contains_key(&registry.selected) {
-        return Err("Selected profile is missing from the registry".into());
+    let active_count = registry
+        .profiles
+        .values()
+        .filter(|record| !record.removed)
+        .count();
+    match registry.selected.as_deref() {
+        Some(selected)
+            if registry
+                .profiles
+                .get(selected)
+                .is_some_and(|record| !record.removed) => {}
+        None if active_count == 0 => {}
+        _ => return Err("Selected profile is missing or removed".into()),
     }
     for (id, record) in &registry.profiles {
         if id != DEFAULT_ID && !valid_profile_id(id) {
@@ -517,14 +595,14 @@ mod tests {
     #[test]
     fn missing_registry_and_add_select_roundtrip_preserve_other_profiles() {
         let original = Registry::decode_or_default(None).unwrap();
-        assert_eq!(original.selected(), "default");
+        assert_eq!(original.selected(), Some("default"));
         assert_eq!(original.profiles()["default"].label(), "Default");
         let added = original.with_added(ID, "  Work  ").unwrap();
-        assert_eq!(added.selected(), "default");
+        assert_eq!(added.selected(), Some("default"));
         assert_eq!(added.profiles()[ID].label(), "Work");
         let selected = added.with_selected(ID).unwrap();
         let restored = Registry::decode_or_default(Some(&selected.encode().unwrap())).unwrap();
-        assert_eq!(restored.selected(), ID);
+        assert_eq!(restored.selected(), Some(ID));
         assert_eq!(restored.profiles().len(), 2);
         assert_eq!(restored.profiles()["default"].label(), "Default");
         assert_eq!(original.profiles().len(), 1);
@@ -639,6 +717,70 @@ mod tests {
         let mut value: serde_json::Value = serde_json::from_slice(&full.encode().unwrap()).unwrap();
         value["profiles"]["default"]["root_reservations"][0]["unexpected"] = true.into();
         assert!(Registry::decode_or_default(Some(&serde_json::to_vec(&value).unwrap())).is_err());
+    }
+    #[test]
+    fn retirement_preserves_identity_and_reservations_until_explicit_restore() {
+        let mut registry = Registry::decode_or_default(None)
+            .unwrap()
+            .with_added(ID, "Work")
+            .unwrap()
+            .with_reserved_root(
+                ID,
+                RootReservation::new(r"C:\WorkCloud".into(), 31, 47, true).unwrap(),
+            )
+            .unwrap()
+            .with_reserved_source(
+                ID,
+                SourceReservation::new(
+                    "a".repeat(64),
+                    SourceKind::FolderPair,
+                    "pair-1".into(),
+                    RootReservation::new(r"C:\WorkSource".into(), 31, 48, false).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .with_reserved_vault(
+                ID,
+                VaultReservation::new(
+                    "b".repeat(64),
+                    "space-id".into(),
+                    "root-id".into(),
+                    "/Spaces/space-id".into(),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .with_selected(ID)
+            .unwrap();
+
+        registry = registry.with_retired(ID, Some("default")).unwrap();
+        assert_eq!(registry.selected(), Some("default"));
+        assert!(registry.profiles()[ID].removed());
+        assert_eq!(registry.profiles()[ID].label(), "Work");
+        assert_eq!(registry.profiles()[ID].root_reservations().len(), 1);
+        assert_eq!(registry.profiles()[ID].source_reservations().len(), 1);
+        assert_eq!(registry.profiles()[ID].vault_reservations().len(), 1);
+        assert!(registry.with_selected(ID).is_err());
+
+        registry = registry.with_retired("default", None).unwrap();
+        assert_eq!(registry.selected(), None);
+        assert!(registry.profiles()["default"].removed());
+        let decoded = Registry::decode_or_default(Some(&registry.encode().unwrap())).unwrap();
+        assert_eq!(decoded.selected(), None);
+        assert!(decoded.profiles()[ID].removed());
+        assert_eq!(decoded.profiles()[ID].root_reservations().len(), 1);
+        assert_eq!(decoded.profiles()[ID].source_reservations().len(), 1);
+        assert_eq!(decoded.profiles()[ID].vault_reservations().len(), 1);
+
+        let restored = decoded.with_restored(ID).unwrap();
+        assert_eq!(restored.selected(), Some(ID));
+        assert!(!restored.profiles()[ID].removed());
+        assert_eq!(restored.profiles()[ID].root_reservations().len(), 1);
+        assert_eq!(restored.profiles()[ID].source_reservations().len(), 1);
+        assert_eq!(restored.profiles()[ID].vault_reservations().len(), 1);
+        assert!(restored.profiles()["default"].removed());
+        assert!(restored.with_retired(ID, Some(ID)).is_err());
     }
     fn source(path: &str, index: u64, kind: SourceKind) -> SourceReservation {
         SourceReservation::new(

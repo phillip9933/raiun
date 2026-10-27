@@ -11,7 +11,9 @@ struct BrokerState {
 pub(super) struct WindowsProfiles {
     source_admissions: SharedSourceAdmissions,
     vault_sessions: Arc<raiun_vault::session::VaultSessionCoordinator>,
-    storage: DpapiSessionStore,
+    storage: Option<DpapiSessionStore>,
+    #[cfg(test)]
+    synthetic_registry: Option<Arc<Mutex<Vec<u8>>>>,
     state: Mutex<BrokerState>,
     mutation_gate: Mutex<()>,
 }
@@ -60,7 +62,14 @@ impl WindowsProfiles {
         // and KDF permit across every account, including newly added profiles.
         let vault_sessions = Arc::new(raiun_vault::session::VaultSessionCoordinator::new());
         let mut runtimes = BTreeMap::new();
-        for id in ids {
+        // Reservation inventory above includes retired profiles. Only active
+        // profiles receive runtimes or restore credentials at startup.
+        for id in ids.into_iter().filter(|id| {
+            registry
+                .profiles()
+                .get(id)
+                .is_some_and(|record| !record.removed())
+        }) {
             let store = DpapiStore::for_profile(&id)?;
             let runtime = Arc::new(WindowsAgent::new_for_profile_with_services(
                 &id,
@@ -74,7 +83,9 @@ impl WindowsProfiles {
         Ok(Self {
             source_admissions,
             vault_sessions,
-            storage,
+            storage: Some(storage),
+            #[cfg(test)]
+            synthetic_registry: None,
             state: Mutex::new(BrokerState { registry, runtimes }),
             mutation_gate: Mutex::new(()),
         })
@@ -86,7 +97,7 @@ impl WindowsProfiles {
         registry: Registry,
         runtime: Arc<WindowsAgent>,
     ) -> Result<Self, String> {
-        if registry.selected() != runtime.profile_scope {
+        if registry.selected() != Some(runtime.profile_scope.as_str()) {
             return Err("Fixture profile mismatch".into());
         }
         let source_admissions = runtime
@@ -101,8 +112,62 @@ impl WindowsProfiles {
         Ok(Self {
             source_admissions,
             vault_sessions: runtime.vault_sessions.clone(),
-            storage,
+            storage: Some(storage),
+            #[cfg(test)]
+            synthetic_registry: None,
             state: Mutex::new(BrokerState { registry, runtimes }),
+            mutation_gate: Mutex::new(()),
+        })
+    }
+
+    #[cfg(test)]
+    fn for_synthetic_lifecycle_fixture(
+        registry: Registry,
+        runtimes: Vec<Arc<WindowsAgent>>,
+    ) -> Result<Self, String> {
+        let source_admissions = runtimes
+            .first()
+            .and_then(|runtime| runtime.source_admissions.clone())
+            .ok_or("Synthetic fixture admissions missing")?;
+        let vault_sessions = runtimes
+            .first()
+            .map(|runtime| runtime.vault_sessions.clone())
+            .ok_or("Synthetic fixture runtimes missing")?;
+        let mut runtime_map = BTreeMap::new();
+        for runtime in runtimes {
+            if registry
+                .profiles()
+                .get(&runtime.profile_scope)
+                .is_none_or(|record| record.removed())
+            {
+                return Err("Synthetic runtime is not an active profile".into());
+            }
+            runtime_map.insert(runtime.profile_scope.clone(), runtime);
+        }
+        if registry
+            .selected()
+            .is_some_and(|selected| !runtime_map.contains_key(selected))
+        {
+            return Err("Synthetic selected runtime is missing".into());
+        }
+        if registry
+            .profiles()
+            .iter()
+            .any(|(id, record)| !record.removed() && !runtime_map.contains_key(id))
+        {
+            return Err("Synthetic active runtime is missing".into());
+        }
+        let encoded = registry.encode()?;
+        Ok(Self {
+            source_admissions,
+            vault_sessions,
+            storage: None,
+            #[cfg(test)]
+            synthetic_registry: Some(Arc::new(Mutex::new(encoded))),
+            state: Mutex::new(BrokerState {
+                registry,
+                runtimes: runtime_map,
+            }),
             mutation_gate: Mutex::new(()),
         })
     }
@@ -124,10 +189,21 @@ impl WindowsProfiles {
             .lock()
             .map_err(|_| "Account state is unavailable")?;
         let id = match request.get("profile_id") {
-            None => state.registry.selected(),
+            None => state
+                .registry
+                .selected()
+                .ok_or("No active account is selected")?,
             Some(Value::String(id)) => id,
             Some(_) => return Err("Invalid profile_id".into()),
         };
+        if state
+            .registry
+            .profiles()
+            .get(id)
+            .is_none_or(|record| record.removed())
+        {
+            return Err("Account has been removed".into());
+        }
         let runtime = state
             .runtimes
             .get(id)
@@ -143,11 +219,46 @@ impl WindowsProfiles {
             .source_admissions
             .lock()
             .map_err(|_| "Source admission is unavailable")?;
-        self.storage
-            .save_profile_registry(&registry.encode()?)
-            .map_err(|_| "Could not save the account registry".to_owned())?;
+        let bytes = registry.encode()?;
+        if let Some(storage) = &self.storage {
+            storage
+                .save_profile_registry(&bytes)
+                .map_err(|_| "Could not save the account registry".to_owned())?;
+        } else {
+            #[cfg(test)]
+            {
+                *self
+                    .synthetic_registry
+                    .as_ref()
+                    .ok_or("Synthetic account persistence is unavailable")?
+                    .lock()
+                    .map_err(|_| "Synthetic account persistence is unavailable")? = bytes;
+            }
+            #[cfg(not(test))]
+            return Err("Account storage is unavailable".into());
+        }
         *published = Arc::new(registry.clone());
         Ok(())
+    }
+
+    fn new_runtime(&self, id: &str) -> Result<Arc<WindowsAgent>, String> {
+        #[cfg(test)]
+        if self.storage.is_none() {
+            return Ok(super::tests::synthetic_profile_runtime(
+                id,
+                Some(self.source_admissions.clone()),
+                self.vault_sessions.clone(),
+            )
+            .0);
+        }
+        let runtime = Arc::new(WindowsAgent::new_for_profile_with_services(
+            id,
+            DpapiStore::for_profile(id)?,
+            Some(self.source_admissions.clone()),
+            self.vault_sessions.clone(),
+        )?);
+        runtime.attach_existing_file_save_owner()?;
+        Ok(runtime)
     }
 
     pub(super) fn refresh_all(&self) -> Result<(), String> {
@@ -226,8 +337,17 @@ impl WindowsProfiles {
                     let profile = target
                         .profile_id
                         .as_deref()
-                        .unwrap_or(state.registry.selected())
+                        .or(state.registry.selected())
+                        .ok_or("No active account is selected")?
                         .to_owned();
+                    if state
+                        .registry
+                        .profiles()
+                        .get(&profile)
+                        .is_none_or(|record| record.removed())
+                    {
+                        return Err("Account has been removed".into());
+                    }
                     let runtime = state
                         .runtimes
                         .get(&profile)
@@ -274,7 +394,16 @@ impl WindowsProfiles {
                     let profile = target
                         .profile_id
                         .as_deref()
-                        .unwrap_or(state.registry.selected());
+                        .or(state.registry.selected())
+                        .ok_or("No active account is selected")?;
+                    if state
+                        .registry
+                        .profiles()
+                        .get(profile)
+                        .is_none_or(|record| record.removed())
+                    {
+                        return Err("Account has been removed".into());
+                    }
                     state
                         .runtimes
                         .get(profile)
@@ -296,7 +425,16 @@ impl WindowsProfiles {
                     let profile = target
                         .profile_id
                         .as_deref()
-                        .unwrap_or(state.registry.selected());
+                        .or(state.registry.selected())
+                        .ok_or("No active account is selected")?;
+                    if state
+                        .registry
+                        .profiles()
+                        .get(profile)
+                        .is_none_or(|record| record.removed())
+                    {
+                        return Err("Account has been removed".into());
+                    }
                     state
                         .runtimes
                         .get(profile)
@@ -318,26 +456,63 @@ impl WindowsProfiles {
             .get("action")
             .and_then(Value::as_str)
             .ok_or("Missing action")?;
+        if action == "status" && request.get("profile_id").is_none() {
+            let no_active_account = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?
+                .registry
+                .selected()
+                .is_none();
+            if no_active_account {
+                return Ok((
+                    json!({
+                        "connected":false,
+                        "offline":false,
+                        "mounted":false,
+                        "account_switch_supported":true,
+                        "accounts_empty":true,
+                        "agent_version":env!("CARGO_PKG_VERSION"),
+                        "session_cleanup_uncertain":false
+                    }),
+                    false,
+                ));
+            }
+        }
         match action {
             "shutdown" => Ok((json!({"stopping":true}), true)),
             "accounts" => {
-                let (selected, profiles) = {
+                let (selected, profiles, removed_items) = {
                     let state = self
                         .state
                         .lock()
                         .map_err(|_| "Account state is unavailable")?;
                     (
-                        state.registry.selected().to_owned(),
+                        state.registry.selected().map(str::to_owned),
                         state
                             .registry
                             .profiles()
                             .iter()
+                            .filter(|(_, record)| !record.removed())
                             .map(|(id, record)| {
                                 (
                                     id.clone(),
                                     record.label().to_owned(),
                                     state.runtimes[id].clone(),
                                 )
+                            })
+                            .collect::<Vec<_>>(),
+                        state
+                            .registry
+                            .profiles()
+                            .iter()
+                            .filter(|(_, record)| record.removed())
+                            .map(|(id, record)| {
+                                json!({
+                                    "id":id,
+                                    "label":record.label(),
+                                    "local_data_preserved":true
+                                })
                             })
                             .collect::<Vec<_>>(),
                     )
@@ -350,7 +525,15 @@ impl WindowsProfiles {
                     status["account_switch_supported"] = json!(WINDOWS_ACCOUNTS_ENABLED);
                     items.push(json!({"id":id,"label":label,"status":status}));
                 }
-                Ok((json!({"selected":selected,"items":items}), false))
+                Ok((
+                    json!({
+                        "account_removal_supported": true,
+                        "selected": selected,
+                        "items": items,
+                        "removed_items": removed_items
+                    }),
+                    false,
+                ))
             }
             "account_select" => {
                 let _gate = self
@@ -370,6 +553,169 @@ impl WindowsProfiles {
                 state.registry = next;
                 // Selection neither revokes credentials nor drains any runtime.
                 Ok((json!({}), false))
+            }
+            "account_remove" => {
+                let _gate = self
+                    .mutation_gate
+                    .lock()
+                    .map_err(|_| "Account changes are unavailable")?;
+                if request.get("confirm").and_then(Value::as_bool) != Some(true) {
+                    return Err("Confirm removal of this account".into());
+                }
+                let id = request
+                    .get("profile_id")
+                    .and_then(Value::as_str)
+                    .ok_or("Missing profile_id")?;
+                let expected_generation = request
+                    .get("expected_auth_generation")
+                    .and_then(Value::as_u64)
+                    .ok_or("Missing expected_auth_generation")?;
+                let fallback = {
+                    let state = self
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?;
+                    if state.registry.selected() != Some(id) {
+                        return Err("Only the selected account can be removed".into());
+                    }
+                    state
+                        .registry
+                        .profiles()
+                        .get(id)
+                        .filter(|record| !record.removed())
+                        .ok_or("Account has already been removed")?;
+                    state
+                        .registry
+                        .profiles()
+                        .iter()
+                        .find(|(other, record)| other.as_str() != id && !record.removed())
+                        .map(|(other, _)| other.clone())
+                };
+                let runtime = {
+                    let state = self
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?;
+                    state
+                        .runtimes
+                        .get(id)
+                        .cloned()
+                        .ok_or("Account runtime is unavailable")?
+                };
+                runtime.begin_retirement(expected_generation)?;
+                let removal = (|| {
+                    let result = runtime.logout()?;
+                    if result["session_cleanup_uncertain"] == true {
+                        return Err(
+                            "Signed out, but protected sign-in cleanup is uncertain; retry removal"
+                                .into(),
+                        );
+                    }
+                    runtime.stop_and_join()?;
+                    let mut state = self
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?;
+                    if state.registry.selected() != Some(id)
+                        || state
+                            .runtimes
+                            .get(id)
+                            .is_none_or(|active| !Arc::ptr_eq(active, &runtime))
+                    {
+                        return Err("The account changed during removal".into());
+                    }
+                    let next = state.registry.with_retired(id, fallback.as_deref())?;
+                    self.persist(&next)?;
+                    state.registry = next;
+                    state.runtimes.remove(id);
+                    Ok(json!({
+                        "removed_profile_id":id,
+                        "selected":fallback,
+                        "local_data_preserved":true,
+                        "credentials_revoked":true
+                    }))
+                })();
+                if removal.is_err() {
+                    runtime.cancel_retirement();
+                }
+                removal.map(|response| (response, false))
+            }
+            "account_restore" => {
+                let _gate = self
+                    .mutation_gate
+                    .lock()
+                    .map_err(|_| "Account changes are unavailable")?;
+                if request.get("confirm").and_then(Value::as_bool) != Some(true) {
+                    return Err("Confirm restoration of this account".into());
+                }
+                let id = request
+                    .get("profile_id")
+                    .and_then(Value::as_str)
+                    .ok_or("Missing profile_id")?;
+                let mut state = self
+                    .state
+                    .lock()
+                    .map_err(|_| "Account state is unavailable")?;
+                if !state
+                    .registry
+                    .profiles()
+                    .get(id)
+                    .is_some_and(|record| record.removed())
+                {
+                    return Err("Account is not removed".into());
+                }
+                let runtime = self.new_runtime(id)?;
+                // Retired profiles must never silently regain OAuth or saved
+                // vault-password authority, including tombstones from an older
+                // process that exited before its final cleanup.
+                let had_restored_sign_in_state = {
+                    let runtime_state = runtime
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?;
+                    runtime_state.session.is_some()
+                        || runtime_state.online_authenticated
+                        || runtime_state.root_configuration.is_some()
+                };
+                let result = runtime.logout()?;
+                if result["session_cleanup_uncertain"] == true {
+                    return Err(
+                        "Protected sign-in cleanup is uncertain; account was not restored".into(),
+                    );
+                }
+                if had_restored_sign_in_state {
+                    return Err(
+                        "Saved sign-in state was cleared; retry account restoration while signed out"
+                            .into(),
+                    );
+                }
+                {
+                    let runtime_state = runtime
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?;
+                    if runtime_state.session.is_some()
+                        || runtime_state.online_authenticated
+                        || runtime_state.root_configuration.is_some()
+                    {
+                        return Err(
+                            "The restored account still has sign-in state; it was not activated"
+                                .into(),
+                        );
+                    }
+                }
+                let next = state.registry.with_restored(id)?;
+                self.persist(&next)?;
+                state.registry = next;
+                state.runtimes.insert(id.to_owned(), runtime);
+                Ok((
+                    json!({
+                        "restored_profile_id":id,
+                        "selected":state.registry.selected(),
+                        "sign_in_required":true
+                    }),
+                    false,
+                ))
             }
             "account_add" => {
                 let _gate = self
@@ -408,13 +754,7 @@ impl WindowsProfiles {
                 }
                 let id = allocated.ok_or("Could not allocate an account ID")?;
                 let next = state.registry.with_added(&id, label)?;
-                let runtime = Arc::new(WindowsAgent::new_for_profile_with_services(
-                    &id,
-                    DpapiStore::for_profile(&id)?,
-                    Some(self.source_admissions.clone()),
-                    self.vault_sessions.clone(),
-                )?);
-                runtime.attach_existing_file_save_owner()?;
+                let runtime = self.new_runtime(&id)?;
                 self.persist(&next)?;
                 state.registry = next;
                 state.runtimes.insert(id.clone(), runtime);
@@ -891,6 +1231,154 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_broker_removal_is_confirmed_generation_bound_and_restorable() {
+        let id = "profile-0123456789abcdef0123456789abcdef";
+        let registry = Registry::decode_or_default(None)
+            .unwrap()
+            .with_added(id, "Synthetic Work")
+            .unwrap()
+            .with_reserved_root(
+                id,
+                RootReservation::new(r"C:\SyntheticWork".into(), 7, 9, true).unwrap(),
+            )
+            .unwrap()
+            .with_selected(id)
+            .unwrap();
+        let admissions = Arc::new(Mutex::new(Arc::new(registry.clone())));
+        let vault_sessions = Arc::new(raiun_vault::session::VaultSessionCoordinator::new());
+        let (default_runtime, _) = super::super::tests::synthetic_profile_runtime(
+            "default",
+            Some(admissions.clone()),
+            vault_sessions.clone(),
+        );
+        let (work_runtime, work_store) =
+            super::super::tests::synthetic_profile_runtime(id, Some(admissions), vault_sessions);
+        let broker = WindowsProfiles::for_synthetic_lifecycle_fixture(
+            registry,
+            vec![default_runtime, work_runtime.clone()],
+        )
+        .unwrap();
+        let generation = work_runtime
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire);
+
+        assert!(
+            broker
+                .handle(&json!({
+                    "action":"account_remove",
+                    "profile_id":id,
+                    "expected_auth_generation":generation,
+                    "confirm":false
+                }))
+                .is_err()
+        );
+        assert!(
+            broker
+                .handle(&json!({
+                    "action":"account_remove",
+                    "profile_id":"default",
+                    "expected_auth_generation":generation,
+                    "confirm":true
+                }))
+                .is_err()
+        );
+        assert!(
+            broker
+                .handle(&json!({
+                    "action":"account_remove",
+                    "profile_id":id,
+                    "expected_auth_generation":generation.saturating_add(1),
+                    "confirm":true
+                }))
+                .is_err()
+        );
+
+        super::super::tests::set_synthetic_revoke_failure(&work_store, true);
+        let current_generation = work_runtime
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        assert!(
+            broker
+                .handle(&json!({
+                    "action":"account_remove",
+                    "profile_id":id,
+                    "expected_auth_generation":current_generation,
+                    "confirm":true
+                }))
+                .is_err()
+        );
+        assert_eq!(broker.state.lock().unwrap().registry.selected(), Some(id));
+        assert!(!broker.state.lock().unwrap().registry.profiles()[id].removed());
+
+        super::super::tests::set_synthetic_revoke_failure(&work_store, false);
+        let current_generation = work_runtime
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        let removed = broker
+            .handle(&json!({
+                "action":"account_remove",
+                "profile_id":id,
+                "expected_auth_generation":current_generation,
+                "confirm":true
+            }))
+            .unwrap()
+            .0;
+        assert_eq!(removed["local_data_preserved"], true);
+        assert_eq!(removed["credentials_revoked"], true);
+        assert_eq!(removed["selected"], "default");
+        let accounts = broker.handle(&json!({"action":"accounts"})).unwrap().0;
+        assert_eq!(accounts["account_removal_supported"], true);
+        assert_eq!(accounts["items"].as_array().unwrap().len(), 1);
+        assert_eq!(accounts["removed_items"][0]["id"], id);
+        assert_eq!(accounts["removed_items"][0]["local_data_preserved"], true);
+        assert_eq!(
+            broker.state.lock().unwrap().registry.profiles()[id]
+                .root_reservations()
+                .len(),
+            1
+        );
+
+        let default_runtime = broker.state.lock().unwrap().runtimes["default"].clone();
+        let default_generation = default_runtime
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        broker
+            .handle(&json!({
+                "action":"account_remove",
+                "profile_id":"default",
+                "expected_auth_generation":default_generation,
+                "confirm":true
+            }))
+            .unwrap();
+        let empty_accounts = broker.handle(&json!({"action":"accounts"})).unwrap().0;
+        assert_eq!(empty_accounts["selected"], Value::Null);
+        assert_eq!(empty_accounts["items"].as_array().unwrap().len(), 0);
+        let empty_status = broker.handle(&json!({"action":"status"})).unwrap().0;
+        assert_eq!(empty_status["connected"], false);
+        assert_eq!(empty_status["mounted"], false);
+        assert_eq!(empty_status["account_switch_supported"], true);
+        assert_eq!(empty_status["accounts_empty"], true);
+
+        let restored = broker
+            .handle(&json!({"action":"account_restore","profile_id":id,"confirm":true}))
+            .unwrap()
+            .0;
+        assert_eq!(restored["restored_profile_id"], id);
+        assert_eq!(restored["sign_in_required"], true);
+        assert_eq!(broker.state.lock().unwrap().registry.selected(), Some(id));
+        assert!(!broker.state.lock().unwrap().registry.profiles()[id].removed());
+        assert_eq!(
+            broker
+                .resolve(&json!({"profile_id":id}))
+                .unwrap()
+                .1
+                .status()
+                .unwrap()["connected"],
+            false
+        );
+    }
+
+    #[test]
     #[ignore = "one-shot NIC-less lab VM; task-qualified ordinary RaiunLabUser; leaves registry evidence"]
     fn fresh_lab_broker_persists_profiles_without_stopping_other_runtimes() {
         assert_eq!(
@@ -977,7 +1465,7 @@ mod tests {
                 &storage.load_profile_registry().unwrap().unwrap(),
             ))
             .unwrap();
-            assert_eq!(persisted.selected(), selected);
+            assert_eq!(persisted.selected(), Some(selected.as_str()));
             let (resolved, selected_runtime) = broker.resolve(&json!({"action":"status"})).unwrap();
             assert_eq!(&resolved, selected);
             assert!(Arc::ptr_eq(
@@ -1017,7 +1505,7 @@ mod tests {
         let reopened = WindowsProfiles::open(storage.clone()).expect("reopen durable broker");
         {
             let state = reopened.state.lock().unwrap();
-            assert_eq!(state.registry.selected(), b);
+            assert_eq!(state.registry.selected(), Some(b.as_str()));
             assert_eq!(state.registry.profiles().len(), 3);
             assert_eq!(state.registry.profiles()[&a].label(), "Synthetic A");
             assert_eq!(state.registry.profiles()[&b].label(), "Synthetic B");

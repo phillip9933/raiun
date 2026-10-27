@@ -177,3 +177,23 @@ checks passed; a later emulator run had lock-screen/UI failures, retained and
 reported separately rather than treated as a passing run. Existing C01–C10 gaps
 remain open. Subsequent Desktop releases use numeric Beta versions, beginning
 with planned `0.7.4`; this bridge remains available to older updaters.
+
+
+### Owner-approved 0.7.4 candidate scope — 27 October 2026
+
+Prepare items 1–7 from the agreed prioritization: Windows in-place upgrades
+([#25](https://github.com/phillip9933/raiun/issues/25)), storage/encrypted-file UI
+([#26](https://github.com/phillip9933/raiun/issues/26)), combined sync/media
+workspace ([#27](https://github.com/phillip9933/raiun/issues/27)), stable refresh
+([#28](https://github.com/phillip9933/raiun/issues/28)), safe account removal and
+same-ID restoration ([#29](https://github.com/phillip9933/raiun/issues/29)), and
+appearance/navigation ([#30](https://github.com/phillip9933/raiun/issues/30)).
+Headless/CLI and MSI packaging are excluded. The owner requested ready-for-publication
+candidates; this instruction does not publish 0.7.4.
+
+Source implementation and synthetic frontend/removal checks are in place. Linux
+and Windows exact-package build/upgrade, affected UI, retention and normal-quit
+checks remain required. The local browser preview was denied by automatic review;
+its unfinished interactive checks remain unverified and the preview was stopped.
+Existing unrelated completion gaps remain open; do not reinterpret whole-category
+checkboxes as a count of missing features or re-run unchanged acceptance matrices.

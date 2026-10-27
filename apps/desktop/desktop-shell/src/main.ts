@@ -8,6 +8,7 @@ import { MediaJobsView } from './media-jobs';
 import { mergeVaultLockCleanup, nativeVaultLockMessage, vaultLockScopeKey, type VaultLockCleanupEvent, type VaultLockCleanupStatus } from './vault-lock-state';
 import { connectionMode } from './connection-state';
 import { shouldBlockPassiveRefresh, shouldRunPeriodicPassiveRefresh } from './passive-refresh';
+import { ACCENT_COLORS, mountControlState, readAppearance, writeAppearance, type AccentName, type AppearanceTheme } from './ui-preferences';
 import { completeVaultCreate, finishVaultCreateAttempt } from './vault-create';
 import { offlineCopyStoredSizeLabel } from './offline-snapshot';
 import { isVaultFailureClass, vaultEditRetryStatusMessage, vaultFailureMessage, type VaultFailureClass } from './vault-failure-copy';
@@ -28,10 +29,11 @@ import { isVaultPasswordValidationError, shouldAnnounceVaultCloseBlocked, vaultD
 import raiunLogo from '../src-tauri/icons/raiun.svg';
 
 type OfflineCacheSummary = { available: boolean; quota_bytes: number; used_bytes: number; pinned_bytes: number; protected_bytes: number; over_quota: boolean; unavailable_reason?: string | null };
-type Status = { connected: boolean; offline?: boolean; offline_namespace?: boolean; server?: string | null; client_id?: string | null; paused?: boolean; paused_space_ids?: string[]; mounted?: boolean; cloud_root?: string | null; error?: string | null; autostart?: boolean | null; recovery_folder?: string | null; encrypted_edit_recovery_available?: boolean; offline_cache?: OfflineCacheSummary | null; profile_id?: string | null; profile_label?: string | null; auth_generation?: number; root_configuration?: { valid: boolean; identity_bound: boolean; registration_state: string | null; recovery_scope_token?: unknown } | null; stopped?: boolean; authenticating?: boolean; provider_supported?: boolean; folder_sync_supported?: boolean; media_jobs_supported?: boolean; vaults_supported?: boolean; vault_access_mode?: 'native_read_only'; account_switch_supported?: boolean; account_setup_requires_sign_in?: boolean; pause_supported?: boolean; bandwidth_limits_supported?: boolean; network_proxy_supported?: boolean; proxy_edit_requires_sign_out?: boolean; session_cleanup_uncertain?: boolean };
+type Status = { connected: boolean; offline?: boolean; offline_namespace?: boolean; refreshing?: boolean; agent_version?: string | null; server?: string | null; client_id?: string | null; paused?: boolean; paused_space_ids?: string[]; mounted?: boolean; cloud_root?: string | null; error?: string | null; autostart?: boolean | null; recovery_folder?: string | null; encrypted_edit_recovery_available?: boolean; offline_cache?: OfflineCacheSummary | null; profile_id?: string | null; profile_label?: string | null; auth_generation?: number; root_configuration?: { valid: boolean; identity_bound: boolean; registration_state: string | null; recovery_scope_token?: unknown } | null; stopped?: boolean; authenticating?: boolean; provider_supported?: boolean; folder_sync_supported?: boolean; media_jobs_supported?: boolean; vaults_supported?: boolean; vault_access_mode?: 'native_read_only'; account_switch_supported?: boolean; account_setup_requires_sign_in?: boolean; pause_supported?: boolean; bandwidth_limits_supported?: boolean; network_proxy_supported?: boolean; proxy_edit_requires_sign_out?: boolean; session_cleanup_uncertain?: boolean };
 type Account = { id: string; label: string; status: Status };
+type RemovedAccount = { id: string; label: string; local_data_preserved: true };
 type DesktopUpdateStatus = { state: 'idle' | 'current' | 'available' | 'unavailable' | 'downloaded' | 'dismissed' | 'error'; version: string | null; tag: string | null; release_url: string | null; notes: string | null; error: string | null; automatic_checks: boolean; channel: 'stable' | 'beta'; dismissed_tag: string | null; last_check_unix: number | null; key_configured: boolean; downloaded: boolean };
-type AccountsResult = { selected: string | null; items: Account[] };
+type AccountsResult = { selected: string | null; items: Account[]; account_removal_supported?: boolean; removed_items?: RemovedAccount[] };
 type ShellUnlockIntent = { profile_id: string; space_id: string; root_resource_id: string };
 type ResolvedUnlockTarget = { resolved: boolean; profile_id: string; space_id: string; root_resource_id: string; root_path: string; display_name: string; pin_id?: string | null; pin_generation?: number | null };
 type Space = { id: string; name: string; personal: boolean; writable: boolean; encrypted: boolean };
@@ -102,7 +104,8 @@ function safeOfflineAvailabilityState(value: unknown): OfflineAvailabilityState 
   if (value === null || value === 'ready' || value === 'stale' || value === 'unavailable') return value;
   throw new Error('The agent returned an unknown offline-copy status.');
 }
-type Page = 'overview' | 'folders' | 'transfers' | 'media' | 'settings';
+type Page = 'overview' | 'folders' | 'offline' | 'encrypted' | 'transfers' | 'settings';
+type SyncSection = 'folders' | 'media';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 let appVersionLabel = isTauri() ? 'Loading…' : 'Browser layout preview';
@@ -141,9 +144,9 @@ const desktopUpdateUi: { status: DesktopUpdateStatus | null; busy: boolean; erro
 type InterruptedCreateRetryUi = { key: string; spaceId: string; rootResourceId: string; writeId: string; revision: number; retryGeneration: number; retryState: 'attempting' | 'recovery_attempting' | 'recovery_retrying'; jobId: string; profileId: string; accountEpoch: number; generation: number; busy: boolean; status: VaultEditReconcileStatus | null; error: string };
 const interruptedCreateRetryUi: { job: InterruptedCreateRetryUi | null; timer: number; generation: number } = { job: null, timer: 0, generation: 0 };
 const cachedVaultRootsUi = { roots: [] as CachedVaultRoot[], nextAfter: null as CachedVaultRootsPage['next_after'], truncated: false, loading: false, error: '', selected: '', generation: 0, accountEpoch: -1 };
-const state: { page: Page; status: Status | null; statusErrorDismissed: string; agentReachable: boolean; pairs: Pair[]; transfers: Transfer[]; conflicts: Record<string, ConflictPage>; resolvingConflict: boolean; recoveryPage: RecoveryPage | null; recoveryLoading: boolean; recoveryError: string; encryptedEditRecoveryPage: EncryptedEditRecoveryPage | null; encryptedEditRecoveryLoading: boolean; encryptedEditRecoveryError: string; spaces: Space[]; spacesServer: string | null; spacesLoading: boolean; spacesError: string; transferFilter: string; busy: boolean; addOpen: boolean; localPath: string; spaceId: string; remotePath: string; vaultBinding: VaultBinding | null; vaultWritable: boolean; vaultDialog: VaultDialogState | null; vaultGeneration: number; vaultAccessOpen: boolean; vaultAccessSpaceId: string; pickerPurpose: 'pair' | 'encrypted_access' | 'offline'; pickerGeneration: number; mode: SyncMode; pickerOpen: boolean; pickerPath: string; pickerEntries: RemoteEntry[]; pickerError: string; pickerWritable: Record<string, boolean>; pickerFolderName: string; pickerCreatingFolder: boolean; accounts: Account[]; selectedAccount: string; accountEpoch: number; accountSwitching: boolean; accountsLoading: boolean; accountsError: string; accountSwitchTarget: string; mutationBusy: number; nativeDialogBusy: boolean; addAccountOpen: boolean; addAccountStep: 'details' | 'waiting'; addAccountLabel: string; addAccountRoot: string; addAccountServer: string; addAccountClientId: string; addAccountAuthMessage: string; addAccountAuthStarted: boolean; addAccountError: string; addAccountCreatedId: string; addAccountBusy: boolean; spaceActionBusy: Record<string, 'pause' | 'sync' | 'disconnect'>; message: string; error: string; autostart: boolean | null; server: string; serverEdited: boolean; statusServer: string; clientId: string; clientIdEditedServer: string | null; clientIdServer: string } = {
-  page: 'overview', status: null, statusErrorDismissed: '', agentReachable: false, pairs: [], transfers: [], spaces: [], spacesServer: null, spacesLoading: false, spacesError: '', transferFilter: 'active', busy: false, addOpen: false,
-  conflicts: {}, resolvingConflict: false, recoveryPage: null, recoveryLoading: false, recoveryError: '', encryptedEditRecoveryPage: null, encryptedEditRecoveryLoading: false, encryptedEditRecoveryError: '', localPath: '', spaceId: '', remotePath: '', vaultBinding: null, vaultWritable: false, vaultDialog: null, vaultGeneration: 0, vaultAccessOpen: false, vaultAccessSpaceId: '', pickerPurpose: 'pair', pickerGeneration: 0, mode: 'two_way', pickerOpen: false, pickerPath: '/', pickerEntries: [], pickerError: '', pickerWritable: {}, pickerFolderName: '', pickerCreatingFolder: false, accounts: [], selectedAccount: '', accountEpoch: 0, accountSwitching: false, accountsLoading: false, accountsError: '', accountSwitchTarget: '', mutationBusy: 0, nativeDialogBusy: false, addAccountOpen: false, addAccountStep: 'details', addAccountLabel: '', addAccountRoot: '', addAccountServer: '', addAccountClientId: '', addAccountAuthMessage: '', addAccountAuthStarted: false, addAccountError: '', addAccountCreatedId: '', addAccountBusy: false, spaceActionBusy: {}, message: '', error: '', autostart: null, server: '', serverEdited: false, statusServer: '', clientId: '', clientIdEditedServer: null, clientIdServer: ''
+const state: { page: Page; syncSection: SyncSection; status: Status | null; statusErrorDismissed: string; agentReachable: boolean; pairs: Pair[]; transfers: Transfer[]; conflicts: Record<string, ConflictPage>; resolvingConflict: boolean; recoveryPage: RecoveryPage | null; recoveryLoading: boolean; recoveryError: string; encryptedEditRecoveryPage: EncryptedEditRecoveryPage | null; encryptedEditRecoveryLoading: boolean; encryptedEditRecoveryError: string; spaces: Space[]; spacesServer: string | null; spacesLoading: boolean; spacesError: string; transferFilter: string; busy: boolean; addOpen: boolean; localPath: string; spaceId: string; remotePath: string; vaultBinding: VaultBinding | null; vaultWritable: boolean; vaultDialog: VaultDialogState | null; vaultGeneration: number; vaultAccessOpen: boolean; vaultAccessSpaceId: string; pickerPurpose: 'pair' | 'encrypted_access' | 'offline'; pickerGeneration: number; mode: SyncMode; pickerOpen: boolean; pickerPath: string; pickerEntries: RemoteEntry[]; pickerError: string; pickerWritable: Record<string, boolean>; pickerFolderName: string; pickerCreatingFolder: boolean; accounts: Account[]; removedAccounts: RemovedAccount[]; accountRemovalSupported: boolean; selectedAccount: string; accountEpoch: number; accountSwitching: boolean; accountsLoading: boolean; accountsError: string; accountSwitchTarget: string; mutationBusy: number; nativeDialogBusy: boolean; addAccountOpen: boolean; addAccountStep: 'details' | 'waiting'; addAccountLabel: string; addAccountRoot: string; addAccountServer: string; addAccountClientId: string; addAccountAuthMessage: string; addAccountAuthStarted: boolean; addAccountError: string; addAccountCreatedId: string; addAccountBusy: boolean; spaceActionBusy: Record<string, 'pause' | 'sync' | 'disconnect'>; message: string; error: string; autostart: boolean | null; server: string; serverEdited: boolean; statusServer: string; clientId: string; clientIdEditedServer: string | null; clientIdServer: string } = {
+  page: 'overview', syncSection: 'folders', status: null, statusErrorDismissed: '', agentReachable: false, pairs: [], transfers: [], spaces: [], spacesServer: null, spacesLoading: false, spacesError: '', transferFilter: 'active', busy: false, addOpen: false,
+  conflicts: {}, resolvingConflict: false, recoveryPage: null, recoveryLoading: false, recoveryError: '', encryptedEditRecoveryPage: null, encryptedEditRecoveryLoading: false, encryptedEditRecoveryError: '', localPath: '', spaceId: '', remotePath: '', vaultBinding: null, vaultWritable: false, vaultDialog: null, vaultGeneration: 0, vaultAccessOpen: false, vaultAccessSpaceId: '', pickerPurpose: 'pair', pickerGeneration: 0, mode: 'two_way', pickerOpen: false, pickerPath: '/', pickerEntries: [], pickerError: '', pickerWritable: {}, pickerFolderName: '', pickerCreatingFolder: false, accounts: [], removedAccounts: [], accountRemovalSupported: false, selectedAccount: '', accountEpoch: 0, accountSwitching: false, accountsLoading: false, accountsError: '', accountSwitchTarget: '', mutationBusy: 0, nativeDialogBusy: false, addAccountOpen: false, addAccountStep: 'details', addAccountLabel: '', addAccountRoot: '', addAccountServer: '', addAccountClientId: '', addAccountAuthMessage: '', addAccountAuthStarted: false, addAccountError: '', addAccountCreatedId: '', addAccountBusy: false, spaceActionBusy: {}, message: '', error: '', autostart: null, server: '', serverEdited: false, statusServer: '', clientId: '', clientIdEditedServer: null, clientIdServer: ''
 };
 const mediaJobs = new MediaJobsView({
   key: () => `${state.accountEpoch}:${state.selectedAccount}`,
@@ -170,9 +173,10 @@ let accountSelectionRevision = 0;
 let unlockIntentDrain: Promise<void> | null = null;
 let unlockIntentDrainRequested = false;
 let unlockIntentInitializationReady = false;
-const profileIndependentActions = new Set(['accounts', 'account_add', 'account_select']);
+const profileIndependentActions = new Set(['accounts', 'account_add', 'account_select', 'account_restore']);
 let renderedPage: Page | null = null;
 let renderedAccount = '';
+let lastRenderedMarkup = '';
 type VaultDialogFocusReturn = {
   accountEpoch: number;
   page: Page;
@@ -546,7 +550,7 @@ async function refreshWindowsDeviceCacheUsage() {
 function windowsDeviceCacheCard(): string {
   if (!syncWindowsDeviceCacheContext()) return '';
   const usage = windowsDeviceCacheUi.usage;
-  return `<section class="settings-card windows-device-cache-card"><div class="settings-heading"><span class="settings-icon">${svg('download')}</span><div><h2>Device cache (all accounts)</h2><p>Shared by all Raiun accounts on this Windows device. These totals are not limited to the selected account.</p></div></div>${usage ? `<p role="status">Last observed: ${esc(formatBytes(usage.used_bytes))} used of ${esc(formatBytes(usage.quota_bytes))} · ${esc(formatBytes(usage.pinned_bytes))} pinned · ${esc(formatBytes(usage.protected_bytes))} protected.</p>${usage.over_quota ? '<p class="recovery-warning" role="status">The device cache is over its quota.</p>' : ''}` : '<p role="status">Device cache usage has not been checked.</p>'}${windowsDeviceCacheUi.error ? `<p class="recovery-warning" role="alert">${esc(windowsDeviceCacheUi.error)}</p>` : ''}<div class="button-group"><button class="button subtle" data-action="refresh-windows-device-cache" ${windowsDeviceCacheUi.loading ? 'disabled' : ''}>${windowsDeviceCacheUi.loading ? 'Checking…' : usage ? 'Refresh device cache usage' : 'Check device cache usage'}</button><button class="button subtle" data-action="manage-windows-offline-files">Manage offline files in Transfers</button></div></section>`;
+  return `<section class="settings-card windows-device-cache-card"><div class="settings-heading"><span class="settings-icon">${svg('download')}</span><div><h2>Device cache (all accounts)</h2><p>Shared by all Raiun accounts on this Windows device. These totals are not limited to the selected account.</p></div></div>${usage ? `<p role="status">Last observed: ${esc(formatBytes(usage.used_bytes))} used of ${esc(formatBytes(usage.quota_bytes))} · ${esc(formatBytes(usage.pinned_bytes))} pinned · ${esc(formatBytes(usage.protected_bytes))} protected.</p>${usage.over_quota ? '<p class="recovery-warning" role="status">The device cache is over its quota.</p>' : ''}` : '<p role="status">Device cache usage has not been checked.</p>'}${windowsDeviceCacheUi.error ? `<p class="recovery-warning" role="alert">${esc(windowsDeviceCacheUi.error)}</p>` : ''}<div class="button-group"><button class="button subtle" data-action="refresh-windows-device-cache" ${windowsDeviceCacheUi.loading ? 'disabled' : ''}>${windowsDeviceCacheUi.loading ? 'Checking…' : usage ? 'Refresh device cache usage' : 'Check device cache usage'}</button></div></section>`;
 }
 function windowsOfflineContextKey(context: WindowsOfflineFileContext): string {
   return JSON.stringify([context.accountEpoch, context.profileId, context.server, context.clientId, context.cloudRoot, context.authGeneration, context.recoveryScopeToken, context.flowGeneration]);
@@ -740,15 +744,32 @@ function render() {
       direction: selectionDirection(active)
     }
     : null;
+  const stableButtonFocusKeys = ['action', 'page', 'syncSection', 'accountId', 'pairId', 'spaceId', 'writeId', 'rootResourceId', 'vaultPinRemove', 'vaultPinStart'];
+  const focusedButton = app.contains(active) && active instanceof HTMLButtonElement
+    && (!!active.id || stableButtonFocusKeys.some(key => key in active.dataset))
+    ? {
+      id: active.id,
+      dataset: Object.fromEntries(stableButtonFocusKeys
+        .filter(key => key in active.dataset)
+        .map(key => [key, active.dataset[key] || ''])),
+      accountEpoch: state.accountEpoch,
+      profileId: state.selectedAccount
+    }
+    : null;
+  const focusedSelect = app.contains(active) && active instanceof HTMLSelectElement && active.id
+    ? { id: active.id, value: active.value }
+    : null;
   const connected = state.status?.connected === true;
   const reachable = state.agentReachable;
   const connection = connectionMode(reachable, state.status);
-  const retainedSignInOnly = isRetainedSignInOnly(state.status);
+  const retainedSignInOnly = state.status?.offline === true && state.status.offline_namespace !== true;
+  const appearance = readAppearance({ getItem: key => window.localStorage.getItem(key) }, state.selectedAccount);
+  document.documentElement.dataset.theme = appearance.theme;
+  document.documentElement.style.setProperty('--account-accent', ACCENT_COLORS[appearance.accent]);
   const activeAccount = state.accounts.find(account => account.id === state.selectedAccount);
   const targetAccount = state.accounts.find(account => account.id === state.accountSwitchTarget);
-  const activeServer = state.status?.server || activeAccount?.status.server || (connection === 'connected' ? 'Connected' : connection === 'offline_reconnecting' ? retainedSignInOnly ? 'Reconnecting sign-in' : 'Working offline' : connection === 'sign_in' ? 'Sign-in needed' : 'Agent unavailable');
-  const nav = [['overview', 'Overview', 'overview'], ['folders', 'Synced Folders', 'folders'], ['transfers', 'Transfers', 'transfers'], ['media', 'Media backups', 'media'], ['settings', 'Settings', 'settings']] as const;
-  app.innerHTML = `
+  const nav = [['overview', 'Overview', 'overview'], ['folders', 'Sync workspace', 'folders'], ['offline', 'Offline files', 'download'], ['encrypted', 'Encrypted files', 'lock'], ['transfers', 'Transfers', 'transfers'], ['settings', 'Settings', 'settings']] as const;
+  const markup = `
     <div class="shell">
       <aside class="sidebar">
         <div class="brand"><img class="brand-logo" src="${raiunLogo}" alt="" /><div><strong>raiun</strong><span>DESKTOP</span></div></div>
@@ -768,7 +789,7 @@ function render() {
         <div class="sidebar-bottom"><button class="agent-status agent-status-toggle" data-action="toggle-pause" ${reachable && connected && featureAvailable('pause_supported') ? '' : 'disabled'} aria-label="${state.status?.paused ? 'Resume sync' : 'Pause sync'}"><span class="status-mark ${connected && providerAvailable(state.status?.provider_supported) ? 'online' : 'offline'}">${svg(connected && providerAvailable(state.status?.provider_supported) ? (state.status?.paused ? 'play' : 'pause') : 'alert')}</span><span class="agent-status-copy"><b>${connection === 'unavailable' ? 'Agent unavailable' : connection === 'offline_reconnecting' ? retainedSignInOnly ? 'Reconnecting sign-in' : 'Working offline' : connection === 'sign_in' ? 'Sign-in needed' : !providerAvailable(state.status?.provider_supported) ? 'Drive unavailable' : !featureAvailable('pause_supported') ? 'Drive connected' : (state.status?.paused ? 'Sync paused' : 'Sync running')}</b><small>${!providerAvailable(state.status?.provider_supported) ? 'Windows drive support is not enabled' : connection === 'unavailable' ? 'Waiting for Raiun agent' : connection === 'offline_reconnecting' ? retainedSignInOnly ? 'Retrying saved sign-in' : 'Reconnecting to server' : connection === 'sign_in' ? 'Connect your OpenCloud account' : !featureAvailable('pause_supported') ? 'Cloud drive available' : (state.status?.paused ? 'Click to resume' : 'Click to pause')}</small></span></button><div class="version">RAIUN DESKTOP <span id="app-version">${esc(appVersionLabel)}</span></div></div>
       </aside>
       <main class="main-area">
-        <header class="topbar"><div class="crumb">${svg(state.page === 'media' ? 'media' : 'cloud')}<span>${state.page === 'media' ? 'This PC' : 'OpenCloud'}</span>${svg('chevron')}<strong>${nav.find(([key]) => key === state.page)?.[1]}</strong></div><div class="topbar-account" aria-live="polite"><span>ACTIVE ACCOUNT</span><b>${esc(selectedAccountLabel())}</b><small>${state.accountSwitching && targetAccount ? `Switching to ${esc(targetAccount.label)}…` : esc(activeServer)}</small></div><div class="top-actions"><button class="icon-button" id="refresh" aria-label="Refresh status" title="Refresh">${svg('refresh')}</button><div class="avatar">R</div></div></header>
+        <header class="topbar"><div class="topbar-account ${noAccountsAvailable() ? '' : 'selected-account-accent'}" aria-label="Selected account" aria-live="polite"><b>${noAccountsAvailable() ? 'No account selected' : state.accountSwitching && targetAccount ? `Switching to ${esc(targetAccount.label)}…` : esc(selectedAccountLabel())}</b></div><div class="top-actions"><button class="icon-button" id="refresh" aria-label="Refresh status" title="Refresh">${svg('refresh')}</button></div></header>
         <section class="content">${pageMarkup()}</section>
       </main>
     </div>
@@ -777,10 +798,14 @@ function render() {
     ${state.message ? `<div class="toast success-toast" role="status"><span>${svg('check')}</span><div>${esc(state.message)}</div><button data-dismiss-message aria-label="Dismiss">${svg('close')}</button></div>` : ''}
     ${state.addOpen ? addModal() : ''}
     ${state.addAccountOpen ? addAccountModal() : ''}
-    ${state.pickerOpen ? pickerModal() : ''}
+    ${state.pickerOpen && !(state.page === 'offline' && state.pickerPurpose === 'offline') ? pickerModal() : ''}
     ${state.vaultDialog ? vaultDialog() : ''}
-    ${state.vaultAccessOpen ? encryptedAccessModal() : ''}`;
-  bind();
+    ${state.vaultAccessOpen && state.page !== 'encrypted' ? encryptedAccessModal() : ''}`;
+  if (markup !== lastRenderedMarkup) {
+    app.innerHTML = markup;
+    lastRenderedMarkup = markup;
+    bind();
+  }
   if (sameView) {
     const main = app.querySelector<HTMLElement>('.main-area');
     const sidebar = app.querySelector<HTMLElement>('.sidebar');
@@ -800,6 +825,20 @@ function render() {
         try { replacement.setSelectionRange(focusedInput.start, focusedInput.end, focusedInput.direction || 'none'); } catch { /* Some input types do not support selection ranges. */ }
       }
     }
+  }
+  if (focusedSelect) {
+    const replacement = document.getElementById(focusedSelect.id);
+    if (replacement instanceof HTMLSelectElement) {
+      if ([...replacement.options].some(option => option.value === focusedSelect.value)) replacement.value = focusedSelect.value;
+      replacement.focus({ preventScroll: true });
+    }
+  }
+  if (sameView && focusedButton && focusedButton.accountEpoch === state.accountEpoch && focusedButton.profileId === state.selectedAccount) {
+    const replacement = focusedButton.id
+      ? document.getElementById(focusedButton.id)
+      : [...app.querySelectorAll<HTMLButtonElement>('button')].find(button =>
+        Object.entries(focusedButton.dataset).every(([key, value]) => button.dataset[key] === value));
+    if (replacement instanceof HTMLButtonElement && !replacement.disabled) replacement.focus({ preventScroll: true });
   }
   if (copyFocus && state.page === 'transfers' && copyFocus.accountEpoch === state.accountEpoch && copyFocus.profileId === state.selectedAccount) {
     const matchesBinding = (element: HTMLElement) =>
@@ -891,19 +930,35 @@ function selectionDirection(element: HTMLInputElement | HTMLTextAreaElement): 'f
 }
 
 function pageMarkup(): string {
-  if (state.page === 'media') {
-    const unavailable = !state.agentReachable
-      ? 'Start the Raiun background agent to load media backups.'
-      : !state.status?.connected
-        ? 'Sign in to your OpenCloud account to load and manage media backups.'
-        : 'Recurring media backups are unavailable for this agent.';
-    return `${featureAvailable('media_jobs_supported') ? mediaJobs.html() : `<p class="notice-card">${unavailable}</p>`}${mediaPreviewPage()}`;
-  }
   if (!state.status) return `<div class="loading-panel"><div class="spinner"></div><p>Checking Raiun agent…</p></div>`;
+  if (noAccountsAvailable() && state.page !== 'settings') return noAccountPage();
   if (state.page === 'overview') return overviewPage();
-  if (state.page === 'folders') return foldersPage();
+  if (state.page === 'folders') return syncWorkspacePage();
+  if (state.page === 'offline') return offlineWorkspacePage();
+  if (state.page === 'encrypted') return encryptedWorkspacePage();
   if (state.page === 'transfers') return transfersPage();
   return settingsPage();
+}
+function noAccountsAvailable(): boolean {
+  return state.accountRemovalSupported && !state.accountsLoading && state.accounts.length === 0 && !state.selectedAccount;
+}
+function noAccountPage(): string {
+  return `<div class="empty-card no-account-card"><span class="empty-icon">${svg('cloud')}</span><div><h3>No OpenCloud account is active</h3><p>Add an account to connect a server, or open Settings to restore a removed account. Restoring requires signing in again.</p><div class="button-group"><button class="button primary" data-action="open-add-account">Add account</button><button class="button subtle" data-page="settings">Open Settings</button></div></div></div>`;
+}
+function connectionFailureDetails(status: Status | null | undefined): string {
+  const detail = typeof status?.error === 'string' ? status.error.trim() : '';
+  return detail ? `<details class="connection-error-detail"><summary>Connection details</summary><p>${esc(detail)}</p></details>` : '';
+}
+function syncWorkspacePage() {
+  const unavailable = !state.agentReachable
+    ? 'Start the Raiun background agent to load media backups.'
+    : !state.status?.connected
+      ? 'Sign in to your OpenCloud account to load and manage media backups.'
+      : 'Recurring media backups are unavailable for this agent.';
+  const content = state.syncSection === 'folders'
+    ? foldersPage()
+    : `${featureAvailable('media_jobs_supported') ? mediaJobs.html() : `<p class="notice-card">${unavailable}</p>`}${mediaPreviewPage()}`;
+  return `<div class="workspace-tabs" role="tablist" aria-label="Sync workspace"><button class="filter-tab ${state.syncSection === 'folders' ? 'active' : ''}" role="tab" aria-selected="${state.syncSection === 'folders'}" data-sync-section="folders">Synced folders</button><button class="filter-tab ${state.syncSection === 'media' ? 'active' : ''}" role="tab" aria-selected="${state.syncSection === 'media'}" data-sync-section="media">Media backups</button></div>${content}`;
 }
 function mediaPreviewPage() {
   const busy = mediaPreview.loading || state.nativeDialogBusy;
@@ -949,13 +1004,13 @@ function overviewPage() {
   const connected = state.status?.connected === true;
   const providerEnabled = providerAvailable(state.status?.provider_supported);
   const connection = connectionMode(state.agentReachable, state.status);
-  const retainedSignInOnly = isRetainedSignInOnly(state.status);
+  const retainedSignInOnly = state.status?.offline === true && state.status.offline_namespace !== true;
   const signInPending = windowsSignInPending();
   const reachable = state.agentReachable;
   const errors = (state.status?.error ? 1 : 0) + attentionCount();
   const running = state.transfers.filter(item => ['queued', 'running', 'retry_wait', 'verifying'].includes((item.state || '').toLowerCase())).length;
   return `<div class="welcome-row"><div><div class="eyebrow">YOUR FILES, IN RHYTHM</div><h1>Good to see you.</h1><p class="lede">Your cloud files and sync folders, together in one place.</p></div><button class="button primary" data-action="add-pair" ${connected && featureAvailable('folder_sync_supported') ? '' : 'disabled'}>${svg('plus')} Add sync folder</button></div>
-    ${connection === 'unavailable' ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Raiun agent isn't available</b><p>${esc(state.status?.error || 'Start the Raiun background agent to connect this window to your account. Your settings will appear here once it is running.')}</p></div><button class="button subtle" data-action="refresh">Try again</button></div>` : connection === 'offline_reconnecting' ? `<div class="notice-card offline"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>${retainedSignInOnly ? 'Reconnecting saved sign-in' : 'Working offline — reconnecting to server'}</b><p>${retainedSignInOnly ? 'Raiun retained this account’s sign-in and will retry the server connection. Cloud files are unavailable until it reconnects.' : 'Your existing offline session is still available. Raiun will retry the connection; you do not need to sign in again.'}</p></div><button class="button subtle" data-action="refresh">Retry connection</button></div>` : connection === 'sign_in' ? `<div class="notice-card"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>Connect your OpenCloud account</b><p>Sign in using your organization’s OpenCloud server. Raiun will open the sign-in page in your browser.</p>${signInPending ? `<div class="signin-pending" role="status">Raiun is waiting for sign-in to finish in your browser.<button class="button subtle" data-action="cancel-sign-in" ${state.mutationBusy ? 'disabled' : ''}>Cancel sign-in</button></div>` : `<div class="signin-server"><input id="server-address" data-server value="${esc(state.server)}" placeholder="https://cloud.example.com" aria-label="OpenCloud server address"/><input id="client-id" data-client-id value="${esc(state.clientId)}" placeholder="Automatic client ID" aria-label="OAuth client ID override (optional)"/><button class="button primary" data-action="sign-in">Sign in ${svg('chevron')}</button></div>`}</div></div>` : ''}
+    ${connection === 'unavailable' ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Raiun agent isn't available</b><p>${esc(state.status?.error || 'Start the Raiun background agent to connect this window to your account. Your settings will appear here once it is running.')}</p></div><button class="button subtle" data-action="refresh">Try again</button></div>` : connection === 'offline_reconnecting' ? `<div class="notice-card offline"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>${state.status?.refreshing ? 'Checking connection…' : retainedSignInOnly ? 'Reconnecting saved sign-in' : 'Working offline — reconnecting to server'}</b><p>${retainedSignInOnly ? 'Raiun still has this account’s sign-in and will retry the server connection. Cloud files are not available until it reconnects.' : 'Your existing offline session is still available. Raiun will retry the connection; you do not need to sign in again.'}</p>${connectionFailureDetails(state.status)}</div><button class="button subtle" data-action="refresh" ${state.status?.refreshing ? 'disabled' : ''}>${state.status?.refreshing ? 'Checking…' : 'Retry connection'}</button></div>` : connection === 'sign_in' ? `<div class="notice-card"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>Connect your OpenCloud account</b><p>Sign in using your organization’s OpenCloud server. Raiun will open the sign-in page in your browser.</p>${signInPending ? `<div class="signin-pending" role="status">Raiun is waiting for sign-in to finish in your browser.<button class="button subtle" data-action="cancel-sign-in" ${state.mutationBusy ? 'disabled' : ''}>Cancel sign-in</button></div>` : `<div class="signin-server"><input id="server-address" data-server value="${esc(state.server)}" placeholder="https://cloud.example.com" aria-label="OpenCloud server address"/><input id="client-id" data-client-id value="${esc(state.clientId)}" placeholder="Automatic client ID" aria-label="OAuth client ID override (optional)"/><button class="button primary" data-action="sign-in">Sign in ${svg('chevron')}</button></div>`}</div></div>` : ''}
     <div class="section-heading"><div><h2>At a glance</h2><p>A live view from your Raiun agent.</p></div>${connected ? `<span class="live-pill"><i></i> LIVE</span>` : ''}</div>
     <div class="stats-grid"><article class="stat-card"><div class="stat-label">SYNC FOLDERS</div><div class="stat-value">${reachable && connected && providerEnabled ? state.pairs.length : '—'}</div><div class="stat-foot">${!providerEnabled ? 'Windows drive support is not enabled' : !reachable ? 'Connect the agent to see folders' : connected ? 'Connected folder pairs' : connection === 'offline_reconnecting' ? 'Reconnecting to server' : 'Sign in to load your folders'}</div><span class="stat-icon teal">${svg('folders')}</span></article><article class="stat-card"><div class="stat-label">ACTIVE TRANSFERS</div><div class="stat-value">${reachable && connected && providerEnabled ? running : '—'}</div><div class="stat-foot">${!providerEnabled ? 'Transfer status is unavailable' : !reachable ? 'Connect the agent to see transfers' : connected ? (running ? 'Work in progress' : 'Nothing in progress') : connection === 'offline_reconnecting' ? 'Reconnecting to server' : 'Sign in to load transfers'}</div><span class="stat-icon blue">${svg('transfers')}</span></article><button class="stat-card stat-card-button" data-action="show-attention" ${reachable && (connected || !!state.status?.error) ? '' : 'disabled'} aria-label="Show ${errors} items needing attention"><div class="stat-label">NEEDS ATTENTION</div><div class="stat-value ${errors ? 'attention-value' : ''}">${reachable && (connected || state.status?.error) ? errors : '—'}</div><div class="stat-foot">${!reachable ? 'Connect the agent to see status' : state.status?.error ? 'Open settings to review this issue' : connected ? (errors ? 'Review items below' : 'No issues reported') : connection === 'offline_reconnecting' ? 'Working offline' : 'Sign in to load status'}</div><span class="stat-icon ${errors ? 'amber' : 'green'}">${svg(errors ? 'alert' : 'check')}</span></button></div>
     <div class="section-heading folders-heading"><div><h2>Your sync folders</h2><p>Each folder stays where you put it.</p></div><button class="text-button" data-page="folders">View all ${svg('chevron')}</button></div>
@@ -967,20 +1022,34 @@ function offlineAvailabilityCard() {
   const cache = state.status?.offline_cache;
   if (!cache) return '';
   const providerEnabled = providerAvailable(state.status?.provider_supported);
-  return `<section class="offline-availability-card"><div class="offline-availability-icon">${svg('download')}</div><div class="offline-availability-copy"><b>Offline files</b><span>${!providerEnabled ? 'Offline file access is unavailable because the Windows drive is not enabled.' : cache.available ? 'Choose files or folders to keep available offline. Raiun stores copies on this computer and must stay running to serve them from the drive.' : 'Offline storage is not available for this account yet.'}</span>${cache.available ? `<small>${esc(formatBytes(cache.used_bytes))} used of ${esc(formatBytes(cache.quota_bytes))} · ${esc(formatBytes(cache.pinned_bytes))} pinned</small>` : ''}</div><button class="button ${cache.available ? 'primary' : 'subtle'}" data-action="open-offline-files" ${providerEnabled && cache.available && state.status?.connected && !accountSwitchDisabled() ? '' : 'disabled'}>Manage offline files</button></section>`;
+  return `<section class="offline-availability-card"><div class="offline-availability-icon">${svg('download')}</div><div class="offline-availability-copy"><b>Offline files</b><span>${!providerEnabled ? 'Offline file access is unavailable because the Windows drive is not enabled.' : cache.available ? 'Choose files or folders to keep available offline. Raiun stores copies on this computer and must stay running to serve them from the drive.' : 'Offline storage is not available for this account yet.'}</span>${cache.available ? `<small>${esc(formatBytes(cache.used_bytes))} used of ${esc(formatBytes(cache.quota_bytes))} · ${esc(formatBytes(cache.pinned_bytes))} pinned</small>` : ''}</div><button class="button ${cache.available ? 'primary' : 'subtle'}" data-page="offline">View offline files</button></section>`;
+}
+function offlineWorkspacePage() {
+  const windows = isWindowsAgentStatus(state.status);
+  const providerEnabled = providerAvailable(state.status?.provider_supported);
+  const connected = state.status?.connected === true;
+  const cache = state.status?.offline_cache;
+  const selectedSpace = state.spaces.find(space => space.id === state.spaceId);
+  const details = windows
+    ? `${windowsDeviceCacheCard()}${windowsOfflineFilesCard()}${windowsOfflineFoldersCard()}`
+    : !providerEnabled
+      ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Offline file access is unavailable</b><p>This agent does not provide the cloud drive needed for offline copies.</p></div></div>`
+      : !connected || !state.pickerOpen || state.pickerPurpose !== 'offline'
+        ? `<section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('download')}</span><div><h2>Device storage</h2><p>Offline copies use space on this computer. Raiun must stay running to provide them from the mounted drive.</p></div></div>${cache ? `<div class="offline-cache-usage">${esc(formatBytes(cache.used_bytes))} used of ${esc(formatBytes(cache.quota_bytes))} · ${esc(formatBytes(cache.pinned_bytes))} pinned${cache.over_quota ? ' · over the current storage limit' : ''}</div>` : '<p class="recovery-hint">Storage usage is not available for this account.</p>'}<p class="recovery-hint">Connect this account to check saved folders and change offline availability.</p></section>`
+        : `<section class="settings-card offline-workspace-browser">${offlinePickerBody(selectedSpace)}</section>`;
+  return `<div class="page-title-row"><div><div class="eyebrow">ON THIS DEVICE</div><h1>Offline files</h1><p class="lede">Review device storage and choose the cloud files kept available here.</p></div></div><div class="settings-stack">${details}</div>`;
 }
 function encryptedAccessCard() {
   const providerEnabled = featureAvailable('vaults_supported');
-  return `<section class="encrypted-access-card"><div class="encrypted-access-icon">${svg('lock')}</div><div class="encrypted-access-copy"><b>Encrypted files</b><span>${providerEnabled ? nativeVaultAccess() ? 'Unlock an encrypted Space or folder through the Windows drive. Supported existing-file saves are shown after unlock.' : 'Unlock an encrypted Space or folder to browse it. This does not add a sync folder.' : 'Encrypted browsing is unavailable for this agent.'}</span></div><button class="button primary" data-action="open-encrypted-access" ${providerEnabled && state.agentReachable && !accountSwitchDisabled() ? '' : 'disabled'}>Unlock encrypted files</button></section>`;
+  return `<section class="encrypted-access-card"><div class="encrypted-access-icon">${svg('lock')}</div><div class="encrypted-access-copy"><b>Encrypted files</b><span>${providerEnabled ? nativeVaultAccess() ? 'Unlock an encrypted Space or folder through the Windows drive. Supported existing-file saves are shown after unlock.' : 'Unlock an encrypted Space or folder to browse it. This does not add a sync folder.' : 'Encrypted browsing is unavailable for this agent.'}</span></div><button class="button primary" data-page="encrypted" ${providerEnabled && state.agentReachable ? '' : 'disabled'}>View encrypted files</button></section>`;
 }
 function foldersPage() {
   const connected = state.status?.connected === true;
   const providerEnabled = featureAvailable('folder_sync_supported');
   const connection = connectionMode(state.agentReachable, state.status);
-  const retainedSignInOnly = isRetainedSignInOnly(state.status);
   const groups = folderPairGroups();
   return `<div class="page-title-row"><div><div class="eyebrow">STAY IN SYNC</div><h1>Synced Folders</h1><p class="lede">Choose folders on this computer and where they belong in OpenCloud.</p></div><button class="button primary" data-action="add-pair" ${connected && providerEnabled ? '' : 'disabled'}>${svg('plus')} Add sync folder</button></div>
-    ${connection === 'unavailable' ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Connect to the Raiun agent first</b><p>Folder pairs are managed by the background agent. Start it, then refresh this page.</p></div><button class="button subtle" data-action="refresh">Refresh</button></div>` : connection === 'offline_reconnecting' ? `<div class="notice-card offline"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>${retainedSignInOnly ? 'Reconnecting saved sign-in' : 'Working offline — reconnecting to server'}</b><p>${retainedSignInOnly ? 'Raiun retained this account’s sign-in and will retry the server connection. Cloud files are unavailable until it reconnects.' : 'Your existing offline session remains available. Sync settings will refresh when the server connection returns.'}</p></div><button class="button subtle" data-action="refresh">Retry connection</button></div>${groups.length ? `<div class="space-sync-list">${groups.map(group => spacePairGroup(group.spaceId, group.pairs)).join('')}</div>` : ''}` : connection === 'sign_in' ? `<div class="notice-card"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>Cloud sync is offline</b><p>Sign in to sync files. You can still review or change which paths are excluded; existing local and cloud files stay in place.</p></div><button class="button primary" data-action="sign-in">Sign in</button></div>${groups.length ? `<div class="space-sync-list">${groups.map(group => spacePairGroup(group.spaceId, group.pairs)).join('')}</div>` : ''}` : groups.length ? `<div class="space-sync-list">${groups.map(group => spacePairGroup(group.spaceId, group.pairs)).join('')}</div>` : emptyFolders()}`;
+    ${connection === 'unavailable' ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Connect to the Raiun agent first</b><p>Folder pairs are managed by the background agent. Start it, then refresh this page.</p></div><button class="button subtle" data-action="refresh">Refresh</button></div>` : connection === 'offline_reconnecting' ? `<div class="notice-card offline"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>${state.status?.refreshing ? 'Checking connection…' : 'Working offline — reconnecting to server'}</b><p>Your existing offline session remains available. Sync settings will refresh when the server connection returns.</p>${connectionFailureDetails(state.status)}</div><button class="button subtle" data-action="refresh" ${state.status?.refreshing ? 'disabled' : ''}>${state.status?.refreshing ? 'Checking…' : 'Retry connection'}</button></div>${groups.length ? `<div class="space-sync-list">${groups.map(group => spacePairGroup(group.spaceId, group.pairs)).join('')}</div>` : ''}` : connection === 'sign_in' ? `<div class="notice-card"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>Cloud sync is offline</b><p>Sign in to sync files. You can still review or change which paths are excluded; existing local and cloud files stay in place.</p></div><button class="button primary" data-action="sign-in">Sign in</button></div>${groups.length ? `<div class="space-sync-list">${groups.map(group => spacePairGroup(group.spaceId, group.pairs)).join('')}</div>` : ''}` : groups.length ? `<div class="space-sync-list">${groups.map(group => spacePairGroup(group.spaceId, group.pairs)).join('')}</div>` : emptyFolders()}`;
 }
 function folderPairGroups(): Array<{ spaceId: string; pairs: Pair[] }> {
   const grouped = new Map<string, Pair[]>();
@@ -1105,13 +1174,11 @@ function transfersPage() {
   return `<div class="page-title-row"><div><div class="eyebrow">ACTIVITY</div><h1>Transfers</h1><p class="lede">Follow folder-sync activity and review offline files or saved edits for this account.</p></div></div>
     <div class="filter-tabs" role="tablist">${filters.map(([key,label]) => `<button class="filter-tab ${state.transferFilter === key ? 'active' : ''}" data-filter="${key}">${label}${key === 'attention' && attentionCount() ? `<span class="tab-badge">${attentionCount()}</span>` : ''}</button>`).join('')}</div>
     <p class="helper-note">${state.transferFilter === 'active' ? 'Current & paused: queued, transferring, retrying, checking, and paused folder-sync transfers.' : state.transferFilter === 'attention' ? 'Needs attention: failed transfers, conflicts, and transfers waiting for sign-in.' : 'Finished: completed and cancelled folder-sync transfers.'} These tabs filter folder-sync activity only; offline files and saved edits stay visible below.</p>
-    ${windowsOfflineFilesCard()}
-    ${windowsOfflineFoldersCard()}
     ${!isWindowsAgentStatus(state.status) && state.agentReachable ? pendingOfflineWritesSection() : ''}
     ${vaultAppFeaturesAvailable() && state.agentReachable ? encryptedOperationsTransferSection() : ''}
     ${vaultAppFeaturesAvailable() && state.agentReachable ? encryptedRetryLatestSection() : ''}
     ${vaultAppFeaturesAvailable() && state.agentReachable ? encryptedEditsTransferSection() : ''}
-    ${!providerEnabled ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Transfer status is unavailable</b><p>Folder-sync transfer reporting is unavailable for this agent. Supported cloud-drive offline controls remain available above.</p></div></div>` : state.agentReachable && state.status?.connected ? matching.length ? `<div class="transfer-list">${matching.map(transferCard).join('')}</div>` : `<div class="empty-card transfer-empty"><span class="empty-icon">${svg(state.transferFilter === 'attention' ? 'check' : 'transfers')}</span><h3>${state.transferFilter === 'attention' ? 'No folder-sync transfers need attention' : state.transferFilter === 'history' ? 'No finished folder-sync transfers yet' : 'No current or paused folder-sync transfers'}</h3><p>${state.transferFilter === 'active' ? 'Queued and running transfers appear here, along with retries, checks, and paused transfers.' : state.transferFilter === 'attention' ? 'No failed transfers, conflicts, or sign-in requests have been reported in this list. Saved edits are shown separately above.' : 'Completed and cancelled transfers appear here with their final status.'}</p></div>` : connection === 'unavailable' ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Transfer status is unavailable</b><p>Start the Raiun agent to see transfer activity.</p></div><button class="button subtle" data-action="refresh">Refresh</button></div>` : connection === 'offline_reconnecting' ? `<div class="notice-card offline"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>Working offline — reconnecting to server</b><p>Transfer history will refresh when Raiun reconnects.</p></div><button class="button subtle" data-action="refresh">Retry connection</button></div>` : `<div class="notice-card"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>Sign in to see transfer activity</b><p>Connect your OpenCloud account to load transfer status.</p></div><button class="button primary" data-action="sign-in">Sign in</button></div>`}`;
+    ${!providerEnabled ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Transfer status is unavailable</b><p>Folder-sync transfer reporting is unavailable for this agent. Supported cloud-drive offline controls remain available above.</p></div></div>` : state.agentReachable && state.status?.connected ? matching.length ? `<div class="transfer-list">${matching.map(transferCard).join('')}</div>` : `<div class="empty-card transfer-empty"><span class="empty-icon">${svg(state.transferFilter === 'attention' ? 'check' : 'transfers')}</span><h3>${state.transferFilter === 'attention' ? 'No folder-sync transfers need attention' : state.transferFilter === 'history' ? 'No finished folder-sync transfers yet' : 'No current or paused folder-sync transfers'}</h3><p>${state.transferFilter === 'active' ? 'Queued and running transfers appear here, along with retries, checks, and paused transfers.' : state.transferFilter === 'attention' ? 'No failed transfers, conflicts, or sign-in requests have been reported in this list. Saved edits are shown separately above.' : 'Completed and cancelled transfers appear here with their final status.'}</p></div>` : connection === 'unavailable' ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Transfer status is unavailable</b><p>Start the Raiun agent to see transfer activity.</p></div><button class="button subtle" data-action="refresh">Refresh</button></div>` : connection === 'offline_reconnecting' ? `<div class="notice-card offline"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>${state.status?.refreshing ? 'Checking connection…' : 'Working offline — reconnecting to server'}</b><p>Transfer history will refresh when Raiun reconnects.</p>${connectionFailureDetails(state.status)}</div><button class="button subtle" data-action="refresh" ${state.status?.refreshing ? 'disabled' : ''}>${state.status?.refreshing ? 'Checking…' : 'Retry connection'}</button></div>` : `<div class="notice-card"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>Sign in to see transfer activity</b><p>Connect your OpenCloud account to load transfer status.</p></div><button class="button primary" data-action="sign-in">Sign in</button></div>`}`;
 }
 function validateVaultEditLatest(value: unknown, spaceId: string, rootResourceId: string): VaultEditLatestResult {
   if (!value || typeof value !== 'object') throw new Error('The agent returned an invalid encrypted retry status.');
@@ -2243,19 +2310,28 @@ function networkProxySettingsCard(connected: boolean, connection: ReturnType<typ
 }
 
 function settingsPage() {
+  const noAccounts = noAccountsAvailable();
   const connected = state.status?.connected === true;
+  const canSignOut = state.agentReachable && (connected || state.status?.offline === true || state.status?.offline_namespace === true);
   const providerEnabled = providerAvailable(state.status?.provider_supported);
+  const mountControls = mountControlState(providerEnabled, connected, state.status?.mounted === true, state.busy || state.mutationBusy > 0 || state.accountSwitching);
+  const appearance = readAppearance({ getItem: key => window.localStorage.getItem(key) }, state.selectedAccount);
   const windowsAgent = isWindowsAgentStatus(state.status);
   if (windowsAgent) syncWindowsRecoveryContext();
   const connection = connectionMode(state.agentReachable, state.status);
-  const retainedSignInOnly = isRetainedSignInOnly(state.status);
-  const settingsSignIn = connection === 'sign_in'
+  const retainedSignInOnly = state.status?.offline === true && state.status.offline_namespace !== true;
+  const settingsSignIn = connection === 'sign_in' && !noAccounts
     ? windowsSignInPending()
       ? `<div class="signin-pending" role="status">Raiun is waiting for sign-in to finish in your browser.<button class="button subtle" data-action="cancel-sign-in" ${state.mutationBusy ? 'disabled' : ''}>Cancel sign-in</button></div>`
       : `<div class="signin-server settings-server"><input id="server-address" data-server value="${esc(state.server)}" placeholder="https://cloud.example.com" aria-label="OpenCloud server address"/><input id="client-id" data-client-id value="${esc(state.clientId)}" placeholder="Automatic client ID" aria-label="OAuth client ID override (optional)"/><button class="button primary" data-action="sign-in">Sign in</button></div>`
     : '';
   const canInspectRecoveries = state.agentReachable;
   const canOpenRecoveryFolder = canInspectRecoveries && Boolean(state.status?.recovery_folder);
+  const canRemoveSelectedAccount = state.agentReachable && state.accountRemovalSupported && Boolean(state.selectedAccount)
+    && Number.isSafeInteger(state.status?.auth_generation) && (state.status?.auth_generation ?? -1) >= 0 && !accountSwitchDisabled();
+  const removedAccountSection = state.agentReachable && state.accountRemovalSupported
+    ? `<details class="removed-accounts" ${noAccounts ? 'open' : ''}><summary>Removed accounts${state.removedAccounts.length ? ` (${state.removedAccounts.length})` : ''}</summary><p>Removed accounts keep their local files and recovery copies. Restoring an account does not sign it in again.</p>${state.removedAccounts.length ? state.removedAccounts.map(account => `<div class="settings-row removed-account-row"><div><b>${esc(account.label)}</b><small>Local files are preserved.</small></div><button class="button subtle" data-action="restore-removed-account" data-profile-id="${esc(account.id)}" ${accountSwitchDisabled() ? 'disabled' : ''}>Restore</button></div>`).join('') : '<small>No removed accounts.</small>'}</details>`
+    : '';
   const recoveryPage = state.recoveryPage;
   const recoveryItemWarnings = recoveryPage?.items.reduce((count, item) => count + (item.warnings?.length || 0), 0) || 0;
   const recoveryNotice = recoveryPage && (recoveryPage.truncated || recoveryItemWarnings > 0 || recoveryPage.unrecognized_entries > 0)
@@ -2267,12 +2343,14 @@ function settingsPage() {
       ? `<div class="recovery-empty" role="status" aria-live="polite">${recoveryPage.warning_count || recoveryPage.unrecognized_entries ? 'No recognized saved copies were listed. Review the scan warnings above.' : 'No saved upload copies. Nothing to review.'}</div>`
       : '';
   return `<div class="page-title-row"><div><div class="eyebrow">PREFERENCES</div><h1>Settings</h1><p class="lede">Manage how Raiun works on this computer.</p></div></div>
-    <div class="settings-stack"><section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('cloud')}</span><div><h2>${esc(selectedAccountLabel())}</h2><p>Sign-in and sync folders for this account.${featureAvailable('account_switch_supported') ? ' Other accounts keep syncing in the background.' : ''}</p></div></div><div class="settings-row account-settings-row"><div><b>${connection === 'unavailable' ? 'Agent status' : connection === 'offline_reconnecting' ? retainedSignInOnly ? 'Reconnecting saved sign-in' : 'Working offline' : connected ? 'Connected server' : 'Sign in to OpenCloud'}</b><small>${connection === 'unavailable' ? 'The Raiun agent is not reachable' : connection === 'offline_reconnecting' ? retainedSignInOnly ? 'The saved sign-in is available, but cloud files cannot be reached until the server reconnects.' : 'Raiun is reconnecting to the server. Your offline session remains available.' : connected ? esc(state.status?.server || 'This account is connected') : `Sign in to connect ${selectedAccountLabel()}`}</small>${settingsSignIn}</div><div class="button-group"><button class="button subtle" data-action="refresh">${connection === 'offline_reconnecting' ? 'Retry connection' : 'Refresh'}</button>${connected ? `<button class="button subtle" data-action="logout" title="Sign out of ${esc(selectedAccountLabel())}">Sign out</button>` : ''}</div></div></section>
-    <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('folder')}</span><div><h2>Cloud drive</h2><p>${providerEnabled ? 'This account’s OpenCloud location in the computer’s file manager. Save files inside Personal or a writable Space; the top-level folder is read-only.' : 'Windows cloud drive support is not enabled. Choosing a folder saves its setup, but does not mount or sync files.'}</p></div></div><div class="settings-row"><div><b>Mount status</b><small>${!providerEnabled ? state.status?.cloud_root ? `Configured but disconnected at ${esc(state.status.cloud_root)}` : 'Windows cloud drive is not mounted' : (connected || connection === 'offline_reconnecting') && state.status?.cloud_root ? `${state.status.mounted ? 'Mounted at' : 'Configured at'} ${esc(state.status.cloud_root)}` : 'No cloud drive location reported for this account'}</small></div><div class="button-group"><button class="button subtle" data-action="mount" ${providerEnabled && connected ? '' : 'disabled'}>Mount</button><button class="button subtle" data-action="unmount" ${providerEnabled && connected ? '' : 'disabled'}>Unmount</button></div></div><div class="settings-row"><div><b>Choose location</b><small>Pick this account’s directory for the OpenCloud drive.</small></div><button class="button subtle" data-action="configure-root" ${state.agentReachable && connected ? '' : 'disabled'}>Choose folder</button></div></section>
+    <div class="settings-stack"><section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('settings')}</span><div><h2>Appearance</h2><p>Theme applies to all accounts. Color marks this account.</p></div></div><div class="settings-row appearance-settings-row"><label for="appearance-theme"><b>Theme</b><small>Use your system setting or choose a theme.</small></label><select id="appearance-theme" aria-label="Theme"><option value="system" ${appearance.theme === 'system' ? 'selected' : ''}>System</option><option value="light" ${appearance.theme === 'light' ? 'selected' : ''}>Light</option><option value="dark" ${appearance.theme === 'dark' ? 'selected' : ''}>Dark</option></select></div><div class="settings-row appearance-settings-row"><label for="appearance-accent"><b>Account color</b><small>${noAccounts ? 'Available when an account is active.' : 'Marks this account in the sidebar and header.'}</small></label><select id="appearance-accent" aria-label="Account color" ${state.selectedAccount ? '' : 'disabled'}><option value="ocean" ${appearance.accent === 'ocean' ? 'selected' : ''}>Ocean</option><option value="teal" ${appearance.accent === 'teal' ? 'selected' : ''}>Teal</option><option value="violet" ${appearance.accent === 'violet' ? 'selected' : ''}>Violet</option><option value="rose" ${appearance.accent === 'rose' ? 'selected' : ''}>Rose</option><option value="amber" ${appearance.accent === 'amber' ? 'selected' : ''}>Amber</option></select></div></section>
+    <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('cloud')}</span><div><h2>${noAccounts ? 'No active account' : esc(selectedAccountLabel())}</h2><p>${noAccounts ? 'Add an account or restore one below. Restoring requires a new sign-in.' : `Sign-in and sync folders for this account.${featureAvailable('account_switch_supported') ? ' Other accounts keep syncing in the background.' : ''}`}</p></div></div><div class="settings-row account-settings-row"><div><b>${noAccounts ? 'Account status' : connection === 'unavailable' ? 'Agent status' : connection === 'offline_reconnecting' ? state.status?.refreshing ? 'Checking connection…' : retainedSignInOnly ? 'Reconnecting saved sign-in' : 'Working offline' : connected ? 'Connected server' : 'Sign in to OpenCloud'}</b><small>${noAccounts ? 'No account is selected. Use Add account or restore a removed account below.' : connection === 'unavailable' ? 'The Raiun agent is not reachable' : connection === 'offline_reconnecting' ? retainedSignInOnly ? 'The saved sign-in is available, but cloud files cannot be reached until the server reconnects.' : 'Raiun is reconnecting to the server. Your offline session remains available.' : connected ? esc(state.status?.server || 'This account is connected') : `Sign in to connect ${selectedAccountLabel()}`}</small>${connection === 'offline_reconnecting' ? connectionFailureDetails(state.status) : ''}${settingsSignIn}</div><div class="button-group"><button class="button subtle" data-action="refresh" ${connection === 'offline_reconnecting' && state.status?.refreshing ? 'disabled' : ''}>${connection === 'offline_reconnecting' ? state.status?.refreshing ? 'Checking…' : 'Retry connection' : 'Refresh'}</button>${canSignOut ? `<button class="button subtle" data-action="logout" title="Sign out of ${esc(selectedAccountLabel())}">Sign out</button>` : ''}${canRemoveSelectedAccount ? `<button class="button subtle danger-action" data-action="remove-selected-account">Remove account</button>` : ''}</div></div></section>
+    ${removedAccountSection}
+    <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('folder')}</span><div><h2>Cloud drive</h2><p>${noAccounts ? 'A drive location will be available after you add or restore and sign in to an account.' : providerEnabled ? 'This account’s OpenCloud location in the computer’s file manager. Save files inside Personal or a writable Space; the top-level folder is read-only.' : 'Windows cloud drive support is not enabled. Choosing a folder saves its setup, but does not mount or sync files.'}</p></div></div><div class="settings-row"><div><b>Mount status</b><small>${noAccounts ? 'No active account' : !providerEnabled ? state.status?.cloud_root ? `Configured but disconnected at ${esc(state.status.cloud_root)}` : 'Windows cloud drive is not mounted' : (connected || connection === 'offline_reconnecting') && state.status?.cloud_root ? `${state.status.mounted ? 'Mounted at' : 'Configured at'} ${esc(state.status.cloud_root)}` : 'No cloud drive location reported for this account'}</small></div><div class="button-group"><button class="button subtle" data-action="mount" ${noAccounts || mountControls.mountDisabled ? 'disabled' : ''}>Mount</button><button class="button subtle" data-action="unmount" ${noAccounts || mountControls.unmountDisabled ? 'disabled' : ''}>Unmount</button></div></div><div class="settings-row"><div><b>Choose location</b><small>Pick this account’s directory for the OpenCloud drive.</small></div><button class="button subtle" data-action="configure-root" ${!noAccounts && state.agentReachable && connected ? '' : 'disabled'}>Choose folder</button></div></section>
     ${networkProxySettingsCard(connected, connection)}
     ${bandwidthSettingsCard()}
     ${desktopUpdatesSettingsCard()}
-    <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('lock')}</span><div><h2>Encrypted files</h2><p>${featureAvailable('vaults_supported') ? nativeVaultAccess() ? 'Unlock an encrypted Space or folder through the Windows drive. Supported existing-file saves are shown after unlock.' : 'Unlock an encrypted Space or folder to browse it. This does not add a sync folder; use Synced Folders to set up syncing.' : 'Encrypted file browsing is unavailable for this agent.'}</p></div></div><div class="settings-row"><div><b>Browse encrypted files</b><small>${nativeVaultAccess() ? 'Choose a Space, then unlock a location in the Windows drive. Save availability depends on the file and current connection. Encrypted offline copies are unavailable here.' : 'Choose a Space, then unlock an encrypted location. Offline edits, when available, apply only to supported operations in this unlocked location.'}</small></div><button class="button primary" data-action="open-encrypted-access" ${featureAvailable('vaults_supported') && state.agentReachable && !accountSwitchDisabled() ? '' : 'disabled'}>Unlock encrypted files</button></div></section>
+    <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('lock')}</span><div><h2>Encrypted files</h2><p>${featureAvailable('vaults_supported') ? nativeVaultAccess() ? 'Unlock an encrypted Space or folder through the Windows drive. Supported existing-file saves are shown after unlock.' : 'Unlock an encrypted Space or folder to browse it. This does not add a sync folder; use the Encrypted files workspace.' : 'Encrypted file browsing is unavailable for this agent.'}</p></div></div><div class="settings-row"><div><b>Browse encrypted files</b><small>${nativeVaultAccess() ? 'Choose a Space, then unlock a location in the Windows drive. Save availability depends on the file and current connection. Encrypted offline copies are unavailable here.' : 'Choose a Space, then unlock an encrypted location. Offline edits, when available, apply only to supported operations in this unlocked location.'}</small></div><button class="button primary" data-page="encrypted" ${featureAvailable('vaults_supported') && state.agentReachable ? '' : 'disabled'}>Open Encrypted files</button></div></section>
     ${windowsAgent ? windowsRecoverySettingsCard() : `<section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('folder')}</span><div><h2>Saved upload copies</h2><p>Raiun keeps local copies while uploads are pending or in progress.</p></div></div><div class="settings-row"><div><b>Saved copies</b><small>Review the local and OpenCloud paths. Viewing does not restore, upload, or delete files.</small></div><div class="button-group"><button class="button subtle" data-action="open-recovery" ${canOpenRecoveryFolder ? '' : 'disabled'}>Open folder</button><button class="button primary" data-action="load-recoveries" ${canInspectRecoveries && !state.recoveryLoading ? '' : 'disabled'}>${state.recoveryLoading ? 'Checking…' : recoveryPage ? 'Refresh list' : 'View saved copies'}</button></div></div>${!state.agentReachable ? `<p class="recovery-hint">Raiun is not connected.</p>` : !state.status?.recovery_folder ? `<p class="recovery-hint">No upload-copy folder is linked to this account yet. You can still check for saved copies; sign in to associate future copies with this account.</p>` : ''}${state.recoveryError ? `<div class="recovery-warning" role="alert">${esc(state.recoveryError)}</div>` : ''}${state.recoveryLoading ? `<div class="recovery-loading" role="status" aria-live="polite"><span class="spinner"></span> Checking saved copies…</div>` : ''}${recoveryNotice}${recoveryRows}${recoveryPage?.next_after && !state.recoveryLoading ? `<div class="recovery-more"><button class="button subtle" data-action="more-recoveries">Load more</button></div>` : ''}</section>${nativeVaultAccess() ? '' : encryptedEditRecoveryCard()}`}
     <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('play')}</span><div><h2>Startup</h2><p>Start Raiun when you sign in to this computer.</p></div></div><div class="settings-row"><div><b>Launch at login</b><small>${!providerEnabled ? 'Startup setting is unavailable for this Windows agent' : state.autostart == null ? 'Current setting is not reported by the agent' : state.autostart ? 'Raiun will start at login' : 'Raiun will not start at login'}</small></div><button class="button ${state.autostart ? 'subtle' : 'primary'}" data-action="toggle-autostart" ${providerEnabled && connected && typeof state.autostart === 'boolean' ? '' : 'disabled'}>${state.autostart ? 'Disable' : 'Enable'}</button></div></section>
     <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('pause')}</span><div><h2>Sync activity</h2><p>Pause background work across your folder pairs.</p></div></div><div class="settings-row"><div><b>${!featureAvailable('pause_supported') ? 'Windows folder sync is unavailable' : connection === 'offline_reconnecting' ? 'Working offline' : !connected ? 'Sign in to enable sync' : state.status?.paused ? 'Sync is paused' : 'Sync is enabled'}</b><small>${!featureAvailable('pause_supported') ? 'This agent does not support pausing folder sync.' : connection === 'offline_reconnecting' ? 'Raiun will retry the server connection; no new sign-in is needed.' : 'The current file may finish first. Opening cloud files can still use the network.'}</small></div><button class="button subtle" data-action="toggle-pause" ${featureAvailable('pause_supported') && connected ? '' : 'disabled'}>${state.status?.paused ? 'Resume sync' : 'Pause sync'}</button></div></section>
@@ -2287,6 +2365,33 @@ function desktopUpdateNotification() {
       ? `<button class="button primary" data-action="download-desktop-update" ${desktopUpdateUi.busy ? 'disabled' : ''}>Download update</button>`
       : `<button class="button subtle" data-action="open-desktop-release" ${desktopUpdateUi.busy ? 'disabled' : ''}>Open release page</button>`;
   return `<aside class="toast success-toast" role="status" aria-live="polite"><span>${svg('refresh')}</span><div><b>Raiun Desktop ${esc(update.version)} is available.</b>${update.error ? `<small>${esc(update.error)}</small>` : '<small>Choose when to download and install this update.</small>'}</div>${action}<button data-action="later-desktop-update" aria-label="Later" title="Later">${svg('close')}</button></aside>`;
+}
+
+function leaveWorkspacePage(nextPage: Page) {
+  if (state.page === 'offline' && nextPage !== 'offline') {
+    state.pickerGeneration++;
+    state.pickerOpen = false;
+    state.pickerPurpose = 'pair';
+    offlineUi.folderListing = null;
+  }
+  if (state.page === 'encrypted' && nextPage !== 'encrypted') {
+    state.vaultAccessOpen = false;
+    state.vaultAccessSpaceId = '';
+    cachedVaultRootsUi.generation++;
+    cachedVaultRootsUi.loading = false;
+  }
+}
+function navigateToPage(page: Page) {
+  if (page === 'offline') { leaveWorkspacePage(page); void openOfflineFiles(); return; }
+  if (page === 'encrypted') { leaveWorkspacePage(page); void openEncryptedAccess(); return; }
+  leaveWorkspacePage(page);
+  state.page = page;
+  if (page === 'settings') { void loadNetworkProxySettings(); void loadBandwidthSettings(); }
+  if (page === 'transfers') {
+    if (!isWindowsAgentStatus(state.status)) void loadPendingOfflineWrites(true);
+    if (vaultAppFeaturesAvailable()) { void loadEncryptedEditRecoveries(true); void refreshEncryptedRetryLatestStatuses(); }
+  } else stopEncryptedRetryLatestPolling();
+  render();
 }
 
 function desktopUpdateNotificationVisible(update: DesktopUpdateStatus | null | undefined) {
@@ -2527,7 +2632,7 @@ function offlinePolicyKey(path: string) { return `${state.selectedAccount}\u0000
 function offlinePinsKey(spaceId: string) { return `${state.selectedAccount}\u0000${state.status?.server || ''}\u0000${spaceId}`; }
 function offlinePinRemovalKey(spaceId: string, pinId: string) { return `${offlinePinsKey(spaceId)}\u0000${pinId}`; }
 
-function encryptedAccessModal() {
+function encryptedAccessModal(workspace = false) {
   const selected = state.spaces.find(space => space.id === state.vaultAccessSpaceId);
   const connected = state.status?.connected === true;
   const canBrowse = connected && !!selected && !state.spacesLoading;
@@ -2536,7 +2641,7 @@ function encryptedAccessModal() {
     const key = cachedVaultRootKey(root);
     const suffix = root.root_resource_id.length > 12 ? root.root_resource_id.slice(-8) : root.root_resource_id;
     const snapshotLabel = typeof root.pin_id === 'string' && root.pin_id && Number.isSafeInteger(root.generation) ? ` · verified offline copy · generation ${root.generation}` : ' · saved encrypted location';
-    return `<option value="${esc(key)}" ${cachedVaultRootsUi.selected === key ? 'selected' : ''}>Space ${esc(root.space_id)}${snapshotLabel} · …${esc(suffix)}</option>`;
+    return `<option value="${esc(key)}" ${cachedVaultRootsUi.selected === key ? 'selected' : ''}>${esc(spaceName(root.space_id))}${snapshotLabel} · …${esc(suffix)}</option>`;
   }).join('');
   const cachedContent = copyProducerUi.source
     ? '<div class="vault-hint" role="status">Saved offline locations are read-only. Choose an online encrypted location for the copy destination.</div>'
@@ -2546,10 +2651,15 @@ function encryptedAccessModal() {
     ? `<label class="field-label" for="cached-encrypted-root">Saved encrypted locations</label><select id="cached-encrypted-root" ${cachedVaultRootsUi.loading ? 'disabled' : ''}>${cachedOptions}</select><small class="vault-hint">Names stay hidden until your password verifies the saved location. Only entries marked “verified offline copy” are complete encrypted snapshots. Offline edits, when available, apply only to supported operations in this unlocked location.</small><div class="cached-vault-actions"><button class="button subtle" data-action="more-cached-vault-roots" ${cachedVaultRootsUi.loading || !cachedVaultRootsUi.nextAfter ? 'disabled' : ''}>${cachedVaultRootsUi.loading ? 'Loading…' : 'Load more'}</button><button class="button primary" data-action="browse-cached-vault-root" ${cachedVaultRootsUi.loading || !cachedVaultRootsUi.selected ? 'disabled' : ''}>Unlock saved location</button></div>${cachedVaultRootsUi.truncated ? '<small class="vault-hint">Only a bounded list of saved locations is shown.</small>' : ''}`
       : `<div class="recovery-empty" role="status">${cachedVaultRootsUi.error ? 'Saved encrypted locations could not be checked.' : state.agentReachable ? 'No saved encrypted locations are available offline.' : 'Raiun is not connected.'}</div>`;
   const onlineContent = connected
-    ? `<div class="encrypted-access-divider">Open a location online</div><label class="field-label" for="encrypted-access-space">OpenCloud location</label><select id="encrypted-access-space" ${state.spacesLoading || !state.spaces.length ? 'disabled' : ''}><option value="">${state.spacesLoading ? 'Loading Spaces…' : state.spacesError ? 'Spaces unavailable' : state.spaces.length ? 'Choose a Space' : 'No Spaces available'}</option>${options}</select>${state.spacesError ? `<div class="vault-error" role="alert">${esc(state.spacesError)} <button class="text-button" data-action="retry-encrypted-access-spaces">Try again</button></div>` : ''}<p class="vault-hint">An encrypted Space opens at its root. In a regular Space, browse folders and select an encrypted folder.</p><div class="modal-actions"><button class="button subtle" data-action="close-encrypted-access">Cancel</button><button class="button primary" data-action="browse-encrypted-space" ${canBrowse ? '' : 'disabled'}>${state.spacesLoading ? 'Loading…' : selected?.encrypted ? 'Unlock Space' : 'Browse Space'}</button></div>`
-    : '<div class="modal-actions"><button class="button subtle" data-action="close-encrypted-access">Close</button></div>';
-  return `<div class="modal-backdrop" data-backdrop="encrypted-access"><section class="modal encrypted-access-modal" role="dialog" aria-modal="true" aria-labelledby="encrypted-access-title"><div class="modal-top"><div><div class="eyebrow">END-TO-END ENCRYPTION</div><h2 id="encrypted-access-title">${copyProducerUi.source ? 'Choose copy destination' : 'Unlock encrypted files'}</h2></div><button class="icon-button" data-action="close-encrypted-access" aria-label="Close">${svg('close')}</button></div><p class="modal-lede">${copyProducerUi.source ? `Choose another online encrypted location for ${esc(copyProducerUi.source.displayName)}. Raiun keeps the original file in place.` : 'Unlock this location to open its files from your OpenCloud drive. You do not need to set up a synced folder.'}</p>${copyProducerUi.source ? '<button class="button subtle" data-action="cancel-vault-copy">Cancel copy</button>' : ''}${copyProducerUi.source || nativeVaultAccess() ? '' : `<section class="cached-vault-section"><div class="encrypted-access-divider">Saved encrypted locations</div>${cachedVaultRootsUi.error ? `<div class="vault-error" role="alert">${esc(cachedVaultRootsUi.error)} <button class="text-button" data-action="refresh-cached-vault-roots">Try again</button></div>` : ''}${cachedContent}<div class="cached-vault-actions"><button class="button subtle" data-action="refresh-cached-vault-roots" ${cachedVaultRootsUi.loading ? 'disabled' : ''}>Refresh saved locations</button></div></section>`}${onlineContent}</section></div>`;
+    ? `<div class="encrypted-access-divider">Open a location online</div><label class="field-label" for="encrypted-access-space">OpenCloud location</label><select id="encrypted-access-space" ${state.spacesLoading || !state.spaces.length ? 'disabled' : ''}><option value="">${state.spacesLoading ? 'Loading Spaces…' : state.spacesError ? 'Spaces unavailable' : state.spaces.length ? 'Choose a Space' : 'No Spaces available'}</option>${options}</select>${state.spacesError ? `<div class="vault-error" role="alert">${esc(state.spacesError)} <button class="text-button" data-action="retry-encrypted-access-spaces">Try again</button></div>` : ''}<p class="vault-hint">An encrypted Space opens at its root. In a regular Space, browse folders and select an encrypted folder.</p><div class="modal-actions">${workspace ? '' : '<button class="button subtle" data-action="close-encrypted-access">Cancel</button>'}<button class="button primary" data-action="browse-encrypted-space" ${canBrowse ? '' : 'disabled'}>${state.spacesLoading ? 'Loading…' : selected?.encrypted ? 'Unlock Space' : 'Browse Space'}</button></div>`
+    : '<div class="vault-hint" role="status">Connect this account to browse cloud locations. Saved encrypted locations may still be available below.</div>';
+  const savedLocations = copyProducerUi.source || nativeVaultAccess() ? '' : `<section class="cached-vault-section"><div class="encrypted-access-divider">Saved encrypted locations</div>${cachedVaultRootsUi.error ? `<div class="vault-error" role="alert">${esc(cachedVaultRootsUi.error)} <button class="text-button" data-action="refresh-cached-vault-roots">Try again</button></div>` : ''}${cachedContent}<div class="cached-vault-actions"><button class="button subtle" data-action="refresh-cached-vault-roots" ${cachedVaultRootsUi.loading ? 'disabled' : ''}>Refresh saved locations</button></div></section>`;
+  const sections = `${copyProducerUi.source ? '<button class="button subtle" data-action="cancel-vault-copy">Cancel copy</button>' : ''}${savedLocations}${onlineContent}`;
+  const passwordHelp = `<details class="workspace-help"><summary>How remembered passwords work</summary><p>Your vault password is not saved unless you choose “Remember on this device.” When you opt in and the unlock succeeds, Raiun stores the password in the operating system’s protected credential store for this account and vault.</p><p>Locking a vault does not remove a saved password. Use “Forget saved key” in the unlock window to remove it. Saved encrypted snapshots are read-only while offline; other operations depend on the connected drive and supported features.</p></details>`;
+  if (workspace) return `<div class="page-title-row"><div><div class="eyebrow">END-TO-END ENCRYPTION</div><h1>Encrypted files</h1><p class="lede">Unlock an encrypted Space or folder. This does not add a sync folder.</p></div></div><div class="settings-stack encrypted-workspace"><section class="settings-card">${sections}</section>${passwordHelp}</div>`;
+  return `<div class="modal-backdrop" data-backdrop="encrypted-access"><section class="modal encrypted-access-modal" role="dialog" aria-modal="true" aria-labelledby="encrypted-access-title"><div class="modal-top"><div><div class="eyebrow">END-TO-END ENCRYPTION</div><h2 id="encrypted-access-title">${copyProducerUi.source ? 'Choose copy destination' : 'Unlock encrypted files'}</h2></div><button class="icon-button" data-action="close-encrypted-access" aria-label="Close">${svg('close')}</button></div><p class="modal-lede">${copyProducerUi.source ? `Choose another online encrypted location for ${esc(copyProducerUi.source.displayName)}. Raiun keeps the original file in place.` : 'Unlock this location to open its files from your OpenCloud drive. You do not need to set up a synced folder.'}</p>${sections}</section></div>`;
 }
+function encryptedWorkspacePage() { return encryptedAccessModal(true); }
 
 function mountedVaultAccessMessage(
   writable: boolean | null,
@@ -2648,7 +2758,7 @@ function vaultDialog() {
   const createForm = flow.intent === 'create'
     ? `<label class="field-label" for="vault-create-name">Folder name</label><input class="vault-input" id="vault-create-name" value="${esc(state.pickerFolderName)}" placeholder="For example, Private" maxlength="240" ${busy ? 'disabled' : ''}/><small class="vault-hint">Raiun adds the .vault suffix when needed. Folder creation can be partially completed by the server; if an error appears, check the remote location before retrying.</small><label class="field-label" for="vault-create-password">Vault password</label><input class="vault-input" id="vault-create-password" type="password" autocomplete="new-password" ${busy ? 'disabled' : ''}/><label class="field-label" for="vault-create-confirm">Confirm password</label><input class="vault-input" id="vault-create-confirm" type="password" autocomplete="new-password" ${busy ? 'disabled' : ''}/>`
     : !flow.unlocked && flow.initialized && !flow.statusUnknown && !nativeVaultLockIncomplete(flow)
-      ? `<label class="field-label" for="vault-password">Vault password</label><input class="vault-input" id="vault-password" type="password" autocomplete="current-password" ${vaultPasswordErrorAttributes(passwordErrorActive)} ${busy ? 'disabled' : ''}/><label class="remember-vault-choice"><input id="vault-remember" type="checkbox" ${flow.rememberOnDevice ? 'checked' : ''} ${busy || flow.rememberedStatus === 'unavailable' ? 'disabled' : ''}/><span>Remember on this device</span></label><small class="vault-hint">${flow.rememberedStatus === 'unavailable' ? 'Secure storage is unavailable, so this password cannot be remembered.' : 'The password is saved only if you check this box and the unlock succeeds.'}</small>`
+      ? `<label class="field-label" for="vault-password">Vault password</label><input class="vault-input" id="vault-password" type="password" autocomplete="current-password" ${vaultPasswordErrorAttributes(passwordErrorActive)} ${busy ? 'disabled' : ''}/><label class="remember-vault-choice"><input id="vault-remember" type="checkbox" ${flow.rememberOnDevice ? 'checked' : ''} ${busy || flow.rememberedStatus === 'unavailable' ? 'disabled' : ''}/><span>Remember on this device</span></label><small class="vault-hint">${flow.rememberedStatus === 'unavailable' ? 'Secure storage is unavailable, so this password cannot be remembered.' : 'Your vault password is not saved unless you choose “Remember on this device.”'}</small>`
       : '';
   const rememberedNoteText = flow.statusUnknown || flow.rememberedStatus === null
     ? ''
@@ -2727,17 +2837,36 @@ function vaultDialog() {
     : copyChoosingDestination && flow.unlocked && !flow.statusUnknown
       ? `<div class="vault-hint" role="status">${flow.writable ? 'A stable folder version is unavailable here, or this is the source location. Choose a different folder.' : 'This location is read-only. Choose an unlocked writable encrypted location.'}</div>`
       : '';
-  return `<div class="modal-backdrop" data-backdrop="vault"><section class="modal vault-modal" role="dialog" aria-modal="true" aria-labelledby="vault-title" tabindex="-1"><div class="modal-top"><div><div class="eyebrow">END-TO-END ENCRYPTION</div><h2 id="vault-title">${copyChoosingDestination ? 'Choose copy destination' : title}</h2></div><button class="icon-button" data-vault-action="close" aria-label="Close" ${closeDisabled || copyActive ? 'disabled' : ''}>${svg('close')}</button></div><p class="modal-lede">${copyChoosingDestination ? 'Choose an unlocked writable encrypted folder. Raiun creates a new file there and keeps the original in place.' : browseExplanation}</p><div class="vault-root">${svg('lock')}<code>${esc(flow.offlineUnlockOnly ? opaqueOfflineLabel : rootDisplay)}</code></div>${flow.error ? `<div class="vault-error" ${passwordErrorActive ? 'id="vault-password-error" ' : ''}role="alert">${svg('alert')}<span>${esc(flow.error)}</span></div>` : ''}${flow.closeBlockedNotice ? `<div class="vault-state" role="status" aria-live="polite" aria-atomic="true">${esc(flow.closeBlockedNotice)}</div>` : ''}${flow.intent !== 'create'? `<div class="vault-state ${flow.unlocked && !flow.statusUnknown ? 'unlocked' : ''}" role="status" aria-live="polite" aria-atomic="true">${liveLockState}</div>` : ''}${createForm}${rememberedNote}${flow.unlocked && !flow.statusUnknown ? nativeVaultAccess() ? nativeVaultDrivePanel(flow, busy) : `<div class="vault-browse-label">${copyChoosingDestination ? 'Destination folder' : 'Folders inside this encrypted location'} <code>${esc(flow.path)}</code></div>${flow.loading ? '<div class="vault-empty" role="status"><span class="spinner"></span> Loading encrypted folder…</div>' : directoryRows}${destinationAction}${copyPanel}${!copyChoosingDestination ? `${vaultOfflinePinPanel(flow)}${vaultEditRetryPanel(flow)}` : ''}` : copyPanel}${protectedRecoveryPanel}<div class="helper-note">Raiun never saves a vault password unless you opt in. Locking a vault does not remove a saved key; use “Forget saved key” separately. If a vault password is lost, its encrypted cloud contents cannot be recovered by Raiun.</div>${flow.intent !== 'create' ? `<div class="helper-note">${esc(mountedAvailability)}</div>` : ''}<div class="modal-actions"><button class="button subtle" data-vault-action="close" ${closeDisabled || copyActive ? 'disabled' : ''}>Close</button>${unlockButton}${savedUnlockButton}${lockButton}${flow.offlineUnlockOnly ? '' : forgetButton}${statusButton}${useButton}${!nativeVaultAccess() && flow.intent === 'create' ? `<button class="button primary" data-vault-action="create" ${busy ? 'disabled' : ''}>${busy ? 'Creating…' : 'Create vault'}</button>` : ''}</div></section></div>`;
+  return `<div class="modal-backdrop" data-backdrop="vault"><section class="modal vault-modal" role="dialog" aria-modal="true" aria-labelledby="vault-title" tabindex="-1"><div class="modal-top"><div><div class="eyebrow">END-TO-END ENCRYPTION</div><h2 id="vault-title">${copyChoosingDestination ? 'Choose copy destination' : title}</h2></div><button class="icon-button" data-vault-action="close" aria-label="Close" ${closeDisabled || copyActive ? 'disabled' : ''}>${svg('close')}</button></div><p class="modal-lede">${copyChoosingDestination ? 'Choose an unlocked writable encrypted folder. Raiun creates a new file there and keeps the original in place.' : browseExplanation}</p><div class="vault-root">${svg('lock')}<code>${esc(flow.offlineUnlockOnly ? opaqueOfflineLabel : rootDisplay)}</code></div>${flow.error ? `<div class="vault-error" ${passwordErrorActive ? 'id="vault-password-error" ' : ''}role="alert">${svg('alert')}<span>${esc(flow.error)}</span></div>` : ''}${flow.closeBlockedNotice ? `<div class="vault-state" role="status" aria-live="polite" aria-atomic="true">${esc(flow.closeBlockedNotice)}</div>` : ''}${flow.intent !== 'create'? `<div class="vault-state ${flow.unlocked && !flow.statusUnknown ? 'unlocked' : ''}" role="status" aria-live="polite" aria-atomic="true">${liveLockState}</div>` : ''}${createForm}${rememberedNote}${flow.unlocked && !flow.statusUnknown ? nativeVaultAccess() ? nativeVaultDrivePanel(flow, busy) : `<div class="vault-browse-label">${copyChoosingDestination ? 'Destination folder' : 'Folders inside this encrypted location'} <code>${esc(flow.path)}</code></div>${flow.loading ? '<div class="vault-empty" role="status"><span class="spinner"></span> Loading encrypted folder…</div>' : directoryRows}${destinationAction}${copyPanel}${!copyChoosingDestination ? `${vaultOfflinePinPanel(flow)}${vaultEditRetryPanel(flow)}` : ''}` : copyPanel}${protectedRecoveryPanel}<div class="helper-note">Your vault password is not saved unless you choose “Remember on this device.” After an opted-in successful unlock, Raiun stores the password in the operating system’s protected credential store for this account and vault. Locking the vault does not remove it; use “Forget saved key” separately. If a vault password is lost, its encrypted cloud contents cannot be recovered by Raiun.</div>${flow.intent !== 'create' ? `<div class="helper-note">${esc(mountedAvailability)}</div>` : ''}<div class="modal-actions"><button class="button subtle" data-vault-action="close" ${closeDisabled || copyActive ? 'disabled' : ''}>Close</button>${unlockButton}${savedUnlockButton}${lockButton}${flow.offlineUnlockOnly ? '' : forgetButton}${statusButton}${useButton}${!nativeVaultAccess() && flow.intent === 'create' ? `<button class="button primary" data-vault-action="create" ${busy ? 'disabled' : ''}>${busy ? 'Creating…' : 'Create vault'}</button>` : ''}</div></section></div>`;
 }
 
 function bind() {
   mediaJobs.bind(app);
-  app.querySelectorAll<HTMLElement>('[data-page]').forEach(el => el.addEventListener('click', () => { state.page = el.dataset.page as Page; if (state.page === 'media') void mediaJobs.refresh(); if (state.page === 'settings') { void loadNetworkProxySettings(); void loadBandwidthSettings(); } if (state.page === 'transfers') { render(); if (!isWindowsAgentStatus(state.status)) void loadPendingOfflineWrites(true); if (vaultAppFeaturesAvailable()) { void loadEncryptedEditRecoveries(true); void refreshEncryptedRetryLatestStatuses(); } } else { stopEncryptedRetryLatestPolling(); render(); } }));
+  app.querySelectorAll<HTMLElement>('[data-page]').forEach(el => el.addEventListener('click', () => navigateToPage(el.dataset.page as Page)));
+  app.querySelectorAll<HTMLElement>('[data-sync-section]').forEach(el => el.addEventListener('click', () => {
+    const section = el.dataset.syncSection;
+    if (section !== 'folders' && section !== 'media') return;
+    state.page = 'folders';
+    state.syncSection = section;
+    render();
+    if (section === 'media') void mediaJobs.refresh();
+  }));
   app.querySelector('#refresh')?.addEventListener('click', () => void refresh(true, true));
   app.querySelectorAll<HTMLButtonElement>('[data-account-id]').forEach(el => el.addEventListener('click', () => { if (el.dataset.accountId) void switchAccount(el.dataset.accountId); }));
   app.querySelectorAll<HTMLElement>('[data-action]').forEach(el => el.addEventListener('click', () => void handleAction(el.dataset.action || '', el)));
   app.querySelector<HTMLSelectElement>('#network-proxy-mode')?.addEventListener('change', event => {
     proxyUi.draftMode = (event.target as HTMLSelectElement).value as ProxyMode;
+    render();
+  });
+  app.querySelector<HTMLSelectElement>('#appearance-theme')?.addEventListener('change', event => {
+    const theme = (event.target as HTMLSelectElement).value as AppearanceTheme;
+    const next = writeAppearance({ getItem: key => window.localStorage.getItem(key), setItem: (key, value) => window.localStorage.setItem(key, value) }, state.selectedAccount, { theme });
+    document.documentElement.dataset.theme = next.theme;
+    render();
+  });
+  app.querySelector<HTMLSelectElement>('#appearance-accent')?.addEventListener('change', event => {
+    const accent = (event.target as HTMLSelectElement).value as AccentName;
+    writeAppearance({ getItem: key => window.localStorage.getItem(key), setItem: (key, value) => window.localStorage.setItem(key, value) }, state.selectedAccount, { accent });
     render();
   });
   app.querySelector<HTMLInputElement>('#network-proxy-url')?.addEventListener('input', event => {
@@ -2983,6 +3112,90 @@ async function confirmAccountAction(message: string): Promise<boolean> {
     render();
   }
 }
+async function removeSelectedAccount() {
+  const epoch = state.accountEpoch;
+  const profileId = state.selectedAccount;
+  const account = state.accounts.find(item => item.id === profileId);
+  if (!profileId || !account || !state.accountRemovalSupported || !state.agentReachable || state.accountSwitching || state.mutationBusy > 0) return;
+  const reviewedAuthGeneration = state.status?.auth_generation;
+  if (!Number.isSafeInteger(reviewedAuthGeneration) || (reviewedAuthGeneration ?? -1) < 0) {
+    state.error = 'Raiun could not confirm the current sign-in. Refresh and try again.';
+    render();
+    return;
+  }
+  const confirmed = await confirmAccountAction(`Remove account “${account.label}”? Raiun will sign out and revoke access. Local files and saved recovery copies stay on this computer. Any saved vault-password access will be revoked; you will need each vault password again. You can restore the account later, but you will need to sign in again.`);
+  if (!confirmed || !isCurrentAccount(epoch, profileId) || !state.accountRemovalSupported || !state.agentReachable || !state.accounts.some(item => item.id === profileId)) return;
+  state.error = '';
+  const priorStatus = state.status;
+  await refresh(false);
+  if (!isCurrentAccount(epoch, profileId) || !state.accountRemovalSupported || !state.agentReachable || state.busy || state.status === priorStatus ||
+      (state.status?.profile_id != null && state.status.profile_id !== profileId) || !state.accounts.some(item => item.id === profileId)) {
+    if (isCurrentAccount(epoch, profileId)) {
+      state.error = 'Raiun could not refresh this account’s sign-in status. Refresh and try again.';
+      render();
+    }
+    return;
+  }
+  const authGeneration = state.status?.auth_generation;
+  if (!Number.isSafeInteger(authGeneration) || (authGeneration ?? -1) < 0 || authGeneration !== reviewedAuthGeneration) {
+    state.error = 'This account’s sign-in changed while confirmation was open. Review removal again.';
+    render();
+    return;
+  }
+  state.mutationBusy++;
+  state.error = '';
+  state.message = '';
+  render();
+  try {
+    const result = await request<{ removed_profile_id: string; selected: string | null; local_data_preserved: boolean; credentials_revoked: boolean }>(
+      'account_remove', { profile_id: profileId, expected_auth_generation: authGeneration, confirm: true });
+    if (!isCurrentAccount(epoch, profileId)) return;
+    if (result.removed_profile_id !== profileId || result.local_data_preserved !== true || result.credentials_revoked !== true) {
+      throw new Error('Raiun did not confirm that this account was safely removed. Refresh the account list.');
+    }
+    await syncAccounts();
+    state.message = `Removed ${account.label}. Local files and recovery copies were preserved.`;
+  } catch (error) {
+    if (isCurrentAccount(epoch, profileId) && !isStaleAccountRequest(error)) {
+      const detail = messageOf(error);
+      await syncAccounts();
+      if (isCurrentAccount(epoch, profileId)) {
+        await refresh(false);
+        state.error = detail;
+      }
+    }
+  } finally {
+    state.mutationBusy = Math.max(0, state.mutationBusy - 1);
+    render();
+  }
+}
+async function restoreRemovedAccount(profileId: string) {
+  const epoch = state.accountEpoch;
+  const selectedProfileId = state.selectedAccount;
+  const account = state.removedAccounts.find(item => item.id === profileId);
+  if (!account || !profileId || !state.accountRemovalSupported || !state.agentReachable || accountSwitchDisabled()) return;
+  const confirmed = await confirmAccountAction(`Restore “${account.label}” to the account list? Its local files stay where they are. Raiun will not sign in automatically; you will need to sign in again.`);
+  if (!confirmed || !isCurrentAccount(epoch, selectedProfileId) || !state.accountRemovalSupported || !state.agentReachable || !state.removedAccounts.some(item => item.id === profileId)) return;
+  state.mutationBusy++;
+  state.error = '';
+  state.message = '';
+  render();
+  try {
+    const result = await request<{ restored_profile_id: string; selected: string | null; sign_in_required: boolean }>(
+      'account_restore', { profile_id: profileId, confirm: true });
+    if (!isCurrentAccount(epoch, selectedProfileId)) return;
+    if (result.restored_profile_id !== profileId || result.sign_in_required !== true) {
+      throw new Error('Raiun did not confirm that the account was restored without signing in. Refresh the account list.');
+    }
+    await syncAccounts();
+    if (isCurrentAccount(epoch, selectedProfileId)) state.message = `Restored ${account.label}. Sign in to reconnect it.`;
+  } catch (error) {
+    if (isCurrentAccount(epoch, selectedProfileId) && !isStaleAccountRequest(error)) state.error = messageOf(error);
+  } finally {
+    state.mutationBusy = Math.max(0, state.mutationBusy - 1);
+    render();
+  }
+}
 async function handleAction(action: string, element?: HTMLElement) {
   switch (action) {
     case 'refresh': await refresh(true, true); break;
@@ -3014,7 +3227,6 @@ async function handleAction(action: string, element?: HTMLElement) {
     case 'open-add-account': if (!featureAvailable('account_switch_supported')) return; state.addAccountOpen = true; state.addAccountStep = 'details'; state.addAccountLabel = ''; state.addAccountRoot = ''; state.addAccountServer = ''; state.addAccountClientId = ''; state.addAccountAuthMessage = ''; state.addAccountAuthStarted = false; state.addAccountError = ''; state.addAccountCreatedId = ''; state.accountsError = ''; render(); break;
     case 'open-encrypted-access': if (featureAvailable('vaults_supported')) await openEncryptedAccess(); break;
     case 'refresh-windows-device-cache': await refreshWindowsDeviceCacheUsage(); break;
-    case 'manage-windows-offline-files': if (syncWindowsDeviceCacheContext()) { state.page = 'transfers'; render(); } break;
     case 'open-offline-files': if (providerAvailable(state.status?.provider_supported)) await openOfflineFiles(); break;
     case 'refresh-pending-writes': await loadPendingOfflineWrites(true); break;
     case 'refresh-windows-offline-folders': await windowsOfflineFoldersPanel.load(true); break;
@@ -3117,6 +3329,8 @@ async function handleAction(action: string, element?: HTMLElement) {
       if (await confirmAccountAction(`Sign out of ${selectedAccountLabel()}? Its local files stay on this computer, while this account’s cloud drive stops mounting.`) && isCurrentAccount(epoch, profileId)) await run('logout', {});
       break;
     }
+    case 'remove-selected-account': await removeSelectedAccount(); break;
+    case 'restore-removed-account': if (element?.dataset.profileId) await restoreRemovedAccount(element.dataset.profileId); break;
     case 'toggle-pause': if (featureAvailable('pause_supported') && state.status) await run('pause', { paused: !state.status.paused }); break;
     case 'space-toggle': if (element?.dataset.spaceId) await toggleSpacePause(element.dataset.spaceId); break;
     case 'space-sync-now': if (element?.dataset.spaceId) await queueSpaceSync(element.dataset.spaceId); break;
@@ -3350,6 +3564,7 @@ async function loadRecoveries(reset: boolean) {
 async function beginSignIn() {
   const epoch = state.accountEpoch;
   const profileId = state.selectedAccount;
+  if (!profileId) { state.error = 'Add or restore an account before signing in.'; render(); return; }
   const input = app.querySelector<HTMLInputElement>('[data-server]');
   const clientInput = app.querySelector<HTMLInputElement>('[data-client-id]');
   if (input) state.server = input.value.trim();
@@ -3427,7 +3642,13 @@ async function loadSpaces(force = false) {
   }
 }
 async function openEncryptedAccess() {
-  if (!featureAvailable('vaults_supported') || !state.agentReachable || accountSwitchDisabled()) return;
+  if (accountSwitchDisabled() && state.page !== 'encrypted') return;
+  state.page = 'encrypted';
+  if (!featureAvailable('vaults_supported') || !state.agentReachable) {
+    state.vaultAccessOpen = false;
+    render();
+    return;
+  }
   const epoch = state.accountEpoch;
   state.pickerGeneration++;
   state.pickerOpen = false;
@@ -3508,7 +3729,7 @@ async function openCachedVaultRoot(opener?: HTMLElement) {
   const root = cachedVaultRootsUi.roots.find(item => cachedVaultRootKey(item) === cachedVaultRootsUi.selected);
   if (!root) return;
   if (opener) vaultDialogFocusReturn = captureVaultDialogFocusReturn(opener);
-  closeEncryptedAccess();
+  if (state.page !== 'encrypted') closeEncryptedAccess();
   await openVaultFlow('browse', root.space_id, '', undefined, false, root.root_resource_id, true, root.pin_id || undefined, Number.isSafeInteger(root.generation) ? root.generation! : undefined);
 }
 async function browseEncryptedSpace() {
@@ -3516,7 +3737,8 @@ async function browseEncryptedSpace() {
   const epoch = state.accountEpoch;
   const space = state.spaces.find(candidate => candidate.id === state.vaultAccessSpaceId);
   if (!space) return;
-  state.vaultAccessOpen = false;
+  const workspace = state.page === 'encrypted';
+  if (!workspace) state.vaultAccessOpen = false;
   state.vaultAccessSpaceId = '';
   cachedVaultRootsUi.generation++;
   cachedVaultRootsUi.loading = false;
@@ -3566,7 +3788,23 @@ async function browseRemote(path: string) {
   }
 }
 async function openOfflineFiles() {
-  if (!providerAvailable(state.status?.provider_supported) || state.status?.connected !== true || accountSwitchDisabled()) return;
+  if (accountSwitchDisabled() && state.page !== 'offline') return;
+  state.page = 'offline';
+  if (isWindowsAgentStatus(state.status)) {
+    state.pickerGeneration++;
+    state.pickerOpen = false;
+    state.pickerPurpose = 'pair';
+    render();
+    void refreshWindowsDeviceCacheUsage();
+    return;
+  }
+  if (!providerAvailable(state.status?.provider_supported) || state.status?.connected !== true) {
+    state.pickerGeneration++;
+    state.pickerOpen = false;
+    state.pickerPurpose = 'pair';
+    render();
+    return;
+  }
   const epoch = state.accountEpoch;
   state.pickerGeneration++;
   state.pickerPurpose = 'offline';
@@ -5217,7 +5455,9 @@ function isRetainedSignInOnly(status: Status | null | undefined): boolean {
 }
 function selectedAccountLabel() { return state.accounts.find(account => account.id === state.selectedAccount)?.label || state.status?.profile_label || 'OpenCloud'; }
 function accountSwitchDisabled() {
-  return state.accountsLoading || state.accountSwitching || state.mutationBusy > 0 || state.nativeDialogBusy || state.addOpen || state.pickerOpen || state.vaultDialog !== null || state.vaultAccessOpen || state.addAccountOpen || state.recoveryLoading || state.encryptedEditRecoveryLoading || state.resolvingConflict || state.pickerCreatingFolder;
+  const pickerModalOpen = state.pickerOpen && !(state.page === 'offline' && state.pickerPurpose === 'offline');
+  const encryptedAccessModalOpen = state.vaultAccessOpen && state.page !== 'encrypted';
+  return state.accountsLoading || state.accountSwitching || state.mutationBusy > 0 || state.nativeDialogBusy || state.addOpen || pickerModalOpen || state.vaultDialog !== null || encryptedAccessModalOpen || state.addAccountOpen || state.recoveryLoading || state.encryptedEditRecoveryLoading || state.resolvingConflict || state.pickerCreatingFolder;
 }
 function activateAccount(profileId: string) {
   if (profileId === state.selectedAccount) return false;
@@ -5351,6 +5591,8 @@ async function syncAccounts(): Promise<boolean> {
       try {
         const result = await request<AccountsResult>('accounts');
         state.accounts = result.items || [];
+        state.removedAccounts = result.removed_items || [];
+        state.accountRemovalSupported = result.account_removal_supported === true;
         if (selectionRevision === accountSelectionRevision) {
           changed = activateAccount(result.selected || '');
         } else {
@@ -5405,6 +5647,8 @@ async function switchAccount(profileId: string) {
     state.accountSwitchTarget = '';
     state.mutationBusy = Math.max(0, state.mutationBusy - 1);
     render();
+    if (state.page === 'offline') void openOfflineFiles();
+    if (state.page === 'encrypted') void openEncryptedAccess();
   }
 }
 function normalizeServerAddress(value: string): { ok: true; server: string } | { ok: false; error: string } {
@@ -5857,7 +6101,7 @@ async function refresh(showError = true, forceSpacesRefresh = false) {
     state.busy = false; render();
     if (state.page === 'settings') void loadNetworkProxySettings();
     if (state.page === 'settings') void loadBandwidthSettings();
-    if (state.page === 'media') void mediaJobs.refresh();
+    if (state.page === 'folders' && state.syncSection === 'media') void mediaJobs.refresh();
     if (state.page === 'transfers' && state.status?.connected) scheduleEncryptedRetryLatestPoll(250);
     if (refreshQueued) { refreshQueued = false; void refresh(false); }
   }
@@ -5873,7 +6117,7 @@ function formatBytes(bytes: number) { if (bytes < 1024) return `${bytes} B`; con
 function activeCount() { return state.transfers.filter(t => ['queued','running','retry_wait','verifying'].includes((t.state || '').toLowerCase())).length; }
 function attentionCount() { return state.transfers.filter(t => ['failed','conflict','awaiting_authentication'].includes((t.state || '').toLowerCase())).length; }
 
-void listen<string>('navigate', event => { if (['folders','transfers'].includes(event.payload)) { state.page = event.payload as Page; render(); if (state.page === 'transfers') { if (!isWindowsAgentStatus(state.status)) void loadPendingOfflineWrites(true); if (vaultAppFeaturesAvailable()) { void loadEncryptedEditRecoveries(true); void refreshEncryptedRetryLatestStatuses(); } } else stopEncryptedRetryLatestPolling(); } });
+void listen<string>('navigate', event => { if (['folders','transfers'].includes(event.payload)) navigateToPage(event.payload as Page); });
 void listen<{ source?: string; action?: string }>('raiun:status-changed', async event => {
   const passiveTrayPoll = event.payload?.source === 'tray' && !event.payload.action;
   if (passiveTrayPoll && passiveRefreshBlocked()) {

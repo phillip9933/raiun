@@ -3092,3 +3092,37 @@ candidate packaging, exact metadata checks and parent evidence review are comple
 this evidence update does not publish a release. Earlier setup, observer and
 original whole-case failures remain failures, paired with the focused passing
 recovery evidence rather than retroactively relabeled.
+
+
+## 0.7.4 local integration — 27 October 2026
+
+The isolated candidate is based on published beta.3 and its documentation closeout.
+It carries the prepared frontend work, generation-bound account removal and
+explicit same-ID restoration for Linux and Windows, and a pinned Tauri NSIS
+template that defaults upgrades to in-place installation. Linux retirement retains
+registry rows and inactive runtime settings for path exclusions; Windows retains
+root/source/vault reservations and does not instantiate retired runtimes. Both
+use existing scoped logout/credential revocation and safe shutdown before durable
+retirement. No local/cloud data or protected recovery/history is deleted.
+
+Linux focused tests use synthetic settings and a fake session store; test mode
+skips production Secret Service vault-password cleanup. Existing production
+revocation logic is reused and cleanup uncertainty blocks retirement. The Windows
+registry's portable harness passed; new Windows broker/runtime tests require MSVC
+execution. Local GNU checking could not compile bundled SQLite because MinGW GCC
+is absent; this is not a passing Windows check. Frontend checks are synthetic;
+automatic review denied the restarted localhost preview, so unfinished interactive
+flows remain unverified. Native package acceptance is pending; publication is not
+performed by this evidence update.
+
+
+The owner still reports a retained Windows sign-in that does not reconnect after
+beta.3, with no detailed error. The connection cause is not established. A
+confirmed secondary bug rejects valid Windows diagnostics: its unknown pause
+state is null and its runtime includes a cleanup extension not accepted by the
+old sanitizer. The candidate accepts that known shape, drops the cleanup body
+from public reports, rejects other unknown fields, and exports only bounded
+public release-version syntax for separate app/agent versions. Six focused
+diagnostics tests pass, including privacy canaries and older-agent metadata.
+Reconnect details are also retained inline rather than relying on a dismissed
+toast. This improves diagnosis; it does not prove the owner's connection fixed.

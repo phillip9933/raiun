@@ -110,3 +110,20 @@ Read [architecture](docs/ARCHITECTURE.md),
 See the [desktop feature roadmap](docs/DESKTOP-FEATURE-ROADMAP.md),
 [media design](docs/MEDIA-SYNC-DESIGN.md), and
 [encryption interoperability limits](docs/ENCRYPTION-INTEROP.md) for planned work.
+
+
+### 0.7.4 development candidate (not published)
+
+The next numeric Beta candidate combines Windows in-place installation, the
+Offline files/Encrypted files workspaces, shared folder-sync/media navigation,
+stable refresh, safe account removal/restoration and appearance controls. The
+latest published release remains beta.3 until candidate acceptance and publication.
+
+Remove account signs out and revokes that profile's saved sign-in and remembered
+vault-password access; it does not delete cloud files, local folders or recovery
+copies. Removed accounts remain under Settings so they can be restored to the
+same profile and signed in again. Their paths stay reserved to prevent another
+account from adopting retained data. The bounded registry retains removed
+profiles; restore an existing profile instead of creating a replacement for its
+old root. Downgrading after retirement metadata has been written is unsupported;
+use 0.7.4 to restore the profile rather than deleting its state.

@@ -226,6 +226,7 @@ struct Runtime {
     restoring: AtomicBool,
     shutdown: Arc<AtomicBool>,
     auth_transition: Arc<AtomicBool>,
+    retiring: AtomicBool,
     offline_namespace: AtomicBool,
     offline_namespace_probe_unix: AtomicU64,
     session_store: Arc<dyn SessionStore>,
@@ -334,7 +335,10 @@ impl Runtime {
         // transition must then invalidate this snapshot even if it completes
         // before the operation acquires its execution gate.
         let generation = self.auth_generation.load(Ordering::Acquire);
-        if self.auth_transition.load(Ordering::Acquire) || self.shutdown.load(Ordering::Acquire) {
+        if self.auth_transition.load(Ordering::Acquire)
+            || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
+        {
             return Err("An account transition is in progress".into());
         }
         Ok(generation)
@@ -375,6 +379,7 @@ impl Runtime {
         if self.auth_generation.load(Ordering::Acquire) != expected_generation
             || self.auth_transition.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
         {
             return Err("Agent is shutting down".into());
         }
@@ -399,6 +404,7 @@ impl Runtime {
         if self.auth_generation.load(Ordering::Acquire) != expected_generation
             || self.auth_transition.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
         {
             return Err(RestoreFailure::Permanent(
                 "Saved-session restore was canceled".into(),
@@ -468,6 +474,7 @@ impl Runtime {
             || self.auth_generation.load(Ordering::Acquire) != expected_generation
             || self.auth_transition.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
         {
             return Err("Saved-session restore was canceled".into());
         }
@@ -480,6 +487,7 @@ impl Runtime {
             || self.auth_generation.load(Ordering::Acquire) != expected_generation
             || self.auth_transition.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
         {
             return Err("Saved-session restore was canceled".into());
         }
@@ -522,6 +530,7 @@ impl Runtime {
         if self.auth_generation.load(Ordering::Acquire) != expected_generation
             || self.auth_transition.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
         {
             return Err("Agent is shutting down".into());
         }
@@ -843,7 +852,16 @@ impl Runtime {
     }
 
     fn logout(&self) -> Result<(), String> {
+        self.logout_for_removal(None)
+    }
+
+    fn logout_for_removal(&self, expected_generation: Option<u64>) -> Result<(), String> {
         let _transition = AuthTransition::begin(&self.auth_transition)?;
+        if expected_generation
+            .is_some_and(|expected| self.auth_generation.load(Ordering::Acquire) != expected)
+        {
+            return Err("The account changed; review removal again".into());
+        }
         self.auth_generation.fetch_add(1, Ordering::AcqRel);
         let mut transfer_fence = self.fence_transfer_admission()?;
         self.vault_edit_reconcile_jobs.cancel_all_and_wait()?;
@@ -1494,6 +1512,7 @@ impl Runtime {
         let current = || -> Result<(), String> {
             if self.auth_transition.load(Ordering::Acquire)
                 || self.shutdown.load(Ordering::Acquire)
+                || self.retiring.load(Ordering::Acquire)
                 || self.offline_namespace.load(Ordering::Acquire)
                 || self.auth_generation.load(Ordering::Acquire) != generation
             {
@@ -1562,6 +1581,7 @@ impl Runtime {
         let _sync = self.sync_gate.lock().map_err(|_| "Sync state poisoned")?;
         if self.auth_transition.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
             || self.auth_generation.load(Ordering::Acquire) != generation
         {
             return Err("Media job update was canceled by an account change".into());
@@ -1994,6 +2014,7 @@ impl Runtime {
             || self.authenticating.load(Ordering::Acquire)
             || self.restoring.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
         {
             return Err("Disconnect and reconnect before changing proxy settings".into());
         }
@@ -2099,6 +2120,7 @@ impl Runtime {
             || self.authenticating.load(Ordering::Acquire)
             || self.restoring.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
         {
             return Err(
                 "Wait for the current account connection before changing bandwidth limits".into(),
@@ -2134,6 +2156,7 @@ impl Runtime {
             || self.auth_transition.load(Ordering::Acquire)
             || self.restoring.load(Ordering::Acquire)
             || self.shutdown.load(Ordering::Acquire)
+            || self.retiring.load(Ordering::Acquire)
         {
             return Err(
                 "Wait for the current account connection before changing bandwidth limits".into(),
@@ -2244,6 +2267,9 @@ impl Runtime {
     }
 
     fn handle(self: &Arc<Self>, request: Value) -> Result<Value, String> {
+        if self.retiring.load(Ordering::Acquire) {
+            return Err("This account is being removed or has been removed".into());
+        }
         if request
             .get("action")
             .and_then(Value::as_str)
@@ -2435,6 +2461,7 @@ impl Runtime {
                     return Err("Status was canceled by an account change".into());
                 }
                 Ok(json!({
+                    "agent_version": env!("CARGO_PKG_VERSION"),
                     "auth_generation": generation,
                     "connected": connected,
                     "offline_namespace": offline_namespace,
@@ -2529,6 +2556,7 @@ impl Runtime {
                     let info = flow.public_info();
                     if self.auth_transition.load(Ordering::Acquire)
                         || self.shutdown.load(Ordering::Acquire)
+                        || self.retiring.load(Ordering::Acquire)
                     {
                         return Err("Sign-in was canceled by an account transition".into());
                     }
@@ -2688,6 +2716,7 @@ impl Runtime {
                 let _sync = self.sync_gate.lock().map_err(|_| "Sync state poisoned")?;
                 if self.auth_generation.load(Ordering::Acquire) != generation
                     || self.shutdown.load(Ordering::Acquire)
+                    || self.retiring.load(Ordering::Acquire)
                     || self.auth_transition.load(Ordering::Acquire)
                 {
                     return Err("Conflict operation was canceled".into());
@@ -3194,6 +3223,7 @@ impl Runtime {
                 if self.auth_transition.load(Ordering::Acquire)
                     || self.auth_generation.load(Ordering::Acquire) != generation
                     || self.shutdown.load(Ordering::Acquire)
+                    || self.retiring.load(Ordering::Acquire)
                 {
                     return Err("Space sync request was canceled by an account change".into());
                 }
@@ -4337,6 +4367,7 @@ fn new_runtime(
         restoring: AtomicBool::new(true),
         shutdown: Arc::new(AtomicBool::new(false)),
         auth_transition: Arc::new(AtomicBool::new(false)),
+        retiring: AtomicBool::new(false),
         offline_namespace: AtomicBool::new(false),
         offline_namespace_probe_unix: AtomicU64::new(0),
         vault_account_id: scope.clone().unwrap_or_else(|| "default".into()),
@@ -6444,6 +6475,7 @@ mod tests {
             restoring: AtomicBool::new(false),
             shutdown: Arc::new(AtomicBool::new(false)),
             auth_transition: Arc::new(AtomicBool::new(false)),
+            retiring: AtomicBool::new(false),
             offline_namespace: AtomicBool::new(false),
             offline_namespace_probe_unix: AtomicU64::new(0),
             vaults: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
@@ -7121,6 +7153,7 @@ mod tests {
             restoring: AtomicBool::new(false),
             shutdown: Arc::new(AtomicBool::new(false)),
             auth_transition: Arc::new(AtomicBool::new(false)),
+            retiring: AtomicBool::new(false),
             offline_namespace: AtomicBool::new(false),
             offline_namespace_probe_unix: AtomicU64::new(0),
             session_store,
@@ -7187,6 +7220,7 @@ mod tests {
             restoring: AtomicBool::new(true),
             shutdown: Arc::new(AtomicBool::new(false)),
             auth_transition: Arc::new(AtomicBool::new(false)),
+            retiring: AtomicBool::new(false),
             offline_namespace: AtomicBool::new(false),
             offline_namespace_probe_unix: AtomicU64::new(0),
             session_store,
@@ -8063,6 +8097,7 @@ mod tests {
             restoring: AtomicBool::new(false),
             shutdown: Arc::new(AtomicBool::new(false)),
             auth_transition: Arc::new(AtomicBool::new(false)),
+            retiring: AtomicBool::new(false),
             offline_namespace: AtomicBool::new(false),
             offline_namespace_probe_unix: AtomicU64::new(0),
             vaults: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),

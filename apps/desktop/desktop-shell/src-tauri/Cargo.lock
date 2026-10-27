@@ -3020,7 +3020,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "raiun-control"
-version = "0.7.0-beta.3"
+version = "0.7.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -3029,7 +3029,7 @@ dependencies = [
 
 [[package]]
 name = "raiun-control-windows"
-version = "0.7.0-beta.3"
+version = "0.7.4"
 dependencies = [
  "fs2",
  "raiun-control",
@@ -3041,7 +3041,7 @@ dependencies = [
 
 [[package]]
 name = "raiun-core"
-version = "0.7.0-beta.3"
+version = "0.7.4"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
@@ -3053,7 +3053,7 @@ dependencies = [
 
 [[package]]
 name = "raiun-desktop-shell"
-version = "0.7.0-beta.3"
+version = "0.7.4"
 dependencies = [
  "raiun-control",
  "raiun-control-windows",

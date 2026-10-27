@@ -873,6 +873,28 @@ fn safe_diagnostic_count(value: &Value, optional: bool) -> Result<Value, String>
     Ok(json!(count))
 }
 
+// Export only bounded public release-version syntax, not arbitrary text from
+// an agent response. A mismatched older agent is useful diagnostic information.
+fn safe_diagnostic_version(value: &Value) -> Result<String, String> {
+    let text = value
+        .as_str()
+        .filter(|text| text.len() <= 64)
+        .ok_or("The agent returned invalid diagnostics metadata")?;
+    let version = semver::Version::parse(text)
+        .map_err(|_| "The agent returned invalid diagnostics metadata")?;
+    let pre = version.pre.as_str();
+    let public_pre = pre.is_empty()
+        || ["alpha.", "beta.", "rc."].iter().any(|prefix| {
+            pre.strip_prefix(prefix).is_some_and(|number| {
+                !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        });
+    if !version.build.is_empty() || !public_pre {
+        return Err("The agent returned invalid diagnostics metadata".into());
+    }
+    Ok(text.to_owned())
+}
+
 fn sanitize_diagnostics_report(value: &Value) -> Result<Vec<u8>, String> {
     if !has_exact_keys(
         value,
@@ -891,8 +913,8 @@ fn sanitize_diagnostics_report(value: &Value) -> Result<Vec<u8>, String> {
     {
         return Err("The agent returned an unsupported diagnostics report".into());
     }
-    if value["app_version"].as_str() != Some(env!("CARGO_PKG_VERSION"))
-        || value["target_os"].as_str() != Some(std::env::consts::OS)
+    let agent_version = safe_diagnostic_version(&value["app_version"])?;
+    if value["target_os"].as_str() != Some(std::env::consts::OS)
         || value["target_arch"].as_str() != Some(std::env::consts::ARCH)
     {
         return Err("The agent returned invalid diagnostics metadata".into());
@@ -934,16 +956,23 @@ fn sanitize_diagnostics_report(value: &Value) -> Result<Vec<u8>, String> {
         })
     };
     let runtime = &value["runtime"];
-    if !has_exact_keys(runtime, &["connected", "mounted", "sync_paused"])
+    // Windows adds a cleanup extension. It is deliberately omitted from the
+    // public report, whose projection remains the three reviewed safe fields.
+    if !(has_exact_keys(runtime, &["connected", "mounted", "sync_paused"])
+        || has_exact_keys(
+            runtime,
+            &["connected", "mounted", "sync_paused", "vault_cleanup"],
+        ))
         || !runtime["connected"].is_boolean()
         || !runtime["mounted"].is_boolean()
-        || !runtime["sync_paused"].is_boolean()
+        || (!runtime["sync_paused"].is_boolean() && !runtime["sync_paused"].is_null())
     {
         return Err("The agent returned invalid diagnostics metadata".into());
     }
     let report = json!({
         "schema_version": 1,
         "app_version": env!("CARGO_PKG_VERSION"),
+        "agent_version": agent_version,
         "target_os": std::env::consts::OS,
         "target_arch": std::env::consts::ARCH,
         "profile_scope": "selected_profile",
@@ -2336,6 +2365,54 @@ mod shell_tests {
                 .unwrap_err()
                 .contains("CANARY_PRIVATE_PATH")
         );
+    }
+
+    #[test]
+    fn diagnostics_export_preserves_unknown_pause_and_older_agent_version() {
+        let mut fixture = diagnostic_fixture();
+        fixture["app_version"] = json!("0.7.0-beta.2");
+        fixture["runtime"]["sync_paused"] = serde_json::Value::Null;
+        let report: serde_json::Value =
+            serde_json::from_slice(&sanitize_diagnostics_report(&fixture).unwrap()).unwrap();
+        assert_eq!(report["app_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(report["agent_version"], "0.7.0-beta.2");
+        assert!(report["runtime"]["sync_paused"].is_null());
+        assert_eq!(report["runtime"]["connected"], false);
+        fixture["runtime"]["sync_paused"] = json!("CANARY_PRIVATE_VALUE");
+        assert!(sanitize_diagnostics_report(&fixture).is_err());
+    }
+
+    #[test]
+    fn diagnostics_export_accepts_windows_disconnected_shape_without_copying_cleanup_data() {
+        let mut fixture = diagnostic_fixture();
+        fixture["app_version"] = json!("0.7.0-beta.3");
+        fixture["profile_config"] = json!({"parse_valid":null,"folder_pair_count":null,"mode_counts":null,"vault_pair_count":null});
+        fixture["runtime"] = json!({"connected":false,"mounted":false,"sync_paused":null,"vault_cleanup":{"private_path":"CANARY_PRIVATE_PATH","token":"CANARY_SECRET_TOKEN"}});
+        let bytes = sanitize_diagnostics_report(&fixture).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("CANARY"));
+        assert!(!text.contains("vault_cleanup"));
+        let report: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(report["agent_version"], "0.7.0-beta.3");
+        assert!(report["runtime"]["sync_paused"].is_null());
+        fixture["runtime"]["unexpected_secret"] = json!("CANARY_SECRET");
+        assert!(sanitize_diagnostics_report(&fixture).is_err());
+    }
+
+    #[test]
+    fn diagnostics_version_rejects_arbitrary_private_strings_and_build_metadata() {
+        for version in [
+            "CANARY_PRIVATE_PATH",
+            "0.7.4+CANARY_PRIVATE_VALUE",
+            "0.7.4-CANARY_PRIVATE_VALUE",
+            "https://private.example.test",
+        ] {
+            let mut fixture = diagnostic_fixture();
+            fixture["app_version"] = json!(version);
+            let error = sanitize_diagnostics_report(&fixture).unwrap_err();
+            assert!(!error.contains("CANARY"));
+            assert!(!error.contains("private.example"));
+        }
     }
 
     #[test]
