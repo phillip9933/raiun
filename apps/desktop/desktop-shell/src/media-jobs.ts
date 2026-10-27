@@ -1,4 +1,4 @@
-/** Account-scoped recurring media backup controls. Preview stays independent. */
+/** Account-scoped media import records shown alongside sync folders. */
 export type MediaJob = {
   id: string; revision: number; account_id: string; source_root: string; space_id: string; destination_root: string;
   destination_root_resource_id: string; filter: 'photos' | 'videos' | 'all';
@@ -23,9 +23,9 @@ type Context = {
   key(): string; connected(): boolean; reachable(): boolean; blocked(): boolean;
   supportsVerifyUpload?(): boolean;
   loadWhileDisconnected?(): boolean;
-  supported(): boolean; spaces(): { id: string; name: string; writable: boolean; encrypted: boolean }[];
+  supported(): boolean;
   request<T>(action: string, args?: Record<string, unknown>): Promise<T>;
-  chooseSource(): Promise<string | null>; confirm(message: string): Promise<boolean>; busy(value: boolean): void; render(): void;
+  confirm(message: string): Promise<boolean>; busy(value: boolean): void; render(): void;
 };
 const escape = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
 const formatRecoveryBytes = (bytes: number) => bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KiB`;
@@ -35,15 +35,18 @@ export class MediaJobsView {
   private saving = false;
   private loaded = false;
   private error = '';
+  private folderCreateError = '';
+  private folderCreateErrorKey = '';
   private loadError = '';
   private message = '';
   private revision = 0;
   private recovery: RecoveryPanel | null = null;
   private recoveryRequestToken = 0;
-  private draft = this.emptyDraft();
   constructor(private readonly context: Context) {}
-  private emptyDraft() { return { source: '', space: '', destination: '', filter: 'photos' as MediaJob['filter'], organization: 'preserve_relative_path' as MediaJob['organization'], interval: '3600' }; }
-  reset() { this.revision++; this.recoveryRequestToken++; this.recovery = null; this.rows = []; this.loading = false; this.loaded = false; this.error = ''; this.loadError = ''; this.message = ''; this.draft = this.emptyDraft(); }
+  reset() { this.revision++; this.recoveryRequestToken++; this.recovery = null; this.rows = []; this.loading = false; this.loaded = false; this.error = ''; this.folderCreateError = ''; this.folderCreateErrorKey = ''; this.loadError = ''; this.message = ''; }
+  folderCreationBusy() { return this.saving; }
+  folderCreationError(key: string) { return this.folderCreateErrorKey === key ? this.folderCreateError : ''; }
+  clearFolderCreationError(key: string) { if (this.folderCreateErrorKey === key) { this.folderCreateError = ''; this.folderCreateErrorKey = ''; } }
   async refresh() {
     if (this.saving) return;
     if (!this.context.connected() && this.context.loadWhileDisconnected?.() === false) {
@@ -67,46 +70,39 @@ export class MediaJobsView {
       if (key === this.context.key() && revision === this.revision) { this.loading = false; this.context.render(); }
     }
   }
+  spaceIds() { return [...new Set(this.rows.map(row => row.job.space_id))]; }
+  statusHtml() {
+    if (!this.context.supported()) return '<p class="media-workspace-note">Recurring media imports are unavailable for this agent.</p>';
+    if (this.error || this.loadError) return `<div class="media-warning" role="alert">${escape(this.error || this.loadError)}</div>`;
+    if (!this.loaded && this.loading) return '<p class="media-workspace-note" role="status">Loading folder settings…</p>';
+    if (!this.loaded && this.context.reachable() && this.context.connected()) return '<p class="media-workspace-note">Folder settings have not loaded yet. Refresh to check.</p>';
+    return '';
+  }
+  rowsForSpace(spaceId: string) {
+    if (!this.context.supported()) return '';
+    const blocked = this.saving || this.context.blocked() || !this.context.reachable();
+    const matching = this.rows.filter(row => row.job.space_id === spaceId);
+    return matching.map(row => this.row(row, blocked)).join('');
+  }
   html() {
     if (!this.context.supported()) return '';
     const blocked = this.saving || this.context.blocked() || !this.context.reachable();
-    const createBlocked = blocked || !this.context.connected();
-    const disabled = (value: boolean) => value ? 'disabled' : '';
-    const spaces = this.context.spaces().filter(s => s.writable && !s.encrypted);
-    const draft = this.draft;
-    return `<section class="media-backups" aria-label="Recurring media backups"><div class="section-heading"><div><div class="eyebrow">SOURCE-PRESERVING BACKUP</div><h1>Media backups</h1><p class="lede">Upload photos and videos for the active account. Originals stay on this computer.</p></div><button class="button subtle" data-media-refresh ${disabled(blocked || this.loading)}>Refresh backups</button></div>
-      <p class="media-form-note">Backups follow Pause Sync. Uploads count as complete only after their cloud contents are verified. Name conflicts and uncertain uploads need attention; they are not silently overwritten.</p>
-      ${this.error || this.loadError ? `<div class="media-warning" role="alert">${escape(this.error || this.loadError)}</div>` : ''}${this.message ? `<p role="status">${escape(this.message)}</p>` : ''}
-      <div class="media-job-list">${this.rows.map(row => this.row(row, blocked)).join('') || `<p class="media-empty-result">${this.loading ? 'Loading backups…' : this.loaded ? 'No media backups for this account yet.' : !this.context.reachable() ? 'Start the Raiun background agent to load media backups.' : !this.context.connected() ? 'Sign in to your OpenCloud account to load and manage media backups.' : 'Refresh to load media backups.'}</p>`}</div>
-      <form id="media-job-form" class="settings-card media-form"><h3>Add a media backup</h3>
-      <div class="media-field"><label for="media-job-source">Source folder</label><div class="input-with-button"><input id="media-job-source" value="${escape(draft.source)}" readonly placeholder="Choose a local folder"/><button type="button" class="button subtle" data-media-source ${disabled(blocked)}>Browse</button></div></div>
-      <div class="media-options"><div class="media-field"><label for="media-job-space">OpenCloud location</label><select id="media-job-space" ${disabled(createBlocked)}><option value="">Choose Personal or a Space</option>${spaces.map(s => `<option value="${escape(s.id)}" ${s.id === draft.space ? 'selected' : ''}>${escape(s.name)}</option>`).join('')}</select></div>
-      <div class="media-field"><label for="media-job-destination">Existing folder in this location</label><input id="media-job-destination" value="${escape(draft.destination)}" placeholder="/Photos" ${disabled(createBlocked)}/><small>Use a folder below the location root. Encrypted destinations are not supported by media backup yet.</small></div></div>
-      <div class="media-options"><div class="media-field"><label for="media-job-filter">Include</label><select id="media-job-filter" ${disabled(blocked)}>${(['photos','videos','all'] as const).map(value => `<option value="${value}" ${draft.filter === value ? 'selected' : ''}>${value === 'all' ? 'All files' : value === 'photos' ? 'Photos' : 'Videos'}</option>`).join('')}</select></div>
-      <div class="media-field"><label for="media-job-organization">Destination organization</label><select id="media-job-organization" ${disabled(blocked)}><option value="preserve_relative_path" ${draft.organization === 'preserve_relative_path' ? 'selected' : ''}>Keep folders and filenames</option><option value="utc_year_month" ${draft.organization === 'utc_year_month' ? 'selected' : ''}>Filesystem modified date (UTC year/month)</option></select></div>
-      <div class="media-field"><label for="media-job-interval">Check for new files</label><select id="media-job-interval" ${disabled(blocked)}>${[['60','Every minute'],['900','Every 15 minutes'],['3600','Every hour'],['86400','Every day']].map(([value,label]) => `<option value="${value}" ${draft.interval === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div></div>
-      <p class="media-form-note">Photos includes recognized images; Videos includes recognized videos. File contents determine the type, not the extension. All files also includes other regular files. Scans include subfolders and skip symbolic links.</p>
-      <p class="media-form-note">Date organization uses filesystem modification time, not photo capture time. New files must remain unchanged across two scans at least ten seconds apart. Files larger than 8 GiB need a regular synced folder.</p>
-      ${!this.context.connected() ? '<p>Sign in to choose and verify a destination.</p>' : ''}<button type="submit" class="button primary" ${disabled(createBlocked)}>${this.saving ? 'Saving…' : 'Enable backup'}</button></form></section>`;
+    const empty = this.loading ? 'Loading folder settings…' : this.loaded ? 'No media imports for this account yet.' : !this.context.reachable() ? 'Start the Raiun background agent to load media backups.' : !this.context.connected() ? 'Sign in to your OpenCloud account to load and manage media backups.' : 'Refresh to load media backups.';
+    return `<section class="media-backups" aria-label="Folder settings">${this.statusHtml()}<div class="media-job-list">${this.rows.map(row => this.row(row, blocked)).join('') || `<p class="media-empty-result">${empty}</p>`}</div></section>`;
   }
   private row(row: JobRow, blocked: boolean) {
     const {job,status} = row; const active = row.queued || status?.state === 'running';
     const label = !row.active_account ? 'Different signed-in account' : !job.enabled ? 'Paused' : row.queued ? 'Queued' : status?.state?.replaceAll('_',' ') || 'Waiting for first scan';
+    const interval = job.interval_seconds === 60 ? 'every minute' : job.interval_seconds === 900 ? 'every 15 minutes' : job.interval_seconds === 3600 ? 'every hour' : job.interval_seconds === 86400 ? 'every day' : `every ${job.interval_seconds} seconds`;
+    const organization = job.organization === 'utc_year_month' ? 'Filesystem modified date, UTC year/month' : 'Keep source folders and filenames';
+    const filter = job.filter === 'photos' ? 'Photos (recognized image files)' : job.filter === 'videos' ? 'Videos (recognized video files)' : 'All regular files';
     const inspecting = this.recovery?.jobId === job.id && this.recovery.revision === job.revision && this.recovery.accountId === job.account_id;
     return `<article class="settings-card media-job-card"><div><h3>${escape(job.source_root.split(/[\\/]/).filter(Boolean).at(-1) || job.source_root)}</h3><span class="mode-pill">${escape(label)}</span></div><p><code>${escape(job.source_root)}</code> → <code>${escape(job.destination_root)}</code></p>
-      <p class="media-form-note">Include: ${job.filter === 'photos' ? 'Photos (recognized image files)' : job.filter === 'videos' ? 'Videos (recognized video files)' : 'All regular files'}. Includes subfolders; symbolic links are skipped.</p>
+      <details class="media-job-settings"><summary>Import settings</summary><p>Include: ${filter}. Includes subfolders; symbolic links are skipped.</p><p>Organize: ${organization}. Check for new files ${interval}.</p><p>Files must remain unchanged across two scans at least ten seconds apart. Files larger than 8 GiB need ordinary folder sync. Existing files are reviewed as conflicts; older cloud versions are not automatically kept.</p></details>
       ${status ? `<p role="status">${status.uploaded} uploaded · ${status.unchanged} already backed up · ${status.waiting_for_stability} waiting for stable files · ${status.conflicts + status.needs_attention} need attention</p>${status.last_error ? `<p class="exclusion-error">${escape(status.last_error)}</p>` : ''}` : ''}
-      <div class="media-job-actions"><button class="button subtle" data-media-toggle="${escape(job.id)}" ${blocked || (!job.enabled && !row.active_account) ? 'disabled' : ''}>${job.enabled ? 'Pause backup' : 'Resume backup'}</button><button class="button subtle" data-media-run="${escape(job.id)}" ${blocked || active || !job.enabled || !row.active_account || !this.context.connected() ? 'disabled' : ''}>Check now</button><button class="button subtle" data-media-remove="${escape(job.id)}" ${blocked || active ? 'disabled' : ''}>Remove backup</button><button class="button subtle" data-media-recovery="${escape(job.id)}" ${blocked || !row.active_account || this.recovery?.loading ? 'disabled' : ''}>${inspecting ? 'Hide retained copies' : 'Inspect retained copies'}</button></div>${inspecting ? this.recoveryHtml(this.recovery!) : ''}</article>`;
+      <div class="media-job-actions"><button class="button subtle" data-media-toggle="${escape(job.id)}" ${blocked || (!job.enabled && !row.active_account) ? 'disabled' : ''}>${job.enabled ? 'Pause import' : 'Resume import'}</button><button class="button subtle" data-media-run="${escape(job.id)}" ${blocked || active || !job.enabled || !row.active_account || !this.context.connected() ? 'disabled' : ''}>Check now</button><button class="button subtle" data-media-remove="${escape(job.id)}" ${blocked || active ? 'disabled' : ''}>Remove import</button><button class="button subtle" data-media-recovery="${escape(job.id)}" ${blocked || !row.active_account || this.recovery?.loading ? 'disabled' : ''}>${inspecting ? 'Hide retained copies' : 'Inspect retained copies'}</button></div>${inspecting ? this.recoveryHtml(this.recovery!) : ''}</article>`;
   }
   bind(root: HTMLElement) {
-    root.querySelector('[data-media-refresh]')?.addEventListener('click', () => void this.refresh());
-    root.querySelector('[data-media-source]')?.addEventListener('click', () => void this.choose());
-    const fields = {space:'media-job-space',destination:'media-job-destination',filter:'media-job-filter',organization:'media-job-organization',interval:'media-job-interval'};
-    for (const [key,id] of Object.entries(fields)) {
-      const element = root.querySelector<HTMLInputElement | HTMLSelectElement>(`#${id}`);
-      element?.addEventListener('input', () => { Object.assign(this.draft, {[key]:element.value}); });
-    }
-    root.querySelector('#media-job-form')?.addEventListener('submit', event => { event.preventDefault(); void this.create(); });
     root.querySelectorAll<HTMLButtonElement>('[data-media-recovery]').forEach(button => button.addEventListener('click', () => {
       const row = this.rows.find(value => value.job.id === button.dataset.mediaRecovery);
       if (!row || !row.active_account || this.context.blocked()) return;
@@ -122,8 +118,8 @@ export class MediaJobsView {
     root.querySelectorAll<HTMLButtonElement>('[data-media-toggle],[data-media-run],[data-media-remove]').forEach(button => button.addEventListener('click', () => {
       const id = button.dataset.mediaToggle || button.dataset.mediaRun || button.dataset.mediaRemove;
       const row = this.rows.find(value => value.job.id === id); if (!row) return;
-      if (button.dataset.mediaToggle && (row.job.enabled || row.active_account)) void this.mutate(async () => { await this.context.request('media_job_set',{job:{...row.job,enabled:!row.job.enabled},expected_revision:row.job.revision,expected_account_id:row.job.account_id}); return row.job.enabled ? 'Backup paused.' : 'Backup enabled.'; });
-      else if (button.dataset.mediaRun && row.active_account) void this.mutate(async () => { await this.context.request('media_job_run',{job_id:id,expected_revision:row.job.revision,expected_account_id:row.job.account_id}); return 'Backup check queued. Watch its status for verified uploads.'; });
+      if (button.dataset.mediaToggle && (row.job.enabled || row.active_account)) void this.mutate(async () => { await this.context.request('media_job_set',{job:{...row.job,enabled:!row.job.enabled},expected_revision:row.job.revision,expected_account_id:row.job.account_id}); return row.job.enabled ? 'Import paused.' : 'Import enabled.'; });
+      else if (button.dataset.mediaRun && row.active_account) void this.mutate(async () => { await this.context.request('media_job_run',{job_id:id,expected_revision:row.job.revision,expected_account_id:row.job.account_id}); return 'Import check queued. Watch its status for verified uploads.'; });
       else if (button.dataset.mediaRemove) void this.remove(row);
     }));
   }
@@ -133,13 +129,13 @@ export class MediaJobsView {
     const revision = this.revision;
     const { id, account_id, revision: jobRevision } = row.job;
     try {
-      if (await this.context.confirm('Remove this backup schedule? Source files, cloud files and recovery copies will stay in place.') !== true) return;
+      if (await this.context.confirm('Remove this media import schedule? Source files, cloud files and recovery copies will stay in place.') !== true) return;
       if (key !== this.context.key() || revision !== this.revision || this.saving || this.context.blocked() || !this.context.reachable() || !this.context.supported()) return;
       const current = this.rows.find(value => value.job.id === id && value.job.account_id === account_id && value.job.revision === jobRevision);
       if (!current || current.queued || current.status?.state === 'running') return;
       await this.mutate(async () => {
         await this.context.request('media_job_remove', { job_id: id, expected_revision: jobRevision, expected_account_id: account_id });
-        return 'Backup schedule removed. Files remain in place.';
+        return 'Media import removed. Files remain in place.';
       });
     } catch (error) {
       if (key === this.context.key() && revision === this.revision) { this.error = String(error instanceof Error ? error.message : error); this.context.render(); }
@@ -154,7 +150,7 @@ export class MediaJobsView {
         : 'No verified retained copy found';
       return `<article class="media-recovery-item"><div><b>${escape(item.state.replaceAll('_',' '))}</b><span>${escape(revision)} · ${escape(copy)}</span></div><p><span>Original</span><code>${escape(source)}</code></p><p><span>Destination</span><code>${escape(item.destination_path)}</code></p><small>${formatRecoveryBytes(item.source_size)} source size${item.attempt_generation == null ? '' : ` · attempt ${item.attempt_generation}`}</small>${this.canVerify(panel, item) ? `<button class="button subtle" data-media-verify="${index}" ${panel.verifying || panel.loading || this.context.blocked() || !this.context.connected() ? 'disabled' : ''}>Verify uploaded copy</button>` : ''}</article>`;
     }).join('');
-    return `<section class="media-recovery" aria-label="Retained media copies"><p class="media-recovery-note">Read-only inspection: this shows local recovery metadata and whether a retained copy is present. It does not open, change, upload, or remove retained files.</p>${panel.error ? `<p class="media-recovery-error" role="alert">Could not inspect retained copies: ${escape(panel.error)}</p>` : ''}${panel.accountHasUnindexedStage ? '<p class="media-recovery-warning" role="status">Some local recovery data could not be safely matched to a backup record. Its name and contents are not shown here.</p>' : ''}${panel.loading && !panel.loaded ? '<p role="status">Loading retained-copy details…</p>' : ''}${panel.loaded && panel.items.length === 0 && !panel.accountHasUnindexedStage ? '<p class="media-empty-result">No retained copies or unresolved upload records were found for this backup.</p>' : ''}${panel.verificationMessage ? `<p role="status">${escape(panel.verificationMessage)}</p>` : ''}<p>A remote match does not resume backup or clear retained recovery.</p>${rows}${panel.loading && panel.loaded ? '<p role="status">Loading next page…</p>' : ''}${panel.hasMore ? `<button class="button subtle" data-media-recovery-more ${panel.loading || panel.verifying ? 'disabled' : ''}>Load next 100</button>` : ''}</section>`;
+      return `<section class="media-recovery" aria-label="Retained media copies"><p class="media-recovery-note">Read-only inspection: this shows local recovery metadata and whether a retained copy is present. It does not open, change, upload, or remove retained files.</p>${panel.error ? `<p class="media-recovery-error" role="alert">Could not inspect retained copies: ${escape(panel.error)}</p>` : ''}${panel.accountHasUnindexedStage ? '<p class="media-recovery-warning" role="status">Some local recovery data could not be safely matched to an import record. Its name and contents are not shown here.</p>' : ''}${panel.loading && !panel.loaded ? '<p role="status">Loading retained-copy details…</p>' : ''}${panel.loaded && panel.items.length === 0 && !panel.accountHasUnindexedStage ? '<p class="media-empty-result">No retained copies or unresolved upload records were found for this import.</p>' : ''}${panel.verificationMessage ? `<p role="status">${escape(panel.verificationMessage)}</p>` : ''}<p>A remote match does not resume the import or clear retained recovery.</p>${rows}${panel.loading && panel.loaded ? '<p role="status">Loading next page…</p>' : ''}${panel.hasMore ? `<button class="button subtle" data-media-recovery-more ${panel.loading || panel.verifying ? 'disabled' : ''}>Load next 100</button>` : ''}</section>`;
   }
   private canVerify(panel: RecoveryPanel, item: RecoveryItem) {
     return this.context.supportsVerifyUpload?.() !== false && item.upload_verification_available === true && item.state === 'uncertain'
@@ -215,29 +211,39 @@ export class MediaJobsView {
       if (this.recoveryIsCurrent(panel) && panel.requestToken === requestToken) { panel.loading = false; this.context.render(); }
     }
   }
-  private async choose() {
-    if (this.saving || this.context.blocked()) return;
+  async createFromFolder(input: { source: string; space: string; destination: string; filter: MediaJob['filter']; organization: MediaJob['organization']; interval: string }, onCreated: () => void) {
+    const draft = {...input};
     const key = this.context.key();
-    await this.mutate(async () => { const source = await this.context.chooseSource(); if (source && key === this.context.key()) this.draft.source = source; return ''; });
-  }
-  private async create() {
-    const draft = {...this.draft};
-    const key = this.context.key();
-    if (!draft.source || !draft.space || !draft.destination.startsWith('/') || draft.destination === '/') { this.error = 'Choose a source, a location, and an existing destination folder such as /Photos.'; this.context.render(); return; }
-    if (!this.context.connected()) return;
-    await this.mutate(async () => {
+    this.clearFolderCreationError(key);
+    if (!draft.source || !draft.space || !draft.destination.startsWith('/') || draft.destination === '/') {
+      this.folderCreateErrorKey = key;
+      this.folderCreateError = 'Choose a source, a location, and an existing destination folder.';
+      this.error = this.folderCreateError;
+      this.context.render();
+      return false;
+    }
+    if (!this.context.connected() || !this.context.supported()) return false;
+    let created = false;
+    const succeeded = await this.mutate(async () => {
       const destination = await this.context.request<{id:string;path:string;space_id:string;account_id:string}>('media_destination',{space_id:draft.space,path:draft.destination});
       if (key !== this.context.key()) throw new Error('Account changed before the backup was saved.');
+      if (destination.space_id !== draft.space || !destination.account_id || !destination.id || !destination.path.startsWith('/')) throw new Error('The selected destination did not match this Space. Choose it again.');
       const job: MediaJob = {id:crypto.randomUUID(),revision:0,account_id:destination.account_id,source_root:draft.source,space_id:draft.space,destination_root:destination.path,destination_root_resource_id:destination.id,filter:draft.filter,organization:draft.organization,filesystem_mtime_utc:draft.organization === 'utc_year_month',interval_seconds:Number(draft.interval),enabled:true};
-      await this.context.request('media_job_set',{job,expected_revision:0,expected_account_id:destination.account_id}); this.draft = this.emptyDraft(); return 'Backup enabled. Files will be checked for stability before uploading.';
+      await this.context.request('media_job_set',{job,expected_revision:0,expected_account_id:destination.account_id}); return 'Media import enabled. Files will be checked for stability before uploading.';
     });
+    created = succeeded && key === this.context.key();
+    if (created) { this.clearFolderCreationError(key); onCreated(); }
+    else if (key === this.context.key() && this.error) { this.folderCreateErrorKey = key; this.folderCreateError = this.error; this.context.render(); }
+    return created;
   }
-  private async mutate(action: () => Promise<string>) {
-    if (this.saving || this.context.blocked() || !this.context.reachable()) return;
+  private async mutate(action: () => Promise<string>): Promise<boolean> {
+    if (this.saving || this.context.blocked() || !this.context.reachable()) return false;
     const key = this.context.key(); const revision = this.revision;
+    let succeeded = false;
     this.saving = true; this.context.busy(true); this.error = ''; this.message = ''; this.context.render();
-    try { const message = await action(); if (key === this.context.key() && revision === this.revision) this.message = message; }
+    try { const message = await action(); if (key === this.context.key() && revision === this.revision) { this.message = message; succeeded = true; } }
     catch(error) { if (key === this.context.key() && revision === this.revision) this.error = String(error instanceof Error ? error.message : error); }
     finally { this.saving = false; this.context.busy(false); if (key === this.context.key() && revision === this.revision) { await this.refresh(); this.context.render(); } }
+    return succeeded;
   }
 }

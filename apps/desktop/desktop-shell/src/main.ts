@@ -5,6 +5,7 @@ import { open, confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
 import './style.css';
 import { MediaJobsView } from './media-jobs';
+import { folderCreationRoute, folderWorkspaceSpaceIds, type FolderDirection } from './folder-workspace';
 import { mergeVaultLockCleanup, nativeVaultLockMessage, vaultLockScopeKey, type VaultLockCleanupEvent, type VaultLockCleanupStatus } from './vault-lock-state';
 import { connectionMode } from './connection-state';
 import { shouldBlockPassiveRefresh, shouldRunPeriodicPassiveRefresh } from './passive-refresh';
@@ -105,7 +106,6 @@ function safeOfflineAvailabilityState(value: unknown): OfflineAvailabilityState 
   throw new Error('The agent returned an unknown offline-copy status.');
 }
 type Page = 'overview' | 'folders' | 'offline' | 'encrypted' | 'transfers' | 'settings';
-type SyncSection = 'folders' | 'media';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 let appVersionLabel = isTauri() ? 'Loading…' : 'Browser layout preview';
@@ -145,9 +145,9 @@ const accountRenameUi = { profileId: '', accountEpoch: -1, expectedLabel: '', dr
 type InterruptedCreateRetryUi = { key: string; spaceId: string; rootResourceId: string; writeId: string; revision: number; retryGeneration: number; retryState: 'attempting' | 'recovery_attempting' | 'recovery_retrying'; jobId: string; profileId: string; accountEpoch: number; generation: number; busy: boolean; status: VaultEditReconcileStatus | null; error: string };
 const interruptedCreateRetryUi: { job: InterruptedCreateRetryUi | null; timer: number; generation: number } = { job: null, timer: 0, generation: 0 };
 const cachedVaultRootsUi = { roots: [] as CachedVaultRoot[], nextAfter: null as CachedVaultRootsPage['next_after'], truncated: false, loading: false, error: '', selected: '', generation: 0, accountEpoch: -1 };
-const state: { page: Page; syncSection: SyncSection; status: Status | null; statusErrorDismissed: string; agentReachable: boolean; pairs: Pair[]; transfers: Transfer[]; conflicts: Record<string, ConflictPage>; resolvingConflict: boolean; recoveryPage: RecoveryPage | null; recoveryLoading: boolean; recoveryError: string; encryptedEditRecoveryPage: EncryptedEditRecoveryPage | null; encryptedEditRecoveryLoading: boolean; encryptedEditRecoveryError: string; spaces: Space[]; spacesServer: string | null; spacesLoading: boolean; spacesError: string; transferFilter: string; busy: boolean; addOpen: boolean; localPath: string; spaceId: string; remotePath: string; vaultBinding: VaultBinding | null; vaultWritable: boolean; vaultDialog: VaultDialogState | null; vaultGeneration: number; vaultAccessOpen: boolean; vaultAccessSpaceId: string; pickerPurpose: 'pair' | 'encrypted_access' | 'offline'; pickerGeneration: number; mode: SyncMode; pickerOpen: boolean; pickerPath: string; pickerEntries: RemoteEntry[]; pickerError: string; pickerWritable: Record<string, boolean>; pickerFolderName: string; pickerCreatingFolder: boolean; accounts: Account[]; removedAccounts: RemovedAccount[]; accountRemovalSupported: boolean; selectedAccount: string; accountEpoch: number; accountSwitching: boolean; accountsLoading: boolean; accountsError: string; accountSwitchTarget: string; mutationBusy: number; nativeDialogBusy: boolean; addAccountOpen: boolean; addAccountStep: 'details' | 'waiting'; addAccountLabel: string; addAccountRoot: string; addAccountServer: string; addAccountClientId: string; addAccountAuthMessage: string; addAccountAuthStarted: boolean; addAccountError: string; addAccountCreatedId: string; addAccountBusy: boolean; spaceActionBusy: Record<string, 'pause' | 'sync' | 'disconnect'>; message: string; error: string; autostart: boolean | null; server: string; serverEdited: boolean; statusServer: string; clientId: string; clientIdEditedServer: string | null; clientIdServer: string } = {
-  page: 'overview', syncSection: 'folders', status: null, statusErrorDismissed: '', agentReachable: false, pairs: [], transfers: [], spaces: [], spacesServer: null, spacesLoading: false, spacesError: '', transferFilter: 'active', busy: false, addOpen: false,
-  conflicts: {}, resolvingConflict: false, recoveryPage: null, recoveryLoading: false, recoveryError: '', encryptedEditRecoveryPage: null, encryptedEditRecoveryLoading: false, encryptedEditRecoveryError: '', localPath: '', spaceId: '', remotePath: '', vaultBinding: null, vaultWritable: false, vaultDialog: null, vaultGeneration: 0, vaultAccessOpen: false, vaultAccessSpaceId: '', pickerPurpose: 'pair', pickerGeneration: 0, mode: 'two_way', pickerOpen: false, pickerPath: '/', pickerEntries: [], pickerError: '', pickerWritable: {}, pickerFolderName: '', pickerCreatingFolder: false, accounts: [], removedAccounts: [], accountRemovalSupported: false, selectedAccount: '', accountEpoch: 0, accountSwitching: false, accountsLoading: false, accountsError: '', accountSwitchTarget: '', mutationBusy: 0, nativeDialogBusy: false, addAccountOpen: false, addAccountStep: 'details', addAccountLabel: '', addAccountRoot: '', addAccountServer: '', addAccountClientId: '', addAccountAuthMessage: '', addAccountAuthStarted: false, addAccountError: '', addAccountCreatedId: '', addAccountBusy: false, spaceActionBusy: {}, message: '', error: '', autostart: null, server: '', serverEdited: false, statusServer: '', clientId: '', clientIdEditedServer: null, clientIdServer: ''
+const state: { page: Page; status: Status | null; statusErrorDismissed: string; agentReachable: boolean; pairs: Pair[]; transfers: Transfer[]; conflicts: Record<string, ConflictPage>; resolvingConflict: boolean; recoveryPage: RecoveryPage | null; recoveryLoading: boolean; recoveryError: string; encryptedEditRecoveryPage: EncryptedEditRecoveryPage | null; encryptedEditRecoveryLoading: boolean; encryptedEditRecoveryError: string; spaces: Space[]; spacesServer: string | null; spacesLoading: boolean; spacesError: string; transferFilter: string; busy: boolean; addOpen: boolean; localPath: string; spaceId: string; remotePath: string; folderDirection: FolderDirection; existingCopyHandling: 'update_safe' | 'review'; folderAdvancedOpen: boolean; mediaFilter: MediaFilterValue; mediaOrganization: MediaOrganizationValue; mediaInterval: string; vaultBinding: VaultBinding | null; vaultWritable: boolean; vaultDialog: VaultDialogState | null; vaultGeneration: number; vaultAccessOpen: boolean; vaultAccessSpaceId: string; pickerPurpose: 'pair' | 'encrypted_access' | 'offline'; pickerGeneration: number; mode: SyncMode; pickerOpen: boolean; pickerPath: string; pickerEntries: RemoteEntry[]; pickerError: string; pickerWritable: Record<string, boolean>; pickerFolderName: string; pickerCreatingFolder: boolean; accounts: Account[]; removedAccounts: RemovedAccount[]; accountRemovalSupported: boolean; selectedAccount: string; accountEpoch: number; accountSwitching: boolean; accountsLoading: boolean; accountsError: string; accountSwitchTarget: string; mutationBusy: number; nativeDialogBusy: boolean; addAccountOpen: boolean; addAccountStep: 'details' | 'waiting'; addAccountLabel: string; addAccountRoot: string; addAccountServer: string; addAccountClientId: string; addAccountAuthMessage: string; addAccountAuthStarted: boolean; addAccountError: string; addAccountCreatedId: string; addAccountBusy: boolean; spaceActionBusy: Record<string, 'pause' | 'sync' | 'disconnect'>; message: string; error: string; autostart: boolean | null; server: string; serverEdited: boolean; statusServer: string; clientId: string; clientIdEditedServer: string | null; clientIdServer: string } = {
+  page: 'overview', status: null, statusErrorDismissed: '', agentReachable: false, pairs: [], transfers: [], spaces: [], spacesServer: null, spacesLoading: false, spacesError: '', transferFilter: 'active', busy: false, addOpen: false,
+  conflicts: {}, resolvingConflict: false, recoveryPage: null, recoveryLoading: false, recoveryError: '', encryptedEditRecoveryPage: null, encryptedEditRecoveryLoading: false, encryptedEditRecoveryError: '', localPath: '', spaceId: '', remotePath: '', folderDirection: 'both_ways', existingCopyHandling: 'update_safe', folderAdvancedOpen: false, mediaFilter: 'photos', mediaOrganization: 'preserve_relative_path', mediaInterval: '3600', vaultBinding: null, vaultWritable: false, vaultDialog: null, vaultGeneration: 0, vaultAccessOpen: false, vaultAccessSpaceId: '', pickerPurpose: 'pair', pickerGeneration: 0, mode: 'two_way', pickerOpen: false, pickerPath: '/', pickerEntries: [], pickerError: '', pickerWritable: {}, pickerFolderName: '', pickerCreatingFolder: false, accounts: [], removedAccounts: [], accountRemovalSupported: false, selectedAccount: '', accountEpoch: 0, accountSwitching: false, accountsLoading: false, accountsError: '', accountSwitchTarget: '', mutationBusy: 0, nativeDialogBusy: false, addAccountOpen: false, addAccountStep: 'details', addAccountLabel: '', addAccountRoot: '', addAccountServer: '', addAccountClientId: '', addAccountAuthMessage: '', addAccountAuthStarted: false, addAccountError: '', addAccountCreatedId: '', addAccountBusy: false, spaceActionBusy: {}, message: '', error: '', autostart: null, server: '', serverEdited: false, statusServer: '', clientId: '', clientIdEditedServer: null, clientIdServer: ''
 };
 const mediaJobs = new MediaJobsView({
   key: () => `${state.accountEpoch}:${state.selectedAccount}`,
@@ -157,13 +157,8 @@ const mediaJobs = new MediaJobsView({
   supportsVerifyUpload: () => !isWindowsAgentStatus(state.status),
   loadWhileDisconnected: () => !isWindowsAgentStatus(state.status),
   blocked: () => state.mutationBusy > 0 || state.nativeDialogBusy || state.accountSwitching,
-  spaces: () => state.spaces,
   request,
   confirm: confirmAccountAction,
-  chooseSource: async () => {
-    const selected = await open({ directory: true, multiple: false, title: 'Choose media backup source' });
-    return typeof selected === 'string' ? selected : null;
-  },
   busy: value => { state.mutationBusy = Math.max(0, state.mutationBusy + (value ? 1 : -1)); },
   render
 });
@@ -745,7 +740,7 @@ function render() {
       direction: selectionDirection(active)
     }
     : null;
-  const stableButtonFocusKeys = ['action', 'page', 'syncSection', 'accountId', 'pairId', 'spaceId', 'writeId', 'rootResourceId', 'vaultPinRemove', 'vaultPinStart'];
+  const stableButtonFocusKeys = ['action', 'page', 'accountId', 'pairId', 'spaceId', 'writeId', 'rootResourceId', 'vaultPinRemove', 'vaultPinStart'];
   const focusedButton = app.contains(active) && active instanceof HTMLButtonElement
     && (!!active.id || stableButtonFocusKeys.some(key => key in active.dataset))
     ? {
@@ -769,7 +764,7 @@ function render() {
   document.documentElement.style.setProperty('--account-accent', ACCENT_COLORS[appearance.accent]);
   const activeAccount = state.accounts.find(account => account.id === state.selectedAccount);
   const targetAccount = state.accounts.find(account => account.id === state.accountSwitchTarget);
-  const nav = [['overview', 'Overview', 'overview'], ['folders', 'Sync workspace', 'folders'], ['offline', 'Offline files', 'download'], ['encrypted', 'Encrypted files', 'lock'], ['transfers', 'Transfers', 'transfers'], ['settings', 'Settings', 'settings']] as const;
+  const nav = [['overview', 'Overview', 'overview'], ['folders', 'Folders', 'folders'], ['offline', 'Offline files', 'download'], ['encrypted', 'Encrypted files', 'lock'], ['transfers', 'Transfers', 'transfers'], ['settings', 'Settings', 'settings']] as const;
   const markup = `
     <div class="shell">
       <aside class="sidebar">
@@ -951,15 +946,7 @@ function connectionFailureDetails(status: Status | null | undefined): string {
   return detail ? `<details class="connection-error-detail"><summary>Connection details</summary><p>${esc(detail)}</p></details>` : '';
 }
 function syncWorkspacePage() {
-  const unavailable = !state.agentReachable
-    ? 'Start the Raiun background agent to load media backups.'
-    : !state.status?.connected
-      ? 'Sign in to your OpenCloud account to load and manage media backups.'
-      : 'Recurring media backups are unavailable for this agent.';
-  const content = state.syncSection === 'folders'
-    ? foldersPage()
-    : `${featureAvailable('media_jobs_supported') ? mediaJobs.html() : `<p class="notice-card">${unavailable}</p>`}${mediaPreviewPage()}`;
-  return `<div class="workspace-tabs" role="tablist" aria-label="Sync workspace"><button class="filter-tab ${state.syncSection === 'folders' ? 'active' : ''}" role="tab" aria-selected="${state.syncSection === 'folders'}" data-sync-section="folders">Synced folders</button><button class="filter-tab ${state.syncSection === 'media' ? 'active' : ''}" role="tab" aria-selected="${state.syncSection === 'media'}" data-sync-section="media">Media backups</button></div>${content}`;
+  return foldersPage();
 }
 function mediaPreviewPage() {
   const busy = mediaPreview.loading || state.nativeDialogBusy;
@@ -1010,7 +997,7 @@ function overviewPage() {
   const reachable = state.agentReachable;
   const errors = (state.status?.error ? 1 : 0) + attentionCount();
   const running = state.transfers.filter(item => ['queued', 'running', 'retry_wait', 'verifying'].includes((item.state || '').toLowerCase())).length;
-  return `<div class="welcome-row"><div><div class="eyebrow">YOUR FILES, IN RHYTHM</div><h1>Good to see you.</h1><p class="lede">Your cloud files and sync folders, together in one place.</p></div><button class="button primary" data-action="add-pair" ${connected && featureAvailable('folder_sync_supported') ? '' : 'disabled'}>${svg('plus')} Add sync folder</button></div>
+  return `<div class="welcome-row"><div><div class="eyebrow">YOUR FILES, IN RHYTHM</div><h1>Good to see you.</h1><p class="lede">Your cloud files and folder settings, together in one place.</p></div><button class="button primary" data-action="add-folder" ${connected && (featureAvailable('folder_sync_supported') || featureAvailable('media_jobs_supported')) ? '' : 'disabled'}>${svg('plus')} Add folder</button></div>
     ${connection === 'unavailable' ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Raiun agent isn't available</b><p>${esc(state.status?.error || 'Start the Raiun background agent to connect this window to your account. Your settings will appear here once it is running.')}</p></div><button class="button subtle" data-action="refresh">Try again</button></div>` : connection === 'offline_reconnecting' ? `<div class="notice-card offline"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>${state.status?.refreshing ? 'Checking connection…' : retainedSignInOnly ? 'Reconnecting saved sign-in' : 'Working offline — reconnecting to server'}</b><p>${retainedSignInOnly ? 'Raiun still has this account’s sign-in and will retry the server connection. Cloud files are not available until it reconnects.' : 'Your existing offline session is still available. Raiun will retry the connection; you do not need to sign in again.'}</p>${connectionFailureDetails(state.status)}</div><button class="button subtle" data-action="refresh" ${state.status?.refreshing ? 'disabled' : ''}>${state.status?.refreshing ? 'Checking…' : 'Retry connection'}</button></div>` : connection === 'sign_in' ? `<div class="notice-card"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>Connect your OpenCloud account</b><p>Sign in using your organization’s OpenCloud server. Raiun will open the sign-in page in your browser.</p>${signInPending ? `<div class="signin-pending" role="status">Raiun is waiting for sign-in to finish in your browser.<button class="button subtle" data-action="cancel-sign-in" ${state.mutationBusy ? 'disabled' : ''}>Cancel sign-in</button></div>` : `<div class="signin-server"><input id="server-address" data-server value="${esc(state.server)}" placeholder="https://cloud.example.com" aria-label="OpenCloud server address"/><input id="client-id" data-client-id value="${esc(state.clientId)}" placeholder="Automatic client ID" aria-label="OAuth client ID override (optional)"/><button class="button primary" data-action="sign-in">Sign in ${svg('chevron')}</button></div>`}</div></div>` : ''}
     <div class="section-heading"><div><h2>At a glance</h2><p>A live view from your Raiun agent.</p></div>${connected ? `<span class="live-pill"><i></i> LIVE</span>` : ''}</div>
     <div class="stats-grid"><article class="stat-card"><div class="stat-label">SYNC FOLDERS</div><div class="stat-value">${reachable && connected && providerEnabled ? state.pairs.length : '—'}</div><div class="stat-foot">${!providerEnabled ? 'Windows drive support is not enabled' : !reachable ? 'Connect the agent to see folders' : connected ? 'Connected folder pairs' : connection === 'offline_reconnecting' ? 'Reconnecting to server' : 'Sign in to load your folders'}</div><span class="stat-icon teal">${svg('folders')}</span></article><article class="stat-card"><div class="stat-label">ACTIVE TRANSFERS</div><div class="stat-value">${reachable && connected && providerEnabled ? running : '—'}</div><div class="stat-foot">${!providerEnabled ? 'Transfer status is unavailable' : !reachable ? 'Connect the agent to see transfers' : connected ? (running ? 'Work in progress' : 'Nothing in progress') : connection === 'offline_reconnecting' ? 'Reconnecting to server' : 'Sign in to load transfers'}</div><span class="stat-icon blue">${svg('transfers')}</span></article><button class="stat-card stat-card-button" data-action="show-attention" ${reachable && (connected || !!state.status?.error) ? '' : 'disabled'} aria-label="Show ${errors} items needing attention"><div class="stat-label">NEEDS ATTENTION</div><div class="stat-value ${errors ? 'attention-value' : ''}">${reachable && (connected || state.status?.error) ? errors : '—'}</div><div class="stat-foot">${!reachable ? 'Connect the agent to see status' : state.status?.error ? 'Open settings to review this issue' : connected ? (errors ? 'Review items below' : 'No issues reported') : connection === 'offline_reconnecting' ? 'Working offline' : 'Sign in to load status'}</div><span class="stat-icon ${errors ? 'amber' : 'green'}">${svg(errors ? 'alert' : 'check')}</span></button></div>
@@ -1049,8 +1036,19 @@ function foldersPage() {
   const providerEnabled = featureAvailable('folder_sync_supported');
   const connection = connectionMode(state.agentReachable, state.status);
   const groups = folderPairGroups();
-  return `<div class="page-title-row"><div><div class="eyebrow">STAY IN SYNC</div><h1>Synced Folders</h1><p class="lede">Choose folders on this computer and where they belong in OpenCloud.</p></div><button class="button primary" data-action="add-pair" ${connected && providerEnabled ? '' : 'disabled'}>${svg('plus')} Add sync folder</button></div>
-    ${connection === 'unavailable' ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Connect to the Raiun agent first</b><p>Folder pairs are managed by the background agent. Start it, then refresh this page.</p></div><button class="button subtle" data-action="refresh">Refresh</button></div>` : connection === 'offline_reconnecting' ? `<div class="notice-card offline"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>${state.status?.refreshing ? 'Checking connection…' : 'Working offline — reconnecting to server'}</b><p>Your existing offline session remains available. Sync settings will refresh when the server connection returns.</p>${connectionFailureDetails(state.status)}</div><button class="button subtle" data-action="refresh" ${state.status?.refreshing ? 'disabled' : ''}>${state.status?.refreshing ? 'Checking…' : 'Retry connection'}</button></div>${groups.length ? `<div class="space-sync-list">${groups.map(group => spacePairGroup(group.spaceId, group.pairs)).join('')}</div>` : ''}` : connection === 'sign_in' ? `<div class="notice-card"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>Cloud sync is offline</b><p>Sign in to sync files. You can still review or change which paths are excluded; existing local and cloud files stay in place.</p></div><button class="button primary" data-action="sign-in">Sign in</button></div>${groups.length ? `<div class="space-sync-list">${groups.map(group => spacePairGroup(group.spaceId, group.pairs)).join('')}</div>` : ''}` : groups.length ? `<div class="space-sync-list">${groups.map(group => spacePairGroup(group.spaceId, group.pairs)).join('')}</div>` : emptyFolders()}`;
+  const list = groups.length
+    ? `<div class="space-sync-list">${groups.map(group => spacePairGroup(group.spaceId, group.pairs)).join('')}</div>`
+    : connection === 'sign_in' || connection === 'unavailable' ? '' : emptyFolders();
+  const connectionNotice = connection === 'unavailable'
+    ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Connect to the Raiun agent first</b><p>Folder settings are managed by the background agent. Start it, then refresh this page.</p></div><button class="button subtle" data-action="refresh">Refresh</button></div>`
+    : connection === 'offline_reconnecting'
+      ? `<div class="notice-card offline"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>${state.status?.refreshing ? 'Checking connection…' : 'Working offline — reconnecting to server'}</b><p>Your existing offline session remains available. Settings will refresh when the server connection returns.</p>${connectionFailureDetails(state.status)}</div><button class="button subtle" data-action="refresh" ${state.status?.refreshing ? 'disabled' : ''}>${state.status?.refreshing ? 'Checking…' : 'Retry connection'}</button></div>`
+      : connection === 'sign_in'
+        ? `<div class="notice-card"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>Cloud sync is offline</b><p>Sign in to sync files. Existing local and cloud files stay in place.</p></div><button class="button primary" data-action="sign-in">Sign in</button></div>`
+        : '';
+  return `<div class="page-title-row"><div><div class="eyebrow">YOUR FOLDERS</div><h1>Folders</h1><p class="lede">Choose a local folder, its OpenCloud location, and how files move between them.</p></div><button class="button primary" data-action="add-folder" ${connected && (providerEnabled || featureAvailable('media_jobs_supported')) ? '' : 'disabled'}>${svg('plus')} Add folder</button></div>
+    <p class="folder-workspace-explainer">Both-way and one-way sync keep selected files aligned. Media imports preserve original files and ask for review when names conflict; they do not keep automatic file versions.</p>
+    ${connectionNotice}${mediaJobs.statusHtml()}${list}<details class="local-media-preview"><summary>Preview media destinations on this device</summary><p class="media-form-note">This local preview does not read cloud contents or change files.</p>${mediaPreviewPage()}</details>`;
 }
 function folderPairGroups(): Array<{ spaceId: string; pairs: Pair[] }> {
   const grouped = new Map<string, Pair[]>();
@@ -1059,23 +1057,22 @@ function folderPairGroups(): Array<{ spaceId: string; pairs: Pair[] }> {
     pairs.push(pair);
     grouped.set(pair.space_id, pairs);
   }
-  const orderedSpaceIds = [
-    ...state.spaces.filter(space => space.personal && grouped.has(space.id)).map(space => space.id),
-    ...state.spaces.filter(space => !space.personal && grouped.has(space.id)).map(space => space.id),
-    ...[...grouped.keys()].filter(id => !state.spaces.some(space => space.id === id))
-  ];
+  const orderedSpaceIds = folderWorkspaceSpaceIds([...grouped.keys()], mediaJobs.spaceIds(), state.spaces);
   return orderedSpaceIds.map(spaceId => ({ spaceId, pairs: grouped.get(spaceId) || [] }));
 }
 function spacePairGroup(spaceId: string, pairs: Pair[]) {
   const paused = state.status?.paused_space_ids?.includes(spaceId) === true;
   const globalPaused = state.status?.paused === true;
   const busy = state.spaceActionBusy[spaceId];
-  const controlsUnavailable = !state.agentReachable || !featureAvailable('folder_sync_supported') || state.status?.connected !== true || state.mutationBusy > 0 || Boolean(busy);
+  const controlsUnavailable = !state.agentReachable || state.status?.connected !== true || state.mutationBusy > 0 || Boolean(busy);
+  const folderRows = pairs.map(folderPairCard).join('');
+  const mediaRows = mediaJobs.rowsForSpace(spaceId);
+  const hasRows = pairs.length > 0 || mediaRows.length > 0;
   const syncUnavailable = controlsUnavailable || globalPaused || paused;
   const title = spaceName(spaceId);
-  const pauseLabel = busy === 'pause' ? 'Updating…' : paused ? 'Resume folder sync' : 'Pause folder sync';
+  const pauseLabel = busy === 'pause' ? 'Updating…' : paused ? 'Resume sync' : 'Pause sync';
   const syncLabel = busy === 'sync' ? 'Queueing…' : 'Sync now';
-  const syncStateLabel = state.status?.connected !== true ? 'Cloud sync offline' : globalPaused ? 'All folder sync paused' : paused ? 'Folder sync paused' : 'Folder sync enabled';
+  const syncStateLabel = state.status?.connected !== true ? 'Cloud sync offline' : globalPaused ? 'All sync paused' : paused ? 'Sync paused' : 'Sync enabled';
   const syncReason = !state.agentReachable || state.status?.connected !== true
     ? 'Sign in and connect the agent to sync this Space.'
     : globalPaused
@@ -1083,7 +1080,7 @@ function spacePairGroup(spaceId: string, pairs: Pair[]) {
       : paused
         ? 'Resume folder sync for this Space before queueing it.'
         : 'Queue an immediate sync for this Space.';
-  return `<section class="space-sync-group" aria-labelledby="space-sync-${esc(spaceId)}"><header class="space-sync-header"><div class="space-sync-title"><span class="space-sync-icon">${svg('cloud')}</span><div><div class="eyebrow">FOLDER SYNC</div><h2 id="space-sync-${esc(spaceId)}">${esc(title)}</h2><span class="space-sync-state ${paused || globalPaused ? 'paused' : ''}">${syncStateLabel}</span></div></div><div class="space-sync-controls"><button class="button subtle" data-action="space-toggle" data-space-id="${esc(spaceId)}" aria-label="${paused ? 'Resume' : 'Pause'} folder sync for ${esc(title)}" title="Pause or resume automatic folder sync for ${esc(title)}" ${controlsUnavailable || !featureAvailable('pause_supported') ? 'disabled' : ''}>${pauseLabel}</button><button class="button primary" data-action="space-sync-now" data-space-id="${esc(spaceId)}" aria-label="Sync ${esc(title)} now" title="${esc(syncReason)}" ${syncUnavailable ? 'disabled' : ''}>${syncLabel}</button><button class="button subtle danger-hover" data-action="space-disconnect" data-space-id="${esc(spaceId)}" aria-label="Disconnect folder sync for ${esc(title)}" title="Remove this Space’s folder-sync connections. Local and cloud files stay in place." ${controlsUnavailable || !pairs.length ? 'disabled' : ''}>${busy === 'disconnect' ? 'Disconnecting…' : 'Disconnect folder sync'}</button></div></header><p class="space-sync-note">Pausing waits for an active folder sync to finish. Mounted drive browsing and writes are unaffected.</p><div class="pair-list page-pair-list">${pairs.map(folderPairCard).join('')}</div></section>`;
+  return `<section class="space-sync-group" aria-labelledby="space-sync-${esc(spaceId)}"><header class="space-sync-header"><div class="space-sync-title"><span class="space-sync-icon">${svg('cloud')}</span><div><div class="eyebrow">OPENCloud FOLDER</div><h2 id="space-sync-${esc(spaceId)}">${esc(title)}</h2><span class="space-sync-state ${paused || globalPaused ? 'paused' : ''}">${syncStateLabel}</span></div></div><div class="space-sync-controls"><button class="button subtle" data-action="space-toggle" data-space-id="${esc(spaceId)}" aria-label="${paused ? 'Resume' : 'Pause'} sync for ${esc(title)}" title="Pause or resume sync and scheduled media imports for ${esc(title)}" ${controlsUnavailable || !featureAvailable('folder_sync_supported') || !featureAvailable('pause_supported') ? 'disabled' : ''}>${pauseLabel}</button>${pairs.length ? `<button class="button primary" data-action="space-sync-now" data-space-id="${esc(spaceId)}" aria-label="Sync ${esc(title)} now" title="${esc(syncReason)}" ${syncUnavailable ? 'disabled' : ''}>${syncLabel}</button><button class="button subtle danger-hover" data-action="space-disconnect" data-space-id="${esc(spaceId)}" aria-label="Disconnect folder sync for ${esc(title)}" title="Remove this Space’s folder-sync connections. Local and cloud files stay in place." ${controlsUnavailable ? 'disabled' : ''}>${busy === 'disconnect' ? 'Disconnecting…' : 'Disconnect folder sync'}</button>` : ''}</div></header><p class="space-sync-note">Pausing waits for an active folder sync to finish. Scheduled media imports also follow this pause. Mounted drive browsing and writes are unaffected.</p><div class="pair-list page-pair-list">${hasRows ? `${folderRows}${mediaRows}` : '<p class="media-empty-result">No folders here yet.</p>'}</div></section>`;
 }
 function folderPairCard(pair: Pair) {
   const panel = state.conflicts[pair.id];
@@ -1121,8 +1118,10 @@ function conflictCard(pair: Pair, item: Conflict) {
   return `<article class="conflict-card"><div class="conflict-file">${svg('alert')}<div><b>${esc(lastPath(item.path))}</b><small>${esc(item.path)}</small></div></div><p class="conflict-description">Local and cloud versions both changed. Pick one to keep.</p><div class="conflict-actions"><button class="button subtle" data-resolve-conflict="keep_local" data-pair-id="${esc(pair.id)}" data-path="${esc(item.path)}" data-local-hash="${esc(item.local_hash)}" data-remote-etag="${esc(item.remote_etag)}" ${localDisabled ? 'disabled' : ''}>Keep local</button><button class="button subtle" data-resolve-conflict="keep_remote" data-pair-id="${esc(pair.id)}" data-path="${esc(item.path)}" data-local-hash="${esc(item.local_hash)}" data-remote-etag="${esc(item.remote_etag)}" ${remoteDisabled ? 'disabled' : ''}>Keep cloud</button></div>${pair.mode === 'download_only' ? '<small class="conflict-mode-note">Keep local is unavailable for download-only pairs.</small>' : pair.mode === 'upload_only' ? '<small class="conflict-mode-note">Keep cloud is unavailable for upload-only pairs.</small>' : ''}</article>`;
 }
 function emptyFolders() {
-  if (!featureAvailable('folder_sync_supported')) return `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Windows folder sync is unavailable</b><p>The account is connected, but this Windows agent cannot load or run folder sync yet. No folder list or transfer state is available.</p></div></div>`;
-  return `<div class="empty-card"><span class="empty-icon">${svg('folders')}</span><h3>No sync folders yet</h3><p>Add an existing folder and choose its place in OpenCloud. The folder stays on your computer.</p><button class="button primary" data-action="add-pair" ${state.status?.connected ? '' : 'disabled'}>${svg('plus')} Add your first folder</button></div>`;
+  if (!featureAvailable('folder_sync_supported')) return featureAvailable('media_jobs_supported')
+    ? `<div class="empty-card"><span class="empty-icon">${svg('folders')}</span><h3>No folders connected yet</h3><p>Ordinary two-way and one-way folder sync is unavailable for this agent. You can still add a To Cloud media import and review existing copies.</p><button class="button primary" data-action="add-folder" ${state.status?.connected ? '' : 'disabled'}>${svg('plus')} Add folder</button></div>`
+    : `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Folder sync is unavailable</b><p>This agent cannot load or run folder sync yet. No folder list or transfer state is available.</p></div></div>`;
+  return `<div class="empty-card"><span class="empty-icon">${svg('folders')}</span><h3>No folders connected yet</h3><p>Add a local folder, choose its OpenCloud location, and select how files move between them.</p><button class="button primary" data-action="add-folder" ${state.status?.connected ? '' : 'disabled'}>${svg('plus')} Add your first folder</button></div>`;
 }
 function pendingOfflineWritesSection() {
   const loadedForAccount = pendingWritesUi.accountEpoch === state.accountEpoch;
@@ -2387,6 +2386,7 @@ function navigateToPage(page: Page) {
   if (page === 'encrypted') { leaveWorkspacePage(page); void openEncryptedAccess(); return; }
   leaveWorkspacePage(page);
   state.page = page;
+  if (page === 'folders') void mediaJobs.refresh();
   if (page === 'settings') { void loadNetworkProxySettings(); void loadBandwidthSettings(); }
   if (page === 'transfers') {
     if (!isWindowsAgentStatus(state.status)) void loadPendingOfflineWrites(true);
@@ -2486,16 +2486,28 @@ function recoveryWarningText(warning: string) {
   return messages[warning] || 'This recovery record needs review.';
 }
 function addModal() {
+  const folderBusy = folderDialogBusy();
+  const folderCreateError = mediaJobs.folderCreationError(`${state.accountEpoch}:${state.selectedAccount}`);
   const available = nativeVaultAccess() ? state.spaces.filter(space => !space.encrypted) : state.spaces;
   const selected = state.spaces.find(s => s.id === state.spaceId);
   const destinationWritable = selected?.writable === true && (!state.vaultBinding || state.vaultWritable);
-  return `<div class="modal-backdrop" data-backdrop="add"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="add-title"><div class="modal-top"><div><div class="eyebrow">NEW CONNECTION</div><h2 id="add-title">Add a sync folder</h2></div><button class="icon-button" data-action="close-add" aria-label="Close">${svg('close')}</button></div><p class="modal-lede">Choose a folder on this computer and the place it belongs in OpenCloud.</p>
-    <label class="field-label" for="localPath">Folder on this computer</label><div class="input-with-button"><input id="localPath" value="${esc(state.localPath)}" placeholder="Select an existing folder" readonly /><button class="button subtle" data-action="choose-local">Browse</button></div>
-    <label class="field-label" for="spaceSelect">OpenCloud location</label><select id="spaceSelect" ${state.spacesLoading || !state.spaces.length ? 'disabled' : ''}><option value="">${state.spacesLoading ? 'Loading Spaces…' : state.spacesError ? 'Spaces unavailable' : state.spaces.length ? 'Choose a Space' : 'No Spaces available'}</option>${available.map(space => `<option value="${esc(space.id)}" ${state.spaceId === space.id ? 'selected' : ''}>${space.personal ? 'Personal' : 'Space'} · ${esc(space.name)}${space.encrypted ? ' · encrypted' : space.writable ? '' : ' · read only'}</option>`).join('')}</select>
+  const isReviewImport = state.folderDirection === 'to_cloud' && state.existingCopyHandling === 'review';
+  const mediaDestinationWritable = destinationWritable && !selected?.encrypted && !state.vaultBinding;
+  const mediaOptionsDisabled = folderBusy || !isReviewImport || !featureAvailable('media_jobs_supported') || !mediaDestinationWritable;
+  const directionMode: SyncMode = state.folderDirection === 'both_ways' ? 'two_way' : state.folderDirection === 'to_cloud' ? 'upload_only' : 'download_only';
+  const warning = !featureAvailable('folder_sync_supported') && !isReviewImport
+    ? '<p class="media-warning">This agent can add To Cloud media imports with “Review existing copies.” Both-way, update-safe To Cloud, and From Cloud sync are unavailable.</p>' : '';
+  return `<div class="modal-backdrop" data-backdrop="add"><section class="modal folder-modal" role="dialog" aria-modal="true" aria-labelledby="add-title"><div class="modal-top"><div><div class="eyebrow">NEW FOLDER</div><h2 id="add-title">Add a folder</h2></div><button class="icon-button" data-action="close-add" aria-label="Close" ${folderBusy ? 'disabled' : ''}>${svg('close')}</button></div><p class="modal-lede">Choose the local folder, its OpenCloud destination, and the direction files should move.</p>
+    <label class="field-label" for="localPath">Folder on this computer</label><div class="input-with-button"><input id="localPath" value="${esc(state.localPath)}" placeholder="Select an existing folder" readonly /><button class="button subtle" data-action="choose-local" ${folderBusy ? 'disabled' : ''}>Browse</button></div>
+    <label class="field-label" for="spaceSelect">OpenCloud location</label><select id="spaceSelect" ${folderBusy || state.spacesLoading || !state.spaces.length ? 'disabled' : ''}><option value="">${state.spacesLoading ? 'Loading Spaces…' : state.spacesError ? 'Spaces unavailable' : state.spaces.length ? 'Choose a Space' : 'No Spaces available'}</option>${available.map(space => `<option value="${esc(space.id)}" ${state.spaceId === space.id ? 'selected' : ''}>${space.personal ? 'Personal' : 'Space'} · ${esc(space.name)}${space.encrypted ? ' · encrypted' : space.writable ? '' : ' · read only'}</option>`).join('')}</select>
     ${state.spacesError ? `<div class="spaces-load-error" role="alert">Could not load Spaces: ${esc(state.spacesError)} <button class="text-button" data-action="refresh-spaces">Try again</button></div>` : ''}
-    ${selected ? `<button class="remote-pick-row" data-action="choose-remote"><span class="remote-pick-icon">${svg(state.vaultBinding ? 'lock' : 'folder')}</span><span><small>${state.vaultBinding ? 'ENCRYPTED FOLDER' : 'REMOTE FOLDER'}</small><b>${esc(selected.name)}${esc(state.vaultBinding ? `${state.vaultBinding.root_path}${state.remotePath === '/' ? '' : state.remotePath}` : state.remotePath || ' · Choose a folder')}</b></span>${svg('chevron')}</button>` : `<div class="remote-pick-row disabled"><span class="remote-pick-icon">${svg('folder')}</span><span><small>REMOTE FOLDER</small><b>Select a Space first</b></span></div>`}
-    <label class="field-label" for="modeSelect">Sync direction</label><select id="modeSelect"><option value="two_way" ${state.mode === 'two_way' ? 'selected' : ''} ${destinationWritable ? '' : 'disabled'}>Two-way · keep both sides in sync</option><option value="upload_only" ${state.mode === 'upload_only' ? 'selected' : ''} ${destinationWritable ? '' : 'disabled'}>Upload only · send local changes to OpenCloud</option><option value="download_only" ${state.mode === 'download_only' ? 'selected' : ''}>Download only · receive OpenCloud changes</option></select>${selected && !destinationWritable ? '<small class="vault-hint">This Space or encrypted folder is read only. Choose Download only.</small>' : ''}
-    <div class="helper-note">${state.vaultBinding ? 'Your local folder remains plaintext on this computer. Locking the vault stops encrypted sync but does not remove local copies.' : 'Removing a folder pair later removes the connection only. It will not delete your local or cloud files.'}</div><div class="modal-actions"><button class="button subtle" data-action="close-add">Cancel</button><button class="button primary" data-action="save-pair" ${(state.localPath && state.spaceId && state.remotePath) ? '' : 'disabled'}>${svg('plus')} Add folder</button></div></section></div>`;
+    ${selected ? `<button class="remote-pick-row" data-action="choose-remote" ${folderBusy ? 'disabled' : ''}><span class="remote-pick-icon">${svg(state.vaultBinding ? 'lock' : 'folder')}</span><span><small>${state.vaultBinding ? 'ENCRYPTED FOLDER' : 'REMOTE FOLDER'}</small><b>${esc(selected.name)}${esc(state.vaultBinding ? `${state.vaultBinding.root_path}${state.remotePath === '/' ? '' : state.remotePath}` : state.remotePath || ' · Choose a folder')}</b></span>${svg('chevron')}</button>` : `<div class="remote-pick-row disabled"><span class="remote-pick-icon">${svg('folder')}</span><span><small>REMOTE FOLDER</small><b>Select a Space first</b></span></div>`}
+    <label class="field-label" for="folder-direction">Direction</label><select id="folder-direction" ${folderBusy ? 'disabled' : ''}><option value="both_ways" ${state.folderDirection === 'both_ways' ? 'selected' : ''} ${destinationWritable ? '' : 'disabled'}>Both ways · keep both sides in sync</option><option value="to_cloud" ${state.folderDirection === 'to_cloud' ? 'selected' : ''} ${destinationWritable ? '' : 'disabled'}>To Cloud · send local changes</option><option value="from_cloud" ${state.folderDirection === 'from_cloud' ? 'selected' : ''}>From Cloud · receive cloud changes</option></select>${selected && !destinationWritable ? '<small class="vault-hint">This location is read only. Choose From Cloud.</small>' : ''}
+    <details class="folder-advanced" ${state.folderAdvancedOpen ? 'open' : ''}><summary>Advanced settings</summary><div class="folder-advanced-body"><div class="media-field"><label class="field-label" for="existing-copy-handling">When a cloud file already exists</label><select id="existing-copy-handling" ${folderBusy || state.folderDirection !== 'to_cloud' ? 'disabled' : ''}><option value="update_safe" ${state.existingCopyHandling === 'update_safe' ? 'selected' : ''}>Update existing copy when safe</option><option value="review" ${state.existingCopyHandling === 'review' ? 'selected' : ''} ${featureAvailable('media_jobs_supported') && mediaDestinationWritable ? '' : 'disabled'}>Review existing copies</option></select><small>${isReviewImport ? 'Media import preserves source files and flags name conflicts for review. It does not automatically keep older file versions.' : 'Folder sync updates files only when its tracked version and cloud preconditions allow it; unexpected remote changes become conflicts.'}</small></div>${isReviewImport ? `<div class="folder-media-options"><p>Media import scans this folder and keeps its source files in place.</p><div class="media-options"><div class="media-field"><label class="field-label" for="folder-media-filter">Include</label><select id="folder-media-filter" ${mediaOptionsDisabled ? 'disabled' : ''}><option value="photos" ${state.mediaFilter === 'photos' ? 'selected' : ''}>Photos</option><option value="videos" ${state.mediaFilter === 'videos' ? 'selected' : ''}>Videos</option><option value="all" ${state.mediaFilter === 'all' ? 'selected' : ''}>All regular files</option></select></div><div class="media-field"><label class="field-label" for="folder-media-organization">Organize destination</label><select id="folder-media-organization" ${mediaOptionsDisabled ? 'disabled' : ''}><option value="preserve_relative_path" ${state.mediaOrganization === 'preserve_relative_path' ? 'selected' : ''}>Keep source folders and filenames</option><option value="utc_year_month" ${state.mediaOrganization === 'utc_year_month' ? 'selected' : ''}>Filesystem modified date (UTC year/month)</option></select></div><div class="media-field"><label class="field-label" for="folder-media-interval">Check for new files</label><select id="folder-media-interval" ${mediaOptionsDisabled ? 'disabled' : ''}>${[['60','Every minute'],['900','Every 15 minutes'],['3600','Every hour'],['86400','Every day']].map(([value,label]) => `<option value="${value}" ${state.mediaInterval === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div></div><p class="media-form-note">Photos and Videos are identified by file contents. Imports include subfolders and skip symbolic links. Date grouping uses filesystem modified time in UTC, not photo metadata. New files must remain unchanged across two scans at least ten seconds apart; files over 8 GiB need ordinary sync. Encrypted destinations are not supported.</p></div>` : ''}</div></details>${warning}${folderCreateError ? `<div class="media-warning folder-create-error" role="alert">${esc(folderCreateError)}</div>` : ''}
+    <div class="helper-note">${state.vaultBinding ? 'Your local folder remains plaintext on this computer. Locking the vault stops encrypted sync but does not remove local copies.' : 'Removing this folder setting later leaves the local and cloud files in place.'}</div><div class="modal-actions"><button class="button subtle" data-action="close-add" ${folderBusy ? 'disabled' : ''}>Cancel</button><button class="button primary" data-action="save-folder" ${folderBusy || !(state.localPath && state.spaceId && state.remotePath && (isReviewImport ? featureAvailable('media_jobs_supported') && mediaDestinationWritable : featureAvailable(directionMode === 'download_only' ? 'folder_sync_supported' : 'folder_sync_supported'))) ? 'disabled' : ''}>${svg('plus')} Add folder</button></div></section></div>`;
+}
+function folderDialogBusy() {
+  return state.mutationBusy > 0 || state.nativeDialogBusy || state.accountSwitching || mediaJobs.folderCreationBusy();
 }
 function addAccountModal() {
   const blocked = state.addAccountBusy;
@@ -2844,14 +2856,6 @@ function vaultDialog() {
 function bind() {
   mediaJobs.bind(app);
   app.querySelectorAll<HTMLElement>('[data-page]').forEach(el => el.addEventListener('click', () => navigateToPage(el.dataset.page as Page)));
-  app.querySelectorAll<HTMLElement>('[data-sync-section]').forEach(el => el.addEventListener('click', () => {
-    const section = el.dataset.syncSection;
-    if (section !== 'folders' && section !== 'media') return;
-    state.page = 'folders';
-    state.syncSection = section;
-    render();
-    if (section === 'media') void mediaJobs.refresh();
-  }));
   app.querySelector('#refresh')?.addEventListener('click', () => void refresh(true, true));
   app.querySelectorAll<HTMLButtonElement>('[data-account-id]').forEach(el => el.addEventListener('click', () => { if (el.dataset.accountId) void switchAccount(el.dataset.accountId); }));
   app.querySelectorAll<HTMLElement>('[data-action]').forEach(el => el.addEventListener('click', () => void handleAction(el.dataset.action || '', el)));
@@ -3068,6 +3072,7 @@ function bind() {
     render();
   });
   app.querySelector<HTMLSelectElement>('#spaceSelect')?.addEventListener('change', event => {
+    if (folderDialogBusy()) return;
     state.spaceId = (event.target as HTMLSelectElement).value;
     state.remotePath = '';
     state.vaultBinding = null;
@@ -3090,16 +3095,27 @@ function bind() {
     const button = app.querySelector<HTMLButtonElement>('[data-action="browse-cached-vault-root"]');
     if (button) button.disabled = cachedVaultRootsUi.loading || !cachedVaultRootsUi.roots.some(root => cachedVaultRootKey(root) === cachedVaultRootsUi.selected);
   });
-  app.querySelector<HTMLSelectElement>('#modeSelect')?.addEventListener('change', event => { state.mode = (event.target as HTMLSelectElement).value as SyncMode; });
+  app.querySelector<HTMLSelectElement>('#folder-direction')?.addEventListener('change', event => {
+    if (folderDialogBusy()) return;
+    state.folderDirection = (event.target as HTMLSelectElement).value as FolderDirection;
+    state.mode = state.folderDirection === 'both_ways' ? 'two_way' : state.folderDirection === 'to_cloud' ? 'upload_only' : 'download_only';
+    render();
+  });
+  app.querySelector<HTMLSelectElement>('#existing-copy-handling')?.addEventListener('change', event => { if (folderDialogBusy()) return; state.existingCopyHandling = (event.target as HTMLSelectElement).value as 'update_safe' | 'review'; state.folderAdvancedOpen = true; render(); });
+  app.querySelector<HTMLDetailsElement>('.folder-advanced')?.addEventListener('toggle', event => { if (!folderDialogBusy()) state.folderAdvancedOpen = (event.currentTarget as HTMLDetailsElement).open; });
+  app.querySelector<HTMLSelectElement>('#folder-media-filter')?.addEventListener('change', event => { if (!folderDialogBusy()) state.mediaFilter = (event.target as HTMLSelectElement).value as MediaFilterValue; });
+  app.querySelector<HTMLSelectElement>('#folder-media-organization')?.addEventListener('change', event => { if (!folderDialogBusy()) state.mediaOrganization = (event.target as HTMLSelectElement).value as MediaOrganizationValue; });
+  app.querySelector<HTMLSelectElement>('#folder-media-interval')?.addEventListener('change', event => { if (!folderDialogBusy()) state.mediaInterval = (event.target as HTMLSelectElement).value; });
   app.querySelector<HTMLButtonElement>('[data-action="select-remote"]')?.addEventListener('click', () => {
+    if (folderDialogBusy()) return;
     state.remotePath = state.pickerPath;
     state.vaultBinding = null;
     state.vaultWritable = false;
-    if (!state.pickerWritable[state.pickerPath]) state.mode = 'download_only';
+    if (!state.pickerWritable[state.pickerPath]) { state.mode = 'download_only'; state.folderDirection = 'from_cloud'; }
     state.pickerOpen = false;
     render();
   });
-  app.querySelector<HTMLButtonElement>('[data-action="save-pair"]')?.addEventListener('click', () => void savePair());
+  app.querySelector<HTMLButtonElement>('[data-action="save-folder"]')?.addEventListener('click', () => void saveFolder());
   app.querySelector<HTMLButtonElement>('[data-dismiss-error]')?.addEventListener('click', () => { state.statusErrorDismissed = state.status?.error || ''; state.error = ''; render(); });
   app.querySelector<HTMLButtonElement>('[data-dismiss-message]')?.addEventListener('click', () => { state.message = ''; render(); });
 }
@@ -3319,20 +3335,22 @@ async function handleAction(action: string, element?: HTMLElement) {
       break;
     }
     case 'save-account': await addAccount(); break;
-    case 'add-pair': if (!featureAvailable('folder_sync_supported') || !state.status?.connected) return; state.pickerGeneration++; state.pickerPurpose = 'pair'; state.vaultAccessOpen = false; state.addOpen = true; state.message = ''; state.localPath = ''; state.spaceId = state.spaces.find(space => space.personal && space.writable && !space.encrypted)?.id || ''; state.remotePath = ''; state.vaultBinding = null; state.vaultWritable = false; state.mode = 'two_way'; render(); void loadSpaces(); break;
+    case 'add-folder': case 'add-pair': openAddFolder(); break;
     case 'close-add': closeAdd(); break;
     case 'choose-local': {
+      if (folderDialogBusy()) break;
       const epoch = state.accountEpoch;
       state.nativeDialogBusy = true;
       render();
       try {
-        const selected = await open({ directory: true, multiple: false, title: 'Choose a folder to sync' });
+        const selected = await open({ directory: true, multiple: false, title: 'Choose a local folder' });
         if (isCurrentAccount(epoch) && typeof selected === 'string') state.localPath = selected;
       } catch (error) { if (isCurrentAccount(epoch)) state.error = messageOf(error); }
       finally { state.nativeDialogBusy = false; render(); }
       break;
     }
     case 'choose-remote': {
+      if (folderDialogBusy()) break;
       const space = state.spaces.find(candidate => candidate.id === state.spaceId);
       if (!space) break;
       if (space.encrypted) { await openVaultFlow('add', space.id, '/'); break; }
@@ -5208,8 +5226,80 @@ async function savePair() {
   const id = crypto.randomUUID();
   await run('pair_add', { id, local_path: state.localPath, space_id: state.spaceId, remote_path: state.remotePath, mode, vault: state.vaultBinding });
   if (!isCurrentAccount(epoch)) return;
-  if (!state.error) { state.addOpen = false; state.message = 'Folder pair added.'; await refresh(); }
+  if (!state.error) { state.addOpen = false; state.message = 'Folder pair added.'; resetFolderDraft(); await refresh(); }
   render();
+}
+function openAddFolder() {
+  if ((!featureAvailable('folder_sync_supported') && !featureAvailable('media_jobs_supported')) || !state.status?.connected || state.accountSwitching) return;
+  mediaJobs.clearFolderCreationError(`${state.accountEpoch}:${state.selectedAccount}`);
+  state.pickerGeneration++;
+  state.pickerPurpose = 'pair';
+  state.vaultAccessOpen = false;
+  state.addOpen = true;
+  state.message = '';
+  state.error = '';
+  state.localPath = '';
+  state.spaceId = state.spaces.find(space => space.personal && space.writable && !space.encrypted)?.id || '';
+  state.remotePath = '';
+  state.folderDirection = 'both_ways';
+  state.existingCopyHandling = 'update_safe';
+  state.folderAdvancedOpen = false;
+  state.mediaFilter = 'all';
+  state.mediaOrganization = 'preserve_relative_path';
+  state.mediaInterval = '3600';
+  state.vaultBinding = null;
+  state.vaultWritable = false;
+  state.mode = 'two_way';
+  render();
+  void loadSpaces();
+}
+async function saveFolder() {
+  if (folderDialogBusy()) return;
+  if (!state.localPath || !state.spaceId || !state.remotePath || !state.status?.connected) return;
+  const selected = state.spaces.find(space => space.id === state.spaceId);
+  if (!selected) { state.error = 'Choose an OpenCloud location again.'; render(); return; }
+  const route = folderCreationRoute(state.folderDirection, state.existingCopyHandling);
+  if (route.kind === 'media_import') {
+    if (!featureAvailable('media_jobs_supported')) { state.error = 'Review-based media import is unavailable for this agent.'; render(); return; }
+    if (selected.encrypted || state.vaultBinding) { state.error = 'Media imports do not support encrypted destinations yet. Choose a regular folder.'; render(); return; }
+    if (!selected.writable) { state.error = 'Media imports need a writable, unencrypted destination.'; render(); return; }
+    const created = await mediaJobs.createFromFolder({
+      source: state.localPath,
+      space: state.spaceId,
+      destination: state.remotePath,
+      filter: state.mediaFilter,
+      organization: state.mediaOrganization,
+      interval: state.mediaInterval
+    }, () => {
+      state.addOpen = false;
+      state.message = 'Media import added. The source folder stays in place; review name conflicts in its folder settings.';
+      resetFolderDraft();
+    });
+    if (created) render();
+    return;
+  }
+  if (!featureAvailable('folder_sync_supported')) { state.error = 'Folder sync is unavailable for this agent.'; render(); return; }
+  state.mode = route.mode;
+  await savePair();
+}
+function resetFolderDraft() {
+  state.pickerGeneration++;
+  state.pickerPurpose = 'pair';
+  state.pickerOpen = false;
+  state.localPath = '';
+  state.spaceId = '';
+  state.remotePath = '';
+  state.folderDirection = 'both_ways';
+  state.existingCopyHandling = 'update_safe';
+  state.folderAdvancedOpen = false;
+  state.mediaFilter = 'all';
+  state.mediaOrganization = 'preserve_relative_path';
+  state.mediaInterval = '3600';
+  state.vaultBinding = null;
+  state.vaultWritable = false;
+  state.vaultGeneration++;
+  state.vaultDialog = null;
+  state.mode = 'two_way';
 }
 async function removePair(id: string) {
   if (!featureAvailable('folder_sync_supported')) return;
@@ -6131,6 +6221,7 @@ async function initialize() {
       if (destination === 'folders' || destination === 'transfers') {
         state.page = destination;
         render();
+        if (destination === 'folders') void mediaJobs.refresh();
         if (destination === 'transfers') { if (!isWindowsAgentStatus(state.status)) void loadPendingOfflineWrites(true); if (vaultAppFeaturesAvailable()) { void loadEncryptedEditRecoveries(true); void refreshEncryptedRetryLatestStatuses(); } }
       }
     } catch (error) {
@@ -6223,12 +6314,12 @@ async function refresh(showError = true, forceSpacesRefresh = false) {
     state.busy = false; render();
     if (state.page === 'settings') void loadNetworkProxySettings();
     if (state.page === 'settings') void loadBandwidthSettings();
-    if (state.page === 'folders' && state.syncSection === 'media') void mediaJobs.refresh();
+    if (state.page === 'folders') void mediaJobs.refresh();
     if (state.page === 'transfers' && state.status?.connected) scheduleEncryptedRetryLatestPoll(250);
     if (refreshQueued) { refreshQueued = false; void refresh(false); }
   }
 }
-function closeAdd() { state.addOpen = false; state.pickerGeneration++; state.pickerPurpose = 'pair'; state.pickerOpen = false; state.localPath = ''; state.spaceId = ''; state.remotePath = ''; state.vaultBinding = null; state.vaultWritable = false; state.vaultGeneration++; state.vaultDialog = null; state.mode = 'two_way'; render(); }
+function closeAdd() { if (folderDialogBusy()) return; mediaJobs.clearFolderCreationError(`${state.accountEpoch}:${state.selectedAccount}`); state.addOpen = false; resetFolderDraft(); render(); }
 function serverKey(value: string | null | undefined) {
   return (value || '').trim().replace(/\/$/, '').toLowerCase();
 }

@@ -50,12 +50,52 @@ test('job actions carry the displayed revision rather than changing newer settin
   await new Promise(resolve=>setImmediate(resolve));
   assert.deepEqual(calls.find(([action])=>action==='media_job_run')[1],{job_id:'a',expected_revision:7,expected_account_id:'subject-a'});
 });
-test('account switch during destination lookup cannot create a job for another account',async()=>{
+test('account switch during shared-folder destination lookup cannot create a job for another account',async()=>{
   let resolve; const lookup=new Promise(done=>{resolve=done;}); const calls=[];
   const {view,switchAccount}=setup(async(action,args)=>{calls.push([action,args]);return action==='media_destination'?lookup:{jobs:[]};});
-  view.draft={source:'/Photos',space:'space-a',destination:'/Backups',filter:'photos',organization:'preserve_relative_path',interval:'3600'};
-  const pending=view.create();switchAccount();resolve({id:'root-a',space_id:'space-a',path:'/Backups'});await pending;
+  const pending=view.createFromFolder({source:'/Photos',space:'space-a',destination:'/Backups',filter:'photos',organization:'preserve_relative_path',interval:'3600'},()=>{});switchAccount();resolve({id:'root-a',space_id:'space-a',path:'/Backups',account_id:'A'});await pending;
   assert.equal(calls.some(([action])=>action==='media_job_set'),false);
+});
+test('shared Add folder review route creates a media job with the selected destination and options',async()=>{
+  const calls=[];let closed=0;
+  const {view}=setup(async(action,args)=>{calls.push([action,args]);if(action==='media_destination')return {id:'resource-7',path:'/Archive',space_id:'space-2',account_id:'cloud-account-92'};return {jobs:[]};});
+  const created=await view.createFromFolder({source:'/home/photos',space:'space-2',destination:'/Archive',filter:'videos',organization:'utc_year_month',interval:'900'},()=>closed++);
+  assert.equal(created,true);assert.equal(closed,1);
+  assert.deepEqual(calls[0],['media_destination',{space_id:'space-2',path:'/Archive'}]);
+  const [,set]=calls.find(([action])=>action==='media_job_set');
+  assert.equal(set.job.source_root,'/home/photos');assert.equal(set.job.destination_root,'/Archive');
+  assert.equal(set.job.space_id,'space-2');assert.equal(set.job.filter,'videos');
+  assert.equal(set.job.account_id,'cloud-account-92');assert.equal(set.expected_account_id,'cloud-account-92');
+  assert.equal(set.job.organization,'utc_year_month');assert.equal(set.job.filesystem_mtime_utc,true);
+  assert.equal(set.job.interval_seconds,900);assert.equal(set.expected_revision,0);
+  assert.equal(calls.some(([action])=>action==='pair_add'),false);
+});
+test('shared Add folder media route rejects a destination response for another Space',async()=>{
+  const calls=[];let closed=0;
+  const {view}=setup(async(action,args)=>{calls.push([action,args]);if(action==='media_destination')return {id:'resource-7',path:'/Archive',space_id:'other-space',account_id:'A'};return {jobs:[]};});
+  const created=await view.createFromFolder({source:'/home/photos',space:'space-2',destination:'/Archive',filter:'photos',organization:'preserve_relative_path',interval:'3600'},()=>closed++);
+  assert.equal(created,false);assert.equal(closed,0);
+  assert.equal(calls.some(([action])=>action==='media_job_set'),false);
+  assert.match(view.html(),/did not match this Space/);
+});
+test('shared Add folder keeps creation errors visible for this account and clears them on retry',async()=>{
+  const calls=[];let fail=true;let closed=0;
+  const {view}=setup(async(action,args)=>{
+    calls.push([action,args]);
+    if(action==='media_destination'&&fail)throw new Error('Destination folder changed. Choose it again.');
+    if(action==='media_destination')return {id:'resource-7',path:'/Archive',space_id:'space-2',account_id:'cloud-account-92'};
+    return {jobs:[]};
+  });
+  const draft={source:'/home/photos',space:'space-2',destination:'/Archive',filter:'all',organization:'preserve_relative_path',interval:'3600'};
+  assert.equal(await view.createFromFolder(draft,()=>closed++),false);
+  assert.equal(view.folderCreationError('A'),'Destination folder changed. Choose it again.');
+  assert.equal(view.folderCreationError('B'),'');
+  assert.equal(closed,0);
+  fail=false;
+  assert.equal(await view.createFromFolder(draft,()=>closed++),true);
+  assert.equal(view.folderCreationError('A'),'');
+  assert.equal(closed,1);
+  assert.equal(calls.filter(([action])=>action==='media_job_set').length,1);
 });
 test('a backup from another signed-in identity cannot queue a run',async()=>{
   const calls=[];

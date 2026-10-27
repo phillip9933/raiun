@@ -229,12 +229,12 @@ body{min-width:0}
 .account-option.selected{background:var(--account-accent,#00677f);border-color:var(--account-accent,#00677f);color:#fff;box-shadow:none}
 .account-option.selected:hover:not(:disabled){background:var(--account-accent,#00677f);border-color:var(--account-accent,#00677f)}
 .account-option.selected .account-option-mark{background:#ffffff24;color:#fff}
-.account-option.selected .account-option-copy small{color:#ffffffdf}
+.account-option.selected .account-option-copy small{color:#fff}
 .account-option.selected .account-option-state.connected,.account-option.selected .account-option-state.attention{color:#fff}
 :root:not([data-theme="light"]) .account-option.selected,:root[data-theme="dark"] .account-option.selected{background:var(--account-accent,#00677f);border-color:var(--account-accent,#00677f);color:#fff;box-shadow:none}
 :root:not([data-theme="light"]) .account-option.selected:hover:not(:disabled),:root[data-theme="dark"] .account-option.selected:hover:not(:disabled){background:var(--account-accent,#00677f);border-color:var(--account-accent,#00677f)}
 :root:not([data-theme="light"]) .account-option.selected .account-option-mark,:root[data-theme="dark"] .account-option.selected .account-option-mark{background:#ffffff24;color:#fff}
-:root:not([data-theme="light"]) .account-option.selected .account-option-copy small,:root[data-theme="dark"] .account-option.selected .account-option-copy small{color:#ffffffdf}
+:root:not([data-theme="light"]) .account-option.selected .account-option-copy small,:root[data-theme="dark"] .account-option.selected .account-option-copy small{color:#fff}
 :root:not([data-theme="light"]) .account-option.selected .account-option-state.connected,:root:not([data-theme="light"]) .account-option.selected .account-option-state.attention,:root[data-theme="dark"] .account-option.selected .account-option-state.connected,:root[data-theme="dark"] .account-option.selected .account-option-state.attention{color:#fff}
 .topbar.selected-account-accent{background:var(--account-accent,#00677f);border-bottom-color:var(--account-accent,#00677f)}
 :root:not([data-theme="light"]) .topbar.selected-account-accent,:root[data-theme="dark"] .topbar.selected-account-accent{background:var(--account-accent,#00677f);border-bottom-color:var(--account-accent,#00677f)}
@@ -261,3 +261,6 @@ body{min-width:0}
 :root[data-theme="dark"] .appearance-accent-row legend{color:#dce4e5}
 :root[data-theme="dark"] .appearance-accent-row legend small{color:#a1abad}
 :root[data-theme="dark"] .account-color-choice input:focus-visible+.account-color-swatch{outline-color:#f3f7f8}
+
+/* One folder workspace for sync pairs and media imports. */
+.folder-workspace-explainer{margin:-12px 0 18px;color:var(--muted);font-size:13px;line-height:1.55}.folder-modal{max-height:min(88vh,860px);overflow:auto}.folder-advanced{margin:20px 0 8px;border:1px solid var(--line);border-radius:12px;padding:0 14px;background:var(--surface)}.folder-advanced>summary{padding:14px 0;font-weight:650;cursor:pointer}.folder-advanced-body{display:grid;gap:14px;padding:0 0 14px}.folder-advanced .media-field>select{width:100%}.folder-advanced .media-field>small,.folder-media-options>p{display:block;margin:7px 0 0;color:var(--muted);font-size:12px;line-height:1.5}.folder-media-options{padding:12px;border-radius:10px;background:var(--surface-soft,var(--surface))}.folder-media-options>.media-options{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}.folder-media-options .media-form-note{margin-bottom:0}.local-media-preview{margin-top:24px;border-top:1px solid var(--line);padding-top:14px}.local-media-preview>summary{cursor:pointer;color:var(--muted);font-weight:600}.local-media-preview>.media-preview{margin-top:16px}.media-workspace-note{color:var(--muted);font-size:13px}.media-job-card{margin:0 0 12px}.media-job-card:last-child{margin-bottom:0}.media-backups{display:contents}.media-job-list{display:contents}.media-job-settings{margin:10px 0;color:var(--muted);font-size:12px}.media-job-settings>summary{cursor:pointer;font-weight:600}.media-job-settings>p{margin:7px 0 0;line-height:1.5}
