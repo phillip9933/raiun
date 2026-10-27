@@ -141,6 +141,7 @@ const copyProducerUi: CopyProducerUi = { source: null, generation: 0, flowGenera
 const proxyUi = { config: { mode: 'system' } as ProxyConfig, revision: 0, accountId: null as string | null, scopeToken: undefined as string | undefined, loadedEpoch: -1, loading: false, saving: false, error: '', draftMode: 'system' as ProxyMode, draftUrl: '', generation: 0 };
 const bandwidthUi = { upload: '', download: '', revision: 0, accountId: null as string | null, scopeToken: undefined as string | undefined, loadedEpoch: -1, loading: false, saving: false, error: '', generation: 0 };
 const desktopUpdateUi: { status: DesktopUpdateStatus | null; busy: boolean; error: string } = { status: null, busy: false, error: '' };
+const accountRenameUi = { profileId: '', accountEpoch: -1, expectedLabel: '', draft: '', editing: false, saving: false, error: '' };
 type InterruptedCreateRetryUi = { key: string; spaceId: string; rootResourceId: string; writeId: string; revision: number; retryGeneration: number; retryState: 'attempting' | 'recovery_attempting' | 'recovery_retrying'; jobId: string; profileId: string; accountEpoch: number; generation: number; busy: boolean; status: VaultEditReconcileStatus | null; error: string };
 const interruptedCreateRetryUi: { job: InterruptedCreateRetryUi | null; timer: number; generation: number } = { job: null, timer: 0, generation: 0 };
 const cachedVaultRootsUi = { roots: [] as CachedVaultRoot[], nextAfter: null as CachedVaultRootsPage['next_after'], truncated: false, loading: false, error: '', selected: '', generation: 0, accountEpoch: -1 };
@@ -2344,7 +2345,7 @@ function settingsPage() {
       : '';
   return `<div class="page-title-row"><div><div class="eyebrow">PREFERENCES</div><h1>Settings</h1><p class="lede">Manage how Raiun works on this computer.</p></div></div>
     <div class="settings-stack"><section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('settings')}</span><div><h2>Appearance</h2><p>Theme applies to all accounts. Color marks this account.</p></div></div><div class="settings-row appearance-settings-row"><label for="appearance-theme"><b>Theme</b><small>Use your system setting or choose a theme.</small></label><select id="appearance-theme" aria-label="Theme"><option value="system" ${appearance.theme === 'system' ? 'selected' : ''}>System</option><option value="light" ${appearance.theme === 'light' ? 'selected' : ''}>Light</option><option value="dark" ${appearance.theme === 'dark' ? 'selected' : ''}>Dark</option></select></div><div class="settings-row appearance-settings-row"><label for="appearance-accent"><b>Account color</b><small>${noAccounts ? 'Available when an account is active.' : 'Marks this account in the sidebar and header.'}</small></label><select id="appearance-accent" aria-label="Account color" ${state.selectedAccount ? '' : 'disabled'}><option value="ocean" ${appearance.accent === 'ocean' ? 'selected' : ''}>Ocean</option><option value="teal" ${appearance.accent === 'teal' ? 'selected' : ''}>Teal</option><option value="violet" ${appearance.accent === 'violet' ? 'selected' : ''}>Violet</option><option value="rose" ${appearance.accent === 'rose' ? 'selected' : ''}>Rose</option><option value="amber" ${appearance.accent === 'amber' ? 'selected' : ''}>Amber</option></select></div></section>
-    <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('cloud')}</span><div><h2>${noAccounts ? 'No active account' : esc(selectedAccountLabel())}</h2><p>${noAccounts ? 'Add an account or restore one below. Restoring requires a new sign-in.' : `Sign-in and sync folders for this account.${featureAvailable('account_switch_supported') ? ' Other accounts keep syncing in the background.' : ''}`}</p></div></div><div class="settings-row account-settings-row"><div><b>${noAccounts ? 'Account status' : connection === 'unavailable' ? 'Agent status' : connection === 'offline_reconnecting' ? state.status?.refreshing ? 'Checking connection…' : retainedSignInOnly ? 'Reconnecting saved sign-in' : 'Working offline' : connected ? 'Connected server' : 'Sign in to OpenCloud'}</b><small>${noAccounts ? 'No account is selected. Use Add account or restore a removed account below.' : connection === 'unavailable' ? 'The Raiun agent is not reachable' : connection === 'offline_reconnecting' ? retainedSignInOnly ? 'The saved sign-in is available, but cloud files cannot be reached until the server reconnects.' : 'Raiun is reconnecting to the server. Your offline session remains available.' : connected ? esc(state.status?.server || 'This account is connected') : `Sign in to connect ${selectedAccountLabel()}`}</small>${connection === 'offline_reconnecting' ? connectionFailureDetails(state.status) : ''}${settingsSignIn}</div><div class="button-group"><button class="button subtle" data-action="refresh" ${connection === 'offline_reconnecting' && state.status?.refreshing ? 'disabled' : ''}>${connection === 'offline_reconnecting' ? state.status?.refreshing ? 'Checking…' : 'Retry connection' : 'Refresh'}</button>${canSignOut ? `<button class="button subtle" data-action="logout" title="Sign out of ${esc(selectedAccountLabel())}">Sign out</button>` : ''}${canRemoveSelectedAccount ? `<button class="button subtle danger-action" data-action="remove-selected-account">Remove account</button>` : ''}</div></div></section>
+    <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('cloud')}</span><div><h2>${noAccounts ? 'No active account' : esc(selectedAccountLabel())}</h2><p>${noAccounts ? 'Add an account or restore one below. Restoring requires a new sign-in.' : `Sign-in and sync folders for this account.${featureAvailable('account_switch_supported') ? ' Other accounts keep syncing in the background.' : ''}`}</p>${accountRenameControl()}</div></div><div class="settings-row account-settings-row"><div><b>${noAccounts ? 'Account status' : connection === 'unavailable' ? 'Agent status' : connection === 'offline_reconnecting' ? state.status?.refreshing ? 'Checking connection…' : retainedSignInOnly ? 'Reconnecting saved sign-in' : 'Working offline' : connected ? 'Connected server' : 'Sign in to OpenCloud'}</b><small>${noAccounts ? 'No account is selected. Use Add account or restore a removed account below.' : connection === 'unavailable' ? 'The Raiun agent is not reachable' : connection === 'offline_reconnecting' ? retainedSignInOnly ? 'The saved sign-in is available, but cloud files cannot be reached until the server reconnects.' : 'Raiun is reconnecting to the server. Your offline session remains available.' : connected ? esc(state.status?.server || 'This account is connected') : `Sign in to connect ${selectedAccountLabel()}`}</small>${connection === 'offline_reconnecting' ? connectionFailureDetails(state.status) : ''}${settingsSignIn}</div><div class="button-group"><button class="button subtle" data-action="refresh" ${connection === 'offline_reconnecting' && state.status?.refreshing ? 'disabled' : ''}>${connection === 'offline_reconnecting' ? state.status?.refreshing ? 'Checking…' : 'Retry connection' : 'Refresh'}</button>${canSignOut ? `<button class="button subtle" data-action="logout" title="Sign out of ${esc(selectedAccountLabel())}">Sign out</button>` : ''}${canRemoveSelectedAccount ? `<button class="button subtle danger-action" data-action="remove-selected-account">Remove account</button>` : ''}</div></div></section>
     ${removedAccountSection}
     <section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('folder')}</span><div><h2>Cloud drive</h2><p>${noAccounts ? 'A drive location will be available after you add or restore and sign in to an account.' : providerEnabled ? 'This account’s OpenCloud location in the computer’s file manager. Save files inside Personal or a writable Space; the top-level folder is read-only.' : 'Windows cloud drive support is not enabled. Choosing a folder saves its setup, but does not mount or sync files.'}</p></div></div><div class="settings-row"><div><b>Mount status</b><small>${noAccounts ? 'No active account' : !providerEnabled ? state.status?.cloud_root ? `Configured but disconnected at ${esc(state.status.cloud_root)}` : 'Windows cloud drive is not mounted' : (connected || connection === 'offline_reconnecting') && state.status?.cloud_root ? `${state.status.mounted ? 'Mounted at' : 'Configured at'} ${esc(state.status.cloud_root)}` : 'No cloud drive location reported for this account'}</small></div><div class="button-group"><button class="button subtle" data-action="mount" ${noAccounts || mountControls.mountDisabled ? 'disabled' : ''}>Mount</button><button class="button subtle" data-action="unmount" ${noAccounts || mountControls.unmountDisabled ? 'disabled' : ''}>Unmount</button></div></div><div class="settings-row"><div><b>Choose location</b><small>Pick this account’s directory for the OpenCloud drive.</small></div><button class="button subtle" data-action="configure-root" ${!noAccounts && state.agentReachable && connected ? '' : 'disabled'}>Choose folder</button></div></section>
     ${networkProxySettingsCard(connected, connection)}
@@ -2869,6 +2870,13 @@ function bind() {
     writeAppearance({ getItem: key => window.localStorage.getItem(key), setItem: (key, value) => window.localStorage.setItem(key, value) }, state.selectedAccount, { accent });
     render();
   });
+  app.querySelector<HTMLInputElement>('#account-display-name')?.addEventListener('input', event => {
+    if (!accountRenameContextCurrent() || accountRenameUi.saving) return;
+    accountRenameUi.draft = (event.target as HTMLInputElement).value;
+    accountRenameUi.error = '';
+    const save = app.querySelector<HTMLButtonElement>('[data-action="save-account-name"]');
+    if (save) save.disabled = !accountRenameCanSave();
+  });
   app.querySelector<HTMLInputElement>('#network-proxy-url')?.addEventListener('input', event => {
     proxyUi.draftUrl = (event.target as HTMLInputElement).value;
   });
@@ -3225,6 +3233,9 @@ async function handleAction(action: string, element?: HTMLElement) {
     case 'run-media-preview': await runMediaPreview(); break;
     case 'refresh-spaces': await loadSpaces(true); break;
     case 'open-add-account': if (!featureAvailable('account_switch_supported')) return; state.addAccountOpen = true; state.addAccountStep = 'details'; state.addAccountLabel = ''; state.addAccountRoot = ''; state.addAccountServer = ''; state.addAccountClientId = ''; state.addAccountAuthMessage = ''; state.addAccountAuthStarted = false; state.addAccountError = ''; state.addAccountCreatedId = ''; state.accountsError = ''; render(); break;
+    case 'edit-account-name': beginAccountRename(); break;
+    case 'cancel-account-name': cancelAccountRename(); break;
+    case 'save-account-name': await saveAccountRename(); break;
     case 'open-encrypted-access': if (featureAvailable('vaults_supported')) await openEncryptedAccess(); break;
     case 'refresh-windows-device-cache': await refreshWindowsDeviceCacheUsage(); break;
     case 'open-offline-files': if (providerAvailable(state.status?.provider_supported)) await openOfflineFiles(); break;
@@ -5454,6 +5465,96 @@ function isRetainedSignInOnly(status: Status | null | undefined): boolean {
   return status?.offline === true && status.offline_namespace !== true;
 }
 function selectedAccountLabel() { return state.accounts.find(account => account.id === state.selectedAccount)?.label || state.status?.profile_label || 'OpenCloud'; }
+function accountRenameContextCurrent() {
+  return Boolean(accountRenameUi.profileId) && accountRenameUi.accountEpoch === state.accountEpoch && accountRenameUi.profileId === state.selectedAccount;
+}
+function accountRenameDraftError() {
+  const label = accountRenameUi.draft.trim();
+  if (!label) return 'Enter a display name.';
+  if (new TextEncoder().encode(label).length > 256) return 'Display names must be 256 UTF-8 bytes or fewer.';
+  if (/[ --]/u.test(label)) return 'Display names cannot contain control characters.';
+  return '';
+}
+function accountRenameCanSave() {
+  const account = state.accounts.find(item => item.id === state.selectedAccount);
+  return accountRenameUi.editing && accountRenameContextCurrent() && !!account && account.label === accountRenameUi.expectedLabel &&
+    state.agentReachable && !accountSwitchDisabled() && !accountRenameUi.saving && accountRenameUi.draft.trim() !== account.label && !accountRenameDraftError();
+}
+function accountRenameControl() {
+  const account = state.accounts.find(item => item.id === state.selectedAccount);
+  if (!account || !state.selectedAccount) return '';
+  if (accountRenameUi.editing && accountRenameContextCurrent()) {
+    return `<div class="account-rename-editor"><label class="field-label" for="account-display-name">Display name</label><input class="account-form-input" id="account-display-name" value="${esc(accountRenameUi.draft)}" maxlength="256" ${accountRenameUi.saving ? 'disabled' : ''}/>${accountRenameUi.error ? `<small class="account-setup-error" role="alert">${esc(accountRenameUi.error)}</small>` : ''}<div class="button-group"><button class="button primary" data-action="save-account-name" ${accountRenameCanSave() ? '' : 'disabled'}>${accountRenameUi.saving ? 'Saving…' : 'Save'}</button><button class="button subtle" data-action="cancel-account-name" ${accountRenameUi.saving ? 'disabled' : ''}>Cancel</button></div></div>`;
+  }
+  const disabled = !state.agentReachable || accountSwitchDisabled();
+  return `<button class="text-button" data-action="edit-account-name" ${disabled ? 'disabled' : ''}>Edit display name</button>`;
+}
+function beginAccountRename() {
+  const account = state.accounts.find(item => item.id === state.selectedAccount);
+  if (!account || !state.selectedAccount || !state.agentReachable || accountSwitchDisabled()) return;
+  accountRenameUi.profileId = state.selectedAccount;
+  accountRenameUi.accountEpoch = state.accountEpoch;
+  accountRenameUi.expectedLabel = account.label;
+  accountRenameUi.draft = account.label;
+  accountRenameUi.editing = true;
+  accountRenameUi.saving = false;
+  accountRenameUi.error = '';
+  render();
+}
+function cancelAccountRename() {
+  if (accountRenameUi.saving) return;
+  accountRenameUi.editing = false;
+  accountRenameUi.error = '';
+  render();
+}
+async function saveAccountRename() {
+  const profileId = accountRenameUi.profileId;
+  const epoch = accountRenameUi.accountEpoch;
+  if (!accountRenameUi.editing || !profileId || !accountRenameContextCurrent() || !state.agentReachable || accountSwitchDisabled()) return;
+  const account = state.accounts.find(item => item.id === profileId);
+  if (!account) return;
+  if (account.label !== accountRenameUi.expectedLabel) {
+    accountRenameUi.error = 'This account name changed. Cancel and edit the current name.';
+    render();
+    return;
+  }
+  const label = accountRenameUi.draft.trim();
+  const validation = accountRenameDraftError();
+  if (validation) { accountRenameUi.error = validation; render(); return; }
+  if (label === account.label) return;
+  accountRenameUi.error = '';
+  accountRenameUi.saving = true;
+  state.mutationBusy++;
+  render();
+  try {
+    const result = await request<{ renamed_profile_id: string; label: string; selected: string | null }>(
+      'account_rename', { profile_id: profileId, expected_label: accountRenameUi.expectedLabel, label });
+    if (!isCurrentAccount(epoch, profileId) || !accountRenameContextCurrent()) return;
+    if (result.renamed_profile_id !== profileId || result.label !== label || result.selected !== profileId) {
+      throw new Error('Raiun could not confirm the renamed account. Refresh the account list and try again.');
+    }
+    await syncAccounts();
+    if (!isCurrentAccount(epoch, profileId) || !accountRenameContextCurrent()) return;
+    const refreshed = state.accounts.find(item => item.id === profileId);
+    if (!refreshed || refreshed.label !== label) {
+      accountRenameUi.error = 'The account name was saved, but the refreshed account list did not confirm it. Refresh and try again.';
+      return;
+    }
+    accountRenameUi.editing = false;
+    accountRenameUi.error = '';
+    state.message = 'Account display name updated.';
+  } catch (error) {
+    if (isCurrentAccount(epoch, profileId) && accountRenameContextCurrent() && !isStaleAccountRequest(error)) {
+      accountRenameUi.error = messageOf(error);
+    }
+  } finally {
+    state.mutationBusy = Math.max(0, state.mutationBusy - 1);
+    if (isCurrentAccount(epoch, profileId) && accountRenameContextCurrent()) {
+      accountRenameUi.saving = false;
+      render();
+    }
+  }
+}
 function accountSwitchDisabled() {
   const pickerModalOpen = state.pickerOpen && !(state.page === 'offline' && state.pickerPurpose === 'offline');
   const encryptedAccessModalOpen = state.vaultAccessOpen && state.page !== 'encrypted';

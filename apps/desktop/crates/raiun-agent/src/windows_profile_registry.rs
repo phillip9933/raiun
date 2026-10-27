@@ -370,6 +370,33 @@ impl Registry {
         validate_registry(&next)?;
         Ok(next)
     }
+    /// Return an unpublished candidate with only the active profile label
+    /// changed. The caller supplies the exact current label to reject stale UI
+    /// edits; IDs and every reservation remain byte-for-byte intact.
+    pub fn with_renamed(
+        &self,
+        id: &str,
+        expected_label: &str,
+        label: &str,
+    ) -> Result<Self, String> {
+        validate_registry(self)?;
+        validate_label(label)?;
+        let mut next = self.clone();
+        if next.selected.as_deref() != Some(id) {
+            return Err("Only the selected account can be renamed".into());
+        }
+        let record = next
+            .profiles
+            .get_mut(id)
+            .filter(|record| !record.removed)
+            .ok_or("Unknown active profile_id")?;
+        if record.label != expected_label {
+            return Err("The account label changed; refresh and try again".into());
+        }
+        record.label = label.trim().into();
+        validate_registry(&next)?;
+        Ok(next)
+    }
     /// Produce an unpublished candidate; existing reservations cannot be removed
     /// or downgraded here. The caller must persist before configure/registration.
     pub fn with_reserved_root(
@@ -650,6 +677,72 @@ mod tests {
         }
         assert_eq!(registry.profiles().len(), MAX_PROFILES);
         assert!(registry.with_added(ID, "Extra").is_err());
+    }
+    #[test]
+    fn rename_requires_exact_current_label_and_preserves_profile_identity_and_reservations() {
+        let registry = Registry::decode_or_default(None)
+            .unwrap()
+            .with_added(ID, "Work")
+            .unwrap()
+            .with_reserved_root(
+                ID,
+                RootReservation::new(r"C:\WorkCloud".into(), 31, 47, true).unwrap(),
+            )
+            .unwrap()
+            .with_reserved_source(
+                ID,
+                SourceReservation::new(
+                    "a".repeat(64),
+                    SourceKind::FolderPair,
+                    "pair-1".into(),
+                    RootReservation::new(r"C:\WorkSource".into(), 31, 48, false).unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .with_reserved_vault(
+                ID,
+                VaultReservation::new(
+                    "b".repeat(64),
+                    "space-id".into(),
+                    "root-id".into(),
+                    "/Spaces/space-id".into(),
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .with_selected(ID)
+            .unwrap();
+
+        assert!(registry.with_renamed(ID, "Stale", "New name").is_err());
+        assert!(
+            registry
+                .with_renamed("default", "Default", "New name")
+                .is_err()
+        );
+        assert!(registry.with_renamed(ID, "Work", "\n").is_err());
+        assert!(registry.with_renamed(ID, "Work", &"é".repeat(129)).is_err());
+
+        let renamed = registry
+            .with_renamed(ID, "Work", "  Work laptop  ")
+            .unwrap();
+        let record = &renamed.profiles()[ID];
+        assert_eq!(renamed.selected(), Some(ID));
+        assert_eq!(renamed.profiles().len(), registry.profiles().len());
+        assert_eq!(record.label(), "Work laptop");
+        assert_eq!(
+            serde_json::to_value(record.root_reservations()).unwrap(),
+            serde_json::to_value(registry.profiles()[ID].root_reservations()).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(record.source_reservations()).unwrap(),
+            serde_json::to_value(registry.profiles()[ID].source_reservations()).unwrap()
+        );
+        assert_eq!(
+            record.vault_reservations(),
+            registry.profiles()[ID].vault_reservations()
+        );
+        assert_eq!(registry.profiles()[ID].label(), "Work");
     }
     #[test]
     fn actual_linux_wire_shape_is_compatible_and_has_no_runtime_fields() {

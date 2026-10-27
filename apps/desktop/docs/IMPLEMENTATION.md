@@ -3126,3 +3126,15 @@ public release-version syntax for separate app/agent versions. Six focused
 diagnostics tests pass, including privacy canaries and older-agent metadata.
 Reconnect details are also retained inline rather than relying on a dismissed
 toast. This improves diagnosis; it does not prove the owner's connection fixed.
+
+
+The owner explicitly withdrew public Windows beta.2/beta.3 downloads while this
+issue is investigated and requested editable account names. Renaming changes only
+the selected active registry label with an exact expected-label check; profile
+IDs, credentials, roots and runtime generation are unchanged. The Windows refresh
+threshold of 300 seconds also makes five-minute access tokens immediately due on
+every status request, clearing the online flag repeatedly. The candidate changes
+the lead to 30 seconds and adds a loopback five-minute-token regression; Windows
+execution of that test remains required. The owner's actual token lifetime and
+connection cause have not yet been confirmed, so do not restore public Windows
+downloads or claim their deployment fixed based only on this candidate.

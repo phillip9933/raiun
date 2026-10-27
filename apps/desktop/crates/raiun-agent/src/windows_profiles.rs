@@ -554,6 +554,40 @@ impl WindowsProfiles {
                 // Selection neither revokes credentials nor drains any runtime.
                 Ok((json!({}), false))
             }
+            "account_rename" => {
+                let _gate = self
+                    .mutation_gate
+                    .lock()
+                    .map_err(|_| "Account changes are unavailable")?;
+                let id = request
+                    .get("profile_id")
+                    .and_then(Value::as_str)
+                    .ok_or("Missing profile_id")?;
+                let expected_label = request
+                    .get("expected_label")
+                    .and_then(Value::as_str)
+                    .ok_or("Missing expected_label")?;
+                let label = request
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .ok_or("Missing label")?;
+                let mut state = self
+                    .state
+                    .lock()
+                    .map_err(|_| "Account state is unavailable")?;
+                let next = state.registry.with_renamed(id, expected_label, label)?;
+                self.persist(&next)?;
+                state.registry = next;
+                let label = state.registry.profiles()[id].label();
+                Ok((
+                    json!({
+                        "renamed_profile_id":id,
+                        "label":label,
+                        "selected":id
+                    }),
+                    false,
+                ))
+            }
             "account_remove" => {
                 let _gate = self
                     .mutation_gate
@@ -1261,6 +1295,67 @@ mod tests {
         let generation = work_runtime
             .generation
             .load(std::sync::atomic::Ordering::Acquire);
+
+        assert!(
+            broker
+                .handle(&json!({
+                    "action":"account_rename",
+                    "profile_id":id,
+                    "expected_label":"Stale label",
+                    "label":"Renamed Work"
+                }))
+                .is_err()
+        );
+        assert!(
+            broker
+                .handle(&json!({
+                    "action":"account_rename",
+                    "profile_id":"default",
+                    "expected_label":"Default",
+                    "label":"Renamed Work"
+                }))
+                .is_err()
+        );
+        let renamed = broker
+            .handle(&json!({
+                "action":"account_rename",
+                "profile_id":id,
+                "expected_label":"Synthetic Work",
+                "label":"  Renamed Work  "
+            }))
+            .unwrap()
+            .0;
+        assert_eq!(renamed["renamed_profile_id"], id);
+        assert_eq!(renamed["label"], "Renamed Work");
+        assert_eq!(renamed["selected"], id);
+        let after_rename = broker.state.lock().unwrap();
+        assert_eq!(after_rename.registry.selected(), Some(id));
+        assert_eq!(after_rename.registry.profiles()[id].label(), "Renamed Work");
+        assert_eq!(
+            after_rename.registry.profiles()[id]
+                .root_reservations()
+                .len(),
+            1
+        );
+        assert!(Arc::ptr_eq(&after_rename.runtimes[id], &work_runtime));
+        drop(after_rename);
+        assert_eq!(
+            work_runtime
+                .generation
+                .load(std::sync::atomic::Ordering::Acquire),
+            generation,
+            "renaming must not change auth generation"
+        );
+        let accounts_after_rename = broker.handle(&json!({"action":"accounts"})).unwrap().0;
+        let renamed_item = accounts_after_rename["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == id)
+            .unwrap();
+        assert_eq!(renamed_item["label"], "Renamed Work");
+        assert_eq!(renamed_item["status"]["profile_id"], id);
+        assert_eq!(renamed_item["status"]["auth_generation"], generation);
 
         assert!(
             broker

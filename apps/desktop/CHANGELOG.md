@@ -9,6 +9,8 @@
 - Explicit account removal signs out, revokes remembered vault-password access and stops the account while preserving local files, recovery and path reservations. Removed accounts can be restored to the same profile; sign-in and vault passwords are required again.
 - Light/Dark/System themes, per-account accents, consistent account selection, a standard settings icon and a compact account/Refresh strip.
 - Mount is unavailable when already mounted; encrypted-file help distinguishes Lock from forgetting a saved password.
+- Account display names can be edited without changing profile identity, credentials or data paths.
+- Windows refresh scheduling uses a 30-second lead instead of 300 seconds, avoiding an immediate repeated-refresh cycle for five-minute access tokens.
 - Reconnect failure details remain available inline after a toast is dismissed. Redacted diagnostics accept legitimate disconnected Windows status, omit cleanup extension data and report app/agent versions separately.
 
 This candidate retains the beta.3 sign-in/Space fixes and uses numeric Beta versioning. Exact-package acceptance is being prepared; no 0.7.4 release is published. Headless/CLI distribution and MSI packaging are outside this candidate.

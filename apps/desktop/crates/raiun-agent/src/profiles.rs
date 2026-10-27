@@ -162,6 +162,7 @@ impl ProfileManager {
             }
             "account_add" => self.add_account(&request),
             "account_select" => self.select_account(&request),
+            "account_rename" => self.rename_account(&request),
             "account_remove" => self.remove_account(&request),
             "account_restore" => self.restore_account(&request),
             "shutdown" => self.request_shutdown(),
@@ -377,6 +378,44 @@ impl ProfileManager {
         save_registry(&self.state_dir.join(REGISTRY_FILE), &next)?;
         state.registry = next;
         Ok(json!({}))
+    }
+
+    fn rename_account(&self, request: &Value) -> Result<Value, String> {
+        let _gate = self
+            .mutation_gate
+            .lock()
+            .map_err(|_| "Profile mutation gate poisoned")?;
+        self.ensure_running()?;
+        let id = request
+            .get("profile_id")
+            .and_then(Value::as_str)
+            .ok_or("Missing profile_id")?;
+        let expected = request
+            .get("expected_label")
+            .and_then(Value::as_str)
+            .ok_or("Missing expected_label")?;
+        let label = request
+            .get("label")
+            .and_then(Value::as_str)
+            .ok_or("Missing label")?;
+        validate_label(label)?;
+        let mut state = self.state.lock().map_err(|_| "Profile state poisoned")?;
+        if state.registry.selected != id || state.registry.removed.contains(id) {
+            return Err("The selected account changed; review its name again".into());
+        }
+        let current = state
+            .registry
+            .profiles
+            .get(id)
+            .ok_or("Unknown profile_id")?;
+        if current.label != expected {
+            return Err("The account name changed; refresh and try again".into());
+        }
+        let mut next = state.registry.clone();
+        next.profiles.get_mut(id).ok_or("Unknown profile_id")?.label = label.trim().to_owned();
+        save_registry(&self.state_dir.join(REGISTRY_FILE), &next)?;
+        state.registry = next;
+        Ok(json!({"renamed_profile_id":id,"label":label.trim(),"selected":id}))
     }
 
     fn selected_profile(&self) -> Result<Option<String>, String> {
@@ -1402,13 +1441,32 @@ mod tests {
         assert!(manager.handle(json!({"action":"account_remove","profile_id":peer,"expected_auth_generation":0,"confirm":true})).is_err());
         let removed = manager.handle(json!({"action":"account_remove","profile_id":"default","expected_auth_generation":0,"confirm":true})).unwrap();
         assert_eq!(removed["selected"], peer);
-        assert_eq!(manager.accounts().unwrap()["items"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            manager.accounts().unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(credentials.lock().unwrap().len(), 1);
-        assert_eq!(manager.state.lock().unwrap().runtimes[&peer].auth_generation.load(Ordering::Acquire), 0);
+        assert_eq!(
+            manager.state.lock().unwrap().runtimes[&peer]
+                .auth_generation
+                .load(Ordering::Acquire),
+            0
+        );
         assert!(manager.handle(json!({"action":"account_add","label":"Unsafe reuse","cloud_root":temp.path().join("cloud")})).is_err());
-        let restored = manager.handle(json!({"action":"account_restore","profile_id":"default","confirm":true})).unwrap();
+        let restored = manager
+            .handle(json!({"action":"account_restore","profile_id":"default","confirm":true}))
+            .unwrap();
         assert_eq!(restored["selected"], peer);
-        assert_eq!(manager.accounts().unwrap()["items"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            manager.accounts().unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
         manager.request_shutdown().unwrap();
     }
 
@@ -1416,11 +1474,52 @@ mod tests {
     fn removal_uncertain_password_cleanup_keeps_profile_visible() {
         let temp = tempdir().unwrap();
         let (manager, _) = removal_fixture(temp.path(), false);
-        manager.state.lock().unwrap().runtimes[DEFAULT_ID].vault_cleanup_uncertain.store(true, Ordering::Release);
+        manager.state.lock().unwrap().runtimes[DEFAULT_ID]
+            .vault_cleanup_uncertain
+            .store(true, Ordering::Release);
         let error = manager.handle(json!({"action":"account_remove","profile_id":"default","expected_auth_generation":0,"confirm":true})).unwrap_err();
         assert!(error.contains("cleanup is uncertain"));
         assert_eq!(manager.accounts().unwrap()["items"][0]["id"], "default");
-        assert!(manager.accounts().unwrap()["removed_items"].as_array().unwrap().is_empty());
+        assert!(
+            manager.accounts().unwrap()["removed_items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        manager.request_shutdown().unwrap();
+    }
+
+    #[test]
+    fn rename_changes_label_only_and_rejects_stale_labels_and_invalid_names() {
+        let temp = tempdir().unwrap();
+        let (manager, credentials) = removal_fixture(temp.path(), false);
+        let runtime = manager.state.lock().unwrap().runtimes[DEFAULT_ID].clone();
+        let settings = fs::read(manager.state_dir.join("settings.json")).unwrap();
+        let result = manager.handle(json!({"action":"account_rename","profile_id":"default","expected_label":"Default","label":"  Personal  "})).unwrap();
+        assert_eq!(result["label"], "Personal");
+        assert_eq!(result["renamed_profile_id"], "default");
+        assert_eq!(manager.accounts().unwrap()["items"][0]["label"], "Personal");
+        assert!(Arc::ptr_eq(
+            &runtime,
+            &manager.state.lock().unwrap().runtimes[DEFAULT_ID]
+        ));
+        assert_eq!(runtime.auth_generation.load(Ordering::Acquire), 0);
+        assert_eq!(
+            fs::read(manager.state_dir.join("settings.json")).unwrap(),
+            settings
+        );
+        assert!(credentials.lock().unwrap().is_empty());
+        assert!(manager.handle(json!({"action":"account_rename","profile_id":"default","expected_label":"Default","label":"Stale overwrite"})).is_err());
+        for label in ["", "bad\nname"] {
+            assert!(manager.handle(json!({"action":"account_rename","profile_id":"default","expected_label":"Personal","label":label})).is_err());
+        }
+        assert_eq!(
+            load_registry(&manager.state_dir.join(REGISTRY_FILE))
+                .unwrap()
+                .profiles[DEFAULT_ID]
+                .label,
+            "Personal"
+        );
         manager.request_shutdown().unwrap();
     }
 

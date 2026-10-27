@@ -77,6 +77,7 @@ const WINDOWS_MEDIA_METADATA_ENABLED: bool = !cfg!(test);
 // Test builds keep public capability exposure disabled; direct fixtures cover
 // the same guarded implementation. Installed-package acceptance is separate.
 const WINDOWS_VAULT_SESSIONS_ENABLED: bool = !cfg!(test);
+const WINDOWS_REFRESH_LEAD_SECONDS: u64 = 30;
 include!("windows_vault_session_control.rs");
 include!("windows_vault_edit_upload.rs");
 
@@ -4664,7 +4665,8 @@ impl WindowsAgent {
             // Retry it after the existing backoff even when its token is fresh.
             let refresh_due = state.needs_refresh
                 || !state.online_authenticated
-                || session.expires_at <= unix_time_now().saturating_add(300);
+                || session.expires_at
+                    <= unix_time_now().saturating_add(WINDOWS_REFRESH_LEAD_SECONDS);
             if state.logout_pending
                 || !refresh_due
                 || state.authenticating
@@ -17577,6 +17579,41 @@ pub(super) mod tests {
                 .as_deref(),
             Some("rotated-refresh-token")
         );
+    }
+
+    #[test]
+    fn successful_refresh_with_five_minute_token_stays_connected_on_status() {
+        let (endpoint, fixture) = synthetic_refresh_server(
+            200,
+            r#"{"access_token":"rotated-access-token","refresh_token":"rotated-refresh-token","expires_in":300}"#,
+        );
+        let store = Arc::new(MemoryStore::default());
+        seed_active_session(
+            &store,
+            "default",
+            session_for_refresh(&endpoint, unix_time_now() + 25),
+        );
+
+        let agent = WindowsAgent::new(store.clone());
+        assert_eq!(agent.status().unwrap()["offline"], true);
+        let refreshed = wait_for_refresh(&agent);
+        assert_eq!(refreshed["connected"], true);
+        fixture.join().unwrap();
+
+        let generation = refreshed["auth_generation"].as_u64().unwrap();
+        let saved = store.sessions.lock().unwrap();
+        let session = saved.values().next().unwrap();
+        assert!(session.expires_at > unix_time_now() + 250);
+        assert!(session.last_refresh_at.is_some());
+        drop(saved);
+
+        let status = agent.status().unwrap();
+        assert_eq!(status["connected"], true);
+        assert_eq!(status["offline"], false);
+        assert_eq!(status["refreshing"], false);
+        assert_eq!(status["auth_generation"], generation);
+        assert_eq!(agent.generation.load(Ordering::Acquire), generation);
+        agent.stop_and_join().unwrap();
     }
 
     #[test]

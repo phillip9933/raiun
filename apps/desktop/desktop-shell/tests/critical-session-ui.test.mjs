@@ -166,6 +166,61 @@ test('removing the last account exposes Add/Restore and cannot start sign-in wit
   assert.equal(removalCalls[0].action, 'account_remove');
 });
 
+function accountRenameHarness({ switchBeforeSave = false, staleExpectedLabel = false } = {}) {
+  const state = {
+    accountEpoch: 5, selectedAccount: 'profile-a', agentReachable: true, accountsLoading: false,
+    accounts: [{ id: 'profile-a', label: 'Work' }, { id: 'profile-b', label: 'Personal' }],
+    mutationBusy: 0, accountSwitching: false, nativeDialogBusy: false, addAccountOpen: false,
+    addOpen: false, pickerOpen: false, vaultDialog: null, vaultAccessOpen: false, recoveryLoading: false,
+    encryptedEditRecoveryLoading: false, resolvingConflict: false, pickerCreatingFolder: false,
+    message: '', error: ''
+  };
+  const accountRenameUi = { profileId: 'profile-a', accountEpoch: 5, expectedLabel: 'Work', draft: '  Work account  ', editing: true, saving: false, error: '' };
+  if (switchBeforeSave) { state.accountEpoch++; state.selectedAccount = 'profile-b'; }
+  if (staleExpectedLabel) state.accounts[0].label = 'Renamed elsewhere';
+  const calls = [];
+  const context = {
+    state, accountRenameUi,
+    isCurrentAccount: (epoch, profileId) => epoch === state.accountEpoch && profileId === state.selectedAccount,
+    accountRenameContextCurrent: () => !!accountRenameUi.profileId && accountRenameUi.accountEpoch === state.accountEpoch && accountRenameUi.profileId === state.selectedAccount,
+    accountRenameDraftError: () => '',
+    accountRenameCanSave: () => false,
+    accountSwitchDisabled: () => state.mutationBusy > 0 || state.accountsLoading || state.accountSwitching,
+    request: async (action, args) => {
+      calls.push({ action, args });
+      return { renamed_profile_id: 'profile-a', label: 'Work account', selected: 'profile-a' };
+    },
+    syncAccounts: async () => { state.accounts[0] = { id: 'profile-a', label: 'Work account' }; },
+    render: () => {}, messageOf: error => String(error), isStaleAccountRequest: () => false
+  };
+  return { state, accountRenameUi, calls, context };
+}
+
+test('account display-name rename targets only the selected profile and refreshes its label', async () => {
+  const { state, accountRenameUi, calls, context } = accountRenameHarness();
+  await evaluateFunction('saveAccountRename', context)();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{ action: 'account_rename', args: { profile_id: 'profile-a', expected_label: 'Work', label: 'Work account' } }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(state.accounts)), [{ id: 'profile-a', label: 'Work account' }, { id: 'profile-b', label: 'Personal' }]);
+  assert.equal(accountRenameUi.editing, false);
+  assert.equal(state.message, 'Account display name updated.');
+  assert.equal(state.mutationBusy, 0);
+  assert.match(main, /data-action="edit-account-name"/);
+  assert.match(main, /data-action="save-account-name"/);
+  assert.match(main, /data-action="cancel-account-name"/);
+});
+
+test('display-name rename refuses a stale account selection or expected label and keeps the form on label conflict', async () => {
+  const switched = accountRenameHarness({ switchBeforeSave: true });
+  await evaluateFunction('saveAccountRename', switched.context)();
+  assert.deepEqual(switched.calls, []);
+
+  const staleLabel = accountRenameHarness({ staleExpectedLabel: true });
+  await evaluateFunction('saveAccountRename', staleLabel.context)();
+  assert.deepEqual(staleLabel.calls, []);
+  assert.equal(staleLabel.accountRenameUi.editing, true);
+  assert.match(staleLabel.accountRenameUi.error, /name changed/);
+});
+
 test('account removal rejects a same-profile reauthentication during the confirmation dialog', async () => {
   const state = {
     accountEpoch: 4, selectedAccount: 'profile-a', accountRemovalSupported: true, agentReachable: true,
