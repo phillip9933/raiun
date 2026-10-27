@@ -15,6 +15,151 @@ if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_OS -cne 'Windows' -or $env:R
 }
 if (Test-Path -LiteralPath $OutputDirectory) { throw 'output_directory_already_exists' }
 
+# CI fixture only: new objects use this process token's default owner.
+# Use its existing user SID without changing identity, groups, privileges or ACLs.
+# https://learn.microsoft.com/en-us/windows/win32/secauthz/owner-of-a-new-object
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+
+public sealed class RaiunAcceptanceTokenOwnerScope : IDisposable
+{
+    private const uint TOKEN_QUERY = 0x0008;
+    private const uint TOKEN_ADJUST_DEFAULT = 0x0080;
+    private const int ERROR_INSUFFICIENT_BUFFER = 122;
+    private const int TokenUser = 1;
+    private const int TokenOwner = 4;
+    private IntPtr token = IntPtr.Zero;
+    private SecurityIdentifier originalOwner;
+    private SecurityIdentifier userSid;
+    private bool changed;
+    private bool disposed;
+
+    public bool OriginalOwnerMatchesUser { get; private set; }
+    public bool EffectiveOwnerMatchesUser { get; private set; }
+    public bool RestoredToOriginalOwner { get; private set; }
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr tokenHandle);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetTokenInformation(IntPtr tokenHandle, int informationClass,
+        IntPtr information, uint informationLength, out uint returnLength);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool SetTokenInformation(IntPtr tokenHandle, int informationClass,
+        IntPtr information, uint informationLength);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern uint GetLengthSid(IntPtr sid);
+
+    public RaiunAcceptanceTokenOwnerScope()
+    {
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_ADJUST_DEFAULT, out token))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        try
+        {
+            userSid = ReadSid(TokenUser);
+            originalOwner = ReadSid(TokenOwner);
+            OriginalOwnerMatchesUser = originalOwner.Equals(userSid);
+            if (!OriginalOwnerMatchesUser)
+            {
+                SetOwner(userSid);
+                changed = true;
+            }
+            EffectiveOwnerMatchesUser = ReadSid(TokenOwner).Equals(userSid);
+            if (!EffectiveOwnerMatchesUser)
+                throw new InvalidOperationException("Current process token owner verification failed.");
+        }
+        catch
+        {
+            try { if (changed) SetOwner(originalOwner); }
+            finally { CloseToken(); }
+            throw;
+        }
+    }
+
+    private SecurityIdentifier ReadSid(int informationClass)
+    {
+        uint needed;
+        GetTokenInformation(token, informationClass, IntPtr.Zero, 0, out needed);
+        int error = Marshal.GetLastWin32Error();
+        if (needed == 0 || error != ERROR_INSUFFICIENT_BUFFER)
+            throw new Win32Exception(error);
+        IntPtr buffer = Marshal.AllocHGlobal(checked((int)needed));
+        try
+        {
+            if (!GetTokenInformation(token, informationClass, buffer, needed, out needed))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            IntPtr sidPointer = Marshal.ReadIntPtr(buffer);
+            if (sidPointer == IntPtr.Zero)
+                throw new InvalidOperationException("Token SID is unavailable.");
+            uint sidLength = GetLengthSid(sidPointer);
+            if (sidLength == 0)
+                throw new InvalidOperationException("Token SID is unavailable.");
+            byte[] sidBytes = new byte[sidLength];
+            Marshal.Copy(sidPointer, sidBytes, 0, checked((int)sidLength));
+            return new SecurityIdentifier(sidBytes, 0);
+        }
+        finally { Marshal.FreeHGlobal(buffer); }
+    }
+
+    private void SetOwner(SecurityIdentifier owner)
+    {
+        byte[] sidBytes = new byte[owner.BinaryLength];
+        owner.GetBinaryForm(sidBytes, 0);
+        IntPtr sidPointer = Marshal.AllocHGlobal(sidBytes.Length);
+        IntPtr ownerInfo = Marshal.AllocHGlobal(IntPtr.Size);
+        try
+        {
+            Marshal.Copy(sidBytes, 0, sidPointer, sidBytes.Length);
+            Marshal.WriteIntPtr(ownerInfo, sidPointer);
+            if (!SetTokenInformation(token, TokenOwner, ownerInfo, (uint)IntPtr.Size))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(ownerInfo);
+            Marshal.FreeHGlobal(sidPointer);
+        }
+    }
+
+    public void Dispose()
+    {
+        if (disposed) return;
+        try
+        {
+            if (changed) SetOwner(originalOwner);
+            RestoredToOriginalOwner = ReadSid(TokenOwner).Equals(originalOwner);
+            if (!RestoredToOriginalOwner)
+                throw new InvalidOperationException("Original process token owner restoration failed.");
+        }
+        finally
+        {
+            CloseToken();
+            disposed = true;
+        }
+    }
+
+    private void CloseToken()
+    {
+        if (token != IntPtr.Zero)
+        {
+            CloseHandle(token);
+            token = IntPtr.Zero;
+        }
+    }
+}
+'@
+
 $script:events = [System.Collections.Generic.List[object]]::new()
 $script:phase = 'preflight'
 $script:failure = $null
@@ -41,6 +186,8 @@ $script:startupAppData = $env:APPDATA
 $script:startupLocalAppData = $env:LOCALAPPDATA
 $script:sidHash = $null
 $script:tokenFacts = $null
+$script:tokenOwnerScope = $null
+$script:tokenOwnerFacts = $null
 $script:result = 'failed'
 
 function Add-Event([string] $Name, [string] $Result, [hashtable] $Details = @{}) {
@@ -364,6 +511,14 @@ $script:finalProfileMetadata = $null
 
 try {
     New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
+    $script:phase = 'runner_default_owner_scope'
+    $script:tokenOwnerScope = [RaiunAcceptanceTokenOwnerScope]::new()
+    $script:tokenOwnerFacts = [ordered]@{
+        originalOwnerMatchesUser = $script:tokenOwnerScope.OriginalOwnerMatchesUser
+        effectiveOwnerMatchesUser = $script:tokenOwnerScope.EffectiveOwnerMatchesUser
+        restoredToOriginalOwner = $null
+    }
+    Add-Event 'runner_default_owner_scope' 'passed' @{ originalOwnerMatchesUser = $script:tokenOwnerFacts.originalOwnerMatchesUser; effectiveOwnerMatchesUser = $script:tokenOwnerFacts.effectiveOwnerMatchesUser }
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $script:sidHash = Hash-Bytes ([Text.Encoding]::UTF8.GetBytes($sid))
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -533,14 +688,45 @@ try {
     $script:failure = $script:phase + ':' + $_.Exception.GetType().Name
     Add-Event $script:phase 'failed' @{ exceptionType = $_.Exception.GetType().Name }
 } finally {
+    $childrenStopped = ($null -eq $script:agent)
     if ($null -ne $script:agent) {
         try {
             $cleanupExit = Stop-Agent
+            $childrenStopped = ($null -eq $script:agent)
             Add-Event 'agent_cleanup' 'passed' @{ exitCode = $cleanupExit }
         } catch {
             Add-Event 'agent_cleanup' 'failed' @{ exceptionType = $_.Exception.GetType().Name }
             $script:result = 'failed'
             if ($null -eq $script:failure) { $script:failure = 'agent_cleanup:' + $_.Exception.GetType().Name }
+            try {
+                $script:agent.Refresh()
+                if ($script:agent.HasExited) {
+                    $script:agent.Dispose()
+                    $script:agent = $null
+                    $script:agentPath = $null
+                }
+            } catch { }
+            $childrenStopped = ($null -eq $script:agent)
+        }
+    }
+    if ($null -ne $script:tokenOwnerScope) {
+        if ($childrenStopped) {
+            try {
+                $script:tokenOwnerScope.Dispose()
+                $script:tokenOwnerFacts.restoredToOriginalOwner = $script:tokenOwnerScope.RestoredToOriginalOwner
+                Add-Event 'runner_default_owner_restore' 'passed' @{ restoredToOriginalOwner = $script:tokenOwnerFacts.restoredToOriginalOwner }
+            } catch {
+                $script:tokenOwnerFacts.restoredToOriginalOwner = $false
+                $script:result = 'failed'
+                if ($null -eq $script:failure) { $script:failure = 'runner_default_owner_restore:' + $_.Exception.GetType().Name }
+                Add-Event 'runner_default_owner_restore' 'failed' @{ exceptionType = $_.Exception.GetType().Name }
+            }
+        } else {
+            $script:tokenOwnerFacts.restoredToOriginalOwner = $false
+            $script:tokenOwnerFacts.restoreSkipped = 'owned_agent_still_running'
+            $script:result = 'failed'
+            if ($null -eq $script:failure) { $script:failure = 'runner_default_owner_restore:owned_agent_still_running' }
+            Add-Event 'runner_default_owner_restore' 'skipped' @{ reason = 'owned_agent_still_running' }
         }
     }
     if ($null -ne $script:startupAppData) { $env:APPDATA = $script:startupAppData }
@@ -559,6 +745,7 @@ try {
         finalInstallerExitCode = $script:finalInstallExit
         sameUserSidSha256 = $script:sidHash
         runnerTokenContext = $script:tokenFacts
+        tokenOwnerScope = $script:tokenOwnerFacts
         baselineFiles = $script:baselineFiles
         finalFiles = $script:finalFiles
         busyGuard = ($null -ne $script:busyInstallExit -and $script:busyInstallExit -ne 0)
