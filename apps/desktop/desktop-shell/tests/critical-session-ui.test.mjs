@@ -95,28 +95,32 @@ test('sign-in failure does not refresh or surface an error after the selected ac
   assert.equal(result.state.mutationBusy, 0);
 });
 
-test('account removal confirms the selected profile and sends a freshly refreshed auth generation', async () => {
+test('account removal uses a fresh scoped generation even while passive refresh is busy', async () => {
   const state = {
     accountEpoch: 4, selectedAccount: 'profile-a', accountRemovalSupported: true, agentReachable: true,
-    accountSwitching: false, mutationBusy: 0, accounts: [{ id: 'profile-a', label: 'Work' }],
+    accountSwitching: false, mutationBusy: 0, busy: true, accounts: [{ id: 'profile-a', label: 'Work' }],
     status: { auth_generation: 8 }, error: '', message: ''
   };
   const requests = [];
-  const refreshes = [];
   const context = {
     state,
     confirmAccountAction: async text => { assert.match(text, /Remove account “Work”/); assert.match(text, /saved vault-password access will be revoked/); return true; },
     isCurrentAccount: (epoch, profile) => epoch === state.accountEpoch && profile === state.selectedAccount,
-    refresh: async () => { refreshes.push(true); state.status = { ...state.status, auth_generation: 8 }; },
-    request: async (action, args) => { requests.push({ action, args }); return { removed_profile_id: 'profile-a', selected: null, local_data_preserved: true, credentials_revoked: true }; },
+    request: async (action, args) => {
+      requests.push({ action, args });
+      if (action === 'status') return { profile_id: 'profile-a', auth_generation: 8 };
+      return { removed_profile_id: 'profile-a', selected: null, local_data_preserved: true, credentials_revoked: true };
+    },
     syncAccounts: async () => {},
     render: () => {},
     messageOf: String,
     isStaleAccountRequest: () => false
   };
   await evaluateFunction('removeSelectedAccount', context)();
-  assert.deepEqual(JSON.parse(JSON.stringify(requests)), [{ action: 'account_remove', args: { profile_id: 'profile-a', expected_auth_generation: 8, confirm: true } }]);
-  assert.equal(refreshes.length, 1);
+  assert.deepEqual(JSON.parse(JSON.stringify(requests)), [
+    { action: 'status', args: { profile_id: 'profile-a' } },
+    { action: 'account_remove', args: { profile_id: 'profile-a', expected_auth_generation: 8, confirm: true } }
+  ]);
   assert.equal(state.message, 'Removed Work. Local files and recovery copies were preserved.');
   assert.equal(state.mutationBusy, 0);
 });
@@ -134,9 +138,9 @@ test('removing the last account exposes Add/Restore and cannot start sign-in wit
     state,
     confirmAccountAction: async () => true,
     isCurrentAccount: (epoch, profile) => epoch === state.accountEpoch && profile === state.selectedAccount,
-    refresh: async () => { state.status = { auth_generation: 12 }; },
     request: async (action, args) => {
       removalCalls.push({ action, args });
+      if (action === 'status') return { profile_id: 'last-profile', auth_generation: 12 };
       return { removed_profile_id: 'last-profile', selected: null, local_data_preserved: true, credentials_revoked: true };
     },
     syncAccounts: async () => {
@@ -163,7 +167,7 @@ test('removing the last account exposes Add/Restore and cannot start sign-in wit
   await beginSignIn();
   assert.deepEqual(authCalls, []);
   assert.match(state.error, /Add or restore an account/);
-  assert.equal(removalCalls[0].action, 'account_remove');
+  assert.ok(removalCalls.some(call => call.action === 'account_remove'));
 });
 
 function accountRenameHarness({ switchBeforeSave = false, staleExpectedLabel = false } = {}) {
@@ -232,8 +236,10 @@ test('account removal rejects a same-profile reauthentication during the confirm
     state,
     confirmAccountAction: async () => { state.status = { auth_generation: 9 }; return true; },
     isCurrentAccount: (epoch, profile) => epoch === state.accountEpoch && profile === state.selectedAccount,
-    refresh: async () => { state.status = { ...state.status }; },
-    request: async () => { requestCount++; }, syncAccounts: async () => {}, render: () => {},
+    request: async action => {
+      if (action === 'status') return { profile_id: 'profile-a', auth_generation: 9 };
+      requestCount++;
+    }, syncAccounts: async () => {}, render: () => {},
     messageOf: String, isStaleAccountRequest: () => false
   };
   await evaluateFunction('removeSelectedAccount', context)();
@@ -242,7 +248,7 @@ test('account removal rejects a same-profile reauthentication during the confirm
   assert.equal(state.mutationBusy, 0);
 });
 
-test('account removal emits no RPC if confirmation is followed by a queued or failed refresh', async () => {
+test('account removal emits no mutation if its fresh scoped status request fails', async () => {
   const state = {
     accountEpoch: 4, selectedAccount: 'profile-a', accountRemovalSupported: true, agentReachable: true,
     accountSwitching: false, mutationBusy: 0, busy: false, accounts: [{ id: 'profile-a', label: 'Work' }],
@@ -252,12 +258,58 @@ test('account removal emits no RPC if confirmation is followed by a queued or fa
   const context = {
     state, confirmAccountAction: async () => true,
     isCurrentAccount: (epoch, profile) => epoch === state.accountEpoch && profile === state.selectedAccount,
-    refresh: async () => {}, request: async () => { requestCount++; }, syncAccounts: async () => {}, render: () => {},
+    request: async action => { if (action === 'status') throw new Error('temporary read failure'); requestCount++; }, syncAccounts: async () => {}, render: () => {},
     messageOf: String, isStaleAccountRequest: () => false
   };
   await evaluateFunction('removeSelectedAccount', context)();
   assert.equal(requestCount, 0);
   assert.match(state.error, /could not refresh this account’s sign-in status/);
+});
+
+test('account removal emits no mutation if the scoped status response belongs to another profile', async () => {
+  const state = {
+    accountEpoch: 4, selectedAccount: 'profile-a', accountRemovalSupported: true, agentReachable: true,
+    accountSwitching: false, mutationBusy: 0, accounts: [{ id: 'profile-a', label: 'Work' }],
+    status: { auth_generation: 3 }, error: '', message: ''
+  };
+  let removalCount = 0;
+  const context = {
+    state, confirmAccountAction: async () => true,
+    isCurrentAccount: (epoch, profile) => epoch === state.accountEpoch && profile === state.selectedAccount,
+    request: async action => {
+      if (action === 'status') return { profile_id: 'profile-b', auth_generation: 3 };
+      removalCount++;
+    }, syncAccounts: async () => {}, render: () => {},
+    messageOf: String, isStaleAccountRequest: () => false
+  };
+  await evaluateFunction('removeSelectedAccount', context)();
+  assert.equal(removalCount, 0);
+  assert.match(state.error, /could not refresh this account’s sign-in status/);
+});
+
+test('account removal emits no mutation if selection changes during the scoped status request', async () => {
+  const state = {
+    accountEpoch: 4, selectedAccount: 'profile-a', accountRemovalSupported: true, agentReachable: true,
+    accountSwitching: false, mutationBusy: 0, accounts: [{ id: 'profile-a', label: 'Work' }],
+    status: { auth_generation: 3 }, error: '', message: ''
+  };
+  let removalCount = 0;
+  const context = {
+    state, confirmAccountAction: async () => true,
+    isCurrentAccount: (epoch, profile) => epoch === state.accountEpoch && profile === state.selectedAccount,
+    request: async action => {
+      if (action === 'status') {
+        state.accountEpoch++;
+        state.selectedAccount = 'profile-b';
+        return { profile_id: 'profile-a', auth_generation: 3 };
+      }
+      removalCount++;
+    }, syncAccounts: async () => {}, render: () => {},
+    messageOf: String, isStaleAccountRequest: () => false
+  };
+  await evaluateFunction('removeSelectedAccount', context)();
+  assert.equal(removalCount, 0);
+  assert.equal(state.mutationBusy, 0);
 });
 
 test('account removal stops if selection changes while confirmation is open', async () => {

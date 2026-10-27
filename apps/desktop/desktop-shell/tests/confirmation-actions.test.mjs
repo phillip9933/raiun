@@ -39,6 +39,7 @@ function harness() {
     refreshEncryptedRetryLatestStatuses: async () => {},
     request: async (action, payload) => {
       calls.push({ action, payload: structuredClone(payload) });
+      if (action === 'status') return { profile_id: 'profile-a', auth_generation: 7 };
       if (action === 'space_disconnect') return { space_id: 'space-a', removed_pair_ids: ['alpha-one', 'alpha-two'] };
       if (action === 'vault_pin_remove') return { removed: true };
       if (action === 'resolve_conflict') return { recovery_path: '/synthetic-recovery' };
@@ -67,8 +68,12 @@ test('all confirmed actions wait for explicit approval; Cancel emits no RPC and 
       assert.equal(h.prompts.length, 1); assert.equal(h.state.nativeDialogBusy, true); assert.equal(h.calls.length, 0);
       assert.equal(h.prompts[0].options.okLabel, 'OK'); assert.equal(h.prompts[0].options.cancelLabel, 'Cancel');
       h.dialog.resolve(approval); await pending;
-      assert.equal(h.state.nativeDialogBusy, false); assert.equal(h.calls.length, approval ? 1 : 0);
-      if (approval) assert.equal(h.calls[0].action, action);
+      assert.equal(h.state.nativeDialogBusy, false);
+      assert.equal(h.calls.length, approval ? (action === 'account_remove' ? 2 : 1) : 0);
+      if (approval) {
+        if (action === 'account_remove') assert.deepEqual(h.calls.map(call => call.action), ['status', action]);
+        else assert.equal(h.calls[0].action, action);
+      }
     }
   });
 });

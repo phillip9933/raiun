@@ -3134,17 +3134,27 @@ async function removeSelectedAccount() {
   const confirmed = await confirmAccountAction(`Remove account “${account.label}”? Raiun will sign out and revoke access. Local files and saved recovery copies stay on this computer. Any saved vault-password access will be revoked; you will need each vault password again. You can restore the account later, but you will need to sign in again.`);
   if (!confirmed || !isCurrentAccount(epoch, profileId) || !state.accountRemovalSupported || !state.agentReachable || !state.accounts.some(item => item.id === profileId)) return;
   state.error = '';
-  const priorStatus = state.status;
-  await refresh(false);
-  if (!isCurrentAccount(epoch, profileId) || !state.accountRemovalSupported || !state.agentReachable || state.busy || state.status === priorStatus ||
-      (state.status?.profile_id != null && state.status.profile_id !== profileId) || !state.accounts.some(item => item.id === profileId)) {
+  let freshStatus: Status;
+  try {
+    // Read the selected profile directly. A passive overview refresh may be busy,
+    // queued, or unchanged; it is not evidence that this confirmation is current.
+    freshStatus = await request<Status>('status', { profile_id: profileId });
+  } catch (error) {
+    if (isCurrentAccount(epoch, profileId) && !isStaleAccountRequest(error)) {
+      state.error = 'Raiun could not refresh this account’s sign-in status. Refresh and try again.';
+      render();
+    }
+    return;
+  }
+  if (!isCurrentAccount(epoch, profileId) || !state.accountRemovalSupported || !state.agentReachable ||
+      freshStatus.profile_id !== profileId || !state.accounts.some(item => item.id === profileId)) {
     if (isCurrentAccount(epoch, profileId)) {
       state.error = 'Raiun could not refresh this account’s sign-in status. Refresh and try again.';
       render();
     }
     return;
   }
-  const authGeneration = state.status?.auth_generation;
+  const authGeneration = freshStatus.auth_generation;
   if (!Number.isSafeInteger(authGeneration) || (authGeneration ?? -1) < 0 || authGeneration !== reviewedAuthGeneration) {
     state.error = 'This account’s sign-in changed while confirmation was open. Review removal again.';
     render();
