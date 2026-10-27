@@ -457,12 +457,11 @@ impl ProfileManager {
         }
         let result = (|| {
             runtime.logout_for_removal(Some(generation))?;
-            if runtime.vault_cleanup_uncertain.load(Ordering::Acquire) {
-                return Err(
-                    "Signed out, but remembered password cleanup is uncertain; retry removal"
-                        .into(),
-                );
-            }
+            // Successful logout durably revokes the saved-password authority.
+            // Secret Service cannot prove physical deletion of locked items;
+            // that separate uncertainty must not undo account retirement.
+            let vault_password_cleanup_uncertain =
+                runtime.vault_cleanup_uncertain.load(Ordering::Acquire);
             runtime.shutdown_safely()?;
             let mut state = self.state.lock().map_err(|_| "Profile state poisoned")?;
             let mut next = state.registry.clone();
@@ -478,7 +477,7 @@ impl ProfileManager {
             let selected = (!next.removed.contains(&next.selected)).then(|| next.selected.clone());
             state.registry = next;
             Ok(
-                json!({"removed_profile_id":id,"selected":selected,"local_data_preserved":true,"credentials_revoked":true}),
+                json!({"removed_profile_id":id,"selected":selected,"local_data_preserved":true,"credentials_revoked":true,"vault_password_cleanup_uncertain":vault_password_cleanup_uncertain}),
             )
         })();
         if result.is_err() {
@@ -1471,21 +1470,21 @@ mod tests {
     }
 
     #[test]
-    fn removal_uncertain_password_cleanup_keeps_profile_visible() {
+    fn removal_preserves_physical_cleanup_uncertainty_after_authority_revocation() {
         let temp = tempdir().unwrap();
-        let (manager, _) = removal_fixture(temp.path(), false);
+        let (manager, credentials) = removal_fixture(temp.path(), false);
         manager.state.lock().unwrap().runtimes[DEFAULT_ID]
             .vault_cleanup_uncertain
             .store(true, Ordering::Release);
-        let error = manager.handle(json!({"action":"account_remove","profile_id":"default","expected_auth_generation":0,"confirm":true})).unwrap_err();
-        assert!(error.contains("cleanup is uncertain"));
-        assert_eq!(manager.accounts().unwrap()["items"][0]["id"], "default");
-        assert!(
-            manager.accounts().unwrap()["removed_items"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
+        let removed = manager.handle(json!({"action":"account_remove","profile_id":"default","expected_auth_generation":0,"confirm":true})).unwrap();
+        assert_eq!(removed["credentials_revoked"], true);
+        assert_eq!(removed["vault_password_cleanup_uncertain"], true);
+        assert_eq!(credentials.lock().unwrap().len(), 1);
+        assert!(manager.accounts().unwrap()["items"].as_array().unwrap().is_empty());
+        assert_eq!(manager.accounts().unwrap()["removed_items"][0]["id"], "default");
+        let restored = manager.handle(json!({"action":"account_restore","profile_id":"default","confirm":true})).unwrap();
+        assert_eq!(restored["sign_in_required"], true);
+        assert!(manager.state.lock().unwrap().runtimes[DEFAULT_ID].settings.lock().unwrap().server.is_none());
         manager.request_shutdown().unwrap();
     }
 

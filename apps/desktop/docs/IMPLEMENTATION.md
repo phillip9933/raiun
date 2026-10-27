@@ -3094,47 +3094,60 @@ original whole-case failures remain failures, paired with the focused passing
 recovery evidence rather than retroactively relabeled.
 
 
-## 0.7.4 local integration — 27 October 2026
+## 0.7.4 candidate acceptance — 27 October 2026
 
-The isolated candidate is based on published beta.3 and its documentation closeout.
-It carries the prepared frontend work, generation-bound account removal and
-explicit same-ID restoration for Linux and Windows, and a pinned Tauri NSIS
-template that defaults upgrades to in-place installation. Linux retirement retains
-registry rows and inactive runtime settings for path exclusions; Windows retains
-root/source/vault reservations and does not instantiate retired runtimes. Both
-use existing scoped logout/credential revocation and safe shutdown before durable
-retirement. No local/cloud data or protected recovery/history is deleted.
+The isolated candidate starts from published beta.3. It adds the approved desktop
+workspace/appearance changes, generation-bound account removal, same-ID restore,
+label-only account rename, and in-place Windows installer upgrades with a safe
+running-process guard. Removing an account revokes saved sign-in and remembered
+vault-password authority, stops its runtime and retains local/cloud files,
+protected recovery/history and root/source/vault reservations. Restore requires
+a new sign-in and each vault password again.
 
-Linux focused tests use synthetic settings and a fake session store; test mode
-skips production Secret Service vault-password cleanup. Existing production
-revocation logic is reused and cleanup uncertainty blocks retirement. The Windows
-registry's portable harness passed; new Windows broker/runtime tests require MSVC
-execution. Local GNU checking could not compile bundled SQLite because MinGW GCC
-is absent; this is not a passing Windows check. Frontend checks are synthetic;
-automatic review denied the restarted localhost preview, so unfinished interactive
-flows remain unverified. Native package acceptance is pending; publication is not
-performed by this evidence update.
+Linux Secret Service revocation durably rotates the profile authority generation.
+It cannot prove physical removal of locked keyring items, even when clear reports
+success; such old-generation items are inaccessible to Raiun. Account retirement
+therefore depends on successful authority revocation, not on physical deletion.
+Authority read/write or sign-in revocation failures still stop retirement. The
+removal result retains `vault_password_cleanup_uncertain` separately and never
+claims that physical keyring erasure was confirmed. Native testing caught and
+retained the earlier incorrect gate that blocked every Linux removal. The Linux
+correction and its package acceptance are in progress; no physical-cleanup guard
+has been changed into an assumption that inaccessible keyrings are empty.
 
+Windows five-minute-token churn was confirmed on the affected deployment: beta.3
+refreshed when a token had at most 300 seconds left, so each successful 300-second
+refresh immediately triggered another. The candidate uses a 30-second lead. The
+Windows five-minute-token regression, account lifecycle tests and full MSVC
+workspace gates passed. The exact candidate at source `1c60b4e` was installed over
+beta.3 with exit 0 and all three installed executable hashes matching the package
+manifest. Both saved accounts restored without credential entry or reset and
+passed a 331-second observation: each had one normal renewal, no reported error
+and no rapid generation churn. A brief reconnecting state was observed during
+renewal; uninterrupted connectivity is not claimed. Cloud roots were not
+configured in that deployment test, so it does not establish mount/file-operation
+acceptance.
 
-The owner still reports a retained Windows sign-in that does not reconnect after
-beta.3, with no detailed error. The connection cause is not established. A
-confirmed secondary bug rejects valid Windows diagnostics: its unknown pause
-state is null and its runtime includes a cleanup extension not accepted by the
-old sanitizer. The candidate accepts that known shape, drops the cleanup body
-from public reports, rejects other unknown fields, and exports only bounded
-public release-version syntax for separate app/agent versions. Six focused
-diagnostics tests pass, including privacy canaries and older-agent metadata.
-Reconnect details are also retained inline rather than relying on a dismissed
-toast. This improves diagnosis; it does not prove the owner's connection fixed.
+The diagnostics sanitizer accepts the legitimate nullable Windows pause state
+and known cleanup extension, omits cleanup details from the exported report,
+rejects unexpected fields, and records bounded public shell/agent versions
+separately. Focused tests cover privacy canaries and older-agent metadata. Native
+agent diagnostics succeeded on both affected Windows accounts; the physical UI
+export button was not exercised there.
 
+The frozen cross-platform candidate passed independent Desktop checks run
+40463704146 and full Windows checks/package run 40463700987, with 245 frontend
+tests and production build passing locally. Its canonical Windows updater ZIP
+contains the exact admitted setup executable and was signed with the existing
+host-only Desktop updater key. The subsequent Linux-only authority-retirement
+correction changes no Windows runtime, installer, UI or update-policy source;
+Windows artifact/evidence reuse requires that explicit source comparison. Linux
+revalidation and focused native UI/package acceptance remain pending.
 
-The owner explicitly withdrew public Windows beta.2/beta.3 downloads while this
-issue is investigated and requested editable account names. Renaming changes only
-the selected active registry label with an exact expected-label check; profile
-IDs, credentials, roots and runtime generation are unchanged. The Windows refresh
-threshold of 300 seconds also makes five-minute access tokens immediately due on
-every status request, clearing the online flag repeatedly. The candidate changes
-the lead to 30 seconds and adds a loopback five-minute-token regression; Windows
-execution of that test remains required. The owner's actual token lifetime and
-connection cause have not yet been confirmed, so do not restore public Windows
-downloads or claim their deployment fixed based only on this candidate.
+Public Windows beta.2/beta.3 downloads remain withdrawn. PR #31 is a preparation
+candidate, not an app publication. The new stronger account colors, unified folder
+workflow and Android-style ignore rules are follow-up work in a separate checkout;
+they do not silently replace this tested candidate. The earlier browser preview
+was stopped after automatic approval denial; separate previously authorized
+packaged-app VM checks proceed independently. Test/harness failures are retained
+under the external task evidence directory rather than represented as passes.
