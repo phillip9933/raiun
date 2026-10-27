@@ -177,3 +177,16 @@ checks passed; a later emulator run had lock-screen/UI failures, retained and
 reported separately rather than treated as a passing run. Existing C01–C10 gaps
 remain open. Subsequent Desktop releases use numeric Beta versions, beginning
 with planned `0.7.4`; this bridge remains available to older updaters.
+
+
+### Windows beta withdrawal — owner request, 27 October 2026
+
+Windows beta.2 and beta.3 installers, updater archives and sidecar signatures were
+withdrawn from both public Desktop releases. Their update manifests/inventories
+now contain Linux only; checksums and distribution notes were refreshed. Linux
+AppImages and signatures are unchanged. Original Windows artifacts and release
+metadata remain preserved in maintainer-local evidence. The owner reports the
+same reconnecting-saved-sign-in failure on a newly added account, and diagnostics
+export fails. The connection cause is not yet confirmed. Do not claim Windows
+public beta readiness from the earlier synthetic acceptance or restore these
+downloads without verified resolution and owner authorization.

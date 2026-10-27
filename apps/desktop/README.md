@@ -1,5 +1,7 @@
 # Raiun Desktop
 
+> **Windows beta withdrawn — 27 October 2026.** Windows beta.2 and beta.3 installers and updater packages have been removed while a reported sign-in/reconnection failure affecting both Default and newly added accounts is investigated. Linux downloads and Linux update support remain available. Earlier Windows acceptance notes describe synthetic checks and do not establish resolution of this deployment issue.
+
 An OpenCloud desktop client for Linux and Windows with a Rust background engine, a Tauri
 tray/settings UI, and a separate filesystem root per account:
 
