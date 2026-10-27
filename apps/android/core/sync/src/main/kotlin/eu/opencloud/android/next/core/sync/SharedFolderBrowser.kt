@@ -6,6 +6,7 @@ import eu.opencloud.android.next.core.database.SharedFolderCacheStore
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.network.RemoteDiscoveryClient
+import eu.opencloud.android.next.core.network.RemoteFolderSink
 import eu.opencloud.android.next.core.network.RemoteFolderSnapshot
 import eu.opencloud.android.next.core.network.RemoteResource
 import eu.opencloud.android.next.core.network.SharedMetadataException
@@ -28,6 +29,10 @@ class SharedFolderBrowser(
             String,
         ) -> RemoteFolderSnapshot
     )? = null,
+    private val stagingDirectory: java.io.File? = null,
+    private val streamSnapshot: (
+        suspend (CheckedShareAccess, SharedFolderLocation, String, RemoteFolderSink) -> RemoteFolderSnapshot
+    )? = null,
     private val fetch: suspend (CheckedShareAccess, SharedFolderLocation, String) -> List<RemoteResource>,
 ) {
     suspend fun open(
@@ -47,6 +52,54 @@ class SharedFolderBrowser(
         path: String,
     ): SharedFolderPage = browse(accountId, shareId, path, scopeId)
 
+    /** Refresh metadata and isolated indexes without materializing all children. */
+    suspend fun openMetadata(
+        accountId: String,
+        shareId: String,
+    ): SharedFolderPage = browse(accountId, shareId, "/", null, retainItems = false)
+
+    internal suspend fun refreshBound(
+        accountId: String,
+        shareId: String,
+        scopeId: String,
+        path: String,
+    ): SharedFolderPage = browse(accountId, shareId, path, scopeId, retainItems = false)
+
+    suspend fun find(
+        page: SharedFolderPage,
+        remoteId: String,
+    ): RemoteResource? {
+        if (!access.isCurrent(page.checked)) stale()
+        val item =
+            if (cache == null) {
+                page.items.singleOrNull { it.id == remoteId }
+            } else {
+                cache.find(page.checked, page.location, remoteId)?.takeIf { it.parentPath == page.path }?.resource()
+            }
+        if (!access.isCurrent(page.checked)) stale()
+        return item
+    }
+
+    internal suspend fun findPath(
+        page: SharedFolderPage,
+        path: String,
+    ): RemoteResource? {
+        requireSharedPath(path)
+        if (path.substringBeforeLast('/').ifEmpty { "/" } != page.path) stale()
+        if (!access.isCurrent(page.checked)) stale()
+        val item =
+            if (cache == null) {
+                if (path in page.excludedVaultPaths) throw OpenCloudException(OpenCloudError.Unsupported)
+                page.items.singleOrNull { it.path == path }
+            } else {
+                val result = cache.findPath(page.checked, page.location, page.path, path) ?: stale()
+                if (result.second) throw OpenCloudException(OpenCloudError.Unsupported)
+                result.first?.resource()
+            }
+        if (!access.isCurrent(page.checked)) stale()
+        return item
+    }
+
     suspend fun isCurrent(page: SharedFolderPage): Boolean = access.isCurrent(page.checked)
 
     /** A remembered folder path must still identify the same folder before listing its children. */
@@ -65,11 +118,135 @@ class SharedFolderBrowser(
         return list(page.location, folder.path)
     }
 
+    /** Resolves remembered identity and refreshes using bounded staging, without a list-returning discovery. */
+    suspend fun refreshFolder(request: SharedFolderRequest): SharedFolderPage {
+        requireSharedPath(request.path)
+        if (request.remoteId.isBlank()) stale()
+        if (cache == null) return openFolder(request)
+        return refreshCachedFolder(request)
+    }
+
+    /** Opens a remembered folder through fresh metadata while retaining no complete child list. */
+    suspend fun openFolderMetadata(request: SharedFolderRequest): SharedFolderPage = refreshFolder(request)
+
+    private suspend fun refreshCachedFolder(request: SharedFolderRequest): SharedFolderPage {
+        if (request.path == "/") return refreshCachedRoot(request)
+        val parent = request.path.substringBeforeLast('/').ifEmpty { "/" }
+        val page = browse(request.account, request.share, parent, request.scope, retainItems = false)
+        val entry = cache?.find(page.checked, page.location, request.remoteId) ?: stale()
+        if (!entry.isFolder || entry.path != request.path || entry.parentPath != parent) stale()
+        if (!access.isCurrent(page.checked)) stale()
+        return browse(request.account, request.share, request.path, request.scope, retainItems = false)
+    }
+
+    private suspend fun refreshCachedRoot(request: SharedFolderRequest): SharedFolderPage {
+        val page = browse(request.account, request.share, "/", request.scope, retainItems = false)
+        if (page.location.rootItemId != request.remoteId) stale()
+        return page
+    }
+
+    suspend fun displayPage(
+        page: SharedFolderPage,
+        offset: Int,
+    ): Pair<List<eu.opencloud.android.next.core.database.SharedFolderEntry>, Int> {
+        if (!access.isCurrent(page.checked)) stale()
+        require(offset >= 0)
+        val result =
+            cache?.displayPage(page.checked, page.location, page.path, offset)
+                ?: if (cache == null) {
+                    page.items.drop(offset).take(256).map { item ->
+                        eu.opencloud.android.next.core.database.SharedFolderEntry(
+                            page.location.accountId,
+                            page.location.scopeId,
+                            item.id,
+                            page.path,
+                            item.path,
+                            item.name,
+                            item.folder,
+                            item.mimeType,
+                            item.size,
+                            item.eTag,
+                            item.modifiedAtEpochMillis,
+                            item.createdAtEpochMillis,
+                        )
+                    } to page.items.size
+                } else {
+                    stale()
+                }
+        if (!access.isCurrent(page.checked)) stale()
+        return result
+    }
+
+    /** Pins provider pagination to one atomically counted cache generation. */
+    suspend fun captureDisplaySnapshot(page: SharedFolderPage): SharedFolderPageCursorSnapshot {
+        if (!access.isCurrent(page.checked)) stale()
+        val snapshot =
+            cache?.captureDisplaySnapshot(page.checked, page.location, page.path)
+                ?: if (cache == null) {
+                    eu.opencloud.android.next.core.database
+                        .SharedFolderDisplaySnapshot(page.items.size, 0)
+                } else {
+                    stale()
+                }
+        if (!access.isCurrent(page.checked)) stale()
+        return SharedFolderPageCursorSnapshot(snapshot.total, snapshot.revision)
+    }
+
+    suspend fun displayPage(
+        page: SharedFolderPage,
+        offset: Int,
+        revision: Long,
+    ): List<eu.opencloud.android.next.core.database.SharedFolderEntry> {
+        if (!access.isCurrent(page.checked)) stale()
+        require(offset >= 0)
+        val result =
+            cache?.displayPageAtRevision(page.checked, page.location, page.path, offset, revision)
+                ?: if (cache == null && revision == 0L) {
+                    page.items.drop(offset).take(256).map { item ->
+                        eu.opencloud.android.next.core.database.SharedFolderEntry(
+                            page.location.accountId,
+                            page.location.scopeId,
+                            item.id,
+                            page.path,
+                            item.path,
+                            item.name,
+                            item.folder,
+                            item.mimeType,
+                            item.size,
+                            item.eTag,
+                            item.modifiedAtEpochMillis,
+                            item.createdAtEpochMillis,
+                        )
+                    }
+                } else {
+                    stale()
+                }
+        if (!access.isCurrent(page.checked)) stale()
+        return result
+    }
+
+    suspend fun isDisplaySnapshotCurrent(
+        page: SharedFolderPage,
+        revision: Long,
+    ): Boolean =
+        access.isCurrent(page.checked) &&
+            (cache?.isDisplayRevisionCurrent(page.checked, page.location, page.path, revision) ?: (revision == 0L))
+
+    /** Refreshes the isolated cache without retaining the shared directory in the caller's heap. */
+    suspend fun refresh(
+        location: SharedFolderLocation,
+        path: String,
+    ) {
+        browse(location.accountId, location.shareId, path, location.scopeId, retainItems = false)
+    }
+
+    @Suppress("CyclomaticComplexMethod") // Compatibility and streaming routes share one checked-access boundary.
     private suspend fun browse(
         accountId: String,
         shareId: String,
         path: String,
         expectedScope: String?,
+        retainItems: Boolean = true,
     ): SharedFolderPage {
         requireSharedPath(path)
         val checked = access.resolve(accountId, shareId) ?: stale()
@@ -78,6 +255,39 @@ class SharedFolderBrowser(
         if (!access.isCurrent(checked)) stale()
         val cacheToken = cache?.let { it.begin(checked, location, path) ?: stale() }
         currentCoroutineContext().ensureActive()
+        if (streamSnapshot != null && stagingDirectory != null && cacheToken != null) {
+            return withContext(Dispatchers.IO) {
+                StagedRemoteFolder.create(stagingDirectory).use { staged ->
+                    val job = currentCoroutineContext()
+                    val metadata =
+                        streamSnapshot.invoke(
+                            checked,
+                            location,
+                            path,
+                            RemoteFolderSink(
+                                registerCanonicalPath = { value ->
+                                    job.ensureActive()
+                                    staged.registerCanonicalPath(value)
+                                },
+                                registerCollectionId = { value ->
+                                    job.ensureActive()
+                                    staged.registerCollectionId(value)
+                                },
+                                onEntry = { entry ->
+                                    job.ensureActive()
+                                    staged.add(entry)
+                                },
+                            ),
+                        )
+                    staged.finish()
+                    job.ensureActive()
+                    if (!access.isCurrent(checked)) stale()
+                    if (cache?.saveStaged(checked, location, path, cacheToken, staged, metadata) != true) stale()
+                    if (path in metadata.excludedVaultPaths) throw OpenCloudException(OpenCloudError.Unsupported)
+                    materializePage(staged, checked, location, path, metadata, retainItems)
+                }
+            }
+        }
         val snapshot =
             fetchSnapshot?.invoke(checked, location, path)
                 ?: RemoteFolderSnapshot(fetch(checked, location, path), emptySet())
@@ -100,7 +310,52 @@ class SharedFolderBrowser(
             if (cache?.save(page, cacheToken) != true) stale()
         }
         if (requestedCollectionExcluded) throw OpenCloudException(OpenCloudError.Unsupported)
-        return page
+        return if (retainItems || cache == null) {
+            page
+        } else {
+            SharedFolderPage(
+                location,
+                path,
+                emptyList(),
+                checked,
+                snapshot.excludedVaultPaths,
+                snapshot.plainCollectionConfirmed,
+            )
+        }
+    }
+
+    @Suppress("LongParameterList") // Compatibility list publication shares the checked snapshot identity.
+    private suspend fun materializePage(
+        staged: StagedRemoteFolder,
+        checked: CheckedShareAccess,
+        location: SharedFolderLocation,
+        path: String,
+        metadata: RemoteFolderSnapshot,
+        retainItems: Boolean,
+    ): SharedFolderPage {
+        val job = currentCoroutineContext()
+        val items = mutableListOf<RemoteResource>()
+        val exclusions = mutableSetOf<String>()
+        if (retainItems) {
+            var after = 0L
+            while (true) {
+                job.ensureActive()
+                val batch = staged.page(after)
+                if (batch.isEmpty()) break
+                after = batch.last().sequence
+                batch.forEach { row ->
+                    row.entry.resource?.let(items::add) ?: exclusions.add(row.entry.path)
+                }
+            }
+        }
+        return SharedFolderPage(
+            location,
+            path,
+            items,
+            checked,
+            exclusions,
+            metadata.plainCollectionConfirmed,
+        )
     }
 
     private fun validateListing(
@@ -155,6 +410,7 @@ class SharedFolderBrowser(
     private fun stale(): Nothing = throw OpenCloudException(OpenCloudError.PreconditionFailed)
 
     companion object {
+        @Suppress("ThrowsCount") // Every network route rechecks the live share lease.
         fun create(context: Context): SharedFolderBrowser {
             val app = context.applicationContext
             val access = IncomingShareAccessRepository.create(app)
@@ -165,6 +421,14 @@ class SharedFolderBrowser(
             return SharedFolderBrowser(
                 access,
                 cache,
+                stagingDirectory = app.cacheDir,
+                streamSnapshot = { checked, location, path, sink ->
+                    val account = checked.lease.account
+                    val authorization = WorkerAuthorizationProvider(app).authorization(account)
+                    if (!access.isCurrent(checked)) throw OpenCloudException(OpenCloudError.PreconditionFailed)
+                    val http = TlsPolicy(app).applyTo(OkHttpClient(), account.serverUrl)
+                    RemoteDiscoveryClient(http).streamSharedFolder(location.rootWebDavUrl, path, authorization, sink)
+                },
                 fetch = { checked, location, path ->
                     val account = checked.lease.account
                     val authorization = WorkerAuthorizationProvider(app).authorization(account)
@@ -197,6 +461,11 @@ class SharedFolderPage internal constructor(
     internal val plainCollectionConfirmed: Boolean = false,
 )
 
+data class SharedFolderPageCursorSnapshot(
+    val total: Int,
+    val revision: Long,
+)
+
 data class SharedFolderRequest(
     val account: String,
     val share: String,
@@ -204,3 +473,16 @@ data class SharedFolderRequest(
     val remoteId: String,
     val path: String,
 )
+
+private fun eu.opencloud.android.next.core.database.SharedFolderEntry.resource() =
+    RemoteResource(
+        remoteId,
+        path,
+        name,
+        isFolder,
+        mimeType,
+        sizeBytes,
+        eTag,
+        modifiedAtEpochMillis,
+        createdAtEpochMillis,
+    )

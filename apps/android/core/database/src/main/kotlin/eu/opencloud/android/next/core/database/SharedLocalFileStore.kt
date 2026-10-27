@@ -38,6 +38,13 @@ data class SharedLocalFile(
 
 @Dao
 interface SharedLocalFileDao {
+    @Query("SELECT * FROM shared_local_files WHERE accountId = :account AND scopeId = :scope AND remoteId IN (:ids)")
+    fun observePage(
+        account: String,
+        scope: String,
+        ids: List<String>,
+    ): Flow<List<SharedLocalFile>>
+
     @Query("SELECT * FROM shared_local_files WHERE accountId = :account ORDER BY scopeId, remoteId")
     fun observe(account: String): Flow<List<SharedLocalFile>>
 

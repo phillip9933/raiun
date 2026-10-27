@@ -167,7 +167,8 @@ data class SettingsDiagnostics(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-@Suppress("LongParameterList") // Screen navigation, actions, modifier and diagnostics are explicit Compose inputs.
+// Explicit subpage navigation keeps Back behavior and state in one place.
+@Suppress("LongParameterList", "CyclomaticComplexMethod")
 fun SettingsScreen(
     state: UserSettings,
     onNavigateBack: () -> Unit,
@@ -190,10 +191,12 @@ fun SettingsScreen(
     var temporaryFilesOpen by rememberSaveable { mutableStateOf(false) }
     var encryptedPreferencesOpen by rememberSaveable { mutableStateOf(false) }
     var updatesOpen by rememberSaveable(openUpdatesInitially) { mutableStateOf(openUpdatesInitially) }
+    var connectionOpen by rememberSaveable { mutableStateOf(false) }
     var permissionsOpen by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = updatesOpen) { updatesOpen = false }
     BackHandler(enabled = !updatesOpen) {
         when {
+            connectionOpen -> connectionOpen = false
             openingFiles -> openingFiles = false
             appearanceOpen -> appearanceOpen = false
             temporaryFilesOpen -> temporaryFilesOpen = false
@@ -204,6 +207,7 @@ fun SettingsScreen(
     }
     Box(modifier = modifier.fillMaxSize()) {
         when {
+            connectionOpen -> AccountServerConnectionScreen(accountId) { connectionOpen = false }
             updatesOpen -> AppUpdatesRoute(onNavigateBack = { updatesOpen = false })
             openingFiles -> OpeningFilesScreen(state.fileOpening, onFileOpening) { openingFiles = false }
             appearanceOpen ->
@@ -258,6 +262,7 @@ fun SettingsScreen(
                             { temporaryFilesOpen = true },
                             { openingFiles = true },
                             { updatesOpen = true },
+                            ({ connectionOpen = true }).takeIf { accountId != null },
                         )
                     }
                 }

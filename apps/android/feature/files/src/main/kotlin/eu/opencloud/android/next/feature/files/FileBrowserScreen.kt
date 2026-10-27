@@ -231,6 +231,8 @@ fun FileBrowserRoute(
             onExport = exportFile,
             onDismissExportStatus = viewModel::dismissExportStatus,
             onRefresh = viewModel::refresh,
+            onDirectoryPage = viewModel::directoryPage,
+            onDirectorySort = viewModel::setDirectorySort,
             onMoveSelection = viewModel::moveSelection,
             onCopySelection = viewModel::copySelection,
             onFavoriteSelection = viewModel::favoriteSelection,
@@ -423,6 +425,8 @@ fun FileBrowserScreen(
     onDismissExportStatus: () -> Unit = {},
     onRemoveLocalCopy: (ResourceEntity) -> Unit = {},
     onScan: () -> Unit = {},
+    onDirectoryPage: (Boolean) -> Unit = {},
+    onDirectorySort: (String, Boolean) -> Unit = { _, _ -> },
     pinnedNavigationItems: List<NavigationItem> = DEFAULT_PINNED_NAVIGATION_ITEMS,
 ) {
     var dialog by remember { mutableStateOf<BrowserDialog?>(null) }
@@ -431,6 +435,8 @@ fun FileBrowserScreen(
     var expandedAdd by rememberSaveable { mutableStateOf(false) }
     var sortCriterion by rememberSaveable(accountId) { mutableStateOf(BrowserSortCriterion.Name) }
     var sortAscending by rememberSaveable(accountId) { mutableStateOf(true) }
+    val currentDirectorySort by rememberUpdatedState(onDirectorySort)
+    LaunchedEffect(sortCriterion, sortAscending) { currentDirectorySort(sortCriterion.name, sortAscending) }
     var showSortMenu by remember { mutableStateOf(false) }
     var favoritesQuery by rememberSaveable(accountId) { mutableStateOf("") }
     // Keep the in-session tab selection through recomposition, but start a fresh app launch
@@ -600,7 +606,10 @@ fun FileBrowserScreen(
                                     stringResource(R.string.browser_delete_selected),
                                     onDeleteSelection,
                                 )
-                                if ((state.resources + state.searchResults + state.offlineResources).any {
+                                if ((
+                                        state.resources + state.searchResults + state.offlineResources +
+                                            state.selectedResources
+                                    ).any {
                                         it.selectionKey in state.selectedIds &&
                                             it.hasLocalCopy
                                     }
@@ -917,6 +926,19 @@ fun FileBrowserScreen(
                         } else {
                             emptyList()
                         }
+                    val directoryPage =
+                        state.directoryPage.takeIf {
+                            selectedDestination == FileBrowserDestination.Personal && state.searchQuery.isBlank()
+                        }
+                    val directoryEntries =
+                        directoryPage?.entries?.mapNotNull { item ->
+                            item.resource
+                                ?.takeUnless { it.matchesEncryptedFolder(encryptedFolders) }
+                                ?.let { MixedBrowserEntry(resource = it) }
+                                ?: encryptedFolders
+                                    .firstOrNull { it.directoryOverlayId == item.overlayId }
+                                    ?.let { MixedBrowserEntry(encrypted = it) }
+                        }
                     Column(Modifier.fillMaxSize()) {
                         if (selectedDestination == FileBrowserDestination.Personal) {
                             state.encryptedFoldersError?.let {
@@ -939,62 +961,75 @@ fun FileBrowserScreen(
                                 onClearSelection()
                             }
                         }
-                        Box(Modifier.weight(1f)) {
-                            if (selectedDestination == FileBrowserDestination.Favorites &&
-                                displayedResources.isEmpty()
-                            ) {
-                                FavoritesEmpty(contentPadding = padding)
-                            } else if (displayedResources.isEmpty() &&
-                                selectedDestination in
-                                setOf(FileBrowserDestination.Offline, FileBrowserDestination.Recents)
-                            ) {
-                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                    Text(
-                                        if (selectedDestination ==
-                                            FileBrowserDestination.Offline
-                                        ) {
-                                            stringResource(R.string.browser_no_downloaded_files)
-                                        } else {
-                                            stringResource(R.string.browser_opened_files_offline)
-                                        },
+                        androidx.compose.runtime.key(
+                            directoryPage?.offset,
+                            sortCriterion,
+                            sortAscending,
+                            state.spaceId,
+                            state.currentFolderId,
+                        ) {
+                            Box(Modifier.weight(1f)) {
+                                if (selectedDestination == FileBrowserDestination.Favorites &&
+                                    displayedResources.isEmpty()
+                                ) {
+                                    FavoritesEmpty(contentPadding = padding)
+                                } else if (displayedResources.isEmpty() &&
+                                    selectedDestination in
+                                    setOf(FileBrowserDestination.Offline, FileBrowserDestination.Recents)
+                                ) {
+                                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                        Text(
+                                            if (selectedDestination ==
+                                                FileBrowserDestination.Offline
+                                            ) {
+                                                stringResource(R.string.browser_no_downloaded_files)
+                                            } else {
+                                                stringResource(R.string.browser_opened_files_offline)
+                                            },
+                                        )
+                                    }
+                                } else if (state.layout == BrowserLayout.TILES) {
+                                    BrowserGrid(
+                                        offlinePins = state.offlinePins,
+                                        resources = displayedResources,
+                                        directoryEntries = directoryEntries,
+                                        encryptedFolders = encryptedFolders,
+                                        onOpenEncryptedLocation = onOpenEncryptedLocation,
+                                        onEncryptedLocationActions = onEncryptedLocationActions,
+                                        sortCriterion = sortCriterion,
+                                        sortAscending = sortAscending,
+                                        display = state.fileDisplay,
+                                        selectedIds = state.selectedIds,
+                                        selectionMode = selectionMode,
+                                        contentPadding = padding,
+                                        onOpen = onOpen,
+                                        onToggleSelection = onToggleSelection,
+                                        onShowActions = onShowActions,
+                                    )
+                                } else {
+                                    BrowserList(
+                                        offlinePins = state.offlinePins,
+                                        resources = displayedResources,
+                                        directoryEntries = directoryEntries,
+                                        encryptedFolders = encryptedFolders,
+                                        onOpenEncryptedLocation = onOpenEncryptedLocation,
+                                        onEncryptedLocationActions = onEncryptedLocationActions,
+                                        sortCriterion = sortCriterion,
+                                        sortAscending = sortAscending,
+                                        display = state.fileDisplay,
+                                        selectedIds = state.selectedIds,
+                                        selectionMode = selectionMode,
+                                        condensed = state.layout == BrowserLayout.CONDENSED_TABLE,
+                                        contentPadding = padding,
+                                        onOpen = onOpen,
+                                        onToggleSelection = onToggleSelection,
+                                        onShowActions = onShowActions,
                                     )
                                 }
-                            } else if (state.layout == BrowserLayout.TILES) {
-                                BrowserGrid(
-                                    offlinePins = state.offlinePins,
-                                    resources = displayedResources,
-                                    encryptedFolders = encryptedFolders,
-                                    onOpenEncryptedLocation = onOpenEncryptedLocation,
-                                    onEncryptedLocationActions = onEncryptedLocationActions,
-                                    sortCriterion = sortCriterion,
-                                    sortAscending = sortAscending,
-                                    display = state.fileDisplay,
-                                    selectedIds = state.selectedIds,
-                                    selectionMode = selectionMode,
-                                    contentPadding = padding,
-                                    onOpen = onOpen,
-                                    onToggleSelection = onToggleSelection,
-                                    onShowActions = onShowActions,
-                                )
-                            } else {
-                                BrowserList(
-                                    offlinePins = state.offlinePins,
-                                    resources = displayedResources,
-                                    encryptedFolders = encryptedFolders,
-                                    onOpenEncryptedLocation = onOpenEncryptedLocation,
-                                    onEncryptedLocationActions = onEncryptedLocationActions,
-                                    sortCriterion = sortCriterion,
-                                    sortAscending = sortAscending,
-                                    display = state.fileDisplay,
-                                    selectedIds = state.selectedIds,
-                                    selectionMode = selectionMode,
-                                    condensed = state.layout == BrowserLayout.CONDENSED_TABLE,
-                                    contentPadding = padding,
-                                    onOpen = onOpen,
-                                    onToggleSelection = onToggleSelection,
-                                    onShowActions = onShowActions,
-                                )
                             }
+                        }
+                        directoryPage?.let { page ->
+                            DirectoryPagingBar(page, onDirectoryPage)
                         }
                     }
                 }
@@ -1612,6 +1647,7 @@ private fun BrowserList(
     onEncryptedLocationActions: (VaultLocation) -> Unit = {},
     sortCriterion: BrowserSortCriterion = BrowserSortCriterion.Name,
     sortAscending: Boolean = true,
+    directoryEntries: List<MixedBrowserEntry>? = null,
 ) = ResourceBrowserContent(
     offlinePins,
     resources,
@@ -1628,6 +1664,7 @@ private fun BrowserList(
     onEncryptedLocationActions,
     sortCriterion,
     sortAscending,
+    directoryEntries,
 )
 
 @Composable
@@ -1647,6 +1684,7 @@ private fun BrowserGrid(
     onEncryptedLocationActions: (VaultLocation) -> Unit = {},
     sortCriterion: BrowserSortCriterion = BrowserSortCriterion.Name,
     sortAscending: Boolean = true,
+    directoryEntries: List<MixedBrowserEntry>? = null,
 ) = ResourceBrowserContent(
     offlinePins,
     resources,
@@ -1663,6 +1701,7 @@ private fun BrowserGrid(
     onEncryptedLocationActions,
     sortCriterion,
     sortAscending,
+    directoryEntries,
 )
 
 @Composable
@@ -1683,14 +1722,20 @@ private fun ResourceBrowserContent(
     onEncryptedLocationActions: (VaultLocation) -> Unit,
     sortCriterion: BrowserSortCriterion,
     sortAscending: Boolean,
+    directoryEntries: List<MixedBrowserEntry>?,
 ) {
     BrowserContent(
-        mixedBrowserEntries(resources, encryptedFolders, sortCriterion, sortAscending),
+        directoryEntries ?: mixedBrowserEntries(resources, encryptedFolders, sortCriterion, sortAscending),
         { it.key },
         layout,
         padding = contentPadding,
         footer = {
-            FolderSummary(resources.filterNot { it.matchesEncryptedFolder(encryptedFolders) }, encryptedFolders.size)
+            if (directoryEntries == null) {
+                FolderSummary(
+                    resources.filterNot { it.matchesEncryptedFolder(encryptedFolders) },
+                    encryptedFolders.size,
+                )
+            }
         },
     ) { entry ->
         val item = entry.resource
@@ -2106,6 +2151,7 @@ fun FolderBackupSettingsContent(
     transfers: List<TransferEntity> = emptyList(),
     sourceDisplayName: String? = null,
     onChooseSource: () -> Unit = {},
+    onBackupPickerPage: (Boolean) -> Unit = {},
     pickerState: FileBrowserUiState = FileBrowserUiState(),
     defaultSpaceId: String? = null,
     requireDestinationBinding: Boolean = false,
@@ -2313,6 +2359,7 @@ fun FolderBackupSettingsContent(
             onNavigateUp = onNavigateUp,
             onRetry = onOpenPicker,
             onCreateFolder = { showCreateFolder = true },
+            onPage = onBackupPickerPage,
             onSelect = { selected ->
                 destination = selected.path
                 destinationSpaceId = selected.spaceId
@@ -2863,3 +2910,31 @@ private fun initialBackupDatePattern(organization: String?): String =
         null, "NONE", "YEAR_MONTH" -> "[YYYY]/[MM]"
         else -> organization
     }
+
+@Composable
+private fun DirectoryPagingBar(
+    page: eu.opencloud.android.next.core.database.ResourceDirectoryPage,
+    onPage: (Boolean) -> Unit,
+) {
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = OpenCloudDimensions.SpacingSm),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        TextButton(onClick = { onPage(true) }, enabled = page.hasPrevious) {
+            Text(stringResource(R.string.browser_previous_page))
+        }
+        Text(
+            stringResource(
+                R.string.browser_page_range,
+                if (page.total == 0) 0 else page.offset + 1,
+                page.offset + page.entries.size,
+                page.total,
+            ),
+            style = MaterialTheme.typography.labelMedium,
+        )
+        TextButton(onClick = { onPage(false) }, enabled = page.hasNext) {
+            Text(stringResource(R.string.browser_next_page))
+        }
+    }
+}

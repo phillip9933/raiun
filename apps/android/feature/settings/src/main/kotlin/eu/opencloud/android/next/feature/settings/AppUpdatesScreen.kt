@@ -45,6 +45,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
@@ -56,12 +58,18 @@ import kotlinx.coroutines.launch
 
 class AppUpdatesViewModel(
     application: Application,
+    val manager: UpdateManager,
 ) : AndroidViewModel(application) {
-    val manager = RaiunUpdates.get(application)
+    constructor(application: Application) : this(application, RaiunUpdates.get(application))
+
     val state = manager.state
 
     fun check() {
         viewModelScope.launch { manager.checkNow() }
+    }
+
+    fun checkWhenDue() {
+        viewModelScope.launch { manager.checkNow(force = false) }
     }
 
     fun download() {
@@ -219,11 +227,30 @@ fun AppUpdatesScreen(
 /** Foreground-only offer; Android's installer is never opened by a background worker. */
 @Composable
 fun AppUpdateNotice(model: AppUpdatesViewModel = viewModel()) {
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { model.checkWhenDue() }
     val state by model.state.collectAsState()
+    AppUpdateNoticeDialog(
+        state = state,
+        onDismiss = model.manager::dismissOffer,
+        onDownload = model::download,
+        onCancel = model.manager::cancelDownload,
+        installControl = { UpdateInstallButton(model.manager) },
+    )
+}
+
+/** Presentation preserves the updater engine's persistent offer/dismissal policy. */
+@Composable
+fun AppUpdateNoticeDialog(
+    state: UpdateState,
+    onDismiss: () -> Unit,
+    onDownload: () -> Unit,
+    onCancel: () -> Unit,
+    installControl: @Composable () -> Unit,
+) {
     if (!state.offer || state.available == null) return
     AlertDialog(
-        onDismissRequest = model.manager::dismissOffer,
-        title = { Text(stringResource(R.string.updates_title)) },
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.updates_new_version_title)) },
         text = {
             Column(
                 Modifier.verticalScroll(rememberScrollState()),
@@ -235,12 +262,10 @@ fun AppUpdateNotice(model: AppUpdatesViewModel = viewModel()) {
             }
         },
         confirmButton = {
-            UpdatePrimaryAction(state, model::download, model.manager::cancelDownload) {
-                UpdateInstallButton(model.manager)
-            }
+            UpdatePrimaryAction(state, onDownload, onCancel, installControl)
         },
         dismissButton = {
-            TextButton(onClick = model.manager::dismissOffer) { Text(stringResource(R.string.updates_later)) }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.updates_later)) }
         },
     )
 }

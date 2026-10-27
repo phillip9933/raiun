@@ -3,7 +3,7 @@
   "component": {
     "group": "io.github.phillip9933",
     "module": "android-updater",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "attributes": {
       "org.gradle.status": "release"
     }
@@ -47,13 +47,13 @@
       ],
       "files": [
         {
-          "name": "android-updater-0.2.0.aar",
-          "url": "android-updater-0.2.0.aar",
-          "size": 133112,
-          "sha512": "16b8fc1351572bc966d3678a333fc5d40f081a03d5f1233466dfcacc3bb7adf95e69f88bc09fff565b7517aa0374e43cb97be3a66e55948d97786e290ae1fce2",
-          "sha256": "ede8c4b3660654918b15004b17d0633bc8c7e1989c1548786671b98be9ea4854",
-          "sha1": "1d1abad93b1170adc6a7e2e1d534541d1320b968",
-          "md5": "116283dcfd294eb0fad678d3bca501d4"
+          "name": "android-updater-0.2.1.aar",
+          "url": "android-updater-0.2.1.aar",
+          "size": 133142,
+          "sha512": "5dbeec77a6e7d516dc08ac822f814c221836878fbf1b742d4b22a8534474e3231a3001816820daf5a1417b786a3920bda4c5f568b5c097b70910fca647cc7e28",
+          "sha256": "78d5f42c866c2430c52e858a653e8f54b1a4d344cefdd0762ea267e5e3b5373b",
+          "sha1": "f6f41adc3366d875a9864a966b5a51e71ca77c61",
+          "md5": "d13d619afe2f32dfa19bccc6b2c69c4e"
         }
       ]
     },
@@ -111,13 +111,13 @@
       ],
       "files": [
         {
-          "name": "android-updater-0.2.0.aar",
-          "url": "android-updater-0.2.0.aar",
-          "size": 133112,
-          "sha512": "16b8fc1351572bc966d3678a333fc5d40f081a03d5f1233466dfcacc3bb7adf95e69f88bc09fff565b7517aa0374e43cb97be3a66e55948d97786e290ae1fce2",
-          "sha256": "ede8c4b3660654918b15004b17d0633bc8c7e1989c1548786671b98be9ea4854",
-          "sha1": "1d1abad93b1170adc6a7e2e1d534541d1320b968",
-          "md5": "116283dcfd294eb0fad678d3bca501d4"
+          "name": "android-updater-0.2.1.aar",
+          "url": "android-updater-0.2.1.aar",
+          "size": 133142,
+          "sha512": "5dbeec77a6e7d516dc08ac822f814c221836878fbf1b742d4b22a8534474e3231a3001816820daf5a1417b786a3920bda4c5f568b5c097b70910fca647cc7e28",
+          "sha256": "78d5f42c866c2430c52e858a653e8f54b1a4d344cefdd0762ea267e5e3b5373b",
+          "sha1": "f6f41adc3366d875a9864a966b5a51e71ca77c61",
+          "md5": "d13d619afe2f32dfa19bccc6b2c69c4e"
         }
       ]
     },
@@ -131,13 +131,13 @@
       },
       "files": [
         {
-          "name": "android-updater-0.2.0-sources.jar",
-          "url": "android-updater-0.2.0-sources.jar",
-          "size": 19239,
-          "sha512": "48a32df4da5639e04bd43be923884d136c0b4139a1ad33cd141c1badf037eb55a4c54ec5f61ab9fa13c4dd522e3f60c354aed731507b99c1d5037ae762951e44",
-          "sha256": "d6e4c42b0742e82c750ed1507349f6bf8049b3fab60190ae7270018e8fb1794a",
-          "sha1": "626814edf3ae28df9b7e8d38fc2c830a99e608a6",
-          "md5": "99fd13a76ba625e32d3110e0caaf5fb0"
+          "name": "android-updater-0.2.1-sources.jar",
+          "url": "android-updater-0.2.1-sources.jar",
+          "size": 19299,
+          "sha512": "7de7bb2bf1dc82cff1ecf2541c96044226f4f8595e780ec42f3a9782da9871b67b09f4bf591337b89ee1bc6f46ddf67d64d604aa53f3cdf2bb8044729167e7a4",
+          "sha256": "d59529cca45e8fe109215271248a633eb2f7cb9d90b189a6bc9850828f03c17a",
+          "sha1": "7f671b7e718da6a86052218e861d040adf370226",
+          "md5": "e145231d5b1859e47c26136f87b62ade"
         }
       ]
     }

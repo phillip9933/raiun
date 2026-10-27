@@ -24,5 +24,5 @@
     <string name="auth_required_fields">Introduce la dirección del servidor, el nombre de usuario y la contraseña de aplicación o el token.</string>
     <string name="auth_oidc_session_expired">La sesión de inicio de sesión caducó o no se pudo verificar. Inicia sesión de nuevo.</string>
     <string name="auth_sign_in_cancelled">El inicio de sesión se canceló o rechazó.</string>
-    <string name="auth_certificate_untrusted">No se pudo confiar en el certificado del servidor. Revisa su huella antes de aprobar su fijación explícita.</string>
+    <string name="auth_certificate_untrusted">La conexión segura ha fallado. Revisa el certificado del servidor y cualquier certificado de cliente necesario en los ajustes de conexión al servidor.</string>
 </resources>

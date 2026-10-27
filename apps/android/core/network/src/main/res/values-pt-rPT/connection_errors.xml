@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="error_client_certificate_required">O certificado de cliente selecionado está indisponível ou foi alterado. Reveja as definições de ligação ao servidor.</string>
+    <string name="error_network_route_changed">A rede ou as definições de ligação ao servidor foram alteradas. Atualize ou tente novamente.</string>
+</resources>

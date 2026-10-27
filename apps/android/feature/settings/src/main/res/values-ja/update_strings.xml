@@ -1,4 +1,5 @@
 <resources>
+    <string name="updates_new_version_title">新しいバージョンがあります</string>
     <string name="updates_title">アプリのアップデート</string>
     <string name="updates_summary">アップデートを確認し、安定版またはベータ版を選択</string>
     <string name="updates_installed">インストール済みバージョン: %1$s</string>

@@ -39,12 +39,15 @@ sealed interface IncomingBrowserItem {
     ) : IncomingBrowserItem
 }
 
+@Suppress("LongParameterList") // Rows, lease, copy flow and navigation metadata form one atomic page result.
 internal class IncomingBrowserPage(
     val items: List<IncomingBrowserItem>,
     val unavailable: Int = 0,
     val copies: Flow<List<SharedLocalFile>> = emptyFlow(),
     val uploadDestination: SharedFolderRequest? = null,
     val folderName: String? = null,
+    val offset: Int = 0,
+    val total: Int = items.size,
     val current: suspend () -> Boolean,
 )
 
@@ -55,6 +58,13 @@ internal fun interface IncomingBrowserBackend {
         destination: SharedFolderRequest,
         sourceUri: String,
     ): Unit = throw OpenCloudException(OpenCloudError.AccessDenied)
+
+    suspend fun loadPage(
+        account: String,
+        folder: SharedFolderRequest?,
+        offset: Int,
+        refresh: Boolean,
+    ): IncomingBrowserPage = load(account, folder)
 
     suspend fun load(
         account: String,
@@ -70,6 +80,8 @@ data class IncomingBrowserState(
     val unavailable: Int = 0,
     val error: String? = null,
     val uploadDestination: SharedFolderRequest? = null,
+    val offset: Int = 0,
+    val total: Int = 0,
 )
 
 /** Navigation and publication belong to the owner's main dispatcher; stale requests cannot restore old rows. */
@@ -87,6 +99,7 @@ internal class IncomingBrowserController(
     val state = mutableState.asStateFlow()
     private var pending: Job? = null
     private var revision = 0L
+    private var currentPage: (suspend () -> Boolean)? = null
 
     fun load(
         account: String,
@@ -101,21 +114,29 @@ internal class IncomingBrowserController(
     fun open(folder: IncomingBrowserItem.Folder) {
         val selected = state.value
         if (selected.loading || folder !in selected.items || folder.request.account != selected.account) return
-        navigate(selected.copy(trail = selected.trail + folder))
+        navigate(selected.copy(trail = selected.trail + folder, offset = 0))
     }
 
     fun back(): Boolean {
         if (state.value.trail.isEmpty()) return false
-        navigate(state.value.copy(trail = state.value.trail.dropLast(1)))
+        navigate(state.value.copy(trail = state.value.trail.dropLast(1), offset = 0))
         return true
     }
 
     fun openShortcut(folder: IncomingBrowserItem.Folder) {
         if (folder.request.account != state.value.account) return
-        navigate(state.value.copy(trail = listOf(folder)))
+        navigate(state.value.copy(trail = listOf(folder), offset = 0))
     }
 
-    fun refresh() = navigate(state.value)
+    fun refresh() = navigate(state.value.copy(offset = 0))
+
+    fun page(forward: Boolean) {
+        val selected = state.value
+        if (selected.loading || selected.trail.isEmpty()) return
+        val next = if (forward) selected.offset + 256 else (selected.offset - 256).coerceAtLeast(0)
+        if (next == selected.offset || next >= selected.total) return
+        navigate(selected.copy(offset = next), refresh = false)
+    }
 
     fun upload(
         destination: SharedFolderRequest,
@@ -139,12 +160,15 @@ internal class IncomingBrowserController(
         revision++
         pending?.cancel()
         mutableState.value = IncomingBrowserState()
+        currentPage = null
     }
 
     @Suppress("TooGenericExceptionCaught") // UI boundary sanitizes failures; coroutine cancellation is rethrown.
-    private fun navigate(target: IncomingBrowserState, beforeLoad: suspend () -> Unit = {}) {
+    private fun navigate(target: IncomingBrowserState, refresh: Boolean = true, beforeLoad: suspend () -> Unit = {}) {
         val account = target.account ?: return
         val ticket = ++revision
+        val previous = state.value
+        val previousCurrent = currentPage
         pending?.cancel()
         mutableState.value =
             target.copy(items = emptyList(), loading = true, error = null, unavailable = 0, uploadDestination = null)
@@ -156,12 +180,13 @@ internal class IncomingBrowserController(
                         withContext(io) {
                             beforeLoad()
                             currentCoroutineContext().ensureActive()
-                            backend.load(account, target.trail.lastOrNull()?.request)
+                            backend.loadPage(account, target.trail.lastOrNull()?.request, target.offset, refresh)
                         }
                     val valid = withContext(io) { page.current() }
                     currentCoroutineContext().ensureActive()
                     if (!valid) throw OpenCloudException(OpenCloudError.PreconditionFailed)
                     if (ticket == revision) {
+                        currentPage = page.current
                         mutableState.value =
                             state.value.copy(
                                 trail =
@@ -173,6 +198,8 @@ internal class IncomingBrowserController(
                                         }
                                     },
                                 items = page.items,
+                                offset = page.offset,
+                                total = page.total,
                                 unavailable = page.unavailable,
                                 loading = false,
                                 uploadDestination = page.uploadDestination,
@@ -182,10 +209,12 @@ internal class IncomingBrowserController(
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (failure: Exception) {
+                    val retainPrevious = canRetainPage(refresh, previousCurrent)
+                    currentCoroutineContext().ensureActive()
                     if (ticket == revision) {
                         mutableState.value =
-                            state.value.copy(
-                                items = emptyList(),
+                            (if (retainPrevious) previous else state.value).copy(
+                                items = if (retainPrevious) previous.items else emptyList(),
                                 loading = false,
                                 error =
                                     errorMessage(failure.toOpenCloudError()) +
@@ -195,6 +224,14 @@ internal class IncomingBrowserController(
                     }
                 }
             }
+    }
+
+    private suspend fun canRetainPage(
+        refresh: Boolean,
+        previousCurrent: (suspend () -> Boolean)?,
+    ): Boolean {
+        if (refresh || previousCurrent == null) return false
+        return withContext(io) { runCatching { previousCurrent() }.getOrDefault(false) }
     }
 
     private suspend fun observeCopies(

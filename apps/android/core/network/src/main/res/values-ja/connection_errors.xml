@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="error_client_certificate_required">選択したクライアント証明書を利用できないか、証明書が変更されました。サーバー接続設定を確認してください。</string>
+    <string name="error_network_route_changed">ネットワークまたはサーバー接続設定が変更されました。更新するか、もう一度お試しください。</string>
+</resources>

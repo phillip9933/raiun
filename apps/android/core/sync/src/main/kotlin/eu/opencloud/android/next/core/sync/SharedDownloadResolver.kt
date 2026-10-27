@@ -37,7 +37,7 @@ class SharedDownloadResolver(
     ): SharedDownloadRequest {
         currentCoroutineContext().ensureActive()
         if (!browser.isCurrent(page)) staleDownload()
-        val item = page.items.singleOrNull { it.id == remoteId } ?: staleDownload()
+        val item = browser.find(page, remoteId) ?: staleDownload()
         if (item.folder || item.size < 0) staleDownload()
         return SharedDownloadRequest(
             page.location.accountId,
@@ -53,8 +53,8 @@ class SharedDownloadResolver(
             request.file.path
                 .substringBeforeLast('/')
                 .ifEmpty { "/" }
-        val page = browser.listBound(request.accountId, request.shareId, request.scopeId, parent)
-        val item = page.items.singleOrNull { it.id == request.file.remoteId } ?: staleDownload()
+        val page = browser.refreshBound(request.accountId, request.shareId, request.scopeId, parent)
+        val item = browser.find(page, request.file.remoteId) ?: staleDownload()
         val unchanged =
             !item.folder &&
                 item.path == request.file.path &&

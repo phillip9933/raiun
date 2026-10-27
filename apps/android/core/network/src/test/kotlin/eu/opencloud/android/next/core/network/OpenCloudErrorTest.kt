@@ -60,6 +60,19 @@ class OpenCloudErrorTest {
         )
     }
 
+    @Test fun `transport policy errors stay actionable without exposing metadata`() {
+        listOf(OpenCloudError.ClientCertificateRequired, OpenCloudError.NetworkRouteChanged).forEach { error ->
+            val failure = TransportPolicyException(error)
+            assertEquals(error, failure.toOpenCloudError())
+            assertEquals(error.safeMessage(), failure.message)
+            assertNull(failure.cause)
+            assertEquals(
+                error,
+                SSLHandshakeException("untrusted diagnostic").apply { initCause(failure) }.toOpenCloudError(),
+            )
+        }
+    }
+
     @Test fun `cancellation is rethrown unchanged`() {
         val cancelled = CancellationException("cancelled")
         assertSame(cancelled, assertThrows(CancellationException::class.java) { cancelled.toOpenCloudError() })

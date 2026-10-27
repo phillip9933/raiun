@@ -1,9 +1,11 @@
 package eu.opencloud.android.next.feature.settings
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -86,14 +88,16 @@ internal fun AppearanceSettingsScreen(
                         ListItemDefaults.colors(
                             containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
                         ),
-                    supportingContent = {
-                        SettingsChoice(
-                            stringResource(R.string.settings_change_language),
-                            selectedLanguageChoice(languages, language.tag),
-                            languages,
-                            label = { it.second },
-                        ) { choice ->
-                            language.onSelect(choice.first)
+                    trailingContent = {
+                        Box(Modifier.widthIn(max = OpenCloudDimensions.SettingsChoiceMaxWidth)) {
+                            SettingsChoice(
+                                stringResource(R.string.settings_change_language),
+                                selectedLanguageChoice(languages, language.tag),
+                                languages,
+                                label = { it.second },
+                            ) { choice ->
+                                language.onSelect(choice.first)
+                            }
                         }
                     },
                 )

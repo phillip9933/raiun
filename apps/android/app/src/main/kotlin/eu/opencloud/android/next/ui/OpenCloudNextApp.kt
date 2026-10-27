@@ -18,6 +18,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,6 +64,8 @@ fun OpenCloudNextApp(
     var encryptedCleanupFailed by remember { mutableStateOf(false) }
     val state = viewModel.state.collectAsStateWithLifecycle()
     var destination by rememberSaveable(state.value.activeAccountId) { mutableStateOf(AppDestination.Files) }
+    val signInFormState = rememberSaveableStateHolder()
+    var connectionServer by rememberSaveable { mutableStateOf<String?>(null) }
     var settingsOpenUpdates by rememberSaveable(state.value.activeAccountId) { mutableStateOf(false) }
     var nextBrowserAddRequest by remember(state.value.activeAccountId) { mutableIntStateOf(0) }
     var pendingBrowserAddRequest by remember(state.value.activeAccountId) { mutableIntStateOf(0) }
@@ -357,34 +360,44 @@ fun OpenCloudNextApp(
                 }
             }
             else ->
-                AuthScreen(
-                    state = state.value,
-                    devLogin =
-                        if (BuildConfig.DEBUG) {
-                            DevLoginConfiguration(
-                                serverUrl = BuildConfig.DEV_SERVER_URL,
-                                username = BuildConfig.DEV_SERVER_USERNAME,
-                                password = BuildConfig.DEV_SERVER_PASSWORD,
-                            )
-                        } else {
-                            null
-                        },
-                    onDiscover = viewModel::discover,
-                    onBasicLogin = viewModel::loginBasic,
-                    onAppTokenLogin = viewModel::loginBasicDirect,
-                    onDevLogin = { configuration ->
-                        viewModel.loginBasicDirect(
-                            configuration.serverUrl,
-                            configuration.username,
-                            configuration.password,
+                if (connectionServer != null) {
+                    eu.opencloud.android.next.feature.settings.ServerConnectionScreen(
+                        serverUrl = requireNotNull(connectionServer),
+                        onNavigateBack = { connectionServer = null },
+                    )
+                } else {
+                    signInFormState.SaveableStateProvider("sign-in-form") {
+                        AuthScreen(
+                            state = state.value,
+                            devLogin =
+                                if (BuildConfig.DEBUG) {
+                                    DevLoginConfiguration(
+                                        serverUrl = BuildConfig.DEV_SERVER_URL,
+                                        username = BuildConfig.DEV_SERVER_USERNAME,
+                                        password = BuildConfig.DEV_SERVER_PASSWORD,
+                                    )
+                                } else {
+                                    null
+                                },
+                            onDiscover = viewModel::discover,
+                            onConnectionSettings = { connectionServer = it },
+                            onBasicLogin = viewModel::loginBasic,
+                            onAppTokenLogin = viewModel::loginBasicDirect,
+                            onDevLogin = { configuration ->
+                                viewModel.loginBasicDirect(
+                                    configuration.serverUrl,
+                                    configuration.username,
+                                    configuration.password,
+                                )
+                            },
+                            onBeginOidc = {
+                                viewModel.beginOidc()?.let { url ->
+                                    CustomTabsIntent.Builder().build().launchUrl(context, url.toUri())
+                                }
+                            },
                         )
-                    },
-                    onBeginOidc = {
-                        viewModel.beginOidc()?.let { url ->
-                            CustomTabsIntent.Builder().build().launchUrl(context, url.toUri())
-                        }
-                    },
-                )
+                    }
+                }
         }
     }
     boundaryRequest?.let { request ->

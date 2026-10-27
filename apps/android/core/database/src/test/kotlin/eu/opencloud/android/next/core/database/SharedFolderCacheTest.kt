@@ -1,6 +1,7 @@
 package eu.opencloud.android.next.core.database
 
 import androidx.room.Room
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -545,6 +546,39 @@ class SharedFolderCacheTest {
             assertNull(database.sharedLocalFileDao().find("a", scope.scopeId, original.remoteId))
             assertNull(SharedDownloadStore(database).read(transfer.id))
             assertEquals(changed, database.sharedFolderCacheDao().entry("a", scope.scopeId, original.remoteId))
+        }
+
+    @Test fun localCopyObservationOnlyIncludesVisiblePageIdsAndScope() =
+        runBlocking {
+            val lease = lease()
+            assertTrue(cache.save(lease, requireNotNull(cache.begin(lease, scope, "/")), scope, "/", listOf(entry())))
+            repeat(600) { index ->
+                database.sharedLocalFileDao().save(
+                    SharedLocalFile(
+                        "a",
+                        scope.scopeId,
+                        "file-$index",
+                        "/file-$index",
+                        1,
+                        "v1",
+                        "/synthetic/$index",
+                        "a".repeat(64),
+                        1,
+                        false,
+                    ),
+                )
+            }
+            val ids = (256 until 512).map { "file-$it" }
+            val observed = database.sharedLocalFileDao().observePage("a", scope.scopeId, ids).first()
+            assertEquals(256, observed.size)
+            assertEquals(ids.toSet(), observed.map { it.remoteId }.toSet())
+            assertTrue(
+                database
+                    .sharedLocalFileDao()
+                    .observePage("a", "other-scope", ids)
+                    .first()
+                    .isEmpty(),
+            )
         }
 
     private fun entry() =

@@ -22,7 +22,19 @@ class SharedUploadDestinationResolver(
     private val resolveTarget: suspend (SharedFolderPage, String) -> SharedFolderResolution,
 ) {
     suspend fun prepare(request: SharedFolderRequest): PreparedSharedUploadDestination {
-        val page = browser.openFolder(request)
+        val page = browser.refreshFolder(request)
+        return prepare(request, page)
+    }
+
+    @Suppress("ThrowsCount") // Each failure rejects a distinct stale, denied, or untrusted target.
+    suspend fun prepare(
+        request: SharedFolderRequest,
+        page: SharedFolderPage,
+    ): PreparedSharedUploadDestination {
+        val sameShare = page.location.accountId == request.account && page.location.shareId == request.share
+        val sameFolder = page.location.scopeId == request.scope && page.path == request.path
+        if (!sameShare || !sameFolder) throw OpenCloudException(OpenCloudError.PreconditionFailed)
+        if (!browser.isCurrent(page)) throw OpenCloudException(OpenCloudError.PreconditionFailed)
         val target =
             resolveTarget(page, request.remoteId) as? SharedFolderResolution.Resolved
                 ?: throw OpenCloudException(OpenCloudError.AccessDenied)

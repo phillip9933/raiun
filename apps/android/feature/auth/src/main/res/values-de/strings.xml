@@ -24,5 +24,5 @@
     <string name="auth_required_fields">Gib die Serveradresse, den Benutzernamen und das App-Passwort oder Token ein.</string>
     <string name="auth_oidc_session_expired">Die Anmeldesitzung ist abgelaufen oder konnte nicht überprüft werden. Bitte melde dich erneut an.</string>
     <string name="auth_sign_in_cancelled">Die Anmeldung wurde abgebrochen oder abgelehnt.</string>
-    <string name="auth_certificate_untrusted">Das Serverzertifikat ist nicht vertrauenswürdig. Überprüfe den Zertifikat-Fingerabdruck, bevor du eine feste Zertifikatsbindung bestätigst.</string>
+    <string name="auth_certificate_untrusted">Die sichere Verbindung ist fehlgeschlagen. Prüfe das Serverzertifikat und ein eventuell erforderliches Client-Zertifikat in den Serververbindungseinstellungen.</string>
 </resources>

@@ -113,6 +113,19 @@ class AccountViewModel(
                         .VaultOfflineStore(getApplication())
                         .forgetAccount(account.id)
                     store.removeAccount(account.id)
+                    // Connection identities are explicitly shared by accounts at this server.
+                    // Forget the local grant metadata when the final such account is removed;
+                    // the system-managed certificate itself remains owned by Android.
+                    if (store.activeAccounts().none { it.serverUrl.trimEnd('/') == account.serverUrl.trimEnd('/') }) {
+                        eu.opencloud.android.next.core.security
+                            .ClientCertificatePolicy(
+                                getApplication(),
+                            ).clear(account.serverUrl)
+                        eu.opencloud.android.next.core.security
+                            .WifiServerRouteStore(
+                                getApplication(),
+                            ).remove(account.serverUrl)
+                    }
                     eu.opencloud.android.next.core.sync
                         .clearAccountPrivateFiles(getApplication(), account.id)
                     eu.opencloud.android.next.core.sync.AccountProfiles

@@ -8,6 +8,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -375,6 +376,107 @@ class VaultDavClientTest {
         assertThrows(OpenCloudException::class.java) {
             smallCipher.readCiphertext(server.url("dav/Secret.vault/").toString(), entry, "Bearer test")
         }
+    }
+
+    @Test fun streamingVaultDiscoveryRetainsOnlyMarkersFromLargeOrdinaryDirectory() {
+        val children =
+            buildString {
+                repeat(
+                    20_000,
+                ) { index ->
+                    append(response("/dav/space/file-$index", "file-$index", "file-$index", false))
+                }
+            }
+        val root = response("/dav/space/", "root", "space", true)
+        val marker = response("/dav/space/Secret.vault/", "vault", "Secret.vault", true)
+        server.enqueue(MockResponse().setResponseCode(207).setBody(envelope(children, marker, root)))
+        val identities = mutableSetOf<String>()
+        var checked = 0
+        val started = System.nanoTime()
+        val listing =
+            client.streamOrdinaryVaultMarkers(
+                server.url("dav/space/").toString(),
+                authorization = "Bearer test",
+            ) { id, path ->
+                checked++
+                identities.add("id:$id") && identities.add("path:$path")
+            }
+        assertEquals(20_002, checked)
+        assertEquals(listOf("vault"), listing.children.map { it.id })
+        assertEquals("root", listing.root.id)
+        assertTrue(!listing.requestedIsVaultMarker)
+        println(
+            "vault-marker-stream ordinary=20000 retainedMarkers=1 elapsedMs=${(System.nanoTime() - started) / 1_000_000}",
+        )
+    }
+
+    @Test fun streamedVaultMarkersRejectDuplicatesMalformedScopesAndIncompleteXml() {
+        val root = response("/dav/space/", "root", "space", true)
+        val child = response("/dav/space/child", "child", "child", false)
+        val cases =
+            listOf(
+                envelope(root, child, response("/dav/space/other", "child", "other", false)),
+                envelope(root, child, response("/dav/space/child", "other", "child", false)),
+                envelope(root, response("/dav/other/child", "child", "child", false)),
+                envelope(root, child).dropLast(5),
+                envelope(child),
+            )
+        cases.forEach { xml ->
+            server.enqueue(MockResponse().setResponseCode(207).setBody(xml))
+            val keys = mutableSetOf<String>()
+            assertThrows(OpenCloudException::class.java) {
+                client.streamOrdinaryVaultMarkers(
+                    server.url("dav/space/").toString(),
+                    authorization = "Bearer test",
+                ) { id, path ->
+                    keys.add("id:$id") && keys.add("path:$path")
+                }
+            }
+        }
+    }
+
+    @Test fun streamedVaultRootAppearingLastPreservesEvidenceAndCancellation() {
+        val child = response("/dav/space/child", "child", "child", false)
+        val root =
+            response(
+                "/dav/space/",
+                "root",
+                "space",
+                true,
+                "<d:getcontenttype>application/vnd.opencloud.vault</d:getcontenttype>",
+            )
+        server.enqueue(MockResponse().setResponseCode(207).setBody(envelope(child, root)))
+        val listing =
+            client.streamOrdinaryVaultMarkers(
+                server.url("dav/space/").toString(),
+                authorization = "Bearer test",
+            ) { _, _ -> true }
+        assertTrue(listing.requestedIsVaultMarker)
+        assertTrue(listing.vaultEvidence)
+        server.enqueue(MockResponse().setResponseCode(207).setBody(envelope(child, root)))
+        assertThrows(java.util.concurrent.CancellationException::class.java) {
+            client.streamOrdinaryVaultMarkers(
+                server.url("dav/space/").toString(),
+                authorization = "Bearer test",
+            ) { _, _ ->
+                throw java.util.concurrent.CancellationException()
+            }
+        }
+    }
+
+    @Test fun streamedMarkerDescriptorsKeepTheConfiguredBudget() {
+        val bounded = VaultDavClient(OkHttpClient(), maxXmlBytes = 128, endpoints = EndpointPolicy(true))
+        val root = response("/dav/space/", "root", "space", true)
+        val marker = response("/dav/space/Secret.vault/", "vault", "Secret.vault", true)
+        server.enqueue(MockResponse().setResponseCode(207).setBody(envelope(root, marker)))
+        val failure =
+            assertThrows(OpenCloudException::class.java) {
+                bounded.streamOrdinaryVaultMarkers(
+                    server.url("dav/space/").toString(),
+                    authorization = "Bearer test",
+                ) { _, _ -> true }
+            }
+        assertEquals(OpenCloudError.DirectoryListingTooLarge, failure.error)
     }
 
     private fun envelope(vararg responses: String) =

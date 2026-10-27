@@ -281,8 +281,8 @@ enum class AuthenticationMode {
 
 internal fun Throwable.toAuthError(): String =
     toAuthError(
-        "The server certificate could not be trusted. " +
-            "Review the certificate fingerprint before approving an explicit pin.",
+        "The secure connection failed. Check the server certificate and any required client certificate " +
+            "in Server connection settings.",
     )
 
 internal fun Throwable.toAuthError(
@@ -290,6 +290,8 @@ internal fun Throwable.toAuthError(
     certificateErrorMessage: String,
 ): String =
     when {
+        toOpenCloudError() == eu.opencloud.android.next.core.network.OpenCloudError.ClientCertificateRequired ->
+            toOpenCloudError().safeMessage(context)
         this is SSLHandshakeException || cause is SSLHandshakeException || cause is CertificateException ->
             certificateErrorMessage
         this is eu.opencloud.android.next.core.network.OpenCloudException -> error.safeMessage(context)
@@ -298,6 +300,8 @@ internal fun Throwable.toAuthError(
 
 internal fun Throwable.toAuthError(certificateErrorMessage: String): String =
     when {
+        toOpenCloudError() == eu.opencloud.android.next.core.network.OpenCloudError.ClientCertificateRequired ->
+            toOpenCloudError().safeMessage()
         this is SSLHandshakeException || cause is SSLHandshakeException || cause is CertificateException ->
             certificateErrorMessage
         this is eu.opencloud.android.next.core.network.OpenCloudException -> error.safeMessage()

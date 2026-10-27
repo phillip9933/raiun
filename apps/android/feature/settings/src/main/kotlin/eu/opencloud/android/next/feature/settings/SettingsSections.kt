@@ -64,6 +64,7 @@ internal fun SettingsSections(
     onOpenTemporary: () -> Unit,
     onFileOpening: () -> Unit,
     onUpdates: () -> Unit,
+    onConnection: (() -> Unit)? = null,
 ) {
     Column(
         Modifier.padding(OpenCloudDimensions.SpacingMd),
@@ -107,6 +108,19 @@ internal fun SettingsSections(
                 trailingContent = { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null) },
                 colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceContainerHighest),
             )
+        }
+        onConnection?.let { openConnection ->
+            Card(onClick = openConnection, modifier = Modifier.fillMaxWidth()) {
+                ListItem(
+                    headlineContent = { Text(stringResource(R.string.connection_title)) },
+                    leadingContent = { Icon(Icons.Default.Security, null) },
+                    trailingContent = { Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null) },
+                    colors =
+                        ListItemDefaults.colors(
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        ),
+                )
+            }
         }
         Text(stringResource(R.string.settings_data), style = MaterialTheme.typography.titleSmall)
         Card(onClick = onBackup, modifier = Modifier.fillMaxWidth()) {

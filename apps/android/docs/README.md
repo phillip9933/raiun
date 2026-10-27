@@ -11,7 +11,9 @@ Start with [README](../README.md) for installation and current limitations, and 
 | [Scanner SDK](OFFLINE-SCANNER-SDK.md) | Pinned dependency setup and host ownership |
 | [Screenshot testing](SCREENSHOT_TESTING.md) | Golden ownership and review |
 | [Release procedure](RELEASING.md) | Packaging, signing continuity and release checks |
+| [Android 1.2.0 release notes](RELEASE-NOTES-1.2.0.md) | Android 1.2.0 changes and update guidance |
 | [Android 1.1.0 release notes](RELEASE-NOTES-1.1.0.md) | Android 1.1.0 changes and update guidance |
+| [Translation feedback](TRANSLATION-REVIEW.md) | Reporting wording/layout issues and maintaining translations |
 | [Release notes](RELEASE-NOTES-0.9.3.md) | Historical 0.9.3 beta changes, limits and feedback |
 | [Changelog](../CHANGELOG.md) | Version history |
 | [Encrypted security review](ENCRYPTED-SECURITY-REVIEW.md) | Encryption compatibility, local key handling and explicit plaintext handoff boundaries |
@@ -37,3 +39,5 @@ Paths below are relative to `apps/android`. This map reflects [settings.gradle.k
 | `docs/` | Current guides, historical proposals and retained release audit data |
 
 Tests live with their modules under `src/test` and `src/androidTest`. The scanner is a pinned binary dependency, not a source module in this repository. Keep module boundaries within this platform project. See the [monorepo guide](../../../docs/MONOREPO.md) for repository-wide ownership and the later desktop import.
+
+[Server connections](SERVER-CONNECTIONS.md) describes the unreleased Wi-Fi route and scoped TLS client-certificate settings, including compatibility limits and acceptance requirements.

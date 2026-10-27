@@ -3,6 +3,7 @@ package eu.opencloud.android.next.feature.files
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -22,6 +23,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import eu.opencloud.android.next.core.database.ResourceEntity
@@ -65,6 +67,7 @@ fun BackupDestinationPickerDialog(
     onRetry: () -> Unit,
     onCreateFolder: () -> Unit,
     onSelect: (BackupDestination) -> Unit,
+    onPage: (Boolean) -> Unit = {},
 ) {
     val destination = state.backupPickerDestination
     val spaces = state.spaces.filter { !it.isDisabled && !it.isDeleted }
@@ -122,6 +125,7 @@ fun BackupDestinationPickerDialog(
                         }
                     }
                 }
+                state.backupPickerPage?.let { page -> BackupPickerPagingBar(page, state.backupPickerLoading, onPage) }
                 if (state.backupPickerLoading) CircularProgressIndicator()
                 if (destination?.destinationKind == "SPACE" &&
                     !state.backupPickerLoading &&
@@ -140,7 +144,9 @@ fun BackupDestinationPickerDialog(
                     !state.backupPickerLoading &&
                     state.backupPickerError == null &&
                     state.backupPickerResources.isEmpty() &&
-                    state.backupPickerSharedFolders.isEmpty()
+                    state.backupPickerSharedFolders.isEmpty() &&
+                    state.backupPickerPage?.hasNext != true &&
+                    state.backupPickerPage?.hasPrevious != true
                 ) {
                     Text(stringResource(R.string.browser_no_folders_here))
                 }
@@ -170,6 +176,33 @@ fun BackupDestinationPickerDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.browser_cancel)) } },
     )
+}
+
+@Composable
+private fun BackupPickerPagingBar(
+    page: BackupPickerPageState,
+    loading: Boolean,
+    onPage: (Boolean) -> Unit,
+) {
+    if (page.total <= 0) return
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        TextButton(onClick = { onPage(true) }, enabled = page.hasPrevious && !loading) {
+            Text(stringResource(R.string.browser_previous_page))
+        }
+        val first = page.offset + 1
+        val last = minOf(page.offset + page.pageSize, page.total)
+        Text(
+            stringResource(R.string.browser_page_range, first, last, page.total),
+            style = MaterialTheme.typography.labelMedium,
+        )
+        TextButton(onClick = { onPage(false) }, enabled = page.hasNext && !loading) {
+            Text(stringResource(R.string.browser_next_page))
+        }
+    }
 }
 
 @Composable

@@ -1,4 +1,5 @@
 <resources>
+    <string name="updates_new_version_title">Nueva versión disponible</string>
     <string name="updates_title">Actualizaciones de la aplicación</string>
     <string name="updates_summary">Buscar actualizaciones y elegir versiones estables o beta</string>
     <string name="updates_installed">Versión instalada: %1$s</string>

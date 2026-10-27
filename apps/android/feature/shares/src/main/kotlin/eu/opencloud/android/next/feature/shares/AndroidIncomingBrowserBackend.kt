@@ -22,6 +22,8 @@ internal class AndroidIncomingBrowserBackend(
     private val discovery = SharedRootDiscovery.create(app)
     private val browser = SharedFolderBrowser.create(app)
     private val database = FileBrowserDatabase.create(app)
+    private var rememberedFolder: SharedFolderRequest? = null
+    private var rememberedPage: eu.opencloud.android.next.core.sync.SharedFolderPage? = null
 
     override suspend fun upload(
         destination: SharedFolderRequest,
@@ -31,9 +33,12 @@ internal class AndroidIncomingBrowserBackend(
         TransferManager(app).enqueueSharedUpload(destination, Uri.parse(sourceUri))
     }
 
-    private suspend fun uploadDestination(folder: SharedFolderRequest): SharedFolderRequest? =
+    private suspend fun uploadDestination(
+        folder: SharedFolderRequest,
+        page: eu.opencloud.android.next.core.sync.SharedFolderPage,
+    ): SharedFolderRequest? =
         try {
-            SharedUploadDestinationResolver.create(app).prepare(folder).request
+            SharedUploadDestinationResolver.create(app).prepare(folder, page).request
         } catch (failure: OpenCloudException) {
             if (failure.error != OpenCloudError.AccessDenied) throw failure
             null
@@ -66,6 +71,13 @@ internal class AndroidIncomingBrowserBackend(
     override suspend fun load(
         account: String,
         folder: SharedFolderRequest?,
+    ): IncomingBrowserPage = loadPage(account, folder, 0, refresh = true)
+
+    override suspend fun loadPage(
+        account: String,
+        folder: SharedFolderRequest?,
+        offset: Int,
+        refresh: Boolean,
     ): IncomingBrowserPage {
         val permit = AppLock(app).beginDocumentRead()
         if (!permit()) throw OpenCloudException(OpenCloudError.AccessDenied)
@@ -83,13 +95,23 @@ internal class AndroidIncomingBrowserBackend(
             IncomingBrowserPage(items, catalog.unavailable.size) { discovery.isCurrent(catalog) && permit() }
         } else {
             require(folder.account == account)
-            val page = browser.openFolder(folder)
+            val page =
+                if (!refresh && rememberedFolder == folder) {
+                    rememberedPage ?: browser.refreshFolder(folder)
+                } else {
+                    browser.refreshFolder(folder)
+                }
+            val initial = browser.displayPage(page, offset)
+            val actualOffset = if (initial.second == 0) 0 else minOf(offset, ((initial.second - 1) / 256) * 256)
+            val (entries, total) = if (actualOffset == offset) initial else browser.displayPage(page, actualOffset)
+            rememberedFolder = folder
+            rememberedPage = page
             val items =
-                page.items.sortedWith(compareBy({ !it.folder }, { it.name.lowercase() })).map {
-                    if (it.folder) {
+                entries.map {
+                    if (it.isFolder) {
                         IncomingBrowserItem.Folder(
                             it.name,
-                            SharedFolderRequest(account, folder.share, folder.scope, it.id, it.path),
+                            SharedFolderRequest(account, folder.share, folder.scope, it.remoteId, it.path),
                         )
                     } else {
                         IncomingBrowserItem.File(
@@ -98,17 +120,19 @@ internal class AndroidIncomingBrowserBackend(
                                 account,
                                 folder.share,
                                 folder.scope,
-                                SharedDownloadFile(it.id, it.path, it.size, it.eTag),
+                                SharedDownloadFile(it.remoteId, it.path, it.sizeBytes, it.eTag),
                             ),
                             it.mimeType,
-                            database.sharedLocalFileDao().find(account, folder.scope, it.id),
+                            database.sharedLocalFileDao().find(account, folder.scope, it.remoteId),
                         )
                     }
                 }
             IncomingBrowserPage(
                 items,
-                copies = database.sharedLocalFileDao().observe(account),
-                uploadDestination = uploadDestination(folder),
+                copies = database.sharedLocalFileDao().observePage(account, folder.scope, entries.map { it.remoteId }),
+                offset = actualOffset,
+                total = total,
+                uploadDestination = uploadDestination(folder, page),
                 folderName = if (page.path == "/") page.location.name else page.path.substringAfterLast('/'),
             ) {
                 browser.isCurrent(page) && permit()

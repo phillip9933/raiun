@@ -409,7 +409,7 @@ class VaultRepository internal constructor(
             val root = safeRoot(access, source.rootWebDavUrl)
             val dav = VaultDavClient(access.http, endpoints = endpointPolicy)
 
-            val rootListing = dav.inspectOrdinaryDirectory(root.toString(), authorization = access.authorization)
+            val rootListing = inspectVaultMarkers(dav, root.toString(), "", access.authorization)
             access.requireCurrent()
             if (rootListing.requestedIsVaultMarker || !graphRootMatchesDav(space.rootId, rootListing.root.id)) {
                 throw OpenCloudException(OpenCloudError.PreconditionFailed)
@@ -418,7 +418,7 @@ class VaultRepository internal constructor(
                 if (path.isEmpty()) {
                     rootListing
                 } else {
-                    dav.inspectOrdinaryDirectory(root.toString(), path, access.authorization)
+                    inspectVaultMarkers(dav, root.toString(), path, access.authorization)
                 }
             access.requireCurrent()
             if (listing.requestedIsVaultMarker) throw OpenCloudException(OpenCloudError.PreconditionFailed)
@@ -432,6 +432,22 @@ class VaultRepository internal constructor(
                 )
             }
         }
+
+    private suspend fun inspectVaultMarkers(
+        dav: VaultDavClient,
+        root: String,
+        path: String,
+        authorization: String,
+    ): eu.opencloud.android.next.core.network.VaultDavListing {
+        val coroutine = currentCoroutineContext()
+        val directory = spoolDirectory ?: File(requireNotNull(System.getProperty("java.io.tmpdir")))
+        return StagedRemoteFolder.create(directory).use { identities ->
+            dav.streamOrdinaryVaultMarkers(root, path, authorization) { id, childPath ->
+                coroutine.ensureActive()
+                identities.registerCanonicalPath("id:$id") && identities.registerCanonicalPath("path:$childPath")
+            }
+        }
+    }
 
     /**
      * Creates a Web-compatible `.vault` collection inside a fresh ordinary Space listing.

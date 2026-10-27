@@ -37,13 +37,14 @@ Settings rendered from the Android app with test data.
 - Cloud folders for other apps, built-in text/PDF/image viewers and file version history.
 - File and folder activities showing changes reported by the server.
 - Home screen folder shortcuts with color choices and custom images.
+- In-app Android release checks and optional verified APK downloads.
 - Shared-folder downloads, server notifications and Space member management.
 - English and German, with an independent app-language choice and grouped Appearance settings.
 - PDF/JPEG scanning through a pinned, separately versioned [offline scanner SDK](https://github.com/phillip9933/open-android-doc-scanner).
 
 ## Install
 
-Download the latest Android APK from [GitHub Releases](https://github.com/phillip9933/raiun/releases) and verify it against the attached SHA256SUMS file. Install over an existing Raiun release to keep its app data. See the [release notes](docs/RELEASE-NOTES-1.1.0.md) for Android 1.1.0 changes. Please report problems through the project issue tracker.
+Download the latest Android APK from [GitHub Releases](https://github.com/phillip9933/raiun/releases) and verify it against the attached SHA256SUMS file. Install over an existing Raiun release to keep its app data. See the [release notes](docs/RELEASE-NOTES-1.2.0.md) for Android 1.2.0 changes. Please report problems through the project issue tracker.
 
 ## Build and test
 
@@ -57,7 +58,7 @@ python scripts/install_offline_scanner_sdk.py
 
 On Windows use `gradlew.bat`. Release builds contain no development credentials and are unsigned until the maintainer signs them. See [release procedure](docs/RELEASING.md), [privacy](PRIVACY.md), [security reporting](../../SECURITY.md) and [third-party notices](THIRD-PARTY-NOTICES.md).
 
-Translations use standard Android resource files. Android 1.0.0 includes German, French, Spanish, European Portuguese and Japanese alongside English. Missing translations fall back to English, and the draft translations still need native-speaker review.
+Translations use standard Android resource files. Android 1.1.0 includes German, French, Spanish, European Portuguese and Japanese alongside English. Missing translations fall back to English. Native-speaker sign-off is not required for release. Please [report translation or layout problems](https://github.com/phillip9933/raiun/issues/new), including the app version, selected language and affected screen. Automated resource checks do not guarantee every phrase is correct.
 
 ## Known limitations
 
@@ -66,8 +67,10 @@ Translations use standard Android resource files. Android 1.0.0 includes German,
 - Encrypted previews have no fixed file-size limit. Available device storage, supported file formats and decoder capabilities still apply; large text files are edited one section at a time.
 - “Open with” sends a temporary plaintext file to another app only after confirmation. Raiun revokes access and attempts cleanup on return; Android may delay physical deletion, and another app can retain an open descriptor or make its own copy. Deletion is not guaranteed forensic erasure.
 - Keep the encryption password as your recovery method. The security review is a focused source review, not an independent penetration test or certification.
+- In-app update checks cover public Android APK releases from GitHub. Installation uses Android's system installer and requires user confirmation; opening the installer or returning from it does not by itself confirm that the update succeeded.
 - HTTP 502/timeouts have been observed on some server/network paths, particularly when network stability is inconsistent.
 - External editor, Office/server integrations and some Android document-provider combinations have not been fully tested.
+- Directory paging in the unreleased follow-up covers ordinary Personal/Space and received-share folders. Favorites, Offline inventories and decrypted vault directories are separate paths; this does not promise bounded memory for every collection.
 - Folder backup queues uploads; it is not a bidirectional mirror and does not delete source files. Changed destination names can require conflict resolution.
 - Exclusions apply during future scans. They do not remove files already in the cloud, and uploads already queued may still finish after you pause a backup.
 - Metadata comes from Android's supplied file representation; Raiun does not guarantee removal or preservation of GPS or other metadata.

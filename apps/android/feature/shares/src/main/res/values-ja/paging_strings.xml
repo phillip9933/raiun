@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="incoming_previous_page">前へ</string>
+    <string name="incoming_next_page">次へ</string>
+    <string name="incoming_page_range">%3$d件中%1$d–%2$d件</string>
+</resources>

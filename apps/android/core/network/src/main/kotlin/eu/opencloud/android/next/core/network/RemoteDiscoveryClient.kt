@@ -69,6 +69,25 @@ class RemoteDiscoveryClient(
             throw SharedMetadataException(SharedMetadataStage.DAV_LISTING)
         }
 
+    /** Streams provisional shared entries; returned metadata is valid only after complete validation. */
+    fun streamSharedFolder(
+        rootWebDavUrl: String,
+        path: String,
+        authorization: String,
+        sink: RemoteFolderSink,
+    ): RemoteFolderSnapshot =
+        try {
+            readFolder(
+                rootWebDavUrl,
+                path,
+                authorization,
+                FolderReadOptions(reportEncryptedCollection = true, sink = sink),
+            )
+        } catch (failure: OpenCloudException) {
+            if (failure.error != OpenCloudError.InvalidResponse) throw failure
+            throw SharedMetadataException(SharedMetadataStage.DAV_LISTING)
+        }
+
     internal fun requireCollection(
         url: String,
         authorization: String,

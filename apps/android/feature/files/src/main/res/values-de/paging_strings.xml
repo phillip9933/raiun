@@ -1,0 +1,5 @@
+<resources>
+    <string name="browser_previous_page">Zurück</string>
+    <string name="browser_next_page">Weiter</string>
+    <string name="browser_page_range">%1$d–%2$d von %3$d</string>
+</resources>

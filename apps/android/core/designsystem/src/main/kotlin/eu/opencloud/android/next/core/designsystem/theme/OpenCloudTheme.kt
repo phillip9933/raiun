@@ -59,6 +59,7 @@ val LocalOpenCloudExtendedColors =
     }
 
 object OpenCloudDimensions {
+    val SettingsChoiceMaxWidth = 200.dp
     val DestinationPickerHeight = 320.dp
     val TransferDateRangePickerHeight = 500.dp
     val BackupExclusionsListHeight = 400.dp

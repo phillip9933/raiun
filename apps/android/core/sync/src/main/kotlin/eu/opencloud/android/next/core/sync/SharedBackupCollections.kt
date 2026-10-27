@@ -43,17 +43,17 @@ internal class SharedBackupCollections(
             checkCurrent()
             segment.requireValidSegment()
             val prepared = resolver.prepare(current)
-            val page = browser.openFolder(current)
+            val page = browser.refreshFolder(current)
             val childPath = if (current.path == "/") "/$segment" else "${current.path}/$segment"
             if (childPath in page.excludedVaultPaths) throw OpenCloudException(OpenCloudError.Unsupported)
-            var child = page.items.singleOrNull { it.path == childPath }
+            var child = browser.findPath(page, childPath)
             if (child == null) {
                 if (!prepared.canCreateFolder || !resolver.isCurrent(prepared)) {
                     throw OpenCloudException(OpenCloudError.AccessDenied)
                 }
                 checkCurrent()
                 create(prepared, segment, checkCurrent)
-                child = browser.openFolder(current).items.singleOrNull { it.path == childPath }
+                child = browser.findPath(browser.refreshFolder(current), childPath)
             }
             if (child?.folder != true) throw OpenCloudException(OpenCloudError.PreconditionFailed)
             current = current.copy(remoteId = child.id, path = childPath)

@@ -13,7 +13,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 
-/** Opt-in check of a disposable 0.1.3 updater state after installing the 0.2.0 host APK. */
+/** Opt-in check of a disposable 0.1.3 updater state after installing the current updater host APK. */
 class AppUpdateMigrationAndroidTest {
     @Test fun priorSyntheticReadyStateSurvivesNamespaceChange() {
         assumeTrue(InstrumentationRegistry.getArguments().getString("runUpdaterMigrationProbe") == "true")

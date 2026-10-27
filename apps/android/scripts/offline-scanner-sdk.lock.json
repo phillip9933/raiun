@@ -1,7 +1,7 @@
 {
-  "version": "0.7.0",
-  "sourceCommit": "3ba5c50a64f9be8eaeec47d263b360488e58835b",
-  "archive": "open-android-doc-scanner-0.7.0-sdk-maven.zip",
-  "url": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v0.7.0/open-android-doc-scanner-0.7.0-sdk-maven.zip",
-  "sha256": "00fd250fba32a5f0d4e1f7353644e99d8b8e2b648665ea06a4bef542c7c472ba"
+  "version": "0.8.0-beta.1",
+  "sourceCommit": "8d9a451c27ed87d20110d25dcedb81001e0f521f",
+  "archive": "open-android-doc-scanner-0.8.0-beta.1-sdk-maven.zip",
+  "url": "https://github.com/phillip9933/open-android-doc-scanner/releases/download/v0.8.0-beta.1/open-android-doc-scanner-0.8.0-beta.1-sdk-maven.zip",
+  "sha256": "6f68f7000817b981854dd68a5863804a28c6f388b7040af1b4e4ef4879d4af99"
 }
