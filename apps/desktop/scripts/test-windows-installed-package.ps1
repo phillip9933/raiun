@@ -119,6 +119,7 @@ function Check-InstalledFiles($Candidate) {
     $rows = [System.Collections.Generic.List[object]]::new()
     $expect = @(@{ name = 'raiun-desktop-shell.exe'; length = $Candidate.shell.length; sha256 = $Candidate.shell.sha256 }) + @($Candidate.payloads)
     foreach ($entry in $expect) {
+        $script:phase = 'installed_payload_' + ([string]$entry.name).Replace('.exe', '')
         $path = Join-Path $script:installRoot ([string]$entry.name)
         $pin = Pin-File $path
         if ($pin.length -ne [long]$entry.length -or $pin.sha256 -cne [string]$entry.sha256) { throw 'installed_payload_hash_mismatch' }
@@ -265,10 +266,12 @@ function Check-StartMenuShortcut {
 
 function Check-DataRetention {
     foreach ($entry in $script:retentionPaths) {
+        $script:phase = 'retention_' + [string]$entry.name
         if (-not (Test-Path -LiteralPath $entry.path -PathType Leaf)) { throw 'synthetic_data_missing' }
         $pin = Pin-File $entry.path
         if ($pin.sha256 -cne $entry.expected.sha256 -or $pin.length -ne $entry.expected.length) { throw 'synthetic_data_changed' }
     }
+    $script:phase = 'retention_dpapi_unprotect'
     $plain = [Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($script:canaryPath), $script:canaryEntropy,
         [Security.Cryptography.DataProtectionScope]::CurrentUser)
     if ((Hash-Bytes $plain) -cne $script:canaryPlainHash) { throw 'dpapi_current_user_decrypt_failed' }
@@ -345,9 +348,11 @@ try {
     $script:shortcutCounts.baseline = Check-StartMenuShortcut
     Add-Event 'baseline_install' 'passed' @{ exitCode = $script:baselineInstallExit; installedPayloadCount = $script:baselineFiles.Count; uninstallEntryCount = $script:registration.baseline.entries; startMenuShortcuts = $script:shortcutCounts.baseline }
 
-    $script:phase = 'baseline_agent_busy_guard'
     $baselineAgent = Join-Path $script:installRoot 'raiun-agent.exe'
+    $script:phase = 'baseline_agent_process_start'
     Start-Agent $baselineAgent
+    Add-Event 'baseline_agent_process_start' 'passed'
+    $script:phase = 'baseline_agent_status_request'
     $baselineReply = $null
     $until = [DateTime]::UtcNow.AddSeconds(20)
     do {
@@ -357,15 +362,23 @@ try {
         catch { Start-Sleep -Milliseconds 250 }
     } while ([DateTime]::UtcNow -lt $until)
     if ($null -eq $baselineReply) { throw 'baseline_agent_not_ready' }
+    $script:phase = 'baseline_agent_status_validation'
     $script:baselineStatus = Check-OfflineStatus $baselineReply
+    $script:phase = 'busy_installer_invocation'
     $busy = Run-Process -Path $script:final.installerPath -Arguments @('/S', "/D=$script:installRoot") -TimeoutMs 180000
     $script:busyInstallExit = $busy.exitCode
+    $script:phase = 'busy_agent_process_state'
     $script:agent.Refresh()
     if ($script:busyInstallExit -eq 0 -or $script:agent.HasExited) { throw 'busy_guard_did_not_fail_closed' }
+    $script:phase = 'busy_payload_retention'
     $afterBusy = Check-InstalledFiles $script:baseline
+    $script:phase = 'busy_synthetic_data_retention'
     $busyData = Check-DataRetention
+    $script:phase = 'busy_registry_check'
     $script:registration.baseline = Check-InstallRegistration
+    $script:phase = 'busy_agent_postattempt_status'
     $script:baselineStatus = Check-OfflineStatus (Invoke-Control $baselineAgent ([ordered]@{ action = 'status' }))
+    $script:phase = 'busy_guard_receipt'
     Add-Event 'busy_guard' 'passed' @{ installerExitCode = $script:busyInstallExit; baselineFilesUnchanged = ($afterBusy.Count -eq $script:baselineFiles.Count); syntheticDataUnchanged = $true; dpapiDecryptSucceeded = $busyData.dpapiCurrentUserDecryptSucceeded; registeredAppCount = $script:registration.baseline.entries; agentStillRunning = $true; connected = $script:baselineStatus.connected; mounted = $script:baselineStatus.mounted }
 
     $script:phase = 'baseline_agent_shutdown'
@@ -383,9 +396,11 @@ try {
     $script:retained = Check-DataRetention
     Add-Event 'final_in_place_upgrade' 'passed' @{ exitCode = $script:finalInstallExit; installedPayloadCount = $script:finalFiles.Count; uninstallEntryCount = $script:registration.final.entries; startMenuShortcuts = $script:shortcutCounts.final; dpapiDecryptSucceeded = $true; settingsRetained = $true; syntheticDocumentRetained = $true }
 
-    $script:phase = 'final_agent_capability'
     $finalAgent = Join-Path $script:installRoot 'raiun-agent.exe'
+    $script:phase = 'final_agent_process_start'
     Start-Agent $finalAgent
+    Add-Event 'final_agent_process_start' 'passed'
+    $script:phase = 'final_agent_status_request'
     $until = [DateTime]::UtcNow.AddSeconds(20)
     $script:agent.Refresh()
     $finalReply = $null
@@ -395,10 +410,13 @@ try {
         catch { Start-Sleep -Milliseconds 250 }
     } while ([DateTime]::UtcNow -lt $until)
     if ($null -eq $finalReply) { throw 'final_agent_not_ready' }
+    $script:phase = 'final_agent_status_validation'
     $script:finalStatus = Check-OfflineStatus $finalReply -RequireFolderSettings $true
+    $script:phase = 'final_pair_update_validation'
     $invalid = Invoke-Control $finalAgent ([ordered]@{ action = 'pair_update'; id = 'acceptance-incomplete-pair' })
     if ($invalid.ok -ne $false -or [string]$invalid.error -cne 'Invalid folder request') { throw 'incomplete_pair_update_validation_not_rejected' }
     $script:invalidPairRejected = $true
+    $script:phase = 'final_postvalidation_status'
     $afterInvalid = Check-OfflineStatus (Invoke-Control $finalAgent ([ordered]@{ action = 'status' }))
     if ($afterInvalid.authGeneration -ne $script:finalStatus.authGeneration -or $afterInvalid.folderSettingsSupported -ne $true) { throw 'invalid_pair_update_changed_agent_state' }
     Add-Event 'final_agent_capability' 'passed' @{ folderSettingsSupported = $script:finalStatus.folderSettingsSupported; incompletePairUpdateRejected = $true; connected = $script:finalStatus.connected; mounted = $script:finalStatus.mounted }
