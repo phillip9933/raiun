@@ -384,6 +384,7 @@ async fn preview_media_scan(
             std::path::Path::new(&source),
             MediaScanOptions {
                 filesystem_mtime_utc,
+                exclusions: Vec::new(),
             },
         )
         .map_err(|error| error.to_string())?;
