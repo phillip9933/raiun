@@ -226,3 +226,38 @@ body{min-width:0}
 .workspace-help{padding:14px 16px;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--muted);font-size:12px;line-height:1.55}
 .workspace-help summary{color:var(--ink);font-weight:700;cursor:pointer}
 .workspace-help p{margin-top:9px}
+.account-option.selected{background:var(--account-accent,#00677f);border-color:var(--account-accent,#00677f);color:#fff;box-shadow:none}
+.account-option.selected:hover:not(:disabled){background:var(--account-accent,#00677f);border-color:var(--account-accent,#00677f)}
+.account-option.selected .account-option-mark{background:#ffffff24;color:#fff}
+.account-option.selected .account-option-copy small{color:#ffffffdf}
+.account-option.selected .account-option-state.connected,.account-option.selected .account-option-state.attention{color:#fff}
+:root:not([data-theme="light"]) .account-option.selected,:root[data-theme="dark"] .account-option.selected{background:var(--account-accent,#00677f);border-color:var(--account-accent,#00677f);color:#fff;box-shadow:none}
+:root:not([data-theme="light"]) .account-option.selected:hover:not(:disabled),:root[data-theme="dark"] .account-option.selected:hover:not(:disabled){background:var(--account-accent,#00677f);border-color:var(--account-accent,#00677f)}
+:root:not([data-theme="light"]) .account-option.selected .account-option-mark,:root[data-theme="dark"] .account-option.selected .account-option-mark{background:#ffffff24;color:#fff}
+:root:not([data-theme="light"]) .account-option.selected .account-option-copy small,:root[data-theme="dark"] .account-option.selected .account-option-copy small{color:#ffffffdf}
+:root:not([data-theme="light"]) .account-option.selected .account-option-state.connected,:root:not([data-theme="light"]) .account-option.selected .account-option-state.attention,:root[data-theme="dark"] .account-option.selected .account-option-state.connected,:root[data-theme="dark"] .account-option.selected .account-option-state.attention{color:#fff}
+.topbar.selected-account-accent{background:var(--account-accent,#00677f);border-bottom-color:var(--account-accent,#00677f)}
+:root:not([data-theme="light"]) .topbar.selected-account-accent,:root[data-theme="dark"] .topbar.selected-account-accent{background:var(--account-accent,#00677f);border-bottom-color:var(--account-accent,#00677f)}
+.topbar.selected-account-accent .topbar-account{margin-left:0}
+.topbar.selected-account-accent .topbar-account>b{color:#fff}
+.topbar.selected-account-accent #refresh{color:#fff}
+.topbar.selected-account-accent #refresh:hover:not(:disabled){background:#ffffff2b;color:#fff}
+.topbar.selected-account-accent #refresh:focus-visible{outline:2px solid #fff;outline-offset:2px;box-shadow:0 0 0 4px #14262a80}
+:root:not([data-theme="light"]) .topbar.selected-account-accent .topbar-account>b,:root[data-theme="dark"] .topbar.selected-account-accent .topbar-account>b{color:#fff}
+:root:not([data-theme="light"]) .topbar.selected-account-accent #refresh,:root[data-theme="dark"] .topbar.selected-account-accent #refresh{color:#fff}
+.appearance-accent-row{min-width:0;margin:0;padding:12px 0 0;border:0;border-top:1px solid #edf0f1}
+.settings-row.appearance-accent-row{display:flex;flex-direction:column;align-items:stretch;gap:0}
+.appearance-accent-row legend{padding:0;font-size:12px;font-weight:700;color:#26383c}
+.appearance-accent-row legend small{display:block;margin-top:4px;color:#859196;font-size:11px;font-weight:400}
+.account-accent-options{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px}
+.account-color-choice{position:relative;display:inline-grid;place-items:center;width:36px;height:36px;cursor:pointer}
+.account-color-choice input{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+.account-color-swatch{position:relative;display:block;width:26px;height:26px;border:2px solid transparent;border-radius:7px;background:var(--swatch-color);box-shadow:0 0 0 1px #18282b20;transition:transform .12s ease,border-color .12s ease}
+.account-color-choice:hover .account-color-swatch{transform:scale(1.08)}
+.account-color-choice input:checked+.account-color-swatch{border-color:#fff;box-shadow:0 0 0 2px var(--swatch-color),0 0 0 3px #18282b30}
+.account-color-choice input:focus-visible+.account-color-swatch{outline:3px solid #1b2528;outline-offset:4px}
+.appearance-accent-row:disabled .account-accent-options{opacity:.55}
+:root[data-theme="dark"] .appearance-accent-row{border-top-color:#30393b}
+:root[data-theme="dark"] .appearance-accent-row legend{color:#dce4e5}
+:root[data-theme="dark"] .appearance-accent-row legend small{color:#a1abad}
+:root[data-theme="dark"] .account-color-choice input:focus-visible+.account-color-swatch{outline-color:#f3f7f8}

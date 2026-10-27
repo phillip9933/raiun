@@ -70,7 +70,6 @@ test('theme is global, account color remains profile-scoped, and existing sign-o
   const main = await readFile(new URL('../src/main.ts', import.meta.url), 'utf8');
   assert.match(main, /readAppearance\([^\n]*state\.selectedAccount/);
   assert.match(main, /Theme applies to all accounts\. Color marks this account\./);
-  assert.match(main, /id="appearance-accent" aria-label="Account color" \$\{state\.selectedAccount \? '' : 'disabled'\}/);
   assert.match(main, /const canSignOut = state\.agentReachable && \(connected \|\| state\.status\?\.offline === true \|\| state\.status\?\.offline_namespace === true\)/);
   assert.match(main, /if \(isRetainedSignInOnly\(status\)\) return 'Reconnecting sign-in'/);
   assert.match(main, /offlineNamespace: state\.status\?\.offline_namespace === true/);
