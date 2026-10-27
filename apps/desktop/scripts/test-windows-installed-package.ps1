@@ -231,6 +231,26 @@ function Check-OfflineStatus($Reply, [bool] $RequireFolderSettings = $false) {
     }
 }
 
+function Get-SafeAclFacts([string] $Path) {
+    try {
+        $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+        $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+        $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+        $explicitUserAllows = @($rules | Where-Object { $_.IdentityReference.Value -ceq $userSid -and -not $_.IsInherited -and $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow }).Count
+        $inheritedRules = @($rules | Where-Object { $_.IsInherited }).Count
+        return [ordered]@{
+            readable = $true
+            ownerMatchesCurrentUser = ($ownerSid -ceq $userSid)
+            explicitCurrentUserAllowCount = $explicitUserAllows
+            inheritedAceCount = $inheritedRules
+            protectedDacl = [bool]$acl.AreAccessRulesProtected
+        }
+    } catch {
+        return [ordered]@{ readable = $false; exceptionType = $_.Exception.GetType().Name }
+    }
+}
+
 function Check-InstallRegistration {
     $uninstall = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
     $matches = @()
@@ -266,9 +286,11 @@ function Check-StartMenuShortcut {
 
 function Check-DataRetention {
     foreach ($entry in $script:retentionPaths) {
-        $script:phase = 'retention_' + [string]$entry.name
+        $script:phase = 'retention_' + [string]$entry.name + '_existence_check'
         if (-not (Test-Path -LiteralPath $entry.path -PathType Leaf)) { throw 'synthetic_data_missing' }
+        $script:phase = 'retention_' + [string]$entry.name + '_metadata_read'
         $pin = Pin-File $entry.path
+        $script:phase = 'retention_' + [string]$entry.name + '_hash_compare'
         if ($pin.sha256 -cne $entry.expected.sha256 -or $pin.length -ne $entry.expected.length) { throw 'synthetic_data_changed' }
     }
     $script:phase = 'retention_dpapi_unprotect'
@@ -285,6 +307,11 @@ $script:invalidPairRejected = $false
 $script:registration = [ordered]@{ baseline = $null; final = $null }
 $script:shortcutCounts = [ordered]@{ baseline = $null; final = $null }
 $script:retained = $null
+$script:postShutdownRetentionProbe = $null
+$script:documentRootPath = $null
+$script:documentAclBeforeAgent = $null
+$script:documentAclAfterAgent = $null
+$script:agentCleanupSucceeded = $true
 
 try {
     New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
@@ -307,6 +334,7 @@ try {
     New-Item -ItemType Directory -Path $env:APPDATA,$env:LOCALAPPDATA | Out-Null
     $isolatedRoaming = Join-Path $env:APPDATA 'org.raiun.desktop'
     $isolatedLocal = Join-Path $env:LOCALAPPDATA 'Raiun'
+    $script:documentRootPath = $isolatedLocal
     $realRoaming = Join-Path $realRoaming 'org.raiun.desktop'
     $realLocal = Join-Path $realLocal 'Raiun'
     New-Item -ItemType Directory -Path $isolatedRoaming,$isolatedLocal,$realRoaming,$realLocal -Force | Out-Null
@@ -349,6 +377,8 @@ try {
     Add-Event 'baseline_install' 'passed' @{ exitCode = $script:baselineInstallExit; installedPayloadCount = $script:baselineFiles.Count; uninstallEntryCount = $script:registration.baseline.entries; startMenuShortcuts = $script:shortcutCounts.baseline }
 
     $baselineAgent = Join-Path $script:installRoot 'raiun-agent.exe'
+    $script:documentAclBeforeAgent = [ordered]@{ directory = Get-SafeAclFacts $script:documentRootPath; document = Get-SafeAclFacts $script:documentPath }
+    Add-Event 'fixture_acl_before_agent' 'diagnostic' @{ directory = $script:documentAclBeforeAgent.directory; document = $script:documentAclBeforeAgent.document }
     $script:phase = 'baseline_agent_process_start'
     Start-Agent $baselineAgent
     Add-Event 'baseline_agent_process_start' 'passed'
@@ -437,9 +467,31 @@ try {
             Add-Event 'agent_cleanup' 'passed' @{ exitCode = $cleanupExit }
         } catch {
             Add-Event 'agent_cleanup' 'failed' @{ exceptionType = $_.Exception.GetType().Name }
+            $script:agentCleanupSucceeded = $false
             $script:result = 'failed'
             if ($null -eq $script:failure) { $script:failure = 'agent_cleanup:' + $_.Exception.GetType().Name }
         }
+    }
+    if ($script:agentCleanupSucceeded -and $script:failure -match '^retention_([^:]+):') {
+        $failedName = $Matches[1] -replace '_(existence_check|metadata_read|hash_compare)$', ''
+        $entry = @($script:retentionPaths | Where-Object { $_.name -ceq $failedName })
+        if ($entry.Count -eq 1) {
+            try {
+                if (-not (Test-Path -LiteralPath $entry[0].path -PathType Leaf)) {
+                    $script:postShutdownRetentionProbe = [ordered]@{ name = $failedName; readableAfterAgentExit = $false; result = 'not_found' }
+                } else {
+                    $pin = Pin-File $entry[0].path
+                    $script:postShutdownRetentionProbe = [ordered]@{ name = $failedName; readableAfterAgentExit = $true; hashMatches = ($pin.sha256 -ceq $entry[0].expected.sha256 -and $pin.length -eq $entry[0].expected.length) }
+                }
+            } catch {
+                $script:postShutdownRetentionProbe = [ordered]@{ name = $failedName; readableAfterAgentExit = $false; exceptionType = $_.Exception.GetType().Name }
+            }
+            Add-Event 'post_shutdown_retention_probe' 'diagnostic' $script:postShutdownRetentionProbe
+        }
+    }
+    if ($null -ne $script:documentRootPath -and (Test-Path -LiteralPath $script:documentRootPath -PathType Container)) {
+        $script:documentAclAfterAgent = [ordered]@{ directory = Get-SafeAclFacts $script:documentRootPath; document = Get-SafeAclFacts $script:documentPath }
+        Add-Event 'fixture_acl_after_agent_stop' 'diagnostic' @{ directory = $script:documentAclAfterAgent.directory; document = $script:documentAclAfterAgent.document }
     }
     if ($null -ne $script:startupAppData) { $env:APPDATA = $script:startupAppData }
     if ($null -ne $script:startupLocalAppData) { $env:LOCALAPPDATA = $script:startupLocalAppData }
@@ -462,6 +514,9 @@ try {
         registeredApp = $script:registration
         startMenuShortcuts = $script:shortcutCounts
         retainedData = $script:retained
+        postShutdownRetentionProbe = $script:postShutdownRetentionProbe
+        syntheticDocumentAclBeforeAgent = $script:documentAclBeforeAgent
+        syntheticDocumentAclAfterAgentStop = $script:documentAclAfterAgent
         baselineAgentStatus = $script:baselineStatus
         finalAgentStatus = $script:finalStatus
         incompletePairUpdateRejected = $script:invalidPairRejected
