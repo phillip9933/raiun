@@ -1,16 +1,11 @@
 {
   "cached_notice_gaps_resolved_from_verified_upstream": [
-    "alloc-stdlib@0.2.4",
     "dlopen2@0.8.2",
     "dlopen2_derive@0.4.3",
     "libappindicator-sys@0.9.0",
-    "selectors@0.36.1",
-    "tauri-plugin@2.6.3",
-    "unic-char-property@0.9.0",
-    "unic-char-range@0.9.0",
-    "unic-common@0.9.0",
-    "unic-ucd-ident@0.9.0",
-    "unic-ucd-version@0.9.0"
+    "tauri-plugin@2.7.2",
+    "selectors@0.38.0",
+    "alloc-stdlib@0.3.0"
   ],
   "eme_notice": {
     "bytes": 1087,
@@ -19,16 +14,16 @@
   },
   "gaps": [],
   "lock_sha256": {
-    "Cargo.lock": "68c0bf868a82aa22fd3b85bd988fafdffbfcdcb7c80a5b38c733941d43e723f4",
-    "desktop-shell/package-lock.json": "a5b605c975309557b7ec3825dccd9649dbaf2797857a0c52ab388f603cc0e3d3",
-    "desktop-shell/src-tauri/Cargo.lock": "d519bcb3092d12752ac6759b8b76e373bddd3cee14311ecfad16f610bae0d27a",
-    "package-lock.json": "d14cfcba3678aa24e91bc6765ae2c570aac2b2f1a64d840636e1f90549c07b46"
+    "Cargo.lock": "2f3d869b4af0a86827478e8d8fedbe0a551b6eaf1a01e394d6db51334b83a636",
+    "desktop-shell/package-lock.json": "fa80c59e5a6265312d29aefe9278596d57182665c881feeb8fe94e6ab65c17f2",
+    "desktop-shell/src-tauri/Cargo.lock": "bfa155e29d8cfd05a6ced4800b73cdcd40c74777648959ff8ac7b61c53b885f6",
+    "package-lock.json": "fc694dd4b238d9f55909d1a8229f1cfb8f063f042f2bb0256c20c73495dad64d"
   },
   "production_ui_packages": [
     {
       "declared_license": "Apache-2.0 OR MIT",
       "ecosystem": "npm",
-      "lock_integrity": "sha512-M2FPuYND2m+wh5hfW9ZpSdxMPdEJovPBWwoHJmwUpysTYNHaOkVFN419m/K0LIgjb/7KU2vBgsUepJWugQCvAA==",
+      "lock_integrity": "sha512-pVmfis+4zT8H0Qhp3xPZx9Ju7kpzvA6rr/PSJPyuwfvucTQ8sVt61NYU9KMkK703UFlYadFmjKA4HhybOtN0gg==",
       "lockfiles": [
         "package-lock.json",
         "desktop-shell/package-lock.json"
@@ -37,16 +32,21 @@
       "notice_files": [
         {
           "bytes": 10174,
-          "path": "legal/npm/@tauri-apps__api-2.11.1/LICENSE_APACHE-2.0",
+          "path": "legal/npm/@tauri-apps__api-2.12.4/LICENSE-APACHE-2.0",
           "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
         },
         {
           "bytes": 1090,
-          "path": "legal/npm/@tauri-apps__api-2.11.1/LICENSE_MIT",
+          "path": "legal/npm/@tauri-apps__api-2.12.4/LICENSE-MIT",
           "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
+        },
+        {
+          "bytes": 889,
+          "path": "legal/npm/@tauri-apps__api-2.12.4/LICENSE.spdx",
+          "sha256": "5e834fe9788c524210deda859c46a550ffa5aa0cba9ea0572f0d81120e97c008"
         }
       ],
-      "version": "2.11.1"
+      "version": "2.12.4"
     },
     {
       "declared_license": "MIT OR Apache-2.0",
@@ -78,6 +78,16 @@
       ],
       "version": "2.7.3"
     }
+  ],
+  "retained_upstream_supplements_outside_current_graph": [
+    "alloc-stdlib@0.2.4",
+    "selectors@0.36.1",
+    "tauri-plugin@2.6.3",
+    "unic-char-property@0.9.0",
+    "unic-char-range@0.9.0",
+    "unic-common@0.9.0",
+    "unic-ucd-ident@0.9.0",
+    "unic-ucd-version@0.9.0"
   ],
   "rust_packages": [
     {
@@ -216,13 +226,13 @@
       "notice_files": [
         {
           "bytes": 1483,
-          "path": "legal/rust/alloc-no-stdlib-2.0.4/LICENSE",
+          "path": "legal/rust/alloc-no-stdlib-3.0.0/LICENSE",
           "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"
         }
       ],
       "repository": "https://github.com/dropbox/rust-alloc-no-stdlib",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "2.0.4"
+      "version": "3.0.0"
     },
     {
       "declared_license": "BSD-3-Clause",
@@ -235,20 +245,20 @@
       "notice_files": [
         {
           "bytes": 1483,
-          "path": "legal/upstream-retrieval/alloc-ae42d22078b98549e987d2f03d12df7b984fde47/LICENSE",
+          "path": "legal/upstream-retrieval/alloc-0a81fd6928ea3b33c8cd484aa4575d50ffb98012/LICENSE",
           "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae",
-          "url": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/ae42d22078b98549e987d2f03d12df7b984fde47/LICENSE"
+          "url": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/0a81fd6928ea3b33c8cd484aa4575d50ffb98012/LICENSE"
         }
       ],
       "repository": "https://github.com/dropbox/rust-alloc-no-stdlib",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "upstream_notice_provenance": {
         "path": "legal/upstream-notice-provenance.json",
-        "registry_crate_sha256": "0e76a019e91224d279006ff972f1e984179a6e9feb050adba6ce8274aef23195",
+        "registry_crate_sha256": "0b5c1865780388bfa186411ab5f247819487fc4864c6e9c3106611fa347586e1",
         "resolution": "exact upstream commit license/copyright texts",
-        "vcs_commit": "ae42d22078b98549e987d2f03d12df7b984fde47"
+        "vcs_commit": "0a81fd6928ea3b33c8cd484aa4575d50ffb98012"
       },
-      "version": "0.2.4"
+      "version": "0.3.0"
     },
     {
       "declared_license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
@@ -739,6 +749,54 @@
       "version": "1.5.1"
     },
     {
+      "declared_license": "ISC AND (Apache-2.0 OR ISC)",
+      "description": "aws-lc-rs is a cryptographic library using AWS-LC for its cryptographic operations. This library strives to be API-compatible with the popular Rust library named ring.",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "aws-lc-rs",
+      "notice_files": [
+        {
+          "bytes": 11085,
+          "path": "legal/rust/aws-lc-rs-1.18.2/LICENSE",
+          "sha256": "b50b376e7d24a0598488b730c3034ffcd0b58dd36c0913a24b9903a3cfd04bf7"
+        }
+      ],
+      "repository": "https://github.com/aws/aws-lc-rs",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "1.18.2"
+    },
+    {
+      "declared_license": "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)",
+      "description": "AWS-LC is a general-purpose cryptographic library maintained by the AWS Cryptography team for AWS and their customers. It \u0456s based on code from the Google BoringSSL project and the OpenSSL project.",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "aws-lc-sys",
+      "notice_files": [
+        {
+          "bytes": 20337,
+          "path": "legal/rust/aws-lc-sys-0.46.0/LICENSE",
+          "sha256": "728536b4160e051f86d7c9c388f704866b3d512cd7df97ac3516c65279523c4e"
+        },
+        {
+          "bytes": 20338,
+          "path": "legal/rust/aws-lc-sys-0.46.0/aws-lc/LICENSE",
+          "sha256": "977c541bd25ffe36975dde25c028c0cd15ddf3d08243983b58e8a6a3d9447523"
+        },
+        {
+          "bytes": 1161,
+          "path": "legal/rust/aws-lc-sys-0.46.0/aws-lc/third_party/fiat/LICENSE",
+          "sha256": "43e358d7b6eb109d0f51f7b3a090fd82607965767c25fadee39e922475de2061"
+        }
+      ],
+      "repository": "https://github.com/aws/aws-lc-rs",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.46.0"
+    },
+    {
       "declared_license": "MIT OR Apache-2.0",
       "description": "encodes and decodes base64 as bytes or utf8",
       "ecosystem": "cargo",
@@ -768,7 +826,8 @@
       "description": "encodes and decodes base64 as bytes or utf8",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "base64",
       "notice_files": [
@@ -968,18 +1027,18 @@
       "notice_files": [
         {
           "bytes": 1483,
-          "path": "legal/rust/brotli-8.0.4/LICENSE.BSD-3-Clause",
+          "path": "legal/rust/brotli-9.1.0/LICENSE.BSD-3-Clause",
           "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"
         },
         {
           "bytes": 1084,
-          "path": "legal/rust/brotli-8.0.4/LICENSE.MIT",
+          "path": "legal/rust/brotli-9.1.0/LICENSE.MIT",
           "sha256": "3d180008e36922a4e8daec11c34c7af264fed5962d07924aea928c38e8663c94"
         }
       ],
       "repository": "https://github.com/dropbox/rust-brotli",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "8.0.4"
+      "version": "9.1.0"
     },
     {
       "declared_license": "BSD-3-Clause/MIT",
@@ -992,13 +1051,13 @@
       "notice_files": [
         {
           "bytes": 1483,
-          "path": "legal/rust/brotli-decompressor-5.0.3/LICENSE",
+          "path": "legal/rust/brotli-decompressor-6.2.0/LICENSE",
           "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"
         }
       ],
       "repository": "https://github.com/dropbox/rust-brotli-decompressor",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "5.0.3"
+      "version": "6.2.0"
     },
     {
       "declared_license": "Unlicense OR MIT",
@@ -1271,13 +1330,13 @@
       "notice_files": [
         {
           "bytes": 11193,
-          "path": "legal/rust/cargo_toml-0.22.3/LICENSE",
+          "path": "legal/rust/cargo_toml-1.0.1/LICENSE",
           "sha256": "ee874098519e956c23a3c5c7e20581f8e9b1d70aa05eb178f983be9775090a2f"
         }
       ],
       "repository": "https://gitlab.com/lib.rs/cargo_toml",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.22.3"
+      "version": "1.0.1"
     },
     {
       "declared_license": "MIT",
@@ -1322,6 +1381,25 @@
       "repository": "https://github.com/rust-lang/cc-rs",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "version": "1.6.0"
+    },
+    {
+      "declared_license": "MIT",
+      "description": "Read/write Compound File Binary (structured storage) files",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "cfb",
+      "notice_files": [
+        {
+          "bytes": 1074,
+          "path": "legal/rust/cfb-0.14.0/LICENSE",
+          "sha256": "ebaac853b53fec0ed475796f533ce676912a4df9ad9d8a621fa76d5060591e10"
+        }
+      ],
+      "repository": "https://github.com/mdsteele/rust-cfb",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.14.0"
     },
     {
       "declared_license": "MIT",
@@ -1397,7 +1475,8 @@
       "description": "A tiny utility to help save you a lot of effort with long winded `#[cfg()]` checks.",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "cfg_aliases",
       "notice_files": [
@@ -1416,7 +1495,8 @@
       "description": "The ChaCha20 stream cipher (RFC 8439) implemented in pure Rust using traits\nfrom the RustCrypto `cipher` crate, with optional architecture-specific\nhardware acceleration (AVX2, SSE2). Additionally provides the ChaCha8, ChaCha12,\nXChaCha20, XChaCha12 and XChaCha8 stream ciphers, and also optional\nrand_core-compatible RNGs based on those ciphers.\n",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "chacha20",
       "notice_files": [
@@ -1576,6 +1656,30 @@
     },
     {
       "declared_license": "MIT OR Apache-2.0",
+      "description": "A build dependency for running `cmake` to build a native library\n",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "cmake",
+      "notice_files": [
+        {
+          "bytes": 10847,
+          "path": "legal/rust/cmake-0.1.58/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "bytes": 1057,
+          "path": "legal/rust/cmake-0.1.58/LICENSE-MIT",
+          "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+        }
+      ],
+      "repository": "https://github.com/rust-lang/cmake-rs",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.1.58"
+    },
+    {
+      "declared_license": "MIT OR Apache-2.0",
       "description": "Global override of color control",
       "ecosystem": "cargo",
       "graphs": [
@@ -1676,7 +1780,8 @@
       "description": "Lightweight runtime CPU feature detection for aarch64, loongarch64, and x86/x86_64 targets,\nwith no_std support and support for mobile targets including Android and iOS\n",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "cpufeatures",
       "notice_files": [
@@ -1832,13 +1937,13 @@
       "notice_files": [
         {
           "bytes": 16726,
-          "path": "legal/rust/cssparser-0.36.0/LICENSE",
+          "path": "legal/rust/cssparser-0.37.0/LICENSE",
           "sha256": "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85"
         }
       ],
       "repository": "https://github.com/servo/rust-cssparser",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.36.0"
+      "version": "0.37.0"
     },
     {
       "declared_license": "MPL-2.0",
@@ -1851,17 +1956,17 @@
       "notice_files": [
         {
           "bytes": 16726,
-          "path": "legal/rust/cssparser-macros-0.6.1/LICENSE",
+          "path": "legal/rust/cssparser-macros-0.7.1/LICENSE",
           "sha256": "fab3dd6bdab226f1c08630b1dd917e11fcb4ec5e1e020e2c16f83a0a13863e85"
         }
       ],
       "repository": "https://github.com/servo/rust-cssparser",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.6.1"
+      "version": "0.7.1"
     },
     {
       "declared_license": "Apache-2.0 OR MIT",
-      "description": "__attribute__((constructor)) for Rust",
+      "description": "Global, no_std-compatible constructors for all platforms that run before main (like C/C++ __attribute__((constructor)))",
       "ecosystem": "cargo",
       "graphs": [
         "desktop-shell/src-tauri/Cargo.toml"
@@ -1870,42 +1975,18 @@
       "notice_files": [
         {
           "bytes": 11324,
-          "path": "legal/rust/ctor-0.8.0/LICENSE-APACHE",
+          "path": "legal/rust/ctor-1.0.13/LICENSE-APACHE",
           "sha256": "a8ad31b1c3f40dca5a84119351b8fa8ddc868edd77fad8a8ebf6d8f2d16fa4ae"
         },
         {
           "bytes": 1022,
-          "path": "legal/rust/ctor-0.8.0/LICENSE-MIT",
+          "path": "legal/rust/ctor-1.0.13/LICENSE-MIT",
           "sha256": "bccaa8b6c09f94e81f06696e179dbe058464bbdfbc823b6d49cada1d71e84ac3"
         }
       ],
-      "repository": "https://github.com/mmastrac/rust-ctor",
+      "repository": "https://github.com/mmastrac/linktime",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.8.0"
-    },
-    {
-      "declared_license": "Apache-2.0 OR MIT",
-      "description": "proc-macro support for the ctor crate",
-      "ecosystem": "cargo",
-      "graphs": [
-        "desktop-shell/src-tauri/Cargo.toml"
-      ],
-      "name": "ctor-proc-macro",
-      "notice_files": [
-        {
-          "bytes": 11324,
-          "path": "legal/rust/ctor-proc-macro-0.0.7/LICENSE-APACHE",
-          "sha256": "a8ad31b1c3f40dca5a84119351b8fa8ddc868edd77fad8a8ebf6d8f2d16fa4ae"
-        },
-        {
-          "bytes": 1022,
-          "path": "legal/rust/ctor-proc-macro-0.0.7/LICENSE-MIT",
-          "sha256": "bccaa8b6c09f94e81f06696e179dbe058464bbdfbc823b6d49cada1d71e84ac3"
-        }
-      ],
-      "repository": "https://github.com/mmastrac/rust-ctor",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.0.7"
+      "version": "1.0.13"
     },
     {
       "declared_license": "MIT/Apache-2.0",
@@ -2111,18 +2192,18 @@
       "notice_files": [
         {
           "bytes": 9694,
-          "path": "legal/rust/dirs-6.0.0/LICENSE-APACHE",
+          "path": "legal/rust/dirs-7.0.0/LICENSE-APACHE",
           "sha256": "d3174ad63e721d4c9dccb8ad4320848992d314369bc46319720b5802c9153fe9"
         },
         {
           "bytes": 1069,
-          "path": "legal/rust/dirs-6.0.0/LICENSE-MIT",
+          "path": "legal/rust/dirs-7.0.0/LICENSE-MIT",
           "sha256": "6a2e0ade09a7d5f816f11566fee2b151b32235a7fad52b41d49cce96f833c1a9"
         }
       ],
-      "repository": "https://github.com/soc/dirs-rs",
+      "repository": "https://codeberg.org/dirs/dirs-rs",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "6.0.0"
+      "version": "7.0.0"
     },
     {
       "declared_license": "MIT OR Apache-2.0",
@@ -2255,13 +2336,13 @@
       "notice_files": [
         {
           "bytes": 1328,
-          "path": "legal/rust/dom_query-0.27.0/LICENSE",
+          "path": "legal/rust/dom_query-0.28.0/LICENSE",
           "sha256": "7554701d1e74fc434f68c522b1dd743c8c16d816a4b761b5213f367b898884c8"
         }
       ],
       "repository": "https://github.com/niklak/dom_query",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.27.0"
+      "version": "0.28.0"
     },
     {
       "declared_license": "MIT/Apache-2.0",
@@ -2353,54 +2434,6 @@
       "repository": "https://github.com/upsuper/dtoa-short",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "version": "0.3.5"
-    },
-    {
-      "declared_license": "Apache-2.0 OR MIT",
-      "description": "__attribute__((destructor)) for Rust",
-      "ecosystem": "cargo",
-      "graphs": [
-        "desktop-shell/src-tauri/Cargo.toml"
-      ],
-      "name": "dtor",
-      "notice_files": [
-        {
-          "bytes": 11324,
-          "path": "legal/rust/dtor-0.3.0/LICENSE-APACHE",
-          "sha256": "a8ad31b1c3f40dca5a84119351b8fa8ddc868edd77fad8a8ebf6d8f2d16fa4ae"
-        },
-        {
-          "bytes": 1022,
-          "path": "legal/rust/dtor-0.3.0/LICENSE-MIT",
-          "sha256": "bccaa8b6c09f94e81f06696e179dbe058464bbdfbc823b6d49cada1d71e84ac3"
-        }
-      ],
-      "repository": "https://github.com/mmastrac/rust-ctor",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.3.0"
-    },
-    {
-      "declared_license": "Apache-2.0 OR MIT",
-      "description": "proc-macro support for the dtor crate",
-      "ecosystem": "cargo",
-      "graphs": [
-        "desktop-shell/src-tauri/Cargo.toml"
-      ],
-      "name": "dtor-proc-macro",
-      "notice_files": [
-        {
-          "bytes": 11324,
-          "path": "legal/rust/dtor-proc-macro-0.0.6/LICENSE-APACHE",
-          "sha256": "a8ad31b1c3f40dca5a84119351b8fa8ddc868edd77fad8a8ebf6d8f2d16fa4ae"
-        },
-        {
-          "bytes": 1022,
-          "path": "legal/rust/dtor-proc-macro-0.0.6/LICENSE-MIT",
-          "sha256": "bccaa8b6c09f94e81f06696e179dbe058464bbdfbc823b6d49cada1d71e84ac3"
-        }
-      ],
-      "repository": "https://github.com/mmastrac/rust-ctor",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.0.6"
     },
     {
       "declared_license": "CC0-1.0 OR MIT-0 OR Apache-2.0",
@@ -2775,6 +2808,30 @@
       "version": "0.3.6"
     },
     {
+      "declared_license": "MIT/Apache-2.0",
+      "description": "Platform-agnostic accessors of timestamps in File metadata\n",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "filetime",
+      "notice_files": [
+        {
+          "bytes": 10847,
+          "path": "legal/rust/filetime-0.2.29/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "bytes": 1057,
+          "path": "legal/rust/filetime-0.2.29/LICENSE-MIT",
+          "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+        }
+      ],
+      "repository": "https://github.com/alexcrichton/filetime",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.2.29"
+    },
+    {
       "declared_license": "MIT OR Apache-2.0",
       "description": "Find windows-specific tools, read MSVC versions from the registry and from COM interfaces",
       "ecosystem": "cargo",
@@ -2950,6 +3007,25 @@
       "repository": "https://github.com/danburkert/fs2-rs",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "version": "0.4.3"
+    },
+    {
+      "declared_license": "MIT",
+      "description": "Expanding std::fs and std::io. Recursively copy folders with information about process and much more.",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "fs_extra",
+      "notice_files": [
+        {
+          "bytes": 1072,
+          "path": "legal/rust/fs_extra-1.3.0/LICENSE",
+          "sha256": "251ea8ccb1205ce5fa847d6e264d6b6753af62de2cecf2fd9abc0eb02c7c83fc"
+        }
+      ],
+      "repository": "https://github.com/webdesus/fs_extra",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "1.3.0"
     },
     {
       "declared_license": "MIT",
@@ -3371,7 +3447,8 @@
       "description": "A small cross-platform library for retrieving random data from system source",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "getrandom",
       "notice_files": [
@@ -3864,18 +3941,18 @@
       "notice_files": [
         {
           "bytes": 10847,
-          "path": "legal/rust/html5ever-0.38.0/LICENSE-APACHE",
+          "path": "legal/rust/html5ever-0.39.0/LICENSE-APACHE",
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
         },
         {
           "bytes": 1076,
-          "path": "legal/rust/html5ever-0.38.0/LICENSE-MIT",
+          "path": "legal/rust/html5ever-0.39.0/LICENSE-MIT",
           "sha256": "86dd7f026f916daf7511e39951ad8ea8cf55a8db67ae64060dacf829761c18f3"
         }
       ],
       "repository": "https://github.com/servo/html5ever",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.38.0"
+      "version": "0.39.0"
     },
     {
       "declared_license": "MIT OR Apache-2.0",
@@ -3907,7 +3984,8 @@
       "description": "Trait representing an asynchronous, streaming, HTTP request or response body.\n",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "http-body",
       "notice_files": [
@@ -3926,7 +4004,8 @@
       "description": "Combinators and adapters for HTTP request or response bodies.\n",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "http-body-util",
       "notice_files": [
@@ -3945,7 +4024,8 @@
       "description": "A tiny, safe, speedy, zero-copy HTTP/1.x parser.",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "httparse",
       "notice_files": [
@@ -3969,7 +4049,8 @@
       "description": "A protective and efficient HTTP library for all.",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "hyper",
       "notice_files": [
@@ -3988,7 +4069,8 @@
       "description": "Rustls+hyper integration for pure rust HTTPS",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "hyper-rustls",
       "notice_files": [
@@ -4017,7 +4099,8 @@
       "description": "hyper utilities",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "hyper-util",
       "notice_files": [
@@ -4066,13 +4149,13 @@
       "notice_files": [
         {
           "bytes": 1074,
-          "path": "legal/rust/ico-0.5.0/LICENSE",
+          "path": "legal/rust/ico-0.6.0/LICENSE",
           "sha256": "41ca90213441b294e7517d5858f0cc85bc12e19ec044001b45bc213de461d33b"
         }
       ],
       "repository": "https://github.com/mdsteele/rust-ico",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.5.0"
+      "version": "0.6.0"
     },
     {
       "declared_license": "Unicode-3.0",
@@ -4502,6 +4585,25 @@
       "version": "0.19.0"
     },
     {
+      "declared_license": "MIT",
+      "description": "Small crate to infer file type based on magic number signatures",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "infer",
+      "notice_files": [
+        {
+          "bytes": 1062,
+          "path": "legal/rust/infer-0.22.0/LICENSE",
+          "sha256": "270b0d81891aa44c7e8726cf9432dade9556a01c848bacd2f3ef839c9c1a1859"
+        }
+      ],
+      "repository": "https://github.com/bojand/infer",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.22.0"
+    },
+    {
       "declared_license": "MIT OR Apache-2.0",
       "description": "Custom reference types for code generic over in-place and buffer-to-buffer modes of operation.",
       "ecosystem": "cargo",
@@ -4781,6 +4883,30 @@
       "version": "1.1.1"
     },
     {
+      "declared_license": "MIT OR Apache-2.0",
+      "description": "An implementation of the GNU Make jobserver for Rust.\n",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "jobserver",
+      "notice_files": [
+        {
+          "bytes": 10847,
+          "path": "legal/rust/jobserver-0.1.35/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "bytes": 1057,
+          "path": "legal/rust/jobserver-0.1.35/LICENSE-MIT",
+          "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+        }
+      ],
+      "repository": "https://github.com/rust-lang/jobserver-rs",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.1.35"
+    },
+    {
       "declared_license": "MIT/Apache-2.0",
       "description": "RFC 6902, JavaScript Object Notation (JSON) Patch",
       "ecosystem": "cargo",
@@ -4791,18 +4917,18 @@
       "notice_files": [
         {
           "bytes": 11357,
-          "path": "legal/rust/json-patch-3.0.1/LICENSE-APACHE",
+          "path": "legal/rust/json-patch-4.2.0/LICENSE-APACHE",
           "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1"
         },
         {
           "bytes": 1068,
-          "path": "legal/rust/json-patch-3.0.1/LICENSE-MIT",
+          "path": "legal/rust/json-patch-4.2.0/LICENSE-MIT",
           "sha256": "87f7527b1066337751f7f4d717089bf514ff8f7ee7d66c4c5b891b09e744ec11"
         }
       ],
       "repository": "https://github.com/idubrov/json-patch",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "3.0.1"
+      "version": "4.2.0"
     },
     {
       "declared_license": "MIT OR Apache-2.0",
@@ -4815,18 +4941,18 @@
       "notice_files": [
         {
           "bytes": 10867,
-          "path": "legal/rust/jsonptr-0.6.3/LICENSE-APACHE",
+          "path": "legal/rust/jsonptr-0.7.1/LICENSE-APACHE",
           "sha256": "2cf31f2ae7f3feba667d50fc1d4d21ecf217703c04c3068b83c9a73b6dde723a"
         },
         {
           "bytes": 1071,
-          "path": "legal/rust/jsonptr-0.6.3/LICENSE-MIT",
+          "path": "legal/rust/jsonptr-0.7.1/LICENSE-MIT",
           "sha256": "2bc107bdc18a74263d20bdefdb8073e17bc1a01b6b374dc5835683a33ee5ba7d"
         }
       ],
       "repository": "https://github.com/chanced/jsonptr",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.6.3"
+      "version": "0.7.1"
     },
     {
       "declared_license": "MIT OR Apache-2.0",
@@ -4839,18 +4965,18 @@
       "notice_files": [
         {
           "bytes": 10846,
-          "path": "legal/rust/keyboard-types-0.7.0/LICENSE-APACHE",
+          "path": "legal/rust/keyboard-types-0.8.3/LICENSE-APACHE",
           "sha256": "769f80b5bcb42ed0af4e4d2fd74e1ac9bf843cb80c5a29219d1ef3544428a6bb"
         },
         {
           "bytes": 1050,
-          "path": "legal/rust/keyboard-types-0.7.0/LICENSE-MIT",
+          "path": "legal/rust/keyboard-types-0.8.3/LICENSE-MIT",
           "sha256": "31dbbab009f1b2e59a1622d5955dfafc38ebe834000215b49d954c6f85fe927c"
         }
       ],
-      "repository": "https://github.com/pyfisch/keyboard-types",
+      "repository": "https://github.com/rust-windowing/keyboard-types",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.7.0"
+      "version": "0.8.3"
     },
     {
       "declared_license": "Apache-2.0 OR MIT",
@@ -5120,7 +5246,8 @@
       "description": "Pre-allocated storage with constant-time LRU tracking",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "lru-slab",
       "notice_files": [
@@ -5155,18 +5282,18 @@
       "notice_files": [
         {
           "bytes": 10847,
-          "path": "legal/rust/markup5ever-0.38.0/LICENSE-APACHE",
+          "path": "legal/rust/markup5ever-0.39.0/LICENSE-APACHE",
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
         },
         {
           "bytes": 1076,
-          "path": "legal/rust/markup5ever-0.38.0/LICENSE-MIT",
+          "path": "legal/rust/markup5ever-0.39.0/LICENSE-MIT",
           "sha256": "86dd7f026f916daf7511e39951ad8ea8cf55a8db67ae64060dacf829761c18f3"
         }
       ],
       "repository": "https://github.com/servo/html5ever",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.38.0"
+      "version": "0.39.0"
     },
     {
       "declared_license": "MIT OR Apache-2.0",
@@ -5261,6 +5388,25 @@
       "repository": "https://github.com/hyperium/mime",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "version": "0.3.17"
+    },
+    {
+      "declared_license": "MIT",
+      "description": "Minisign signature verification for files and streams with Ed25519. A small Rust library with no external dependencies.",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "minisign-verify",
+      "notice_files": [
+        {
+          "bytes": 2312,
+          "path": "legal/rust/minisign-verify-0.3.0/LICENSE",
+          "sha256": "42c8695fbc468866d9756be99af0ba4e37d733f8daa3c8827c8d80b8bec1b2f9"
+        }
+      ],
+      "repository": "https://github.com/jedisct1/rust-minisign-verify",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.3.0"
     },
     {
       "declared_license": "MIT OR Zlib OR Apache-2.0",
@@ -5361,23 +5507,23 @@
       "notice_files": [
         {
           "bytes": 10847,
-          "path": "legal/rust/muda-0.19.3/LICENSE-APACHE",
+          "path": "legal/rust/muda-0.20.0/LICENSE-APACHE",
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
         },
         {
           "bytes": 1108,
-          "path": "legal/rust/muda-0.19.3/LICENSE-MIT",
+          "path": "legal/rust/muda-0.20.0/LICENSE-MIT",
           "sha256": "2ab5537b8c0cb1d475e2145b6a7994b04e7c71e6e5bd836f7f9c47c221a5ad9a"
         },
         {
           "bytes": 809,
-          "path": "legal/rust/muda-0.19.3/LICENSE.spdx",
+          "path": "legal/rust/muda-0.20.0/LICENSE.spdx",
           "sha256": "b99f9d43803f2ac979c50949df630bd8eeaf2fcd1b9fdb9093710d70f5dfb63d"
         }
       ],
       "repository": "https://github.com/tauri-apps/muda",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.19.3"
+      "version": "0.20.0"
     },
     {
       "declared_license": "MIT",
@@ -5591,6 +5737,30 @@
       "repository": "https://github.com/Byron/open-rs",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "version": "5.4.4"
+    },
+    {
+      "declared_license": "MIT OR Apache-2.0",
+      "description": "A library for helping to find system-wide trust anchor (\"root\") certificate\nlocations based on paths typically used by `openssl`.\n",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "openssl-probe",
+      "notice_files": [
+        {
+          "bytes": 10847,
+          "path": "legal/rust/openssl-probe-0.2.1/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "bytes": 1057,
+          "path": "legal/rust/openssl-probe-0.2.1/LICENSE-MIT",
+          "sha256": "378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397"
+        }
+      ],
+      "repository": "https://github.com/rustls/openssl-probe",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.2.1"
     },
     {
       "declared_license": "MPL-2.0",
@@ -6053,30 +6223,6 @@
       "notice_files": [
         {
           "bytes": 10847,
-          "path": "legal/rust/png-0.17.16/LICENSE-APACHE",
-          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
-        },
-        {
-          "bytes": 1048,
-          "path": "legal/rust/png-0.17.16/LICENSE-MIT",
-          "sha256": "eaf40297c75da471f7cda1f3458e8d91b4b2ec866e609527a13acfa93b638652"
-        }
-      ],
-      "repository": "https://github.com/image-rs/image-png",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.17.16"
-    },
-    {
-      "declared_license": "MIT OR Apache-2.0",
-      "description": "PNG decoding and encoding library in pure Rust",
-      "ecosystem": "cargo",
-      "graphs": [
-        "desktop-shell/src-tauri/Cargo.toml"
-      ],
-      "name": "png",
-      "notice_files": [
-        {
-          "bytes": 10847,
           "path": "legal/rust/png-0.18.1/LICENSE-APACHE",
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
         },
@@ -6440,7 +6586,8 @@
       "description": "Versatile QUIC transport protocol implementation",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "quinn",
       "notice_files": [
@@ -6464,7 +6611,8 @@
       "description": "State machine for the QUIC transport protocol",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "quinn-proto",
       "notice_files": [
@@ -6488,7 +6636,8 @@
       "description": "UDP sockets with ECN information for the QUIC transport protocol",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "quinn-udp",
       "notice_files": [
@@ -6537,7 +6686,8 @@
       "description": "Random number generators and other randomness functionality.\n",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "rand",
       "notice_files": [
@@ -6624,7 +6774,8 @@
       "description": "Core random number generation traits and tools for implementation.",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "rand_core",
       "notice_files": [
@@ -6711,7 +6862,8 @@
       "description": "Selected PCG random number generators",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "rand_pcg",
       "notice_files": [
@@ -6916,6 +7068,30 @@
       "version": "0.12.28"
     },
     {
+      "declared_license": "MIT OR Apache-2.0",
+      "description": "higher level HTTP client library",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "reqwest",
+      "notice_files": [
+        {
+          "bytes": 10833,
+          "path": "legal/rust/reqwest-0.13.5/LICENSE-APACHE",
+          "sha256": "751963a8b88c0e3a9f27e98933079fbcf09b9998b2c13ac49c2e4d58444520d6"
+        },
+        {
+          "bytes": 1063,
+          "path": "legal/rust/reqwest-0.13.5/LICENSE-MIT",
+          "sha256": "dd87e27dfbaa888cb77ea34592648a7743636b8dce07e49543bddda0fcfc73bc"
+        }
+      ],
+      "repository": "https://github.com/seanmonstar/reqwest",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.13.5"
+    },
+    {
       "declared_license": "MIT",
       "description": "Rusty File Dialog",
       "ecosystem": "cargo",
@@ -6939,7 +7115,8 @@
       "description": "An experiment.",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "ring",
       "notice_files": [
@@ -7146,11 +7323,75 @@
       "version": "0.23.45"
     },
     {
+      "declared_license": "Apache-2.0 OR ISC OR MIT",
+      "description": "Rustls is a modern TLS library written in Rust.",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "rustls",
+      "notice_files": [
+        {
+          "bytes": 10847,
+          "path": "legal/rust/rustls-0.23.46/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "bytes": 775,
+          "path": "legal/rust/rustls-0.23.46/LICENSE-ISC",
+          "sha256": "7cfafc877eccc46c0e346ccbaa5c51bb6b894d2b818e617d970211e232785ad4"
+        },
+        {
+          "bytes": 1082,
+          "path": "legal/rust/rustls-0.23.46/LICENSE-MIT",
+          "sha256": "709e3175b4212f7b13aa93971c9f62ff8c69ec45ad8c6532a7e0c41d7a7d6f8c"
+        }
+      ],
+      "repository": "https://github.com/rustls/rustls",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.23.46"
+    },
+    {
+      "declared_license": "Apache-2.0 OR ISC OR MIT",
+      "description": "rustls-native-certs allows rustls to use the platform native certificate store",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "rustls-native-certs",
+      "notice_files": [
+        {
+          "bytes": 286,
+          "path": "legal/rust/rustls-native-certs-0.8.5/LICENSE",
+          "sha256": "d75967ce788187f83c3bd3328210974acfc443d4dc44909f1d7e34f21623a0c6"
+        },
+        {
+          "bytes": 10847,
+          "path": "legal/rust/rustls-native-certs-0.8.5/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "bytes": 775,
+          "path": "legal/rust/rustls-native-certs-0.8.5/LICENSE-ISC",
+          "sha256": "7cfafc877eccc46c0e346ccbaa5c51bb6b894d2b818e617d970211e232785ad4"
+        },
+        {
+          "bytes": 1082,
+          "path": "legal/rust/rustls-native-certs-0.8.5/LICENSE-MIT",
+          "sha256": "709e3175b4212f7b13aa93971c9f62ff8c69ec45ad8c6532a7e0c41d7a7d6f8c"
+        }
+      ],
+      "repository": "https://github.com/rustls/rustls-native-certs",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.8.5"
+    },
+    {
       "declared_license": "MIT OR Apache-2.0",
       "description": "Shared types for the rustls PKI ecosystem",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "rustls-pki-types",
       "notice_files": [
@@ -7170,6 +7411,30 @@
       "version": "1.15.1"
     },
     {
+      "declared_license": "MIT OR Apache-2.0",
+      "description": "rustls-platform-verifier supports verifying TLS certificates in rustls with the operating system verifier",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "rustls-platform-verifier",
+      "notice_files": [
+        {
+          "bytes": 11357,
+          "path": "legal/rust/rustls-platform-verifier-0.7.1/LICENSE-APACHE",
+          "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+        },
+        {
+          "bytes": 1066,
+          "path": "legal/rust/rustls-platform-verifier-0.7.1/LICENSE-MIT",
+          "sha256": "1c7cf76689c837a68ed8d704994e52a0f2940c087958f860d17f3186afbdcc0c"
+        }
+      ],
+      "repository": "https://github.com/rustls/rustls-platform-verifier",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.7.1"
+    },
+    {
       "declared_license": "ISC",
       "description": "Web PKI X.509 Certificate Verification.",
       "ecosystem": "cargo",
@@ -7187,6 +7452,25 @@
       "repository": "https://github.com/rustls/webpki",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "version": "0.103.15"
+    },
+    {
+      "declared_license": "ISC",
+      "description": "Web PKI X.509 Certificate Verification.",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "rustls-webpki",
+      "notice_files": [
+        {
+          "bytes": 916,
+          "path": "legal/rust/rustls-webpki-0.103.16/LICENSE",
+          "sha256": "5b698ca13897be3afdb7174256fa1574f8c6892b8bea1a66dd6469d3fe27885a"
+        }
+      ],
+      "repository": "https://github.com/rustls/webpki",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.103.16"
     },
     {
       "declared_license": "MIT OR Apache-2.0",
@@ -7443,27 +7727,27 @@
       "name": "selectors",
       "notice_files": [
         {
+          "bytes": 206,
+          "path": "legal/registry-provenance/selectors@0.38.0/source-license-header.txt",
+          "sha256": "766674381e88a468d55e07de3596987391cf0e8beebe51baf4fddf11078785b3",
+          "source": "verified registry archive lib.rs leading license comment; references official MPL text"
+        },
+        {
           "bytes": 16726,
           "path": "legal/upstream-retrieval/selectors-635e1a19d02960588a00e189bd4bd5bdb150ec3d/MPL-2.0.txt",
           "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
           "url": "https://www.mozilla.org/media/MPL/2.0/index.txt"
-        },
-        {
-          "bytes": 206,
-          "path": "legal/registry-provenance/selectors@0.36.1/source-license-header.txt",
-          "sha256": "766674381e88a468d55e07de3596987391cf0e8beebe51baf4fddf11078785b3",
-          "source": "verified registry archive lib.rs leading license comment; MPL official text URL is referenced by that header"
         }
       ],
       "repository": "https://github.com/servo/stylo",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "upstream_notice_provenance": {
         "path": "legal/upstream-notice-provenance.json",
-        "registry_crate_sha256": "c5d9c0c92a92d33f08817311cf3f2c29a3538a8240e94a6a3c622ce652d7e00c",
-        "resolution": "verified archive source license header plus official Mozilla MPL-2.0 text; upstream root has no standalone LICENSE",
-        "vcs_commit": "635e1a19d02960588a00e189bd4bd5bdb150ec3d"
+        "registry_crate_sha256": "8adfa1c298912827b8a28b223b3b874357397ae706e6190acd9bf28cee99114d",
+        "resolution": "verified current registry archive source license header plus retained official Mozilla MPL-2.0 text; original primary-source retrieval hash unchanged",
+        "vcs_commit": "572ecba2d1600e7c3d490586692a209faf703baa"
       },
-      "version": "0.36.1"
+      "version": "0.38.0"
     },
     {
       "declared_license": "MIT OR Apache-2.0",
@@ -8109,6 +8393,40 @@
       "version": "1.2.1"
     },
     {
+      "declared_license": "MIT OR Apache-2.0 OR Zlib",
+      "description": "Statically link the VCRuntime when using the MSVC toolchain.",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "static_vcruntime",
+      "notice_files": [
+        {
+          "bytes": 26,
+          "path": "legal/rust/static_vcruntime-3.0.0/LICENSE",
+          "sha256": "b9290e9d37bc53272ff4f3fb392c1762169fc0a8b797d164803049c81eacb48c"
+        },
+        {
+          "bytes": 10398,
+          "path": "legal/rust/static_vcruntime-3.0.0/LICENSE-APACHE",
+          "sha256": "e3ba223bb1423f0aad8c3dfce0fe3148db48926d41e6fbc3afbbf5ff9e1c89cb"
+        },
+        {
+          "bytes": 1101,
+          "path": "legal/rust/static_vcruntime-3.0.0/LICENSE-MIT",
+          "sha256": "748c208045a6f00734dbc85a1c0e401c9a25e1f83fc756e99916750dbd2469a7"
+        },
+        {
+          "bytes": 842,
+          "path": "legal/rust/static_vcruntime-3.0.0/LICENSE-ZLIB",
+          "sha256": "c1ff532091cac33bdecedf7268ff4f9bc3ddcffba494249fb723033e9e782f1a"
+        }
+      ],
+      "repository": "https://github.com/ChrisDenton/static_vcruntime",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "3.0.0"
+    },
+    {
       "declared_license": "MIT OR Apache-2.0",
       "description": "A string interning library for Rust, developed as part of the Servo project.",
       "ecosystem": "cargo",
@@ -8181,7 +8499,8 @@
       "description": "Pure-Rust traits and utilities for constant-time cryptographic implementations.",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "subtle",
       "notice_files": [
@@ -8274,7 +8593,8 @@
       "description": "A tool for enlisting the compiler's help in proving the absence of concurrency",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "sync_wrapper",
       "notice_files": [
@@ -8343,18 +8663,42 @@
       "notice_files": [
         {
           "bytes": 11323,
-          "path": "legal/rust/tao-0.35.3/LICENSE",
+          "path": "legal/rust/tao-0.37.2/LICENSE",
           "sha256": "6dc0e068dcf3a5bc8e054205b85b7720e1d49265bbc64bf515d2cf79197df69a"
         },
         {
           "bytes": 793,
-          "path": "legal/rust/tao-0.35.3/LICENSE.spdx",
+          "path": "legal/rust/tao-0.37.2/LICENSE.spdx",
           "sha256": "02b6448337b757772d90e5f31caaa0f9e6afaad2221c01771d0a3deaa4d4196c"
         }
       ],
       "repository": "https://github.com/tauri-apps/tao",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.35.3"
+      "version": "0.37.2"
+    },
+    {
+      "declared_license": "MIT OR Apache-2.0",
+      "description": "A Rust implementation of a TAR file reader and writer. This library does not\ncurrently handle compression, but it is abstract over all I/O readers and\nwriters. Additionally, great lengths are taken to ensure that the entire\ncontents are never required to be entirely resident in memory all at once.\n",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "tar",
+      "notice_files": [
+        {
+          "bytes": 10847,
+          "path": "legal/rust/tar-0.4.46/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "bytes": 1070,
+          "path": "legal/rust/tar-0.4.46/LICENSE-MIT",
+          "sha256": "8ca6b96cea9e67c6c5c63f452c31bd396db8bd2406231fdea5d48ef462b48077"
+        }
+      ],
+      "repository": "https://github.com/composefs/tar-rs",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.4.46"
     },
     {
       "declared_license": "Apache-2.0 WITH LLVM-exception",
@@ -8386,18 +8730,18 @@
       "notice_files": [
         {
           "bytes": 10174,
-          "path": "legal/rust/tauri-2.11.6/LICENSE_APACHE-2.0",
+          "path": "legal/rust/tauri-2.12.5/LICENSE-APACHE-2.0",
           "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
         },
         {
           "bytes": 1090,
-          "path": "legal/rust/tauri-2.11.6/LICENSE_MIT",
+          "path": "legal/rust/tauri-2.12.5/LICENSE-MIT",
           "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
         }
       ],
       "repository": "https://github.com/tauri-apps/tauri",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "2.11.6"
+      "version": "2.12.5"
     },
     {
       "declared_license": "Apache-2.0 OR MIT",
@@ -8410,18 +8754,18 @@
       "notice_files": [
         {
           "bytes": 10174,
-          "path": "legal/rust/tauri-build-2.6.3/LICENSE_APACHE-2.0",
+          "path": "legal/rust/tauri-build-2.7.4/LICENSE-APACHE-2.0",
           "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
         },
         {
           "bytes": 1090,
-          "path": "legal/rust/tauri-build-2.6.3/LICENSE_MIT",
+          "path": "legal/rust/tauri-build-2.7.4/LICENSE-MIT",
           "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
         }
       ],
       "repository": "https://github.com/tauri-apps/tauri",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "2.6.3"
+      "version": "2.7.4"
     },
     {
       "declared_license": "Apache-2.0 OR MIT",
@@ -8434,18 +8778,18 @@
       "notice_files": [
         {
           "bytes": 10174,
-          "path": "legal/rust/tauri-codegen-2.6.3/LICENSE_APACHE-2.0",
+          "path": "legal/rust/tauri-codegen-2.7.4/LICENSE-APACHE-2.0",
           "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
         },
         {
           "bytes": 1090,
-          "path": "legal/rust/tauri-codegen-2.6.3/LICENSE_MIT",
+          "path": "legal/rust/tauri-codegen-2.7.4/LICENSE-MIT",
           "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
         }
       ],
       "repository": "https://github.com/tauri-apps/tauri",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "2.6.3"
+      "version": "2.7.4"
     },
     {
       "declared_license": "Apache-2.0 OR MIT",
@@ -8458,18 +8802,18 @@
       "notice_files": [
         {
           "bytes": 10174,
-          "path": "legal/rust/tauri-macros-2.6.3/LICENSE_APACHE-2.0",
+          "path": "legal/rust/tauri-macros-2.7.4/LICENSE-APACHE-2.0",
           "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
         },
         {
           "bytes": 1090,
-          "path": "legal/rust/tauri-macros-2.6.3/LICENSE_MIT",
+          "path": "legal/rust/tauri-macros-2.7.4/LICENSE-MIT",
           "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
         }
       ],
       "repository": "https://github.com/tauri-apps/tauri",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "2.6.3"
+      "version": "2.7.4"
     },
     {
       "declared_license": "Apache-2.0 OR MIT",
@@ -8482,26 +8826,32 @@
       "notice_files": [
         {
           "bytes": 1090,
-          "path": "legal/upstream-retrieval/tauriplugin-6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a/LICENSE_MIT",
+          "path": "legal/upstream-retrieval/tauriplugin-59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE-MIT",
           "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d",
-          "url": "https://raw.githubusercontent.com/tauri-apps/tauri/6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a/LICENSE_MIT"
+          "url": "https://raw.githubusercontent.com/tauri-apps/tauri/59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE-MIT"
         },
         {
           "bytes": 10174,
-          "path": "legal/upstream-retrieval/tauriplugin-6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a/LICENSE_APACHE-2.0",
+          "path": "legal/upstream-retrieval/tauriplugin-59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE-APACHE-2.0",
           "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594",
-          "url": "https://raw.githubusercontent.com/tauri-apps/tauri/6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a/LICENSE_APACHE-2.0"
+          "url": "https://raw.githubusercontent.com/tauri-apps/tauri/59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE-APACHE-2.0"
+        },
+        {
+          "bytes": 889,
+          "path": "legal/upstream-retrieval/tauriplugin-59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE.spdx",
+          "sha256": "5e834fe9788c524210deda859c46a550ffa5aa0cba9ea0572f0d81120e97c008",
+          "url": "https://raw.githubusercontent.com/tauri-apps/tauri/59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE.spdx"
         }
       ],
       "repository": "https://github.com/tauri-apps/tauri",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "upstream_notice_provenance": {
         "path": "legal/upstream-notice-provenance.json",
-        "registry_crate_sha256": "74be5dd4bed9afbd145e5716b5fa2ec28cbc29c34ffa61c258c9273d896c8020",
+        "registry_crate_sha256": "67fb21a77e8f94e8beb3325e583102488659365af0a3948b7ea244c5b779c291",
         "resolution": "exact upstream commit license/copyright texts",
-        "vcs_commit": "6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a"
+        "vcs_commit": "59b63ab500da9859f12d8888c3298bc29bba0b92"
       },
-      "version": "2.6.3"
+      "version": "2.7.2"
     },
     {
       "declared_license": "Apache-2.0 OR MIT",
@@ -8621,6 +8971,35 @@
     },
     {
       "declared_license": "Apache-2.0 OR MIT",
+      "description": "In-app updates for Tauri applications.",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "tauri-plugin-updater",
+      "notice_files": [
+        {
+          "bytes": 888,
+          "path": "legal/rust/tauri-plugin-updater-2.14.0/LICENSE.spdx",
+          "sha256": "eb8a6c84630461b352badcab1dbe5d0168c56d377358b2b8c86b51003272d5ef"
+        },
+        {
+          "bytes": 10173,
+          "path": "legal/rust/tauri-plugin-updater-2.14.0/LICENSE_APACHE-2.0",
+          "sha256": "0cec06e0e55fbc3dc5cee4fca9b607f66cb8f4e4dbcf3b3c013594dd156732e9"
+        },
+        {
+          "bytes": 1089,
+          "path": "legal/rust/tauri-plugin-updater-2.14.0/LICENSE_MIT",
+          "sha256": "89ff9689dcf9dd53968785d05a26f7898bb169dbfcada8d032b3e68cf0d55607"
+        }
+      ],
+      "repository": "https://github.com/tauri-apps/plugins-workspace",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "2.14.0"
+    },
+    {
+      "declared_license": "Apache-2.0 OR MIT",
       "description": "Runtime for Tauri applications",
       "ecosystem": "cargo",
       "graphs": [
@@ -8630,18 +9009,18 @@
       "notice_files": [
         {
           "bytes": 10174,
-          "path": "legal/rust/tauri-runtime-2.11.3/LICENSE_APACHE-2.0",
+          "path": "legal/rust/tauri-runtime-2.12.2/LICENSE-APACHE-2.0",
           "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
         },
         {
           "bytes": 1090,
-          "path": "legal/rust/tauri-runtime-2.11.3/LICENSE_MIT",
+          "path": "legal/rust/tauri-runtime-2.12.2/LICENSE-MIT",
           "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
         }
       ],
       "repository": "https://github.com/tauri-apps/tauri",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "2.11.3"
+      "version": "2.12.2"
     },
     {
       "declared_license": "Apache-2.0 OR MIT",
@@ -8654,18 +9033,18 @@
       "notice_files": [
         {
           "bytes": 10174,
-          "path": "legal/rust/tauri-runtime-wry-2.11.4/LICENSE_APACHE-2.0",
+          "path": "legal/rust/tauri-runtime-wry-2.12.3/LICENSE-APACHE-2.0",
           "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
         },
         {
           "bytes": 1090,
-          "path": "legal/rust/tauri-runtime-wry-2.11.4/LICENSE_MIT",
+          "path": "legal/rust/tauri-runtime-wry-2.12.3/LICENSE-MIT",
           "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
         }
       ],
       "repository": "https://github.com/tauri-apps/tauri",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "2.11.4"
+      "version": "2.12.3"
     },
     {
       "declared_license": "Apache-2.0 OR MIT",
@@ -8678,18 +9057,18 @@
       "notice_files": [
         {
           "bytes": 10174,
-          "path": "legal/rust/tauri-utils-2.9.3/LICENSE_APACHE-2.0",
+          "path": "legal/rust/tauri-utils-2.10.2/LICENSE-APACHE-2.0",
           "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
         },
         {
           "bytes": 1090,
-          "path": "legal/rust/tauri-utils-2.9.3/LICENSE_MIT",
+          "path": "legal/rust/tauri-utils-2.10.2/LICENSE-MIT",
           "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
         }
       ],
       "repository": "https://github.com/tauri-apps/tauri",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "2.9.3"
+      "version": "2.10.2"
     },
     {
       "declared_license": "MIT",
@@ -8715,7 +9094,8 @@
       "description": "A library for managing temporary files and directories.",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "tempfile",
       "notice_files": [
@@ -8955,7 +9335,8 @@
       "description": "`tinyvec` provides 100% safe vec-like data structures.",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "tinyvec",
       "notice_files": [
@@ -9004,7 +9385,8 @@
       "description": "Asynchronous TLS/SSL streams for Tokio using Rustls.",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "tokio-rustls",
       "notice_files": [
@@ -9022,6 +9404,25 @@
       "repository": "https://github.com/rustls/tokio-rustls",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "version": "0.26.6"
+    },
+    {
+      "declared_license": "MIT",
+      "description": "Additional utilities for working with Tokio.\n",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "tokio-util",
+      "notice_files": [
+        {
+          "bytes": 1070,
+          "path": "legal/rust/tokio-util-0.7.19/LICENSE",
+          "sha256": "253cd04c6714889df2d32f3f64d669179a1c95c76ac43c40882c52eb06bc3552"
+        }
+      ],
+      "repository": "https://github.com/tokio-rs/tokio",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.7.19"
     },
     {
       "declared_license": "MIT",
@@ -9076,30 +9477,6 @@
       "name": "toml",
       "notice_files": [
         {
-          "bytes": 11358,
-          "path": "legal/rust/toml-0.9.12+spec-1.1.0/LICENSE-APACHE",
-          "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
-        },
-        {
-          "bytes": 1062,
-          "path": "legal/rust/toml-0.9.12+spec-1.1.0/LICENSE-MIT",
-          "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6"
-        }
-      ],
-      "repository": "https://github.com/toml-rs/toml",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.9.12+spec-1.1.0"
-    },
-    {
-      "declared_license": "MIT OR Apache-2.0",
-      "description": "A native Rust encoder and decoder of TOML-formatted files and streams. Provides\nimplementations of the standard Serialize/Deserialize traits for TOML data to\nfacilitate deserializing and serializing Rust structures.\n",
-      "ecosystem": "cargo",
-      "graphs": [
-        "desktop-shell/src-tauri/Cargo.toml"
-      ],
-      "name": "toml",
-      "notice_files": [
-        {
           "bytes": 11349,
           "path": "legal/rust/toml-1.1.7+spec-1.1.0/LICENSE-APACHE",
           "sha256": "249fdb6694467dd615b259f7ddde07be3f8ae5a72cecebb0e24f6629af4215fe"
@@ -9137,30 +9514,6 @@
       "repository": "https://github.com/toml-rs/toml",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "version": "0.6.3"
-    },
-    {
-      "declared_license": "MIT OR Apache-2.0",
-      "description": "A TOML-compatible datetime type",
-      "ecosystem": "cargo",
-      "graphs": [
-        "desktop-shell/src-tauri/Cargo.toml"
-      ],
-      "name": "toml_datetime",
-      "notice_files": [
-        {
-          "bytes": 11358,
-          "path": "legal/rust/toml_datetime-0.7.5+spec-1.1.0/LICENSE-APACHE",
-          "sha256": "c6596eb7be8581c18be736c846fb9173b69eccf6ef94c5135893ec56bd92ba08"
-        },
-        {
-          "bytes": 1062,
-          "path": "legal/rust/toml_datetime-0.7.5+spec-1.1.0/LICENSE-MIT",
-          "sha256": "6efb0476a1cc085077ed49357026d8c173bf33017278ef440f222fb9cbcb66e6"
-        }
-      ],
-      "repository": "https://github.com/toml-rs/toml",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.7.5+spec-1.1.0"
     },
     {
       "declared_license": "MIT OR Apache-2.0",
@@ -9314,7 +9667,8 @@
       "description": "Tower is a library of modular and reusable components for building robust\nclients and servers.\n",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "tower",
       "notice_files": [
@@ -9333,7 +9687,8 @@
       "description": "Tower middleware and utilities for HTTP clients and servers",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "tower-http",
       "notice_files": [
@@ -9352,7 +9707,8 @@
       "description": "Decorates a `Service` to allow easy composition between `Service`s.\n",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "tower-layer",
       "notice_files": [
@@ -9371,7 +9727,8 @@
       "description": "Trait representing an asynchronous, request / response based, client or server.\n",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "tower-service",
       "notice_files": [
@@ -9460,30 +9817,31 @@
       "notice_files": [
         {
           "bytes": 10847,
-          "path": "legal/rust/tray-icon-0.24.2/LICENSE-APACHE",
+          "path": "legal/rust/tray-icon-0.25.1/LICENSE-APACHE",
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
         },
         {
           "bytes": 1108,
-          "path": "legal/rust/tray-icon-0.24.2/LICENSE-MIT",
+          "path": "legal/rust/tray-icon-0.25.1/LICENSE-MIT",
           "sha256": "2ab5537b8c0cb1d475e2145b6a7994b04e7c71e6e5bd836f7f9c47c221a5ad9a"
         },
         {
           "bytes": 832,
-          "path": "legal/rust/tray-icon-0.24.2/LICENSE.spdx",
+          "path": "legal/rust/tray-icon-0.25.1/LICENSE.spdx",
           "sha256": "6c1e5d0ccf5e8951401cb964036ae664d52fc8d1148173b53bc54fc534f5d404"
         }
       ],
       "repository": "https://github.com/tauri-apps/tray-icon",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.24.2"
+      "version": "0.25.1"
     },
     {
       "declared_license": "MIT",
       "description": "A lightweight atomic lock.",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "try-lock",
       "notice_files": [
@@ -9552,226 +9910,6 @@
       "version": "1.20.1"
     },
     {
-      "declared_license": "MIT/Apache-2.0",
-      "description": "UNIC \u2014 Unicode Character Tools \u2014 Character Property taxonomy, contracts and build macros",
-      "ecosystem": "cargo",
-      "graphs": [
-        "desktop-shell/src-tauri/Cargo.toml"
-      ],
-      "name": "unic-char-property",
-      "notice_files": [
-        {
-          "bytes": 1023,
-          "path": "legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT",
-          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
-          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT"
-        },
-        {
-          "bytes": 10847,
-          "path": "legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE",
-          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE"
-        },
-        {
-          "bytes": 608,
-          "path": "legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md",
-          "sha256": "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b",
-          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md"
-        },
-        {
-          "bytes": 664,
-          "path": "legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/AUTHORS",
-          "sha256": "2748c1a1fba7616917c61d455e8d715ab952671ead63f2026ad0124410596b09",
-          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/AUTHORS"
-        }
-      ],
-      "repository": "https://github.com/open-i18n/rust-unic/",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "upstream_notice_provenance": {
-        "path": "legal/upstream-notice-provenance.json",
-        "registry_crate_sha256": "a8c57a407d9b6fa02b4795eb81c5b6652060a15a7903ea981f3d723e6c0be221",
-        "resolution": "exact upstream commit license/copyright texts",
-        "vcs_commit": "5878605364af97a3358368a6eaef02104af2e016"
-      },
-      "version": "0.9.0"
-    },
-    {
-      "declared_license": "MIT/Apache-2.0",
-      "description": "UNIC \u2014 Unicode Character Tools \u2014 Character Range and Iteration",
-      "ecosystem": "cargo",
-      "graphs": [
-        "desktop-shell/src-tauri/Cargo.toml"
-      ],
-      "name": "unic-char-range",
-      "notice_files": [
-        {
-          "bytes": 1023,
-          "path": "legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT",
-          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
-          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT"
-        },
-        {
-          "bytes": 10847,
-          "path": "legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE",
-          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE"
-        },
-        {
-          "bytes": 608,
-          "path": "legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md",
-          "sha256": "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b",
-          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md"
-        },
-        {
-          "bytes": 664,
-          "path": "legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/AUTHORS",
-          "sha256": "2748c1a1fba7616917c61d455e8d715ab952671ead63f2026ad0124410596b09",
-          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/AUTHORS"
-        }
-      ],
-      "repository": "https://github.com/open-i18n/rust-unic/",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "upstream_notice_provenance": {
-        "path": "legal/upstream-notice-provenance.json",
-        "registry_crate_sha256": "0398022d5f700414f6b899e10b8348231abf9173fa93144cbc1a43b9793c1fbc",
-        "resolution": "exact upstream commit license/copyright texts",
-        "vcs_commit": "5878605364af97a3358368a6eaef02104af2e016"
-      },
-      "version": "0.9.0"
-    },
-    {
-      "declared_license": "MIT/Apache-2.0",
-      "description": "UNIC \u2014 Common Utilities",
-      "ecosystem": "cargo",
-      "graphs": [
-        "desktop-shell/src-tauri/Cargo.toml"
-      ],
-      "name": "unic-common",
-      "notice_files": [
-        {
-          "bytes": 1023,
-          "path": "legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT",
-          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
-          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT"
-        },
-        {
-          "bytes": 10847,
-          "path": "legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE",
-          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE"
-        },
-        {
-          "bytes": 608,
-          "path": "legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md",
-          "sha256": "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b",
-          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md"
-        },
-        {
-          "bytes": 664,
-          "path": "legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/AUTHORS",
-          "sha256": "2748c1a1fba7616917c61d455e8d715ab952671ead63f2026ad0124410596b09",
-          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/AUTHORS"
-        }
-      ],
-      "repository": "https://github.com/open-i18n/rust-unic/",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "upstream_notice_provenance": {
-        "path": "legal/upstream-notice-provenance.json",
-        "registry_crate_sha256": "80d7ff825a6a654ee85a63e80f92f054f904f21e7d12da4e22f9834a4aaa35bc",
-        "resolution": "exact upstream commit license/copyright texts",
-        "vcs_commit": "5878605364af97a3358368a6eaef02104af2e016"
-      },
-      "version": "0.9.0"
-    },
-    {
-      "declared_license": "MIT/Apache-2.0",
-      "description": "UNIC \u2014 Unicode Character Database \u2014 Identifier Properties",
-      "ecosystem": "cargo",
-      "graphs": [
-        "desktop-shell/src-tauri/Cargo.toml"
-      ],
-      "name": "unic-ucd-ident",
-      "notice_files": [
-        {
-          "bytes": 1023,
-          "path": "legal/upstream-retrieval/unicident-8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-MIT",
-          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
-          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-MIT"
-        },
-        {
-          "bytes": 10847,
-          "path": "legal/upstream-retrieval/unicident-8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-APACHE",
-          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-APACHE"
-        },
-        {
-          "bytes": 608,
-          "path": "legal/upstream-retrieval/unicident-8a6ce83063d90b91ae2ce59eddb803edd393fca9/COPYRIGHT.md",
-          "sha256": "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b",
-          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/COPYRIGHT.md"
-        },
-        {
-          "bytes": 664,
-          "path": "legal/upstream-retrieval/unicident-8a6ce83063d90b91ae2ce59eddb803edd393fca9/AUTHORS",
-          "sha256": "2748c1a1fba7616917c61d455e8d715ab952671ead63f2026ad0124410596b09",
-          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/8a6ce83063d90b91ae2ce59eddb803edd393fca9/AUTHORS"
-        }
-      ],
-      "repository": "https://github.com/open-i18n/rust-unic/",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "upstream_notice_provenance": {
-        "path": "legal/upstream-notice-provenance.json",
-        "registry_crate_sha256": "e230a37c0381caa9219d67cf063aa3a375ffed5bf541a452db16e744bdab6987",
-        "resolution": "exact upstream commit license/copyright texts",
-        "vcs_commit": "8a6ce83063d90b91ae2ce59eddb803edd393fca9"
-      },
-      "version": "0.9.0"
-    },
-    {
-      "declared_license": "MIT/Apache-2.0",
-      "description": "UNIC \u2014 Unicode Character Database \u2014 Version",
-      "ecosystem": "cargo",
-      "graphs": [
-        "desktop-shell/src-tauri/Cargo.toml"
-      ],
-      "name": "unic-ucd-version",
-      "notice_files": [
-        {
-          "bytes": 1023,
-          "path": "legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT",
-          "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
-          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT"
-        },
-        {
-          "bytes": 10847,
-          "path": "legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE",
-          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
-          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE"
-        },
-        {
-          "bytes": 608,
-          "path": "legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md",
-          "sha256": "f5c342c49f3ac804f3e8e7bb62a8040a44c50d47bb36902b1abd13f66a1adf8b",
-          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md"
-        },
-        {
-          "bytes": 664,
-          "path": "legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/AUTHORS",
-          "sha256": "2748c1a1fba7616917c61d455e8d715ab952671ead63f2026ad0124410596b09",
-          "url": "https://raw.githubusercontent.com/open-i18n/rust-unic/5878605364af97a3358368a6eaef02104af2e016/AUTHORS"
-        }
-      ],
-      "repository": "https://github.com/open-i18n/rust-unic/",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "upstream_notice_provenance": {
-        "path": "legal/upstream-notice-provenance.json",
-        "registry_crate_sha256": "96bd2f2237fe450fcd0a1d2f5f4e91711124f7857ba2e964247776ebeeb7b0c4",
-        "resolution": "exact upstream commit license/copyright texts",
-        "vcs_commit": "5878605364af97a3358368a6eaef02104af2e016"
-      },
-      "version": "0.9.0"
-    },
-    {
       "declared_license": "(MIT OR Apache-2.0) AND Unicode-3.0",
       "description": "Determine whether characters have the XID_Start or XID_Continue properties according to Unicode Standard Annex #31",
       "ecosystem": "cargo",
@@ -9832,35 +9970,6 @@
     },
     {
       "declared_license": "MIT OR Apache-2.0",
-      "description": "This crate provides Grapheme Cluster, Word and Sentence boundaries\naccording to Unicode Standard Annex #29 rules.\n",
-      "ecosystem": "cargo",
-      "graphs": [
-        "desktop-shell/src-tauri/Cargo.toml"
-      ],
-      "name": "unicode-segmentation",
-      "notice_files": [
-        {
-          "bytes": 321,
-          "path": "legal/rust/unicode-segmentation-1.13.3/COPYRIGHT",
-          "sha256": "23860c2a7b5d96b21569afedf033469bab9fe14a1b24a35068b8641c578ce24d"
-        },
-        {
-          "bytes": 10847,
-          "path": "legal/rust/unicode-segmentation-1.13.3/LICENSE-APACHE",
-          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
-        },
-        {
-          "bytes": 1071,
-          "path": "legal/rust/unicode-segmentation-1.13.3/LICENSE-MIT",
-          "sha256": "7b63ecd5f1902af1b63729947373683c32745c16a10e8e6292e2e2dcd7e90ae0"
-        }
-      ],
-      "repository": "https://github.com/unicode-rs/unicode-segmentation",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "1.13.3"
-    },
-    {
-      "declared_license": "MIT OR Apache-2.0",
       "description": "Traits which describe the functionality of universal hash functions (UHFs)",
       "ecosystem": "cargo",
       "graphs": [
@@ -9888,7 +9997,8 @@
       "description": "Safe, fast, zero-panic, zero-crashing, zero-allocation parsing of untrusted inputs in Rust.",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "untrusted",
       "notice_files": [
@@ -9957,13 +10067,13 @@
       "notice_files": [
         {
           "bytes": 1073,
-          "path": "legal/rust/urlpattern-0.3.0/LICENSE",
+          "path": "legal/rust/urlpattern-0.6.0/LICENSE",
           "sha256": "5cf1c9dc617e4cad7fa03181ff893601ad5243aa3be527ef39034e1cd6377676"
         }
       ],
       "repository": "https://github.com/denoland/rust-urlpattern",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.3.0"
+      "version": "0.6.0"
     },
     {
       "declared_license": "Apache-2.0 OR MIT",
@@ -10164,7 +10274,8 @@
       "description": "Detect when another Future wants a result.",
       "ecosystem": "cargo",
       "graphs": [
-        "Cargo.toml"
+        "Cargo.toml",
+        "desktop-shell/src-tauri/Cargo.toml"
       ],
       "name": "want",
       "notice_files": [
@@ -10277,6 +10388,30 @@
       "repository": "https://github.com/smithay/wayland-rs",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "version": "0.31.11"
+    },
+    {
+      "declared_license": "MIT OR Apache-2.0",
+      "description": "Drop-in replacement for std::time for Wasm in browsers",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "web-time",
+      "notice_files": [
+        {
+          "bytes": 11338,
+          "path": "legal/rust/web-time-1.1.0/LICENSE-APACHE",
+          "sha256": "54a744942eb3fa63a74d8d359989ed6962c04f3f10ff20cfa08ff8aa7efbe4e6"
+        },
+        {
+          "bytes": 1065,
+          "path": "legal/rust/web-time-1.1.0/LICENSE-MIT",
+          "sha256": "f428305bbf2e70fbd807af0f3c7ac1b7acfb95311640f451e9d2e48db6d7e96b"
+        }
+      ],
+      "repository": "https://github.com/daxpedda/web-time",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "1.1.0"
     },
     {
       "declared_license": "MIT OR Apache-2.0",
@@ -10448,23 +10583,23 @@
       "notice_files": [
         {
           "bytes": 10847,
-          "path": "legal/rust/wry-0.55.1/LICENSE-APACHE",
+          "path": "legal/rust/wry-0.57.1/LICENSE-APACHE",
           "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
         },
         {
           "bytes": 1121,
-          "path": "legal/rust/wry-0.55.1/LICENSE-MIT",
+          "path": "legal/rust/wry-0.57.1/LICENSE-MIT",
           "sha256": "ef88893533af22ffbb68ceef0724ba1389518df26165a34f3c99ad30b884df4f"
         },
         {
           "bytes": 833,
-          "path": "legal/rust/wry-0.55.1/LICENSE.spdx",
+          "path": "legal/rust/wry-0.57.1/LICENSE.spdx",
           "sha256": "26235c41e314fb0da35b33b2bb5bcbc4dd523839f8eeca52efcd43586f441fb5"
         }
       ],
       "repository": "https://github.com/tauri-apps/wry",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
-      "version": "0.55.1"
+      "version": "0.57.1"
     },
     {
       "declared_license": "MIT",
@@ -10503,6 +10638,30 @@
       "repository": "https://github.com/AltF02/x11-rs.git",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "version": "2.21.0"
+    },
+    {
+      "declared_license": "MIT OR Apache-2.0",
+      "description": "unix extended filesystem attributes",
+      "ecosystem": "cargo",
+      "graphs": [
+        "desktop-shell/src-tauri/Cargo.toml"
+      ],
+      "name": "xattr",
+      "notice_files": [
+        {
+          "bytes": 10847,
+          "path": "legal/rust/xattr-1.6.1/LICENSE-APACHE",
+          "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+        },
+        {
+          "bytes": 1056,
+          "path": "legal/rust/xattr-1.6.1/LICENSE-MIT",
+          "sha256": "8b427f5bc501764575e52ba4f9d95673cf8f6d80a86d0d06599852e1a9a20a36"
+        }
+      ],
+      "repository": "https://github.com/Stebalien/xattr",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "1.6.1"
     },
     {
       "declared_license": "Unicode-3.0",

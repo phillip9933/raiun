@@ -4,7 +4,10 @@ $ErrorActionPreference = 'Stop'
 # Run from an elevated PowerShell session. This does not touch Windows accounts,
 # activation, repository contents, or system PATH.
 
-function Assert-ExitCode([string] $Label, [int] $Code) {
+function Assert-ExitCode([string] $Label, [object] $Code) {
+    if (($Code -isnot [int]) -and ($Code -isnot [long])) {
+        throw "$Label did not return a numeric process exit code."
+    }
     if ($Code -eq 3010) {
         Write-Host "$Label completed; Windows reports that a reboot is required (3010)."
         $script:RebootRequired = $true
@@ -23,8 +26,19 @@ function Invoke-Installer([string] $FilePath, [string[]] $Arguments, [string] $L
     Remove-Item -LiteralPath $stdoutLog, $stderrLog -Force -ErrorAction SilentlyContinue
     Write-Host "Running $Label..."
     Write-Host "Installer output: $stdoutLog ; $stderrLog"
-    $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -Wait -PassThru -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
-    if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
+    $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -PassThru -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
+    # Retain the native handle before waiting; an unavailable exit code is never success.
+    $retainedHandle = $process.Handle
+    if ($retainedHandle -eq [IntPtr]::Zero) {
+        throw "$Label process handle is unavailable."
+    }
+    $process.WaitForExit()
+    $process.Refresh()
+    $exitCode = $process.ExitCode
+    if (($exitCode -isnot [int]) -and ($exitCode -isnot [long])) {
+        throw "$Label did not return a numeric process exit code."
+    }
+    if ($exitCode -ne 0 -and $exitCode -ne 3010) {
         foreach ($logPath in @($stdoutLog, $stderrLog)) {
             if (Test-Path -LiteralPath $logPath) {
                 Write-Host "Last installer output from ${logPath}:"
@@ -32,7 +46,7 @@ function Invoke-Installer([string] $FilePath, [string[]] $Arguments, [string] $L
             }
         }
     }
-    Assert-ExitCode $Label $process.ExitCode
+    Assert-ExitCode $Label $exitCode
 }
 
 function Get-VsWherePath {
@@ -44,6 +58,7 @@ function Get-VsWherePath {
 }
 
 function Test-MsvcAndWindowsSdk {
+    $script:SelectedWindowsSdk = $null
     $vswhere = Get-VsWherePath
     if (-not $vswhere) {
         return $false
@@ -65,7 +80,19 @@ function Test-MsvcAndWindowsSdk {
     foreach ($version in $sdkVersions) {
         $header = Join-Path $version.FullName 'um\Windows.h'
         $library = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\Lib\$($version.Name)\um\x64\kernel32.lib"
-        if ((Test-Path -LiteralPath $header) -and (Test-Path -LiteralPath $library)) {
+        $cfApiHeader = Join-Path $version.FullName 'um\CfApi.h'
+        $cldApiLibrary = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\Lib\$($version.Name)\um\x64\CldApi.lib"
+        if ((Test-Path -LiteralPath $header -PathType Leaf) -and
+            (Test-Path -LiteralPath $library -PathType Leaf) -and
+            (Test-Path -LiteralPath $cfApiHeader -PathType Leaf) -and
+            (Test-Path -LiteralPath $cldApiLibrary -PathType Leaf)) {
+            $script:SelectedWindowsSdk = [ordered]@{
+                version = $version.Name
+                windows_header = $header
+                kernel32_library = $library
+                cfapi_header = $cfApiHeader
+                cldapi_library = $cldApiLibrary
+            }
             return $true
         }
     }
@@ -176,6 +203,9 @@ if ($rustcVersion -notmatch 'host: x86_64-pc-windows-msvc') {
     throw 'The active Rust compiler is not targeting x86_64-pc-windows-msvc.'
 }
 
+if ($script:SelectedWindowsSdk) {
+    Write-Host ('Qualified Windows SDK: ' + ($script:SelectedWindowsSdk | ConvertTo-Json -Compress))
+}
 Write-Host 'Windows test toolchain is ready.'
 Write-Host "Rust tools: $env:USERPROFILE\.cargo\bin (no PATH changes made)"
 Write-Host 'Open Developer PowerShell for Visual Studio before running scripts/test-windows-vm.ps1.'

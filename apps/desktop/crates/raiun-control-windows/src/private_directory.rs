@@ -7,7 +7,7 @@
 //! bytes are read. Unsafe Win32 calls stay in this adapter crate.
 
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs::File,
     io::{self, Read, Seek, SeekFrom, Write},
     os::windows::{
@@ -17,6 +17,9 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use windows_sys::Win32::{
     Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE, LocalFree},
@@ -65,7 +68,7 @@ pub struct PinnedDirectory {
 
 impl PinnedDirectory {
     pub fn open(path: &Path) -> io::Result<Self> {
-        let handles = open_directory_chain(path)?;
+        let (walked_path, handles) = open_directory_chain(path)?;
         let identity = identity(handles.last().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -73,7 +76,9 @@ impl PinnedDirectory {
             )
         })?)?;
         Ok(Self {
-            path: path.to_owned(),
+            // Reuse the exact component-walk spelling used for the held final
+            // handle; do not reinterpret the caller's original separators.
+            path: walked_path,
             _handles: handles,
             identity,
         })
@@ -115,6 +120,27 @@ impl PinnedDirectory {
         self.identity
     }
 
+    /// Duplicate this already-open directory for capability-based traversal.
+    /// Keep this owner alive to retain every ancestor pin while using the file.
+    pub fn try_clone_directory_file(&self) -> io::Result<File> {
+        self.verify_path()?;
+        let file = self
+            ._handles
+            .last()
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "Pinned directory is empty")
+            })?
+            .try_clone()?;
+        if identity(&file)? != self.identity {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Pinned directory identity changed",
+            ));
+        }
+        self.verify_path()?;
+        Ok(file)
+    }
+
     /// Create an immutable child file without following an existing reparse
     /// point. The returned handle remains pinned against rename/delete.
     pub fn create_new_file(&self, name: &OsStr) -> io::Result<(File, PinnedFileIdentity)> {
@@ -142,6 +168,26 @@ impl PinnedDirectory {
         )?;
         let id = trace_publish_stage("child_handle_identity", identity(&file))?;
         trace_publish_stage("verify_parent_after_child_open", self.verify_path())?;
+        Ok((file, id))
+    }
+
+    /// Hold one ordinary source file immutable while a path-based backend reads
+    /// it. Existing writers, reparse points, replacement and new writers are
+    /// refused; this does not require a private application-state ACL.
+    pub fn open_immutable_regular_file(
+        &self,
+        name: &OsStr,
+    ) -> io::Result<(File, PinnedFileIdentity)> {
+        self.verify_path()?;
+        validate_component(name)?;
+        let file = open_file_handle_with_share(
+            &self.path.join(name),
+            GENERIC_READ,
+            OPEN_EXISTING,
+            FILE_SHARE_READ,
+        )?;
+        let id = identity(&file)?;
+        self.verify_path()?;
         Ok((file, id))
     }
 
@@ -510,6 +556,81 @@ impl PrivateDirectory {
         })
     }
 
+    /// Fill a new private file, then admit an immutable reader only after its
+    /// exact identity, length and complete SHA-256 match the sequential writes.
+    /// This closes the write-sharing handoff gap without trusting a pathname.
+    /// The callback must not publish its staging output. Partial files on error
+    /// are removed by exact identity when possible; no secure erasure is claimed.
+    pub fn stage_immutable_file<T>(
+        self: &Arc<Self>,
+        name: &OsStr,
+        maximum_bytes: u64,
+        fill: impl FnOnce(&mut dyn Write) -> io::Result<T>,
+    ) -> io::Result<(OwnedPrivateStagedReader, T)> {
+        let mut writer = Some(self.create_new_pinned_file(name)?);
+        let expected_identity = writer.as_ref().expect("created stage").identity();
+        let result = (|| {
+            let pin = writer.as_mut().expect("held stage");
+            let mut sink = StagedDigestWriter {
+                writer: pin,
+                digest: Sha256::new(),
+                bytes: 0,
+                maximum_bytes,
+            };
+            let value = fill(&mut sink)?;
+            sink.flush()?;
+            let expected_bytes = sink.bytes;
+            let expected_digest = sink.digest.finalize();
+            pin.verify()?;
+            pin.file.sync_all()?;
+            // Immutable sharing cannot coexist with our write handle. Reopen
+            // before publication, then validate the complete pinned contents.
+            drop(writer.take());
+            let mut reader = self.open_owned_immutable_file(name)?;
+            if reader.identity() != expected_identity || reader.metadata()?.len() != expected_bytes
+            {
+                return Err(private_stage_changed());
+            }
+            let mut digest = Sha256::new();
+            let mut buffer = Zeroizing::new(vec![0u8; 1024 * 1024]);
+            let mut bytes = 0u64;
+            loop {
+                let count = reader.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                bytes = bytes
+                    .checked_add(count as u64)
+                    .ok_or_else(private_stage_changed)?;
+                if bytes > expected_bytes {
+                    return Err(private_stage_changed());
+                }
+                digest.update(&buffer[..count]);
+            }
+            if bytes != expected_bytes || digest.finalize() != expected_digest {
+                return Err(private_stage_changed());
+            }
+            reader.seek(SeekFrom::Start(0))?;
+            reader.verify()?;
+            Ok((
+                OwnedPrivateStagedReader {
+                    reader: Some(reader),
+                    directory: Arc::clone(self),
+                    name: name.to_owned(),
+                    identity: expected_identity,
+                },
+                value,
+            ))
+        })();
+        drop(writer);
+        if result.is_err() {
+            if let Ok(file) = self.open_delete_candidate(name, expected_identity) {
+                let _ = file.delete();
+            }
+        }
+        result
+    }
+
     /// Open one validated private child and retain its no-delete-sharing
     /// handle. This pins the file entry against replacement for the handle's
     /// lifetime. It does not make SQLite's own sidecar lifecycle safe; a VFS
@@ -594,6 +715,76 @@ impl PrivateDirectory {
             identity,
             delete_authorized: true,
         })
+    }
+}
+
+fn private_stage_changed() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "Private stage changed before admission",
+    )
+}
+
+struct StagedDigestWriter<'a, 'directory> {
+    writer: &'a mut PinnedPrivateFile<'directory>,
+    digest: Sha256,
+    bytes: u64,
+    maximum_bytes: u64,
+}
+impl Write for StagedDigestWriter<'_, '_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() as u64 > self.maximum_bytes.saturating_sub(self.bytes) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Private stage size limit exceeded",
+            ));
+        }
+        let count = self.writer.write(bytes)?;
+        self.digest.update(&bytes[..count]);
+        self.bytes += count as u64;
+        Ok(count)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+/// An immutable stage that attempts exact-identity cleanup when closed.
+/// It never exposes its path or a writable/raw handle. Cleanup failure retains
+/// a private local file; it never deletes a replacement or any remote resource.
+pub struct OwnedPrivateStagedReader {
+    reader: Option<OwnedPrivateReader>,
+    directory: Arc<PrivateDirectory>,
+    name: OsString,
+    identity: PinnedFileIdentity,
+}
+impl OwnedPrivateStagedReader {
+    pub fn verify(&self) -> io::Result<()> {
+        self.reader.as_ref().expect("open stage").verify()
+    }
+    pub fn metadata(&self) -> io::Result<std::fs::Metadata> {
+        self.reader.as_ref().expect("open stage").metadata()
+    }
+}
+impl Read for OwnedPrivateStagedReader {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        self.reader.as_mut().expect("open stage").read(output)
+    }
+}
+impl Seek for OwnedPrivateStagedReader {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.reader.as_mut().expect("open stage").seek(position)
+    }
+}
+impl Drop for OwnedPrivateStagedReader {
+    fn drop(&mut self) {
+        drop(self.reader.take());
+        if let Ok(file) = self
+            .directory
+            .open_delete_candidate(&self.name, self.identity)
+        {
+            let _ = file.delete();
+        }
     }
 }
 
@@ -704,6 +895,14 @@ pub struct OwnedPrivateReader {
 }
 
 impl OwnedPrivateReader {
+    /// Retain a process-lifetime exclusion lock on this exact immutable file.
+    /// Closing the reader releases the OS lock. Persistent lock entries must
+    /// never be deleted/recreated; replacement is denied by this reader's pin.
+    pub fn try_lock_exclusive(&mut self) -> io::Result<()> {
+        self.verify()?;
+        fs2::FileExt::try_lock_exclusive(&self.file)
+    }
+
     pub fn identity(&self) -> PinnedFileIdentity {
         self.identity
     }
@@ -737,6 +936,12 @@ impl Seek for OwnedPrivateReader {
         self.verify()?;
         self.file.seek(position)
     }
+}
+
+/// Validate an already immutably pinned metadata file without repairing ACLs.
+/// Kept crate-private for the fixed legacy root-configuration inventory.
+pub(crate) fn verify_private_metadata_file(file: &File) -> io::Result<()> {
+    validate_private_handle(file, PrivateEntryKind::File)
 }
 
 #[derive(Clone, Copy)]
@@ -1041,7 +1246,7 @@ fn open_directory_handle(path: &Path) -> io::Result<File> {
     checked_handle(raw, true)
 }
 
-fn open_directory_chain(path: &Path) -> io::Result<Vec<File>> {
+fn open_directory_chain(path: &Path) -> io::Result<(PathBuf, Vec<File>)> {
     use std::path::Component;
 
     let mut current = PathBuf::new();
@@ -1072,7 +1277,7 @@ fn open_directory_chain(path: &Path) -> io::Result<Vec<File>> {
             "Journal directory path is not rooted",
         ));
     }
-    Ok(handles)
+    Ok((current, handles))
 }
 
 fn open_file_handle(path: &Path, access: u32, disposition: u32) -> io::Result<File> {
@@ -1330,6 +1535,165 @@ mod tests {
         let private = PrivateDirectory::create_or_open_under(&parent, OsStr::new(&name))
             .expect("create current-user-only child");
         (parent, private)
+    }
+
+    #[test]
+    #[ignore = "isolated ordinary lab Windows only; RAIUN_PINNED_PATH_PROBE=public-temp-only; fresh temp directories only"]
+    fn pinned_directory_normal_and_doubled_separator_probe() {
+        assert_eq!(
+            std::env::var("RAIUN_PINNED_PATH_PROBE").as_deref(),
+            Ok("public-temp-only"),
+            "explicit public sandbox opt-in required"
+        );
+        assert_eq!(std::env::var("USERNAME").as_deref(), Ok("RaiunLabUser"));
+        let token = std::process::Command::new("powershell.exe")
+            .env_remove("PSModulePath")
+            .args(["-NoProfile", "-NonInteractive", "-Command",
+                "$i=[Security.Principal.WindowsIdentity]::GetCurrent();$p=[Security.Principal.WindowsPrincipal]::new($i);if($i.User.Value-cne'S-1-5-21-1397333782-1256641849-3475801233-1001'-or$p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){exit 7};exit 0"])
+            .output().expect("read inherited token");
+        assert!(token.status.success(), "exact ordinary lab token required");
+        assert_eq!(
+            std::env::temp_dir(),
+            PathBuf::from(r"C:\Users\RaiunLabUser\AppData\Local\Temp"),
+            "fixed public temporary sandbox required"
+        );
+        let root = private_test_directory();
+        let path = root.join("plain-child");
+        std::fs::create_dir(&path).expect("create fresh owned public child");
+        let normal = PinnedDirectory::open(&path);
+        eprintln!(
+            "PINNED_PATH_NORMAL open={} kind={:?} raw={:?}",
+            normal.is_ok(),
+            normal.as_ref().err().map(io::Error::kind),
+            normal.as_ref().err().and_then(io::Error::raw_os_error)
+        );
+        let normal = normal.expect("normal public path must open");
+        let normal_verify = normal.verify_path();
+        eprintln!(
+            "PINNED_PATH_NORMAL verify={} kind={:?} raw={:?}",
+            normal_verify.is_ok(),
+            normal_verify.as_ref().err().map(io::Error::kind),
+            normal_verify
+                .as_ref()
+                .err()
+                .and_then(io::Error::raw_os_error)
+        );
+        assert!(normal_verify.is_ok(), "normal public path must verify");
+        // Change spelling only, preserving the drive-absolute prefix. No
+        // filesystem object, registration, ACL or application store is changed.
+        let spelling = path
+            .to_str()
+            .expect("synthetic path UTF8")
+            .replace('\\', "\\\\");
+        let doubled = PinnedDirectory::open(Path::new(&spelling));
+        eprintln!(
+            "PINNED_PATH_DOUBLED open={} kind={:?} raw={:?}",
+            doubled.is_ok(),
+            doubled.as_ref().err().map(io::Error::kind),
+            doubled.as_ref().err().and_then(io::Error::raw_os_error)
+        );
+        assert!(
+            doubled.is_ok(),
+            "walked doubled-separator public path must open"
+        );
+        let mut both_verified = false;
+        if let Ok(held) = &doubled {
+            let equal = held.identity() == normal.identity();
+            eprintln!("PINNED_PATH_DOUBLED identity_equal={equal}");
+            assert!(equal, "same public object must retain exact identity");
+            let verified = held.verify_path();
+            eprintln!(
+                "PINNED_PATH_DOUBLED verify={} kind={:?} raw={:?}",
+                verified.is_ok(),
+                verified.as_ref().err().map(io::Error::kind),
+                verified.as_ref().err().and_then(io::Error::raw_os_error)
+            );
+            both_verified = verified.is_ok();
+        }
+        assert!(
+            both_verified,
+            "walked doubled-separator public path must verify"
+        );
+        drop(doubled);
+        drop(normal);
+        // Preserve the small, wholly owned namespace on any diagnostic refusal.
+        // The operator can locate it by the existing synthetic temp prefix.
+        if both_verified {
+            std::fs::remove_dir(&path).expect("remove only owned empty child");
+            std::fs::remove_dir(&root).expect("remove only owned empty root");
+        }
+        eprintln!(
+            "PINNED_PATH_PROBE_COMPLETE=true both_verified={both_verified} retained={}",
+            !both_verified
+        );
+    }
+
+    #[test]
+    #[ignore = "requires isolated ordinary-user Windows synthetic private storage; no credentials, provider registration or GUI"]
+    fn private_staged_reader_admits_complete_bytes_and_cleans_only_owned_stages() {
+        assert!(
+            std::env::var("USERNAME")
+                .unwrap_or_default()
+                .eq_ignore_ascii_case("RaiunLabUser"),
+            "requires the isolated synthetic ordinary-user task"
+        );
+        let root = private_test_directory();
+        println!("PRIVATE_STAGED_READER_FIXTURE={}", root.display());
+        let (parent, private) = private_directory_under(&root);
+        let private = Arc::new(private);
+        let bytes: Vec<u8> = (0..131073).map(|index| (index * 31 + 7) as u8).collect();
+        let path = private.path().join("unpublished-stage");
+        let (mut reader, metadata) = private
+            .stage_immutable_file(
+                OsStr::new("unpublished-stage"),
+                bytes.len() as u64,
+                |writer| {
+                    for chunk in bytes.chunks(8191) {
+                        writer.write_all(chunk)?;
+                    }
+                    Ok((bytes.len(), "complete synthetic callback"))
+                },
+            )
+            .unwrap();
+        assert_eq!(metadata, (bytes.len(), "complete synthetic callback"));
+        reader.verify().unwrap();
+        assert_eq!(reader.metadata().unwrap().len(), bytes.len() as u64);
+        let mut received = Vec::new();
+        reader.read_to_end(&mut received).unwrap();
+        assert_eq!(received, bytes);
+        reader.seek(SeekFrom::Start(65530)).unwrap();
+        let mut middle = [0u8; 17];
+        reader.read_exact(&mut middle).unwrap();
+        assert_eq!(middle.as_slice(), &bytes[65530..65547]);
+        assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
+        assert!(std::fs::remove_file(&path).is_err());
+        reader.verify().unwrap();
+        drop(reader);
+        assert!(!path.exists());
+
+        let failed = private
+            .stage_immutable_file(OsStr::new("callback-error"), 32, |writer| {
+                writer.write_all(b"unpublished prefix")?;
+                Err::<(), _>(io::Error::other("synthetic callback refusal"))
+            })
+            .err()
+            .expect("callback failure must not admit a reader");
+        assert_eq!(failed.to_string(), "synthetic callback refusal");
+        assert!(!private.path().join("callback-error").exists());
+        assert!(
+            private
+                .stage_immutable_file(OsStr::new("over-bound"), 4, |writer| {
+                    writer.write_all(b"abc")?;
+                    writer.write_all(b"de")
+                })
+                .is_err()
+        );
+        assert!(!private.path().join("over-bound").exists());
+        assert_eq!(std::fs::read_dir(private.path()).unwrap().count(), 0);
+        drop(private);
+        drop(parent);
+        // This exclusively owned synthetic root is retained on any earlier panic.
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn replace_dacl(path: &Path, sddl: Option<&str>) {
@@ -2145,5 +2509,40 @@ mod tests {
         drop(parent);
         let _ = std::fs::remove_dir(&link_path);
         std::fs::remove_dir_all(root).expect("remove private test tree");
+    }
+    #[test]
+    fn immutable_regular_file_pin_denies_writes_and_replacement_until_drop() {
+        let root = private_test_directory();
+        let path = root.join("source.bin");
+        let renamed = root.join("renamed.bin");
+        let expected = b"ordinary synthetic source";
+        std::fs::write(&path, expected).expect("create ordinary source");
+        let parent = PinnedDirectory::open(&root).expect("hold ordinary parent");
+        let (mut pinned, captured) = parent
+            .open_immutable_regular_file(OsStr::new("source.bin"))
+            .expect("pin immutable ordinary file");
+        assert_eq!(identity(&pinned).unwrap(), captured);
+        let mut actual = Vec::new();
+        pinned.read_to_end(&mut actual).unwrap();
+        assert_eq!(actual, expected);
+        assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
+        assert!(std::fs::rename(&path, &renamed).is_err());
+        assert!(std::fs::remove_file(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        assert!(!renamed.exists());
+        drop(pinned);
+        let mut writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("ordinary write allowed after immutable pin drops");
+        assert_eq!(std::fs::read(&path).unwrap(), expected);
+        writer.write_all(b"controlled").unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(&after[..10], b"controlled");
+        assert_eq!(&after[10..], &expected[10..]);
+        drop(parent);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

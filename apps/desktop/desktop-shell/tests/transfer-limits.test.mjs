@@ -43,3 +43,30 @@ test('backend rates round-trip through a stable KiB/s editor value', () => {
   }
   assert.equal(formatTransferRate(null), '');
 });
+
+
+test('Windows transfer settings require an exact scope token while older Linux replies remain valid', () => {
+  const reply = {
+    limits: { upload_bytes_per_second: null, download_bytes_per_second: 8192 },
+    account_id: 'shared-subject', revision: 1, apply_immediately: false,
+  };
+  assert.equal(parseTransferLimitsReply(reply).scope_token, undefined);
+  assert.throws(() => parseTransferLimitsReply(reply, true));
+  for (const scope_token of [null, '', 'A'.repeat(64), 'a'.repeat(63), 'a'.repeat(65), 'a'.repeat(64) + '\n', 12]) {
+    assert.throws(() => parseTransferLimitsReply({ ...reply, scope_token }, true));
+  }
+  const scope_token = 'a'.repeat(64);
+  assert.equal(parseTransferLimitsReply({ ...reply, scope_token }, true).scope_token, scope_token);
+});
+
+
+test('an unbound Windows account displays defaults without authorizing writes', () => {
+  const reply = {
+    limits: { upload_bytes_per_second: null, download_bytes_per_second: null },
+    account_id: null, scope_token: null, revision: 1, apply_immediately: false,
+  };
+  const saved = parseTransferLimitsReply(reply, true);
+  assert.equal(saved.account_id, null);
+  assert.equal(saved.scope_token, undefined);
+  assert.throws(() => parseTransferLimitsReply({ ...reply, account_id: 'account-a' }, true));
+});

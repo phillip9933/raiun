@@ -13,16 +13,47 @@ mod initial_edit_queue;
 mod opencloud;
 mod recovery_provider;
 mod recovery_reconcile;
+#[cfg(any(windows, test))]
+mod vault_capture_dispatch;
+#[cfg(any(windows, test))]
+pub use vault_capture_dispatch::FreshVaultCaptureDispatch;
+#[cfg(windows)]
+mod vault_completion;
+#[cfg(any(windows, test))]
+mod vault_dirty;
+#[cfg(any(windows, test))]
+mod vault_hydration;
+#[cfg(windows)]
+pub use vault_hydration::FreshVaultHydration;
+#[cfg(any(windows, test))]
+mod writable_cleanup_receipts;
+#[cfg(windows)]
+pub use vault_completion::{
+    FreshVaultUpload, VaultLiveUploadOutcome, VaultLocalCompletionStore,
+    VaultLocalCompletionTarget, VaultNativeCompletionProof, VaultNativePreparation,
+    VaultUploadControl,
+};
+#[cfg(windows)]
+pub mod vault_custody;
+#[cfg(any(windows, test))]
+pub mod vault_placeholder;
+#[cfg(windows)]
+pub mod vault_read;
+#[cfg(windows)]
+pub mod vault_routes;
+#[cfg(windows)]
+pub use backend::ExistingVaultEditCapture;
 #[cfg(windows)]
 pub(crate) use backend::placeholder_population_completed;
 pub use backend::{
     BackendError, BoundedPermit, BoundedPermitPool, CancellationToken, DEFAULT_FETCH_TIMEOUT,
-    EditRecoveryProvider, FetchRange, MAX_CONCURRENT_DIRECTORY_ENUMERATIONS,
-    MAX_CONCURRENT_FETCHES, MAX_DIRECTORY_CHILDREN, MAX_FILE_BYTES, MAX_RANGE_BYTES,
-    MAX_REQUEST_BYTES, MAX_STAGED_CALLBACKS, PlaceholderBackend, PlaceholderChild,
-    PlaceholderEditBinding, PlaceholderMetadata, PreparedEditBinding, PreparedEditRecovery,
-    PreparedEnumeration, PreparedFetch, PreparedFetchSession, PublishPermit,
-    RequestPublicationGate, RequestPublicationPermit, checked_fetch_range, next_chunk_len,
+    DeferredVaultCaptureNotification, EditRecoveryProvider, FetchRange,
+    MAX_CONCURRENT_DIRECTORY_ENUMERATIONS, MAX_CONCURRENT_FETCHES, MAX_DIRECTORY_CHILDREN,
+    MAX_FILE_BYTES, MAX_RANGE_BYTES, MAX_REQUEST_BYTES, MAX_STAGED_CALLBACKS,
+    MAX_VAULT_EDIT_CAPTURE_BYTES, PlaceholderBackend, PlaceholderChild, PlaceholderEditBinding,
+    PlaceholderMetadata, PreparedEditBinding, PreparedEditRecovery, PreparedEnumeration,
+    PreparedFetch, PreparedFetchSession, PublishPermit, RequestPublicationGate,
+    RequestPublicationPermit, checked_fetch_range, next_chunk_len,
 };
 #[cfg(windows)]
 pub use edit_journal::DpapiEditRecordProtector;
@@ -49,6 +80,10 @@ pub use recovery_reconcile::{
     ReconciliationIssue, ReconciliationOutcome, RecoveryRemote, RecoveryRemoteBody,
     RecoveryRemoteVersion, VerifiedEditReadback, verify_edit_readback,
 };
+#[cfg(windows)]
+pub use vault_custody::{
+    ExistingVaultEditBaseline, ExistingVaultEditPayload, ExistingVaultUploadTarget,
+};
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
@@ -61,6 +96,21 @@ pub struct PlatformVersion {
     pub build: u32,
     pub revision: u32,
     pub integration: u32,
+}
+
+/// Read-only support evidence; no file names, identities or content are included.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VaultCleanupDiagnostics {
+    pub modified_closes: usize,
+    pub unverifiable_closes: usize,
+    pub journaled_closes: usize,
+    pub close_callbacks: usize,
+    pub close_pool_refusals: usize,
+    pub deleted_closes: usize,
+    pub last_close_stage: usize,
+    pub last_close_hresult: i32,
+    /// None means the short inventory lock was unavailable, not complete.
+    pub inventory_complete: Option<bool>,
 }
 
 /// Safe, non-path-bearing error from the Cloud Files adapter.
@@ -226,6 +276,75 @@ pub fn pin_registered_configured_root(
     }
 }
 
+/// Borrowed proof for preparing protected vault metadata. Construction requires
+/// an actual pinned root and the current authenticated composite backend. This
+/// does not prove complete historical custody or authorize any native cleanup.
+#[cfg(windows)]
+pub struct VaultCustodyRootContext<'a> {
+    lease: &'a ConfiguredRootLease,
+    backend: &'a OpenCloudPlaceholderBackend,
+    composite: OpaqueIdentity,
+    registration: String,
+}
+
+#[cfg(windows)]
+impl VaultCustodyRootContext<'_> {
+    pub fn provider_scope(&self) -> &ProviderScope {
+        self.backend.scope()
+    }
+
+    pub fn root_identity(&self) -> ConfiguredRootIdentity {
+        self.lease.identity()
+    }
+
+    /// Expected registration domain, including the checked native SyncRootIdentity
+    /// and the authenticated backend's composite identity. This does not claim
+    /// native readback of CF_SYNC_REGISTRATION.FileIdentity.
+    pub fn registration_binding(&self) -> &str {
+        &self.registration
+    }
+
+    pub fn is_new_registration(&self) -> bool {
+        !self.lease.registered
+    }
+
+    /// Re-pin rather than relying on the old component handles to prevent every
+    /// rename. Call before and after protected initialization/persistence.
+    pub fn revalidate(&self) -> Result<(), Error> {
+        if !self.backend.owns_composite_root_identity(self.composite) {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        let current = if self.lease.registered {
+            pin_registered_configured_root(&self.lease.path, self.lease.identity())?
+        } else {
+            pin_configured_root(&self.lease.path)?
+        };
+        if current.identity() != self.lease.identity()
+            || !self.backend.owns_composite_root_identity(self.composite)
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        Ok(())
+    }
+}
+
+/// No caller-supplied "fresh" boolean or filesystem identity is accepted here.
+#[cfg(windows)]
+pub fn prepare_vault_custody_root<'a>(
+    lease: &'a ConfiguredRootLease,
+    backend: &'a OpenCloudPlaceholderBackend,
+    composite: OpaqueIdentity,
+) -> Result<VaultCustodyRootContext<'a>, Error> {
+    let context = VaultCustodyRootContext {
+        lease,
+        backend,
+        composite,
+        registration: native::vault_custody_registration_binding(lease.identity(), composite),
+    };
+    context.revalidate()?;
+    Ok(context)
+}
+
 /// Complete, preflighted input for a configured-root connection. The root,
 /// authenticated backend scope, and durable recovery lease are acquired as a
 /// unit before Cloud Files callbacks can start.
@@ -236,6 +355,7 @@ pub struct PreparedConfiguredRootRuntime {
     backend: std::sync::Arc<OpenCloudPlaceholderBackend>,
     composite_root_identity: OpaqueIdentity,
     recovery: std::sync::Arc<dyn PreparedEditRecovery>,
+    vault_history: Option<std::sync::Arc<dyn vault_custody::VaultPublishedHistorySource>>,
 }
 
 /// Prepare all required identity and recovery capabilities before native root
@@ -258,7 +378,26 @@ pub fn prepare_configured_root_runtime(
         backend,
         composite_root_identity,
         recovery,
+        vault_history: None,
     })
+}
+
+/// Attach only the trusted protected-history service. The native owner invokes
+/// it after CfConnectSyncRoot establishes the sole root connection, while data
+/// callbacks remain fenced. Merely attaching it cannot admit vault sessions.
+#[cfg(windows)]
+pub fn attach_vault_published_history(
+    mut runtime: PreparedConfiguredRootRuntime,
+    history: std::sync::Arc<dyn vault_custody::VaultPublishedHistorySource>,
+) -> Result<PreparedConfiguredRootRuntime, Error> {
+    prepare_vault_custody_root(
+        &runtime.root,
+        runtime.backend.as_ref(),
+        runtime.composite_root_identity,
+    )?
+    .revalidate()?;
+    runtime.vault_history = Some(history);
+    Ok(runtime)
 }
 
 #[cfg(any(windows, test))]
@@ -295,6 +434,13 @@ pub fn connect_configured_root(
     })
 }
 
+/// Owner-thread-only held writable eviction proof. Dropping it releases native
+/// references but never confirms cleanup or reconstructs authority from history.
+#[cfg(windows)]
+pub struct VaultCleanupFence {
+    inner: native::VaultCleanupFence,
+}
+
 /// Internal connection lease for one fully prepared configured root.
 #[cfg(windows)]
 #[allow(dead_code)]
@@ -305,6 +451,99 @@ pub struct ConfiguredRootConnection {
 #[cfg(windows)]
 #[allow(dead_code)]
 impl ConfiguredRootConnection {
+    /// Conservative admission fence for new vault sessions. Unknown historical
+    /// custody (including reconnects) refuses activation; this does not hide
+    /// existing plaintext or prove complete filesystem cleanup.
+    pub fn can_admit_vault_session(&self) -> bool {
+        self.inner.can_admit_vault_session()
+    }
+
+    /// Fixed support counters only; this does not authorize cleanup or admission.
+    pub fn vault_cleanup_diagnostics(&self) -> VaultCleanupDiagnostics {
+        self.inner.vault_cleanup_diagnostics()
+    }
+
+    /// Revoke/drain this retained route before cleaning recorded plaintext.
+    /// Dirty/uncertain state or failed postproof returns incomplete cleanup;
+    /// the owner must retain the route for retry and never report fully locked.
+    pub fn cleanup_retired_vault_route(
+        &self,
+        route: &vault_routes::VerifiedVaultRoute,
+    ) -> Result<(), Error> {
+        let fence = self.begin_cleanup_retired_vault_route(route)?;
+        self.finish_vault_cleanup(fence)
+    }
+
+    /// Revoke/drain and retain every writable eviction reference until finish.
+    /// The provider keeps this opaque span on its owner thread across key clear.
+    pub fn begin_cleanup_retired_vault_route(
+        &self,
+        route: &vault_routes::VerifiedVaultRoute,
+    ) -> Result<VaultCleanupFence, Error> {
+        let owned = route
+            .revoke_and_cleanup_identities()
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
+        self.inner
+            .begin_cleanup_recorded_vault_files(route, &owned)
+            .map(|inner| VaultCleanupFence { inner })
+    }
+
+    /// Final current proof on the same native connection, after owner key clear.
+    pub fn finish_vault_cleanup(&self, fence: VaultCleanupFence) -> Result<(), Error> {
+        self.inner.finish_vault_cleanup(fence.inner)
+    }
+
+    /// Conservative current connection footprint; absence is not Lock authority.
+    pub fn writable_vault_cleanup_incomplete(&self) -> Result<bool, Error> {
+        self.inner.writable_vault_cleanup_incomplete()
+    }
+
+    #[cfg(feature = "synthetic-agent-integration")]
+    pub fn placeholder_on_disk_empty_for_integration(
+        &self,
+        relative_components: &[&str],
+    ) -> Result<bool, Error> {
+        self.inner
+            .placeholder_on_disk_empty_for_integration(relative_components)
+    }
+
+    /// Denial-only fixture helper: deletes only this connection's volatile receipt.
+    #[cfg(feature = "synthetic-agent-integration")]
+    pub fn forget_writable_cleanup_receipt_for_integration(
+        &self,
+        identity: [u8; 16],
+    ) -> Result<(), Error> {
+        self.inner
+            .forget_writable_cleanup_receipt_for_integration(identity)
+    }
+
+    /// Native owner-thread continuation of one fresh live vault upload. No
+    /// historical proof, unlocked replacement route, or recovered ticket works.
+    pub fn complete_vault_upload(
+        &self,
+        upload: FreshVaultUpload,
+        store: &mut dyn VaultLocalCompletionStore,
+    ) -> Result<(), Error> {
+        self.inner.complete_vault_upload(upload, store)
+    }
+
+    /// Complete verified writable bytes under the same fresh native fences,
+    /// without an explicit attribute or timestamp overwrite. Platform effects
+    /// from Mark are sampled and verified. This does not restore READONLY or
+    /// authorize cleanup/Lock from historical evidence.
+    pub fn complete_writable_vault_upload(
+        &self,
+        upload: FreshVaultUpload,
+        store: &mut dyn VaultLocalCompletionStore,
+    ) -> Result<(), Error> {
+        self.inner.complete_writable_vault_upload(upload, store)
+    }
+    /// Exact per-file tracker observation only; never global cleanup authority.
+    #[cfg(feature = "synthetic-agent-integration")]
+    pub fn vault_file_pending_for_test(&self, identity: &[u8; 16]) -> Result<bool, Error> {
+        self.inner.vault_file_pending_for_test(identity)
+    }
+
     /// Complete one freshly verified existing file under its exact live
     /// backend session. Local components must come from the native handoff,
     /// not a guessed remote path. This never retires the journal. Failure
@@ -330,6 +569,12 @@ impl ConfiguredRootConnection {
     #[cfg(feature = "synthetic-agent-integration")]
     pub fn directory_observation(&self) -> (usize, usize, usize, usize, usize) {
         self.inner.directory_observation()
+    }
+
+    /// Fixed admission-stage number only; no paths or account data.
+    #[cfg(feature = "synthetic-agent-integration")]
+    pub fn fetch_validation_stage(&self) -> usize {
+        self.inner.fetch_validation_stage()
     }
 
     /// Bounded hydration callback telemetry for the synthetic agent test.
@@ -494,6 +739,26 @@ pub fn registered_configured_root_overlaps(
     #[cfg(not(windows))]
     {
         let _ = (registered, expected, plain);
+        Err(Error::UnsupportedPlatform)
+    }
+}
+
+/// Compare two exactly identified, OS-registered Cloud Files roots.
+/// Only each final root may carry Cloud Files reparse state; ancestors remain
+/// plain and pinned. No registration, repair or account authorization occurs.
+pub fn registered_configured_roots_overlap(
+    left: &std::path::Path,
+    expected_left: ConfiguredRootIdentity,
+    right: &std::path::Path,
+    expected_right: ConfiguredRootIdentity,
+) -> Result<bool, Error> {
+    #[cfg(windows)]
+    {
+        native::registered_configured_roots_overlap(left, expected_left, right, expected_right)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (left, expected_left, right, expected_right);
         Err(Error::UnsupportedPlatform)
     }
 }
@@ -935,7 +1200,7 @@ mod tests {
     /// Run only in the isolated Windows test VM. It registers an internally
     /// created empty temp directory and immediately unregisters it.
     #[cfg(windows)]
-    fn query_owned_fixture_directory_in_child(path: &std::path::Path) -> bool {
+    pub(crate) fn query_owned_fixture_directory_in_child(path: &std::path::Path) -> bool {
         use std::{
             process::{Command, Stdio},
             thread,
@@ -966,6 +1231,49 @@ mod tests {
                 Some(status) => break status.success(),
                 None if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
                 None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// Same bounded external-client pattern; emits only length and SHA256.
+    #[cfg(all(windows, feature = "synthetic-agent-integration"))]
+    pub(crate) fn query_owned_fixture_file_in_child(
+        path: &std::path::Path,
+        expected_len: usize,
+        expected_sha: &str,
+    ) -> bool {
+        use std::{
+            process::{Command, Stdio},
+            thread,
+            time::{Duration, Instant},
+        };
+        assert!(path.is_absolute(), "fixture path must be absolute");
+        let mut child = Command::new("powershell.exe")
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                "$ErrorActionPreference='Stop'; try { $b=[System.IO.File]::ReadAllBytes($env:RAIUN_SYNTHETIC_FILE); $h=[System.Security.Cryptography.SHA256]::Create(); try { $s=[BitConverter]::ToString($h.ComputeHash($b)).Replace('-','').ToLowerInvariant(); [Console]::WriteLine(('{0}|{1}' -f $b.Length,$s)) } finally { $h.Dispose() } } catch { $e=$_.Exception; while ($e.InnerException) { $e=$e.InnerException }; [Console]::WriteLine(('ERROR|{0}' -f $e.HResult)); exit 24 }"])
+            .env("RAIUN_SYNTHETIC_FILE", path).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+            .spawn().expect("start bounded synthetic file-read process");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            match child.try_wait().expect("poll synthetic file-read process") {
+                Some(status) => {
+                    let output = child
+                        .wait_with_output()
+                        .expect("collect synthetic file-read result");
+                    let summary =
+                        String::from_utf8(output.stdout).expect("ASCII file-read summary");
+                    println!("VAULT_REFRESH_EXTERNAL_FILE={}", summary.trim());
+                    println!("VAULT_REFRESH_EXTERNAL_FILE_STATUS={status}");
+                    return status.success()
+                        && summary.trim() == format!("{expected_len}|{expected_sha}");
+                }
+                None if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+                None => {
+                    println!("VAULT_REFRESH_EXTERNAL_FILE_TIMEOUT=true");
                     let _ = child.kill();
                     let _ = child.wait();
                     return false;

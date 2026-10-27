@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 
 /// Maximum number of bytes passed to one backend range read.
 pub const MAX_RANGE_BYTES: usize = 64 * 1024;
+/// Historical vault edit retention bound; never writable-mount activation.
+pub const MAX_VAULT_EDIT_CAPTURE_BYTES: usize = 512 * 1024;
 /// Bound total work accepted for one callback request.
 pub const MAX_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 /// Total native file/request bound; individual staging windows remain 16 MiB.
@@ -78,6 +80,182 @@ pub struct PlaceholderEditBinding {
     pub virtual_path: String,
     pub base_etag: String,
     pub base_size: u64,
+}
+
+/// Borrowed only inside the exact live vault capture callback. This exposes
+/// immutable historical metadata and local retention, never keys or a live lease.
+/// A successful retain may return a one-use notification, which is not published
+/// until native dirty accounting and every capture/callback guard have finished.
+#[cfg(windows)]
+pub trait ExistingVaultEditCapture {
+    fn baseline(&self) -> &crate::vault_custody::ExistingVaultEditBaseline;
+    fn retain(
+        &self,
+        payload: crate::vault_custody::ExistingVaultEditPayload,
+    ) -> Result<Option<Box<dyn DeferredVaultCaptureNotification>>, BackendError>;
+}
+
+/// Owned fresh-close locator only, never upload/session/cleanup authority.
+/// Implementations perform only one bounded nonblocking send. A refused send
+/// queues nothing; dropping this value must never publish. No locks, body,
+/// native pointers, account lookup, provider reentry or HTTP may escape here.
+pub trait DeferredVaultCaptureNotification: Send {
+    fn try_publish(self: Box<Self>) -> Result<(), BackendError>;
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn finish_vault_capture_notification(
+    callback: Result<(), BackendError>,
+    retained: bool,
+    notification: Option<Box<dyn DeferredVaultCaptureNotification>>,
+) -> Result<Option<Box<dyn DeferredVaultCaptureNotification>>, BackendError> {
+    callback?;
+    if !retained {
+        return Err(BackendError::Unavailable);
+    }
+    Ok(notification)
+}
+
+/// Called only after native close accounting and all callback guards dropped.
+/// Contain an implementation panic at the external callback boundary; neither
+/// an error nor a panic retries publication or changes retained dirty history.
+#[cfg(any(windows, test))]
+pub(crate) fn publish_vault_capture_notification(
+    notification: Option<Box<dyn DeferredVaultCaptureNotification>>,
+) -> Result<(), BackendError> {
+    match notification {
+        Some(notification) => {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| notification.try_publish()))
+                .unwrap_or(Err(BackendError::Unavailable))
+        }
+        None => Ok(()),
+    }
+}
+
+/// Local synchronous accounting only, never a durable or live permit. Even a
+/// swallowed failed/second retain attempt prevents a successful callback ack.
+#[cfg(any(windows, test))]
+#[derive(Default)]
+pub(crate) struct ExistingCaptureAcknowledgement {
+    attempts: std::cell::Cell<u8>,
+    retained: std::cell::Cell<bool>,
+}
+#[cfg(any(windows, test))]
+impl ExistingCaptureAcknowledgement {
+    pub(crate) fn begin_attempt(&self) -> Result<(), BackendError> {
+        let previous = self.attempts.get();
+        self.attempts.set(previous.saturating_add(1));
+        if previous == 0 {
+            Ok(())
+        } else {
+            Err(BackendError::Unavailable)
+        }
+    }
+    pub(crate) fn acknowledge_retained(&self) {
+        self.retained.set(true);
+    }
+    pub(crate) fn finish(&self, callback: Result<(), BackendError>) -> Result<(), BackendError> {
+        callback?;
+        if self.attempts.get() == 1 && self.retained.get() {
+            Ok(())
+        } else {
+            Err(BackendError::Unavailable)
+        }
+    }
+}
+#[cfg(test)]
+mod existing_capture_ack_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+        mpsc::{SyncSender, sync_channel},
+    };
+
+    struct Notice {
+        sender: SyncSender<()>,
+        attempts: Arc<AtomicUsize>,
+    }
+    impl DeferredVaultCaptureNotification for Notice {
+        fn try_publish(self: Box<Self>) -> Result<(), BackendError> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            self.sender
+                .try_send(())
+                .map_err(|_| BackendError::Unavailable)
+        }
+    }
+
+    #[test]
+    fn deferred_notice_requires_retention_and_successful_outer_ack() {
+        let (sender, receiver) = sync_channel(1);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let notice = || -> Option<Box<dyn DeferredVaultCaptureNotification>> {
+            Some(Box::new(Notice {
+                sender: sender.clone(),
+                attempts: Arc::clone(&attempts),
+            }))
+        };
+        assert!(finish_vault_capture_notification(Ok(()), false, notice()).is_err());
+        assert!(
+            finish_vault_capture_notification(Err(BackendError::Unavailable), true, notice())
+                .is_err()
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+        assert!(receiver.try_recv().is_err());
+        let deferred = finish_vault_capture_notification(Ok(()), true, notice()).unwrap();
+        // Native accounting/guard unwinding must happen before this later call.
+        assert_eq!(attempts.load(Ordering::SeqCst), 0);
+        assert!(receiver.try_recv().is_err());
+        publish_vault_capture_notification(deferred).unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(receiver.try_recv(), Ok(()));
+        assert!(receiver.try_recv().is_err());
+        assert!(
+            finish_vault_capture_notification(Ok(()), true, None)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn refused_nonblocking_publish_is_not_retried_or_queued() {
+        let (sender, receiver) = sync_channel(1);
+        sender.try_send(()).unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let deferred = Some(Box::new(Notice {
+            sender: sender.clone(),
+            attempts: Arc::clone(&attempts),
+        }) as Box<dyn DeferredVaultCaptureNotification>);
+        assert!(publish_vault_capture_notification(deferred).is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(receiver.try_recv(), Ok(()));
+        assert!(receiver.try_recv().is_err());
+        publish_vault_capture_notification(None).unwrap();
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn callback_success_requires_exactly_one_acknowledged_retain() {
+        let absent = ExistingCaptureAcknowledgement::default();
+        assert!(absent.finish(Ok(())).is_err());
+        let failed = ExistingCaptureAcknowledgement::default();
+        failed.begin_attempt().unwrap();
+        assert!(failed.finish(Ok(())).is_err());
+        let retained = ExistingCaptureAcknowledgement::default();
+        retained.begin_attempt().unwrap();
+        retained.acknowledge_retained();
+        assert!(retained.finish(Ok(())).is_ok());
+        // Caller errors remain errors even after durable retention succeeded.
+        assert!(retained.finish(Err(BackendError::Unavailable)).is_err());
+    }
+    #[test]
+    fn swallowed_second_retain_error_cannot_acknowledge_the_callback() {
+        let retained = ExistingCaptureAcknowledgement::default();
+        retained.begin_attempt().unwrap();
+        retained.acknowledge_retained();
+        assert!(retained.begin_attempt().is_err());
+        assert!(retained.finish(Ok(())).is_err());
+    }
 }
 
 /// Holds the account/root revocation lease while a local edit record is being
@@ -217,6 +395,19 @@ pub enum BackendError {
 /// lease until `begin_publish` returns and the caller finishes native
 /// publication.
 pub trait PreparedEnumeration {
+    /// Files in this complete listing must be projected read-only. Directories
+    /// retain their normal attributes. This hint acquires no authorization lock.
+    fn read_only(&self) -> bool {
+        false
+    }
+
+    /// Per-file projection policy under the same publication permit. Existing
+    /// adapters keep their listing-wide policy unless explicitly overridden.
+    /// This does not change authenticated remote metadata or directory rights.
+    fn file_read_only(&self, _child: &PlaceholderChild) -> bool {
+        self.read_only()
+    }
+
     fn children(&self) -> &[PlaceholderChild];
 
     /// Hold the relevant scope/revocation guard through one native publication.
@@ -247,6 +438,28 @@ impl PreparedEnumeration for StagedEnumeration {
 pub trait PreparedFetch {
     fn metadata(&self) -> PlaceholderMetadata;
     fn bytes(&self) -> &[u8];
+
+    /// Called only for tracked vault data, under this fetch's existing
+    /// publication permit. Implementations must use a captured custody view;
+    /// resolving a route here could recursively acquire the publication lock.
+    #[cfg(windows)]
+    fn persist_vault_hydration(
+        &self,
+        _intent: &crate::vault_custody::VaultHydrationIntent,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
+    /// Opaque authenticated full-stage provenance before first plaintext transfer.
+    /// Ordinary/readonly adapters supply None. Native acknowledgement, never the
+    /// durable hydration intent, decides whether a receipt becomes ready.
+    #[cfg(windows)]
+    fn prepare_fresh_vault_hydration(
+        &self,
+        _intent: &crate::vault_custody::VaultHydrationIntent,
+    ) -> Result<Option<crate::FreshVaultHydration>, BackendError> {
+        Ok(None)
+    }
 
     /// Recheck cancellation, authorization generation, and revocation before
     /// each native transfer slice. The OpenCloud implementation also retains
@@ -502,7 +715,27 @@ pub trait PreparedFetchSession {
 /// expensive work. The callback bridge caps each staging window at
 /// [`MAX_REQUEST_BYTES`] and transfers data in [`MAX_RANGE_BYTES`] slices.
 pub trait PlaceholderBackend: Send + Sync + 'static {
+    /// Native bookkeeping is mandatory before publishing decrypted vault bytes.
+    /// This classifies an already owned opaque identity; it grants no unlock.
+    fn requires_hydration_inventory(&self, _identity: &[u8]) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+
     fn lookup(&self, identity: &[u8]) -> Result<Option<PlaceholderMetadata>, BackendError>;
+
+    /// Synchronously invoke exactly one callback while the exact vault's live
+    /// account/root/route/token/session fences remain held. The caller must have
+    /// classified this as a vault identity; refusal must never fall through to
+    /// ordinary edit dispatch. No network or coordinator/token reentry is allowed
+    /// in the callback. Ok acknowledges one historical retention only.
+    #[cfg(windows)]
+    fn with_vault_edit_capture(
+        &self,
+        _identity: &[u8],
+        _callback: &mut dyn FnMut(&dyn ExistingVaultEditCapture) -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unavailable)
+    }
 
     /// Prepare an exact account-bound baseline for a user-edited placeholder.
     /// Backends that cannot prove the callback identity return an error; native
@@ -689,6 +922,34 @@ pub fn next_chunk_len(remaining: u64) -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn per_file_readonly_default_preserves_the_existing_listing_policy() {
+        use super::*;
+        let child = PlaceholderChild {
+            name: "file".into(),
+            identity: vec![1; 16],
+            metadata: PlaceholderMetadata {
+                is_directory: false,
+                length: 4,
+            },
+            last_write_time: 0,
+        };
+        let ordinary = StagedEnumeration {
+            children: vec![child.clone()],
+        };
+        assert!(!ordinary.file_read_only(&child));
+        struct ReadOnly(Vec<PlaceholderChild>);
+        impl PreparedEnumeration for ReadOnly {
+            fn read_only(&self) -> bool {
+                true
+            }
+            fn children(&self) -> &[PlaceholderChild] {
+                &self.0
+            }
+        }
+        assert!(ReadOnly(vec![child.clone()]).file_read_only(&child));
+    }
+
     use super::{BackendError, MAX_RANGE_BYTES, checked_fetch_range, next_chunk_len};
 
     #[test]

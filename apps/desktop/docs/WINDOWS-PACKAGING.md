@@ -22,6 +22,13 @@ the [Tauri CLI 2.12.1 NSIS template](https://github.com/tauri-apps/tauri/blob/ta
 pinned in `package-lock.json`: its install section copies mapped resources
 under `$INSTDIR`, and its uninstall section deletes those same target paths.
 
+Set `CARGO_TARGET_DIR` to retain build artifacts across filtered source copies.
+The helper uses that target for both the Agent/CLI build and payload lookup,
+and resolves a relative setting against the desktop repository root before
+changing directories. Resource staging stays under the source copy's ignored
+`target/windows-package-resources`. Without the setting, existing defaults
+apply. Use one build at a time for a shared target directory.
+
 The installer writes to the current user's installation directory and creates
 a Raiun Start Menu entry. It does not register login autostart. By default, the
 uninstaller removes application files and shortcuts while preserving account,
@@ -39,6 +46,8 @@ python scripts/test-windows-packaging.py
 
 It validates the NSIS mode, bundled agent/CLI root-level resource mapping,
 unsigned manifest, and absence of a custom companion-copy hook.
+PowerShell contracts also check target routing, refusal to stage after a failed
+Cargo command, and payload selection when stale default-target files exist.
 It does not build or execute an installer. Native install, upgrade, launch, and
 uninstall-preserves-state checks still require a Windows VM. This workflow does
 not sign or publish a package.

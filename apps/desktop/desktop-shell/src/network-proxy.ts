@@ -9,18 +9,23 @@ export type ProxySettingsReply = {
   account_id: string | null;
   revision: number;
   apply_requires_reconnect: true;
+  scope_token?: string;
 };
 
-export function parseProxySettings(value: unknown): ProxySettingsReply {
+export function parseProxySettings(value: unknown, requireScopeToken = false): ProxySettingsReply {
   if (!value || typeof value !== 'object') throw new Error('Proxy settings are unavailable.');
   const row = value as Record<string, unknown>;
   const proxy = parseProxyConfig(row.proxy);
   if (!(row.account_id === null || typeof row.account_id === 'string') ||
       !Number.isSafeInteger(row.revision) || Number(row.revision) < 1 ||
-      row.apply_requires_reconnect !== true) {
+      row.apply_requires_reconnect !== true ||
+      (row.scope_token !== undefined && !(row.scope_token === null && row.account_id === null) &&
+        (typeof row.scope_token !== 'string' || row.scope_token.length !== 64 || !/^[0-9a-f]{64}$/u.test(row.scope_token))) ||
+      (requireScopeToken && row.account_id !== null &&
+        (typeof row.account_id !== 'string' || !row.account_id || typeof row.scope_token !== 'string'))) {
     throw new Error('Proxy settings are unavailable.');
   }
-  return { proxy, account_id: row.account_id as string | null, revision: Number(row.revision), apply_requires_reconnect: true };
+  return { proxy, account_id: row.account_id as string | null, revision: Number(row.revision), apply_requires_reconnect: true, ...(typeof row.scope_token === 'string' ? { scope_token: row.scope_token } : {}) };
 }
 
 export function parseProxyConfig(value: unknown): ProxyConfig {
@@ -60,6 +65,7 @@ export function proxyEditorEnabled(input: {
   offlineNamespace: boolean;
   authenticating: boolean;
   saving: boolean;
+  requiresSignOut?: boolean;
 }): boolean {
-  return input.reachable && !input.connected && !input.offlineNamespace && !input.authenticating && !input.saving;
+  return input.reachable && !input.requiresSignOut && !input.connected && !input.offlineNamespace && !input.authenticating && !input.saving;
 }

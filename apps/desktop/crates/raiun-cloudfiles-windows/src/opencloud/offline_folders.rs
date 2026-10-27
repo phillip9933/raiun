@@ -23,6 +23,7 @@ impl OpenCloudPlaceholderBackend {
         cancellation: &CancellationToken,
     ) -> Result<(OpaqueIdentity, DirectoryBinding), BackendError> {
         check_cancel(cancellation)?;
+        self.ensure_ordinary_location(expected.space_id, expected.path)?;
         self.catalog_scope_snapshot()?
             .ok_or(BackendError::Unavailable)?;
         if !valid_remote_path(
@@ -60,6 +61,7 @@ impl OpenCloudPlaceholderBackend {
     ) -> Result<(), BackendError> {
         check_cancel(cancellation)?;
         self.ensure_active()?;
+        self.ensure_ordinary_location(&directory.space_id, &directory.path)?;
         let context = RangeReadContext {
             deadline: cancellation.request_deadline(),
             token_generation: self.token_generation,
@@ -278,6 +280,7 @@ impl OpenCloudPlaceholderBackend {
             let entries = self.fresh_directory_entries(&directory, cancellation)?;
             for (_, entry) in &entries {
                 check_cancel(cancellation)?;
+                self.ensure_ordinary_location(&directory.space_id, &entry.path)?;
                 metadata_bytes = metadata_bytes
                     .checked_add(directory.remote_id.len())
                     .and_then(|n| n.checked_add(entry.id.len()))
@@ -326,6 +329,11 @@ impl OpenCloudPlaceholderBackend {
             if self.resolve_folder_binding(expected, cancellation)? != (identity, selected.clone())
             {
                 return Err(BackendError::NotFound.into());
+            }
+            // Admission takes the write lease, so this final snapshot cannot
+            // acquire a vault subtree between traversal and manifest commit.
+            for item in &manifest {
+                self.ensure_ordinary_location(&selected.space_id, &item.entry.path)?;
             }
             let _publication = self.begin_scoped_publish(cancellation)?;
             // Token generation is already locked by the permit. The probe must

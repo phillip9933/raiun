@@ -6,9 +6,9 @@ import vm from 'node:vm';
 const source = await readFile(new URL('../src/media-jobs.ts', import.meta.url), 'utf8');
 const compiled = ts.transpileModule(source, {compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ES2022}}).outputText;
 const { MediaJobsView } = await import(`data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`);
-function setup(request) {
+function setup(request, supportsVerifyUpload) {
   let account = 'A'; let busy = 0;
-  const view = new MediaJobsView({key:()=>account,connected:()=>true,reachable:()=>true,supported:()=>true,blocked:()=>busy>0,spaces:()=>[],request,chooseSource:async()=>null,confirm:async()=>true,busy:value=>{busy+=value?1:-1;},render:()=>{}});
+  const view = new MediaJobsView({supportsVerifyUpload,key:()=>account,connected:()=>true,reachable:()=>true,supported:()=>true,blocked:()=>busy>0,spaces:()=>[],request,chooseSource:async()=>null,confirm:async()=>true,busy:value=>{busy+=value?1:-1;},render:()=>{}});
   return {view,switchAccount:()=>{account='B';view.reset();},busy:()=>busy};
 }
 test('late account-A list cannot appear in account B', async()=>{
@@ -225,4 +225,56 @@ test('late verification cannot surface after account or job revision changes',as
 test('mismatched verification response cannot claim a matching copy',async()=>{
   const {view}=setup(async(action)=>action==='media_jobs'?{jobs:[recoveryRow]}:action==='media_job_recovery'?recoveryResponse([verifiableItem]):{job_id:'backup',account_id:'account-a',revision:4,attempt_generation:99,status:'matched',recovery_retained:true,backup_resumed:false});
   await openVerifiable(view);await view.verifyUploadedCopy(0);assert.doesNotMatch(view.html(),/uploaded copy matches/);assert.match(view.html(),/did not match this retained attempt/);
+});
+
+test('unsupported upload verification stays hidden and refuses stale or programmatic calls without blocking inspection',async()=>{
+  let supported=false; const calls=[];
+  const {view}=setup(async(action)=>{calls.push(action);return action==='media_jobs'?{jobs:[recoveryRow]}:recoveryResponse([verifiableItem]);},()=>supported);
+  await openVerifiable(view);
+  assert.match(view.html(),/Retained copy present/);
+  assert.match(view.html(),/Hide retained copies/);
+  assert.doesNotMatch(view.html(),/Verify uploaded copy/);
+  await view.verifyUploadedCopy(0);
+  supported=true; assert.match(view.html(),/Verify uploaded copy/);
+  supported=false; await view.verifyUploadedCopy(0);
+  assert.deepEqual(calls,['media_jobs','media_job_recovery']);
+  assert.match(view.html(),/Retained copy present/);
+  assert.doesNotMatch(view.html(),/uploaded copy matches/);
+});
+
+test('media empty state distinguishes reachable signed-out agent from unavailable agent', () => {
+  let connected = false; let reachable = true;
+  const view = new MediaJobsView({key:()=> 'A', connected:()=>connected, reachable:()=>reachable, supported:()=>true, blocked:()=>false, spaces:()=>[], request:async()=>{throw new Error('No requests expected');}, chooseSource:async()=>null, confirm:async()=>true, busy:()=>{}, render:()=>{}});
+  assert.match(view.html(), /Sign in to your OpenCloud account to load and manage media backups/);
+  assert.doesNotMatch(view.html(), /Start the Raiun background agent/);
+  reachable = false;
+  assert.match(view.html(), /Start the Raiun background agent to load media backups/);
+  reachable = true; connected = true;
+  assert.match(view.html(), /Refresh to load media backups/);
+});
+
+
+test('Windows signed-out media refresh skips authenticated listing and discards an older load error; legacy disconnected reads remain', async () => {
+  let connected = false; let reachable = true; let calls = 0; let reject;
+  const context = {key:()=> 'A', connected:()=>connected, reachable:()=>reachable, supported:()=>true, blocked:()=>false, spaces:()=>[], request:async()=>{calls++;return new Promise((_resolve, fail)=>{reject=fail;});}, chooseSource:async()=>null, confirm:async()=>true, busy:()=>{}, render:()=>{}};
+  const view = new MediaJobsView({...context, loadWhileDisconnected:()=>false});
+  await view.refresh();
+  assert.equal(calls, 0);
+  assert.match(view.html(), /Sign in to your OpenCloud account to load and manage media backups/);
+  assert.doesNotMatch(view.html(), /folder sync|background agent|media-warning/);
+  connected = true;
+  const pending = view.refresh();
+  assert.equal(calls, 1, 'connected Windows still loads jobs');
+  connected = false;
+  await view.refresh();
+  reject(new Error('Sign in before using folder sync'));
+  await pending;
+  assert.doesNotMatch(view.html(), /folder sync|media-warning/);
+  assert.match(view.html(), /Sign in to your OpenCloud account/);
+  reachable = false;
+  assert.match(view.html(), /Start the Raiun background agent to load media backups/);
+  const legacy = new MediaJobsView({...context, request:async()=>{calls++;return {jobs:[]};}});
+  reachable = true;
+  await legacy.refresh();
+  assert.equal(calls, 2, 'omitting the policy retains Linux disconnected listing');
 });

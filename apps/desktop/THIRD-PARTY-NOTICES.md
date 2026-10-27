@@ -4,7 +4,7 @@ This inventory accompanies the Linux x86_64 beta. Third-party copyrights and lic
 
 ## Scope and retained texts
 
-The offline collector traverses the two locked Linux Cargo graphs from the shipped agent, CLI and Tauri shell, excluding dev-only edges and conservatively retaining build/proc-macro dependencies. It records 455 distinct crate versions and the two production UI packages. This is a source/notice inventory, not a claim that every listed crate is linked into every binary. Development npm build tools are outside the shipped UI runtime inventory.
+The offline collector traverses the two locked Linux Cargo graphs from the shipped agent, CLI and Tauri shell, excluding dev-only edges and conservatively retaining build/proc-macro dependencies. It records 464 distinct crate versions and the two production UI packages. This is a source/notice inventory, not a claim that every listed crate is linked into every binary. Development npm build tools are outside the shipped UI runtime inventory.
 
 Exact lock hashes, declared license expressions, source repositories and retained text hashes are in [legal/dependency-inventory.json](legal/dependency-inventory.json). All available cached nested LICENSE/COPYING/NOTICE/COPYRIGHT files are retained. Upstream declarations with `/` are reproduced verbatim rather than silently normalized. Retaining alternative license texts does not replace combined-license requirements.
 
@@ -20,35 +20,41 @@ System GTK/WebKitGTK, Ayatana AppIndicator, FUSE, Secret Service, Zenity and the
 
 Raiun corresponding source and build scripts are available at https://github.com/phillip9933/raiun under `apps/desktop`. Match the release tag and packaged source revision. Locked external crate source is available as exact versioned crates.io packages; links for MPL-2.0 components are listed below. These dependencies retain their upstream terms; no local modifications to cached external crate sources were made for this collection.
 
-- cssparser 0.36.0: https://crates.io/api/v1/crates/cssparser/0.36.0/download
-- cssparser-macros 0.6.1: https://crates.io/api/v1/crates/cssparser-macros/0.6.1/download
+- cssparser 0.37.0: https://crates.io/api/v1/crates/cssparser/0.37.0/download
+- cssparser-macros 0.7.1: https://crates.io/api/v1/crates/cssparser-macros/0.7.1/download
 - dtoa-short 0.3.5: https://crates.io/api/v1/crates/dtoa-short/0.3.5/download
 - option-ext 0.2.0: https://crates.io/api/v1/crates/option-ext/0.2.0/download
-- selectors 0.36.1: https://crates.io/api/v1/crates/selectors/0.36.1/download
+- selectors 0.38.0: https://crates.io/api/v1/crates/selectors/0.38.0/download
 
 ## Exact upstream supplements for cached-notice gaps
 
-Eleven cached crate distributions omitted standalone license or attribution files.
-Those text gaps are now supplemented from the exact upstream commits recorded
-inside their registry archives. Each cached `.crate` SHA-256 was verified against
-`Cargo.lock` before its VCS metadata was trusted. The full record, retrieval URLs,
-source archive checksums and retained-text hashes are in
-[legal/upstream-notice-provenance.json](legal/upstream-notice-provenance.json).
+The current graph uses six exact-registry upstream notice supplements. Each
+cached `.crate` SHA-256 is verified against the current `Cargo.lock` before its
+VCS metadata is trusted. Retrieval URLs, exact commits and retained-text hashes
+are recorded in [legal/upstream-notice-provenance.json](legal/upstream-notice-provenance.json).
 
-- `alloc-stdlib 0.2.4`: exact-commit Dropbox BSD-3-Clause notice.
 - `dlopen2 0.8.2` and `dlopen2_derive 0.4.3`: exact-commit MIT license with original author attributions.
-- `libappindicator-sys 0.9.0`: exact-commit MIT/Apache texts; upstream `sys/Cargo.toml` is byte-identical to the verified crate's original manifest, establishing the repository join absent from its package metadata.
-- Five UNIC `0.9.0` crates: MIT/Apache texts plus `COPYRIGHT.md` and `AUTHORS` from their respective exact commits.
-- `tauri-plugin 2.6.3`: MIT/Apache texts from the recorded Tauri commit.
-- `selectors 0.36.1`: its exact registry source license header and original manifest are retained, together with the official Mozilla MPL-2.0 text referenced by that header. The exact upstream repository root contains no standalone LICENSE file. This is recorded as a source-header/official-text resolution, not a fabricated upstream file.
+- `libappindicator-sys 0.9.0`: exact-commit MIT/Apache texts; the retained upstream `sys/Cargo.toml` matches its verified original registry manifest.
+- `alloc-stdlib 0.3.0`: Dropbox BSD-3-Clause notice from its recorded exact upstream commit.
+- `tauri-plugin 2.7.2`: MIT/Apache texts and SPDX attribution from its recorded exact Tauri commit.
+- `selectors 0.38.0`: the current verified registry source license header and original manifest, together with the retained official Mozilla MPL-2.0 text referenced by that header. This is a source-header/official-text resolution, not a fabricated upstream file.
 
-No previously identified text gap remains unresolved after this bounded primary-source retrieval. This is not a comprehensive legal certification or a binary-link audit. Parent release integration must retain these materials and corresponding source availability. The collector remains offline: it rechecks archive checksums, recorded commits and retained text hashes without downloading new material.
+All eleven earlier supplement records and their existing text files remain
+preserved. Eight now fall outside the current resolved graph; the inventory lists
+them separately as historical inputs rather than applying them to this release.
+The collector skips those inactive packages without requiring removed lockfile
+entries, and still verifies checksums, exact commits and retained text hashes for
+all six current supplements. It does not download material.
+
+No current cached-notice text gap remains unresolved. This is not a comprehensive
+legal certification or binary-link audit. Release packaging must retain these
+materials and corresponding source availability.
 
 ## Production UI packages
 
-| Package | Version | Declared license | Retained text |
+| Package | Version | Declared license | Retained texts |
 | --- | --- | --- | --- |
-| @tauri-apps/api | 2.11.1 | Apache-2.0 OR MIT | [LICENSE_APACHE-2.0](legal/npm/@tauri-apps__api-2.11.1/LICENSE_APACHE-2.0), [LICENSE_MIT](legal/npm/@tauri-apps__api-2.11.1/LICENSE_MIT) |
+| @tauri-apps/api | 2.12.4 | Apache-2.0 OR MIT | [LICENSE-APACHE-2.0](legal/npm/@tauri-apps__api-2.12.4/LICENSE-APACHE-2.0), [LICENSE-MIT](legal/npm/@tauri-apps__api-2.12.4/LICENSE-MIT), [LICENSE.spdx](legal/npm/@tauri-apps__api-2.12.4/LICENSE.spdx) |
 | @tauri-apps/plugin-dialog | 2.7.3 | MIT OR Apache-2.0 | [LICENSE.spdx](legal/npm/@tauri-apps__plugin-dialog-2.7.3/LICENSE.spdx) |
 
 ## Locked Linux Rust dependency inventory
@@ -60,8 +66,8 @@ No previously identified text gap remains unresolved after this bounded primary-
 | aes | 0.8.4 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/aes-0.8.4/LICENSE-APACHE), [LICENSE-MIT](legal/rust/aes-0.8.4/LICENSE-MIT) |
 | ahash | 0.8.12 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/ahash-0.8.12/LICENSE-APACHE), [LICENSE-MIT](legal/rust/ahash-0.8.12/LICENSE-MIT) |
 | aho-corasick | 1.1.5 | Unlicense OR MIT | [COPYING](legal/rust/aho-corasick-1.1.5/COPYING), [LICENSE-MIT](legal/rust/aho-corasick-1.1.5/LICENSE-MIT) |
-| alloc-no-stdlib | 2.0.4 | BSD-3-Clause | [LICENSE](legal/rust/alloc-no-stdlib-2.0.4/LICENSE) |
-| alloc-stdlib | 0.2.4 | BSD-3-Clause | [LICENSE](legal/upstream-retrieval/alloc-ae42d22078b98549e987d2f03d12df7b984fde47/LICENSE) |
+| alloc-no-stdlib | 3.0.0 | BSD-3-Clause | [LICENSE](legal/rust/alloc-no-stdlib-3.0.0/LICENSE) |
+| alloc-stdlib | 0.3.0 | BSD-3-Clause | [LICENSE](legal/upstream-retrieval/alloc-0a81fd6928ea3b33c8cd484aa4575d50ffb98012/LICENSE) |
 | ambient-authority | 0.0.2 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | [COPYRIGHT](legal/rust/ambient-authority-0.0.2/COPYRIGHT), [LICENSE-APACHE](legal/rust/ambient-authority-0.0.2/LICENSE-APACHE), [LICENSE-Apache-2.0_WITH_LLVM-exception](legal/rust/ambient-authority-0.0.2/LICENSE-Apache-2.0_WITH_LLVM-exception), [LICENSE-MIT](legal/rust/ambient-authority-0.0.2/LICENSE-MIT) |
 | anstream | 1.0.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/anstream-1.0.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/anstream-1.0.0/LICENSE-MIT) |
 | anstyle | 1.0.14 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/anstyle-1.0.14/LICENSE-APACHE), [LICENSE-MIT](legal/rust/anstyle-1.0.14/LICENSE-MIT) |
@@ -82,6 +88,8 @@ No previously identified text gap remains unresolved after this bounded primary-
 | atk-sys | 0.18.2 | MIT | [LICENSE](legal/rust/atk-sys-0.18.2/LICENSE) |
 | atomic-waker | 1.1.2 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/atomic-waker-1.1.2/LICENSE-APACHE), [LICENSE-MIT](legal/rust/atomic-waker-1.1.2/LICENSE-MIT), [LICENSE-THIRD-PARTY](legal/rust/atomic-waker-1.1.2/LICENSE-THIRD-PARTY) |
 | autocfg | 1.5.1 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/autocfg-1.5.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/autocfg-1.5.1/LICENSE-MIT) |
+| aws-lc-rs | 1.18.2 | ISC AND (Apache-2.0 OR ISC) | [LICENSE](legal/rust/aws-lc-rs-1.18.2/LICENSE) |
+| aws-lc-sys | 0.46.0 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) | [LICENSE](legal/rust/aws-lc-sys-0.46.0/LICENSE), [LICENSE](legal/rust/aws-lc-sys-0.46.0/aws-lc/LICENSE), [LICENSE](legal/rust/aws-lc-sys-0.46.0/aws-lc/third_party/fiat/LICENSE) |
 | base64 | 0.22.1 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/base64-0.22.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/base64-0.22.1/LICENSE-MIT) |
 | base64 | 0.23.1 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/base64-0.23.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/base64-0.23.1/LICENSE-MIT) |
 | base64ct | 1.8.3 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/base64ct-1.8.3/LICENSE-APACHE), [LICENSE-MIT](legal/rust/base64ct-1.8.3/LICENSE-MIT) |
@@ -91,8 +99,8 @@ No previously identified text gap remains unresolved after this bounded primary-
 | bitflags | 2.13.2 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/bitflags-2.13.2/LICENSE-APACHE), [LICENSE-MIT](legal/rust/bitflags-2.13.2/LICENSE-MIT) |
 | block-buffer | 0.10.4 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/block-buffer-0.10.4/LICENSE-APACHE), [LICENSE-MIT](legal/rust/block-buffer-0.10.4/LICENSE-MIT) |
 | blocking | 1.7.0 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/blocking-1.7.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/blocking-1.7.0/LICENSE-MIT) |
-| brotli | 8.0.4 | BSD-3-Clause AND MIT | [LICENSE.BSD-3-Clause](legal/rust/brotli-8.0.4/LICENSE.BSD-3-Clause), [LICENSE.MIT](legal/rust/brotli-8.0.4/LICENSE.MIT) |
-| brotli-decompressor | 5.0.3 | BSD-3-Clause/MIT | [LICENSE](legal/rust/brotli-decompressor-5.0.3/LICENSE) |
+| brotli | 9.1.0 | BSD-3-Clause AND MIT | [LICENSE.BSD-3-Clause](legal/rust/brotli-9.1.0/LICENSE.BSD-3-Clause), [LICENSE.MIT](legal/rust/brotli-9.1.0/LICENSE.MIT) |
+| brotli-decompressor | 6.2.0 | BSD-3-Clause/MIT | [LICENSE](legal/rust/brotli-decompressor-6.2.0/LICENSE) |
 | byteorder | 1.5.0 | Unlicense OR MIT | [COPYING](legal/rust/byteorder-1.5.0/COPYING), [LICENSE-MIT](legal/rust/byteorder-1.5.0/LICENSE-MIT) |
 | bytes | 1.12.1 | MIT | [LICENSE](legal/rust/bytes-1.12.1/LICENSE) |
 | cairo-rs | 0.18.5 | MIT | [COPYRIGHT](legal/rust/cairo-rs-0.18.5/COPYRIGHT), [LICENSE](legal/rust/cairo-rs-0.18.5/LICENSE) |
@@ -103,9 +111,10 @@ No previously identified text gap remains unresolved after this bounded primary-
 | cap-std | 4.0.3 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | [COPYRIGHT](legal/rust/cap-std-4.0.3/COPYRIGHT), [LICENSE-APACHE](legal/rust/cap-std-4.0.3/LICENSE-APACHE), [LICENSE-Apache-2.0_WITH_LLVM-exception](legal/rust/cap-std-4.0.3/LICENSE-Apache-2.0_WITH_LLVM-exception), [LICENSE-MIT](legal/rust/cap-std-4.0.3/LICENSE-MIT) |
 | cargo-platform | 0.1.9 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/cargo-platform-0.1.9/LICENSE-APACHE), [LICENSE-MIT](legal/rust/cargo-platform-0.1.9/LICENSE-MIT) |
 | cargo_metadata | 0.19.2 | MIT | [LICENSE-MIT](legal/rust/cargo_metadata-0.19.2/LICENSE-MIT) |
-| cargo_toml | 0.22.3 | Apache-2.0 OR MIT | [LICENSE](legal/rust/cargo_toml-0.22.3/LICENSE) |
+| cargo_toml | 1.0.1 | Apache-2.0 OR MIT | [LICENSE](legal/rust/cargo_toml-1.0.1/LICENSE) |
 | caseless | 0.2.2 | MIT | [LICENSE](legal/rust/caseless-0.2.2/LICENSE) |
 | cc | 1.6.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/cc-1.6.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/cc-1.6.0/LICENSE-MIT) |
+| cfb | 0.14.0 | MIT | [LICENSE](legal/rust/cfb-0.14.0/LICENSE) |
 | cfb | 0.7.3 | MIT | [LICENSE](legal/rust/cfb-0.7.3/LICENSE) |
 | cfg-expr | 0.15.8 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/cfg-expr-0.15.8/LICENSE-APACHE), [LICENSE-MIT](legal/rust/cfg-expr-0.15.8/LICENSE-MIT) |
 | cfg-if | 1.0.5 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/cfg-if-1.0.5/LICENSE-APACHE), [LICENSE-MIT](legal/rust/cfg-if-1.0.5/LICENSE-MIT) |
@@ -117,6 +126,7 @@ No previously identified text gap remains unresolved after this bounded primary-
 | clap_builder | 4.6.7 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/clap_builder-4.6.7/LICENSE-APACHE), [LICENSE-MIT](legal/rust/clap_builder-4.6.7/LICENSE-MIT) |
 | clap_derive | 4.6.7 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/clap_derive-4.6.7/LICENSE-APACHE), [LICENSE-MIT](legal/rust/clap_derive-4.6.7/LICENSE-MIT) |
 | clap_lex | 1.1.1 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/clap_lex-1.1.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/clap_lex-1.1.1/LICENSE-MIT) |
+| cmake | 0.1.58 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/cmake-0.1.58/LICENSE-APACHE), [LICENSE-MIT](legal/rust/cmake-0.1.58/LICENSE-MIT) |
 | colorchoice | 1.0.5 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/colorchoice-1.0.5/LICENSE-APACHE), [LICENSE-MIT](legal/rust/colorchoice-1.0.5/LICENSE-MIT) |
 | concurrent-queue | 2.5.0 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/concurrent-queue-2.5.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/concurrent-queue-2.5.0/LICENSE-MIT) |
 | cookie | 0.18.2 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/cookie-0.18.2/LICENSE-APACHE), [LICENSE-MIT](legal/rust/cookie-0.18.2/LICENSE-MIT) |
@@ -127,10 +137,9 @@ No previously identified text gap remains unresolved after this bounded primary-
 | crossbeam-utils | 0.8.23 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/crossbeam-utils-0.8.23/LICENSE-APACHE), [LICENSE-MIT](legal/rust/crossbeam-utils-0.8.23/LICENSE-MIT) |
 | crypto-common | 0.1.7 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/crypto-common-0.1.7/LICENSE-APACHE), [LICENSE-MIT](legal/rust/crypto-common-0.1.7/LICENSE-MIT) |
 | crypto_secretbox | 0.1.1 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/crypto_secretbox-0.1.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/crypto_secretbox-0.1.1/LICENSE-MIT) |
-| cssparser | 0.36.0 | MPL-2.0 | [LICENSE](legal/rust/cssparser-0.36.0/LICENSE) |
-| cssparser-macros | 0.6.1 | MPL-2.0 | [LICENSE](legal/rust/cssparser-macros-0.6.1/LICENSE) |
-| ctor | 0.8.0 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/ctor-0.8.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/ctor-0.8.0/LICENSE-MIT) |
-| ctor-proc-macro | 0.0.7 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/ctor-proc-macro-0.0.7/LICENSE-APACHE), [LICENSE-MIT](legal/rust/ctor-proc-macro-0.0.7/LICENSE-MIT) |
+| cssparser | 0.37.0 | MPL-2.0 | [LICENSE](legal/rust/cssparser-0.37.0/LICENSE) |
+| cssparser-macros | 0.7.1 | MPL-2.0 | [LICENSE](legal/rust/cssparser-macros-0.7.1/LICENSE) |
+| ctor | 1.0.13 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/ctor-1.0.13/LICENSE-APACHE), [LICENSE-MIT](legal/rust/ctor-1.0.13/LICENSE-MIT) |
 | ctrlc | 3.5.2 | MIT/Apache-2.0 | [LICENSE-APACHE](legal/rust/ctrlc-3.5.2/LICENSE-APACHE), [LICENSE-MIT](legal/rust/ctrlc-3.5.2/LICENSE-MIT) |
 | darling | 0.21.3 | MIT | [LICENSE](legal/rust/darling-0.21.3/LICENSE) |
 | darling_core | 0.21.3 | MIT | [LICENSE](legal/rust/darling_core-0.21.3/LICENSE) |
@@ -140,19 +149,17 @@ No previously identified text gap remains unresolved after this bounded primary-
 | derive_more | 2.1.1 | MIT | [LICENSE](legal/rust/derive_more-2.1.1/LICENSE) |
 | derive_more-impl | 2.1.1 | MIT | [LICENSE](legal/rust/derive_more-impl-2.1.1/LICENSE) |
 | digest | 0.10.7 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/digest-0.10.7/LICENSE-APACHE), [LICENSE-MIT](legal/rust/digest-0.10.7/LICENSE-MIT) |
-| dirs | 6.0.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/dirs-6.0.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/dirs-6.0.0/LICENSE-MIT) |
+| dirs | 7.0.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/dirs-7.0.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/dirs-7.0.0/LICENSE-MIT) |
 | dirs-sys | 0.5.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/dirs-sys-0.5.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/dirs-sys-0.5.0/LICENSE-MIT) |
 | displaydoc | 0.2.7 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/displaydoc-0.2.7/LICENSE-APACHE), [LICENSE-MIT](legal/rust/displaydoc-0.2.7/LICENSE-MIT) |
 | dlib | 0.5.3 | MIT | [LICENSE.txt](legal/rust/dlib-0.5.3/LICENSE.txt) |
 | dlopen2 | 0.8.2 | MIT | [LICENSE](legal/upstream-retrieval/dlopen-cc80e4a0a90d499b677fdf7743699b4b3a43a989/LICENSE) |
 | dlopen2_derive | 0.4.3 | MIT | [LICENSE](legal/upstream-retrieval/dlopen-cc80e4a0a90d499b677fdf7743699b4b3a43a989/LICENSE) |
-| dom_query | 0.27.0 | MIT | [LICENSE](legal/rust/dom_query-0.27.0/LICENSE) |
+| dom_query | 0.28.0 | MIT | [LICENSE](legal/rust/dom_query-0.28.0/LICENSE) |
 | downcast-rs | 1.2.1 | MIT/Apache-2.0 | [LICENSE-APACHE](legal/rust/downcast-rs-1.2.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/downcast-rs-1.2.1/LICENSE-MIT) |
 | dpi | 0.1.2 | Apache-2.0 AND MIT | [LICENSE](legal/rust/dpi-0.1.2/LICENSE), [LICENSE-LIBM-MIT](legal/rust/dpi-0.1.2/LICENSE-LIBM-MIT) |
 | dtoa | 1.0.11 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/dtoa-1.0.11/LICENSE-APACHE), [LICENSE-MIT](legal/rust/dtoa-1.0.11/LICENSE-MIT) |
 | dtoa-short | 0.3.5 | MPL-2.0 | [LICENSE](legal/rust/dtoa-short-0.3.5/LICENSE) |
-| dtor | 0.3.0 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/dtor-0.3.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/dtor-0.3.0/LICENSE-MIT) |
-| dtor-proc-macro | 0.0.6 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/dtor-proc-macro-0.0.6/LICENSE-APACHE), [LICENSE-MIT](legal/rust/dtor-proc-macro-0.0.6/LICENSE-MIT) |
 | dunce | 1.0.5 | CC0-1.0 OR MIT-0 OR Apache-2.0 | [LICENSE](legal/rust/dunce-1.0.5/LICENSE) |
 | dyn-clone | 1.0.20 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/dyn-clone-1.0.20/LICENSE-APACHE), [LICENSE-MIT](legal/rust/dyn-clone-1.0.20/LICENSE-MIT) |
 | embed-resource | 3.0.12 | MIT | [LICENSE](legal/rust/embed-resource-3.0.12/LICENSE) |
@@ -169,6 +176,7 @@ No previously identified text gap remains unresolved after this bounded primary-
 | fastrand | 2.5.0 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/fastrand-2.5.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/fastrand-2.5.0/LICENSE-MIT) |
 | fdeflate | 0.3.7 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/fdeflate-0.3.7/LICENSE-APACHE), [LICENSE-MIT](legal/rust/fdeflate-0.3.7/LICENSE-MIT) |
 | field-offset | 0.3.6 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/field-offset-0.3.6/LICENSE-APACHE), [LICENSE-MIT](legal/rust/field-offset-0.3.6/LICENSE-MIT) |
+| filetime | 0.2.29 | MIT/Apache-2.0 | [LICENSE-APACHE](legal/rust/filetime-0.2.29/LICENSE-APACHE), [LICENSE-MIT](legal/rust/filetime-0.2.29/LICENSE-MIT) |
 | find-msvc-tools | 0.1.14 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/find-msvc-tools-0.1.14/LICENSE-APACHE), [LICENSE-MIT](legal/rust/find-msvc-tools-0.1.14/LICENSE-MIT) |
 | flate2 | 1.1.10 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/flate2-1.1.10/LICENSE-APACHE), [LICENSE-MIT](legal/rust/flate2-1.1.10/LICENSE-MIT) |
 | fnv | 1.0.7 | Apache-2.0 / MIT | [LICENSE-APACHE](legal/rust/fnv-1.0.7/LICENSE-APACHE), [LICENSE-MIT](legal/rust/fnv-1.0.7/LICENSE-MIT) |
@@ -176,6 +184,7 @@ No previously identified text gap remains unresolved after this bounded primary-
 | form_urlencoded | 1.2.2 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/form_urlencoded-1.2.2/LICENSE-APACHE), [LICENSE-MIT](legal/rust/form_urlencoded-1.2.2/LICENSE-MIT) |
 | fs-set-times | 0.20.3 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | [COPYRIGHT](legal/rust/fs-set-times-0.20.3/COPYRIGHT), [LICENSE-APACHE](legal/rust/fs-set-times-0.20.3/LICENSE-APACHE), [LICENSE-Apache-2.0_WITH_LLVM-exception](legal/rust/fs-set-times-0.20.3/LICENSE-Apache-2.0_WITH_LLVM-exception), [LICENSE-MIT](legal/rust/fs-set-times-0.20.3/LICENSE-MIT) |
 | fs2 | 0.4.3 | MIT/Apache-2.0 | [LICENSE-APACHE](legal/rust/fs2-0.4.3/LICENSE-APACHE), [LICENSE-MIT](legal/rust/fs2-0.4.3/LICENSE-MIT) |
+| fs_extra | 1.3.0 | MIT | [LICENSE](legal/rust/fs_extra-1.3.0/LICENSE) |
 | fuser | 0.18.0 | MIT | [LICENSE.md](legal/rust/fuser-0.18.0/LICENSE.md) |
 | futures-channel | 0.3.34 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/futures-channel-0.3.34/LICENSE-APACHE), [LICENSE-MIT](legal/rust/futures-channel-0.3.34/LICENSE-MIT) |
 | futures-core | 0.3.34 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/futures-core-0.3.34/LICENSE-APACHE), [LICENSE-MIT](legal/rust/futures-core-0.3.34/LICENSE-MIT) |
@@ -215,7 +224,7 @@ No previously identified text gap remains unresolved after this bounded primary-
 | heck | 0.5.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/heck-0.5.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/heck-0.5.0/LICENSE-MIT) |
 | hex | 0.4.3 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/hex-0.4.3/LICENSE-APACHE), [LICENSE-MIT](legal/rust/hex-0.4.3/LICENSE-MIT) |
 | hmac | 0.12.1 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/hmac-0.12.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/hmac-0.12.1/LICENSE-MIT) |
-| html5ever | 0.38.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/html5ever-0.38.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/html5ever-0.38.0/LICENSE-MIT) |
+| html5ever | 0.39.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/html5ever-0.39.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/html5ever-0.39.0/LICENSE-MIT) |
 | http | 1.5.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/http-1.5.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/http-1.5.0/LICENSE-MIT) |
 | http-body | 1.1.0 | MIT | [LICENSE](legal/rust/http-body-1.1.0/LICENSE) |
 | http-body-util | 0.1.5 | MIT | [LICENSE](legal/rust/http-body-util-0.1.5/LICENSE) |
@@ -224,7 +233,7 @@ No previously identified text gap remains unresolved after this bounded primary-
 | hyper-rustls | 0.27.10 | Apache-2.0 OR ISC OR MIT | [LICENSE-APACHE](legal/rust/hyper-rustls-0.27.10/LICENSE-APACHE), [LICENSE-ISC](legal/rust/hyper-rustls-0.27.10/LICENSE-ISC), [LICENSE-MIT](legal/rust/hyper-rustls-0.27.10/LICENSE-MIT) |
 | hyper-util | 0.1.21 | MIT | [LICENSE](legal/rust/hyper-util-0.1.21/LICENSE) |
 | iana-time-zone | 0.1.65 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/iana-time-zone-0.1.65/LICENSE-APACHE), [LICENSE-MIT](legal/rust/iana-time-zone-0.1.65/LICENSE-MIT) |
-| ico | 0.5.0 | MIT | [LICENSE](legal/rust/ico-0.5.0/LICENSE) |
+| ico | 0.6.0 | MIT | [LICENSE](legal/rust/ico-0.6.0/LICENSE) |
 | icu_collections | 2.1.1 | Unicode-3.0 | [LICENSE](legal/rust/icu_collections-2.1.1/LICENSE) |
 | icu_collections | 2.3.0 | Unicode-3.0 | [LICENSE](legal/rust/icu_collections-2.3.0/LICENSE) |
 | icu_locale_core | 2.1.1 | Unicode-3.0 | [LICENSE](legal/rust/icu_locale_core-2.1.1/LICENSE) |
@@ -246,6 +255,7 @@ No previously identified text gap remains unresolved after this bounded primary-
 | indexmap | 1.9.3 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/indexmap-1.9.3/LICENSE-APACHE), [LICENSE-MIT](legal/rust/indexmap-1.9.3/LICENSE-MIT) |
 | indexmap | 2.14.2 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/indexmap-2.14.2/LICENSE-APACHE), [LICENSE-MIT](legal/rust/indexmap-2.14.2/LICENSE-MIT) |
 | infer | 0.19.0 | MIT | [LICENSE](legal/rust/infer-0.19.0/LICENSE) |
+| infer | 0.22.0 | MIT | [LICENSE](legal/rust/infer-0.22.0/LICENSE) |
 | inout | 0.1.4 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/inout-0.1.4/LICENSE-APACHE), [LICENSE-MIT](legal/rust/inout-0.1.4/LICENSE-MIT) |
 | io-extras | 0.19.0 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | [COPYRIGHT](legal/rust/io-extras-0.19.0/COPYRIGHT), [LICENSE-APACHE](legal/rust/io-extras-0.19.0/LICENSE-APACHE), [LICENSE-Apache-2.0_WITH_LLVM-exception](legal/rust/io-extras-0.19.0/LICENSE-Apache-2.0_WITH_LLVM-exception), [LICENSE-MIT](legal/rust/io-extras-0.19.0/LICENSE-MIT) |
 | io-lifetimes | 2.0.4 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | [COPYRIGHT](legal/rust/io-lifetimes-2.0.4/COPYRIGHT), [LICENSE-APACHE](legal/rust/io-lifetimes-2.0.4/LICENSE-APACHE), [LICENSE-Apache-2.0_WITH_LLVM-exception](legal/rust/io-lifetimes-2.0.4/LICENSE-Apache-2.0_WITH_LLVM-exception), [LICENSE-MIT](legal/rust/io-lifetimes-2.0.4/LICENSE-MIT) |
@@ -257,9 +267,10 @@ No previously identified text gap remains unresolved after this bounded primary-
 | itoa | 1.0.18 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/itoa-1.0.18/LICENSE-APACHE), [LICENSE-MIT](legal/rust/itoa-1.0.18/LICENSE-MIT) |
 | javascriptcore-rs | 1.1.2 | MIT | [LICENSE](legal/rust/javascriptcore-rs-1.1.2/LICENSE) |
 | javascriptcore-rs-sys | 1.1.1 | MIT | [LICENSE](legal/rust/javascriptcore-rs-sys-1.1.1/LICENSE) |
-| json-patch | 3.0.1 | MIT/Apache-2.0 | [LICENSE-APACHE](legal/rust/json-patch-3.0.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/json-patch-3.0.1/LICENSE-MIT) |
-| jsonptr | 0.6.3 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/jsonptr-0.6.3/LICENSE-APACHE), [LICENSE-MIT](legal/rust/jsonptr-0.6.3/LICENSE-MIT) |
-| keyboard-types | 0.7.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/keyboard-types-0.7.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/keyboard-types-0.7.0/LICENSE-MIT) |
+| jobserver | 0.1.35 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/jobserver-0.1.35/LICENSE-APACHE), [LICENSE-MIT](legal/rust/jobserver-0.1.35/LICENSE-MIT) |
+| json-patch | 4.2.0 | MIT/Apache-2.0 | [LICENSE-APACHE](legal/rust/json-patch-4.2.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/json-patch-4.2.0/LICENSE-MIT) |
+| jsonptr | 0.7.1 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/jsonptr-0.7.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/jsonptr-0.7.1/LICENSE-MIT) |
+| keyboard-types | 0.8.3 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/keyboard-types-0.8.3/LICENSE-APACHE), [LICENSE-MIT](legal/rust/keyboard-types-0.8.3/LICENSE-MIT) |
 | libappindicator | 0.9.0 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/libappindicator-0.9.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/libappindicator-0.9.0/LICENSE-MIT) |
 | libappindicator-sys | 0.9.0 | Apache-2.0 OR MIT | [LICENSE-MIT](legal/upstream-retrieval/indicator-eafd1e3682a1247f595410266091e9684021cb6f/LICENSE-MIT), [LICENSE-APACHE](legal/upstream-retrieval/indicator-eafd1e3682a1247f595410266091e9684021cb6f/LICENSE-APACHE) |
 | libc | 0.2.190 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/libc-0.2.190/LICENSE-APACHE), [LICENSE-MIT](legal/rust/libc-0.2.190/LICENSE-MIT) |
@@ -271,15 +282,16 @@ No previously identified text gap remains unresolved after this bounded primary-
 | lock_api | 0.4.14 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/lock_api-0.4.14/LICENSE-APACHE), [LICENSE-MIT](legal/rust/lock_api-0.4.14/LICENSE-MIT) |
 | log | 0.4.34 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/log-0.4.34/LICENSE-APACHE), [LICENSE-MIT](legal/rust/log-0.4.34/LICENSE-MIT) |
 | lru-slab | 0.1.3 | MIT OR Apache-2.0 OR Zlib | [LICENSE-APACHE](legal/rust/lru-slab-0.1.3/LICENSE-APACHE), [LICENSE-MIT](legal/rust/lru-slab-0.1.3/LICENSE-MIT), [LICENSE-ZLIB](legal/rust/lru-slab-0.1.3/LICENSE-ZLIB) |
-| markup5ever | 0.38.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/markup5ever-0.38.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/markup5ever-0.38.0/LICENSE-MIT) |
+| markup5ever | 0.39.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/markup5ever-0.39.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/markup5ever-0.39.0/LICENSE-MIT) |
 | maybe-owned | 0.3.4 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/maybe-owned-0.3.4/LICENSE-APACHE), [LICENSE-MIT](legal/rust/maybe-owned-0.3.4/LICENSE-MIT) |
 | memchr | 2.8.3 | Unlicense OR MIT | [COPYING](legal/rust/memchr-2.8.3/COPYING), [LICENSE-MIT](legal/rust/memchr-2.8.3/LICENSE-MIT) |
 | memoffset | 0.9.1 | MIT | [LICENSE](legal/rust/memoffset-0.9.1/LICENSE) |
 | mime | 0.3.17 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/mime-0.3.17/LICENSE-APACHE), [LICENSE-MIT](legal/rust/mime-0.3.17/LICENSE-MIT) |
+| minisign-verify | 0.3.0 | MIT | [LICENSE](legal/rust/minisign-verify-0.3.0/LICENSE) |
 | miniz_oxide | 0.8.9 | MIT OR Zlib OR Apache-2.0 | [LICENSE](legal/rust/miniz_oxide-0.8.9/LICENSE), [LICENSE-APACHE.md](legal/rust/miniz_oxide-0.8.9/LICENSE-APACHE.md), [LICENSE-MIT.md](legal/rust/miniz_oxide-0.8.9/LICENSE-MIT.md), [LICENSE-ZLIB.md](legal/rust/miniz_oxide-0.8.9/LICENSE-ZLIB.md) |
 | miniz_oxide | 0.9.1 | MIT OR Zlib OR Apache-2.0 | [LICENSE](legal/rust/miniz_oxide-0.9.1/LICENSE), [LICENSE-APACHE.md](legal/rust/miniz_oxide-0.9.1/LICENSE-APACHE.md), [LICENSE-MIT.md](legal/rust/miniz_oxide-0.9.1/LICENSE-MIT.md), [LICENSE-ZLIB.md](legal/rust/miniz_oxide-0.9.1/LICENSE-ZLIB.md) |
 | mio | 1.2.4 | MIT | [LICENSE](legal/rust/mio-1.2.4/LICENSE) |
-| muda | 0.19.3 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/muda-0.19.3/LICENSE-APACHE), [LICENSE-MIT](legal/rust/muda-0.19.3/LICENSE-MIT), [LICENSE.spdx](legal/rust/muda-0.19.3/LICENSE.spdx) |
+| muda | 0.20.0 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/muda-0.20.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/muda-0.20.0/LICENSE-MIT), [LICENSE.spdx](legal/rust/muda-0.20.0/LICENSE.spdx) |
 | new_debug_unreachable | 1.0.6 | MIT | [LICENSE-MIT](legal/rust/new_debug_unreachable-1.0.6/LICENSE-MIT) |
 | nix | 0.31.3 | MIT | [LICENSE](legal/rust/nix-0.31.3/LICENSE) |
 | num-conv | 0.1.0 | MIT OR Apache-2.0 | [LICENSE-Apache](legal/rust/num-conv-0.1.0/LICENSE-Apache), [LICENSE-MIT](legal/rust/num-conv-0.1.0/LICENSE-MIT) |
@@ -289,6 +301,7 @@ No previously identified text gap remains unresolved after this bounded primary-
 | once_cell | 1.21.4 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/once_cell-1.21.4/LICENSE-APACHE), [LICENSE-MIT](legal/rust/once_cell-1.21.4/LICENSE-MIT) |
 | opaque-debug | 0.3.1 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/opaque-debug-0.3.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/opaque-debug-0.3.1/LICENSE-MIT) |
 | open | 5.4.4 | MIT | [LICENSE.md](legal/rust/open-5.4.4/LICENSE.md) |
+| openssl-probe | 0.2.1 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/openssl-probe-0.2.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/openssl-probe-0.2.1/LICENSE-MIT) |
 | option-ext | 0.2.0 | MPL-2.0 | [LICENSE.txt](legal/rust/option-ext-0.2.0/LICENSE.txt) |
 | ordered-stream | 0.2.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/ordered-stream-0.2.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/ordered-stream-0.2.0/LICENSE-MIT) |
 | page_size | 0.6.0 | MIT/Apache-2.0 | [LICENSE-APACHE](legal/rust/page_size-0.6.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/page_size-0.6.0/LICENSE-MIT) |
@@ -309,7 +322,6 @@ No previously identified text gap remains unresolved after this bounded primary-
 | piper | 0.2.5 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/piper-0.2.5/LICENSE-APACHE), [LICENSE-MIT](legal/rust/piper-0.2.5/LICENSE-MIT) |
 | pkg-config | 0.3.34 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/pkg-config-0.3.34/LICENSE-APACHE), [LICENSE-MIT](legal/rust/pkg-config-0.3.34/LICENSE-MIT) |
 | plist | 1.8.0 | MIT | [LICENCE](legal/rust/plist-1.8.0/LICENCE) |
-| png | 0.17.16 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/png-0.17.16/LICENSE-APACHE), [LICENSE-MIT](legal/rust/png-0.17.16/LICENSE-MIT) |
 | png | 0.18.1 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/png-0.18.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/png-0.18.1/LICENSE-MIT) |
 | polling | 3.11.0 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/polling-3.11.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/polling-3.11.0/LICENSE-MIT) |
 | pollster | 0.4.0 | Apache-2.0/MIT | [LICENSE-APACHE](legal/rust/pollster-0.4.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/pollster-0.4.0/LICENSE-MIT) |
@@ -344,6 +356,7 @@ No previously identified text gap remains unresolved after this bounded primary-
 | regex-automata | 0.4.18 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/regex-automata-0.4.18/LICENSE-APACHE), [LICENSE-MIT](legal/rust/regex-automata-0.4.18/LICENSE-MIT) |
 | regex-syntax | 0.8.11 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/regex-syntax-0.8.11/LICENSE-APACHE), [LICENSE-MIT](legal/rust/regex-syntax-0.8.11/LICENSE-MIT), [LICENSE-UNICODE](legal/rust/regex-syntax-0.8.11/src/unicode_tables/LICENSE-UNICODE) |
 | reqwest | 0.12.28 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/reqwest-0.12.28/LICENSE-APACHE), [LICENSE-MIT](legal/rust/reqwest-0.12.28/LICENSE-MIT) |
+| reqwest | 0.13.5 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/reqwest-0.13.5/LICENSE-APACHE), [LICENSE-MIT](legal/rust/reqwest-0.13.5/LICENSE-MIT) |
 | rfd | 0.16.0 | MIT | [LICENSE](legal/rust/rfd-0.16.0/LICENSE) |
 | ring | 0.17.14 | Apache-2.0 AND ISC | [LICENSE](legal/rust/ring-0.17.14/LICENSE), [LICENSE-BoringSSL](legal/rust/ring-0.17.14/LICENSE-BoringSSL), [LICENSE-other-bits](legal/rust/ring-0.17.14/LICENSE-other-bits), [LICENSE-APACHE](legal/rust/ring-0.17.14/src/polyfill/once_cell/LICENSE-APACHE), [LICENSE-MIT](legal/rust/ring-0.17.14/src/polyfill/once_cell/LICENSE-MIT), [LICENSE](legal/rust/ring-0.17.14/third_party/fiat/LICENSE) |
 | rusqlite | 0.32.1 | MIT | [LICENSE](legal/rust/rusqlite-0.32.1/LICENSE) |
@@ -352,8 +365,12 @@ No previously identified text gap remains unresolved after this bounded primary-
 | rustix | 1.1.5 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | [COPYRIGHT](legal/rust/rustix-1.1.5/COPYRIGHT), [LICENSE-APACHE](legal/rust/rustix-1.1.5/LICENSE-APACHE), [LICENSE-Apache-2.0_WITH_LLVM-exception](legal/rust/rustix-1.1.5/LICENSE-Apache-2.0_WITH_LLVM-exception), [LICENSE-MIT](legal/rust/rustix-1.1.5/LICENSE-MIT) |
 | rustix-linux-procfs | 0.1.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | [COPYRIGHT](legal/rust/rustix-linux-procfs-0.1.1/COPYRIGHT), [LICENSE-APACHE](legal/rust/rustix-linux-procfs-0.1.1/LICENSE-APACHE), [LICENSE-Apache-2.0_WITH_LLVM-exception](legal/rust/rustix-linux-procfs-0.1.1/LICENSE-Apache-2.0_WITH_LLVM-exception), [LICENSE-MIT](legal/rust/rustix-linux-procfs-0.1.1/LICENSE-MIT) |
 | rustls | 0.23.45 | Apache-2.0 OR ISC OR MIT | [LICENSE-APACHE](legal/rust/rustls-0.23.45/LICENSE-APACHE), [LICENSE-ISC](legal/rust/rustls-0.23.45/LICENSE-ISC), [LICENSE-MIT](legal/rust/rustls-0.23.45/LICENSE-MIT) |
+| rustls | 0.23.46 | Apache-2.0 OR ISC OR MIT | [LICENSE-APACHE](legal/rust/rustls-0.23.46/LICENSE-APACHE), [LICENSE-ISC](legal/rust/rustls-0.23.46/LICENSE-ISC), [LICENSE-MIT](legal/rust/rustls-0.23.46/LICENSE-MIT) |
+| rustls-native-certs | 0.8.5 | Apache-2.0 OR ISC OR MIT | [LICENSE](legal/rust/rustls-native-certs-0.8.5/LICENSE), [LICENSE-APACHE](legal/rust/rustls-native-certs-0.8.5/LICENSE-APACHE), [LICENSE-ISC](legal/rust/rustls-native-certs-0.8.5/LICENSE-ISC), [LICENSE-MIT](legal/rust/rustls-native-certs-0.8.5/LICENSE-MIT) |
 | rustls-pki-types | 1.15.1 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/rustls-pki-types-1.15.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/rustls-pki-types-1.15.1/LICENSE-MIT) |
+| rustls-platform-verifier | 0.7.1 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/rustls-platform-verifier-0.7.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/rustls-platform-verifier-0.7.1/LICENSE-MIT) |
 | rustls-webpki | 0.103.15 | ISC | [LICENSE](legal/rust/rustls-webpki-0.103.15/LICENSE) |
+| rustls-webpki | 0.103.16 | ISC | [LICENSE](legal/rust/rustls-webpki-0.103.16/LICENSE) |
 | rustversion | 1.0.23 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/rustversion-1.0.23/LICENSE-APACHE), [LICENSE-MIT](legal/rust/rustversion-1.0.23/LICENSE-MIT) |
 | ryu | 1.0.23 | Apache-2.0 OR BSL-1.0 | [LICENSE-APACHE](legal/rust/ryu-1.0.23/LICENSE-APACHE), [LICENSE-BOOST](legal/rust/ryu-1.0.23/LICENSE-BOOST) |
 | salsa20 | 0.10.2 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/salsa20-0.10.2/LICENSE-APACHE), [LICENSE-MIT](legal/rust/salsa20-0.10.2/LICENSE-MIT) |
@@ -365,7 +382,7 @@ No previously identified text gap remains unresolved after this bounded primary-
 | scoped-tls | 1.0.1 | MIT/Apache-2.0 | [LICENSE-APACHE](legal/rust/scoped-tls-1.0.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/scoped-tls-1.0.1/LICENSE-MIT) |
 | scopeguard | 1.2.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/scopeguard-1.2.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/scopeguard-1.2.0/LICENSE-MIT) |
 | scrypt | 0.11.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/scrypt-0.11.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/scrypt-0.11.0/LICENSE-MIT) |
-| selectors | 0.36.1 | MPL-2.0 | [MPL-2.0.txt](legal/upstream-retrieval/selectors-635e1a19d02960588a00e189bd4bd5bdb150ec3d/MPL-2.0.txt), [source-license-header.txt](legal/registry-provenance/selectors@0.36.1/source-license-header.txt) |
+| selectors | 0.38.0 | MPL-2.0 | [source-license-header.txt](legal/registry-provenance/selectors@0.38.0/source-license-header.txt), [MPL-2.0.txt](legal/upstream-retrieval/selectors-635e1a19d02960588a00e189bd4bd5bdb150ec3d/MPL-2.0.txt) |
 | semver | 1.0.28 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/semver-1.0.28/LICENSE-APACHE), [LICENSE-MIT](legal/rust/semver-1.0.28/LICENSE-MIT) |
 | serde | 1.0.229 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/serde-1.0.229/LICENSE-APACHE), [LICENSE-MIT](legal/rust/serde-1.0.229/LICENSE-MIT) |
 | serde-untagged | 0.1.9 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/serde-untagged-0.1.9/LICENSE-APACHE), [LICENSE-MIT](legal/rust/serde-untagged-0.1.9/LICENSE-MIT) |
@@ -393,6 +410,7 @@ No previously identified text gap remains unresolved after this bounded primary-
 | soup3 | 0.5.0 | MIT | [LICENSE](legal/rust/soup3-0.5.0/LICENSE) |
 | soup3-sys | 0.5.0 | MIT | [LICENSE](legal/rust/soup3-sys-0.5.0/LICENSE) |
 | stable_deref_trait | 1.2.1 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/stable_deref_trait-1.2.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/stable_deref_trait-1.2.1/LICENSE-MIT) |
+| static_vcruntime | 3.0.0 | MIT OR Apache-2.0 OR Zlib | [LICENSE](legal/rust/static_vcruntime-3.0.0/LICENSE), [LICENSE-APACHE](legal/rust/static_vcruntime-3.0.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/static_vcruntime-3.0.0/LICENSE-MIT), [LICENSE-ZLIB](legal/rust/static_vcruntime-3.0.0/LICENSE-ZLIB) |
 | string_cache | 0.9.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/string_cache-0.9.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/string_cache-0.9.0/LICENSE-MIT) |
 | string_cache_codegen | 0.6.1 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/string_cache_codegen-0.6.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/string_cache_codegen-0.6.1/LICENSE-MIT) |
 | strsim | 0.11.1 | MIT | [LICENSE](legal/rust/strsim-0.11.1/LICENSE) |
@@ -403,20 +421,22 @@ No previously identified text gap remains unresolved after this bounded primary-
 | sync_wrapper | 1.0.2 | Apache-2.0 | [LICENSE](legal/rust/sync_wrapper-1.0.2/LICENSE) |
 | synstructure | 0.14.0 | MIT | [LICENSE](legal/rust/synstructure-0.14.0/LICENSE) |
 | system-deps | 6.2.2 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/system-deps-6.2.2/LICENSE-APACHE), [LICENSE-MIT](legal/rust/system-deps-6.2.2/LICENSE-MIT) |
-| tao | 0.35.3 | Apache-2.0 | [LICENSE](legal/rust/tao-0.35.3/LICENSE), [LICENSE.spdx](legal/rust/tao-0.35.3/LICENSE.spdx) |
+| tao | 0.37.2 | Apache-2.0 | [LICENSE](legal/rust/tao-0.37.2/LICENSE), [LICENSE.spdx](legal/rust/tao-0.37.2/LICENSE.spdx) |
+| tar | 0.4.46 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/tar-0.4.46/LICENSE-APACHE), [LICENSE-MIT](legal/rust/tar-0.4.46/LICENSE-MIT) |
 | target-lexicon | 0.12.16 | Apache-2.0 WITH LLVM-exception | [LICENSE](legal/rust/target-lexicon-0.12.16/LICENSE) |
-| tauri | 2.11.6 | Apache-2.0 OR MIT | [LICENSE_APACHE-2.0](legal/rust/tauri-2.11.6/LICENSE_APACHE-2.0), [LICENSE_MIT](legal/rust/tauri-2.11.6/LICENSE_MIT) |
-| tauri-build | 2.6.3 | Apache-2.0 OR MIT | [LICENSE_APACHE-2.0](legal/rust/tauri-build-2.6.3/LICENSE_APACHE-2.0), [LICENSE_MIT](legal/rust/tauri-build-2.6.3/LICENSE_MIT) |
-| tauri-codegen | 2.6.3 | Apache-2.0 OR MIT | [LICENSE_APACHE-2.0](legal/rust/tauri-codegen-2.6.3/LICENSE_APACHE-2.0), [LICENSE_MIT](legal/rust/tauri-codegen-2.6.3/LICENSE_MIT) |
-| tauri-macros | 2.6.3 | Apache-2.0 OR MIT | [LICENSE_APACHE-2.0](legal/rust/tauri-macros-2.6.3/LICENSE_APACHE-2.0), [LICENSE_MIT](legal/rust/tauri-macros-2.6.3/LICENSE_MIT) |
-| tauri-plugin | 2.6.3 | Apache-2.0 OR MIT | [LICENSE_MIT](legal/upstream-retrieval/tauriplugin-6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a/LICENSE_MIT), [LICENSE_APACHE-2.0](legal/upstream-retrieval/tauriplugin-6f6ab1207bb3923c2721fbc67d2fdb1c8deb0c7a/LICENSE_APACHE-2.0) |
+| tauri | 2.12.5 | Apache-2.0 OR MIT | [LICENSE-APACHE-2.0](legal/rust/tauri-2.12.5/LICENSE-APACHE-2.0), [LICENSE-MIT](legal/rust/tauri-2.12.5/LICENSE-MIT) |
+| tauri-build | 2.7.4 | Apache-2.0 OR MIT | [LICENSE-APACHE-2.0](legal/rust/tauri-build-2.7.4/LICENSE-APACHE-2.0), [LICENSE-MIT](legal/rust/tauri-build-2.7.4/LICENSE-MIT) |
+| tauri-codegen | 2.7.4 | Apache-2.0 OR MIT | [LICENSE-APACHE-2.0](legal/rust/tauri-codegen-2.7.4/LICENSE-APACHE-2.0), [LICENSE-MIT](legal/rust/tauri-codegen-2.7.4/LICENSE-MIT) |
+| tauri-macros | 2.7.4 | Apache-2.0 OR MIT | [LICENSE-APACHE-2.0](legal/rust/tauri-macros-2.7.4/LICENSE-APACHE-2.0), [LICENSE-MIT](legal/rust/tauri-macros-2.7.4/LICENSE-MIT) |
+| tauri-plugin | 2.7.2 | Apache-2.0 OR MIT | [LICENSE-MIT](legal/upstream-retrieval/tauriplugin-59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE-MIT), [LICENSE-APACHE-2.0](legal/upstream-retrieval/tauriplugin-59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE-APACHE-2.0), [LICENSE.spdx](legal/upstream-retrieval/tauriplugin-59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE.spdx) |
 | tauri-plugin-dialog | 2.7.3 | Apache-2.0 OR MIT | [LICENSE.spdx](legal/rust/tauri-plugin-dialog-2.7.3/LICENSE.spdx), [LICENSE_APACHE-2.0](legal/rust/tauri-plugin-dialog-2.7.3/LICENSE_APACHE-2.0), [LICENSE_MIT](legal/rust/tauri-plugin-dialog-2.7.3/LICENSE_MIT) |
 | tauri-plugin-fs | 2.5.2 | Apache-2.0 OR MIT | [LICENSE.spdx](legal/rust/tauri-plugin-fs-2.5.2/LICENSE.spdx), [LICENSE_APACHE-2.0](legal/rust/tauri-plugin-fs-2.5.2/LICENSE_APACHE-2.0), [LICENSE_MIT](legal/rust/tauri-plugin-fs-2.5.2/LICENSE_MIT) |
 | tauri-plugin-opener | 2.5.5 | Apache-2.0 OR MIT | [LICENSE.spdx](legal/rust/tauri-plugin-opener-2.5.5/LICENSE.spdx), [LICENSE_APACHE-2.0](legal/rust/tauri-plugin-opener-2.5.5/LICENSE_APACHE-2.0), [LICENSE_MIT](legal/rust/tauri-plugin-opener-2.5.5/LICENSE_MIT) |
 | tauri-plugin-single-instance | 2.4.5 | Apache-2.0 OR MIT | [LICENSE.spdx](legal/rust/tauri-plugin-single-instance-2.4.5/LICENSE.spdx), [LICENSE_APACHE-2.0](legal/rust/tauri-plugin-single-instance-2.4.5/LICENSE_APACHE-2.0), [LICENSE_MIT](legal/rust/tauri-plugin-single-instance-2.4.5/LICENSE_MIT) |
-| tauri-runtime | 2.11.3 | Apache-2.0 OR MIT | [LICENSE_APACHE-2.0](legal/rust/tauri-runtime-2.11.3/LICENSE_APACHE-2.0), [LICENSE_MIT](legal/rust/tauri-runtime-2.11.3/LICENSE_MIT) |
-| tauri-runtime-wry | 2.11.4 | Apache-2.0 OR MIT | [LICENSE_APACHE-2.0](legal/rust/tauri-runtime-wry-2.11.4/LICENSE_APACHE-2.0), [LICENSE_MIT](legal/rust/tauri-runtime-wry-2.11.4/LICENSE_MIT) |
-| tauri-utils | 2.9.3 | Apache-2.0 OR MIT | [LICENSE_APACHE-2.0](legal/rust/tauri-utils-2.9.3/LICENSE_APACHE-2.0), [LICENSE_MIT](legal/rust/tauri-utils-2.9.3/LICENSE_MIT) |
+| tauri-plugin-updater | 2.14.0 | Apache-2.0 OR MIT | [LICENSE.spdx](legal/rust/tauri-plugin-updater-2.14.0/LICENSE.spdx), [LICENSE_APACHE-2.0](legal/rust/tauri-plugin-updater-2.14.0/LICENSE_APACHE-2.0), [LICENSE_MIT](legal/rust/tauri-plugin-updater-2.14.0/LICENSE_MIT) |
+| tauri-runtime | 2.12.2 | Apache-2.0 OR MIT | [LICENSE-APACHE-2.0](legal/rust/tauri-runtime-2.12.2/LICENSE-APACHE-2.0), [LICENSE-MIT](legal/rust/tauri-runtime-2.12.2/LICENSE-MIT) |
+| tauri-runtime-wry | 2.12.3 | Apache-2.0 OR MIT | [LICENSE-APACHE-2.0](legal/rust/tauri-runtime-wry-2.12.3/LICENSE-APACHE-2.0), [LICENSE-MIT](legal/rust/tauri-runtime-wry-2.12.3/LICENSE-MIT) |
+| tauri-utils | 2.10.2 | Apache-2.0 OR MIT | [LICENSE-APACHE-2.0](legal/rust/tauri-utils-2.10.2/LICENSE-APACHE-2.0), [LICENSE-MIT](legal/rust/tauri-utils-2.10.2/LICENSE-MIT) |
 | tauri-winres | 0.3.6 | MIT | [LICENSE](legal/rust/tauri-winres-0.3.6/LICENSE) |
 | tempfile | 3.27.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/tempfile-3.27.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/tempfile-3.27.0/LICENSE-MIT) |
 | tendril | 0.5.1 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/tendril-0.5.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/tendril-0.5.1/LICENSE-MIT) |
@@ -431,12 +451,11 @@ No previously identified text gap remains unresolved after this bounded primary-
 | tinyvec | 1.13.3 | Zlib OR Apache-2.0 OR MIT | [LICENSE-APACHE.md](legal/rust/tinyvec-1.13.3/LICENSE-APACHE.md), [LICENSE-MIT.md](legal/rust/tinyvec-1.13.3/LICENSE-MIT.md), [LICENSE-ZLIB.md](legal/rust/tinyvec-1.13.3/LICENSE-ZLIB.md) |
 | tokio | 1.53.2 | MIT | [LICENSE](legal/rust/tokio-1.53.2/LICENSE) |
 | tokio-rustls | 0.26.6 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/tokio-rustls-0.26.6/LICENSE-APACHE), [LICENSE-MIT](legal/rust/tokio-rustls-0.26.6/LICENSE-MIT) |
+| tokio-util | 0.7.19 | MIT | [LICENSE](legal/rust/tokio-util-0.7.19/LICENSE) |
 | tokio-util | 0.7.20 | MIT | [LICENSE](legal/rust/tokio-util-0.7.20/LICENSE) |
 | toml | 0.8.2 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/toml-0.8.2/LICENSE-APACHE), [LICENSE-MIT](legal/rust/toml-0.8.2/LICENSE-MIT) |
-| toml | 0.9.12+spec-1.1.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/toml-0.9.12+spec-1.1.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/toml-0.9.12+spec-1.1.0/LICENSE-MIT) |
 | toml | 1.1.7+spec-1.1.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/toml-1.1.7+spec-1.1.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/toml-1.1.7+spec-1.1.0/LICENSE-MIT) |
 | toml_datetime | 0.6.3 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/toml_datetime-0.6.3/LICENSE-APACHE), [LICENSE-MIT](legal/rust/toml_datetime-0.6.3/LICENSE-MIT) |
-| toml_datetime | 0.7.5+spec-1.1.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/toml_datetime-0.7.5+spec-1.1.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/toml_datetime-0.7.5+spec-1.1.0/LICENSE-MIT) |
 | toml_datetime | 1.1.2+spec-1.1.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/toml_datetime-1.1.2+spec-1.1.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/toml_datetime-1.1.2+spec-1.1.0/LICENSE-MIT) |
 | toml_edit | 0.19.15 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/toml_edit-0.19.15/LICENSE-APACHE), [LICENSE-MIT](legal/rust/toml_edit-0.19.15/LICENSE-MIT) |
 | toml_edit | 0.20.2 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/toml_edit-0.20.2/LICENSE-APACHE), [LICENSE-MIT](legal/rust/toml_edit-0.20.2/LICENSE-MIT) |
@@ -450,23 +469,17 @@ No previously identified text gap remains unresolved after this bounded primary-
 | tracing | 0.1.44 | MIT | [LICENSE](legal/rust/tracing-0.1.44/LICENSE) |
 | tracing-attributes | 0.1.31 | MIT | [LICENSE](legal/rust/tracing-attributes-0.1.31/LICENSE) |
 | tracing-core | 0.1.36 | MIT | [LICENSE](legal/rust/tracing-core-0.1.36/LICENSE), [LICENSE](legal/rust/tracing-core-0.1.36/src/spin/LICENSE) |
-| tray-icon | 0.24.2 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/tray-icon-0.24.2/LICENSE-APACHE), [LICENSE-MIT](legal/rust/tray-icon-0.24.2/LICENSE-MIT), [LICENSE.spdx](legal/rust/tray-icon-0.24.2/LICENSE.spdx) |
+| tray-icon | 0.25.1 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/tray-icon-0.25.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/tray-icon-0.25.1/LICENSE-MIT), [LICENSE.spdx](legal/rust/tray-icon-0.25.1/LICENSE.spdx) |
 | try-lock | 0.2.5 | MIT | [LICENSE](legal/rust/try-lock-0.2.5/LICENSE) |
 | typeid | 1.0.3 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/typeid-1.0.3/LICENSE-APACHE), [LICENSE-MIT](legal/rust/typeid-1.0.3/LICENSE-MIT) |
 | typenum | 1.20.1 | MIT OR Apache-2.0 | [LICENSE](legal/rust/typenum-1.20.1/LICENSE), [LICENSE-APACHE](legal/rust/typenum-1.20.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/typenum-1.20.1/LICENSE-MIT) |
-| unic-char-property | 0.9.0 | MIT/Apache-2.0 | [LICENSE-MIT](legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT), [LICENSE-APACHE](legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE), [COPYRIGHT.md](legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md), [AUTHORS](legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/AUTHORS) |
-| unic-char-range | 0.9.0 | MIT/Apache-2.0 | [LICENSE-MIT](legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT), [LICENSE-APACHE](legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE), [COPYRIGHT.md](legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md), [AUTHORS](legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/AUTHORS) |
-| unic-common | 0.9.0 | MIT/Apache-2.0 | [LICENSE-MIT](legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT), [LICENSE-APACHE](legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE), [COPYRIGHT.md](legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md), [AUTHORS](legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/AUTHORS) |
-| unic-ucd-ident | 0.9.0 | MIT/Apache-2.0 | [LICENSE-MIT](legal/upstream-retrieval/unicident-8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-MIT), [LICENSE-APACHE](legal/upstream-retrieval/unicident-8a6ce83063d90b91ae2ce59eddb803edd393fca9/LICENSE-APACHE), [COPYRIGHT.md](legal/upstream-retrieval/unicident-8a6ce83063d90b91ae2ce59eddb803edd393fca9/COPYRIGHT.md), [AUTHORS](legal/upstream-retrieval/unicident-8a6ce83063d90b91ae2ce59eddb803edd393fca9/AUTHORS) |
-| unic-ucd-version | 0.9.0 | MIT/Apache-2.0 | [LICENSE-MIT](legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/LICENSE-MIT), [LICENSE-APACHE](legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/LICENSE-APACHE), [COPYRIGHT.md](legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/COPYRIGHT.md), [AUTHORS](legal/upstream-retrieval/unic-5878605364af97a3358368a6eaef02104af2e016/AUTHORS) |
 | unicode-ident | 1.0.26 | (MIT OR Apache-2.0) AND Unicode-3.0 | [LICENSE-APACHE](legal/rust/unicode-ident-1.0.26/LICENSE-APACHE), [LICENSE-MIT](legal/rust/unicode-ident-1.0.26/LICENSE-MIT), [LICENSE-UNICODE](legal/rust/unicode-ident-1.0.26/LICENSE-UNICODE) |
 | unicode-normalization | 0.1.24 | MIT/Apache-2.0 | [COPYRIGHT](legal/rust/unicode-normalization-0.1.24/COPYRIGHT), [LICENSE-APACHE](legal/rust/unicode-normalization-0.1.24/LICENSE-APACHE), [LICENSE-MIT](legal/rust/unicode-normalization-0.1.24/LICENSE-MIT) |
-| unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | [COPYRIGHT](legal/rust/unicode-segmentation-1.13.3/COPYRIGHT), [LICENSE-APACHE](legal/rust/unicode-segmentation-1.13.3/LICENSE-APACHE), [LICENSE-MIT](legal/rust/unicode-segmentation-1.13.3/LICENSE-MIT) |
 | universal-hash | 0.5.1 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/universal-hash-0.5.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/universal-hash-0.5.1/LICENSE-MIT) |
 | untrusted | 0.9.0 | ISC | [LICENSE.txt](legal/rust/untrusted-0.9.0/LICENSE.txt) |
 | url | 2.5.8 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/url-2.5.8/LICENSE-APACHE), [LICENSE-MIT](legal/rust/url-2.5.8/LICENSE-MIT) |
 | urlencoding | 2.1.3 | MIT | [LICENSE](legal/rust/urlencoding-2.1.3/LICENSE) |
-| urlpattern | 0.3.0 | MIT | [LICENSE](legal/rust/urlpattern-0.3.0/LICENSE) |
+| urlpattern | 0.6.0 | MIT | [LICENSE](legal/rust/urlpattern-0.6.0/LICENSE) |
 | utf8_iter | 1.0.4 | Apache-2.0 OR MIT | [COPYRIGHT](legal/rust/utf8_iter-1.0.4/COPYRIGHT), [LICENSE-APACHE](legal/rust/utf8_iter-1.0.4/LICENSE-APACHE), [LICENSE-MIT](legal/rust/utf8_iter-1.0.4/LICENSE-MIT) |
 | utf8parse | 0.2.2 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/utf8parse-0.2.2/LICENSE-APACHE), [LICENSE-MIT](legal/rust/utf8parse-0.2.2/LICENSE-MIT) |
 | uuid | 1.26.1 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/uuid-1.26.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/uuid-1.26.1/LICENSE-MIT) |
@@ -481,6 +494,7 @@ No previously identified text gap remains unresolved after this bounded primary-
 | wayland-protocols | 0.32.12 | MIT | [LICENSE.txt](legal/rust/wayland-protocols-0.32.12/LICENSE.txt), [COPYING](legal/rust/wayland-protocols-0.32.12/protocols/COPYING) |
 | wayland-scanner | 0.31.11 | MIT | [LICENSE.txt](legal/rust/wayland-scanner-0.31.11/LICENSE.txt) |
 | wayland-sys | 0.31.11 | MIT | [LICENSE.txt](legal/rust/wayland-sys-0.31.11/LICENSE.txt) |
+| web-time | 1.1.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/web-time-1.1.0/LICENSE-APACHE), [LICENSE-MIT](legal/rust/web-time-1.1.0/LICENSE-MIT) |
 | web_atoms | 0.2.6 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/web_atoms-0.2.6/LICENSE-APACHE), [LICENSE-MIT](legal/rust/web_atoms-0.2.6/LICENSE-MIT) |
 | webkit2gtk | 2.0.2 | MIT | [LICENSE](legal/rust/webkit2gtk-2.0.2/LICENSE) |
 | webkit2gtk-sys | 2.0.2 | MIT | [LICENSE](legal/rust/webkit2gtk-sys-2.0.2/LICENSE) |
@@ -489,9 +503,10 @@ No previously identified text gap remains unresolved after this bounded primary-
 | winnow | 0.7.15 | MIT | [LICENSE-MIT](legal/rust/winnow-0.7.15/LICENSE-MIT) |
 | winnow | 1.0.4 | MIT | [LICENSE-MIT](legal/rust/winnow-1.0.4/LICENSE-MIT) |
 | writeable | 0.6.4 | Unicode-3.0 | [LICENSE](legal/rust/writeable-0.6.4/LICENSE) |
-| wry | 0.55.1 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/wry-0.55.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/wry-0.55.1/LICENSE-MIT), [LICENSE.spdx](legal/rust/wry-0.55.1/LICENSE.spdx) |
+| wry | 0.57.1 | Apache-2.0 OR MIT | [LICENSE-APACHE](legal/rust/wry-0.57.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/wry-0.57.1/LICENSE-MIT), [LICENSE.spdx](legal/rust/wry-0.57.1/LICENSE.spdx) |
 | x11 | 2.21.0 | MIT | [LICENSE-MIT](legal/rust/x11-2.21.0/LICENSE-MIT) |
 | x11-dl | 2.21.0 | MIT | [LICENSE-MIT](legal/rust/x11-dl-2.21.0/LICENSE-MIT) |
+| xattr | 1.6.1 | MIT OR Apache-2.0 | [LICENSE-APACHE](legal/rust/xattr-1.6.1/LICENSE-APACHE), [LICENSE-MIT](legal/rust/xattr-1.6.1/LICENSE-MIT) |
 | yoke | 0.8.3 | Unicode-3.0 | [LICENSE](legal/rust/yoke-0.8.3/LICENSE) |
 | yoke-derive | 0.8.4 | Unicode-3.0 | [LICENSE](legal/rust/yoke-derive-0.8.4/LICENSE) |
 | zbus | 5.13.2 | MIT | [LICENSE](legal/rust/zbus-5.13.2/LICENSE) |

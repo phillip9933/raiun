@@ -2,7 +2,7 @@ use super::*;
 use raiun_core::backend::{CloudBackend, CloudSpace};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tempfile::TempDir;
+use tempfile::{NamedTempFile, TempDir};
 
 #[derive(Default)]
 struct FakeCloud {
@@ -252,8 +252,44 @@ fn job(root: &Path) -> MediaImportJob {
     }
 }
 
-fn engine(state: &TempDir, cloud: &Arc<FakeCloud>) -> Engine {
-    Engine::open(state.path(), cloud.clone())
+#[cfg(not(windows))]
+type StateDir = TempDir;
+#[cfg(windows)]
+struct StateDir {
+    parent: TempDir,
+    path: PathBuf,
+}
+#[cfg(windows)]
+impl StateDir {
+    fn new() -> std::io::Result<Self> {
+        use raiun_control_windows::{PinnedDirectory, PrivateDirectory};
+        let parent = TempDir::new()?;
+        let pin = PinnedDirectory::open(parent.path())?;
+        let private =
+            PrivateDirectory::create_or_open_under(&pin, std::ffi::OsStr::new("engine-state"))?;
+        let path = private.path().to_path_buf();
+        drop(private);
+        drop(pin);
+        Ok(Self { parent, path })
+    }
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+fn engine(state: &StateDir, cloud: &Arc<FakeCloud>) -> Engine {
+    #[cfg(windows)]
+    let opened = {
+        use raiun_control_windows::{PinnedDirectory, PrivateDirectory};
+        let parent = PinnedDirectory::open(state.parent.path()).expect("pin state parent");
+        let private = PrivateDirectory::open_under(&parent, std::ffi::OsStr::new("engine-state"))
+            .expect("reopen validated private state");
+        assert_eq!(private.path(), state.path());
+        Engine::open_private_windows(private, cloud.clone())
+    };
+    #[cfg(not(windows))]
+    let opened = Engine::open(state.path(), cloud.clone());
+    opened
         .expect("engine")
         .with_account_scope("account-1".into(), "https://cloud.example".into())
         .expect("account scope")
@@ -266,7 +302,7 @@ fn image_source(root: &Path, bytes: &[u8]) {
 
 #[test]
 fn recovery_pages_are_bounded_and_continue_after_the_exact_last_key() {
-    let state = TempDir::new().expect("state");
+    let state = StateDir::new().expect("state");
     let cloud = Arc::new(FakeCloud::new());
     let engine = engine(&state, &cloud);
     {
@@ -283,6 +319,19 @@ fn recovery_pages_are_bounded_and_continue_after_the_exact_last_key() {
     let first =
         Engine::media_import_recovery_at(state.path(), "phone-import", "account-1", 1, None)
             .expect("first recovery page");
+    assert_eq!(
+        engine
+            .media_import_recovery("phone-import", "account-1", 1, None)
+            .expect("held recovery page"),
+        first,
+    );
+    assert_eq!(
+        engine
+            .media_import_recovery("phone-import", "other-account", 1, None)
+            .expect_err("wrong account refused")
+            .kind,
+        ErrorKind::Conflict,
+    );
     assert_eq!(first.items.len(), 1);
     assert_eq!(first.items[0].source_relative_path, "Camera/a.jpg");
     assert_eq!(first.items[0].state, "stage_only");
@@ -296,6 +345,12 @@ fn recovery_pages_are_bounded_and_continue_after_the_exact_last_key() {
         first.next_cursor.as_ref(),
     )
     .expect("next recovery page");
+    assert_eq!(
+        engine
+            .media_import_recovery("phone-import", "account-1", 1, first.next_cursor.as_ref())
+            .expect("held next page"),
+        second,
+    );
     assert_eq!(second.items.len(), 1);
     assert_eq!(second.items[0].source_relative_path, "Camera/b.jpg");
     assert!(!second.has_more);
@@ -304,7 +359,7 @@ fn recovery_pages_are_bounded_and_continue_after_the_exact_last_key() {
 
 #[test]
 fn recovery_cursor_keeps_identical_paths_from_distinct_spaces_separate() {
-    let state = TempDir::new().expect("state");
+    let state = StateDir::new().expect("state");
     let cloud = Arc::new(FakeCloud::new());
     let engine = engine(&state, &cloud);
     {
@@ -346,7 +401,7 @@ fn recovery_cursor_keeps_identical_paths_from_distinct_spaces_separate() {
 #[test]
 fn stable_media_import_verifies_receipts_and_updates_only_its_exact_remote_identity() {
     let source = TempDir::new().expect("source");
-    let state = TempDir::new().expect("state");
+    let state = StateDir::new().expect("state");
     let cloud = Arc::new(FakeCloud::new());
     let engine = engine(&state, &cloud);
     let import_job = job(source.path());
@@ -413,7 +468,7 @@ fn stable_media_import_verifies_receipts_and_updates_only_its_exact_remote_ident
 #[test]
 fn cancelled_media_pass_is_interrupted_and_preserves_its_source() {
     let source = TempDir::new().expect("source");
-    let state = TempDir::new().expect("state");
+    let state = StateDir::new().expect("state");
     let cloud = Arc::new(FakeCloud::new());
     let engine = engine(&state, &cloud);
     let import_job = job(source.path());
@@ -441,13 +496,28 @@ fn cancelled_media_pass_is_interrupted_and_preserves_its_source() {
 
 #[test]
 fn crash_orphaned_stage_is_accounted_and_blocks_job_removal() {
-    let state = TempDir::new().expect("state");
+    let state = StateDir::new().expect("state");
     let cloud = Arc::new(FakeCloud::new());
     let engine = engine(&state, &cloud);
     let staging = state.path().join("media-staging");
-    fs::create_dir(&staging).expect("staging directory");
+    fs::create_dir_all(&staging).expect("staging directory");
     let orphan = staging.join("crash-orphan");
+    #[cfg(not(windows))]
     fs::write(&orphan, b"retained staged bytes").expect("orphan stage");
+    #[cfg(windows)]
+    {
+        let directory = engine
+            .db()
+            .expect("db")
+            .media_directory()
+            .expect("private staging owner");
+        let (mut file, _) = directory
+            .create_new_file(std::ffi::OsStr::new("crash-orphan"))
+            .expect("exclusive private orphan stage");
+        file.write_all(b"retained staged bytes")
+            .expect("orphan bytes");
+        file.sync_all().expect("durable orphan bytes");
+    }
 
     assert!(
         engine
@@ -471,7 +541,7 @@ fn crash_orphaned_stage_is_accounted_and_blocks_job_removal() {
 #[test]
 fn collision_is_never_overwritten_and_lost_response_stays_uncertain_across_restart() {
     let source = TempDir::new().expect("source");
-    let state = TempDir::new().expect("state");
+    let state = StateDir::new().expect("state");
     let cloud = Arc::new(FakeCloud::new());
     let import_job = job(source.path());
     image_source(source.path(), &[0xff, 0xd8, 0xff, 1]);
@@ -618,7 +688,7 @@ fn collision_is_never_overwritten_and_lost_response_stays_uncertain_across_resta
 #[test]
 fn upload_uses_the_staged_signature_when_the_source_changes_during_transfer() {
     let source = TempDir::new().expect("source");
-    let state = TempDir::new().expect("state");
+    let state = StateDir::new().expect("state");
     let cloud = Arc::new(FakeCloud::new());
     let import_job = job(source.path());
     let initial = vec![0xff, 0xd8, 0xff, 0x01, 0x02];
@@ -652,7 +722,7 @@ fn upload_uses_the_staged_signature_when_the_source_changes_during_transfer() {
 #[test]
 fn a_replaced_destination_root_at_the_same_path_is_not_adopted() {
     let source = TempDir::new().expect("source");
-    let state = TempDir::new().expect("state");
+    let state = StateDir::new().expect("state");
     let cloud = Arc::new(FakeCloud::new());
     let import_job = job(source.path());
     image_source(source.path(), &[0xff, 0xd8, 0xff, 1]);
@@ -691,7 +761,7 @@ fn a_replaced_destination_root_at_the_same_path_is_not_adopted() {
 #[test]
 fn verify_retained_upload_matches_bytes_without_committing_or_replaying() {
     let source = TempDir::new().unwrap();
-    let state = TempDir::new().unwrap();
+    let state = StateDir::new().unwrap();
     let cloud = Arc::new(FakeCloud::new());
     let mut job = job(source.path());
     image_source(source.path(), &[0xff, 0xd8, 0xff, 9]);

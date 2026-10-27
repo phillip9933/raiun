@@ -1,5 +1,7 @@
+import { validWindowsProfileId } from './windows-recovery';
+
 export type WindowsOfflineFileContext = {
-  profileId: 'default';
+  profileId: string;
   accountEpoch: number;
   authGeneration: number;
   recoveryScopeToken: string;
@@ -20,7 +22,7 @@ export type WindowsOfflineFileRow = {
 };
 
 export type WindowsFileCacheStatus = {
-  profile_id: 'default';
+  profile_id: string;
   auth_generation: number;
   recovery_scope_token: string;
   read_only: true;
@@ -91,7 +93,7 @@ function validText(value: unknown, maxUtf8Bytes: number): value is string {
 }
 
 function validContext(context: WindowsOfflineFileContext): boolean {
-  return isRecord(context) && context.profileId === 'default' &&
+  return isRecord(context) && validWindowsProfileId(context.profileId) &&
     Number.isSafeInteger(context.accountEpoch) && context.accountEpoch >= 0 &&
     Number.isSafeInteger(context.authGeneration) && context.authGeneration > 0 &&
     Number.isSafeInteger(context.flowGeneration) && context.flowGeneration >= 0 &&

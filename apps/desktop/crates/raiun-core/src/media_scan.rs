@@ -148,6 +148,18 @@ pub fn scan_media_dir(
 
 // An entry can change to a FIFO between enumeration and open. Nonblocking
 // opens let the subsequent handle metadata check reject it without hanging.
+fn media_reparse_point(metadata: &cap_std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use cap_std::fs::MetadataExt;
+        metadata.file_attributes() & 0x0000_0400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
 fn avoid_blocking_special_file_open(options: &mut OpenOptions) {
     #[cfg(unix)]
     {
@@ -297,9 +309,14 @@ fn visit_directory(
                 .follow(FollowSymlinks::No)
                 .maybe_dir(true);
             avoid_blocking_special_file_open(&mut dir_options);
+            #[cfg(windows)]
+            {
+                use cap_std::fs::OpenOptionsExt;
+                dir_options.share_mode(0x0000_0001 | 0x0000_0002);
+            }
             let child = dir.open_with(&name, &dir_options).and_then(|file| {
                 let metadata = file.metadata()?;
-                if !metadata.is_dir() {
+                if !metadata.is_dir() || media_reparse_point(&metadata) {
                     return Err(io::Error::other("entry changed from directory"));
                 }
                 Ok(Dir::from_std_file(file.into_std()))
@@ -348,6 +365,12 @@ fn visit_directory(
         let mut open_options = OpenOptions::new();
         open_options.read(true).follow(FollowSymlinks::No);
         avoid_blocking_special_file_open(&mut open_options);
+        #[cfg(windows)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            // Keep each bounded signature read immutable without delete sharing.
+            open_options.share_mode(0x0000_0001);
+        }
         let mut file = match dir.open_with(&name, &open_options) {
             Ok(file) => file,
             Err(_) => {
@@ -376,7 +399,7 @@ fn visit_directory(
             }
         };
         let before = match file.metadata() {
-            Ok(metadata) if metadata.is_file() => metadata,
+            Ok(metadata) if metadata.is_file() && !media_reparse_point(&metadata) => metadata,
             _ => {
                 warn(
                     report,

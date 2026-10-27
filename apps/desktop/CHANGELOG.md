@@ -1,13 +1,38 @@
 # Raiun Desktop changelog
 
-## Unreleased
+## 0.7.0-beta.2 — 2026-10-27
 
+Linux and Windows x86_64 beta, with matching Desktop versions.
+
+- Check compatible Desktop GitHub releases automatically or manually, dismiss
+  individual update notices, and explicitly download and install version-bound
+  signed updater packages. Desktop and Android release selection stay separate.
+- Windows: guarded encrypted-file save-back, durable completed-save history and
+  explicit Save Copy recovery, including history beyond the active index limit.
+  Registered cloud-root pinning preserves the exact recovery scope.
 - Linux: add **Verify uploaded copy** for newly recorded uncertain media uploads.
   It checks the saved cloud destination without changing source files, retrying
   the upload, or clearing recovery. Older attempts remain inspection-only.
-- Windows development: verified test installers and guarded cloud-drive save
-  completion are in progress. Automatic drive activation remains disabled while
-  native acceptance is completed; Windows is not yet a public release.
+- Verified native upgrades preserve settings and synthetic documents; Windows
+  additionally preserves same-user DPAPI data. Focused Windows recovery checks
+  preserve 129 retained edits, refuse destination overwrite and leave custody
+  unchanged. Both platforms retain their safe shutdown and recovery checks.
+
+### Upgrade and beta limits
+
+Desktop beta.1 predates in-app updates: install beta.2 manually once. Future
+compatible releases can use beta.2's App updates controls. Downloads and
+installation require separate user actions; missing trust metadata fails closed.
+The Windows updater signature authenticates the updater package; it is not an
+Authenticode certificate for the standalone installer.
+
+Acceptance uses isolated native synthetic data and offline release fixtures;
+advanced encrypted/offline and full account/file-manager workflows are not
+exhaustively certified. The original 129-save test failure is retained; the
+corrected Save Copy path passed a separate focused native continuation. Release
+notes document supported behavior and remaining limits rather than claiming
+whole-category completion. Local working/recovery copies may be plaintext;
+cloud encryption is not local-disk encryption.
 
 ## 0.7.0-beta.1 — 2026-10-21
 

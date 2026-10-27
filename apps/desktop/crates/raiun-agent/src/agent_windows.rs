@@ -1,16 +1,84 @@
-//! Windows control-plane and gated Cloud Files runtime. The connection manager
-//! is wired for exact-scope synthetic validation, but general provider support
-//! remains disabled until recovery enumeration and the production namespace
-//! identity bridge are complete.
+//! Windows control plane and account-bound Cloud Files runtime. The provider
+//! and verified save path are enabled in the next non-test candidate after
+//! isolated native save/recovery/lifecycle acceptance. Package acceptance and
+//! publication remain separate; other feature gates are independent.
 
 #[path = "auth.rs"]
 mod auth;
+
+#[path = "root_manifest.rs"]
+mod root_manifest;
+#[path = "vault_custody.rs"]
+mod vault_custody;
+// Historical protected retention only; no upload or cleanup authority.
+#[allow(dead_code)]
+#[path = "vault_edit_capture.rs"]
+mod vault_edit_capture;
+#[path = "vault_edit_disposition.rs"]
+mod vault_edit_disposition;
+#[allow(dead_code)]
+#[path = "vault_edit_retention.rs"]
+mod vault_edit_retention;
+#[path = "vault_edit_upload.rs"]
+mod vault_edit_upload;
+#[path = "windows_vault_capture_recovery.rs"]
+mod windows_vault_capture_recovery;
+#[path = "windows_vault_credentials.rs"]
+mod windows_vault_credentials;
+#[path = "windows_vault_custody.rs"]
+mod windows_vault_custody;
+// Dormant in normal activation; only an explicit per-Agent native fixture
+// starts this fresh-only consumer. No history/startup dispatch.
+#[allow(dead_code)]
+#[path = "windows_vault_close_worker.rs"]
+mod windows_vault_close_worker;
+
+#[path = "windows_vault_cleanup_holds.rs"]
+mod windows_vault_cleanup_holds;
+
+#[path = "windows_proxy.rs"]
+mod windows_proxy;
+
+#[path = "windows_bandwidth.rs"]
+mod windows_bandwidth;
 
 #[path = "windows_cache_status.rs"]
 mod windows_cache_status;
 
 #[path = "windows_offline_jobs.rs"]
 mod windows_offline_jobs;
+
+#[path = "windows_folder_requests.rs"]
+mod windows_folder_requests;
+#[path = "windows_folder_sync.rs"]
+mod windows_folder_sync;
+#[path = "windows_media_requests.rs"]
+mod windows_media_requests;
+#[path = "windows_vault_requests.rs"]
+mod windows_vault_requests;
+
+#[path = "windows_profile_registry.rs"]
+mod windows_profile_registry;
+#[path = "windows_profiles.rs"]
+mod windows_profiles;
+
+type ProtectedCapturePage = (
+    Vec<windows_vault_custody::RecoveryCaptureMetadata>,
+    Option<String>,
+);
+
+// Focused native broker acceptance passed. Enable candidate account routing;
+// Folder/media source receipts bind the exact authenticated scope and source identity.
+const WINDOWS_ACCOUNTS_ENABLED: bool = !cfg!(test);
+const WINDOWS_FOLDER_SYNC_ENABLED: bool = !cfg!(test);
+// Non-test candidate enables verified worker paths; exact package acceptance is separate.
+const WINDOWS_MEDIA_METADATA_ENABLED: bool = !cfg!(test);
+// Candidate unlock/read/lock and normal reconnection passed native acceptance.
+// Test builds keep public capability exposure disabled; direct fixtures cover
+// the same guarded implementation. Installed-package acceptance is separate.
+const WINDOWS_VAULT_SESSIONS_ENABLED: bool = !cfg!(test);
+include!("windows_vault_session_control.rs");
+include!("windows_vault_edit_upload.rs");
 
 use clap::{Parser, Subcommand};
 use raiun_cloudfiles_windows::{
@@ -25,25 +93,32 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use zeroize::Zeroizing;
 
-const PROVIDER_UNAVAILABLE: &str = "Windows cloud drive support is not enabled yet; Raiun keeps the selected folder disconnected until durable recovery and namespace identity checks are available.";
+const PROVIDER_UNAVAILABLE: &str = "This operation is not available in this Windows beta.";
+
+fn windows_startup_executable() -> Result<PathBuf, String> {
+    std::env::current_exe()
+        .map_err(|_| "The installed app path is unavailable".to_owned())?
+        .parent()
+        .map(|directory| directory.join("raiun-desktop-shell.exe"))
+        .ok_or_else(|| "The installed app path is unavailable".to_owned())
+}
+
 const MAX_SESSION_BYTES: usize = 65_536;
 const MAX_ROOT_CONFIG_BYTES: usize = 16 * 1024;
-// Keep ordinary Windows builds disconnected until conditional upload and
-// recovery reconciliation have passed their release gates. Lifecycle hooks
-// below are intentionally wired now so enabling this requires one explicit,
-// reviewed capability change rather than new auth/root plumbing.
-const WINDOWS_PROVIDER_ACTIVATION_ENABLED: bool = false;
-// Initial upload wiring is separate from activation and native acknowledgement.
-// Keep it off until the full save/acknowledgement/restart acceptance passes.
-const WINDOWS_INITIAL_SAVE_DISPATCH_ENABLED: bool = false;
+// The 9219 isolated native save + lifecycle checks passed. Non-test candidates
+// now use the real provider/save path; exact-package acceptance is still required.
+// Ordinary unit tests remain kernel-inactive. Ignored isolated-VM fixtures opt
+// in per instance, exercising the same guarded production operations explicitly.
+const WINDOWS_PROVIDER_ACTIVATION_ENABLED: bool = !cfg!(test);
+const WINDOWS_INITIAL_SAVE_DISPATCH_ENABLED: bool = !cfg!(test);
 
 #[derive(Parser)]
 struct Args {
@@ -58,6 +133,10 @@ enum Command {
 }
 
 trait SessionStore: Send + Sync {
+    /// Production stores declare their trusted profile before any restore or mutation.
+    fn bound_profile(&self) -> Option<&str> {
+        None
+    }
     /// Persist the protected session blob without granting startup restore
     /// authority. The active pointer is published only after the auth worker
     /// wins the same state lock used by cancellation and logout.
@@ -80,7 +159,187 @@ trait SessionStore: Send + Sync {
         client_id: &str,
     ) -> Result<Option<Vec<u8>>, String>;
     fn remove_root_config(&self, scope: &str, server: &str, client_id: &str) -> Result<(), String>;
+    fn load_bandwidth_settings(
+        &self,
+        _profile: &str,
+        _scope: &[u8],
+    ) -> Result<Option<Vec<u8>>, String> {
+        Err("Bandwidth storage is unavailable".into())
+    }
+    fn compare_exchange_bandwidth_settings(
+        &self,
+        _profile: &str,
+        _scope: &[u8],
+        _old: Option<&[u8]>,
+        _next: &[u8],
+    ) -> Result<(), String> {
+        Err("Bandwidth storage is unavailable".into())
+    }
+    fn load_proxy_settings(&self, _profile: &str) -> Result<Option<Vec<u8>>, String> {
+        Err("Proxy storage is unavailable".into())
+    }
+    fn compare_exchange_proxy_settings(
+        &self,
+        _profile: &str,
+        _old: Option<&[u8]>,
+        _next: &[u8],
+    ) -> Result<(), String> {
+        Err("Proxy storage is unavailable".into())
+    }
+    fn load_vault_credentials(
+        &self,
+        _profile: &str,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
+        Err("Protected vault credentials are unavailable".into())
+    }
+    fn compare_exchange_vault_credentials(
+        &self,
+        _profile: &str,
+        _old: Option<&[u8]>,
+        _next: &[u8],
+    ) -> Result<(), String> {
+        Err("Protected vault credentials are unavailable".into())
+    }
+    fn load_vault_custody(
+        &self,
+        _scope: &[u8],
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
+        Err("Protected vault history is unavailable".into())
+    }
+    fn compare_exchange_vault_custody(
+        &self,
+        _scope: &[u8],
+        _old: Option<&[u8]>,
+        _next: &[u8],
+    ) -> Result<(), String> {
+        Err("Protected vault history is unavailable".into())
+    }
+    fn load_vault_existing_edit_capture(
+        &self,
+        _binding: &[u8],
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
+        Err("Protected vault capture is unavailable".into())
+    }
+    fn put_new_vault_existing_edit_capture(
+        &self,
+        _binding: &[u8],
+        _record: &[u8],
+    ) -> Result<(), String> {
+        Err("Protected vault capture is unavailable".into())
+    }
+    fn load_vault_completed_history_segment(
+        &self,
+        _binding: &[u8],
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
+        Err("Protected completed vault history is unavailable".into())
+    }
+    fn put_new_vault_completed_history_segment(
+        &self,
+        _binding: &[u8],
+        _record: &[u8],
+    ) -> Result<(), String> {
+        Err("Protected completed vault history is unavailable".into())
+    }
     fn before_publish(&self) {}
+}
+
+struct BandwidthStore<'a> {
+    store: &'a dyn SessionStore,
+    profile: &'a str,
+}
+impl windows_bandwidth::Store for BandwidthStore<'_> {
+    fn load(&self, scope: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        self.store.load_bandwidth_settings(self.profile, scope)
+    }
+    fn compare_exchange(
+        &self,
+        scope: &[u8],
+        old: Option<&[u8]>,
+        next: &[u8],
+    ) -> Result<(), String> {
+        self.store
+            .compare_exchange_bandwidth_settings(self.profile, scope, old, next)
+    }
+}
+struct VaultCredentialStore<'a> {
+    store: &'a dyn SessionStore,
+    profile: &'a str,
+}
+impl windows_vault_credentials::Store for VaultCredentialStore<'_> {
+    fn load(&self, profile: &str) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
+        if profile != self.profile {
+            return Err("Vault credential profile changed".into());
+        }
+        self.store.load_vault_credentials(profile)
+    }
+    fn compare_exchange(
+        &self,
+        profile: &str,
+        old: Option<&[u8]>,
+        next: &[u8],
+    ) -> Result<(), String> {
+        if profile != self.profile {
+            return Err("Vault credential profile changed".into());
+        }
+        self.store
+            .compare_exchange_vault_credentials(profile, old, next)
+    }
+}
+
+struct ProxyStore<'a> {
+    store: &'a dyn SessionStore,
+    profile: &'a str,
+}
+impl windows_proxy::Store for ProxyStore<'_> {
+    fn load(&self) -> Result<Option<Vec<u8>>, String> {
+        self.store.load_proxy_settings(self.profile)
+    }
+    fn compare_exchange(&self, old: Option<&[u8]>, next: &[u8]) -> Result<(), String> {
+        self.store
+            .compare_exchange_proxy_settings(self.profile, old, next)
+    }
+}
+
+fn budget_client(
+    client: Arc<OpenCloudClient>,
+    session: &auth::Session,
+    profile: &str,
+    account: &str,
+    generation: u64,
+    provider: &ProviderManager,
+    store: &dyn SessionStore,
+) -> Result<(Arc<OpenCloudClient>, windows_bandwidth::Scope), String> {
+    if generation == 0 || provider.authorized_generation.load(Ordering::Acquire) != generation {
+        return Err("The account changed before bandwidth admission".into());
+    }
+    let scope = windows_bandwidth::Scope::new(
+        profile,
+        &session.server,
+        &session.client_id,
+        session.expected_issuer.as_deref(),
+        account,
+    )?;
+    provider.proxy.bind_verified(
+        profile,
+        scope.bytes(),
+        &session.proxy,
+        generation,
+        &ProxyStore { store, profile },
+    )?;
+    let budget = provider.bandwidth.bind(
+        scope.clone(),
+        generation,
+        &BandwidthStore { store, profile },
+    )?;
+    if provider.authorized_generation.load(Ordering::Acquire) != generation {
+        // authorize_generation already cancels the retired generation; a stale
+        // completion must not pause a newer controller.
+        return Err("The account changed during bandwidth admission".into());
+    }
+    let client = Arc::try_unwrap(client)
+        .map_err(|_| "The account client was already published")?
+        .with_transfer_budget(budget);
+    Ok((Arc::new(client), scope))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,13 +397,39 @@ struct WindowsRecoveryContext {
     recovery_provider: raiun_cloudfiles_windows::DurableEditRecoveryProvider,
 }
 
+type SharedSourceAdmissions = Arc<Mutex<Arc<windows_profile_registry::Registry>>>;
+
 struct WindowsAgent {
+    source_admissions: Option<SharedSourceAdmissions>,
+    vault_sessions: Arc<raiun_vault::session::VaultSessionCoordinator>,
+    profile_scope: String,
     session_store: Arc<dyn SessionStore>,
     state: Arc<Mutex<AccountState>>,
     generation: Arc<AtomicU64>,
     provider: Arc<ProviderManager>,
     auth_thread: Mutex<Option<JoinHandle<()>>>,
     refresh_thread: Mutex<Option<JoinHandle<()>>>,
+    fresh_close_worker: Mutex<Option<windows_vault_close_worker::FreshCloseWorker>>,
+    folder_lifecycle: Mutex<()>,
+    vault_credential_operation: Mutex<()>,
+    protected_recovery_tokens: Mutex<windows_vault_capture_recovery::Tokens>,
+    #[cfg(all(test, debug_assertions))]
+    synthetic_vault_completion_writer_probe: bool,
+}
+
+struct ProtectedRecoveryContext {
+    generation: u64,
+    session: auth::Session,
+    configuration: RootConfiguration,
+    binding: ActiveProviderBinding,
+    context_token: String,
+}
+
+#[derive(Clone)]
+struct FolderPauseSnapshot {
+    generation: u64,
+    paused: bool,
+    paused_space_ids: Vec<String>,
 }
 
 /// Own the native Cloud Files connection on one dedicated thread. The native
@@ -152,18 +437,29 @@ struct WindowsAgent {
 /// crosses a Rust thread boundary. All auth/session transitions synchronously
 /// request a revoke-and-disconnect before replacing credentials.
 struct ProviderManager {
+    proxy: windows_proxy::Service,
+    bandwidth: windows_bandwidth::Service,
     commands: std::sync::mpsc::SyncSender<ProviderCommand>,
     connected: Arc<AtomicBool>,
     authorized_generation: Arc<AtomicU64>,
     recovery_cursor_nonce: Option<[u8; 32]>,
     offline_jobs: Arc<windows_offline_jobs::OfflineJobs>,
     worker: Mutex<Option<JoinHandle<()>>>,
+    fresh_close_source: Mutex<Option<FreshClosePublication>>,
+    existing_save_owner: Mutex<Weak<WindowsAgent>>,
+    existing_save_admission: AtomicBool,
+    folder_generation: Arc<AtomicU64>,
+    folder_revocation: Arc<Mutex<Option<raiun_engine::SyncRevocationHandle>>>,
+    folder_error: Arc<Mutex<Option<String>>>,
+    folder_pause: Arc<Mutex<Option<FolderPauseSnapshot>>>,
     // Per-instance native-test capability; absent from production binaries and
     // never controlled by environment, IPC, configuration, or another agent.
     #[cfg(all(test, debug_assertions))]
     lifecycle_test_activation: AtomicBool,
     #[cfg(all(test, debug_assertions))]
     initial_save_test_activation: Arc<AtomicBool>,
+    #[cfg(all(test, debug_assertions))]
+    initial_save_test_observation: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -175,7 +471,107 @@ struct ActiveProviderBinding {
     personal_root_resource_id: String,
 }
 
+// Immutable source admission metadata; not a restored publication capability.
+struct FreshClosePublication {
+    source: windows_vault_close_worker::VaultClosePublisherSource,
+    binding: Option<ActiveProviderBinding>,
+    original_active: Option<Arc<AtomicBool>>,
+}
+impl FreshClosePublication {
+    #[cfg(all(test, debug_assertions))]
+    fn private(source: windows_vault_close_worker::VaultClosePublisherSource) -> Self {
+        Self {
+            source,
+            binding: None,
+            original_active: None,
+        }
+    }
+    fn cancel(&self) {
+        self.source.cancel();
+    }
+    fn publisher(
+        &self,
+        generation: u64,
+    ) -> Option<windows_vault_close_worker::VaultClosePublisher> {
+        if self
+            .binding
+            .as_ref()
+            .is_some_and(|binding| binding.generation != generation)
+        {
+            return None;
+        }
+        self.source.publisher(generation)
+    }
+    fn marker(&self, binding: &ActiveProviderBinding) -> Option<Arc<AtomicBool>> {
+        if self.binding.as_ref() != Some(binding) {
+            return None;
+        }
+        let active = self.source.existing_file_save_marker(binding.generation)?;
+        self.original_active
+            .as_ref()
+            .filter(|original| Arc::ptr_eq(original, &active))?;
+        Some(active)
+    }
+}
+
+// The atomic gate is finite admission serialization, never a mutex held through
+// a worker join or native command. Failure cancels only this exact source.
+struct ExistingSaveWorkerAdmission {
+    owner: Arc<WindowsAgent>,
+    binding: ActiveProviderBinding,
+    original_active: Option<Arc<AtomicBool>>,
+    connection_current: bool,
+    committed: bool,
+}
+impl Drop for ExistingSaveWorkerAdmission {
+    fn drop(&mut self) {
+        if !self.committed
+            && let Some(active) = self.original_active.as_ref()
+        {
+            self.owner
+                .abort_existing_file_save_admission(&self.binding, active);
+        }
+        self.owner
+            .provider
+            .existing_save_admission
+            .store(false, Ordering::Release);
+    }
+}
+
+// Pure admission check used before any native parent-population operation.
+fn vault_worker_binding_current(
+    generation: u64,
+    requested: &ActiveProviderBinding,
+    active: Option<&ActiveProviderBinding>,
+) -> bool {
+    requested.generation != 0 && generation == requested.generation && active == Some(requested)
+}
+
+struct VerifiedVaultBackend {
+    backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
+    custody: Arc<windows_vault_custody::WindowsVaultCustody>,
+}
+
+// Owner-thread only: the opaque native fence never enters a command or response.
+struct PendingNativeVaultCleanup {
+    binding: ActiveProviderBinding,
+    expected_backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
+    route: Arc<raiun_cloudfiles_windows::vault_routes::VerifiedVaultRoute>,
+    fence: raiun_cloudfiles_windows::VaultCleanupFence,
+}
+
+type PendingVaultCleanupTicket = windows_vault_cleanup_holds::PendingCleanupTicket;
+
 enum ProviderCommand {
+    InstallFolders {
+        setup: Box<windows_folder_sync::Setup>,
+        response: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+    FolderRequest {
+        generation: u64,
+        request: windows_folder_requests::FolderRequest,
+        response: std::sync::mpsc::SyncSender<Result<Value, String>>,
+    },
     PrepareOfflineFolder {
         binding: ActiveProviderBinding,
         response: std::sync::mpsc::SyncSender<Result<Value, String>>,
@@ -202,11 +598,78 @@ enum ProviderCommand {
         row: windows_cache_status::CacheStatusRow,
         response: std::sync::mpsc::SyncSender<Result<Value, String>>,
     },
+    DeviceCacheUsage {
+        binding: ActiveProviderBinding,
+        response: std::sync::mpsc::SyncSender<Result<Value, String>>,
+    },
     FileCacheStatus {
         binding: ActiveProviderBinding,
         row: windows_cache_status::CacheStatusRow,
         response:
             std::sync::mpsc::SyncSender<Result<raiun_cloudfiles_windows::FileCacheStatus, String>>,
+    },
+    RefreshVaultParent {
+        binding: ActiveProviderBinding,
+        space_id: String,
+        root_resource_id: String,
+        root_path: String,
+        response: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+    BeginLockVaultRoute {
+        binding: ActiveProviderBinding,
+        space_id: String,
+        root_resource_id: String,
+        root_path: String,
+        response: std::sync::mpsc::SyncSender<Result<PendingVaultCleanupTicket, String>>,
+    },
+    FinishLockVaultRoute {
+        binding: ActiveProviderBinding,
+        ticket: PendingVaultCleanupTicket,
+        response: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+    AbortLockVaultRoute {
+        binding: ActiveProviderBinding,
+        ticket: PendingVaultCleanupTicket,
+        response: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+    InspectVaultBackend {
+        binding: ActiveProviderBinding,
+        response: std::sync::mpsc::SyncSender<Result<VerifiedVaultBackend, String>>,
+    },
+    ListProtectedVaultCaptures {
+        binding: ActiveProviderBinding,
+        scope: windows_vault_capture_recovery::RecoveryScope,
+        after_capture_id: Option<String>,
+        limit: usize,
+        response: std::sync::mpsc::SyncSender<Result<ProtectedCapturePage, String>>,
+    },
+    SaveProtectedVaultCaptureCopy {
+        binding: ActiveProviderBinding,
+        scope: windows_vault_capture_recovery::RecoveryScope,
+        capture_id: String,
+        destination: PathBuf,
+        response: std::sync::mpsc::SyncSender<
+            Result<windows_vault_capture_recovery::CopyReceipt, String>,
+        >,
+    },
+    CompleteVaultUpload {
+        writable_bytes: bool,
+        binding: ActiveProviderBinding,
+        expected_backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
+        upload: raiun_cloudfiles_windows::FreshVaultUpload,
+        store: Box<dyn raiun_cloudfiles_windows::VaultLocalCompletionStore>,
+        response: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+    VaultCleanupDiagnostics {
+        binding: ActiveProviderBinding,
+        response: std::sync::mpsc::SyncSender<Result<Value, String>>,
+    },
+    VaultLockCleanupStatus {
+        binding: ActiveProviderBinding,
+        space_id: String,
+        root_resource_id: String,
+        root_path: String,
+        response: std::sync::mpsc::SyncSender<Result<bool, String>>,
     },
     InspectConnection {
         binding: ActiveProviderBinding,
@@ -221,6 +684,9 @@ enum ProviderCommand {
         personal_root_resource_id: String,
         backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
         recovery: Arc<dyn raiun_cloudfiles_windows::EditRecoveryProvider>,
+        custody_account: Vec<u8>,
+        custody_store: Arc<dyn SessionStore>,
+        fresh_close_publisher: Option<windows_vault_close_worker::VaultClosePublisher>,
         response: std::sync::mpsc::SyncSender<Result<(), String>>,
     },
     DispatchRecovery {
@@ -246,6 +712,17 @@ enum ProviderCommand {
     HydrateNativeReadFixtureForTest {
         fixture: NativeReadFixturePath,
         response: std::sync::mpsc::SyncSender<Result<i32, String>>,
+    },
+    #[cfg(test)]
+    VaultFilePendingForTest {
+        identity: [u8; 16],
+        response: std::sync::mpsc::SyncSender<Result<bool, String>>,
+    },
+    #[cfg(test)]
+    VaultCleanupFixture {
+        binding: ActiveProviderBinding,
+        forget_receipt: Option<[u8; 16]>,
+        response: std::sync::mpsc::SyncSender<Result<bool, String>>,
     },
     #[cfg(test)]
     CloseObservation(std::sync::mpsc::SyncSender<Result<NativeCloseObservation, String>>),
@@ -293,6 +770,7 @@ enum NativeRestartProbePath {
     ProjectsNativeRead,
     RecoveryDocument,
     RecoveryReadOnlyProbe,
+    VaultCapturedFile,
 }
 
 impl ProviderManager {
@@ -305,8 +783,20 @@ impl ProviderManager {
         let initial_save_activation =
             Arc::new(AtomicBool::new(WINDOWS_INITIAL_SAVE_DISPATCH_ENABLED));
         let worker_initial_save_activation = Arc::clone(&initial_save_activation);
+        #[cfg(all(test, debug_assertions))]
+        let initial_save_test_observation = Arc::new(Mutex::new(None::<String>));
+        #[cfg(all(test, debug_assertions))]
+        let worker_initial_save_test_observation = Arc::clone(&initial_save_test_observation);
         let offline_jobs = Arc::new(windows_offline_jobs::OfflineJobs::default());
         let worker_jobs = Arc::clone(&offline_jobs);
+        let folder_generation = Arc::new(AtomicU64::new(0));
+        let worker_folder_generation = Arc::clone(&folder_generation);
+        let folder_revocation = Arc::new(Mutex::new(None::<raiun_engine::SyncRevocationHandle>));
+        let worker_folder_revocation = Arc::clone(&folder_revocation);
+        let folder_error = Arc::new(Mutex::new(None));
+        let worker_folder_error = Arc::clone(&folder_error);
+        let folder_pause = Arc::new(Mutex::new(None::<FolderPauseSnapshot>));
+        let worker_folder_pause = Arc::clone(&folder_pause);
         let worker = thread::Builder::new()
             .name("raiun-windows-cloud-files".into())
             .spawn(move || {
@@ -314,15 +804,89 @@ impl ProviderManager {
                     None;
                 let mut backend: Option<Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>> =
                     None;
+                let mut vault_custody: Option<Arc<windows_vault_custody::WindowsVaultCustody>> = None;
+                let mut retired_vaults: Vec<Arc<raiun_cloudfiles_windows::vault_routes::VerifiedVaultRoute>> = Vec::new();
                 let mut active_binding: Option<ActiveProviderBinding> = None;
+                let mut last_vault_cleanup_error: Option<raiun_cloudfiles_windows::Error> = None;
+                let mut folders: Option<windows_folder_sync::Runtime> = None;
+                let mut cleanup_holds = windows_vault_cleanup_holds::PendingCleanupHolds::<PendingNativeVaultCleanup>::new();
+                let mut pending_command = None;
                 loop {
-                    let command = match receiver.recv_timeout(Duration::from_millis(250)) {
+                    let command = match pending_command.take().map_or_else(
+                        || receiver.recv_timeout(Duration::from_millis(250)), Ok,
+                    ) {
                         Ok(command) => Some(command),
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     };
+                    // Sweep on every command and the existing bounded idle tick.
+                    cleanup_holds.sweep(Instant::now());
+                    if active_binding.as_ref().is_some_and(|binding| worker_generation.load(Ordering::Acquire) != binding.generation) {
+                        cleanup_holds.clear();
+                    }
+                    let handled_command = command.is_some();
                     if let Some(command) = command {
                     match command {
+                        ProviderCommand::InstallFolders { setup, response } => {
+                            let generation = setup.generation;
+                            let result = (|| {
+                                if worker_generation.load(Ordering::Acquire) != generation { return Err("The account changed before folder setup".into()); }
+                                if folders.as_ref().is_some_and(|runtime| runtime.generation == generation) { return Ok(()); }
+                                let runtime = windows_folder_sync::Runtime::open(*setup, &worker_generation)?;
+                                let (paused, paused_space_ids) = runtime.pause_snapshot()?;
+                                let mut cancellation = worker_folder_revocation.lock().map_err(|_| "Folder cancellation is unavailable")?;
+                                if worker_generation.load(Ordering::Acquire) != generation { return Err("The account changed during folder setup".into()); }
+                                let mut pause_status = worker_folder_pause.lock().map_err(|_| "Folder status unavailable")?;
+                                if let Some(previous) = cancellation.take() { previous.revoke(); }
+                                *cancellation = Some(runtime.revocation_handle());
+                                *pause_status = Some(FolderPauseSnapshot { generation, paused, paused_space_ids });
+                                folders = Some(runtime);
+                                worker_folder_generation.store(generation, Ordering::Release);
+                                Ok(())
+                            })();
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::FolderRequest { generation, request, response } => {
+                            let Some(runtime) = folders.as_mut().filter(|runtime| runtime.generation == generation && worker_generation.load(Ordering::Acquire) == generation) else {
+                                let _ = response.send(Err("The account changed before folder work".into())); continue;
+                            };
+                            if let windows_folder_requests::FolderRequest::Sync { space_id } = request {
+                                match runtime.prepare_sync(space_id.as_deref(), &worker_generation) {
+                                    Ok((revision, pairs)) => {
+                                        // Acceptance is queued work, never a claim of completion.
+                                        let accepted = space_id.as_ref().map_or_else(|| json!({}), |id| json!({"accepted":true,"space_id":id}));
+                                        let _ = response.send(Ok(accepted));
+                                        let result = runtime.run_sync(revision, pairs, &worker_generation);
+                                        if let Ok(mut error) = worker_folder_error.lock() { *error = result.err(); }
+                                    }
+                                    Err(error) => { let _ = response.send(Err(error)); }
+                                }
+                            } else if let windows_folder_requests::FolderRequest::Media(windows_media_requests::MediaRequest::Run { job_id, expected_revision, expected_account_id }) = request {
+                                match runtime.prepare_media_run(&job_id, expected_revision, &expected_account_id, &worker_generation) {
+                                    Ok((revision, job, pin)) => {
+                                        let accepted = json!({"accepted":true,"queued":true,"job_id":job.id.clone(),"revision":job.revision});
+                                        let _ = response.send(Ok(accepted));
+                                        let result = runtime.run_media_job(revision, job, pin, &worker_generation);
+                                        if let Ok(mut error) = worker_folder_error.lock() { *error = result.err(); }
+                                    }
+                                    Err(error) => { let _ = response.send(Err(error)); }
+                                }
+                            } else {
+                                let changes_pause = matches!(&request, windows_folder_requests::FolderRequest::Pause { .. } | windows_folder_requests::FolderRequest::SpacePause { .. });
+                                let result = runtime.handle(request, &worker_generation);
+                                if result.is_ok() && changes_pause {
+                                    // Snapshot publication shares the install/revocation lock.
+                                    if let Ok(_cancellation) = worker_folder_revocation.lock() {
+                                        if worker_generation.load(Ordering::Acquire) == generation && worker_folder_generation.load(Ordering::Acquire) == generation {
+                                            if let Ok(mut snapshot) = worker_folder_pause.lock() {
+                                                *snapshot = runtime.pause_snapshot().ok().map(|(paused, paused_space_ids)| FolderPauseSnapshot { generation, paused, paused_space_ids });
+                                            }
+                                        }
+                                    }
+                                }
+                                let _ = response.send(result);
+                            }
+                        }
                         ProviderCommand::ListOfflineFolders { binding, cursor, cancellation, response } => {
                             let mut result = windows_cache_status::inspect_worker_folder_page(
                                 worker_generation.load(Ordering::Acquire), &binding,
@@ -396,6 +960,15 @@ impl ProviderManager {
                                 });
                             let _ = response.send(result);
                         }
+                        ProviderCommand::DeviceCacheUsage { binding, response } => {
+                            let mut result = windows_cache_status::inspect_worker_device_cache_usage(
+                                worker_generation.load(Ordering::Acquire), &binding,
+                                active_binding.as_ref(), connection.is_some(), backend.as_deref());
+                            if worker_generation.load(Ordering::Acquire) != binding.generation {
+                                result = Err("The account changed during cache inspection".into());
+                            }
+                            let _ = response.send(result);
+                        }
                         ProviderCommand::FileCacheStatus { binding, row, response } => {
                             let mut result = windows_cache_status::inspect_worker_cache_status(
                                 worker_generation.load(Ordering::Acquire), &binding,
@@ -403,6 +976,284 @@ impl ProviderManager {
                             if worker_generation.load(Ordering::Acquire) != binding.generation {
                                 result = Err("The account changed during Windows drive inspection".into());
                             }
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::RefreshVaultParent { binding, space_id, root_resource_id, root_path, response } => {
+                            let mut result = (|| {
+                                if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref())
+                                    || !retired_vaults.is_empty() || vault_custody.is_none()
+                                    || !connection.as_ref().is_some_and(|connection| connection.can_admit_vault_session())
+                                    || backend.as_ref().is_none_or(|backend| backend.is_revoked()) {
+                                    return Err("The Windows drive changed before vault enumeration".to_owned());
+                                }
+                                let backend = backend.as_ref().ok_or("The Windows drive is unavailable")?;
+                                let connection = connection.as_ref().ok_or("The Windows drive is unavailable")?;
+                                backend.refresh_vault_parent_population(connection, binding.identity, &space_id, &root_resource_id, &root_path)
+                                    .map_err(|_| "Could not refresh the verified vault parent".to_owned())
+                            })();
+                            if worker_generation.load(Ordering::Acquire) != binding.generation {
+                                result = Err("The account changed during vault enumeration".into());
+                            }
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::BeginLockVaultRoute { binding, space_id, root_resource_id, root_path, response } => {
+                            let result = (|| {
+                                if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) || connection.is_none() {
+                                    return Err("The Windows drive changed before vault cleanup".to_owned());
+                                }
+                                // Reserve finite hold capacity and reject duplicate scope BEFORE native work.
+                                if !cleanup_holds.has_capacity() || cleanup_holds.any(|hold| hold.binding == binding
+                                    && hold.route.space_id() == space_id && hold.route.root_resource_id() == root_resource_id
+                                    && hold.route.root_path() == root_path) {
+                                    return Err("Vault cleanup is already pending or capacity is unavailable".to_owned());
+                                }
+                                let expected_backend = backend.as_ref().ok_or("The Windows drive is unavailable")?;
+                                let index = match retired_vaults.iter().position(|route| route.space_id() == space_id
+                                    && route.root_resource_id() == root_resource_id && route.root_path() == root_path) {
+                                    Some(index) => index,
+                                    None => {
+                                        let route = expected_backend.retire_vault_route(&space_id, &root_resource_id, &root_path)
+                                            .map_err(|_| "Could not retain this vault for cleanup")?
+                                            .ok_or("This vault has no active route")?;
+                                        retired_vaults.push(route);
+                                        retired_vaults.len() - 1
+                                    }
+                                };
+                                let route = Arc::clone(&retired_vaults[index]);
+                                route.revoke_hydration().map_err(|_| "Vault hydration could not fully drain")?;
+                                let fence = connection.as_ref().ok_or("The Windows drive is unavailable")?
+                                    .begin_cleanup_retired_vault_route(&route).map_err(|error| {
+                                        last_vault_cleanup_error = Some(error);
+                                        "Vault reads stopped, but local cleanup is incomplete; edits and retry state were preserved"
+                                    })?;
+                                if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) {
+                                    return Err("The account changed during vault cleanup".to_owned());
+                                }
+                                cleanup_holds.insert(PendingNativeVaultCleanup { binding, expected_backend: Arc::clone(expected_backend), route, fence }, Instant::now())
+                                    .map_err(|_hold| "Vault cleanup hold capacity is unavailable".to_owned())
+                            })();
+                            // Failed response drops the only ticket weak ref. Release native
+                            // references immediately, retaining the retired route as incomplete.
+                            if let Err(failed) = response.send(result) {
+                                if let Ok(ticket) = failed.0 { cleanup_holds.abort(ticket); }
+                            }
+                        }
+                        ProviderCommand::FinishLockVaultRoute { binding, ticket, response } => {
+                            let result = (|| {
+                                let hold = cleanup_holds.take(ticket, Instant::now()).ok_or("Vault cleanup hold expired or was abandoned")?;
+                                if hold.binding != binding
+                                    || !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref())
+                                    || backend.as_ref().is_none_or(|current| !Arc::ptr_eq(current, &hold.expected_backend))
+                                    || !retired_vaults.iter().any(|route| Arc::ptr_eq(route, &hold.route)) {
+                                    return Err("The Windows drive changed before vault cleanup finished".to_owned());
+                                }
+                                connection.as_ref().ok_or("The Windows drive is unavailable")?
+                                    .finish_vault_cleanup(hold.fence).map_err(|error| {
+                                        last_vault_cleanup_error = Some(error);
+                                        "Vault keys are locked, but local cleanup is incomplete"
+                                    })?;
+                                if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) {
+                                    return Err("The account changed during vault cleanup".to_owned());
+                                }
+                                retired_vaults.retain(|route| !Arc::ptr_eq(route, &hold.route));
+                                Ok(())
+                            })();
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::AbortLockVaultRoute { binding, ticket, response } => {
+                            // Ticket consumption releases holds even on a stale caller binding;
+                            // abort never removes a retired route or reports cleanup complete.
+                            let current = vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref());
+                            let aborted = cleanup_holds.abort(ticket);
+                            let _ = response.send(if current && aborted { Ok(()) } else { Err("Vault cleanup hold is no longer current".to_owned()) });
+                        }
+                        ProviderCommand::InspectVaultBackend { binding, response } => {
+                            let result = if binding.generation == 0
+                                || worker_generation.load(Ordering::Acquire) != binding.generation {
+                                Err("The account changed before Windows drive inspection".to_owned())
+                            } else if connection.is_none() || !retired_vaults.is_empty() {
+                                Err("The Windows drive is not connected".to_owned())
+                            } else if !connection.as_ref().is_some_and(|connection| connection.can_admit_vault_session()) {
+                                Err("The retained drive needs verified vault cleanup before unlock".to_owned())
+                            } else if active_binding.as_ref() == Some(&binding) {
+                                backend.as_ref().filter(|backend| !backend.is_revoked())
+                                    .cloned().ok_or_else(|| "The Windows drive is waiting for confirmed disconnect".to_owned())
+                                    .and_then(|backend| {
+                                        let custody = vault_custody.as_ref().cloned()
+                                            .ok_or("The retained drive has no verified vault history".to_owned())?;
+                                        Ok(VerifiedVaultBackend { backend, custody })
+                                    })
+                            } else {
+                                Err("A different Windows drive connection is already active".to_owned())
+                            };
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::ListProtectedVaultCaptures {
+                            binding,
+                            scope,
+                            after_capture_id,
+                            limit,
+                            response,
+                        } => {
+                            // Read-only history discovery is tied to the current
+                            // root owner. Retired vault cleanup state is not a
+                            // gate here: it grants no authority and does not
+                            // prevent local protected-history inspection.
+                            let result = (|| {
+                                if !vault_worker_binding_current(
+                                    worker_generation.load(Ordering::Acquire),
+                                    &binding,
+                                    active_binding.as_ref(),
+                                ) || connection.is_none()
+                                {
+                                    return Err("The account or Windows drive changed".to_owned());
+                                }
+                                let custody = vault_custody
+                                    .as_ref()
+                                    .ok_or("Protected vault history is unavailable")?;
+                                let owner = backend
+                                    .as_ref()
+                                    .filter(|backend| !backend.is_revoked())
+                                    .ok_or("The connected account root is unavailable")?
+                                    .scope();
+                                let page = windows_vault_capture_recovery::page_from_custody(
+                                    custody,
+                                    owner,
+                                    &scope,
+                                    after_capture_id.as_deref(),
+                                    limit,
+                                )?;
+                                if !vault_worker_binding_current(
+                                    worker_generation.load(Ordering::Acquire),
+                                    &binding,
+                                    active_binding.as_ref(),
+                                ) {
+                                    return Err("The account or Windows drive changed".to_owned());
+                                }
+                                Ok(page)
+                            })();
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::SaveProtectedVaultCaptureCopy {
+                            binding,
+                            scope,
+                            capture_id,
+                            destination,
+                            response,
+                        } => {
+                            let result = (|| {
+                                if !vault_worker_binding_current(
+                                    worker_generation.load(Ordering::Acquire),
+                                    &binding,
+                                    active_binding.as_ref(),
+                                ) || connection.is_none()
+                                {
+                                    return Err("The account or Windows drive changed".to_owned());
+                                }
+                                let custody = vault_custody
+                                    .as_ref()
+                                    .ok_or("Protected vault history is unavailable")?;
+                                let owner = backend
+                                    .as_ref()
+                                    .filter(|backend| !backend.is_revoked())
+                                    .ok_or("The connected account root is unavailable")?
+                                    .scope();
+                                let receipt = windows_vault_capture_recovery::save_copy(
+                                    custody,
+                                    owner,
+                                    &scope,
+                                    &capture_id,
+                                    windows_vault_capture_recovery::SaveCopyDestination {
+                                        root_path: &binding.path,
+                                        root_identity: binding.identity,
+                                        destination: &destination,
+                                    },
+                                    || {
+                                        vault_worker_binding_current(
+                                            worker_generation.load(Ordering::Acquire),
+                                            &binding,
+                                            active_binding.as_ref(),
+                                        ) && connection.is_some()
+                                    },
+                                )?;
+                                if !vault_worker_binding_current(
+                                    worker_generation.load(Ordering::Acquire),
+                                    &binding,
+                                    active_binding.as_ref(),
+                                ) {
+                                    return Err("The account changed; inspect the chosen destination".to_owned());
+                                }
+                                Ok(receipt)
+                            })();
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::CompleteVaultUpload { writable_bytes, binding, expected_backend, upload, mut store, response } => {
+                            // The HTTP caller hands over an owned fresh capability. Only
+                            // this native owner thread may complete the already-live file.
+                            // Storage callbacks perform local protected CAS only; never
+                            // account/coordinator lookup or HTTP under publication fences.
+                            let result = (|| {
+                                if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref())
+                                    || !retired_vaults.is_empty()
+                                    || backend.as_ref().is_none_or(|current| !Arc::ptr_eq(current, &expected_backend) || current.is_revoked())
+                                    || upload.root() != binding.identity
+                                {
+                                    return Err("The Windows drive changed before local save completion".to_owned());
+                                }
+                                let active = connection.as_ref().ok_or("The Windows drive is not connected")?;
+                                let completed = if writable_bytes {
+                                    active.complete_writable_vault_upload(upload, store.as_mut())
+                                } else {
+                                    active.complete_vault_upload(upload, store.as_mut())
+                                };
+                                completed.map_err(|error| {
+                                        #[cfg(all(test, debug_assertions))]
+                                        eprintln!("synthetic_vault_local_completion_refused error={error:?}");
+                                        #[cfg(not(all(test, debug_assertions)))]
+                                        let _ = error;
+                                        "The cloud save is verified, but local completion needs recovery review".to_owned()
+                                    })?;
+                                if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) {
+                                    return Err("The account changed during local save completion".to_owned());
+                                }
+                                Ok(())
+                            })();
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::VaultCleanupDiagnostics { binding, response } => {
+                            let result = if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) {
+                                Err("The Windows drive changed before support inspection".to_owned())
+                            } else if let Some(active) = connection.as_ref() {
+                                let observation = active.vault_cleanup_diagnostics();
+                                Ok(json!({
+                                    "modified_closes": observation.modified_closes,
+                                    "unverifiable_closes": observation.unverifiable_closes,
+                                    "journaled_closes": observation.journaled_closes,
+                                    "close_callbacks": observation.close_callbacks,
+                                    "close_pool_refusals": observation.close_pool_refusals,
+                                    "deleted_closes": observation.deleted_closes,
+                                    "last_close_stage": observation.last_close_stage,
+                                    "last_close_hresult": observation.last_close_hresult,
+                                    "inventory_complete": observation.inventory_complete,
+                                    "last_cleanup_error": last_vault_cleanup_error.map(|error| format!("{error:?}")),
+                                }))
+                            } else { Err("The Windows drive is not connected".to_owned()) };
+                            let result = if worker_generation.load(Ordering::Acquire) == binding.generation { result }
+                                else { Err("The Windows drive changed during support inspection".to_owned()) };
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::VaultLockCleanupStatus { binding, space_id, root_resource_id, root_path, response } => {
+                            let result = if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) || connection.is_none() {
+                                Err("The Windows drive changed before cleanup inspection".to_owned())
+                            } else {
+                                // Absence is unknown, never proof of complete cleanup.
+                                connection.as_ref().ok_or_else(|| "The Windows drive is unavailable".to_owned()).and_then(|active| {
+                                    let footprint = active.writable_vault_cleanup_incomplete().map_err(|_| "Current vault cleanup status is unavailable".to_owned())?;
+                                    Ok(footprint || retired_vaults.iter().any(|route| route.space_id() == space_id && route.root_resource_id() == root_resource_id && route.root_path() == root_path))
+                                })
+                            };
+                            let result = if worker_generation.load(Ordering::Acquire) == binding.generation { result }
+                                else { Err("The Windows drive changed during cleanup inspection".to_owned()) };
                             let _ = response.send(result);
                         }
                         ProviderCommand::InspectConnection { binding, response } => {
@@ -430,6 +1281,9 @@ impl ProviderManager {
                             personal_root_resource_id,
                             backend: next_backend,
                             recovery,
+                            custody_account,
+                            custody_store,
+                            fresh_close_publisher,
                             response,
                         } => {
                             let candidate_binding = ActiveProviderBinding {
@@ -464,6 +1318,21 @@ impl ProviderManager {
                                             &personal_root_resource_id,
                                         )
                                         .map_err(|_| "The verified Personal/Spaces namespace changed before connection".to_owned())?;
+                                    // Missing/corrupt historical metadata must never be initialized
+                                    // as empty. Ordinary drive connectivity remains independent;
+                                    // vault unlock requires a successfully prepared service below.
+                                    let custody = raiun_cloudfiles_windows::prepare_vault_custody_root(
+                                        &lease, next_backend.as_ref(), composite_root_identity,
+                                    ).ok().and_then(|context| {
+                                        match fresh_close_publisher {
+                                            Some(publisher) => windows_vault_custody::WindowsVaultCustody::prepare_with_fresh_close_publisher(
+                                                custody_store, &custody_account, &context, Some(publisher),
+                                            ),
+                                            None => windows_vault_custody::WindowsVaultCustody::prepare(
+                                                custody_store, &custody_account, &context,
+                                            ),
+                                        }.ok()
+                                    });
                                     let prepared = raiun_cloudfiles_windows::prepare_configured_root_runtime(
                                         lease,
                                         Arc::clone(&next_backend),
@@ -471,20 +1340,28 @@ impl ProviderManager {
                                         recovery,
                                     )
                                     .map_err(|_| "Durable recovery checks failed; the Windows drive was not connected".to_owned())?;
+                                    let prepared = if let Some(history) = custody.as_ref() {
+                                        raiun_cloudfiles_windows::attach_vault_published_history(
+                                            prepared, Arc::clone(history) as Arc<dyn raiun_cloudfiles_windows::vault_custody::VaultPublishedHistorySource>,
+                                        ).map_err(|_| "Could not bind protected vault history".to_owned())?
+                                    } else { prepared };
                                     raiun_cloudfiles_windows::connect_configured_root(prepared)
+                                        .map(|active| (active, custody))
                                         .map_err(|_| "Could not connect the Windows Cloud Files drive".to_owned())
                                 });
                                 match lease {
-                                    Ok(active)
+                                    Ok((active, custody))
                                         if worker_generation.load(Ordering::Acquire) == generation =>
                                     {
+                                        last_vault_cleanup_error = None;
                                         active_binding = Some(candidate_binding.clone());
+                                        vault_custody = custody;
                                         connection = Some(active);
                                         backend = Some(next_backend);
                                         worker_connected.store(true, Ordering::Release);
                                         Ok(())
                                     }
-                                    Ok(mut active) => {
+                                    Ok((mut active, _custody)) => {
                                         next_backend.revoke();
                                         if active.disconnect_in_place().is_err() {
                                             connection = Some(active);
@@ -536,6 +1413,7 @@ impl ProviderManager {
                         }
                         #[cfg(all(test, debug_assertions))]
                         ProviderCommand::RevokeBackendForTest(response) => {
+                            cleanup_holds.clear();
                             let result = backend.as_ref().map(|backend| backend.revoke())
                                 .ok_or_else(|| "No active backend to revoke".to_owned());
                             let _ = response.send(result);
@@ -571,6 +1449,13 @@ impl ProviderManager {
                             let _ = response.send(result);
                         }
                         #[cfg(test)]
+                        ProviderCommand::VaultFilePendingForTest { identity, response } => {
+                            let result = connection.as_ref().ok_or_else(|| "Windows Cloud Files connection is not active".to_owned())
+                                .and_then(|active| active.vault_file_pending_for_test(&identity)
+                                    .map_err(|_| "Vault file pending state is unavailable".to_owned()));
+                            let _ = response.send(result);
+                        }
+                        #[cfg(test)]
                         ProviderCommand::ReadOnlyPlaceholderObservation { path, response } => {
                             let result = connection
                                 .as_ref()
@@ -588,6 +1473,9 @@ impl ProviderManager {
                                         }
                                         NativeRestartProbePath::RecoveryReadOnlyProbe => {
                                             &["Spaces", "Projects", "RecoveryRoot", "read-probe.bin"][..]
+                                        }
+                                        NativeRestartProbePath::VaultCapturedFile => {
+                                            &["Personal", "Travel.vault", "1"][..]
                                         }
                                     };
                                     (
@@ -621,6 +1509,24 @@ impl ProviderManager {
                             let _ = response.send(result);
                         }
                         #[cfg(test)]
+                        ProviderCommand::VaultCleanupFixture { binding, forget_receipt, response } => {
+                            let result = (|| {
+                                if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) {
+                                    return Err("The Windows drive changed before the synthetic cleanup observation".to_owned());
+                                }
+                                let active = connection.as_ref().ok_or("The Windows drive is not connected")?;
+                                if let Some(identity) = forget_receipt {
+                                    active.forget_writable_cleanup_receipt_for_integration(identity)
+                                        .map_err(|_| "Could not drop the matching volatile synthetic receipt".to_owned())?;
+                                    Ok(false)
+                                } else {
+                                    active.placeholder_on_disk_empty_for_integration(&["Personal", "Travel.vault", "1"])
+                                        .map_err(|_| "Could not inspect synthetic native on-disk ranges".to_owned())
+                                }
+                            })();
+                            let _ = response.send(result);
+                        }
+                        #[cfg(test)]
                         ProviderCommand::CloseObservation(response) => {
                             let result = connection
                                 .as_ref()
@@ -629,59 +1535,134 @@ impl ProviderManager {
                             let _ = response.send(result);
                         }
                         ProviderCommand::Disconnect(response) => {
+                            cleanup_holds.clear();
+                            if let Ok(mut handle) = worker_folder_revocation.lock() { if let Some(handle) = handle.take() { handle.revoke(); } }
+                            drop(folders.take());
+                            worker_folder_generation.store(0, Ordering::Release);
+                            if let Ok(mut snapshot) = worker_folder_pause.lock() { *snapshot = None; }
+                            if let Ok(mut error) = worker_folder_error.lock() { *error = None; }
                             worker_jobs.cancel_all();
                             let result = disconnect_provider_connection(
+                                &mut retired_vaults,
                                 &mut connection,
                                 &mut backend,
                                 &worker_connected,
                             );
                             if connection.is_none() {
                                 active_binding = None;
+                                vault_custody = None;
                             }
                             let _ = response.send(result);
                         }
                         ProviderCommand::Stop(response) => {
+                            cleanup_holds.clear();
+                            if let Ok(mut handle) = worker_folder_revocation.lock() { if let Some(handle) = handle.take() { handle.revoke(); } }
+                            drop(folders.take());
+                            worker_folder_generation.store(0, Ordering::Release);
+                            if let Ok(mut snapshot) = worker_folder_pause.lock() { *snapshot = None; }
+                            if let Ok(mut error) = worker_folder_error.lock() { *error = None; }
                             worker_jobs.cancel_all();
                             let result = disconnect_provider_connection(
+                                &mut retired_vaults,
                                 &mut connection,
                                 &mut backend,
                                 &worker_connected,
                             );
+                            let stopped = result.is_ok();
                             let _ = response.send(result);
-                            break;
+                            if stopped { break; }
                         }
                     }
                     }
+                    let mut dispatched_initial = false;
                     if worker_initial_save_activation.load(Ordering::Acquire) {
-                        // One fresh receipt per iteration; commands retain
-                        // priority. Any failure leaves the immutable recovery
-                        // body available and never schedules a recovered scan.
-                        let _ = dispatch_one_initial_edit(connection.as_ref(), backend.as_ref(),
-                            active_binding.as_ref(), &worker_generation);
+                        // Fresh initial-save work retains priority; never scan recovery here.
+                        let result = dispatch_one_initial_edit(
+                            connection.as_ref(), backend.as_ref(), active_binding.as_ref(),
+                            &worker_generation);
+                        dispatched_initial = !matches!(&result, Ok(None));
+                        #[cfg(all(test, debug_assertions))]
+                        if dispatched_initial {
+                            if let Ok(mut observation) = worker_initial_save_test_observation.lock() {
+                                *observation = Some(match &result {
+                                    Err(message) => format!("error: {message}"),
+                                    Ok(Some(raiun_cloudfiles_windows::ReconciliationOutcome::VerifiedApplied { .. })) => "verified_applied".into(),
+                                    Ok(Some(raiun_cloudfiles_windows::ReconciliationOutcome::Conflict(_))) => "conflict".into(),
+                                    Ok(Some(raiun_cloudfiles_windows::ReconciliationOutcome::Ambiguous)) => "ambiguous".into(),
+                                    Ok(Some(raiun_cloudfiles_windows::ReconciliationOutcome::Deferred)) => "deferred".into(),
+                                    Ok(None) => unreachable!("empty dispatch is not observed"),
+                                });
+                            }
+                        }
+                    }
+                    if !handled_command && !dispatched_initial {
+                        // Pick up commands arriving during initial-save inspection first.
+                        match receiver.try_recv() {
+                            Ok(command) => { pending_command = Some(command); continue; }
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                        }
+                        if let Some(runtime) = folders.as_mut() {
+                            // A read-only metadata request may install this worker.
+                            // Disabled features must also suppress background work.
+                            let ordinary = if WINDOWS_FOLDER_SYNC_ENABLED {
+                                runtime.periodic_tick(&worker_generation)
+                            } else {
+                                None
+                            };
+                            if let Some(result) = ordinary {
+                                if let Ok(mut error) = worker_folder_error.lock() { *error = result.err(); }
+                            } else if WINDOWS_MEDIA_METADATA_ENABLED {
+                                if let Some(result) = runtime.periodic_media_tick(&worker_generation) {
+                                    if let Ok(mut error) = worker_folder_error.lock() { *error = result.err(); }
+                                }
+                            }
+                        }
                     }
                 }
+                cleanup_holds.clear();
                 worker_jobs.cancel_all();
-                let _ = disconnect_provider_connection(
+                if disconnect_provider_connection(
+                    &mut retired_vaults,
                     &mut connection,
                     &mut backend,
                     &worker_connected,
-                );
+                ).is_err() {
+                    // The command owner is gone, so no retry can be serviced.
+                    // Preserve native callback/root ownership until process exit
+                    // rather than dropping it after failed cleanup. Bindings
+                    // have been revoked; this never reports a successful lock.
+                    if let Some(active) = connection.take() { std::mem::forget(active); }
+                    if let Some(active) = backend.take() { std::mem::forget(active); }
+                    std::mem::forget(retired_vaults);
+                }
             })
             .expect("start Windows Cloud Files ownership thread");
         Self {
+            proxy: windows_proxy::Service::default(),
+            bandwidth: windows_bandwidth::Service::default(),
             commands,
             connected,
             authorized_generation,
+            folder_generation,
+            folder_revocation,
+            folder_error,
+            folder_pause,
             offline_jobs,
             recovery_cursor_nonce: {
                 let mut nonce = [0; 32];
                 getrandom::fill(&mut nonce).ok().map(|_| nonce)
             },
             worker: Mutex::new(Some(worker)),
+            fresh_close_source: Mutex::new(None),
+            existing_save_owner: Mutex::new(Weak::new()),
+            existing_save_admission: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions))]
             lifecycle_test_activation: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions))]
             initial_save_test_activation: initial_save_activation,
+            #[cfg(all(test, debug_assertions))]
+            initial_save_test_observation,
         }
     }
 
@@ -697,7 +1678,15 @@ impl ProviderManager {
         personal_root_resource_id: String,
         backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
         recovery: Arc<dyn raiun_cloudfiles_windows::EditRecoveryProvider>,
+        custody_account: Vec<u8>,
+        custody_store: Arc<dyn SessionStore>,
     ) -> Result<(), String> {
+        let fresh_close_publisher = self
+            .fresh_close_source
+            .lock()
+            .map_err(|_| "Fresh vault close publication is unavailable")?
+            .as_ref()
+            .and_then(|source| source.publisher(generation));
         let (response, result) = std::sync::mpsc::sync_channel(1);
         self.commands
             .send(ProviderCommand::Connect {
@@ -709,12 +1698,259 @@ impl ProviderManager {
                 personal_root_resource_id,
                 backend,
                 recovery,
+                custody_account,
+                custody_store,
+                fresh_close_publisher,
                 response,
             })
             .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
         result
             .recv()
             .map_err(|_| "Windows Cloud Files connection manager stopped unexpectedly")?
+    }
+
+    fn refresh_vault_parent(
+        &self,
+        binding: ActiveProviderBinding,
+        space_id: String,
+        root_resource_id: String,
+        root_path: String,
+    ) -> Result<(), String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::RefreshVaultParent {
+                binding,
+                space_id,
+                root_resource_id,
+                root_path,
+                response,
+            })
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result
+            .recv()
+            .map_err(|_| "Windows Cloud Files connection manager stopped")?
+    }
+
+    fn begin_lock_vault_route(
+        &self,
+        binding: ActiveProviderBinding,
+        space_id: String,
+        root_resource_id: String,
+        root_path: String,
+    ) -> Result<PendingVaultCleanupTicket, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::BeginLockVaultRoute {
+                binding,
+                space_id,
+                root_resource_id,
+                root_path,
+                response,
+            })
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result
+            .recv()
+            .map_err(|_| "Windows Cloud Files connection manager stopped")?
+    }
+
+    fn finish_lock_vault_route(
+        &self,
+        binding: ActiveProviderBinding,
+        ticket: PendingVaultCleanupTicket,
+    ) -> Result<(), String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::FinishLockVaultRoute {
+                binding,
+                ticket,
+                response,
+            })
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result
+            .recv()
+            .map_err(|_| "Windows Cloud Files connection manager stopped")?
+    }
+
+    fn abort_lock_vault_route(
+        &self,
+        binding: ActiveProviderBinding,
+        ticket: PendingVaultCleanupTicket,
+    ) -> Result<(), String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::AbortLockVaultRoute {
+                binding,
+                ticket,
+                response,
+            })
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result
+            .recv()
+            .map_err(|_| "Windows Cloud Files connection manager stopped")?
+    }
+
+    #[cfg(test)]
+    fn vault_cleanup_fixture(
+        &self,
+        binding: ActiveProviderBinding,
+        forget_receipt: Option<[u8; 16]>,
+    ) -> Result<bool, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::VaultCleanupFixture {
+                binding,
+                forget_receipt,
+                response,
+            })
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "Synthetic cleanup observation timed out")?
+    }
+
+    fn verified_vault_backend(
+        &self,
+        binding: ActiveProviderBinding,
+    ) -> Result<VerifiedVaultBackend, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::InspectVaultBackend { binding, response })
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result
+            .recv()
+            .map_err(|_| "Windows Cloud Files connection manager stopped unexpectedly")?
+    }
+
+    fn list_protected_vault_captures(
+        &self,
+        binding: ActiveProviderBinding,
+        scope: windows_vault_capture_recovery::RecoveryScope,
+        after_capture_id: Option<String>,
+        limit: usize,
+    ) -> Result<ProtectedCapturePage, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::ListProtectedVaultCaptures {
+                binding,
+                scope,
+                after_capture_id,
+                limit,
+                response,
+            })
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|_| "Protected vault history did not respond within its bound".to_owned())?
+    }
+
+    fn save_protected_vault_capture_copy(
+        &self,
+        binding: ActiveProviderBinding,
+        scope: windows_vault_capture_recovery::RecoveryScope,
+        capture_id: String,
+        destination: PathBuf,
+    ) -> Result<windows_vault_capture_recovery::CopyReceipt, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::SaveProtectedVaultCaptureCopy {
+                binding,
+                scope,
+                capture_id,
+                destination,
+                response,
+            })
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result.recv_timeout(Duration::from_secs(30)).map_err(|_| {
+            "Save Copy did not respond within its bound; inspect the chosen destination".to_owned()
+        })?
+    }
+
+    fn complete_vault_upload(
+        &self,
+        binding: ActiveProviderBinding,
+        expected_backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
+        upload: raiun_cloudfiles_windows::FreshVaultUpload,
+        store: Box<dyn raiun_cloudfiles_windows::VaultLocalCompletionStore>,
+    ) -> Result<(), String> {
+        self.complete_vault_upload_mode(binding, expected_backend, upload, store, false)
+    }
+
+    fn complete_writable_vault_upload(
+        &self,
+        binding: ActiveProviderBinding,
+        expected_backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
+        upload: raiun_cloudfiles_windows::FreshVaultUpload,
+        store: Box<dyn raiun_cloudfiles_windows::VaultLocalCompletionStore>,
+    ) -> Result<(), String> {
+        self.complete_vault_upload_mode(binding, expected_backend, upload, store, true)
+    }
+
+    fn complete_vault_upload_mode(
+        &self,
+        binding: ActiveProviderBinding,
+        expected_backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
+        upload: raiun_cloudfiles_windows::FreshVaultUpload,
+        store: Box<dyn raiun_cloudfiles_windows::VaultLocalCompletionStore>,
+        writable_bytes: bool,
+    ) -> Result<(), String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::CompleteVaultUpload {
+                writable_bytes,
+                binding,
+                expected_backend,
+                upload,
+                store,
+                response,
+            })
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result
+            .recv()
+            .map_err(|_| "Windows Cloud Files connection manager stopped during save completion")?
+    }
+
+    #[cfg(test)]
+    fn vault_file_pending_for_test(&self, identity: [u8; 16]) -> Result<bool, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::VaultFilePendingForTest { identity, response })
+            .map_err(|_| "Windows provider manager is unavailable")?;
+        result
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "Vault pending inspection did not complete within its bound".to_owned())?
+    }
+
+    fn vault_cleanup_diagnostics(&self, binding: ActiveProviderBinding) -> Result<Value, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .try_send(ProviderCommand::VaultCleanupDiagnostics { binding, response })
+            .map_err(|_| "Windows support inspection is unavailable")?;
+        result
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Windows support inspection was unavailable within its bound".to_owned())?
+    }
+
+    // true = exact pending cleanup; false = unknown, never complete.
+    fn vault_lock_cleanup_status(
+        &self,
+        binding: ActiveProviderBinding,
+        space_id: String,
+        root_resource_id: String,
+        root_path: String,
+    ) -> Result<bool, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .try_send(ProviderCommand::VaultLockCleanupStatus {
+                binding,
+                space_id,
+                root_resource_id,
+                root_path,
+                response,
+            })
+            .map_err(|_| "Windows cleanup inspection is unavailable")?;
+        result
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Windows cleanup inspection was unavailable within its bound".to_owned())?
     }
 
     fn connection_matches(&self, binding: ActiveProviderBinding) -> Result<bool, String> {
@@ -727,7 +1963,188 @@ impl ProviderManager {
             .map_err(|_| "Windows Cloud Files connection manager stopped unexpectedly")?
     }
 
+    fn existing_vault_save_worker_marker(
+        &self,
+        binding: &ActiveProviderBinding,
+    ) -> Result<Option<Arc<AtomicBool>>, String> {
+        if !self.connection_matches(binding.clone())? {
+            return Ok(None);
+        }
+        let marker = self
+            .fresh_close_source
+            .lock()
+            .map_err(|_| "Existing-file save admission unavailable")?
+            .as_ref()
+            .and_then(|source| source.marker(binding));
+        if self.authorized_generation.load(Ordering::Acquire) != binding.generation
+            || !self.connection_matches(binding.clone())?
+        {
+            return Ok(None);
+        }
+        Ok(marker.filter(|active| active.load(Ordering::Acquire)))
+    }
+
+    fn prepare_existing_file_save_worker(
+        self: &Arc<Self>,
+        binding: &ActiveProviderBinding,
+        state: &Arc<Mutex<AccountState>>,
+        store: &Arc<dyn SessionStore>,
+        connection_current: bool,
+    ) -> Result<Option<ExistingSaveWorkerAdmission>, String> {
+        let owner = self
+            .existing_save_owner
+            .lock()
+            .map_err(|_| "Existing-file save owner unavailable")?
+            .upgrade();
+        let Some(owner) = owner else {
+            return Ok(None);
+        };
+        if !Arc::ptr_eq(&owner.provider, self)
+            || !Arc::ptr_eq(&owner.state, state)
+            || !Arc::ptr_eq(&owner.session_store, store)
+        {
+            return Err("Existing-file save owner does not match this drive".into());
+        }
+        self.existing_save_admission
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "Existing-file save admission is already in progress")?;
+        let mut admission = ExistingSaveWorkerAdmission {
+            owner: Arc::clone(&owner),
+            binding: binding.clone(),
+            original_active: None,
+            connection_current: false,
+            committed: false,
+        };
+        let existing = self
+            .fresh_close_source
+            .lock()
+            .map_err(|_| "Existing-file save admission unavailable")?
+            .as_ref()
+            .and_then(|source| source.marker(binding));
+        admission.original_active = existing.clone();
+        owner.check_existing_file_save_account(binding)?;
+        if connection_current && let Some(active) = existing {
+            admission.original_active = Some(active);
+            admission.connection_current = true;
+            return Ok(Some(admission));
+        }
+        // Cancel first, take ownership, then join with no source/worker/auth/
+        // provider mutex held. The consumer keeps its ORIGINAL active Arc.
+        owner.stop_fresh_close_worker()?;
+        admission.original_active = None;
+        if self.connected.load(Ordering::Acquire) {
+            // Any retained old native connection must drain before a fresh
+            // source is installed; an exact-binding mismatch is not absence.
+            self.disconnect()?;
+        }
+        owner.check_existing_file_save_account(binding)?;
+        let worker = windows_vault_close_worker::FreshCloseWorker::start_for_existing_file_saves(
+            Arc::downgrade(&owner),
+            Arc::clone(&self.authorized_generation),
+            binding.generation,
+        )?;
+        let source = worker.source();
+        let active = source
+            .existing_file_save_marker(binding.generation)
+            .ok_or("Existing-file save worker changed during admission")?;
+        owner.check_existing_file_save_account(binding)?;
+        {
+            let mut slot = owner
+                .fresh_close_worker
+                .lock()
+                .map_err(|_| "Existing-file save worker unavailable")?;
+            let mut publication = self
+                .fresh_close_source
+                .lock()
+                .map_err(|_| "Existing-file save source unavailable")?;
+            if slot.is_some()
+                || publication.is_some()
+                || self.connected.load(Ordering::Acquire)
+                || self.authorized_generation.load(Ordering::Acquire) != binding.generation
+                || !active.load(Ordering::Acquire)
+            {
+                return Err("The drive changed during existing-file save admission".into());
+            }
+            *publication = Some(FreshClosePublication {
+                source,
+                binding: Some(binding.clone()),
+                original_active: Some(Arc::clone(&active)),
+            });
+            *slot = Some(worker);
+        }
+        admission.original_active = Some(active);
+        Ok(Some(admission))
+    }
+
+    fn cancel_fresh_close(&self) {
+        let source = self
+            .fresh_close_source
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(source) = source {
+            source.cancel();
+        }
+    }
+
+    fn revoke_folders(&self) {
+        // Serialize cancellation publication with InstallFolders. No database
+        // owner or token lock crosses threads or is held through networking.
+        if let Ok(mut handle) = self.folder_revocation.lock() {
+            if let Some(handle) = handle.take() {
+                handle.revoke();
+            }
+        }
+        self.folder_generation.store(0, Ordering::Release);
+        if let Ok(mut snapshot) = self.folder_pause.lock() {
+            *snapshot = None;
+        }
+    }
+
+    fn pause_snapshot(&self, generation: u64, online: bool) -> Option<FolderPauseSnapshot> {
+        self.folder_pause
+            .lock()
+            .ok()
+            .and_then(|snapshot| snapshot.clone())
+            .filter(|snapshot| {
+                online
+                    && snapshot.generation == generation
+                    && self.authorized_generation.load(Ordering::Acquire) == generation
+                    && self.folder_generation.load(Ordering::Acquire) == generation
+            })
+    }
+
+    fn install_folders(&self, setup: windows_folder_sync::Setup) -> Result<(), String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::InstallFolders {
+                setup: Box::new(setup),
+                response,
+            })
+            .map_err(|_| "Windows folder worker is unavailable")?;
+        result.recv().map_err(|_| "Windows folder worker stopped")?
+    }
+
+    fn folder_request(
+        &self,
+        generation: u64,
+        request: windows_folder_requests::FolderRequest,
+    ) -> Result<Value, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::FolderRequest {
+                generation,
+                request,
+                response,
+            })
+            .map_err(|_| "Windows folder worker is unavailable")?;
+        result.recv().map_err(|_| "Windows folder worker stopped")?
+    }
+
     fn disconnect(&self) -> Result<(), String> {
+        self.cancel_fresh_close();
+        self.bandwidth.suspend();
+        self.revoke_folders();
         let (response, result) = std::sync::mpsc::sync_channel(1);
         self.commands
             .send(ProviderCommand::Disconnect(response))
@@ -822,6 +2239,17 @@ impl ProviderManager {
             .map_err(|_| "Windows Cloud Files connection manager stopped unexpectedly")?
     }
 
+    #[cfg(test)]
+    fn close_failure_observation(&self) -> Result<NativeCloseObservation, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::CloseObservation(response))
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result
+            .recv_timeout(Duration::from_millis(250))
+            .map_err(|_| "Close callback diagnostic unavailable within its bound".to_owned())?
+    }
+
     fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Acquire)
     }
@@ -834,6 +2262,21 @@ impl ProviderManager {
     }
 
     fn authorize_generation(&self, generation: u64) {
+        self.cancel_fresh_close();
+        self.bandwidth.authorize_generation(generation);
+        // InstallFolders checks/publishes under this same lock. Revocation and
+        // the generation change must be atomic against that publication.
+        let mut handle = self
+            .folder_revocation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(handle) = handle.take() {
+            handle.revoke();
+        }
+        self.folder_generation.store(0, Ordering::Release);
+        if let Ok(mut snapshot) = self.folder_pause.lock() {
+            *snapshot = None;
+        }
         self.offline_jobs
             .cancel_and_authorize(&self.authorized_generation, generation);
     }
@@ -907,12 +2350,41 @@ impl ProviderManager {
 }
 
 fn disconnect_provider_connection(
+    retired_vaults: &mut Vec<Arc<raiun_cloudfiles_windows::vault_routes::VerifiedVaultRoute>>,
     connection: &mut Option<raiun_cloudfiles_windows::ConfiguredRootConnection>,
     backend: &mut Option<Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>>,
     connected: &AtomicBool,
 ) -> Result<(), String> {
     if let Some(active_backend) = backend.as_ref() {
+        // Retain every route before revocation can fail. Native cleanup must
+        // never lose the catalogue that owns previously published plaintext.
+        retired_vaults.extend(
+            active_backend
+                .retire_vault_routes()
+                .map_err(|_| "Could not retain vault cleanup state")?,
+        );
         active_backend.revoke();
+    }
+    if !retired_vaults.is_empty() {
+        // Revoke ALL routes before any fallible cleanup. A failure in the first
+        // file must not leave another route's prepared objects able to publish.
+        let mut revoke_failed = false;
+        for route in retired_vaults.iter() {
+            revoke_failed |= route.revoke_hydration().is_err();
+        }
+        if revoke_failed {
+            return Err(
+                "Vault hydration was revoked incompletely; retry state was preserved".into(),
+            );
+        }
+        let active = connection
+            .as_ref()
+            .ok_or("Vault cleanup needs its retained Windows drive")?;
+        for route in retired_vaults.iter() {
+            active.cleanup_retired_vault_route(route)
+                .map_err(|_| "Vault hydration was revoked, but local cleanup is incomplete; edits and retry state were preserved")?;
+        }
+        retired_vaults.clear();
     }
     let Some(active_connection) = connection.as_mut() else {
         connected.store(false, Ordering::Release);
@@ -938,33 +2410,282 @@ fn disconnect_provider_connection(
 
 impl Drop for ProviderManager {
     fn drop(&mut self) {
+        self.cancel_fresh_close();
+        self.bandwidth.suspend();
+        self.revoke_folders();
         let (response, result) = std::sync::mpsc::sync_channel(1);
-        let _ = self.commands.send(ProviderCommand::Stop(response));
-        let _ = result.recv();
+        let sent = self.commands.send(ProviderCommand::Stop(response)).is_ok();
+        let stopped = sent && matches!(result.recv(), Ok(Ok(())));
+        // Taking the handle still detaches on refusal; dropping commands next
+        // closes the channel so the worker preserves failed cleanup ownership.
         if let Ok(mut worker) = self.worker.lock()
             && let Some(worker) = worker.take()
+            && stopped
         {
             let _ = worker.join();
         }
     }
 }
 
+fn valid_runtime_profile(profile: &str) -> bool {
+    profile == "default"
+        || profile.strip_prefix("profile-").is_some_and(|suffix| {
+            suffix.len() == 32
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+}
+
 impl WindowsAgent {
+    fn attach_existing_file_save_owner(self: &Arc<Self>) -> Result<(), String> {
+        let mut owner = self
+            .provider
+            .existing_save_owner
+            .lock()
+            .map_err(|_| "Existing-file save owner unavailable")?;
+        if let Some(current) = owner.upgrade()
+            && !Arc::ptr_eq(&current, self)
+        {
+            return Err("A different existing-file save owner is attached".into());
+        }
+        *owner = Arc::downgrade(self);
+        Ok(())
+    }
+
+    fn check_existing_file_save_account(
+        &self,
+        binding: &ActiveProviderBinding,
+    ) -> Result<(), String> {
+        let state = self.state.lock().map_err(|_| "Account state unavailable")?;
+        let configuration = state
+            .root_configuration
+            .as_ref()
+            .ok_or("Choose a drive before enabling existing-file saves")?;
+        let session = state
+            .session
+            .as_ref()
+            .ok_or("Connect the account before enabling existing-file saves")?;
+        let owner = configuration
+            .registration_ownership
+            .as_ref()
+            .ok_or("The drive owner is unverified")?;
+        if !state.online_authenticated
+            || state.authenticating
+            || state.refreshing
+            || state.logout_pending
+            || state.needs_refresh
+            || state.session_cleanup_uncertain
+            || binding.generation == 0
+            || self.generation.load(Ordering::Acquire) != binding.generation
+            || session.expires_at <= unix_time_now().saturating_add(30)
+            || state.active_generation != binding.generation
+            || self.provider.authorized_generation.load(Ordering::Acquire) != binding.generation
+            || !configuration.valid
+            || configuration.profile_scope != self.profile_scope
+            || configuration.server != session.server
+            || configuration.client_id != session.client_id
+            || Path::new(&configuration.path) != binding.path.as_path()
+            || configuration.volume_serial != binding.identity.volume_serial
+            || configuration.file_index != binding.identity.file_index
+            || owner.personal_drive_id != binding.personal_space_id
+            || owner.personal_root_resource_id.as_deref()
+                != Some(binding.personal_root_resource_id.as_str())
+        {
+            return Err("The account or root changed before existing-file save admission".into());
+        }
+        Ok(())
+    }
+
+    fn abort_existing_file_save_admission(
+        &self,
+        binding: &ActiveProviderBinding,
+        active: &Arc<AtomicBool>,
+    ) {
+        let worker = {
+            let mut slot = self
+                .fresh_close_worker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut source = self
+                .provider
+                .fresh_close_source
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let exact_source = source.as_ref().is_some_and(|source| {
+                source.binding.as_ref() == Some(binding)
+                    && source
+                        .original_active
+                        .as_ref()
+                        .is_some_and(|original| Arc::ptr_eq(original, active))
+            });
+            let cancelled_exact_worker = source.is_none()
+                && slot.as_ref().is_some_and(|worker| {
+                    worker.owns_existing_file_save_marker(binding.generation, active)
+                });
+            if exact_source || cancelled_exact_worker {
+                active.store(false, Ordering::Release);
+                if let Some(source) = source.take() {
+                    source.cancel();
+                }
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some(worker) = worker {
+            let _ = worker.stop();
+        }
+    }
+
+    // Not present in normal production activation or IPC/configuration. Call
+    // after authenticating the fixture's generation and before provider install.
+    #[cfg(all(test, debug_assertions))]
+    fn start_fresh_close_worker_for_test(self: &Arc<Self>) -> Result<(), String> {
+        let mut slot = self
+            .fresh_close_worker
+            .lock()
+            .map_err(|_| "Fresh vault close worker ownership is unavailable")?;
+        if slot.is_some() {
+            return Err("Fresh vault close worker is already owned".into());
+        }
+        let mut source = self
+            .provider
+            .fresh_close_source
+            .lock()
+            .map_err(|_| "Fresh vault close publication is unavailable")?;
+        if source.is_some() || self.provider.connected.load(Ordering::Acquire) {
+            return Err("Start fresh vault close publication before provider installation".into());
+        }
+        let worker = windows_vault_close_worker::FreshCloseWorker::start(
+            Arc::downgrade(self),
+            Arc::clone(&self.provider.authorized_generation),
+        )?;
+        *source = Some(FreshClosePublication::private(worker.source()));
+        *slot = Some(worker);
+        Ok(())
+    }
+
+    // Not present in normal production activation or IPC/configuration. Call
+    // after authenticating the fixture's generation and before provider install.
+    #[cfg(all(test, debug_assertions))]
+    fn start_fresh_close_worker_with_writable_completion_for_test(
+        self: &Arc<Self>,
+    ) -> Result<(), String> {
+        let mut slot = self
+            .fresh_close_worker
+            .lock()
+            .map_err(|_| "Fresh vault close worker ownership is unavailable")?;
+        if slot.is_some() {
+            return Err("Fresh vault close worker is already owned".into());
+        }
+        let mut source = self
+            .provider
+            .fresh_close_source
+            .lock()
+            .map_err(|_| "Fresh vault close publication is unavailable")?;
+        if source.is_some() || self.provider.connected.load(Ordering::Acquire) {
+            return Err("Start fresh vault close publication before provider installation".into());
+        }
+        let worker =
+            windows_vault_close_worker::FreshCloseWorker::start_with_writable_completion_for_test(
+                Arc::downgrade(self),
+                Arc::clone(&self.provider.authorized_generation),
+            )?;
+        *source = Some(FreshClosePublication::private(worker.source()));
+        *slot = Some(worker);
+        Ok(())
+    }
+
+    #[cfg(all(test, debug_assertions))]
+    fn fresh_close_observation_for_test(
+        &self,
+    ) -> Result<windows_vault_close_worker::FreshCloseObservation, String> {
+        self.fresh_close_worker
+            .lock()
+            .map_err(|_| "Fresh close worker unavailable")?
+            .as_ref()
+            .ok_or("Fresh close worker is absent")?
+            .observation()
+    }
+
+    fn stop_fresh_close_worker(&self) -> Result<(), String> {
+        self.provider.cancel_fresh_close();
+        let worker = self
+            .fresh_close_worker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        // Release the ownership mutex before an in-flight guarded HTTP call
+        // finishes or the consumer's last Agent Arc drops.
+        if let Some(worker) = worker {
+            worker.stop()?;
+        }
+        Ok(())
+    }
     fn new(session_store: impl SessionStore + 'static) -> Self {
+        Self::new_for_profile("default", session_store)
+            .expect("default runtime and session store must match")
+    }
+
+    fn new_for_profile(
+        profile: &str,
+        session_store: impl SessionStore + 'static,
+    ) -> Result<Self, String> {
+        Self::new_for_profile_with_sources(profile, session_store, None)
+    }
+
+    fn new_for_profile_with_sources(
+        profile: &str,
+        session_store: impl SessionStore + 'static,
+        source_admissions: Option<SharedSourceAdmissions>,
+    ) -> Result<Self, String> {
+        Self::new_for_profile_with_services(
+            profile,
+            session_store,
+            source_admissions,
+            Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
+        )
+    }
+
+    fn new_for_profile_with_services(
+        profile: &str,
+        session_store: impl SessionStore + 'static,
+        source_admissions: Option<SharedSourceAdmissions>,
+        vault_sessions: Arc<raiun_vault::session::VaultSessionCoordinator>,
+    ) -> Result<Self, String> {
+        if !valid_runtime_profile(profile) {
+            return Err("Invalid Windows runtime profile".into());
+        }
+        if session_store
+            .bound_profile()
+            .is_some_and(|bound| bound != profile)
+        {
+            return Err("Windows runtime and session store profiles differ".into());
+        }
         let agent = Self {
+            source_admissions,
+            vault_sessions,
+            profile_scope: profile.into(),
             session_store: Arc::new(session_store),
             state: Arc::new(Mutex::new(AccountState::default())),
             generation: Arc::new(AtomicU64::new(1)),
             provider: Arc::new(ProviderManager::new()),
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
+            fresh_close_worker: Mutex::new(None),
+            folder_lifecycle: Mutex::new(()),
+            vault_credential_operation: Mutex::new(()),
+            protected_recovery_tokens: Mutex::new(windows_vault_capture_recovery::Tokens::default()),
+            #[cfg(all(test, debug_assertions))]
+            synthetic_vault_completion_writer_probe: true,
         };
         agent.restore_active_session();
-        agent
+        Ok(agent)
     }
 
     fn restore_active_session(&self) {
-        let restored = self.session_store.load_active("default");
+        let restored = self.session_store.load_active(self.profile_scope.as_str());
         let (session, error, cleanup_uncertain) = match restored {
             Ok(Some(session)) if session.refresh_token.is_some() => (Some(session), None, false),
             Ok(Some(session)) => {
@@ -980,7 +2701,11 @@ impl WindowsAgent {
                 // blob so a surviving pointer cannot restore it next launch.
                 cleanup_uncertain |= self
                     .session_store
-                    .remove("default", &session.server, &session.client_id)
+                    .remove(
+                        self.profile_scope.as_str(),
+                        &session.server,
+                        &session.client_id,
+                    )
                     .is_err();
                 (
                     None,
@@ -992,7 +2717,7 @@ impl WindowsAgent {
             Err(error) => (None, Some(error), false),
         };
         let root_configuration = session.as_ref().and_then(|session| {
-            load_root_configuration(&self.session_store, session)
+            load_root_configuration(&self.session_store, &self.profile_scope, session)
                 .ok()
                 .flatten()
         });
@@ -1009,6 +2734,12 @@ impl WindowsAgent {
     }
 
     fn handle_request(self: &Arc<Self>, request: &Value) -> Result<(Value, bool), String> {
+        if request
+            .get("profile_id")
+            .is_some_and(|value| value.as_str() != Some(self.profile_scope.as_str()))
+        {
+            return Err("The selected Windows profile does not own this request".into());
+        }
         reject_secret_request(request)?;
         let action = request
             .get("action")
@@ -1016,7 +2747,47 @@ impl WindowsAgent {
             .ok_or("Control request must include a string action")?;
         match action {
             "status" => Ok((self.status()?, false)),
+            "network_proxy" => Ok((self.proxy_settings(None)?, false)),
+            "network_proxy_set" => Ok((self.proxy_settings(Some(request))?, false)),
+            "bandwidth_limits" => Ok((self.bandwidth_settings(None)?, false)),
+            "bandwidth_limits_set" => Ok((self.bandwidth_settings(Some(request))?, false)),
+            "pairs"
+            | "transfers"
+            | "spaces"
+            | "list"
+            | "pair_add"
+            | "pair_exclusions_set"
+            | "pair_remove"
+            | "space_disconnect"
+            | "space_sync_now"
+            | "sync_now"
+            | "pause"
+            | "space_pause" => {
+                if !WINDOWS_FOLDER_SYNC_ENABLED {
+                    return Err("Windows folder sync is awaiting native acceptance".into());
+                }
+                Ok((self.folder_request(request)?, false))
+            }
+            "media_jobs" | "media_job_status" | "media_destination" | "media_job_set"
+            | "media_job_remove" | "media_job_run" | "media_job_recovery" => {
+                if !WINDOWS_MEDIA_METADATA_ENABLED {
+                    return Err("Windows media backups are not yet supported".into());
+                }
+                Ok((self.folder_request(request)?, false))
+            }
+            // Inspection is read-only and grants no session, key or native route.
+            "vault_inspect" => Ok((self.inspect_windows_vault(request)?, false)),
+            "vault_upload_capture" => {
+                if !WINDOWS_VAULT_EDIT_UPLOAD_ENABLED {
+                    return Err(
+                        "Vault edit upload is awaiting native acceptance and local disposition"
+                            .into(),
+                    );
+                }
+                Ok((self.upload_windows_vault_capture_request(request)?, false))
+            }
             "windows_recovery_retry" => Ok((self.retry_recovered_edit(request)?, false)),
+            "windows_device_cache_usage" => Ok((self.windows_device_cache_usage(request)?, false)),
             "windows_file_cache_status" => Ok((self.windows_file_cache_status(request)?, false)),
             "windows_offline_folders" => {
                 Ok((self.windows_offline_folder_request(request, "list")?, false))
@@ -1058,39 +2829,83 @@ impl WindowsAgent {
                 Ok((self.windows_offline_file_request(request, "cancel")?, false))
             }
             "windows_recovery_list" => Ok((self.list_recovered_edits(request)?, false)),
+            "windows_vault_capture_recovery_list" => {
+                Ok((self.list_protected_vault_captures_request(request)?, false))
+            }
+            "windows_vault_capture_save_copy" => Ok((
+                self.save_protected_vault_capture_copy_request(request)?,
+                false,
+            )),
+            "set_autostart" => {
+                let enabled = request
+                    .get("enabled")
+                    .and_then(Value::as_bool)
+                    .ok_or("Choose whether to start Raiun at login")?;
+                let executable = windows_startup_executable()?;
+                raiun_control_windows::autostart::configure_autostart(&executable, enabled)
+                    .map_err(|_| "Could not confirm Windows startup settings; check the setting before trying again")?;
+                Ok((json!({"enabled":enabled}), false))
+            }
             "diagnostics" => {
                 let mounted = self.provider.is_connected();
                 let state = self
                     .state
                     .lock()
                     .map_err(|_| "Account state is unavailable")?;
-                Ok((
-                    json!({
-                        "schema_version": 1,
-                        "app_version": env!("CARGO_PKG_VERSION"),
-                        "target_os": std::env::consts::OS,
-                        "target_arch": std::env::consts::ARCH,
-                        "profile_scope": "selected_profile",
-                        "profile_count": 1,
-                        "profile_config": {
-                            "parse_valid": null,
-                            "folder_pair_count": null,
-                            "mode_counts": null,
-                            "vault_pair_count": null,
+                let generation = state.active_generation;
+                let configuration = state.root_configuration.clone();
+                let binding = configuration.as_ref().and_then(|configuration| {
+                    let owner = configuration.registration_ownership.as_ref()?;
+                    Some(ActiveProviderBinding {
+                        generation,
+                        path: PathBuf::from(&configuration.path),
+                        identity: raiun_cloudfiles_windows::ConfiguredRootIdentity {
+                            volume_serial: configuration.volume_serial,
+                            file_index: configuration.file_index,
                         },
-                        "runtime": {
-                            "connected": state.session.is_some() && state.online_authenticated,
-                            "mounted": mounted,
-                            "sync_paused": false,
-                        },
-                    }),
-                    false,
-                ))
+                        personal_space_id: owner.personal_drive_id.clone(),
+                        personal_root_resource_id: owner.personal_root_resource_id.clone()?,
+                    })
+                });
+                let mut value = json!({
+                    "schema_version": 1,
+                    "app_version": env!("CARGO_PKG_VERSION"),
+                    "target_os": std::env::consts::OS,
+                    "target_arch": std::env::consts::ARCH,
+                    "profile_scope": "selected_profile",
+                    "profile_count": 1,
+                    "profile_config": {
+                        "parse_valid": null,
+                        "folder_pair_count": null,
+                        "mode_counts": null,
+                        "vault_pair_count": null,
+                    },
+                    "runtime": {
+                        "connected": state.session.is_some() && state.online_authenticated,
+                        "mounted": mounted,
+                        "sync_paused": self.provider.pause_snapshot(state.active_generation, state.online_authenticated).map(|snapshot| snapshot.paused),
+                    },
+                });
+                drop(state);
+                let mut cleanup = binding
+                    .and_then(|binding| self.provider.vault_cleanup_diagnostics(binding).ok());
+                let state = self
+                    .state
+                    .lock()
+                    .map_err(|_| "Account state is unavailable")?;
+                if state.active_generation != generation
+                    || self.generation.load(Ordering::Acquire) != generation
+                    || state.root_configuration != configuration
+                {
+                    cleanup = None;
+                }
+                value["runtime"]["vault_cleanup"] = cleanup.unwrap_or(Value::Null);
+                Ok((value, false))
             }
             "accounts" => {
                 let status = self.status()?;
                 Ok((
-                    json!({"selected":"default","items":[{"id":"default","label":"This PC","status":status}]}),
+                    json!({"selected":self.profile_scope.as_str(),"items":[{"id":self.profile_scope.as_str(),"label":"This PC","status":status}]}),
                     false,
                 ))
             }
@@ -1107,22 +2922,193 @@ impl WindowsAgent {
         }
     }
 
+    fn proxy_settings(&self, update: Option<&Value>) -> Result<Value, String> {
+        let (generation, session_exists) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if update.is_some()
+                && (state.session.is_some()
+                    || state.authenticating
+                    || state.refreshing
+                    || state.logout_pending
+                    || state.session_cleanup_uncertain)
+            {
+                return Err("Sign out before changing Windows proxy settings".into());
+            }
+            (state.active_generation, state.session.is_some())
+        };
+        let scope = if session_exists {
+            self.provider.bandwidth.scope()?
+        } else {
+            None
+        };
+        let store = ProxyStore {
+            store: self.session_store.as_ref(),
+            profile: &self.profile_scope,
+        };
+        if let Some(request) = update {
+            if self.provider.connected.load(Ordering::Acquire)
+                || self.provider.folder_generation.load(Ordering::Acquire) != 0
+            {
+                return Err("Stop account work and sign out before changing proxy settings".into());
+            }
+            // Recheck after the snapshot, before durable CAS; no state guard is
+            // held through private storage or provider/worker waits.
+            {
+                let state = self
+                    .state
+                    .lock()
+                    .map_err(|_| "Account state is unavailable")?;
+                if state.active_generation != generation
+                    || state.session.is_some()
+                    || state.authenticating
+                    || state.refreshing
+                    || state.logout_pending
+                    || state.session_cleanup_uncertain
+                {
+                    return Err("Account state changed before proxy settings could be saved".into());
+                }
+            }
+            self.provider
+                .proxy
+                .update(&self.profile_scope, request, &store)?;
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Proxy settings may have been saved; account state is unavailable")?;
+            if state.active_generation != generation
+                || state.session.is_some()
+                || state.authenticating
+                || state.refreshing
+                || state.logout_pending
+                || state.session_cleanup_uncertain
+            {
+                return Err("Account state changed; proxy settings may have been saved for the next sign-in".into());
+            }
+        }
+        let value = self.provider.proxy.value(
+            &self.profile_scope,
+            scope.as_ref().map(windows_bandwidth::Scope::bytes),
+            &store,
+        )?;
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "Proxy settings may have been saved; account state is unavailable")?;
+        if state.active_generation != generation || state.session.is_some() != session_exists {
+            return Err("Account state changed; proxy settings may have been saved, so refresh before continuing".into());
+        }
+        Ok(value)
+    }
+
+    fn bandwidth_settings(&self, update: Option<&Value>) -> Result<Value, String> {
+        let (session, generation) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if state.logout_pending
+                || state.authenticating
+                || state.refreshing
+                || state.session_cleanup_uncertain
+            {
+                return Err(
+                    "Wait for the current account transition before changing bandwidth settings"
+                        .into(),
+                );
+            }
+            (state.session.clone(), state.active_generation)
+        };
+        let Some(session) = session else {
+            if update.is_some() {
+                return Err("A trusted account is required for bandwidth settings".into());
+            }
+            return self.provider.bandwidth.value(None, generation);
+        };
+        let scope = self.provider.bandwidth.scope()?.filter(|scope| {
+            scope.matches(
+                &self.profile_scope,
+                &session.server,
+                &session.client_id,
+                session.expected_issuer.as_deref(),
+            )
+        });
+        // A saved root's account ID is an exclusion/registration record, not
+        // proof that newly replaced credentials belong to the same subject.
+        // Offline edits use only this runtime's already-verified exact owner.
+        let check_current = || -> Result<(), String> {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if state.active_generation != generation
+                || state.logout_pending
+                || state.authenticating
+                || state.refreshing
+                || state.session_cleanup_uncertain
+                || state.session.as_ref().is_none_or(|current| {
+                    current.server != session.server
+                        || current.client_id != session.client_id
+                        || current.expected_issuer != session.expected_issuer
+                        || current.access_token != session.access_token
+                })
+            {
+                return Err("The account changed; bandwidth settings may have been saved for the previous scope".into());
+            }
+            Ok(())
+        };
+        check_current()?;
+        if let Some(request) = update {
+            let scope = scope
+                .as_ref()
+                .ok_or("A verified account is required for bandwidth settings")?;
+            self.provider.bandwidth.update(
+                scope,
+                request,
+                &BandwidthStore {
+                    store: self.session_store.as_ref(),
+                    profile: &self.profile_scope,
+                },
+            )?;
+        }
+        check_current()?;
+        self.provider.bandwidth.value(scope.as_ref(), generation)
+    }
+
     fn status(&self) -> Result<Value, String> {
         self.maybe_start_refresh()?;
         let mounted = self.provider.is_connected();
         let provider_supported = self.provider.activation_enabled();
+        let folder_error = self
+            .provider
+            .folder_error
+            .lock()
+            .ok()
+            .and_then(|value| value.clone());
+        // Startup is a per-user app preference, independent of account secrets.
+        // Query before taking account state; status never writes an entry.
+        let autostart = windows_startup_executable().ok().and_then(|executable| {
+            raiun_control_windows::autostart::autostart_status(&executable)
+                .ok()
+                .flatten()
+        });
         let state = self
             .state
             .lock()
             .map_err(|_| "Account state is unavailable")?;
         let session = state.session.as_ref();
-        Ok(json!({
+        let pause = self
+            .provider
+            .pause_snapshot(state.active_generation, state.online_authenticated);
+        let mut status = json!({
             "connected": session.is_some() && state.online_authenticated,
             "offline": session.is_some() && !state.online_authenticated,
             "server": session.map(|value| value.server.as_str()),
             "client_id": session.map(|value| value.client_id.as_str()),
-            "paused": false,
-            "paused_space_ids": [],
+            "paused": pause.as_ref().map(|snapshot| snapshot.paused),
+            "paused_space_ids": pause.as_ref().map(|snapshot| &snapshot.paused_space_ids),
             "mounted": mounted,
             "cloud_root": state.root_configuration.as_ref().map(|value| value.path.as_str()),
             "root_configuration": state.root_configuration.as_ref().map(|value| json!({
@@ -1132,25 +3118,279 @@ impl WindowsAgent {
                 "registration_state": value.registration_ownership.as_ref().map(|owner| owner.state.as_str()),
                 "recovery_scope_token": self.provider.configuration_recovery_scope_token(value, state.active_generation).ok(),
             })),
-            "error": state.error.as_deref().or_else(|| (!provider_supported).then_some(PROVIDER_UNAVAILABLE)),
-            "autostart": null,
+            "error": state.error.as_deref().or(folder_error.as_deref()).or_else(|| (!provider_supported).then_some(PROVIDER_UNAVAILABLE)),
+            "autostart": autostart,
             "recovery_folder": null,
             "encrypted_edit_recovery_available": false,
             "offline_cache": null,
-            "profile_id": "default",
+            "profile_id": self.profile_scope.as_str(),
             "profile_label": "This PC",
             "auth_generation": state.active_generation,
             "provider_supported": provider_supported,
-            "folder_sync_supported": false,
-            "media_jobs_supported": false,
-            "vaults_supported": false,
+            "folder_sync_supported": WINDOWS_FOLDER_SYNC_ENABLED,
+            "bandwidth_limits_supported": true,
+            "network_proxy_supported": true,
+            "proxy_edit_requires_sign_out": state.session.is_some(),
+            "media_jobs_supported": WINDOWS_MEDIA_METADATA_ENABLED,
+            "vaults_supported": WINDOWS_VAULT_SESSIONS_ENABLED,
             "account_switch_supported": false,
-            "pause_supported": false,
+            "pause_supported": WINDOWS_FOLDER_SYNC_ENABLED,
             "authenticating": state.authenticating,
             "refreshing": state.refreshing,
             "session_expires_at": session.map(|value| value.expires_at),
             "session_cleanup_uncertain": state.session_cleanup_uncertain,
-        }))
+        });
+        if WINDOWS_VAULT_SESSIONS_ENABLED {
+            status["vault_access_mode"] = json!("native_read_only");
+        }
+        Ok(status)
+    }
+
+    fn protected_recovery_context(
+        &self,
+        request: &Value,
+    ) -> Result<ProtectedRecoveryContext, String> {
+        if request
+            .get("profile_id")
+            .is_some_and(|value| value.as_str() != Some(self.profile_scope.as_str()))
+        {
+            return Err("Select the current Windows account".into());
+        }
+        let expected_generation = request
+            .get("expected_generation")
+            .and_then(Value::as_u64)
+            .filter(|generation| *generation != 0)
+            .ok_or("Reopen saved vault edits for the current account")?;
+        let expected_scope_token = request
+            .get("expected_recovery_scope_token")
+            .and_then(Value::as_str)
+            .filter(|token| {
+                token.len() == 64
+                    && token
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+            .ok_or("Refresh the Windows drive status before checking saved vault edits")?;
+        let (session, generation, configuration) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if !state.online_authenticated
+                || state.authenticating
+                || state.refreshing
+                || state.logout_pending
+                || state.needs_refresh
+                || state.session_cleanup_uncertain
+            {
+                return Err("Connect the current account before opening saved vault edits".into());
+            }
+            let session = state
+                .session
+                .clone()
+                .ok_or("Connect the current account before opening saved vault edits")?;
+            let configuration = state
+                .root_configuration
+                .clone()
+                .ok_or("The registered Windows drive folder is unavailable")?;
+            (session, state.active_generation, configuration)
+        };
+        if generation != expected_generation
+            || self.generation.load(Ordering::Acquire) != generation
+            || self.provider.authorized_generation.load(Ordering::Acquire) != generation
+            || !self.provider.is_connected()
+        {
+            return Err("The account or Windows drive changed; refresh saved vault edits".into());
+        }
+        if !configuration.valid
+            || configuration.profile_scope != self.profile_scope
+            || configuration.server != session.server
+            || configuration.client_id != session.client_id
+            || session.expires_at <= unix_time_now().saturating_add(30)
+        {
+            return Err("Saved vault edits do not match the connected account and drive".into());
+        }
+        let registration = configuration
+            .registration_ownership
+            .as_ref()
+            .filter(|owner| owner.state == "registered")
+            .ok_or("The Windows drive has no verified registered owner")?;
+        validate_registration_ownership(
+            registration,
+            &session.server,
+            configuration.volume_serial,
+            configuration.file_index,
+        )?;
+        let root_identity = raiun_cloudfiles_windows::ConfiguredRootIdentity {
+            volume_serial: configuration.volume_serial,
+            file_index: configuration.file_index,
+        };
+        pin_registered_configured_root(Path::new(&configuration.path), root_identity)
+            .map_err(root_error_text)?;
+        let binding = ActiveProviderBinding {
+            generation,
+            path: PathBuf::from(&configuration.path),
+            identity: root_identity,
+            personal_space_id: registration.personal_drive_id.clone(),
+            personal_root_resource_id: registration
+                .personal_root_resource_id
+                .clone()
+                .ok_or("The registered drive root identity is incomplete")?,
+        };
+        let context_token = self
+            .provider
+            .configuration_recovery_scope_token(&configuration, generation)?;
+        if context_token != expected_scope_token {
+            return Err("The account or Windows drive changed; refresh saved vault edits".into());
+        }
+        Ok(ProtectedRecoveryContext {
+            generation,
+            session,
+            configuration,
+            binding,
+            context_token,
+        })
+    }
+
+    fn revalidate_protected_recovery_context(
+        &self,
+        context: &ProtectedRecoveryContext,
+    ) -> Result<(), String> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?;
+        let same_session = state.session.as_ref().is_some_and(|current| {
+            current.server == context.session.server
+                && current.client_id == context.session.client_id
+                && current.access_token == context.session.access_token
+                && current.expires_at > unix_time_now().saturating_add(30)
+        });
+        if !state.online_authenticated
+            || state.authenticating
+            || state.refreshing
+            || state.logout_pending
+            || state.needs_refresh
+            || state.session_cleanup_uncertain
+            || state.active_generation != context.generation
+            || self.generation.load(Ordering::Acquire) != context.generation
+            || self.provider.authorized_generation.load(Ordering::Acquire) != context.generation
+            || !same_session
+            || state.root_configuration.as_ref() != Some(&context.configuration)
+            || !self
+                .provider
+                .configuration_recovery_scope_token(&context.configuration, context.generation)
+                .is_ok_and(|token| token == context.context_token)
+        {
+            return Err(
+                "The account or Windows drive changed during saved vault edit access".into(),
+            );
+        }
+        pin_registered_configured_root(
+            Path::new(&context.configuration.path),
+            context.binding.identity,
+        )
+        .map_err(root_error_text)?;
+        Ok(())
+    }
+
+    fn parse_protected_recovery_scope(
+        request: &Value,
+    ) -> Result<windows_vault_capture_recovery::RecoveryScope, String> {
+        let required = |name: &str| -> Result<String, String> {
+            let value = request
+                .get(name)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty() && value.len() <= 4096)
+                .ok_or_else(|| format!("Saved vault edit request has an invalid {name}"))?;
+            Ok(value.to_owned())
+        };
+        Ok(windows_vault_capture_recovery::RecoveryScope {
+            space_id: required("space_id")?,
+            root_resource_id: required("root_resource_id")?,
+            remote_root: required("remote_root")?,
+        })
+    }
+
+    fn list_protected_vault_captures_request(&self, request: &Value) -> Result<Value, String> {
+        let context = self.protected_recovery_context(request)?;
+        let scope = Self::parse_protected_recovery_scope(request)?;
+        let limit = match request.get("limit") {
+            None => 100,
+            Some(value) => value
+                .as_u64()
+                .filter(|limit| (1..=100).contains(limit))
+                .ok_or("Saved vault edit page size must be between 1 and 100")?
+                as usize,
+        };
+        let cursor = request.get("cursor").and_then(Value::as_str);
+        if request.get("cursor").is_some() && cursor.is_none() {
+            return Err("Saved vault edit cursor is invalid".into());
+        }
+        let after = self
+            .protected_recovery_tokens
+            .lock()
+            .map_err(|_| "Saved vault edit pagination is unavailable")?
+            .after(cursor, context.generation, &context.context_token, &scope)?;
+        let (rows, next_after) = self.provider.list_protected_vault_captures(
+            context.binding.clone(),
+            scope.clone(),
+            after,
+            limit,
+        )?;
+        self.revalidate_protected_recovery_context(&context)?;
+        let page = self
+            .protected_recovery_tokens
+            .lock()
+            .map_err(|_| "Saved vault edit pagination is unavailable")?
+            .page(
+                &self.profile_scope,
+                context.generation,
+                &context.context_token,
+                scope,
+                rows,
+                next_after,
+            )?;
+        let encoded =
+            serde_json::to_vec(&page).map_err(|_| "Saved vault edit page could not be encoded")?;
+        if encoded.len() > windows_vault_capture_recovery::MAX_RESPONSE_BYTES {
+            return Err("Saved vault edit page exceeds the response limit".into());
+        }
+        serde_json::from_slice(&encoded)
+            .map_err(|_| "Saved vault edit page could not be decoded".into())
+    }
+
+    fn save_protected_vault_capture_copy_request(&self, request: &Value) -> Result<Value, String> {
+        let context = self.protected_recovery_context(request)?;
+        let scope = Self::parse_protected_recovery_scope(request)?;
+        let item_token = request
+            .get("item_token")
+            .and_then(Value::as_str)
+            .ok_or("Choose one saved vault edit to copy")?;
+        let capture_id = self
+            .protected_recovery_tokens
+            .lock()
+            .map_err(|_| "Saved vault edit selection is unavailable")?
+            .item(
+                item_token,
+                context.generation,
+                &context.context_token,
+                &scope,
+            )?;
+        let destination = request
+            .get("destination")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty() && path.len() <= 32768)
+            .ok_or("Choose one fresh local destination for Save Copy")?;
+        self.revalidate_protected_recovery_context(&context)?;
+        let receipt = self.provider.save_protected_vault_capture_copy(
+            context.binding.clone(),
+            scope,
+            capture_id,
+            PathBuf::from(destination),
+        )?;
+        self.revalidate_protected_recovery_context(&context)?;
+        serde_json::to_value(receipt).map_err(|_| "Save Copy receipt could not be encoded".into())
     }
 
     /// Authenticated read-only discovery. No upload approval, dispatch or
@@ -1158,7 +3398,7 @@ impl WindowsAgent {
     fn list_recovered_edits(&self, request: &Value) -> Result<Value, String> {
         if request
             .get("profile_id")
-            .is_some_and(|value| value.as_str() != Some("default"))
+            .is_some_and(|value| value.as_str() != Some(self.profile_scope.as_str()))
         {
             return Err("Select the current Windows account".into());
         }
@@ -1249,7 +3489,7 @@ impl WindowsAgent {
             return Err("The account changed; reopen saved edits".into());
         }
         Ok(
-            json!({"profile_id":"default", "auth_generation":verified.agent_generation,
+            json!({"profile_id":self.profile_scope.as_str(), "auth_generation":verified.agent_generation,
             "items":page.0, "next_after":next_after, "read_only":true,
             "recovery_scope_token":cursor_context}),
         )
@@ -1311,8 +3551,12 @@ impl WindowsAgent {
                 .map_err(root_error_text)?;
 
         let client = Arc::new(
-            OpenCloudClient::new(&session.server, session.access_token.clone())
-                .map_err(|_| "Could not create the connected account client")?,
+            OpenCloudClient::new_with_proxy(
+                &session.server,
+                session.access_token.clone(),
+                &session.proxy,
+            )
+            .map_err(|_| "Could not create the connected account client")?,
         );
         let server_origin = client
             .server_origin()
@@ -1328,6 +3572,15 @@ impl WindowsAgent {
         {
             return Err("The verified account no longer matches this drive folder".into());
         }
+        let (client, _) = budget_client(
+            client,
+            &session,
+            &self.profile_scope,
+            &account_id,
+            agent_generation,
+            &self.provider,
+            self.session_store.as_ref(),
+        )?;
         let provider_scope = raiun_cloudfiles_windows::ProviderScope::new(
             client.as_ref(),
             configuration.profile_scope.clone(),
@@ -1479,7 +3732,276 @@ impl WindowsAgent {
         Ok(recovery_outcome_json(outcome))
     }
 
+    /// Prepare exclusion metadata from the live authenticated account, never
+    /// from the saved document or a request-supplied account identity. The broker
+    /// retains this pin through durable publication and worker admission.
+    fn prepare_source_reservation(
+        &self,
+        request: &Value,
+    ) -> Result<
+        (
+            windows_profile_registry::SourceReservation,
+            raiun_control_windows::PinnedDirectory,
+        ),
+        String,
+    > {
+        use raiun_engine::folder_pairs::AccountScope;
+        use sha2::Digest;
+        use windows_folder_requests::FolderRequest;
+        use windows_media_requests::MediaRequest;
+        use windows_profile_registry::{RootReservation, SourceKind, SourceReservation};
+        if request
+            .get("profile_id")
+            .is_some_and(|value| value.as_str() != Some(self.profile_scope.as_str()))
+        {
+            return Err("Select the current Windows account".into());
+        }
+        let (session, generation) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if !state.online_authenticated
+                || state.logout_pending
+                || state.authenticating
+                || state.refreshing
+                || state.needs_refresh
+                || state.session_cleanup_uncertain
+            {
+                return Err("Connect this account before admitting a source".into());
+            }
+            (
+                state.session.clone().ok_or("Connect this account")?,
+                state.active_generation,
+            )
+        };
+        let client = Arc::new(
+            OpenCloudClient::new_with_proxy(
+                &session.server,
+                session.access_token.clone(),
+                &session.proxy,
+            )
+            .map_err(|_| "Could not verify the source account")?,
+        );
+        let (_, account, _, _, _) = verified_account_roots(&client, &session.server)?;
+        let (kind, id, path) = match windows_folder_requests::decode(request)? {
+            FolderRequest::Add(pair) => (SourceKind::FolderPair, pair.id, pair.local_path),
+            FolderRequest::Media(MediaRequest::Set {
+                job,
+                expected_account_id,
+                ..
+            }) => {
+                if job.account_id != account || expected_account_id != account {
+                    return Err("Media source belongs to another account".into());
+                }
+                (SourceKind::MediaJob, job.id, job.source_root)
+            }
+            _ => return Err("This request does not admit a source".into()),
+        };
+        let issuer = session
+            .expected_issuer
+            .as_ref()
+            .map(|value| url::Url::parse(value).map(|url| url.to_string()))
+            .transpose()
+            .map_err(|_| "The account issuer is invalid")?;
+        let scope = AccountScope::new(
+            self.profile_scope.clone(),
+            url::Url::parse(&session.server)
+                .map_err(|_| "The account server is invalid")?
+                .to_string(),
+            session.client_id.clone(),
+            issuer,
+            account,
+        )
+        .map_err(|_| "The source account scope is invalid")?;
+        let bytes =
+            serde_json::to_vec(&scope).map_err(|_| "The source account scope is invalid")?;
+        let pin = raiun_control_windows::PinnedDirectory::open(&path)
+            .map_err(|_| "The source folder is unavailable or contains a reparse point")?;
+        let identity = pin.identity();
+        let reservation = SourceReservation::new(
+            format!("{:x}", sha2::Sha256::digest(bytes)),
+            kind,
+            id,
+            RootReservation::new(
+                path.to_str().ok_or("The source path is invalid")?.into(),
+                identity.volume_serial,
+                identity.file_index,
+                false,
+            )?,
+        )?;
+        {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if state.active_generation != generation
+                || !state.online_authenticated
+                || state.logout_pending
+                || state.authenticating
+                || state.refreshing
+                || state.needs_refresh
+                || state.session_cleanup_uncertain
+                || state.session.as_ref().is_none_or(|current| {
+                    current.server != session.server
+                        || current.client_id != session.client_id
+                        || current.expected_issuer != session.expected_issuer
+                        || current.access_token != session.access_token
+                        || current.expires_at != session.expires_at
+                })
+            {
+                return Err("The account changed during source admission".into());
+            }
+        }
+        pin.verify_path()
+            .map_err(|_| "The source changed during admission")?;
+        Ok((reservation, pin))
+    }
+
+    fn folder_request(&self, request: &Value) -> Result<Value, String> {
+        use raiun_control_windows::{PinnedDirectory, PrivateDirectory};
+        use raiun_engine::folder_pairs::AccountScope;
+        use sha2::Digest;
+        let _lifecycle = self
+            .folder_lifecycle
+            .lock()
+            .map_err(|_| "Folder setup is unavailable")?;
+        if request
+            .get("profile_id")
+            .is_some_and(|id| id.as_str() != Some(self.profile_scope.as_str()))
+        {
+            return Err("The selected account is unavailable".into());
+        }
+        let decoded = windows_folder_requests::decode(request)?;
+        let (session, generation, cloud_root) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if !state.online_authenticated
+                || state.logout_pending
+                || state.authenticating
+                || state.refreshing
+                || state.needs_refresh
+            {
+                return Err("Connect this account before using folder sync".into());
+            }
+            (
+                state
+                    .session
+                    .clone()
+                    .ok_or("Sign in before using folder sync")?,
+                state.active_generation,
+                state.root_configuration.clone(),
+            )
+        };
+        if self.provider.folder_generation.load(Ordering::Acquire) != generation {
+            let client = Arc::new(
+                OpenCloudClient::new_with_proxy(
+                    &session.server,
+                    session.access_token.clone(),
+                    &session.proxy,
+                )
+                .map_err(|_| "Could not prepare the connected account")?,
+            );
+            let (_, account_id, _, spaces, _) = verified_account_roots(&client, &session.server)?;
+            let server = url::Url::parse(&session.server)
+                .map_err(|_| "The account server is invalid")?
+                .to_string();
+            let issuer = session
+                .expected_issuer
+                .as_ref()
+                .map(|issuer| url::Url::parse(issuer).map(|value| value.to_string()))
+                .transpose()
+                .map_err(|_| "The account issuer is invalid")?;
+            let scope = AccountScope::new(
+                self.profile_scope.as_str().into(),
+                server,
+                session.client_id.clone(),
+                issuer,
+                account_id.clone(),
+            )
+            .map_err(|_| "The verified folder account is invalid")?;
+            let identity =
+                serde_json::to_vec(&scope).map_err(|_| "The verified folder account is invalid")?;
+            let name = format!("folder-sync-{:x}", sha2::Sha256::digest(&identity));
+            let store = DpapiSessionStore::current_user()
+                .map_err(|_| "Private Windows storage is unavailable")?;
+            let parent = PinnedDirectory::open(store.local_edit_state_directory())
+                .map_err(|_| "Private Windows storage is unavailable")?;
+            let directory =
+                PrivateDirectory::create_or_open_under(&parent, std::ffi::OsStr::new(&name))
+                    .map_err(|_| "Private account storage could not be admitted")?;
+            let (client, bandwidth_scope) = budget_client(
+                client,
+                &session,
+                &self.profile_scope,
+                &account_id,
+                generation,
+                &self.provider,
+                self.session_store.as_ref(),
+            )?;
+            let origin = client
+                .server_origin()
+                .ok_or("The connected server origin is invalid")?;
+            {
+                let state = self
+                    .state
+                    .lock()
+                    .map_err(|_| "Account state is unavailable")?;
+                if state.active_generation != generation
+                    || !state.online_authenticated
+                    || state.logout_pending
+                    || state.root_configuration != cloud_root
+                    || state.session.as_ref().is_none_or(|current| {
+                        current.server != session.server
+                            || current.client_id != session.client_id
+                            || current.expected_issuer != session.expected_issuer
+                    })
+                {
+                    return Err("The account changed during folder setup".into());
+                }
+            }
+            self.provider.install_folders(windows_folder_sync::Setup {
+                source_admissions: windows_folder_sync::SourceAdmissions::Broker {
+                    profile: self.profile_scope.clone(),
+                    registry: self
+                        .source_admissions
+                        .clone()
+                        .ok_or("Broker source admission is unavailable")?,
+                },
+                generation,
+                scope,
+                account_id,
+                origin,
+                client,
+                spaces,
+                directory,
+                cloud_root,
+            })?;
+            self.provider
+                .bandwidth
+                .publish(&bandwidth_scope, generation)?;
+        }
+        let result = self.provider.folder_request(generation, decoded)?;
+        if self.generation.load(Ordering::Acquire) != generation {
+            return Err("The account changed during folder work".into());
+        }
+        Ok(result)
+    }
+
     fn configure_root(&self, request: &Value) -> Result<Value, String> {
+        let _folder_lifecycle = self
+            .folder_lifecycle
+            .lock()
+            .map_err(|_| "Folder setup is unavailable")?;
+        // Drain ordinary folder work before changing its cloud-root boundary.
+        // Preserve the existing native-only configure path while C04 is gated.
+        if WINDOWS_FOLDER_SYNC_ENABLED
+            || self.provider.folder_generation.load(Ordering::Acquire) != 0
+        {
+            self.provider.disconnect()?;
+        }
         let (session, generation, previous_root) = {
             let state = self
                 .state
@@ -1592,7 +4114,7 @@ impl WindowsAgent {
             .map(|owner| owner.state.clone())
             .unwrap_or_else(|| "prepared_not_registered".into());
         let configuration = RootConfiguration {
-            profile_scope: "default".into(),
+            profile_scope: self.profile_scope.as_str().into(),
             server: session.server.clone(),
             client_id: session.client_id.clone(),
             issuer: session.expected_issuer.clone(),
@@ -1679,7 +4201,12 @@ impl WindowsAgent {
         // above, then release the guard before entering that hook.
         drop(state);
         drop(root_lease);
-        Self::maybe_connect_provider(&self.session_store, &self.state, &self.provider)?;
+        Self::maybe_connect_provider_with_exclusions(
+            &self.session_store,
+            &self.state,
+            &self.provider,
+            self.source_admissions.as_ref(),
+        )?;
         let state = self
             .state
             .lock()
@@ -1715,13 +4242,23 @@ impl WindowsAgent {
     }
 
     /// Normal lifecycle entry point. It is called after authentication,
-    /// session refresh, and root configuration. The default capability gate
-    /// keeps production disconnected until upload/recovery acceptance is
-    /// complete.
+    /// session refresh, and root configuration. Every connection still requires
+    /// exact account/root ownership and durable recovery preparation. Ordinary
+    /// unit-test instances stay disconnected unless explicitly opted in.
+    #[cfg(test)]
     fn maybe_connect_provider(
         session_store: &Arc<dyn SessionStore>,
         state: &Arc<Mutex<AccountState>>,
         provider: &Arc<ProviderManager>,
+    ) -> Result<(), String> {
+        Self::maybe_connect_provider_with_exclusions(session_store, state, provider, None)
+    }
+
+    fn maybe_connect_provider_with_exclusions(
+        session_store: &Arc<dyn SessionStore>,
+        state: &Arc<Mutex<AccountState>>,
+        provider: &Arc<ProviderManager>,
+        admissions: Option<&SharedSourceAdmissions>,
     ) -> Result<(), String> {
         if provider.activation_enabled() {
             let has_ready_root = state.lock().is_ok_and(|state| {
@@ -1734,7 +4271,7 @@ impl WindowsAgent {
             if !has_ready_root {
                 return Ok(());
             }
-            Self::connect_verified_root(session_store, state, provider)
+            Self::connect_verified_root_with_exclusions(session_store, state, provider, admissions)
         } else {
             Ok(())
         }
@@ -1743,10 +4280,20 @@ impl WindowsAgent {
     /// Establish a provider connection only from a freshly verified session,
     /// the exact persisted Personal-drive ownership record, a repinned local
     /// directory identity, and a current-user DPAPI recovery provider.
+    #[cfg(test)]
     fn connect_verified_root(
+        session_store: &Arc<dyn SessionStore>,
+        state: &Arc<Mutex<AccountState>>,
+        provider: &Arc<ProviderManager>,
+    ) -> Result<(), String> {
+        Self::connect_verified_root_with_exclusions(session_store, state, provider, None)
+    }
+
+    fn connect_verified_root_with_exclusions(
         session_store: &Arc<dyn SessionStore>,
         state_mutex: &Arc<Mutex<AccountState>>,
         provider: &Arc<ProviderManager>,
+        admissions: Option<&SharedSourceAdmissions>,
     ) -> Result<(), String> {
         let (session, generation, configuration) = {
             let state = state_mutex
@@ -1812,7 +4359,18 @@ impl WindowsAgent {
             personal_space_id: owner.personal_drive_id.clone(),
             personal_root_resource_id: personal_root_resource_id.clone(),
         };
-        if provider.connection_matches(binding)? {
+        let connection_current = provider.connection_matches(binding.clone())?;
+        let mut save_admission = provider.prepare_existing_file_save_worker(
+            &binding,
+            state_mutex,
+            session_store,
+            connection_current,
+        )?;
+        if connection_current
+            && save_admission
+                .as_ref()
+                .is_none_or(|admission| admission.connection_current)
+        {
             let state = state_mutex
                 .lock()
                 .map_err(|_| "Account state is unavailable")?;
@@ -1831,16 +4389,34 @@ impl WindowsAgent {
             }
             // The worker confirmed the exact active binding. Repeated hooks
             // must not overwrite its committed registration with pending.
+            drop(state);
+            if let Some(admission) = save_admission.as_mut() {
+                admission.owner.check_existing_file_save_account(&binding)?;
+                admission.committed = true;
+            }
             return Ok(());
         }
 
         let client = Arc::new(
-            OpenCloudClient::new(&session.server, session.access_token.clone())
-                .map_err(|_| "Could not create an authenticated Windows drive client")?,
+            OpenCloudClient::new_with_proxy(
+                &session.server,
+                session.access_token.clone(),
+                &session.proxy,
+            )
+            .map_err(|_| "Could not create an authenticated Windows drive client")?,
         );
         let server_origin = client
             .server_origin()
             .ok_or("The authenticated server origin is invalid")?;
+        let (client, bandwidth_scope) = budget_client(
+            client,
+            &session,
+            &configuration.profile_scope,
+            &account_id,
+            generation,
+            provider,
+            session_store.as_ref(),
+        )?;
         let scope = raiun_cloudfiles_windows::ProviderScope::new(
             &client,
             configuration.profile_scope.clone(),
@@ -1881,6 +4457,26 @@ impl WindowsAgent {
         // The exact Personal Space/root identity is checked again by runtime
         // preparation before it becomes the native sync-root FileIdentity.
 
+        if let Some(admissions) = admissions {
+            // Clone and release the broker snapshot before provider/route locks.
+            // Historical scopes are exclusions, never current unlock authority.
+            let snapshot = admissions
+                .lock()
+                .map_err(|_| "Vault exclusions are unavailable")?
+                .clone();
+            let record = snapshot
+                .profiles()
+                .get(&configuration.profile_scope)
+                .ok_or("Vault exclusion profile is unavailable")?;
+            let locations = record
+                .vault_reservations()
+                .iter()
+                .map(|row| (row.space_id().to_owned(), row.root_path().to_owned()))
+                .collect::<Vec<_>>();
+            backend
+                .restore_vault_exclusions(identity, &locations)
+                .map_err(|_| "Could not restore encrypted-location exclusions")?;
+        }
         {
             let state = state_mutex
                 .lock()
@@ -1965,7 +4561,11 @@ impl WindowsAgent {
                 .ok_or("The saved Windows drive has no verified Personal root identity")?,
             Arc::clone(&backend),
             recovery,
+            bandwidth_scope.bytes().to_vec(),
+            Arc::clone(session_store),
         )?;
+
+        provider.bandwidth.publish(&bandwidth_scope, generation)?;
 
         let persist_result = (|| -> Result<(), String> {
             let mut updated = configuration.clone();
@@ -2003,6 +4603,10 @@ impl WindowsAgent {
         if let Err(error) = persist_result {
             let _ = provider.disconnect();
             return Err(error);
+        }
+        if let Some(admission) = save_admission.as_mut() {
+            admission.owner.check_existing_file_save_account(&binding)?;
+            admission.committed = true;
         }
         Ok(())
     }
@@ -2049,7 +4653,9 @@ impl WindowsAgent {
         let state = Arc::clone(&self.state);
         let current_generation = Arc::clone(&self.generation);
         let store = Arc::clone(&self.session_store);
+        let profile_scope = self.profile_scope.clone();
         let provider = Arc::clone(&self.provider);
+        let admissions = self.source_admissions.clone();
         let worker = thread::spawn(move || {
             let mut refreshed = session.clone();
             let result = refreshed.refresh_classified();
@@ -2074,7 +4680,7 @@ impl WindowsAgent {
                         && state.active_generation == generation
                         && state.refreshing
                     {
-                        match store.save_pending("default", &refreshed) {
+                        match store.save_pending(profile_scope.as_str(), &refreshed) {
                             Ok(()) => {
                                 state.session = Some(refreshed);
                                 state.online_authenticated = true;
@@ -2094,13 +4700,16 @@ impl WindowsAgent {
                         }
                     }
                     if cleanup {
-                        let uncertain = revoke_and_remove(&store, &session);
+                        let uncertain = revoke_and_remove(&store, &profile_scope, &session);
                         if let Ok(mut state) = state.lock() {
                             state.session_cleanup_uncertain = uncertain;
                         }
-                    } else if let Err(error) =
-                        WindowsAgent::maybe_connect_provider(&store, &state, &provider)
-                    {
+                    } else if let Err(error) = WindowsAgent::maybe_connect_provider_with_exclusions(
+                        &store,
+                        &state,
+                        &provider,
+                        admissions.as_ref(),
+                    ) {
                         if let Ok(mut state) = state.lock()
                             && state.active_generation == generation
                         {
@@ -2133,7 +4742,7 @@ impl WindowsAgent {
                         }
                     }
                     if cleanup {
-                        let uncertain = revoke_and_remove(&store, &session);
+                        let uncertain = revoke_and_remove(&store, &profile_scope, &session);
                         if let Ok(mut state) = state.lock() {
                             state.session_cleanup_uncertain = uncertain;
                         }
@@ -2149,6 +4758,11 @@ impl WindowsAgent {
     }
 
     fn begin_auth(self: &Arc<Self>, request: &Value) -> Result<Value, String> {
+        let _credential_operation = self
+            .vault_credential_operation
+            .lock()
+            .map_err(|_| "Vault credential changes are unavailable")?;
+
         self.provider.disconnect()?;
         {
             let state = self
@@ -2166,6 +4780,9 @@ impl WindowsAgent {
             }
         }
         self.join_finished_auth()?;
+        // A failed refresh may have cleared credentials without explicit logout.
+        // New sign-in must never inherit the prior subject's preferences owner.
+        self.provider.bandwidth.clear();
         let raw = request
             .get("server")
             .and_then(Value::as_str)
@@ -2180,11 +4797,6 @@ impl WindowsAgent {
             .get("client_id")
             .and_then(Value::as_str)
             .unwrap_or("");
-        let flow = auth::AuthFlow::begin(&server, client_id)?;
-        let public_info = flow.public_info();
-        let (expected_server, expected_client_id) = flow.configured_identity();
-        let expected_server = expected_server.to_owned();
-        let expected_client_id = expected_client_id.to_owned();
         let generation = self.next_generation()?;
         {
             let mut state = self
@@ -2197,6 +4809,59 @@ impl WindowsAgent {
             state.authenticating = true;
             state.active_generation = generation;
             state.error = None;
+        }
+        let flow = (|| {
+            if WINDOWS_VAULT_SESSIONS_ENABLED {
+                windows_vault_credentials::revoke_profile(
+                    &VaultCredentialStore {
+                        store: self.session_store.as_ref(),
+                        profile: &self.profile_scope,
+                    },
+                    &self.profile_scope,
+                )?;
+            }
+            let proxy = self.provider.proxy.auth_proxy(
+                &self.profile_scope,
+                generation,
+                &ProxyStore {
+                    store: self.session_store.as_ref(),
+                    profile: &self.profile_scope,
+                },
+            )?;
+            if proxy == raiun_opencloud::ProxyConfig::System {
+                auth::AuthFlow::begin(&server, client_id)
+            } else {
+                auth::AuthFlow::begin_with_proxy(&server, client_id, proxy)
+            }
+        })();
+        let flow = match flow {
+            Ok(flow) => flow,
+            Err(error) => {
+                if let Ok(mut state) = self.state.lock()
+                    && state.active_generation == generation
+                {
+                    state.authenticating = false;
+                    state.error = Some(error.clone());
+                }
+                return Err(error);
+            }
+        };
+        let public_info = flow.public_info();
+        let (expected_server, expected_client_id) = flow.configured_identity();
+        let expected_server = expected_server.to_owned();
+        let expected_client_id = expected_client_id.to_owned();
+        {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if state.active_generation != generation
+                || !state.authenticating
+                || state.session.is_some()
+                || self.generation.load(Ordering::Acquire) != generation
+            {
+                return Err("Sign-in was cancelled while preparing its proxy route".into());
+            }
         }
         let previous_identity = self.session_store.revoke_active();
         let previous_identity = match previous_identity {
@@ -2239,7 +4904,9 @@ impl WindowsAgent {
         let state = Arc::clone(&self.state);
         let current_generation = Arc::clone(&self.generation);
         let store = Arc::clone(&self.session_store);
+        let profile_scope = self.profile_scope.clone();
         let provider = Arc::clone(&self.provider);
+        let admissions = self.source_admissions.clone();
         let thread = thread::spawn(move || {
             let result = flow
                 .wait_with_cancel(|| current_generation.load(Ordering::Acquire) != generation)
@@ -2253,7 +4920,7 @@ impl WindowsAgent {
                 });
             match result {
                 Ok(session) if current_generation.load(Ordering::Acquire) == generation => {
-                    if let Err(error) = store.save_pending("default", &session) {
+                    if let Err(error) = store.save_pending(profile_scope.as_str(), &session) {
                         if current_generation.load(Ordering::Acquire) == generation {
                             if let Ok(mut state) = state.lock() {
                                 if state.active_generation == generation {
@@ -2265,15 +4932,17 @@ impl WindowsAgent {
                         return;
                     }
                     if current_generation.load(Ordering::Acquire) != generation {
-                        record_cleanup_failure(&state, &store, &session);
+                        record_cleanup_failure(&state, &store, &profile_scope, &session);
                         return;
                     }
                     let root_configuration =
-                        load_root_configuration(&store, &session).ok().flatten();
+                        load_root_configuration(&store, &profile_scope, &session)
+                            .ok()
+                            .flatten();
                     store.before_publish();
                     let installed = if let Ok(mut state) = state.lock() {
                         if state.authenticating && state.active_generation == generation {
-                            match store.publish_active("default", &session) {
+                            match store.publish_active(profile_scope.as_str(), &session) {
                                 Ok(()) => {
                                     state.session = Some(session.clone());
                                     state.root_configuration = root_configuration;
@@ -2299,10 +4968,13 @@ impl WindowsAgent {
                         false
                     };
                     if !installed {
-                        record_cleanup_failure(&state, &store, &session);
-                    } else if let Err(error) =
-                        WindowsAgent::maybe_connect_provider(&store, &state, &provider)
-                    {
+                        record_cleanup_failure(&state, &store, &profile_scope, &session);
+                    } else if let Err(error) = WindowsAgent::maybe_connect_provider_with_exclusions(
+                        &store,
+                        &state,
+                        &provider,
+                        admissions.as_ref(),
+                    ) {
                         if let Ok(mut state) = state.lock()
                             && state.active_generation == generation
                         {
@@ -2390,6 +5062,21 @@ impl WindowsAgent {
     }
 
     fn logout(&self) -> Result<Value, String> {
+        let _credential_operation = self
+            .vault_credential_operation
+            .lock()
+            .map_err(|_| "Vault credential changes are unavailable")?;
+        if WINDOWS_VAULT_SESSIONS_ENABLED {
+            windows_vault_credentials::revoke_profile(
+                &VaultCredentialStore {
+                    store: self.session_store.as_ref(),
+                    profile: &self.profile_scope,
+                },
+                &self.profile_scope,
+            )?;
+        }
+
+        self.provider.bandwidth.clear();
         {
             let mut state = self
                 .state
@@ -2435,12 +5122,20 @@ impl WindowsAgent {
         if let Some(session) = &session {
             cleanup_uncertain |= self
                 .session_store
-                .remove("default", &session.server, &session.client_id)
+                .remove(
+                    self.profile_scope.as_str(),
+                    &session.server,
+                    &session.client_id,
+                )
                 .is_err();
             if !preserve_registered_root {
                 cleanup_uncertain |= self
                     .session_store
-                    .remove_root_config("default", &session.server, &session.client_id)
+                    .remove_root_config(
+                        self.profile_scope.as_str(),
+                        &session.server,
+                        &session.client_id,
+                    )
                     .is_err();
             }
         }
@@ -2476,6 +5171,9 @@ impl WindowsAgent {
             ) {
                 Ok(_) => {
                     self.provider.authorize_generation(next);
+                    self.vault_sessions
+                        .logout_account(&self.profile_scope)
+                        .map_err(|_| "Could not revoke the account vault sessions")?;
                     return Ok(next);
                 }
                 Err(actual) => current = actual,
@@ -2505,6 +5203,7 @@ impl WindowsAgent {
     }
 
     fn stop_and_join(&self) -> Result<(), String> {
+        self.provider.cancel_fresh_close();
         let _ = self.cancel_auth()?;
         let handle = self
             .auth_thread
@@ -2526,21 +5225,39 @@ impl WindowsAgent {
                 .join()
                 .map_err(|_| "Session refresh worker stopped unexpectedly")?;
         }
-        self.provider.disconnect()?;
+        let disconnect = self.provider.disconnect();
+        let worker = self.stop_fresh_close_worker();
+        disconnect?;
+        worker?;
         Ok(())
+    }
+}
+
+impl Drop for WindowsAgent {
+    fn drop(&mut self) {
+        self.provider.cancel_fresh_close();
+        let worker = self
+            .fresh_close_worker
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(worker) = worker {
+            let _ = worker.stop();
+        }
     }
 }
 
 fn record_cleanup_failure(
     state: &Arc<Mutex<AccountState>>,
     store: &Arc<dyn SessionStore>,
+    profile_scope: &str,
     session: &auth::Session,
 ) {
     // A cancelled flow only staged an unreferenced blob. It never published
     // startup restore authority, so failed cleanup can leave private bytes but
     // cannot resurrect the cancelled session on the next launch.
     let cleanup_uncertain = store
-        .remove("default", &session.server, &session.client_id)
+        .remove(profile_scope, &session.server, &session.client_id)
         .is_err();
     if !cleanup_uncertain {
         return;
@@ -2553,7 +5270,11 @@ fn record_cleanup_failure(
     }
 }
 
-fn revoke_and_remove(store: &Arc<dyn SessionStore>, session: &auth::Session) -> bool {
+fn revoke_and_remove(
+    store: &Arc<dyn SessionStore>,
+    profile_scope: &str,
+    session: &auth::Session,
+) -> bool {
     let pointer = store.revoke_active();
     let mut uncertain = pointer.is_err();
     if let Ok(Some((scope, server, client_id))) = pointer {
@@ -2563,7 +5284,7 @@ fn revoke_and_remove(store: &Arc<dyn SessionStore>, session: &auth::Session) -> 
     // If both operations fail, startup may retry refresh but never marks the
     // session connected without a successful token response.
     uncertain |= store
-        .remove("default", &session.server, &session.client_id)
+        .remove(profile_scope, &session.server, &session.client_id)
         .is_err();
     uncertain
 }
@@ -2593,17 +5314,49 @@ fn encode_root_configuration(configuration: &RootConfiguration) -> Result<Vec<u8
 
 fn load_root_configuration(
     store: &Arc<dyn SessionStore>,
+    expected_profile: &str,
     session: &auth::Session,
 ) -> Result<Option<RootConfiguration>, String> {
-    let Some(bytes) = store.load_root_config("default", &session.server, &session.client_id)?
+    let Some(bytes) =
+        store.load_root_config(expected_profile, &session.server, &session.client_id)?
     else {
         return Ok(None);
     };
+    let mut configuration = decode_root_metadata(&bytes, expected_profile)?;
+    // Metadata alone only reserves a local path. Restoring a provider still
+    // requires exact binding to this real session, including issuer identity.
+    if configuration.server != session.server
+        || configuration.client_id != session.client_id
+        || configuration.issuer != session.expected_issuer
+    {
+        return Err("Saved drive folder configuration identity does not match".into());
+    }
+    let expected = raiun_cloudfiles_windows::ConfiguredRootIdentity {
+        volume_serial: configuration.volume_serial,
+        file_index: configuration.file_index,
+    };
+    let lease = if configuration
+        .registration_ownership
+        .as_ref()
+        .is_some_and(|owner| owner.state != "prepared_not_registered")
+    {
+        pin_registered_configured_root(Path::new(&configuration.path), expected)
+    } else {
+        pin_configured_root(Path::new(&configuration.path))
+    };
+    configuration.valid = lease.is_ok_and(|lease| lease.identity() == expected);
+    Ok(Some(configuration))
+}
+
+/// Decode protected root metadata for exclusion/reservation only. This does
+/// not restore credentials, inspect/register a root, or grant provider authority.
+/// The authenticated loader separately binds the server/client/issuer and root.
+fn decode_root_metadata(bytes: &[u8], expected_profile: &str) -> Result<RootConfiguration, String> {
     if bytes.is_empty() || bytes.len() > MAX_ROOT_CONFIG_BYTES {
         return Err("Saved drive folder configuration is invalid".into());
     }
-    let value: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| "Saved drive folder configuration is invalid")?;
+    let value: Value =
+        serde_json::from_slice(bytes).map_err(|_| "Saved drive folder configuration is invalid")?;
     let version = value["version"]
         .as_u64()
         .ok_or("Saved drive folder configuration is invalid")?;
@@ -2617,23 +5370,31 @@ fn load_root_configuration(
     let profile_scope = object
         .get("profile_scope")
         .and_then(Value::as_str)
-        .filter(|value| *value == "default")
+        .filter(|value| *value == expected_profile)
         .ok_or("Saved drive folder configuration is invalid")?;
     let server = object
         .get("server")
         .and_then(Value::as_str)
-        .filter(|value| *value == session.server)
+        .filter(|value| {
+            !value.is_empty() && value.len() <= 4096 && !value.chars().any(char::is_control)
+        })
         .ok_or("Saved drive folder configuration identity does not match")?;
     let client_id = object
         .get("client_id")
         .and_then(Value::as_str)
-        .filter(|value| *value == session.client_id)
+        .filter(|value| {
+            !value.is_empty() && value.len() <= 4096 && !value.chars().any(char::is_control)
+        })
         .ok_or("Saved drive folder configuration identity does not match")?;
     let issuer = match object.get("issuer") {
-        Some(Value::String(issuer)) if session.expected_issuer.as_ref() == Some(issuer) => {
+        Some(Value::String(issuer))
+            if !issuer.is_empty()
+                && issuer.len() <= 4096
+                && !issuer.chars().any(char::is_control) =>
+        {
             Some(issuer.clone())
         }
-        Some(Value::Null) if session.expected_issuer.is_none() => None,
+        Some(Value::Null) => None,
         _ => return Err("Saved drive folder configuration identity does not match".into()),
     };
     let path = object
@@ -2730,20 +5491,7 @@ fn load_root_configuration(
             None => return Err("Saved drive folder ownership record is invalid".into()),
         }
     };
-    let expected = raiun_cloudfiles_windows::ConfiguredRootIdentity {
-        volume_serial,
-        file_index,
-    };
-    let lease = if registration_ownership
-        .as_ref()
-        .is_some_and(|owner| owner.state != "prepared_not_registered")
-    {
-        pin_registered_configured_root(Path::new(path), expected)
-    } else {
-        pin_configured_root(Path::new(path))
-    };
-    let valid = lease.is_ok_and(|lease| lease.identity() == expected);
-    Ok(Some(RootConfiguration {
+    Ok(RootConfiguration {
         profile_scope: profile_scope.to_owned(),
         server: server.to_owned(),
         client_id: client_id.to_owned(),
@@ -2752,15 +5500,19 @@ fn load_root_configuration(
         volume_serial,
         file_index,
         registration_ownership,
-        valid,
-    }))
+        valid: false,
+    })
 }
 
 fn verified_personal_root_identity(
     session: &auth::Session,
 ) -> Result<(String, String, String), String> {
-    let client = OpenCloudClient::new(&session.server, session.access_token.clone())
-        .map_err(|_| "Could not verify this account's Personal drive")?;
+    let client = OpenCloudClient::new_with_proxy(
+        &session.server,
+        session.access_token.clone(),
+        &session.proxy,
+    )
+    .map_err(|_| "Could not verify this account's Personal drive")?;
     let token_generation = client.token_generation();
     let context = RangeReadContext {
         deadline: std::time::Instant::now() + Duration::from_secs(30),
@@ -2861,9 +5613,11 @@ fn dispatch_one_initial_edit(
                 .dispatch_verified(&remote)
                 .map_err(|_| "The initial save requires recovery review".to_owned())?;
             if let Some(proof) = dispatched.proof {
-                let location = dispatched
-                    .location
-                    .ok_or_else(|| "The saved edit needs local recovery review".to_owned())?;
+                let location = dispatched.location.ok_or_else(|| {
+                    #[cfg(all(test, debug_assertions))]
+                    eprintln!("synthetic_save_completion_missing_location");
+                    "The saved edit needs local recovery review".to_owned()
+                })?;
                 if generation.load(Ordering::Acquire) != binding.generation
                     || location.root_identity() != binding.identity
                     || location.local_file_identity() != proof.metadata().local_file
@@ -2877,7 +5631,13 @@ fn dispatch_one_initial_edit(
                     location.components().iter().map(String::as_str).collect();
                 connection
                     .acknowledge_verified_edit(&components, &publication)
-                    .map_err(|_| "The saved edit needs local recovery review".to_owned())?;
+                    .map_err(|error| {
+                        #[cfg(all(test, debug_assertions))]
+                        eprintln!("synthetic_save_completion_rejected: {error}");
+                        #[cfg(not(all(test, debug_assertions)))]
+                        let _ = error;
+                        "The saved edit needs local recovery review".to_owned()
+                    })?;
             } else if matches!(
                 dispatched.outcome,
                 raiun_cloudfiles_windows::ReconciliationOutcome::VerifiedApplied { .. }
@@ -3324,18 +6084,160 @@ fn unix_time_now() -> u64 {
 
 struct DpapiStore {
     store: DpapiSessionStore,
+    // Trusted runtime identity, never selected by an individual RPC payload.
+    profile_scope: String,
 }
 
 impl DpapiStore {
     fn current_user() -> Result<Self, String> {
-        DpapiSessionStore::current_user()
-            .map(|store| Self { store })
-            .map_err(|_| "Could not initialize private current-user session storage".into())
+        Self::for_profile("default")
+    }
+    fn for_profile(profile: &str) -> Result<Self, String> {
+        if !valid_runtime_profile(profile) {
+            return Err("Invalid Windows runtime profile".into());
+        }
+        let base = DpapiSessionStore::current_user()
+            .map_err(|_| "Could not initialize private current-user session storage".to_owned())?;
+        let store = base
+            .for_profile(profile)
+            .map_err(|_| "Could not admit private profile storage".to_owned())?;
+        Ok(Self {
+            store,
+            profile_scope: profile.into(),
+        })
+    }
+    fn check_scope(&self, scope: &str) -> Result<(), String> {
+        if scope != self.profile_scope {
+            return Err("Protected Windows storage belongs to another profile".into());
+        }
+        Ok(())
     }
 }
 
 impl SessionStore for DpapiStore {
+    fn load_vault_existing_edit_capture(
+        &self,
+        binding: &[u8],
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
+        self.store
+            .load_vault_existing_edit_capture(binding)
+            .map_err(|_| "Protected vault capture is unavailable".into())
+    }
+    fn put_new_vault_existing_edit_capture(
+        &self,
+        binding: &[u8],
+        record: &[u8],
+    ) -> Result<(), String> {
+        self.store
+            .put_new_vault_existing_edit_capture(binding, record)
+            .map_err(|_| "Vault capture publication is uncertain".into())
+    }
+    fn load_vault_completed_history_segment(
+        &self,
+        binding: &[u8],
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
+        self.store
+            .load_vault_completed_history_segment(binding)
+            .map_err(|_| "Protected completed vault history is unavailable".into())
+    }
+    fn put_new_vault_completed_history_segment(
+        &self,
+        binding: &[u8],
+        record: &[u8],
+    ) -> Result<(), String> {
+        self.store
+            .put_new_vault_completed_history_segment(binding, record)
+            .map_err(|_| "Completed vault history publication is uncertain".into())
+    }
+    fn load_vault_custody(
+        &self,
+        scope: &[u8],
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
+        self.store
+            .load_vault_custody(scope)
+            .map_err(|_| "Protected vault history is unavailable".into())
+    }
+    fn compare_exchange_vault_custody(
+        &self,
+        scope: &[u8],
+        old: Option<&[u8]>,
+        next: &[u8],
+    ) -> Result<(), String> {
+        self.store
+            .compare_exchange_vault_custody(scope, old, next)
+            .map_err(|_| "Vault history publication is uncertain".into())
+    }
+
+    fn load_vault_credentials(
+        &self,
+        profile: &str,
+    ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
+        self.check_scope(profile)?;
+        self.store
+            .load_vault_credentials(profile)
+            .map_err(|_| "Protected vault credentials are unavailable".into())
+    }
+    fn compare_exchange_vault_credentials(
+        &self,
+        profile: &str,
+        old: Option<&[u8]>,
+        next: &[u8],
+    ) -> Result<(), String> {
+        self.check_scope(profile)?;
+        self.store
+            .compare_exchange_vault_credentials(profile, old, next)
+            .map_err(|_| "Vault credential publication is uncertain".into())
+    }
+
+    fn load_proxy_settings(&self, profile: &str) -> Result<Option<Vec<u8>>, String> {
+        self.check_scope(profile)?;
+        self.store
+            .load_proxy_settings(profile)
+            .map_err(|_| "Protected proxy settings could not be read".into())
+    }
+    fn compare_exchange_proxy_settings(
+        &self,
+        profile: &str,
+        old: Option<&[u8]>,
+        next: &[u8],
+    ) -> Result<(), String> {
+        self.check_scope(profile)?;
+        self.store
+            .compare_exchange_proxy_settings(profile, old, next)
+            .map_err(|_| "Proxy settings changed or durable publication is uncertain".into())
+    }
+
+    fn load_bandwidth_settings(
+        &self,
+        profile: &str,
+        scope: &[u8],
+    ) -> Result<Option<Vec<u8>>, String> {
+        self.check_scope(profile)?;
+        self.store
+            .load_bandwidth_settings(scope)
+            .map_err(|_| "Protected bandwidth settings could not be read".into())
+    }
+    fn compare_exchange_bandwidth_settings(
+        &self,
+        profile: &str,
+        scope: &[u8],
+        old: Option<&[u8]>,
+        next: &[u8],
+    ) -> Result<(), String> {
+        self.check_scope(profile)?;
+        self.store
+            .compare_exchange_bandwidth_settings(scope, old, next)
+            .map_err(|_| {
+                "Bandwidth settings changed or their durable publication is uncertain".into()
+            })
+    }
+
+    fn bound_profile(&self) -> Option<&str> {
+        Some(&self.profile_scope)
+    }
+
     fn save_pending(&self, scope: &str, session: &auth::Session) -> Result<(), String> {
+        self.check_scope(scope)?;
         let bytes = Zeroizing::new(
             serde_json::to_vec(session).map_err(|_| "Could not serialize the sign-in session")?,
         );
@@ -3348,12 +6250,14 @@ impl SessionStore for DpapiStore {
     }
 
     fn publish_active(&self, scope: &str, session: &auth::Session) -> Result<(), String> {
+        self.check_scope(scope)?;
         self.store
             .set_active_identity(scope, &session.server, &session.client_id)
             .map_err(|_| "Could not save the active session pointer in protected storage".into())
     }
 
     fn load_active(&self, expected_scope: &str) -> Result<Option<auth::Session>, String> {
+        self.check_scope(expected_scope)?;
         let identity = self
             .store
             .active_identity()
@@ -3384,6 +6288,9 @@ impl SessionStore for DpapiStore {
             .store
             .active_identity()
             .map_err(|_| "Could not read the active session pointer".to_string())?;
+        if let Some((profile, _, _)) = &identity {
+            self.check_scope(profile)?;
+        }
         self.store
             .clear_active_identity()
             .map_err(|_| "Could not revoke the active session pointer".to_string())?;
@@ -3391,6 +6298,7 @@ impl SessionStore for DpapiStore {
     }
 
     fn remove(&self, scope: &str, server: &str, client_id: &str) -> Result<(), String> {
+        self.check_scope(scope)?;
         self.store
             .remove(Some(scope), server, client_id)
             .map_err(|_| "Could not remove the session from Windows protected storage".into())
@@ -3403,6 +6311,7 @@ impl SessionStore for DpapiStore {
         client_id: &str,
         bytes: &[u8],
     ) -> Result<(), String> {
+        self.check_scope(scope)?;
         self.store
             .save_root_config(scope, server, client_id, bytes)
             .map_err(|_| "Could not save the drive folder in private Windows storage".into())
@@ -3414,12 +6323,14 @@ impl SessionStore for DpapiStore {
         server: &str,
         client_id: &str,
     ) -> Result<Option<Vec<u8>>, String> {
+        self.check_scope(scope)?;
         self.store
             .load_root_config(scope, server, client_id)
             .map_err(|_| "Could not read the drive folder from private Windows storage".into())
     }
 
     fn remove_root_config(&self, scope: &str, server: &str, client_id: &str) -> Result<(), String> {
+        self.check_scope(scope)?;
         self.store
             .remove_root_config(scope, server, client_id)
             .map_err(|_| "Could not clear the drive folder from private Windows storage".into())
@@ -3437,7 +6348,13 @@ pub(super) fn run() -> Result<(), String> {
     let args = Args::parse();
     match args.command {
         Command::Request { message } => request_once(&message),
-        Command::Serve => serve(session_store_factory()?),
+        Command::Serve => {
+            if WINDOWS_ACCOUNTS_ENABLED {
+                windows_profiles::serve_profiles()
+            } else {
+                serve(session_store_factory()?)
+            }
+        }
     }
 }
 
@@ -3474,7 +6391,10 @@ fn disconnected_pipe_client(error: &std::io::Error) -> bool {
 }
 
 fn serve_control_connection<S: Read + Write>(agent: &Arc<WindowsAgent>, stream: &mut S) -> bool {
-    let result = read_json_value(stream).and_then(|request| agent.handle_request(&request));
+    let result = read_json_value(stream).and_then(|request| {
+        let request = windows_vault_requests::OwnedControlRequest::new(request);
+        agent.handle_request(request.value())
+    });
     let (response, should_stop) = match result {
         Ok((data, should_stop)) => (json!({"ok":true,"data":data}), should_stop),
         Err(error) => (json!({"ok":false,"error":error}), false),
@@ -3491,6 +6411,7 @@ fn serve(session_store: impl SessionStore + 'static) -> Result<(), String> {
 }
 
 fn serve_agent(agent: Arc<WindowsAgent>) -> Result<(), String> {
+    agent.attach_existing_file_save_owner()?;
     let stopping = Arc::new(AtomicBool::new(false));
     while !stopping.load(Ordering::Acquire) {
         // Do not classify bind errors as disconnected clients: claiming the
@@ -3535,15 +6456,23 @@ fn request_timeout(request: &Value) -> Duration {
         "shutdown"
         | "auth_cancel"
         | "logout"
+        | "pause"
         | "space_pause"
         | "vault_lock"
-        | "windows_recovery_retry" => Duration::from_secs(300),
+        | "windows_recovery_retry"
+        | "vault_upload_capture" => Duration::from_secs(300),
         _ => Duration::from_secs(30),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    mod windows_media_worker_test {
+        include!("windows_media_worker_test.rs");
+    }
+    mod windows_folder_worker_test {
+        include!("windows_folder_worker_test.rs");
+    }
     use super::{
         AccountState, ActiveProviderBinding, AgentGenerationRecoveryRemote, CloudSpace,
         PROVIDER_UNAVAILABLE, RecoveryRemoteHandle, RegistrationOwnership, SessionStore,
@@ -5756,6 +8685,34 @@ mod tests {
         let cache_generation = restored.generation.load(Ordering::Acquire);
         let cache_scope_token =
             restored.status().unwrap()["root_configuration"]["recovery_scope_token"].clone();
+        let usage_request = json!({"action":"windows_device_cache_usage", "profile_id":"default",
+            "expected_generation":cache_generation,
+            "expected_recovery_scope_token":cache_scope_token});
+        let (usage, stop) = restored
+            .handle_request(&usage_request)
+            .expect("connected worker exposes explicit shared-device cache accounting");
+        assert!(!stop);
+        assert_eq!(usage["scope"], "device_all_accounts");
+        assert_eq!(usage["read_only"], true);
+        assert_eq!(usage["last_observed"], true);
+        assert_eq!(usage["atomic_snapshot"], false);
+        assert_eq!(usage["profile_id"], "default");
+        assert_eq!(usage["auth_generation"], cache_generation);
+        assert_eq!(usage["recovery_scope_token"], cache_scope_token);
+        assert!(usage["used_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(usage["quota_bytes"], 1_u64 << 30);
+        for (field, value) in [
+            ("profile_id", json!("foreign")),
+            ("expected_generation", json!(cache_generation + 1)),
+            ("expected_recovery_scope_token", json!("0".repeat(64))),
+        ] {
+            let mut stale = usage_request.clone();
+            stale[field] = value;
+            assert!(restored.handle_request(&stale).is_err(), "{field}");
+        }
+        eprintln!(
+            "native_device_cache_usage=shared_device_scope_positive_bytes_stale_scope_refused"
+        );
         let mut admitted_cache_requests = Vec::new();
         for (space, root_id, resource, etag, expected) in [
             (
@@ -6031,6 +8988,3009 @@ mod tests {
         restored.provider.disconnect().unwrap();
         drop(restored);
         fixture.join().unwrap();
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    fn broker_vault_read_in_child(
+        path: &Path,
+        expected_len: usize,
+        expected_sha: &str,
+    ) -> Result<bool, String> {
+        use std::process::{Command, Stdio};
+
+        assert!(path.is_absolute());
+        assert_eq!(path.file_name().unwrap(), "1");
+        assert_eq!(path.parent().unwrap().file_name().unwrap(), "Travel.vault");
+        assert_eq!(
+            path.parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap(),
+            "Personal"
+        );
+        let mut child = Command::new("powershell.exe")
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                "$ErrorActionPreference='Stop'; try { $b=[System.IO.File]::ReadAllBytes($env:RAIUN_SYNTHETIC_FILE); $h=[System.Security.Cryptography.SHA256]::Create(); try { $s=[BitConverter]::ToString($h.ComputeHash($b)).Replace('-','').ToLowerInvariant(); [Console]::WriteLine(('{0}|{1}' -f $b.Length,$s)) } finally { $h.Dispose() } } catch { $e=$_.Exception; while ($e.InnerException) { $e=$e.InnerException }; [Console]::WriteLine(('ERROR|{0}' -f $e.HResult)); exit 24 }"])
+            .env("RAIUN_SYNTHETIC_FILE", path)
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+            .spawn().map_err(|_| "could not start synthetic vault reader")?;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|_| "could not poll vault reader")?
+            {
+                let output = child
+                    .wait_with_output()
+                    .map_err(|_| "could not collect vault reader")?;
+                let summary =
+                    String::from_utf8(output.stdout).map_err(|_| "invalid vault reader summary")?;
+                let summary = summary.trim();
+                if status.success() && summary == format!("{expected_len}|{expected_sha}") {
+                    println!("C06_VAULT_EXTERNAL_READ_VERIFIED=true");
+                    return Ok(true);
+                }
+                if status.code() == Some(24)
+                    && summary
+                        .strip_prefix("ERROR|")
+                        .and_then(|value| value.parse::<i32>().ok())
+                        .is_some_and(|hr| hr < 0)
+                {
+                    println!("C06_VAULT_EXTERNAL_READ_REJECTED=true");
+                    return Ok(false);
+                }
+                return Err("synthetic vault reader returned unexpected status/content".into());
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("synthetic vault reader timed out; preserve owned fixture".into());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser child with fresh owned LOCALAPPDATA; C05 cleanup acceptance prerequisite"]
+    fn native_broker_manual_remember_lock_saved_forget_lifecycle() {
+        broker_remembered_lifecycle_fixture(false);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser child with fresh owned LOCALAPPDATA and qualified C05 payload cleanup"]
+    fn native_broker_saved_payload_forget_and_lock() {
+        broker_remembered_lifecycle_fixture(true);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser child with fresh owned LOCALAPPDATA; forced synthetic vault modification preserves dirty fixture"]
+    fn native_broker_vault_modified_close_retains_indexed_edit() {
+        broker_remembered_lifecycle_fixture_mode(true, true);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser with fresh child-only LOCALAPPDATA; explicit synthetic encrypted upload retains dirty namespace"]
+    fn native_broker_vault_captured_edit_explicit_upload_verifies_ciphertext() {
+        broker_remembered_lifecycle_fixture_with_upload(true, true, true);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[derive(Debug)]
+    enum VaultWriterOpenOutcome {
+        Opened,
+        Error(Option<i32>),
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    struct VaultWriterOpenResult {
+        outcome: VaultWriterOpenOutcome,
+        critical_span_finished: bool,
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    enum VaultCompletionProbeState {
+        NotStarted,
+        SharingDenied,
+        Pending {
+            received: std::sync::mpsc::Receiver<VaultWriterOpenResult>,
+            competitor: thread::JoinHandle<()>,
+        },
+        Failed,
+        Finalized,
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    pub(super) struct VaultCompletionProbeHandle {
+        state: Arc<Mutex<VaultCompletionProbeState>>,
+        critical_span_finished: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    pub(super) fn finalize_vault_completion_probe(
+        probe: VaultCompletionProbeHandle,
+    ) -> Result<Value, String> {
+        let state = std::mem::replace(
+            &mut *probe
+                .state
+                .lock()
+                .map_err(|_| "writer probe lock poisoned")?,
+            VaultCompletionProbeState::Finalized,
+        );
+        match state {
+            VaultCompletionProbeState::SharingDenied => {
+                if !probe.critical_span_finished.load(Ordering::SeqCst) {
+                    return Err(
+                        "sharing denial observed but full critical span did not finish".into(),
+                    );
+                }
+                Ok(json!({"native_writer_exclusion":"sharing_denied", "native_writer_error":32}))
+            }
+            VaultCompletionProbeState::Pending {
+                received,
+                competitor,
+            } => {
+                // This is an observed channel/marker ordering, not proof of the
+                // exact kernel admission instant: the thread may be preempted.
+                // The real retained native reference and production postproofs
+                // remain the security authority for completion.
+                let result = received
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(|error| {
+                        // Do not block joining a still-pending open or kill its thread.
+                        // Releasing the native guard lets it finish naturally.
+                        eprintln!("C06_VAULT_WRITER_PROBE_FINALIZE_FAILED={error:?}");
+                        "writer open result was not received within five seconds after command returned"
+                            .to_string()
+                    })?;
+                competitor
+                    .join()
+                    .map_err(|_| "writer probe thread panicked")?;
+                let raw = match result.outcome {
+                    VaultWriterOpenOutcome::Opened => 0,
+                    VaultWriterOpenOutcome::Error(Some(5)) => 5,
+                    other => {
+                        return Err(format!("unexpected post-command writer outcome: {other:?}"));
+                    }
+                };
+                if !result.critical_span_finished {
+                    return Err(
+                        "writer thread sampled an unfinished critical span after Open returned"
+                            .into(),
+                    );
+                }
+                eprintln!(
+                    "C06_VAULT_NATIVE_WRITER_EXCLUSION=pending_through_completion;error={raw}"
+                );
+                Ok(
+                    json!({"native_writer_exclusion":"pending_through_completion", "native_writer_error":raw}),
+                )
+            }
+            _ => Err("writer exclusion probe never reached a qualifying completed state".into()),
+        }
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    pub(super) fn instrument_vault_completion_store(
+        inner: Box<dyn raiun_cloudfiles_windows::VaultLocalCompletionStore>,
+        root: PathBuf,
+    ) -> (
+        Box<dyn raiun_cloudfiles_windows::VaultLocalCompletionStore>,
+        VaultCompletionProbeHandle,
+    ) {
+        struct Instrumented {
+            inner: Box<dyn raiun_cloudfiles_windows::VaultLocalCompletionStore>,
+            root: PathBuf,
+            state: Arc<Mutex<VaultCompletionProbeState>>,
+            critical_span_finished: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl raiun_cloudfiles_windows::VaultLocalCompletionStore for Instrumented {
+            fn target(&self) -> &raiun_cloudfiles_windows::VaultLocalCompletionTarget {
+                self.inner.target()
+            }
+            fn prepare(
+                &mut self,
+                proof: &raiun_cloudfiles_windows::VaultNativePreparation,
+            ) -> Result<(), raiun_cloudfiles_windows::BackendError> {
+                self.inner.prepare(proof)
+            }
+            fn complete(
+                &mut self,
+                proof: &raiun_cloudfiles_windows::VaultNativeCompletionProof,
+            ) -> Result<(), raiun_cloudfiles_windows::BackendError> {
+                self.inner.complete(proof)
+            }
+            fn before_in_sync_for_test(
+                &mut self,
+            ) -> Result<(), raiun_cloudfiles_windows::BackendError> {
+                use raiun_cloudfiles_windows::BackendError;
+                let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
+                if !matches!(*state, VaultCompletionProbeState::NotStarted) {
+                    return Err(BackendError::Unavailable);
+                }
+                *state = VaultCompletionProbeState::Failed;
+                let components = self.inner.target().components();
+                if !self.root.is_absolute()
+                    || components.is_empty()
+                    || components.iter().any(|component| {
+                        component.is_empty()
+                            || component == "."
+                            || component == ".."
+                            || component.contains(['/', '\\', ':'])
+                    })
+                {
+                    return Err(BackendError::Unavailable);
+                }
+                let mut path = self.root.clone();
+                for component in components {
+                    path.push(component);
+                }
+                let (entered_sent, entered_received) = std::sync::mpsc::sync_channel(1);
+                let (sent, received) = std::sync::mpsc::sync_channel(1);
+                let finished = Arc::clone(&self.critical_span_finished);
+                let competitor = thread::spawn(move || {
+                    let _ = entered_sent.send(());
+                    // Ordinary existing-file write OPEN only: never write bytes,
+                    // truncate, create, alter permissions or retry after denial.
+                    let opened = std::fs::OpenOptions::new().write(true).open(path);
+                    let critical_span_finished = finished.load(Ordering::SeqCst);
+                    let outcome = match opened {
+                        Ok(file) => {
+                            drop(file);
+                            VaultWriterOpenOutcome::Opened
+                        }
+                        Err(error) => VaultWriterOpenOutcome::Error(error.raw_os_error()),
+                    };
+                    eprintln!(
+                        "C06_VAULT_WRITER_OPEN_RETURN={outcome:?};critical_span_finished={critical_span_finished}"
+                    );
+                    let _ = sent.send(VaultWriterOpenResult {
+                        outcome,
+                        critical_span_finished,
+                    });
+                });
+                if entered_received
+                    .recv_timeout(Duration::from_secs(1))
+                    .is_err()
+                {
+                    eprintln!("C06_VAULT_WRITER_PROBE_ENTER_TIMEOUT");
+                    return Err(BackendError::Unavailable);
+                }
+                match received.recv_timeout(Duration::from_secs(2)) {
+                    Ok(VaultWriterOpenResult {
+                        outcome: VaultWriterOpenOutcome::Error(Some(32)),
+                        ..
+                    }) => {
+                        competitor.join().map_err(|_| BackendError::Unavailable)?;
+                        *state = VaultCompletionProbeState::SharingDenied;
+                        eprintln!("C06_VAULT_NATIVE_WRITER_EXCLUSION=sharing_denied;error=32");
+                        Ok(())
+                    }
+                    Ok(result) => {
+                        eprintln!(
+                            "C06_VAULT_WRITER_PROBE_IMMEDIATE_FAILURE={:?}",
+                            result.outcome
+                        );
+                        let _ = competitor.join();
+                        Err(BackendError::Unavailable)
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        // Provisional only. The final hook must still observe a
+                        // pending probe result, and finalization must qualify its return.
+                        *state = VaultCompletionProbeState::Pending {
+                            received,
+                            competitor,
+                        };
+                        eprintln!("C06_VAULT_WRITER_PROBE_PENDING_PROVISIONAL=true");
+                        Ok(())
+                    }
+                    Err(error) => {
+                        eprintln!("C06_VAULT_WRITER_PROBE_CHANNEL_FAILURE={error:?}");
+                        let _ = competitor.join();
+                        Err(BackendError::Unavailable)
+                    }
+                }
+            }
+            fn before_completion_guard_release_for_test(
+                &mut self,
+            ) -> Result<(), raiun_cloudfiles_windows::BackendError> {
+                use raiun_cloudfiles_windows::BackendError;
+                let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
+                match &*state {
+                    VaultCompletionProbeState::SharingDenied => {}
+                    VaultCompletionProbeState::Pending { received, .. } => {
+                        if !matches!(
+                            received.try_recv(),
+                            Err(std::sync::mpsc::TryRecvError::Empty)
+                        ) {
+                            eprintln!(
+                                "C06_VAULT_WRITER_PROBE_RETURNED_BEFORE_CRITICAL_SPAN_END=true"
+                            );
+                            *state = VaultCompletionProbeState::Failed;
+                            return Err(BackendError::Unavailable);
+                        }
+                    }
+                    _ => return Err(BackendError::Unavailable),
+                }
+                // No result has been observed yet for the pending branch. This
+                // does not establish the exact kernel admission instant.
+                // Native completion, postproof and exact dirty resolution are
+                // already durable. The exclusive guard/fences remain held here.
+                self.critical_span_finished.store(true, Ordering::SeqCst);
+                eprintln!("C06_VAULT_WRITER_PROBE_CRITICAL_SPAN_FINISHED=true");
+                Ok(())
+            }
+        }
+        let state = Arc::new(Mutex::new(VaultCompletionProbeState::NotStarted));
+        let critical_span_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        (
+            Box::new(Instrumented {
+                inner,
+                root,
+                state: Arc::clone(&state),
+                critical_span_finished: Arc::clone(&critical_span_finished),
+            }),
+            VaultCompletionProbeHandle {
+                state,
+                critical_span_finished,
+            },
+        )
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser with fresh child-only LOCALAPPDATA; verifies native local disposition after one explicit synthetic upload"]
+    fn native_broker_vault_verified_upload_completes_local_disposition() {
+        broker_remembered_lifecycle_fixture_with_disposition(true, true, true, true);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser with fresh child-only LOCALAPPDATA; verifies full local disposition after normal close without an injected writer"]
+    fn native_broker_vault_verified_upload_normal_close_completes_local_disposition() {
+        broker_remembered_lifecycle_fixture_with_writer_probe(true, true, true, true, false);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser/fresh child-only LOCALAPPDATA; automatic fresh-close upload leaves dirty native fixture"]
+    fn native_broker_vault_fresh_close_automatically_uploads_retained_edit() {
+        broker_remembered_lifecycle_fixture_with_automatic_upload(true, true, true, true);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser/fresh child LOCALAPPDATA; missing volatile receipt refuses cleanup despite historical native writable-byte completion"]
+    fn native_broker_vault_writable_bytes_complete_preserves_pending_cleanup() {
+        broker_remembered_lifecycle_fixture_with_modes(
+            true,
+            true,
+            true,
+            true,
+            false,
+            false,
+            WritableCleanupFixtureMode::MissingReceipt,
+        );
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser/fresh child appdata; verifies same-live writable cleanup boundary and one bounded late-write outcome"]
+    fn native_broker_vault_writable_bytes_lock_evicts_with_late_activity_truthfulness() {
+        broker_remembered_lifecycle_fixture_with_modes(
+            true,
+            true,
+            true,
+            true,
+            false,
+            false,
+            WritableCleanupFixtureMode::NormalCleanup,
+        );
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser/fresh child appdata; one fresh close automatically completes writable bytes then clean Lock without manual upload"]
+    fn native_broker_vault_fresh_close_automatically_completes_writable_bytes_and_locks() {
+        broker_remembered_lifecycle_fixture_with_modes(
+            true,
+            true,
+            true,
+            true,
+            false,
+            true,
+            WritableCleanupFixtureMode::FreshNative,
+        );
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser/fresh child appdata; normal admitted worker and fresh writable publication complete two same-live in-place saves then Lock"]
+    fn native_broker_vault_normal_existing_file_two_saves_automatically_complete_and_lock() {
+        broker_remembered_lifecycle_fixture_with_modes(
+            true,
+            true,
+            true,
+            true,
+            false,
+            true,
+            WritableCleanupFixtureMode::NormalExisting,
+        );
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser/fresh child appdata; normal writable publication full clean read and same-connection reunlock/Lock without any edit"]
+    fn native_broker_vault_normal_clean_read_reunlock_and_lock_without_edits() {
+        broker_remembered_lifecycle_fixture_with_modes(
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            WritableCleanupFixtureMode::NormalCleanRead,
+        );
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    fn normal_existing_save_owner_is_weak_and_failed_admission_releases_gate() {
+        let agent = Arc::new(WindowsAgent::new(MemoryStore::default()));
+        let owners = Arc::strong_count(&agent);
+        agent.attach_existing_file_save_owner().unwrap();
+        agent.attach_existing_file_save_owner().unwrap();
+        assert_eq!(
+            Arc::strong_count(&agent),
+            owners,
+            "owner attachment cannot create a cycle"
+        );
+        let binding = ActiveProviderBinding {
+            generation: agent.generation.load(Ordering::Acquire),
+            path: PathBuf::from(r"C:\SyntheticRoot"),
+            identity: raiun_cloudfiles_windows::ConfiguredRootIdentity {
+                volume_serial: 9,
+                file_index: 42,
+            },
+            personal_space_id: "space".into(),
+            personal_root_resource_id: "root".into(),
+        };
+        assert!(
+            agent
+                .provider
+                .prepare_existing_file_save_worker(
+                    &binding,
+                    &agent.state,
+                    &agent.session_store,
+                    false
+                )
+                .is_err(),
+            "an unattested account cannot mint a save source"
+        );
+        assert!(
+            !agent
+                .provider
+                .existing_save_admission
+                .load(Ordering::Acquire)
+        );
+        assert!(agent.provider.fresh_close_source.lock().unwrap().is_none());
+        assert!(agent.fresh_close_worker.lock().unwrap().is_none());
+        // Busy admission must not release another caller's finite gate.
+        agent
+            .provider
+            .existing_save_admission
+            .store(true, Ordering::Release);
+        assert!(
+            agent
+                .provider
+                .prepare_existing_file_save_worker(
+                    &binding,
+                    &agent.state,
+                    &agent.session_store,
+                    false
+                )
+                .is_err()
+        );
+        assert!(
+            agent
+                .provider
+                .existing_save_admission
+                .load(Ordering::Acquire)
+        );
+        agent
+            .provider
+            .existing_save_admission
+            .store(false, Ordering::Release);
+        let weak = Arc::downgrade(&agent);
+        drop(agent);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    fn normal_existing_save_source_is_exact_binding_and_cancelled_identity_only() {
+        let agent = Arc::new(WindowsAgent::new(MemoryStore::default()));
+        let generation = agent.provider.authorized_generation.load(Ordering::Acquire);
+        let worker =
+            super::windows_vault_close_worker::FreshCloseWorker::start_for_existing_file_saves(
+                Arc::downgrade(&agent),
+                Arc::clone(&agent.provider.authorized_generation),
+                generation,
+            )
+            .unwrap();
+        let source = worker.source();
+        let active = source.existing_file_save_marker(generation).unwrap();
+        let binding = ActiveProviderBinding {
+            generation,
+            path: PathBuf::from(r"C:\SyntheticRoot"),
+            identity: raiun_cloudfiles_windows::ConfiguredRootIdentity {
+                volume_serial: 9,
+                file_index: 42,
+            },
+            personal_space_id: "space".into(),
+            personal_root_resource_id: "root".into(),
+        };
+        let publication = super::FreshClosePublication {
+            source,
+            binding: Some(binding.clone()),
+            original_active: Some(Arc::clone(&active)),
+        };
+        assert!(publication.marker(&binding).is_some());
+        let mut foreign = binding.clone();
+        foreign.identity.file_index += 1;
+        assert!(publication.marker(&foreign).is_none());
+        foreign = binding.clone();
+        foreign.path = PathBuf::from(r"C:\OtherRoot");
+        assert!(publication.marker(&foreign).is_none());
+        publication.cancel();
+        assert!(publication.marker(&binding).is_none());
+        assert!(!active.load(Ordering::Acquire));
+        assert!(worker.owns_existing_file_save_marker(generation, &active));
+        assert!(
+            !worker.owns_existing_file_save_marker(
+                generation,
+                &Arc::new(std::sync::atomic::AtomicBool::new(true))
+            ),
+            "a replacement active Arc cannot adopt the cancelled original"
+        );
+        worker.stop().unwrap();
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    #[test]
+    fn vault_readiness_binding_refuses_stale_missing_or_foreign_root() {
+        use super::vault_worker_binding_current;
+        let binding = ActiveProviderBinding {
+            generation: 7,
+            path: PathBuf::from(r"C:\SyntheticRoot"),
+            identity: raiun_cloudfiles_windows::ConfiguredRootIdentity {
+                volume_serial: 9,
+                file_index: 42,
+            },
+            personal_space_id: "space".into(),
+            personal_root_resource_id: "root".into(),
+        };
+        assert!(vault_worker_binding_current(7, &binding, Some(&binding)));
+        assert!(!vault_worker_binding_current(8, &binding, Some(&binding)));
+        assert!(!vault_worker_binding_current(7, &binding, None));
+        let mut foreign = binding.clone();
+        foreign.identity.file_index += 1;
+        assert!(!vault_worker_binding_current(7, &binding, Some(&foreign)));
+        for changed in 0..4 {
+            foreign = binding.clone();
+            match changed {
+                0 => foreign.identity.volume_serial += 1,
+                1 => foreign.path = PathBuf::from(r"C:\ForeignRoot"),
+                2 => foreign.personal_space_id = "foreign-space".into(),
+                _ => foreign.personal_root_resource_id = "foreign-root".into(),
+            }
+            assert!(!vault_worker_binding_current(7, &binding, Some(&foreign)));
+        }
+        foreign = binding.clone();
+        foreign.generation = 0;
+        assert!(!vault_worker_binding_current(0, &foreign, Some(&foreign)));
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    fn broker_remembered_lifecycle_fixture(payload: bool) {
+        broker_remembered_lifecycle_fixture_mode(payload, false);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    fn broker_remembered_lifecycle_fixture_mode(payload: bool, capture_edit: bool) {
+        broker_remembered_lifecycle_fixture_with_upload(payload, capture_edit, false);
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    fn broker_remembered_lifecycle_fixture_with_upload(
+        payload: bool,
+        capture_edit: bool,
+        upload_edit: bool,
+    ) {
+        broker_remembered_lifecycle_fixture_with_disposition(
+            payload,
+            capture_edit,
+            upload_edit,
+            false,
+        );
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    fn broker_remembered_lifecycle_fixture_with_automatic_upload(
+        payload: bool,
+        capture_edit: bool,
+        upload_edit: bool,
+        automatic: bool,
+    ) {
+        broker_remembered_lifecycle_fixture_with_modes(
+            payload,
+            capture_edit,
+            upload_edit,
+            false,
+            true,
+            automatic,
+            WritableCleanupFixtureMode::Disabled,
+        );
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    fn broker_remembered_lifecycle_fixture_with_disposition(
+        payload: bool,
+        capture_edit: bool,
+        upload_edit: bool,
+        complete_local: bool,
+    ) {
+        broker_remembered_lifecycle_fixture_with_writer_probe(
+            payload,
+            capture_edit,
+            upload_edit,
+            complete_local,
+            true,
+        );
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    fn broker_remembered_lifecycle_fixture_with_writer_probe(
+        payload: bool,
+        capture_edit: bool,
+        upload_edit: bool,
+        complete_local: bool,
+        inject_writer_probe: bool,
+    ) {
+        broker_remembered_lifecycle_fixture_with_modes(
+            payload,
+            capture_edit,
+            upload_edit,
+            complete_local,
+            inject_writer_probe,
+            false,
+            WritableCleanupFixtureMode::Disabled,
+        );
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    enum WritableCleanupFixtureMode {
+        Disabled,
+        MissingReceipt,
+        NormalCleanup,
+        FreshNative,
+        NormalExisting,
+        NormalCleanRead,
+    }
+
+    #[cfg(all(windows, debug_assertions))]
+    fn broker_remembered_lifecycle_fixture_with_modes(
+        payload: bool,
+        capture_edit: bool,
+        upload_edit: bool,
+        complete_local: bool,
+        inject_writer_probe: bool,
+        automatic: bool,
+        writable_mode: WritableCleanupFixtureMode,
+    ) {
+        let normal_clean_read =
+            matches!(writable_mode, WritableCleanupFixtureMode::NormalCleanRead);
+        let writable_bytes = !matches!(
+            writable_mode,
+            WritableCleanupFixtureMode::Disabled | WritableCleanupFixtureMode::NormalCleanRead
+        );
+        let normal_existing = matches!(
+            writable_mode,
+            WritableCleanupFixtureMode::NormalExisting
+                | WritableCleanupFixtureMode::NormalCleanRead
+        );
+        let fresh_native = matches!(
+            writable_mode,
+            WritableCleanupFixtureMode::FreshNative | WritableCleanupFixtureMode::NormalExisting
+        );
+        let writable_cleanup = matches!(
+            writable_mode,
+            WritableCleanupFixtureMode::NormalCleanup
+                | WritableCleanupFixtureMode::FreshNative
+                | WritableCleanupFixtureMode::NormalExisting
+        );
+        assert!(!fresh_native || automatic);
+        assert!(
+            !writable_bytes
+                || (complete_local && (!automatic || fresh_native) && !inject_writer_probe)
+        );
+        assert!(!automatic || (upload_edit && (!complete_local || fresh_native)));
+        assert!(!complete_local || upload_edit);
+        assert!(!upload_edit || capture_edit);
+        assert!(!capture_edit || payload);
+        use super::{
+            DpapiSessionStore, DpapiStore, VaultCredentialStore, windows_profile_registry,
+            windows_profiles, windows_vault_credentials,
+        };
+        assert_eq!(std::env::var("USERNAME").as_deref(), Ok("RaiunLabUser"));
+        // Operator must supply this only in the child ProcessStartInfo environment.
+        // No process/global environment mutation or real-profile fallback exists.
+        let appdata =
+            PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("isolated child appdata"));
+        let fixture = appdata.parent().expect("owned fixture parent").to_owned();
+        assert_eq!(appdata.file_name().unwrap(), "appdata");
+        assert_eq!(fixture.parent().unwrap(), Path::new(r"C:\RaiunLab"));
+        let name = fixture.file_name().unwrap().to_str().unwrap();
+        let nonce = name
+            .strip_prefix("c06-broker-lifecycle-")
+            .expect("fixed fixture prefix");
+        assert_eq!(nonce.len(), 32);
+        assert!(
+            nonce
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
+        assert_eq!(
+            std::fs::canonicalize(&appdata).unwrap(),
+            PathBuf::from(format!(r"\\?\{}", appdata.display()))
+        );
+        assert_eq!(
+            std::fs::read_dir(&appdata).unwrap().count(),
+            0,
+            "refuse replay before opening storage"
+        );
+        assert_eq!(
+            std::fs::read_dir(&fixture).unwrap().count(),
+            1,
+            "fresh root contains only empty appdata"
+        );
+        let appdata_pin = raiun_control_windows::PinnedDirectory::open(&appdata).unwrap();
+        appdata_pin.verify_path().unwrap();
+        eprintln!("synthetic_c06_broker_fixture={}", fixture.display());
+
+        let (server, remote) = synthetic_personal_spaces_server_inner_with_vault_upload(
+            |_| {},
+            false,
+            false,
+            false,
+            true,
+            payload,
+            upload_edit,
+        );
+        let storage = DpapiSessionStore::current_user().unwrap();
+        let _registry_owner = storage.lock_profile_registry().unwrap();
+        assert!(storage.load_profile_registry().unwrap().is_none());
+        assert!(storage.active_identity().unwrap().is_none());
+        let profile = format!("profile-{nonce}");
+        let registry = windows_profile_registry::Registry::decode_or_default(None)
+            .unwrap()
+            .with_added(&profile, "Synthetic remembered vault")
+            .unwrap()
+            .with_selected(&profile)
+            .unwrap();
+        let admissions = Arc::new(Mutex::new(Arc::new(registry.clone())));
+        let sessions = Arc::new(raiun_vault::session::VaultSessionCoordinator::new());
+        let store = DpapiStore::for_profile(&profile).unwrap();
+        let session = synthetic_session(&server, "synthetic-client", unix_time_now() + 3600);
+        store.save_pending(&profile, &session).unwrap();
+        store.publish_active(&profile, &session).unwrap();
+        let mut runtime = Arc::new(
+            WindowsAgent::new_for_profile_with_services(
+                &profile,
+                store,
+                Some(admissions),
+                sessions.clone(),
+            )
+            .unwrap(),
+        );
+        Arc::get_mut(&mut runtime)
+            .expect("fresh test runtime has one owner before operations")
+            .synthetic_vault_completion_writer_probe = inject_writer_probe;
+        let generation = runtime.generation.load(Ordering::Acquire);
+        {
+            let mut state = runtime.state.lock().unwrap();
+            state.active_generation = generation;
+            state.online_authenticated = true;
+            state.needs_refresh = false;
+        }
+        runtime.provider.authorize_generation(generation);
+        if normal_existing {
+            runtime.attach_existing_file_save_owner().unwrap();
+            runtime
+                .provider
+                .lifecycle_test_activation
+                .store(true, Ordering::Release);
+        }
+
+        let drive = fixture.join("drive");
+        std::fs::create_dir(&drive).unwrap();
+        runtime
+            .configure_root(
+                &json!({"action":"configure_root","profile_id":profile,"cloud_root":drive}),
+            )
+            .unwrap();
+        if automatic && !normal_existing {
+            if fresh_native {
+                runtime
+                    .start_fresh_close_worker_with_writable_completion_for_test()
+                    .unwrap();
+            } else {
+                runtime.start_fresh_close_worker_for_test().unwrap();
+            }
+            assert_eq!(
+                runtime
+                    .fresh_close_observation_for_test()
+                    .unwrap()
+                    .attempted,
+                0
+            );
+        }
+        if normal_existing {
+            WindowsAgent::maybe_connect_provider(
+                &runtime.session_store,
+                &runtime.state,
+                &runtime.provider,
+            )
+            .unwrap();
+            let admitted = runtime.fresh_close_observation_for_test().unwrap();
+            assert_eq!(
+                admitted.attempted, 0,
+                "normal startup admits an idle worker before any child save"
+            );
+        } else {
+            WindowsAgent::connect_verified_root(
+                &runtime.session_store,
+                &runtime.state,
+                &runtime.provider,
+            )
+            .unwrap();
+        }
+        assert!(
+            child_process_directory_matches(&drive, &["Personal", "Spaces"])
+                .unwrap()
+                .matches_expected
+        );
+        let broker = windows_profiles::WindowsProfiles::for_isolated_lifecycle_fixture(
+            storage.clone(),
+            registry,
+            runtime.clone(),
+        )
+        .unwrap();
+        let scope = raiun_vault::session::VaultSessionScope::new(
+            &profile,
+            &server,
+            "synthetic-personal-drive",
+            "synthetic-vault-root",
+        )
+        .unwrap();
+        let target = || {
+            json!({"profile_id":profile,"space_id":"synthetic-personal-drive",
+            "root_path":"/Travel.vault","root_resource_id":"synthetic-vault-root"})
+        };
+        let mut manual = target();
+        manual["action"] = json!("vault_unlock");
+        manual["password"] = json!("potato"); // public fixture password, never owner credentials
+        manual["remember"] = json!(true);
+        let unlocked = broker.handle_isolated_lifecycle_session(manual).unwrap().0;
+        assert_eq!(unlocked["unlocked"], true);
+        assert_eq!(unlocked["remembered_status"], "known_saved");
+        assert_eq!(unlocked["root_resource_id"], "synthetic-vault-root");
+        assert_eq!(unlocked["vault_mount_ready"], true);
+        if normal_existing {
+            assert_eq!(unlocked["vault_mount_existing_file_in_place"], true);
+            assert_eq!(unlocked["vault_mount_writable"], false);
+            assert_eq!(unlocked["vault_mount_existing_file_overwrite"], false);
+        }
+
+        assert!(sessions.is_unlocked(&scope).unwrap());
+        let mut lock = target();
+        lock["action"] = json!("vault_lock");
+        assert_eq!(
+            broker.handle_isolated_lifecycle_session(lock).unwrap().0["unlocked"],
+            false
+        );
+        assert!(!sessions.is_unlocked(&scope).unwrap());
+        assert!(
+            runtime
+                .confirm_windows_vault_readiness(&scope, "/Travel.vault")
+                .is_err()
+        );
+        let mut saved = target();
+        saved["action"] = json!("vault_unlock");
+        saved["use_saved"] = json!(true);
+        let unlocked = broker.handle_isolated_lifecycle_session(saved).unwrap().0;
+        assert_eq!(unlocked["remembered_status"], "known_saved");
+        assert!(sessions.is_unlocked(&scope).unwrap());
+        if payload {
+            let personal = drive.join("Personal");
+            assert!(
+                child_process_directory_matches(&personal, &["Travel.vault"])
+                    .unwrap()
+                    .matches_expected
+            );
+            assert!(
+                child_process_directory_matches(&personal.join("Travel.vault"), &["1"])
+                    .unwrap()
+                    .matches_expected
+            );
+            use sha2::Digest as _;
+            let expected = (0..65537).map(|i| (i * 31 + 7) as u8).collect::<Vec<_>>();
+            let hash = format!("{:x}", sha2::Sha256::digest(&expected));
+            assert!(
+                broker_vault_read_in_child(&personal.join("Travel.vault/1"), expected.len(), &hash)
+                    .unwrap(),
+                "Saved unlock must serve the verified public fixture bytes"
+            );
+            let gets = remote.native_reads.lock().unwrap().vault_get_count;
+            assert!(
+                (1..=16).contains(&gets),
+                "bounded conditional ciphertext download"
+            );
+            println!("C06_SAVED_PAYLOAD_READ_VERIFIED=true");
+        }
+        if normal_clean_read {
+            use sha2::Digest as _;
+            use std::os::windows::fs::MetadataExt as _;
+            let file = drive.join("Personal/Travel.vault/1");
+            let expected = (0..65537).map(|i| (i * 31 + 7) as u8).collect::<Vec<_>>();
+            let hash = format!("{:x}", sha2::Sha256::digest(&expected));
+            let (configuration, root_pin) = runtime
+                .confirm_windows_vault_readiness(&scope, "/Travel.vault")
+                .unwrap();
+            let owner = configuration.registration_ownership.as_ref().unwrap();
+            let active = ActiveProviderBinding {
+                generation,
+                path: PathBuf::from(&configuration.path),
+                identity: raiun_cloudfiles_windows::ConfiguredRootIdentity {
+                    volume_serial: configuration.volume_serial,
+                    file_index: configuration.file_index,
+                },
+                personal_space_id: owner.personal_drive_id.clone(),
+                personal_root_resource_id: owner.personal_root_resource_id.clone().unwrap(),
+            };
+            assert!(runtime.provider.connection_matches(active.clone()).unwrap());
+            let original_source = runtime
+                .provider
+                .existing_vault_save_worker_marker(&active)
+                .unwrap()
+                .expect("normal admitted existing-file worker");
+            let verified = runtime
+                .provider
+                .verified_vault_backend(active.clone())
+                .unwrap();
+            let before = verified
+                .custody
+                .inspect_capture_for_test(&scope, "/Travel.vault")
+                .unwrap();
+            assert!(
+                before.captures.is_empty(),
+                "ordinary hydration is not edit capture/NativeCompleted authority"
+            );
+            let original = before
+                .entries
+                .iter()
+                .find(|entry| !entry.is_directory() && entry.root_relative_path() == "/1")
+                .unwrap()
+                .clone();
+            assert_eq!(original.length(), expected.len() as u64);
+            let first_epoch = sessions
+                .capture_session_epoch(&scope)
+                .unwrap()
+                .historical_generation();
+            let initial_native = runtime
+                .provider
+                .read_only_placeholder_observation(NativeRestartProbePath::VaultCapturedFile)
+                .unwrap()
+                .2
+                .unwrap();
+            assert_eq!(
+                initial_native.0 & 1,
+                0,
+                "fresh eligible normal publication remains writable without fixture attribute changes"
+            );
+            assert_ne!(
+                initial_native.2 & 8,
+                0,
+                "full clean hydration must be native in-sync"
+            );
+            assert_eq!(initial_native.3, expected.len() as u64);
+            assert_eq!(std::fs::metadata(&file).unwrap().file_attributes() & 1, 0);
+            assert!(
+                !runtime
+                    .provider
+                    .vault_cleanup_fixture(active.clone(), None)
+                    .unwrap(),
+                "ordinary full read must have real ONDISK bytes before Lock"
+            );
+            let first_gets = remote.native_reads.lock().unwrap().vault_get_count;
+            assert!((1..=16).contains(&first_gets));
+            let closes = runtime.provider.close_observation().unwrap();
+            assert_eq!(
+                (closes.0, closes.1, closes.4, closes.5, closes.7),
+                (0, 0, 0, 0, 0)
+            );
+            let observed = runtime.fresh_close_observation_for_test().unwrap();
+            assert_eq!(
+                (observed.attempted, observed.completed, observed.failed),
+                (0, 0, 0)
+            );
+            assert!(!observed.local_completed && !observed.remote_verified);
+            assert_eq!(observed.native_confirmation, None);
+            println!(
+                "C06_VAULT_NORMAL_CLEAN_READ_FULL_VERIFIED=true;bytes=65537;GET={first_gets};readonly=false;edits=0;captures=0;NativeCompleted=0;PUT=0;DELETE=0"
+            );
+            let mut first_lock = target();
+            first_lock["action"] = json!("vault_lock");
+            let locked = broker
+                .handle_isolated_lifecycle_session(first_lock)
+                .expect("fresh acknowledged clean-read provenance permits current same-live Lock")
+                .0;
+            assert_eq!(locked["unlocked"], false);
+            assert_eq!(locked["vault_lock_cleanup_status"], "complete");
+            assert!(!sessions.is_unlocked(&scope).unwrap());
+            assert!(sessions.capture_session_epoch(&scope).is_err());
+            assert!(
+                runtime
+                    .provider
+                    .vault_cleanup_fixture(active.clone(), None)
+                    .unwrap()
+            );
+            let empty_native = runtime
+                .provider
+                .read_only_placeholder_observation(NativeRestartProbePath::VaultCapturedFile)
+                .unwrap()
+                .2
+                .unwrap();
+            assert_eq!(empty_native.0 & 1, 0);
+            assert_eq!(empty_native.3, expected.len() as u64);
+            assert!(
+                !broker_vault_read_in_child(&file, expected.len(), &hash).unwrap(),
+                "ordinary reader cannot restore plaintext after clean-read Lock"
+            );
+            assert!(
+                runtime
+                    .provider
+                    .vault_cleanup_fixture(active.clone(), None)
+                    .unwrap()
+            );
+            assert_eq!(
+                remote.native_reads.lock().unwrap().vault_get_count,
+                first_gets,
+                "locked read cannot perform authenticated GET"
+            );
+            let after_first_lock = verified
+                .custody
+                .inspect_capture_for_test(&scope, "/Travel.vault")
+                .unwrap();
+            assert!(after_first_lock.captures.is_empty());
+            assert!(
+                after_first_lock
+                    .entries
+                    .iter()
+                    .any(|entry| entry == &original),
+                "read/Lock never promotes protected original metadata"
+            );
+            println!(
+                "C06_VAULT_NORMAL_CLEAN_READ_FIRST_LOCK_VERIFIED=true;keys_locked=true;on_disk_empty=true;locked_read_refused=true;noGET=true;captures=0;NativeCompleted=0"
+            );
+            // One same-connection manual reunlock, not remembered/history adoption.
+            let mut reunlock = target();
+            reunlock["action"] = json!("vault_unlock");
+            reunlock["password"] = json!("potato"); // public synthetic fixture only
+            reunlock["remember"] = json!(false);
+            let unlocked = broker
+                .handle_isolated_lifecycle_session(reunlock)
+                .unwrap()
+                .0;
+            assert_eq!(unlocked["unlocked"], true);
+            assert_eq!(unlocked["vault_mount_ready"], true);
+            assert_eq!(unlocked["vault_mount_existing_file_in_place"], true);
+            assert_eq!(unlocked["vault_mount_writable"], false);
+            assert!(runtime.provider.connection_matches(active.clone()).unwrap());
+            let current_source = runtime
+                .provider
+                .existing_vault_save_worker_marker(&active)
+                .unwrap()
+                .unwrap();
+            assert!(
+                Arc::ptr_eq(&original_source, &current_source),
+                "reunlock cannot replace or adopt a new worker source"
+            );
+            let current = runtime
+                .provider
+                .verified_vault_backend(active.clone())
+                .unwrap();
+            assert!(
+                Arc::ptr_eq(&verified.backend, &current.backend),
+                "same native connection/root backend spans both Locks"
+            );
+            let second_epoch = sessions
+                .capture_session_epoch(&scope)
+                .unwrap()
+                .historical_generation();
+            assert_ne!(
+                first_epoch, second_epoch,
+                "new crypto epoch label is diagnostic; fresh binding authority is enforced by native provenance"
+            );
+            assert!(
+                runtime
+                    .provider
+                    .vault_cleanup_fixture(active.clone(), None)
+                    .unwrap(),
+                "confirmed-evicted cache remains empty before second ordinary full read"
+            );
+            assert!(broker_vault_read_in_child(&file, expected.len(), &hash).unwrap());
+            assert!(
+                !runtime
+                    .provider
+                    .vault_cleanup_fixture(active.clone(), None)
+                    .unwrap(),
+                "second bound full hydration must create current native cache bytes"
+            );
+            let full_again = runtime
+                .provider
+                .read_only_placeholder_observation(NativeRestartProbePath::VaultCapturedFile)
+                .unwrap()
+                .2
+                .unwrap();
+            assert_eq!(full_again.0 & 1, 0);
+            assert_ne!(full_again.2 & 8, 0);
+            assert_eq!(full_again.3, expected.len() as u64);
+            let second_gets = remote.native_reads.lock().unwrap().vault_get_count;
+            assert!(
+                second_gets >= first_gets && second_gets - first_gets <= 16,
+                "fresh native read may use authenticated private stage cache; HTTP delta remains bounded"
+            );
+            println!(
+                "C06_VAULT_NORMAL_CLEAN_READ_REUNLOCK_FULL_VERIFIED=true;same_connection=true;same_worker=true;new_epoch_label=true;native_empty_to_full=true;first_GET={first_gets};second_GET={second_gets};delta={};captures=0;NativeCompleted=0",
+                second_gets - first_gets
+            );
+            let mut second_lock = target();
+            second_lock["action"] = json!("vault_lock");
+            let locked = broker.handle_isolated_lifecycle_session(second_lock).expect("fresh new-binding clean read can roll confirmed eviction forward and Lock again").0;
+            assert_eq!(locked["unlocked"], false);
+            assert_eq!(locked["vault_lock_cleanup_status"], "complete");
+            assert!(!sessions.is_unlocked(&scope).unwrap());
+            assert!(sessions.capture_session_epoch(&scope).is_err());
+            assert!(
+                runtime
+                    .provider
+                    .vault_cleanup_fixture(active.clone(), None)
+                    .unwrap()
+            );
+            assert!(!broker_vault_read_in_child(&file, expected.len(), &hash).unwrap());
+            assert!(
+                runtime
+                    .provider
+                    .vault_cleanup_fixture(active.clone(), None)
+                    .unwrap()
+            );
+            assert_eq!(
+                remote.native_reads.lock().unwrap().vault_get_count,
+                second_gets
+            );
+            let final_snapshot = current
+                .custody
+                .inspect_capture_for_test(&scope, "/Travel.vault")
+                .unwrap();
+            assert!(
+                final_snapshot.captures.is_empty(),
+                "reads never create edit capture/NativeCompleted rows"
+            );
+            assert!(
+                final_snapshot
+                    .entries
+                    .iter()
+                    .any(|entry| entry == &original)
+            );
+            let final_closes = runtime.provider.close_observation().unwrap();
+            assert_eq!(
+                (
+                    final_closes.0,
+                    final_closes.1,
+                    final_closes.4,
+                    final_closes.5,
+                    final_closes.7
+                ),
+                (0, 0, 0, 0, 0)
+            );
+            let final_worker = runtime.fresh_close_observation_for_test().unwrap();
+            assert_eq!(
+                (
+                    final_worker.attempted,
+                    final_worker.completed,
+                    final_worker.failed
+                ),
+                (0, 0, 0)
+            );
+            assert!(!final_worker.local_completed && !final_worker.remote_verified);
+            assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+            assert_eq!(
+                remote.native_reads.lock().unwrap().mutation_attempt_count,
+                0
+            );
+            assert!(
+                remote.vault_upload.is_none(),
+                "default read-only HTTP fixture has no opt-in upload state"
+            );
+            broker
+                .stop_all()
+                .expect("two acknowledged clean-read Locks permit normal provider stop");
+            assert_eq!(
+                remote.native_reads.lock().unwrap().vault_get_count,
+                second_gets
+            );
+            drop(root_pin);
+            drop(verified);
+            drop(current);
+            drop(broker);
+            drop(runtime);
+            drop(sessions);
+            remote.join().unwrap();
+            appdata_pin.verify_path().unwrap();
+            println!(
+                "C06_VAULT_NORMAL_CLEAN_READ_REUNLOCK_LOCK_VERIFIED=true;normal_owner=true;normal_worker=true;readonly=false;ordinary_full_reads=2;clean_locks=2;same_connection=true;same_worker=true;fresh_reunlock_binding=true;keys_locked=true;on_disk_empty=true;locked_read_refused=true;noGET_afterLocks=true;PUT=0;DELETE=0;edits=0;captures=0;NativeCompleted=0;original_entry_unchanged=true;private_worker_start=false;readonly_clear=false;manual_upload=false;late_probe=false;partial_cache_claim=false;package_acceptance=false"
+            );
+            return;
+        }
+        if capture_edit {
+            let (configuration, root_pin) = runtime
+                .confirm_windows_vault_readiness(&scope, "/Travel.vault")
+                .unwrap();
+            let owner = configuration.registration_ownership.as_ref().unwrap();
+            let active = ActiveProviderBinding {
+                generation,
+                path: PathBuf::from(&configuration.path),
+                identity: raiun_cloudfiles_windows::ConfiguredRootIdentity {
+                    volume_serial: configuration.volume_serial,
+                    file_index: configuration.file_index,
+                },
+                personal_space_id: owner.personal_drive_id.clone(),
+                personal_root_resource_id: owner.personal_root_resource_id.clone().unwrap(),
+            };
+            let verified = runtime
+                .provider
+                .verified_vault_backend(active.clone())
+                .unwrap();
+            let (_, trusted) = verified
+                .backend
+                .vault_read_context(active.identity)
+                .unwrap();
+            let original_epoch = sessions
+                .capture_session_epoch(&scope)
+                .unwrap()
+                .historical_generation();
+            let before = verified
+                .custody
+                .inspect_capture_for_test(&scope, "/Travel.vault")
+                .unwrap();
+            assert!(before.captures.is_empty());
+            let original = before
+                .entries
+                .iter()
+                .find(|entry| !entry.is_directory() && entry.root_relative_path() == "/1")
+                .unwrap()
+                .clone();
+            assert_eq!(original.length(), 65537);
+            let hydration = before
+                .hydrations
+                .iter()
+                .find(|item| item.opaque() == original.opaque())
+                .unwrap();
+            let components = vec![
+                "Personal".to_owned(),
+                "Travel.vault".to_owned(),
+                "1".to_owned(),
+            ];
+            assert_eq!(hydration.components(), components.as_slice());
+            assert_eq!(hydration.length(), original.length());
+            let ordinary = runtime
+                .prepare_recovery_context()
+                .unwrap()
+                .recovery_provider;
+            assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
+            let file = drive.join("Personal/Travel.vault/1");
+            use std::os::windows::fs::MetadataExt as _;
+            let attributes = std::fs::metadata(&file).unwrap().file_attributes();
+            assert_ne!(
+                attributes & 0x400,
+                0,
+                "fixture must remain a Cloud Files reparse point"
+            );
+            let edited = (0..65553).map(|i| (i * 13 + 11) as u8).collect::<Vec<_>>();
+            assert_ne!(edited.len() as u64, original.length());
+            let gets = remote.native_reads.lock().unwrap().vault_get_count;
+            assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+            let before_close = runtime.provider.close_observation().unwrap();
+            assert_eq!(before_close.0, 0, "fresh fixture has no modified closes");
+            assert_eq!(before_close.7, 0);
+            if automatic {
+                let mut state = remote.vault_upload.as_ref().unwrap().lock().unwrap();
+                assert!(!state.enabled);
+                assert_eq!(state.put_count, 0);
+                assert_eq!(state.body_get_count, 0);
+                if normal_existing {
+                    state.max_successful_puts = 2;
+                }
+                state.enabled = true;
+            }
+            // Exact fresh fixture path only. Open existing preserves the native
+            // file ID/reparse point; only read-only is cleared for this forced
+            // synthetic edit. Production vault publication remains read-only.
+            use std::process::{Command, Stdio};
+            if normal_existing {
+                assert_eq!(
+                    std::fs::metadata(&file).unwrap().file_attributes() & 1,
+                    0,
+                    "actual fresh eligible publication must already be writable without fixture metadata mutation"
+                );
+                assert!(
+                    runtime
+                        .provider
+                        .existing_vault_save_worker_marker(&active)
+                        .unwrap()
+                        .is_some()
+                );
+            }
+            let edit_command = if normal_existing {
+                "$ErrorActionPreference='Stop'; $p=$env:RAIUN_SYNTHETIC_EDIT_FILE; $b=New-Object byte[] 65553; for($i=0;$i -lt $b.Length;$i++){$b[$i]=[byte](($i*13+11)-band 255)}; $f=[IO.File]::Open($p,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::Read); try{$f.SetLength($b.Length); $f.Write($b,0,$b.Length); $f.Flush($true)}finally{$f.Dispose()}"
+            } else {
+                "$ErrorActionPreference='Stop'; $p=$env:RAIUN_SYNTHETIC_EDIT_FILE; $a=[IO.File]::GetAttributes($p); [IO.File]::SetAttributes($p,($a -band (-bnot [IO.FileAttributes]::ReadOnly))); $b=New-Object byte[] 65553; for($i=0;$i -lt $b.Length;$i++){$b[$i]=[byte](($i*13+11)-band 255)}; $f=[IO.File]::Open($p,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::Read); try{$f.SetLength($b.Length); $f.Write($b,0,$b.Length); $f.Flush($true)}finally{$f.Dispose()}"
+            };
+            let mut writer = Command::new("powershell.exe")
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    edit_command,
+                ])
+                .env("RAIUN_SYNTHETIC_EDIT_FILE", &file)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            loop {
+                if let Some(status) = writer.try_wait().unwrap() {
+                    assert_eq!(status.code(), Some(0), "synthetic in-place writer failed");
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "synthetic writer timed out; process and fixture preserved"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let observation = loop {
+                let observation = runtime.provider.close_observation().unwrap();
+                if observation.0 > before_close.0 {
+                    break observation;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "native modified-close callback did not complete"
+                );
+                thread::sleep(Duration::from_millis(25));
+            };
+            if automatic {
+                // No protected inspector runs while the off-provider ledger CAS
+                // is in flight. This per-Agent observation contains no payload.
+                let deadline = Instant::now() + Duration::from_secs(60);
+                let completed = loop {
+                    let value = runtime.fresh_close_observation_for_test().unwrap();
+                    if value.completed != 0 {
+                        break value;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "fresh native close did not finish its bounded off-provider attempt; preserve fixture"
+                    );
+                    thread::sleep(Duration::from_millis(25));
+                };
+                assert_eq!(completed.attempted, 1);
+                assert_eq!(completed.completed, 1);
+                assert_eq!(completed.failed, 0);
+                assert!(completed.remote_verified);
+                assert_eq!(completed.native_confirmation, Some(fresh_native));
+                assert_eq!(completed.local_completed, fresh_native);
+                let provider_thread = runtime
+                    .provider
+                    .worker
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .thread()
+                    .id();
+                assert_ne!(completed.thread, Some(provider_thread));
+                assert_ne!(completed.thread, Some(thread::current().id()));
+            }
+            // A protected read holds an immutable no-delete pin. Wait for the
+            // producer callback's completed outcome before opening any index or
+            // body, so acceptance inspection cannot interfere with its CAS.
+            let captured = verified
+                .custody
+                .inspect_capture_for_test(&scope, "/Travel.vault")
+                .expect("completed callback must retain exact protected capture");
+            assert_eq!(captured.captures.len(), 1);
+            let (retained, entry) = &captured.captures[0];
+            assert!(
+                entry == &original,
+                "capture must preserve original protected catalogue row"
+            );
+            assert_eq!(retained.bytes_for_recovery(), edited.as_slice());
+            let baseline = serde_json::to_value(retained.historical_baseline()).unwrap();
+            assert_eq!(
+                baseline["opaque_file"],
+                serde_json::to_value(original.opaque()).unwrap()
+            );
+            assert_eq!(baseline["strong_etag"], original.etag());
+            assert_eq!(baseline["native_volume"], configuration.volume_serial);
+            assert_eq!(baseline["native_file"], hydration.file_index());
+            assert_eq!(baseline["unlock_epoch"], original_epoch);
+            assert_eq!(baseline["token_generation"], trusted.token_generation());
+            assert_eq!(
+                observation.7, 0,
+                "vault capture is not ordinary journal completion"
+            );
+            assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
+            assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+            assert_eq!(
+                remote.native_reads.lock().unwrap().vault_get_count,
+                gets + usize::from(automatic)
+            );
+            assert_eq!(
+                std::fs::metadata(&file).unwrap().file_attributes() & 0x400,
+                attributes & 0x400
+            );
+            if upload_edit {
+                let capture_ids = verified
+                    .custody
+                    .retained_capture_ids(&trusted, &scope, "/Travel.vault")
+                    .unwrap();
+                assert_eq!(capture_ids.len(), 1);
+                let capture_id = &capture_ids[0];
+                let original_frame = retained.encoded_frame_ref();
+                let vault_remote = remote
+                    .vault_upload
+                    .as_ref()
+                    .expect("explicit opt-in remote state");
+                if !automatic {
+                    let mut state = vault_remote.lock().unwrap();
+                    assert!(!state.enabled);
+                    assert_eq!(state.put_count, 0);
+                    assert_eq!(state.body_get_count, 0);
+                    assert_eq!(state.etag, original.etag());
+                    state.enabled = true;
+                }
+                if !automatic {
+                    if complete_local {
+                        assert!(
+                            runtime
+                                .provider
+                                .vault_file_pending_for_test(original.opaque())
+                                .unwrap(),
+                            "the exact captured file is pending before live completion"
+                        );
+                    }
+                    // Completion remains an explicit mode; old remote-only entry
+                    // point and native selector retain their pending-local behavior.
+                    let result = if writable_bytes {
+                        runtime.upload_windows_vault_capture_with_writable_completion(
+                            &scope,
+                            "/Travel.vault",
+                            capture_id,
+                        )
+                    } else if complete_local {
+                        runtime.upload_windows_vault_capture_with_completion(
+                            &scope,
+                            "/Travel.vault",
+                            capture_id,
+                            true,
+                        )
+                    } else {
+                        runtime.upload_windows_vault_capture(&scope, "/Travel.vault", capture_id)
+                    }
+                    .expect("explicit broker worker must verify its requested outcome");
+                    assert_eq!(
+                        result["state"],
+                        if complete_local {
+                            "local_completed"
+                        } else {
+                            "remote_verified_pending_local"
+                        }
+                    );
+                    if complete_local {
+                        if writable_bytes {
+                            assert_eq!(result["native_confirmation"], true);
+                            assert_eq!(result["read_only_restored"], false);
+                        }
+                        if inject_writer_probe {
+                            match result["native_writer_exclusion"].as_str() {
+                                Some("sharing_denied") => {
+                                    assert_eq!(result["native_writer_error"], 32)
+                                }
+                                Some("pending_through_completion") => assert!(
+                                    matches!(result["native_writer_error"].as_i64(), Some(0 | 5)),
+                                    "observed pending probe completes after the marker: open succeeds or is denied by restored readonly"
+                                ),
+                                other => {
+                                    panic!(
+                                        "actual guarded writer exclusion was not qualified: {other:?}"
+                                    )
+                                }
+                            }
+                        } else {
+                            assert!(result.get("native_writer_exclusion").is_none());
+                            assert!(result.get("native_writer_error").is_none());
+                            eprintln!("C06_VAULT_NORMAL_CLOSE_WITHOUT_INJECTED_WRITER=true");
+                        }
+                        assert_eq!(result["local_cleanup"], "requires_current_native_check");
+                        assert!(
+                            !runtime
+                                .provider
+                                .vault_file_pending_for_test(original.opaque())
+                                .unwrap(),
+                            "only this exact native-completed file resolves"
+                        );
+                        assert!(
+                            runtime.provider.close_observation().unwrap().0 >= observation.0,
+                            "historical modified telemetry must never be globally reset"
+                        );
+                    }
+                }
+                {
+                    let state = vault_remote.lock().unwrap();
+                    assert_eq!(state.put_attempt_count, 1);
+                    assert_eq!(state.put_count, 1);
+                    assert_eq!(state.last_put_if_match.as_deref(), Some(original.etag()));
+                    assert_eq!(state.resource_id, original.remote_id());
+                    assert_eq!(state.etag, "\"child-rev-2\"");
+                    assert_eq!(state.body_get_count, 1);
+                    assert_eq!(
+                        state.last_read_if_match.as_deref(),
+                        Some(state.etag.as_str())
+                    );
+                    assert_ne!(state.ciphertext.as_slice(), edited.as_slice());
+                    assert_ne!(
+                        state.ciphertext.as_slice(),
+                        include_bytes!("../../raiun-vault/tests/fixtures/web-65537.bin")
+                    );
+                    assert!(state.ciphertext.len() <= 1024 * 1024);
+                }
+                use sha2::Digest as _;
+                let ledger = verified
+                    .custody
+                    .upload_ledger(&trusted, &scope, "/Travel.vault", capture_id)
+                    .unwrap();
+                let attempt = ledger.reopen_attempt().unwrap();
+                let proof = attempt
+                    .readback_evidence()
+                    .unwrap()
+                    .expect("persisted authenticated remote readback");
+                assert_eq!(proof.resource_id(), original.remote_id());
+                assert_eq!(proof.etag(), "\"child-rev-2\"");
+                assert_eq!(proof.body_len(), edited.len());
+                assert_eq!(
+                    proof.body_sha256(),
+                    <[u8; 32]>::from(sha2::Sha256::digest(&edited))
+                );
+                if complete_local {
+                    let status = ledger
+                        .local_disposition()
+                        .unwrap()
+                        .expect("persisted v4 native disposition");
+                    assert!(
+                        status.is_native_completed(),
+                        "native S_OK alone is not durable completion"
+                    );
+                    assert!(status.reference().frame() == original_frame);
+                    assert!(status.reference().entry() == &original);
+                    assert_eq!(status.verified_entry().opaque(), original.opaque());
+                    assert_eq!(status.verified_entry().remote_id(), original.remote_id());
+                    assert_eq!(status.verified_entry().etag(), "\"child-rev-2\"");
+                    assert_eq!(status.verified_entry().length(), edited.len() as u64);
+                    assert_eq!(
+                        status.promoted_hydration().file_index(),
+                        hydration.file_index()
+                    );
+                    assert_eq!(
+                        status.promoted_hydration().components(),
+                        components.as_slice()
+                    );
+                    assert_eq!(status.promoted_hydration().length(), edited.len() as u64);
+                    assert_eq!(status.descriptor().body_len(), edited.len() as u64);
+                    assert_eq!(
+                        status.descriptor().body_sha256(),
+                        <[u8; 32]>::from(sha2::Sha256::digest(&edited))
+                    );
+                }
+                if !automatic {
+                    assert!(
+                        runtime
+                            .upload_windows_vault_capture(&scope, "/Travel.vault", capture_id)
+                            .is_err(),
+                        "persisted attempt must refuse a second dispatch"
+                    );
+                } else if !fresh_native {
+                    // Reopening protected references cannot mint a fresh job.
+                    let reopened = verified
+                        .custody
+                        .retained_capture_ids(&trusted, &scope, "/Travel.vault")
+                        .unwrap();
+                    assert_eq!(reopened, capture_ids);
+                    let _reopened_attempt = verified
+                        .custody
+                        .upload_ledger(&trusted, &scope, "/Travel.vault", capture_id)
+                        .unwrap()
+                        .reopen_attempt()
+                        .unwrap();
+                    let before_repeat = runtime.provider.close_observation().unwrap();
+                    assert_eq!(before_repeat.1, 0, "no earlier unverifiable close");
+                    assert_eq!(before_repeat.4, 0, "no earlier close failure stage");
+                    assert_eq!(before_repeat.5, 0, "no earlier close failure HRESULT");
+                    assert_eq!(before_repeat.7, 0, "no ordinary journal completion");
+                    // A read-only reopen need not emit a native close callback.
+                    // Reuse the exact existing-file writer with IDENTICAL bytes;
+                    // the capture identity deliberately excludes USN/time.
+                    let mut repeat_writer = Command::new("powershell.exe")
+                        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                            "$ErrorActionPreference='Stop'; $p=$env:RAIUN_SYNTHETIC_EDIT_FILE; $a=[IO.File]::GetAttributes($p); [IO.File]::SetAttributes($p,($a -band (-bnot [IO.FileAttributes]::ReadOnly))); $b=New-Object byte[] 65553; for($i=0;$i -lt $b.Length;$i++){$b[$i]=[byte](($i*13+11)-band 255)}; $f=[IO.File]::Open($p,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::Read); try{$f.SetLength($b.Length); $f.Write($b,0,$b.Length); $f.Flush($true)}finally{$f.Dispose()}"])
+                        .env("RAIUN_SYNTHETIC_EDIT_FILE", &file)
+                        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+                        .spawn().unwrap();
+                    let writer_deadline = Instant::now() + Duration::from_secs(20);
+                    loop {
+                        if let Some(status) = repeat_writer.try_wait().unwrap() {
+                            assert_eq!(status.code(), Some(0), "identical synthetic writer failed");
+                            break;
+                        }
+                        assert!(
+                            Instant::now() < writer_deadline,
+                            "identical synthetic writer timed out; process and fixture preserved"
+                        );
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    let deadline = Instant::now() + Duration::from_secs(15);
+                    let after_repeat = loop {
+                        let value = runtime.provider.close_observation().unwrap();
+                        if value.0 > before_repeat.0 {
+                            break value;
+                        }
+                        assert!(
+                            Instant::now() < deadline,
+                            "identical modified-close callback was not observed"
+                        );
+                        thread::sleep(Duration::from_millis(25));
+                    };
+                    // Modified count also rises on refusal. The existing failure
+                    // stage is published before that increment, so require all
+                    // error/journal fields to remain at their fresh baseline.
+                    assert_eq!(
+                        after_repeat.1, 0,
+                        "duplicate close must not be unverifiable"
+                    );
+                    assert_eq!(
+                        after_repeat.4, 0,
+                        "duplicate close must not fail validation"
+                    );
+                    assert_eq!(after_repeat.5, 0, "duplicate close must not fail natively");
+                    assert_eq!(
+                        after_repeat.7, 0,
+                        "duplicate vault close is not journal completion"
+                    );
+                    let observed = runtime.fresh_close_observation_for_test().unwrap();
+                    assert_eq!(
+                        observed.attempted, 1,
+                        "identical close/reopened history must not enqueue a new dispatch"
+                    );
+                    assert_eq!(observed.completed, 1);
+                }
+                if fresh_native {
+                    let reopened = verified
+                        .custody
+                        .retained_capture_ids(&trusted, &scope, "/Travel.vault")
+                        .unwrap();
+                    assert_eq!(reopened, capture_ids);
+                    let _reopened_attempt = verified
+                        .custody
+                        .upload_ledger(&trusted, &scope, "/Travel.vault", capture_id)
+                        .unwrap()
+                        .reopen_attempt()
+                        .unwrap();
+                    let completed = runtime.fresh_close_observation_for_test().unwrap();
+                    assert_eq!(
+                        completed.attempted, 1,
+                        "reopened references cannot enqueue or replay work"
+                    );
+                    assert_eq!(completed.completed, 1);
+                    assert_eq!(completed.failed, 0);
+                    assert!(completed.local_completed);
+                    assert_eq!(completed.native_confirmation, Some(true));
+                }
+                {
+                    let state = vault_remote.lock().unwrap();
+                    assert_eq!(state.put_attempt_count, 1, "no conditional PUT replay");
+                    assert_eq!(state.put_count, 1);
+                    assert_eq!(state.body_get_count, 1);
+                }
+                let after_upload = verified
+                    .custody
+                    .inspect_capture_for_test(&scope, "/Travel.vault")
+                    .unwrap();
+                assert_eq!(after_upload.captures.len(), 1);
+                assert!(
+                    after_upload.captures[0].0.encoded_frame_ref() == original_frame,
+                    "immutable capture frame must remain unchanged"
+                );
+                assert_eq!(
+                    after_upload.captures[0].0.bytes_for_recovery(),
+                    edited.as_slice()
+                );
+                assert!(after_upload.captures[0].1 == original);
+                assert_eq!(std::fs::read(&file).unwrap(), edited);
+                if automatic {
+                    let after_protected_read = runtime.provider.close_observation().unwrap();
+                    assert_eq!(
+                        after_protected_read.1, 0,
+                        "protected duplicate/frame inspection must not hide an unverifiable close"
+                    );
+                    assert_eq!(
+                        after_protected_read.4, 0,
+                        "protected duplicate/frame inspection must not hide validation refusal"
+                    );
+                    assert_eq!(
+                        after_protected_read.5, 0,
+                        "protected duplicate/frame inspection must not hide native error"
+                    );
+                    assert_eq!(
+                        after_protected_read.7, 0,
+                        "no ordinary journal completion after duplicate"
+                    );
+                }
+                assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
+                assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+                assert_eq!(runtime.provider.close_observation().unwrap().7, 0);
+                if automatic && !fresh_native {
+                    println!(
+                        "C06_VAULT_FRESH_CLOSE_AUTO_UPLOAD_VERIFIED=true;vaultPUT=1;authenticatedBodyGET=1;off_provider_thread=true;noReplay=true;native_confirmation=false;capture_pending=true;cleanup=incomplete"
+                    );
+                } else if !complete_local {
+                    println!(
+                        "C06_VAULT_EXPLICIT_CAPTURE_UPLOAD_VERIFIED=true;vaultPUT=1;authenticatedBodyGET=1;noReplay=true;capture_pending=true;cleanup=incomplete"
+                    );
+                }
+            }
+            if complete_local {
+                let after = runtime
+                    .provider
+                    .read_only_placeholder_observation(NativeRestartProbePath::VaultCapturedFile)
+                    .unwrap()
+                    .2
+                    .expect("completed native placeholder observation");
+                assert_ne!(after.0 & 0x400, 0, "Cloud Files reparse point retained");
+                assert_ne!(after.2 & 0x8, 0, "actual native IN_SYNC state required");
+                assert_eq!(after.3, edited.len() as u64);
+                assert_eq!(std::fs::read(&file).unwrap(), edited);
+                let promoted = verified
+                    .custody
+                    .inspect_capture_for_test(&scope, "/Travel.vault")
+                    .unwrap();
+                assert_eq!(promoted.captures.len(), 1);
+                assert_eq!(
+                    promoted.captures[0].0.bytes_for_recovery(),
+                    edited.as_slice()
+                );
+                assert!(
+                    promoted.captures[0].1 == original,
+                    "historical capture baseline must not be rebased"
+                );
+                let entry = promoted
+                    .entries
+                    .iter()
+                    .find(|entry| entry.opaque() == original.opaque())
+                    .unwrap();
+                assert_eq!(entry.remote_id(), original.remote_id());
+                assert_eq!(entry.etag(), "\"child-rev-2\"");
+                assert_eq!(entry.length(), edited.len() as u64);
+                let hydration = promoted
+                    .hydrations
+                    .iter()
+                    .find(|item| item.opaque() == original.opaque())
+                    .unwrap();
+                assert_eq!(
+                    hydration.file_index(),
+                    baseline["native_file"].as_u64().unwrap()
+                );
+                assert_eq!(hydration.length(), edited.len() as u64);
+                assert_eq!(hydration.components(), components.as_slice());
+                let gets_after_upload = remote.native_reads.lock().unwrap().vault_get_count;
+                assert_eq!(
+                    gets_after_upload,
+                    gets + 1,
+                    "local disposition does no download"
+                );
+                if writable_bytes {
+                    assert_eq!(
+                        after.0 & 1,
+                        0,
+                        "writable byte completion must not restore READONLY"
+                    );
+                    assert!(
+                        !runtime
+                            .provider
+                            .vault_file_pending_for_test(original.opaque())
+                            .unwrap()
+                    );
+                    if normal_existing {
+                        // First save above used only fresh per-child publication and the
+                        // normal authenticated connection hook. No private start/upload.
+                        let first_ids = verified
+                            .custody
+                            .retained_capture_ids(&trusted, &scope, "/Travel.vault")
+                            .unwrap();
+                        assert_eq!(first_ids.len(), 1);
+                        let second_baseline = (*entry).clone();
+                        assert_eq!(second_baseline.etag(), "\"child-rev-2\"");
+                        assert_eq!(second_baseline.length(), edited.len() as u64);
+                        assert!(
+                            runtime
+                                .provider
+                                .existing_vault_save_worker_marker(&active)
+                                .unwrap()
+                                .is_some()
+                        );
+                        let second_bytes =
+                            (0..65569).map(|i| (i * 17 + 3) as u8).collect::<Vec<_>>();
+                        let before_second = runtime.provider.close_observation().unwrap();
+                        assert_eq!(std::fs::metadata(&file).unwrap().file_attributes() & 1, 0);
+                        let mut second_writer = Command::new("powershell.exe")
+                            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                                "$ErrorActionPreference='Stop'; $b=New-Object byte[] 65569; for($i=0;$i -lt $b.Length;$i++){$b[$i]=[byte](($i*17+3)-band 255)}; $f=[IO.File]::Open($env:RAIUN_SYNTHETIC_EDIT_FILE,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::Read); try{$f.SetLength($b.Length); $f.Write($b,0,$b.Length); $f.Flush($true)}finally{$f.Dispose()}"])
+                            .env("RAIUN_SYNTHETIC_EDIT_FILE", &file)
+                            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+                        let deadline = Instant::now() + Duration::from_secs(20);
+                        loop {
+                            if let Some(status) = second_writer.try_wait().unwrap() {
+                                assert_eq!(
+                                    status.code(),
+                                    Some(0),
+                                    "second normal in-place writer failed; preserve fixture"
+                                );
+                                break;
+                            }
+                            assert!(
+                                Instant::now() < deadline,
+                                "second normal writer timed out; preserve process and fixture"
+                            );
+                            thread::sleep(Duration::from_millis(20));
+                        }
+                        let deadline = Instant::now() + Duration::from_secs(30);
+                        loop {
+                            if runtime.provider.close_observation().unwrap().0 > before_second.0 {
+                                break;
+                            }
+                            assert!(
+                                Instant::now() < deadline,
+                                "second normal modified close not observed"
+                            );
+                            thread::sleep(Duration::from_millis(25));
+                        }
+                        // Do not hold a protected inspector against the second CAS.
+                        let deadline = Instant::now() + Duration::from_secs(60);
+                        let completed = loop {
+                            let value = runtime.fresh_close_observation_for_test().unwrap();
+                            if value.completed >= 2 {
+                                break value;
+                            }
+                            assert!(
+                                Instant::now() < deadline,
+                                "second automatic native save did not finish"
+                            );
+                            thread::sleep(Duration::from_millis(25));
+                        };
+                        assert_eq!(completed.attempted, 2);
+                        assert_eq!(completed.completed, 2);
+                        assert_eq!(completed.failed, 0);
+                        assert!(completed.remote_verified && completed.local_completed);
+                        assert_eq!(completed.native_confirmation, Some(true));
+                        let provider_thread = runtime
+                            .provider
+                            .worker
+                            .lock()
+                            .unwrap()
+                            .as_ref()
+                            .unwrap()
+                            .thread()
+                            .id();
+                        assert_ne!(completed.thread, Some(provider_thread));
+                        assert_ne!(completed.thread, Some(thread::current().id()));
+                        let after_second_close = runtime.provider.close_observation().unwrap();
+                        assert!(
+                            after_second_close.0 >= 2,
+                            "historical modified telemetry must not be reset"
+                        );
+                        assert_eq!(
+                            (
+                                after_second_close.1,
+                                after_second_close.4,
+                                after_second_close.5,
+                                after_second_close.7
+                            ),
+                            (0, 0, 0, 0)
+                        );
+                        assert!(
+                            !runtime
+                                .provider
+                                .vault_file_pending_for_test(original.opaque())
+                                .unwrap()
+                        );
+                        let second_snapshot = verified
+                            .custody
+                            .inspect_capture_for_test(&scope, "/Travel.vault")
+                            .unwrap();
+                        assert_eq!(second_snapshot.captures.len(), 2);
+                        let old_capture = second_snapshot
+                            .captures
+                            .iter()
+                            .find(|(capture, _)| {
+                                capture.encoded_frame_ref() == retained.encoded_frame_ref()
+                            })
+                            .unwrap();
+                        assert_eq!(old_capture.0.bytes_for_recovery(), edited.as_slice());
+                        assert!(old_capture.1 == original);
+                        let (second_capture, second_original) = second_snapshot
+                            .captures
+                            .iter()
+                            .find(|(capture, _)| {
+                                capture.encoded_frame_ref() != retained.encoded_frame_ref()
+                            })
+                            .unwrap();
+                        assert_eq!(second_capture.bytes_for_recovery(), second_bytes.as_slice());
+                        assert!(
+                            second_original == &second_baseline,
+                            "second capture must bind promoted first-save baseline"
+                        );
+                        let second_historical =
+                            serde_json::to_value(second_capture.historical_baseline()).unwrap();
+                        assert_eq!(second_historical["strong_etag"], second_baseline.etag());
+                        assert_eq!(second_historical["native_file"], baseline["native_file"]);
+                        assert_eq!(second_historical["unlock_epoch"], original_epoch);
+                        assert_eq!(
+                            second_historical["token_generation"],
+                            trusted.token_generation()
+                        );
+                        let all_ids = verified
+                            .custody
+                            .retained_capture_ids(&trusted, &scope, "/Travel.vault")
+                            .unwrap();
+                        assert_eq!(all_ids.len(), 2);
+                        let second_id = all_ids.iter().find(|id| !first_ids.contains(id)).unwrap();
+                        let second_ledger = verified
+                            .custody
+                            .upload_ledger(&trusted, &scope, "/Travel.vault", second_id)
+                            .unwrap();
+                        let second_attempt = second_ledger.reopen_attempt().unwrap();
+                        let readback = second_attempt.readback_evidence().unwrap().unwrap();
+                        assert_eq!(readback.resource_id(), original.remote_id());
+                        assert_eq!(readback.etag(), "\"child-rev-3\"");
+                        assert_eq!(readback.body_len(), second_bytes.len());
+                        use sha2::Digest as _;
+                        assert_eq!(
+                            readback.body_sha256(),
+                            <[u8; 32]>::from(sha2::Sha256::digest(&second_bytes))
+                        );
+                        let second_status = second_ledger.local_disposition().unwrap().unwrap();
+                        assert!(second_status.is_native_completed());
+                        assert!(second_status.reference().entry() == second_original);
+                        assert!(
+                            second_status.reference().frame() == second_capture.encoded_frame_ref()
+                        );
+                        assert_eq!(second_status.verified_entry().etag(), "\"child-rev-3\"");
+                        assert_eq!(
+                            second_status.verified_entry().length(),
+                            second_bytes.len() as u64
+                        );
+                        assert_eq!(
+                            second_status.promoted_hydration().file_index(),
+                            hydration.file_index()
+                        );
+                        assert_eq!(
+                            second_status.promoted_hydration().components(),
+                            components.as_slice()
+                        );
+                        assert_eq!(
+                            second_status.promoted_hydration().length(),
+                            second_bytes.len() as u64
+                        );
+                        let current = second_snapshot
+                            .entries
+                            .iter()
+                            .find(|entry| entry.opaque() == original.opaque())
+                            .unwrap();
+                        assert_eq!(current.etag(), "\"child-rev-3\"");
+                        assert_eq!(current.length(), second_bytes.len() as u64);
+                        assert_eq!(current.remote_id(), original.remote_id());
+                        let native = runtime
+                            .provider
+                            .read_only_placeholder_observation(
+                                NativeRestartProbePath::VaultCapturedFile,
+                            )
+                            .unwrap()
+                            .2
+                            .unwrap();
+                        assert_eq!(native.0 & 1, 0);
+                        assert_ne!(native.2 & 8, 0);
+                        assert_eq!(native.3, second_bytes.len() as u64);
+                        assert_eq!(std::fs::read(&file).unwrap(), second_bytes);
+                        let gets_after_two = remote.native_reads.lock().unwrap().vault_get_count;
+                        assert_eq!(gets_after_two, gets + 2);
+                        {
+                            let state = remote.vault_upload.as_ref().unwrap().lock().unwrap();
+                            assert_eq!(
+                                (
+                                    state.put_attempt_count,
+                                    state.put_count,
+                                    state.body_get_count
+                                ),
+                                (2, 2, 2)
+                            );
+                            assert_eq!(state.last_put_if_match.as_deref(), Some("\"child-rev-2\""));
+                            assert_eq!(
+                                state.last_read_if_match.as_deref(),
+                                Some("\"child-rev-3\"")
+                            );
+                            assert_eq!(state.resource_id, original.remote_id());
+                            assert_eq!(state.forbidden_mutation_count, 0);
+                        }
+                        assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
+                        assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+                        println!(
+                            "C06_VAULT_NORMAL_EXISTING_FILE_TWO_SAVES_COMPLETED=true;vaultPUT=2;authenticatedBodyGET=2;firstIfMatch=child-rev-1;secondIfMatch=child-rev-2;currentETag=child-rev-3;captures=2;native_completed=2;dirty_resolved=true;manual_upload=false;readonly_clear=false"
+                        );
+                        let mut lock = target();
+                        lock["action"] = json!("vault_lock");
+                        let locked = broker
+                            .handle_isolated_lifecycle_session(lock)
+                            .expect("normal two-save current native state permits clean Lock")
+                            .0;
+                        assert_eq!(locked["unlocked"], false);
+                        assert_eq!(locked["vault_lock_cleanup_status"], "complete");
+                        assert!(!sessions.is_unlocked(&scope).unwrap());
+                        assert!(sessions.capture_session_epoch(&scope).is_err());
+                        assert!(
+                            runtime
+                                .provider
+                                .vault_cleanup_fixture(active.clone(), None)
+                                .unwrap()
+                        );
+                        let locked_native = runtime
+                            .provider
+                            .read_only_placeholder_observation(
+                                NativeRestartProbePath::VaultCapturedFile,
+                            )
+                            .unwrap()
+                            .2
+                            .unwrap();
+                        assert_eq!(locked_native.0 & 1, 0);
+                        assert_eq!(locked_native.3, second_bytes.len() as u64);
+                        let hash = format!("{:x}", sha2::Sha256::digest(&second_bytes));
+                        assert!(
+                            !broker_vault_read_in_child(&file, second_bytes.len(), &hash).unwrap()
+                        );
+                        assert!(
+                            runtime
+                                .provider
+                                .vault_cleanup_fixture(active.clone(), None)
+                                .unwrap()
+                        );
+                        assert_eq!(
+                            remote.native_reads.lock().unwrap().vault_get_count,
+                            gets_after_two
+                        );
+                        let after_lock = verified
+                            .custody
+                            .inspect_capture_for_test(&scope, "/Travel.vault")
+                            .unwrap();
+                        assert_eq!(after_lock.captures.len(), 2);
+                        for (capture, entry) in &after_lock.captures {
+                            if capture.encoded_frame_ref() == retained.encoded_frame_ref() {
+                                assert_eq!(capture.bytes_for_recovery(), edited.as_slice());
+                                assert!(entry == &original);
+                            } else {
+                                assert!(
+                                    capture.encoded_frame_ref()
+                                        == second_capture.encoded_frame_ref()
+                                );
+                                assert_eq!(capture.bytes_for_recovery(), second_bytes.as_slice());
+                                assert!(entry == second_original);
+                            }
+                        }
+                        let final_worker = runtime.fresh_close_observation_for_test().unwrap();
+                        assert_eq!(
+                            (
+                                final_worker.attempted,
+                                final_worker.completed,
+                                final_worker.failed
+                            ),
+                            (2, 2, 0)
+                        );
+                        broker
+                            .stop_all()
+                            .expect("normal two-save locked provider stops without force");
+                        assert_eq!(
+                            remote.native_reads.lock().unwrap().vault_get_count,
+                            gets_after_two
+                        );
+                        {
+                            let state = remote.vault_upload.as_ref().unwrap().lock().unwrap();
+                            assert_eq!(
+                                (
+                                    state.put_attempt_count,
+                                    state.put_count,
+                                    state.body_get_count
+                                ),
+                                (2, 2, 2)
+                            );
+                        }
+                        drop(root_pin);
+                        drop(verified);
+                        drop(broker);
+                        drop(runtime);
+                        drop(sessions);
+                        remote.join().unwrap();
+                        appdata_pin.verify_path().unwrap();
+                        println!(
+                            "C06_VAULT_NORMAL_EXISTING_FILE_TWO_SAVE_LOCK_VERIFIED=true;normal_owner=true;normal_worker=true;fresh_writable_publication=true;vaultPUT=2;authenticatedBodyGET=2;native_completed=2;captures_retained=2;dirty_resolved=true;keys_locked=true;on_disk_empty=true;locked_read_refused=true;noGET_afterLock=true;manual_upload=false;readonly_clear=false;late_probe=false;namespace_writable=false;DELETE=0;package_acceptance=false"
+                        );
+                        return;
+                    }
+                    if writable_cleanup {
+                        let mut lock = target();
+                        lock["action"] = json!("vault_lock");
+                        let locked = broker
+                            .handle_isolated_lifecycle_session(lock)
+                            .expect(
+                                "same-live writable completion permits held-reference clean Lock",
+                            )
+                            .0;
+                        assert_eq!(locked["unlocked"], false);
+                        assert_eq!(locked["vault_lock_cleanup_status"], "complete");
+                        assert!(!sessions.is_unlocked(&scope).unwrap());
+                        assert!(sessions.capture_session_epoch(&scope).is_err());
+                        assert!(
+                            runtime
+                                .provider
+                                .vault_cleanup_fixture(active.clone(), None)
+                                .unwrap(),
+                            "current native ONDISK ranges must be empty after Lock"
+                        );
+                        let empty_native = runtime
+                            .provider
+                            .read_only_placeholder_observation(
+                                NativeRestartProbePath::VaultCapturedFile,
+                            )
+                            .unwrap()
+                            .2
+                            .expect("evicted writable native observation");
+                        assert_eq!(empty_native.0 & 1, 0, "cleanup never restores READONLY");
+                        assert_eq!(empty_native.3, edited.len() as u64);
+                        use sha2::Digest as _;
+                        let hash = format!("{:x}", sha2::Sha256::digest(&edited));
+                        assert!(
+                            !broker_vault_read_in_child(&file, edited.len(), &hash).unwrap(),
+                            "fresh ordinary reader must refuse after keys locked/cache eviction"
+                        );
+                        assert!(
+                            runtime
+                                .provider
+                                .vault_cleanup_fixture(active.clone(), None)
+                                .unwrap(),
+                            "refused read must not restore native plaintext"
+                        );
+                        assert_eq!(
+                            remote.native_reads.lock().unwrap().vault_get_count,
+                            gets_after_upload
+                        );
+                        let protected = verified
+                            .custody
+                            .inspect_capture_for_test(&scope, "/Travel.vault")
+                            .unwrap();
+                        assert_eq!(protected.captures.len(), 1);
+                        assert_eq!(
+                            protected.captures[0].0.bytes_for_recovery(),
+                            edited.as_slice()
+                        );
+                        assert!(
+                            protected.captures[0].0.encoded_frame_ref()
+                                == retained.encoded_frame_ref()
+                        );
+                        assert!(protected.captures[0].1 == original);
+                        println!(
+                            "C06_VAULT_WRITABLE_CLEANUP_LOCK_VERIFIED=true;keys_locked=true;on_disk_empty=true;locked_read_refused=true;readonly=false;protected_body_retained=true;DELETE=0"
+                        );
+                        if fresh_native {
+                            let completed = runtime.fresh_close_observation_for_test().unwrap();
+                            assert_eq!(completed.attempted, 1);
+                            assert_eq!(completed.completed, 1);
+                            assert_eq!(completed.failed, 0);
+                            assert!(completed.remote_verified && completed.local_completed);
+                            assert_eq!(completed.native_confirmation, Some(true));
+                            assert!(
+                                !runtime
+                                    .provider
+                                    .vault_file_pending_for_test(original.opaque())
+                                    .unwrap()
+                            );
+                            assert!(
+                                runtime.provider.close_observation().unwrap().0 >= observation.0,
+                                "automatic completion never resets historical modified telemetry"
+                            );
+                            assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
+                            assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+                            {
+                                let state = remote.vault_upload.as_ref().unwrap().lock().unwrap();
+                                assert_eq!(state.put_attempt_count, 1);
+                                assert_eq!(state.put_count, 1);
+                                assert_eq!(state.body_get_count, 1);
+                                assert_eq!(state.forbidden_mutation_count, 0);
+                            }
+                            broker.stop_all().expect(
+                                "automatically completed same-live capture stops after clean Lock",
+                            );
+                            drop(root_pin);
+                            drop(verified);
+                            drop(broker);
+                            drop(runtime);
+                            drop(sessions);
+                            remote.join().unwrap();
+                            appdata_pin.verify_path().unwrap();
+                            println!(
+                                "C06_VAULT_FRESH_CLOSE_AUTO_NATIVE_LOCK_VERIFIED=true;vaultPUT=1;authenticatedBodyGET=1;off_provider_thread=true;noReplay=true;native_confirmation=true;native_completed=true;dirty_resolved=true;keys_locked=true;on_disk_empty=true;locked_read_refused=true;protected_frame_retained=true;readonly=false;manual_upload=false;late_probe=false;DELETE=0;no_product_activation=true"
+                            );
+                            return;
+                        }
+                        // The held-reference proof ends at Lock. This one ordinary
+                        // existing-file write measures later activity, never permanent
+                        // exclusion. No permission/metadata mutation or hydration read.
+                        let before_late = runtime.provider.close_observation().unwrap();
+                        let late = (0..31).map(|i| (i * 7 + 5) as u8).collect::<Vec<_>>();
+                        let mut late_writer = Command::new("powershell.exe")
+                            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                                "$ErrorActionPreference='Stop'; try { $b=New-Object byte[] 31; for($i=0;$i -lt $b.Length;$i++){$b[$i]=[byte](($i*7+5)-band 255)}; $f=[IO.File]::Open($env:RAIUN_SYNTHETIC_EDIT_FILE,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::Read); try{$f.SetLength($b.Length); $f.Write($b,0,$b.Length); $f.Flush($true)}finally{$f.Dispose()}; [Console]::WriteLine('WRITTEN') } catch { $e=$_.Exception; while($e.InnerException){$e=$e.InnerException}; [Console]::WriteLine(('DENIED|{0}' -f $e.HResult)); exit 24 }"])
+                            .env("RAIUN_SYNTHETIC_EDIT_FILE", &file)
+                            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().unwrap();
+                        let deadline = Instant::now() + Duration::from_secs(20);
+                        let status = loop {
+                            if let Some(status) = late_writer.try_wait().unwrap() {
+                                break status;
+                            }
+                            assert!(
+                                Instant::now() < deadline,
+                                "late writer timed out; preserve owned process and fixture"
+                            );
+                            thread::sleep(Duration::from_millis(20));
+                        };
+                        let output = late_writer.wait_with_output().unwrap();
+                        let report = String::from_utf8(output.stdout).unwrap();
+                        let report = report.trim();
+                        println!(
+                            "C06_VAULT_WRITABLE_CLEANUP_LATE_WRITER_RAW={report};exit={:?}",
+                            status.code()
+                        );
+                        let late_written = if status.success() {
+                            assert_eq!(report, "WRITTEN");
+                            let deadline = Instant::now() + Duration::from_secs(15);
+                            loop {
+                                let observation = runtime.provider.close_observation().unwrap();
+                                if observation.0 > before_late.0 || observation.1 > before_late.1 {
+                                    break;
+                                }
+                                assert!(
+                                    Instant::now() < deadline,
+                                    "late modified/uncertain close not observed; preserve fixture"
+                                );
+                                thread::sleep(Duration::from_millis(25));
+                            }
+                            assert!(
+                                runtime
+                                    .provider
+                                    .vault_lock_cleanup_status(
+                                        active.clone(),
+                                        "synthetic-personal-drive".into(),
+                                        "synthetic-vault-root".into(),
+                                        "/Travel.vault".into()
+                                    )
+                                    .unwrap(),
+                                "later observed activity must make current cleanup incomplete after route removal"
+                            );
+                            assert_eq!(
+                                std::fs::read(&file).unwrap(),
+                                late,
+                                "late native bytes must survive"
+                            );
+                            assert!(
+                                !runtime
+                                    .provider
+                                    .vault_cleanup_fixture(active.clone(), None)
+                                    .unwrap(),
+                                "same recorded native file now has retained late ONDISK bytes"
+                            );
+                            assert!(
+                                broker.stop_all().is_err(),
+                                "later dirty bytes refuse stop cleanup"
+                            );
+                            println!(
+                                "C06_VAULT_WRITABLE_CLEANUP_LATE_ACTIVITY=true;current_cleanup=incomplete;new_bytes_retained=true;permanent_exclusion_claim=false"
+                            );
+                            true
+                        } else {
+                            assert_eq!(status.code(), Some(24));
+                            let hr = report
+                                .strip_prefix("DENIED|")
+                                .and_then(|s| s.parse::<i32>().ok())
+                                .expect("late refusal must report actual HRESULT");
+                            let code = hr as u32 & 0xffff;
+                            assert_eq!(
+                                hr as u32 & 0xffff0000,
+                                0x80070000,
+                                "unexpected setup/.NET error is not a safe write denial"
+                            );
+                            assert!(
+                                matches!(code, 5 | 32 | 362 | 389 | 395),
+                                "late failure must be a known access/sharing/cloud-file error"
+                            );
+                            let after_denial = runtime
+                                .provider
+                                .read_only_placeholder_observation(
+                                    NativeRestartProbePath::VaultCapturedFile,
+                                )
+                                .unwrap()
+                                .2
+                                .expect("current metadata after denied late write");
+                            assert_eq!(
+                                after_denial.0, empty_native.0,
+                                "late denied writer must not change attributes"
+                            );
+                            println!(
+                                "C06_VAULT_WRITABLE_CLEANUP_LATE_DENIAL_METADATA=hresult:{hr};win32:{code};before_attrs:{};after_attrs:{};before_tag:{};after_tag:{};before_state:{};after_state:{};before_len:{};after_len:{}",
+                                empty_native.0,
+                                after_denial.0,
+                                empty_native.1,
+                                after_denial.1,
+                                empty_native.2,
+                                after_denial.2,
+                                empty_native.3,
+                                after_denial.3
+                            );
+                            assert!(
+                                runtime
+                                    .provider
+                                    .vault_cleanup_fixture(active.clone(), None)
+                                    .unwrap(),
+                                "denied writer must leave current ONDISK empty, including after a length-only side effect"
+                            );
+                            let observed = runtime.provider.close_observation().unwrap();
+                            let pending = runtime
+                                .provider
+                                .vault_lock_cleanup_status(
+                                    active.clone(),
+                                    "synthetic-personal-drive".into(),
+                                    "synthetic-vault-root".into(),
+                                    "/Travel.vault".into(),
+                                )
+                                .unwrap();
+                            println!(
+                                "C06_VAULT_WRITABLE_CLEANUP_LATE_DENIAL_OBSERVATION=before:{before_late:?};after:{observed:?};pending:{pending}"
+                            );
+                            let changed = after_denial != empty_native
+                                || observed.0 > before_late.0
+                                || observed.1 > before_late.1
+                                || pending;
+                            let stopped = if changed {
+                                None
+                            } else {
+                                Some(broker.stop_all())
+                            };
+                            let incomplete =
+                                changed || stopped.as_ref().is_some_and(Result::is_err);
+                            if incomplete {
+                                let deadline = Instant::now() + Duration::from_secs(15);
+                                let observed = loop {
+                                    let observation = runtime.provider.close_observation().unwrap();
+                                    if observation.0 > before_late.0
+                                        || observation.1 > before_late.1
+                                    {
+                                        break observation;
+                                    }
+                                    assert!(
+                                        Instant::now() < deadline,
+                                        "denied late write side effect has no observed modified/uncertain close; preserve fixture"
+                                    );
+                                    thread::sleep(Duration::from_millis(25));
+                                };
+                                assert!(
+                                    runtime
+                                        .provider
+                                        .vault_lock_cleanup_status(
+                                            active.clone(),
+                                            "synthetic-personal-drive".into(),
+                                            "synthetic-vault-root".into(),
+                                            "/Travel.vault".into()
+                                        )
+                                        .unwrap()
+                                );
+                                if stopped.is_none() {
+                                    assert!(
+                                        broker.stop_all().is_err(),
+                                        "observed late side effects refuse stop cleanup"
+                                    );
+                                }
+                                println!(
+                                    "C06_VAULT_WRITABLE_CLEANUP_LATE_DENIAL_SIDE_EFFECT=true;hresult={hr};win32={code};native_len={};modified_closes={};uncertain_closes={};current_cleanup=incomplete;native_state_preserved=true;permanent_exclusion_claim=false",
+                                    after_denial.3, observed.0, observed.1
+                                );
+                            } else {
+                                assert!(stopped.unwrap().is_ok());
+                                println!(
+                                    "C06_VAULT_WRITABLE_CLEANUP_LATE_WRITE_DENIED=true;hresult={hr};win32={code};observed_mutation=false;actual_stop=complete;permanent_exclusion_claim=false"
+                                );
+                            }
+                            false
+                        };
+                        assert!(!sessions.is_unlocked(&scope).unwrap());
+                        assert!(sessions.capture_session_epoch(&scope).is_err());
+                        assert_eq!(
+                            remote.native_reads.lock().unwrap().vault_get_count,
+                            gets_after_upload
+                        );
+                        assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+                        assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
+                        let protected_after_late = verified
+                            .custody
+                            .inspect_capture_for_test(&scope, "/Travel.vault")
+                            .unwrap();
+                        assert_eq!(protected_after_late.captures.len(), 1);
+                        assert_eq!(
+                            protected_after_late.captures[0].0.bytes_for_recovery(),
+                            edited.as_slice()
+                        );
+                        assert!(
+                            protected_after_late.captures[0].0.encoded_frame_ref()
+                                == retained.encoded_frame_ref()
+                        );
+                        assert!(protected_after_late.captures[0].1 == original);
+                        {
+                            let state = remote.vault_upload.as_ref().unwrap().lock().unwrap();
+                            assert_eq!(state.put_attempt_count, 1);
+                            assert_eq!(state.put_count, 1);
+                            assert_eq!(state.body_get_count, 1);
+                            assert_eq!(state.forbidden_mutation_count, 0);
+                        }
+                        drop(root_pin);
+                        drop(verified);
+                        drop(broker);
+                        drop(runtime);
+                        drop(sessions);
+                        remote.join().unwrap();
+                        appdata_pin.verify_path().unwrap();
+                        println!(
+                            "C06_VAULT_WRITABLE_CLEANUP_BOUNDARY_VERIFIED=true;vaultPUT=1;authenticatedBodyGET=1;noReplay=true;native_completed=true;keys_locked=true;late_written={late_written};no_product_activation=true"
+                        );
+                        return;
+                    }
+                    // Historical NativeCompleted is NOT cleanup authority. This
+                    // legacy denial case drops only the exact live volatile row.
+                    runtime
+                        .provider
+                        .vault_cleanup_fixture(active.clone(), Some(original.opaque()))
+                        .unwrap();
+                    println!(
+                        "C06_VAULT_WRITABLE_CLEANUP_VOLATILE_RECEIPT_DROPPED=true;protected_history_unchanged=true"
+                    );
+                    let mut lock = target();
+                    lock["action"] = json!("vault_lock");
+                    assert!(
+                        broker.handle_isolated_lifecycle_session(lock).is_err(),
+                        "historical native completion without live receipt cannot authorize writable cleanup"
+                    );
+                    assert!(!sessions.is_unlocked(&scope).unwrap());
+                    assert!(
+                        sessions.capture_session_epoch(&scope).is_err(),
+                        "Lock must refuse a new vault key/epoch lease"
+                    );
+                    assert!(
+                        runtime
+                            .provider
+                            .vault_lock_cleanup_status(
+                                active.clone(),
+                                "synthetic-personal-drive".into(),
+                                "synthetic-vault-root".into(),
+                                "/Travel.vault".into()
+                            )
+                            .unwrap()
+                    );
+                    let locked_native = runtime
+                        .provider
+                        .read_only_placeholder_observation(
+                            NativeRestartProbePath::VaultCapturedFile,
+                        )
+                        .unwrap()
+                        .2
+                        .expect("retained writable native file observation");
+                    assert_eq!(
+                        locked_native.0 & 1,
+                        0,
+                        "failed readonly cleanup cannot claim attribute restoration"
+                    );
+                    assert_eq!(locked_native.3, edited.len() as u64);
+                    assert_eq!(
+                        std::fs::read(&file).unwrap(),
+                        edited,
+                        "incomplete cleanup preserves owned native bytes"
+                    );
+                    assert_eq!(
+                        remote.native_reads.lock().unwrap().vault_get_count,
+                        gets_after_upload
+                    );
+                    let retained_after_lock = verified
+                        .custody
+                        .inspect_capture_for_test(&scope, "/Travel.vault")
+                        .unwrap();
+                    assert_eq!(retained_after_lock.captures.len(), 1);
+                    assert_eq!(
+                        retained_after_lock.captures[0].0.bytes_for_recovery(),
+                        edited.as_slice()
+                    );
+                    assert!(
+                        retained_after_lock.captures[0].0.encoded_frame_ref()
+                            == retained.encoded_frame_ref()
+                    );
+                    assert!(retained_after_lock.captures[0].1 == original);
+                    let diagnostics = runtime
+                        .provider
+                        .vault_cleanup_diagnostics(active.clone())
+                        .unwrap();
+                    assert!(
+                        diagnostics["modified_closes"].as_u64().unwrap() >= 1,
+                        "historical modified telemetry remains"
+                    );
+                    assert_eq!(diagnostics["journaled_closes"], 0);
+                    assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
+                    assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+                    {
+                        let state = remote.vault_upload.as_ref().unwrap().lock().unwrap();
+                        assert_eq!(state.put_attempt_count, 1);
+                        assert_eq!(state.put_count, 1);
+                        assert_eq!(state.body_get_count, 1);
+                        assert_eq!(state.forbidden_mutation_count, 0);
+                    }
+                    assert!(
+                        broker.stop_all().is_err(),
+                        "writable-byte completion must retain incomplete readonly cleanup"
+                    );
+                    drop(root_pin);
+                    drop(verified);
+                    drop(broker);
+                    drop(runtime);
+                    drop(sessions);
+                    remote.join().unwrap();
+                    appdata_pin.verify_path().unwrap();
+                    println!(
+                        "C06_VAULT_WRITABLE_BYTES_NATIVE_COMPLETED_CLEANUP_PENDING=true;vaultPUT=1;authenticatedBodyGET=1;noReplay=true;native_confirmation=true;read_only_restored=false;metadata_overwrite=false;keys_locked=true;cleanup=incomplete;no_product_activation=true"
+                    );
+                    return;
+                }
+                let mut lock = target();
+                lock["action"] = json!("vault_lock");
+                let locked = broker
+                    .handle_isolated_lifecycle_session(lock)
+                    .expect("verified local completion permits clean Lock")
+                    .0;
+                assert_eq!(locked["unlocked"], false);
+                assert_eq!(locked["vault_lock_cleanup_status"], "complete");
+                assert!(!sessions.is_unlocked(&scope).unwrap());
+                let locked_native = runtime
+                    .provider
+                    .read_only_placeholder_observation(NativeRestartProbePath::VaultCapturedFile)
+                    .unwrap()
+                    .2
+                    .expect("locked native placeholder observation");
+                assert_eq!(locked_native.3, edited.len() as u64);
+                assert_ne!(locked_native.0 & 1, 0, "clean locked file remains readonly");
+                use sha2::Digest as _;
+                let hash = format!("{:x}", sha2::Sha256::digest(&edited));
+                assert!(
+                    !broker_vault_read_in_child(&file, edited.len(), &hash).unwrap(),
+                    "one ordinary read after genuine clean Lock must refuse"
+                );
+                assert_eq!(
+                    remote.native_reads.lock().unwrap().vault_get_count,
+                    gets_after_upload
+                );
+                assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
+                assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+                {
+                    let state = remote.vault_upload.as_ref().unwrap().lock().unwrap();
+                    assert_eq!(state.put_attempt_count, 1);
+                    assert_eq!(state.put_count, 1);
+                    assert_eq!(state.body_get_count, 1);
+                    assert_eq!(state.forbidden_mutation_count, 0);
+                }
+                broker
+                    .stop_all()
+                    .expect("clean disposition stops normally without force");
+                drop(root_pin);
+                drop(verified);
+                drop(broker);
+                drop(runtime);
+                drop(sessions);
+                remote.join().unwrap();
+                appdata_pin.verify_path().unwrap();
+                if inject_writer_probe {
+                    println!(
+                        "C06_VAULT_FULL_SAVE_LOCAL_DISPOSITION_VERIFIED=true;vaultPUT=1;authenticatedBodyGET=1;noReplay=true;local_completed=true;locked_read_refused=true;DELETE=0"
+                    );
+                } else {
+                    println!(
+                        "C06_VAULT_NORMAL_CLOSE_FULL_SAVE_LOCAL_DISPOSITION_VERIFIED=true;vaultPUT=1;authenticatedBodyGET=1;noReplay=true;local_completed=true;locked_read_refused=true;DELETE=0;injected_writer=false"
+                    );
+                }
+                return;
+            }
+            let mut lock = target();
+            lock["action"] = json!("vault_lock");
+            assert!(
+                broker.handle_isolated_lifecycle_session(lock).is_err(),
+                "dirty historical capture cannot acknowledge complete cleanup"
+            );
+            assert!(!sessions.is_unlocked(&scope).unwrap());
+            assert!(
+                runtime
+                    .provider
+                    .vault_lock_cleanup_status(
+                        active.clone(),
+                        "synthetic-personal-drive".into(),
+                        "synthetic-vault-root".into(),
+                        "/Travel.vault".into()
+                    )
+                    .unwrap()
+            );
+            let diagnostics = runtime.provider.vault_cleanup_diagnostics(active).unwrap();
+            assert!(diagnostics["modified_closes"].as_u64().unwrap() >= 1);
+            assert_eq!(diagnostics["journaled_closes"], 0);
+            assert_eq!(std::fs::read(&file).unwrap(), edited);
+            assert!(ordinary.unresolved_metadata_bounded().unwrap().is_empty());
+            assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+            assert_eq!(
+                remote.native_reads.lock().unwrap().vault_get_count,
+                gets + usize::from(upload_edit)
+            );
+            let retained_after_lock = verified
+                .custody
+                .inspect_capture_for_test(&scope, "/Travel.vault")
+                .unwrap();
+            assert_eq!(retained_after_lock.captures.len(), 1);
+            assert_eq!(
+                retained_after_lock.captures[0].0.bytes_for_recovery(),
+                edited.as_slice()
+            );
+            assert!(
+                broker.stop_all().is_err(),
+                "dirty native namespace remains retained on stop"
+            );
+            if automatic {
+                runtime.stop_fresh_close_worker().unwrap();
+            }
+            drop(root_pin);
+            drop(verified);
+            drop(broker);
+            drop(runtime);
+            drop(sessions);
+            remote.join().unwrap();
+            appdata_pin.verify_path().unwrap();
+            if automatic {
+                println!(
+                    "C06_VAULT_FRESH_CLOSE_AUTO_UPLOAD_DIRTY_FIXTURE_RETAINED=true;ordinaryPUT=0;cleanup=incomplete;no_native_completion=true"
+                );
+            } else if upload_edit {
+                println!(
+                    "C06_VAULT_EXPLICIT_UPLOAD_DIRTY_FIXTURE_RETAINED=true;ordinaryPUT=0;cleanup=incomplete"
+                );
+            } else {
+                println!(
+                    "C06_VAULT_MODIFIED_CLOSE_INDEXED_CAPTURE_VERIFIED=true;ordinary_journal=0;PUT=0;cleanup=incomplete;dirty_fixture_retained=true"
+                );
+            }
+            return;
+        }
+        let forgotten = broker.handle_isolated_lifecycle_session(json!({"action":"vault_forget",
+            "profile_id":profile,"space_id":"synthetic-personal-drive","root_resource_id":"synthetic-vault-root"})).unwrap().0;
+        assert_eq!(forgotten["forgotten"], true);
+        assert_eq!(forgotten["remembered_status"], "not_saved");
+        assert!(
+            sessions.is_unlocked(&scope).unwrap(),
+            "Forget does not lock"
+        );
+        let readiness_path = "/Travel.vault";
+        runtime
+            .confirm_windows_vault_readiness(&scope, readiness_path)
+            .unwrap();
+        let account = runtime.provider.bandwidth.scope().unwrap().unwrap();
+        let remembered = windows_vault_credentials::Scope::from_trusted_account(
+            &profile,
+            account.bytes(),
+            &scope,
+        )
+        .unwrap();
+        assert!(
+            !windows_vault_credentials::contains_saved(
+                &VaultCredentialStore {
+                    store: runtime.session_store.as_ref(),
+                    profile: &profile,
+                },
+                &remembered
+            )
+            .unwrap()
+        );
+        let mut lock = target();
+        lock["action"] = json!("vault_lock");
+        assert_eq!(
+            broker.handle_isolated_lifecycle_session(lock).unwrap().0["unlocked"],
+            false
+        );
+        assert!(!sessions.is_unlocked(&scope).unwrap());
+        assert!(
+            runtime
+                .confirm_windows_vault_readiness(&scope, "/Travel.vault")
+                .is_err()
+        );
+        if payload {
+            let file = drive.join("Personal/Travel.vault/1");
+            let metadata = std::fs::metadata(&file).unwrap();
+            assert_eq!(metadata.len(), 65537);
+            assert!(metadata.permissions().readonly());
+            let gets = remote.native_reads.lock().unwrap().vault_get_count;
+            use sha2::Digest as _;
+            let expected = (0..65537).map(|i| (i * 31 + 7) as u8).collect::<Vec<_>>();
+            let hash = format!("{:x}", sha2::Sha256::digest(&expected));
+            // Successful actual Lock already requires the native ONDISK-empty
+            // postproof. This one ordinary read must fail; it is never an
+            // explicit hydrate/retry, and cannot contact the retired route.
+            assert!(
+                !broker_vault_read_in_child(&file, expected.len(), &hash).unwrap(),
+                "Locked vault must refuse the single external read"
+            );
+            assert_eq!(
+                remote.native_reads.lock().unwrap().vault_get_count,
+                gets,
+                "post-Lock refusal cannot download ciphertext"
+            );
+            println!("C06_PAYLOAD_LOCK_AND_READ_REFUSAL=true");
+            // A new adapter assigns new callback identities. Reopen the same
+            // retained native file through a new exact route, without saving
+            // the public password again after Forget.
+            let mut manual = target();
+            manual["action"] = json!("vault_unlock");
+            manual["password"] = json!("potato"); // public fixture only
+            manual["remember"] = json!(false);
+            let reopened = broker.handle_isolated_lifecycle_session(manual).unwrap().0;
+            assert_eq!(reopened["unlocked"], true);
+            assert_eq!(reopened["remembered_status"], "unknown");
+            assert_eq!(reopened["remembered"], false);
+            assert!(sessions.is_unlocked(&scope).unwrap());
+            let personal = drive.join("Personal");
+            assert!(
+                child_process_directory_matches(&personal, &["Travel.vault"])
+                    .unwrap()
+                    .matches_expected
+            );
+            assert!(
+                child_process_directory_matches(&personal.join("Travel.vault"), &["1"])
+                    .unwrap()
+                    .matches_expected
+            );
+            assert!(
+                broker_vault_read_in_child(&file, expected.len(), &hash).unwrap(),
+                "Manual reopen must serve the same verified public fixture bytes"
+            );
+            let reopened_gets = remote.native_reads.lock().unwrap().vault_get_count;
+            assert!(
+                reopened_gets > gets && reopened_gets <= 32,
+                "new route must perform a bounded ciphertext download"
+            );
+            let mut lock = target();
+            lock["action"] = json!("vault_lock");
+            assert_eq!(
+                broker.handle_isolated_lifecycle_session(lock).unwrap().0["unlocked"],
+                false
+            );
+            assert!(!sessions.is_unlocked(&scope).unwrap());
+            assert!(
+                runtime
+                    .confirm_windows_vault_readiness(&scope, "/Travel.vault")
+                    .is_err()
+            );
+            assert!(
+                !windows_vault_credentials::contains_saved(
+                    &VaultCredentialStore {
+                        store: runtime.session_store.as_ref(),
+                        profile: &profile,
+                    },
+                    &remembered
+                )
+                .unwrap(),
+                "Manual reopen cannot restore forgotten credentials"
+            );
+            assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+            println!("C06_PAYLOAD_MANUAL_REOPEN_AND_SECOND_LOCK=true");
+        }
+        assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+        broker.stop_all().unwrap();
+        drop(broker);
+        drop(runtime);
+        drop(sessions);
+        if payload {
+            // New Agent/coordinator/native connection, same protected profile and
+            // retained root. This is not an OS-process restart or crash test.
+            let registry_bytes = storage.load_profile_registry().unwrap();
+            assert!(registry_bytes.is_some());
+            let restored_registry =
+                windows_profile_registry::Registry::decode_or_default(registry_bytes.as_deref())
+                    .unwrap();
+            let admissions = Arc::new(Mutex::new(Arc::new(restored_registry.clone())));
+            let restarted_sessions = Arc::new(raiun_vault::session::VaultSessionCoordinator::new());
+            let restarted = Arc::new(
+                WindowsAgent::new_for_profile_with_services(
+                    &profile,
+                    DpapiStore::for_profile(&profile).unwrap(),
+                    Some(admissions),
+                    restarted_sessions.clone(),
+                )
+                .unwrap(),
+            );
+            let generation = restarted.generation.load(Ordering::Acquire);
+            {
+                let mut state = restarted.state.lock().unwrap();
+                state.active_generation = generation;
+                state.online_authenticated = true;
+                state.needs_refresh = false;
+            }
+            restarted.provider.authorize_generation(generation);
+            WindowsAgent::connect_verified_root_with_exclusions(
+                &restarted.session_store,
+                &restarted.state,
+                &restarted.provider,
+                restarted.source_admissions.as_ref(),
+            )
+            .unwrap();
+            assert!(!restarted_sessions.is_unlocked(&scope).unwrap());
+            assert!(
+                restarted
+                    .confirm_windows_vault_readiness(&scope, "/Travel.vault")
+                    .is_err()
+            );
+            let account = restarted.provider.bandwidth.scope().unwrap().unwrap();
+            let remembered = windows_vault_credentials::Scope::from_trusted_account(
+                &profile,
+                account.bytes(),
+                &scope,
+            )
+            .unwrap();
+            assert!(
+                !windows_vault_credentials::contains_saved(
+                    &VaultCredentialStore {
+                        store: restarted.session_store.as_ref(),
+                        profile: &profile
+                    },
+                    &remembered,
+                )
+                .unwrap()
+            );
+            let file = drive.join("Personal/Travel.vault/1");
+            use sha2::Digest as _;
+            let expected = (0..65537).map(|i| (i * 31 + 7) as u8).collect::<Vec<_>>();
+            let hash = format!("{:x}", sha2::Sha256::digest(&expected));
+            let gets = remote.native_reads.lock().unwrap().vault_get_count;
+            assert!(
+                !broker_vault_read_in_child(&file, expected.len(), &hash).unwrap(),
+                "New locked coordinator must refuse the retained file read"
+            );
+            assert_eq!(remote.native_reads.lock().unwrap().vault_get_count, gets);
+            println!("C06_PAYLOAD_RECONNECT_NO_SECRET_RESTORE=true");
+            let restarted_broker =
+                windows_profiles::WindowsProfiles::for_isolated_lifecycle_fixture(
+                    storage.clone(),
+                    restored_registry,
+                    restarted.clone(),
+                )
+                .unwrap();
+            let mut manual = target();
+            manual["action"] = json!("vault_unlock");
+            manual["password"] = json!("potato"); // public fixture only
+            manual["remember"] = json!(false);
+            let unlocked = restarted_broker
+                .handle_isolated_lifecycle_session(manual)
+                .unwrap()
+                .0;
+            assert_eq!(unlocked["unlocked"], true);
+            assert_eq!(unlocked["remembered_status"], "unknown");
+            assert_eq!(unlocked["remembered"], false);
+            assert!(restarted_sessions.is_unlocked(&scope).unwrap());
+            assert!(
+                child_process_directory_matches(&drive.join("Personal"), &["Travel.vault"])
+                    .unwrap()
+                    .matches_expected
+            );
+            assert!(
+                child_process_directory_matches(&drive.join("Personal/Travel.vault"), &["1"])
+                    .unwrap()
+                    .matches_expected
+            );
+            assert!(
+                broker_vault_read_in_child(&file, expected.len(), &hash).unwrap(),
+                "Reconnected route must serve verified public fixture bytes"
+            );
+            let reopened_gets = remote.native_reads.lock().unwrap().vault_get_count;
+            assert!(
+                reopened_gets > gets && reopened_gets <= gets + 16,
+                "Reconnected route performs bounded ciphertext downloads"
+            );
+            let mut lock = target();
+            lock["action"] = json!("vault_lock");
+            assert_eq!(
+                restarted_broker
+                    .handle_isolated_lifecycle_session(lock)
+                    .unwrap()
+                    .0["unlocked"],
+                false
+            );
+            assert!(!restarted_sessions.is_unlocked(&scope).unwrap());
+            assert!(
+                restarted
+                    .confirm_windows_vault_readiness(&scope, "/Travel.vault")
+                    .is_err()
+            );
+            assert!(
+                !windows_vault_credentials::contains_saved(
+                    &VaultCredentialStore {
+                        store: restarted.session_store.as_ref(),
+                        profile: &profile
+                    },
+                    &remembered,
+                )
+                .unwrap()
+            );
+            assert_eq!(remote.recovery.lock().unwrap().put_count, 0);
+            println!("C06_PAYLOAD_RECONNECT_READ_AND_LOCK=true");
+            restarted_broker.stop_all().unwrap();
+            drop(restarted_broker);
+            drop(restarted);
+            drop(restarted_sessions);
+        }
+        remote.join().unwrap();
+        appdata_pin.verify_path().unwrap();
+        // Registered native namespace and private fixture evidence deliberately
+        // remain owned here after normal disconnect; no force/unregister/delete.
+        eprintln!("synthetic_c06_broker_lifecycle=passed;fixture_retained=true");
     }
 
     #[cfg(all(windows, debug_assertions))]
@@ -6515,10 +12475,14 @@ mod tests {
         release: Mutex<mpsc::Receiver<()>>,
     }
 
+    type MemoryBandwidthSettings = HashMap<(String, Vec<u8>), Vec<u8>>;
+
     #[derive(Default)]
     struct MemoryStore {
         sessions: Mutex<HashMap<(String, String, String), auth::Session>>,
         root_configs: Mutex<HashMap<(String, String, String), Vec<u8>>>,
+        bandwidth_settings: Mutex<MemoryBandwidthSettings>,
+        proxy_settings: Mutex<HashMap<String, Vec<u8>>>,
         active_identity: Mutex<Option<(String, String, String)>>,
         fail_saves: Mutex<bool>,
         fail_removes: Mutex<bool>,
@@ -6528,6 +12492,51 @@ mod tests {
     }
 
     impl SessionStore for MemoryStore {
+        fn load_proxy_settings(&self, profile: &str) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.proxy_settings.lock().unwrap().get(profile).cloned())
+        }
+        fn compare_exchange_proxy_settings(
+            &self,
+            profile: &str,
+            old: Option<&[u8]>,
+            next: &[u8],
+        ) -> Result<(), String> {
+            let mut records = self.proxy_settings.lock().unwrap();
+            if records.get(profile).map(Vec::as_slice) != old {
+                return Err("synthetic stale proxy settings".into());
+            }
+            records.insert(profile.into(), next.to_vec());
+            Ok(())
+        }
+
+        fn load_bandwidth_settings(
+            &self,
+            profile: &str,
+            scope: &[u8],
+        ) -> Result<Option<Vec<u8>>, String> {
+            Ok(self
+                .bandwidth_settings
+                .lock()
+                .unwrap()
+                .get(&(profile.into(), scope.to_vec()))
+                .cloned())
+        }
+        fn compare_exchange_bandwidth_settings(
+            &self,
+            profile: &str,
+            scope: &[u8],
+            old: Option<&[u8]>,
+            next: &[u8],
+        ) -> Result<(), String> {
+            let mut settings = self.bandwidth_settings.lock().unwrap();
+            let key = (profile.into(), scope.to_vec());
+            if settings.get(&key).map(Vec::as_slice) != old {
+                return Err("synthetic stale settings".into());
+            }
+            settings.insert(key, next.to_vec());
+            Ok(())
+        }
+
         fn save_pending(&self, scope: &str, session: &auth::Session) -> Result<(), String> {
             if *self.fail_saves.lock().unwrap() {
                 return Err("synthetic protected storage failure".into());
@@ -6643,6 +12652,37 @@ mod tests {
     }
 
     impl SessionStore for Arc<MemoryStore> {
+        fn load_proxy_settings(&self, profile: &str) -> Result<Option<Vec<u8>>, String> {
+            self.as_ref().load_proxy_settings(profile)
+        }
+        fn compare_exchange_proxy_settings(
+            &self,
+            profile: &str,
+            old: Option<&[u8]>,
+            next: &[u8],
+        ) -> Result<(), String> {
+            self.as_ref()
+                .compare_exchange_proxy_settings(profile, old, next)
+        }
+
+        fn load_bandwidth_settings(
+            &self,
+            profile: &str,
+            scope: &[u8],
+        ) -> Result<Option<Vec<u8>>, String> {
+            self.as_ref().load_bandwidth_settings(profile, scope)
+        }
+        fn compare_exchange_bandwidth_settings(
+            &self,
+            profile: &str,
+            scope: &[u8],
+            old: Option<&[u8]>,
+            next: &[u8],
+        ) -> Result<(), String> {
+            self.as_ref()
+                .compare_exchange_bandwidth_settings(profile, scope, old, next)
+        }
+
         fn save_pending(&self, scope: &str, session: &auth::Session) -> Result<(), String> {
             self.as_ref().save_pending(scope, session)
         }
@@ -7222,6 +13262,17 @@ mod tests {
                     .expect("persisted Personal root identity"),
                 Arc::clone(&first_backend),
                 first_recovery.clone(),
+                super::windows_bandwidth::Scope::new(
+                    &configuration.profile_scope,
+                    &session.server,
+                    &session.client_id,
+                    session.expected_issuer.as_deref(),
+                    &owner.account_id,
+                )
+                .expect("bind exact fixture account history")
+                .bytes()
+                .to_vec(),
+                Arc::clone(&agent.session_store),
             )
             .expect("agent manager holds the exact-scope native connection");
         emit_stage("provider_connected");
@@ -7533,7 +13584,7 @@ mod tests {
         if automatic_initial_save {
             // This exact test instance alone enables the ordinary production
             // handoff. No environment or persisted/production flag changes.
-            assert!(!super::WINDOWS_INITIAL_SAVE_DISPATCH_ENABLED);
+            const { assert!(!super::WINDOWS_INITIAL_SAVE_DISPATCH_ENABLED) };
             agent
                 .provider
                 .initial_save_test_activation
@@ -7579,9 +13630,35 @@ mod tests {
                     snapshot.records.len() <= 1,
                     "unexpected additional snapshots; preserve scope"
                 );
+                if Instant::now() >= deadline {
+                    // Read existing bounded callback telemetry once on failure;
+                    // no reopen, rescan or retry. Diagnostic collection alone
+                    // has a 250ms bound after the unchanged save deadline.
+                    if let Ok(observation) = agent.provider.close_failure_observation() {
+                        emit_close_observation(observation);
+                    }
+                }
                 assert!(
                     Instant::now() < deadline,
-                    "automatic save did not complete; preserve root and protected journal"
+                    "automatic save did not complete; preserve root and protected journal; record_count={}; incomplete_staging_files={:?}; recovery_states={:?}; last_dispatch={:?}; fixture_counts_put_get_range_bodylen={:?}",
+                    snapshot.records.len(),
+                    snapshot.incomplete_staging_files,
+                    snapshot.recovery_states.values().collect::<Vec<_>>(),
+                    agent
+                        .provider
+                        .initial_save_test_observation
+                        .lock()
+                        .unwrap()
+                        .as_deref(),
+                    {
+                        let remote = personal_fixture.recovery.lock().unwrap();
+                        (
+                            remote.put_count,
+                            remote.get_count,
+                            remote.range_count,
+                            remote.body.len(),
+                        )
+                    },
                 );
                 thread::sleep(Duration::from_millis(50));
             };
@@ -8900,6 +14977,17 @@ mod tests {
                             .to_owned(),
                         backend.clone(),
                         recovery_provider,
+                        super::windows_bandwidth::Scope::new(
+                            &configuration.profile_scope,
+                            &session.server,
+                            &session.client_id,
+                            session.expected_issuer.as_deref(),
+                            &owner.account_id,
+                        )
+                        .expect("bind exact fixture account history")
+                        .bytes()
+                        .to_vec(),
+                        Arc::clone(&agent.session_store),
                     )
                     .expect("agent-owned native lifecycle connects exact synthetic root");
 
@@ -9834,7 +15922,7 @@ mod tests {
             )
             .unwrap();
         let stored: Arc<dyn SessionStore> = store;
-        let loaded = load_root_configuration(&stored, &session)
+        let loaded = load_root_configuration(&stored, "default", &session)
             .unwrap()
             .expect("legacy selected root remains available for review");
         assert!(loaded.registration_ownership.is_none());
@@ -9881,6 +15969,7 @@ mod tests {
     }
 
     struct SyntheticRecoveryFile {
+        present: bool,
         body: Vec<u8>,
         etag: String,
         put_count: usize,
@@ -9891,15 +15980,31 @@ mod tests {
         last_read_if_match: Option<String>,
     }
 
+    struct SyntheticVaultUploadFixture {
+        enabled: bool,
+        ciphertext: Vec<u8>,
+        etag: String,
+        resource_id: &'static str,
+        put_attempt_count: usize,
+        put_count: usize,
+        max_successful_puts: usize,
+        body_get_count: usize,
+        last_put_if_match: Option<String>,
+        last_read_if_match: Option<String>,
+        forbidden_mutation_count: usize,
+    }
+
     struct SyntheticPersonalSpacesFixture {
         stop: std::sync::mpsc::Sender<()>,
         worker: thread::JoinHandle<()>,
         recovery: Arc<Mutex<SyntheticRecoveryFile>>,
         native_reads: Arc<Mutex<SyntheticNativeReadFixture>>,
+        vault_upload: Option<Arc<Mutex<SyntheticVaultUploadFixture>>>,
     }
 
     #[derive(Default)]
     struct SyntheticNativeReadFixture {
+        vault_get_count: usize,
         request_count: usize,
         files_enabled: bool,
         personal_depth_one_propfind_count: usize,
@@ -9950,6 +16055,81 @@ mod tests {
         native_read_files_enabled: bool,
         recovery_read_probe_enabled: bool,
     ) -> (String, SyntheticPersonalSpacesFixture) {
+        synthetic_personal_spaces_server_inner_with_media_leaf(
+            emit_stage,
+            native_read_files_enabled,
+            recovery_read_probe_enabled,
+            false,
+        )
+    }
+
+    fn synthetic_personal_spaces_server_with_absent_media_leaf(
+        emit_stage: impl Fn(&str),
+    ) -> (String, SyntheticPersonalSpacesFixture) {
+        synthetic_personal_spaces_server_inner_with_media_leaf(emit_stage, true, false, true)
+    }
+
+    fn synthetic_personal_spaces_server_inner_with_media_leaf(
+        emit_stage: impl Fn(&str),
+        native_read_files_enabled: bool,
+        recovery_read_probe_enabled: bool,
+        initially_absent: bool,
+    ) -> (String, SyntheticPersonalSpacesFixture) {
+        synthetic_personal_spaces_server_inner_with_vault(
+            emit_stage,
+            native_read_files_enabled,
+            recovery_read_probe_enabled,
+            initially_absent,
+            false,
+        )
+    }
+
+    fn synthetic_personal_spaces_server_inner_with_vault(
+        emit_stage: impl Fn(&str),
+        native_read_files_enabled: bool,
+        recovery_read_probe_enabled: bool,
+        initially_absent: bool,
+        initialized_vault: bool,
+    ) -> (String, SyntheticPersonalSpacesFixture) {
+        synthetic_personal_spaces_server_inner_with_vault_payload(
+            emit_stage,
+            native_read_files_enabled,
+            recovery_read_probe_enabled,
+            initially_absent,
+            initialized_vault,
+            false,
+        )
+    }
+
+    fn synthetic_personal_spaces_server_inner_with_vault_payload(
+        emit_stage: impl Fn(&str),
+        native_read_files_enabled: bool,
+        recovery_read_probe_enabled: bool,
+        initially_absent: bool,
+        initialized_vault: bool,
+        vault_payload: bool,
+    ) -> (String, SyntheticPersonalSpacesFixture) {
+        synthetic_personal_spaces_server_inner_with_vault_upload(
+            emit_stage,
+            native_read_files_enabled,
+            recovery_read_probe_enabled,
+            initially_absent,
+            initialized_vault,
+            vault_payload,
+            false,
+        )
+    }
+
+    fn synthetic_personal_spaces_server_inner_with_vault_upload(
+        emit_stage: impl Fn(&str),
+        native_read_files_enabled: bool,
+        recovery_read_probe_enabled: bool,
+        initially_absent: bool,
+        initialized_vault: bool,
+        vault_payload: bool,
+        allow_vault_upload: bool,
+    ) -> (String, SyntheticPersonalSpacesFixture) {
+        assert!(!allow_vault_upload || (initialized_vault && vault_payload));
         emit_stage("listener_bind_begin");
         let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|error| {
             emit_stage(&format!("listener_bind_error_kind_{:?}", error.kind()));
@@ -9971,7 +16151,12 @@ mod tests {
         let worker_server = server.clone();
         let webdav = format!("{server}/remote.php/dav/personal/synthetic-personal-drive");
         let recovery = Arc::new(Mutex::new(SyntheticRecoveryFile {
-            body: b"original synthetic placeholder bytes".to_vec(),
+            present: !initially_absent,
+            body: if initially_absent {
+                Vec::new()
+            } else {
+                b"original synthetic placeholder bytes".to_vec()
+            },
             etag: "\"synthetic-file-v1\"".into(),
             put_count: 0,
             get_count: 0,
@@ -9986,6 +16171,23 @@ mod tests {
             ..SyntheticNativeReadFixture::default()
         }));
         let worker_native_reads = Arc::clone(&native_reads);
+        let vault_upload = allow_vault_upload.then(|| {
+            Arc::new(Mutex::new(SyntheticVaultUploadFixture {
+                enabled: false,
+                ciphertext: include_bytes!("../../raiun-vault/tests/fixtures/web-65537.bin")
+                    .to_vec(),
+                etag: "\"child-rev-1\"".into(),
+                resource_id: "child-resource-id",
+                put_attempt_count: 0,
+                put_count: 0,
+                max_successful_puts: 1,
+                body_get_count: 0,
+                last_put_if_match: None,
+                last_read_if_match: None,
+                forbidden_mutation_count: 0,
+            }))
+        });
+        let worker_vault_upload = vault_upload.as_ref().map(Arc::clone);
         listener.set_nonblocking(true).unwrap_or_else(|error| {
             emit_stage("listener_nonblocking_error");
             panic!(
@@ -10017,6 +16219,15 @@ mod tests {
                     .expect("bound synthetic request reads");
                 let (request, headers, body) = read_request_with_headers(&request_stream);
                 worker_native_reads.lock().unwrap().request_count += 1;
+                // Count forbidden methods without granting them a handler.
+                // The existing initialized-vault assertion still rejects them.
+                if ["DELETE ", "MOVE "]
+                    .iter()
+                    .any(|method| request.starts_with(method))
+                    && let Some(remote) = worker_vault_upload.as_ref()
+                {
+                    remote.lock().unwrap().forbidden_mutation_count += 1;
+                }
                 if request.starts_with("GET /__test/remote_counts ") {
                     let snapshot = worker_recovery.lock().unwrap();
                     let counters = format!(
@@ -10039,6 +16250,20 @@ mod tests {
                     );
                     write!(request_stream, "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{counters}", counters.len()).unwrap();
                     continue;
+                }
+                let vault_child_path = "/remote.php/dav/personal/synthetic-personal-drive/Travel.vault/9cmn80lns8obm4t3koceogil20";
+                if initialized_vault {
+                    let exact_opt_in_put = request.starts_with("PUT ")
+                        && request.split_whitespace().nth(1) == Some(vault_child_path)
+                        && worker_vault_upload
+                            .as_ref()
+                            .is_some_and(|state| state.lock().unwrap().enabled);
+                    assert!(
+                        request.starts_with("GET ")
+                            || request.starts_with("PROPFIND ")
+                            || exact_opt_in_put,
+                        "initialized vault fixture permits no remote mutation"
+                    );
                 }
                 if request.starts_with("POST /token ") {
                     let form: HashMap<String, String> =
@@ -10069,6 +16294,122 @@ mod tests {
                     .map(|(_, value)| value.as_str());
                 if authorization != Some(expected_access) {
                     write!(request_stream, "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                    continue;
+                }
+                // Common bearer-auth gate above must precede every opt-in mutation.
+                if request.starts_with("PUT ")
+                    && request.split_whitespace().nth(1) == Some(vault_child_path)
+                    && let Some(remote) = worker_vault_upload.as_ref()
+                {
+                    let mut remote = remote.lock().unwrap();
+                    assert!(remote.enabled);
+                    remote.put_attempt_count += 1;
+                    let condition = headers
+                        .iter()
+                        .find(|(name, _)| name == "if-match")
+                        .map(|(_, value)| value.as_str());
+                    if condition != Some(remote.etag.as_str())
+                        || remote.put_count >= remote.max_successful_puts
+                        || (remote.etag != "\"child-rev-1\""
+                            && !(remote.max_successful_puts == 2
+                                && remote.put_count == 1
+                                && remote.etag == "\"child-rev-2\""))
+                        || headers.iter().any(|(name, _)| name == "if-none-match")
+                        || body.is_empty()
+                        || body.len() > 1024 * 1024
+                    {
+                        write!(request_stream, "HTTP/1.1 412 Precondition Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                        continue;
+                    }
+                    remote.last_put_if_match = condition.map(str::to_owned);
+                    remote.put_count += 1;
+                    remote.ciphertext = body;
+                    remote.etag = format!("\"child-rev-{}\"", remote.put_count + 1);
+                    write!(request_stream, "HTTP/1.1 204 No Content\r\nETag: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", remote.etag).unwrap();
+                    continue;
+                }
+                let vault_child = if initialized_vault
+                    && vault_payload
+                    && let Some(remote) = worker_vault_upload.as_ref()
+                {
+                    let remote = remote.lock().unwrap();
+                    format!(
+                        r#"<d:response><d:href>{worker_server}{vault_child_path}</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>{}</d:getcontentlength><d:getetag>{}</d:getetag><oc:fileid>{}</oc:fileid><oc:name>9cmn80lns8obm4t3koceogil20</oc:name><oc:permissions>RDNVW</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"#,
+                        remote.ciphertext.len(),
+                        remote.etag,
+                        remote.resource_id
+                    )
+                } else if initialized_vault && vault_payload {
+                    format!(
+                        r#"<d:response><d:href>{worker_server}{vault_child_path}</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>{}</d:getcontentlength><d:getetag>"child-rev-1"</d:getetag><oc:fileid>child-resource-id</oc:fileid><oc:name>9cmn80lns8obm4t3koceogil20</oc:name><oc:permissions>RDNVW</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"#,
+                        include_bytes!("../../raiun-vault/tests/fixtures/web-65537.bin").len()
+                    )
+                } else {
+                    String::new()
+                };
+                if initialized_vault
+                    && vault_payload
+                    && request.starts_with("PROPFIND ")
+                    && request.split_whitespace().nth(1) == Some(vault_child_path)
+                {
+                    let xml = format!(
+                        r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">{vault_child}</d:multistatus>"#
+                    );
+                    write!(request_stream, "HTTP/1.1 207 Multi-Status\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}", xml.len()).unwrap();
+                    continue;
+                }
+                if initialized_vault && request.starts_with("PROPFIND ") {
+                    let path = request.split_whitespace().nth(1).unwrap();
+                    if path.trim_end_matches('/')
+                        == "/remote.php/dav/personal/synthetic-personal-drive/Travel.vault"
+                    {
+                        let token = include_str!(
+                            "../../raiun-vault/tests/fixtures/web-integrity-token.b64"
+                        )
+                        .trim();
+                        let xml = format!(
+                            r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:ocrclone="ocrclone"><d:response><d:href>{worker_server}/remote.php/dav/personal/synthetic-personal-drive/Travel.vault/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype><d:getcontentlength>0</d:getcontentlength><d:getetag>"vault-v1"</d:getetag><d:getcontenttype>application/vnd.opencloud.vault</d:getcontenttype><oc:fileid>synthetic-vault-root</oc:fileid><oc:name>Travel.vault</oc:name><oc:size>0</oc:size><oc:permissions>RDNVW</oc:permissions><ocrclone:integrity-id>{token}</ocrclone:integrity-id></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#
+                        );
+                        let xml = if vault_payload
+                            && headers
+                                .iter()
+                                .any(|(name, value)| name == "depth" && value == "1")
+                        {
+                            xml.replace(
+                                "</d:multistatus>",
+                                &(vault_child.clone() + "</d:multistatus>"),
+                            )
+                        } else {
+                            xml
+                        };
+                        write!(request_stream, "HTTP/1.1 207 Multi-Status\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}", xml.len()).unwrap();
+                        continue;
+                    }
+                }
+                if initialized_vault && request.starts_with("GET /remote.php/dav/personal/synthetic-personal-drive/Travel.vault/9cmn80lns8obm4t3koceogil20 ") {
+                    if let Some(remote) = worker_vault_upload.as_ref() {
+                        let mut remote = remote.lock().unwrap();
+                        let condition = headers.iter().find(|(name,_)| name == "if-match").map(|(_,value)| value.as_str());
+                        if condition != Some(remote.etag.as_str()) {
+                            write!(request_stream, "HTTP/1.1 412 Precondition Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                            continue;
+                        }
+                        worker_native_reads.lock().unwrap().vault_get_count += 1;
+                        if remote.put_count != 0 {
+                            remote.body_get_count += 1;
+                            remote.last_read_if_match = condition.map(str::to_owned);
+                        }
+                        write!(request_stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: {}\r\nConnection: close\r\n\r\n", remote.ciphertext.len(), remote.etag).unwrap();
+                        request_stream.write_all(&remote.ciphertext).unwrap();
+                        continue;
+                    }
+                    if vault_payload {
+                        worker_native_reads.lock().unwrap().vault_get_count += 1;
+                    }
+                    let bytes = include_bytes!("../../raiun-vault/tests/fixtures/web-65537.bin");
+                    assert!(headers.iter().any(|(name, value)| name == "if-match" && value == "\"child-rev-1\""));
+                    write!(request_stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", bytes.len()).unwrap();
+                    request_stream.write_all(bytes).unwrap();
                     continue;
                 }
                 if request.starts_with("GET /graph/v1.0/me/drives") {
@@ -10111,6 +16452,10 @@ mod tests {
                             ("synthetic-recovery-directory", "RecoveryRoot", true, "\"synthetic-recovery-directory-etag\"".to_owned(), 0)
                         } else if normalized == format!("{project_prefix}/RecoveryRoot/document.bin") {
                             let snapshot = worker_recovery.lock().unwrap();
+                            if !snapshot.present {
+                                write!(request_stream, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                                continue;
+                            }
                             ("synthetic-recovery-file", "document.bin", false, snapshot.etag.clone(), snapshot.body.len())
                         } else if recovery_read_probe_enabled
                             && normalized == format!("{project_prefix}/RecoveryRoot/read-probe.bin")
@@ -10173,6 +16518,7 @@ mod tests {
                         && normalized == format!("{project_prefix}/RecoveryRoot")
                     {
                         let snapshot = worker_recovery.lock().unwrap();
+                        if snapshot.present {
                         entries.push((
                             format!("{project_prefix}/RecoveryRoot/document.bin"),
                             "synthetic-recovery-file".into(),
@@ -10181,6 +16527,7 @@ mod tests {
                             snapshot.etag.clone(),
                             snapshot.body.len(),
                         ));
+                        }
                         if recovery_read_probe_enabled {
                             entries.push((
                                 format!("{project_prefix}/RecoveryRoot/read-probe.bin"),
@@ -10204,6 +16551,15 @@ mod tests {
                             b"synthetic Personal native read bytes".len(),
                         ));
                     }
+                    if initialized_vault && depth_one
+                        && normalized == "/remote.php/dav/personal/synthetic-personal-drive"
+                    {
+                        entries.push((
+                            format!("{normalized}/Travel.vault/"),
+                            "synthetic-vault-root".into(), "Travel.vault".into(), true,
+                            "\"vault-v1\"".into(), 0,
+                        ));
+                    }
                     let response_xml = entries
                         .into_iter()
                         .map(|(href, id, name, is_directory, etag, size)| {
@@ -10212,8 +16568,12 @@ mod tests {
                             } else {
                                 "<d:resourcetype/>"
                             };
+                            let vault_props = if initialized_vault && id == "synthetic-vault-root" {
+                                format!(r#"<d:getcontenttype>application/vnd.opencloud.vault</d:getcontenttype><ocrclone:integrity-id xmlns:ocrclone="ocrclone">{}</ocrclone:integrity-id>"#,
+                                    include_str!("../../raiun-vault/tests/fixtures/web-integrity-token.b64").trim())
+                            } else { String::new() };
                             format!(
-                                "<d:response><d:href>{worker_server}{href}</d:href><d:propstat><d:prop>{resource_kind}<d:getcontentlength>{size}</d:getcontentlength><d:getetag>{etag}</d:getetag><oc:fileid>{id}</oc:fileid><oc:name>{name}</oc:name><oc:permissions>RDNVW</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
+                                "<d:response><d:href>{worker_server}{href}</d:href><d:propstat><d:prop>{resource_kind}{vault_props}<d:getcontentlength>{size}</d:getcontentlength><d:getetag>{etag}</d:getetag><oc:fileid>{id}</oc:fileid><oc:name>{name}</oc:name><oc:permissions>RDNVW</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
                             )
                         })
                         .collect::<String>();
@@ -10227,10 +16587,13 @@ mod tests {
                         .find(|(name, _)| name == "if-match")
                         .map(|(_, value)| value.clone());
                     let mut snapshot = worker_recovery.lock().unwrap();
-                    if if_match.as_deref() != Some(snapshot.etag.as_str()) {
+                    let absent_condition = headers.iter().find(|(name, _)| name == "if-none-match").map(|(_, value)| value.as_str());
+                    if (snapshot.present && if_match.as_deref() != Some(snapshot.etag.as_str()))
+                        || (!snapshot.present && (if_match.is_some() || absent_condition != Some("*"))) {
                         write!(request_stream, "HTTP/1.1 412 Precondition Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
                         continue;
                     }
+                    snapshot.present = true;
                     snapshot.put_count += 1;
                     snapshot.last_put_if_match = if_match;
                     snapshot.body = body;
@@ -10245,6 +16608,10 @@ mod tests {
                         .find(|(name, _)| name == "if-match")
                         .map(|(_, value)| value.clone());
                     let mut snapshot = worker_recovery.lock().unwrap();
+                    if !snapshot.present {
+                        write!(request_stream, "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                        continue;
+                    }
                     if if_match.as_deref() != Some(snapshot.etag.as_str()) {
                         write!(request_stream, "HTTP/1.1 412 Precondition Failed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
                         continue;
@@ -10350,6 +16717,7 @@ mod tests {
                 worker,
                 recovery,
                 native_reads,
+                vault_upload,
             },
         )
     }
@@ -10538,12 +16906,23 @@ mod tests {
             br#"{"old_user_root":"never_reuse"}"#.to_vec(),
         );
         let agent = Arc::new(WindowsAgent {
+            source_admissions: None,
+            vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
+            profile_scope: "default".into(),
             session_store: store.clone(),
             state: Arc::new(Mutex::new(AccountState::default())),
             generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             provider: Arc::new(ProviderManager::new()),
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
+            fresh_close_worker: Mutex::new(None),
+            folder_lifecycle: Mutex::new(()),
+            vault_credential_operation: Mutex::new(()),
+            protected_recovery_tokens: Mutex::new(
+                super::windows_vault_capture_recovery::Tokens::default(),
+            ),
+            #[cfg(all(test, debug_assertions))]
+            synthetic_vault_completion_writer_probe: true,
         });
         let info = agent
             .begin_auth(&json!({"server":server,"client_id":"synthetic-client"}))
@@ -10604,12 +16983,23 @@ mod tests {
             br#"{"old_user_root":"never_reuse"}"#.to_vec(),
         );
         let agent = Arc::new(WindowsAgent {
+            source_admissions: None,
+            vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
+            profile_scope: "default".into(),
             session_store: store.clone(),
             state: Arc::new(Mutex::new(AccountState::default())),
             generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             provider: Arc::new(ProviderManager::new()),
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
+            fresh_close_worker: Mutex::new(None),
+            folder_lifecycle: Mutex::new(()),
+            vault_credential_operation: Mutex::new(()),
+            protected_recovery_tokens: Mutex::new(
+                super::windows_vault_capture_recovery::Tokens::default(),
+            ),
+            #[cfg(all(test, debug_assertions))]
+            synthetic_vault_completion_writer_probe: true,
         });
 
         agent
@@ -10630,6 +17020,237 @@ mod tests {
                 .as_deref(),
             Some(br#"{"old_user_root":"never_reuse"}"#.as_slice())
         );
+    }
+
+    #[test]
+    #[ignore = "requires isolated native Windows user profile and current-user DPAPI"]
+    fn dpapi_adapter_rejects_foreign_scope_without_mutating_fixture() {
+        use std::{collections::BTreeMap, fs};
+
+        let base = super::DpapiSessionStore::current_user().expect("open current-user storage");
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce).expect("generate unique synthetic profile ID");
+        let profile = format!("profile-{:032x}", u128::from_be_bytes(nonce));
+        let foreign = if profile == "profile-ffffffffffffffffffffffffffffffff" {
+            "profile-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        } else {
+            "profile-ffffffffffffffffffffffffffffffff"
+        };
+        let path = base.local_edit_state_directory().join(&profile);
+        assert!(
+            matches!(fs::symlink_metadata(&path), Err(error) if error.kind() == std::io::ErrorKind::NotFound),
+            "synthetic profile must not already exist"
+        );
+        let raw = base
+            .for_profile(&profile)
+            .expect("create unique private profile fixture");
+        assert_eq!(raw.local_edit_state_directory(), path);
+        // Only this new child is read below; never read the base/default pointer.
+        let server = "https://synthetic.invalid";
+        let client = "synthetic-client";
+        let session = synthetic_session(server, client, unix_time_now() + 3600);
+        let body = serde_json::to_vec(&session).expect("encode synthetic session");
+        let roots = br#"{"synthetic_root":"not-a-user-folder"}"#;
+        // Intentionally seed a foreign identity through the raw storage API inside
+        // our own new child. This exercises the adapter's independent scope fence.
+        raw.save(Some(foreign), server, client, &body)
+            .expect("seed foreign synthetic session");
+        raw.save_root_config(foreign, server, client, roots)
+            .expect("seed foreign synthetic root metadata");
+        raw.set_active_identity(foreign, server, client)
+            .expect("seed foreign synthetic pointer");
+        let snapshot = |directory: &std::path::Path| -> BTreeMap<std::ffi::OsString, Vec<u8>> {
+            fs::read_dir(directory)
+                .expect("enumerate only owned fixture")
+                .map(|entry| {
+                    let entry = entry.expect("fixture entry");
+                    (
+                        entry.file_name(),
+                        fs::read(entry.path()).expect("read owned fixture bytes"),
+                    )
+                })
+                .collect()
+        };
+        let before = snapshot(&path);
+        let adapter = super::DpapiStore {
+            store: raw.clone(),
+            profile_scope: profile.clone(),
+        };
+        assert!(adapter.save_pending(foreign, &session).is_err());
+        assert!(adapter.publish_active(foreign, &session).is_err());
+        assert!(adapter.load_active(foreign).is_err());
+        assert!(adapter.remove(foreign, server, client).is_err());
+        assert!(
+            adapter
+                .save_root_config(foreign, server, client, b"replacement")
+                .is_err()
+        );
+        assert!(adapter.load_root_config(foreign, server, client).is_err());
+        assert!(adapter.remove_root_config(foreign, server, client).is_err());
+        // Even a trusted-scope load must refuse the foreign pointer; revoke must
+        // check before clear_active_identity rather than destroying it first.
+        assert!(adapter.load_active(&profile).is_err());
+        assert!(adapter.revoke_active().is_err());
+        assert_eq!(
+            raw.active_identity().expect("read owned synthetic pointer"),
+            Some((foreign.into(), server.into(), client.into()))
+        );
+        assert_eq!(
+            raw.load(Some(foreign), server, client)
+                .expect("read owned session")
+                .expect("owned session exists")
+                .as_slice(),
+            body.as_slice()
+        );
+        assert_eq!(
+            raw.load_root_config(foreign, server, client)
+                .expect("read owned root metadata"),
+            Some(roots.to_vec())
+        );
+        assert!(
+            snapshot(&path) == before,
+            "foreign calls must not alter any owned fixture bytes or names"
+        );
+        // A mismatched constructor must refuse before restore or revocation.
+        assert!(WindowsAgent::new_for_profile(foreign, adapter).is_err());
+        assert!(snapshot(&path) == before);
+        // Success-only exact fixture cleanup; preserve all evidence on panic.
+        raw.clear_active_identity()
+            .expect("clear synthetic pointer");
+        raw.remove(Some(foreign), server, client)
+            .expect("remove synthetic session");
+        raw.remove_root_config(foreign, server, client)
+            .expect("remove synthetic root metadata");
+        drop(raw);
+        fs::remove_dir(&path).expect("remove only empty synthetic profile child");
+    }
+
+    #[test]
+    fn root_inventory_metadata_cannot_restore_a_different_issuer() {
+        let session = synthetic_session(
+            "https://synthetic.invalid",
+            "synthetic-client",
+            unix_time_now() + 3600,
+        );
+        let configuration = super::RootConfiguration {
+            profile_scope: "default".into(),
+            server: session.server.clone(),
+            client_id: session.client_id.clone(),
+            issuer: session.expected_issuer.clone(),
+            path: "C:\\SyntheticReservation".into(),
+            volume_serial: 1,
+            file_index: 42,
+            registration_ownership: None,
+            valid: true,
+        };
+        let bytes = encode_root_configuration(&configuration).unwrap();
+        let decoded = super::decode_root_metadata(&bytes, "default").unwrap();
+        assert!(
+            !decoded.valid,
+            "inventory decoding grants exclusion only, never attach authority"
+        );
+        assert_eq!(decoded.path, configuration.path);
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::default());
+        store
+            .save_root_config("default", &session.server, &session.client_id, &bytes)
+            .unwrap();
+        let mut foreign = session;
+        foreign.expected_issuer = Some("https://different-issuer.invalid".into());
+        assert!(load_root_configuration(&store, "default", &foreign).is_err());
+        assert!(
+            super::decode_root_metadata(&bytes, "profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn independent_profile_runtimes_reject_foreign_logout_and_preserve_other_session() {
+        let profile_a = "profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let profile_b = "profile-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let server = "https://synthetic.invalid";
+        let client = "synthetic-client";
+        let store_a = Arc::new(MemoryStore::default());
+        let store_b = Arc::new(MemoryStore::default());
+        let mut session_a = synthetic_session(server, client, unix_time_now() + 3600);
+        let mut session_b = session_a.clone();
+        session_a.access_token = "synthetic-profile-a-token".into();
+        session_b.access_token = "synthetic-profile-b-token".into();
+        seed_active_session(&store_a, profile_a, session_a);
+        seed_active_session(&store_b, profile_b, session_b);
+        let agent_a = Arc::new(WindowsAgent::new_for_profile(profile_a, store_a.clone()).unwrap());
+        let agent_b = Arc::new(WindowsAgent::new_for_profile(profile_b, store_b.clone()).unwrap());
+        // Restored runtimes normally refresh on status. Keep this storage/routing
+        // fixture offline via the existing retry deadline; no auth/network thread
+        // is started and no online authentication or capability is fabricated.
+        agent_a.state.lock().unwrap().refresh_retry_at = u64::MAX;
+        agent_b.state.lock().unwrap().refresh_retry_at = u64::MAX;
+        let key_a = (profile_a.to_owned(), server.to_owned(), client.to_owned());
+        let key_b = (profile_b.to_owned(), server.to_owned(), client.to_owned());
+        let preserved_a = || {
+            assert!(store_a.active_identity.lock().unwrap().as_ref() == Some(&key_a));
+            let sessions = store_a.sessions.lock().unwrap();
+            assert_eq!(sessions.len(), 1);
+            assert!(sessions.get(&key_a).unwrap().access_token == "synthetic-profile-a-token");
+        };
+        let preserved_b = || {
+            assert!(store_b.active_identity.lock().unwrap().as_ref() == Some(&key_b));
+            let sessions = store_b.sessions.lock().unwrap();
+            assert_eq!(sessions.len(), 1);
+            assert!(sessions.get(&key_b).unwrap().access_token == "synthetic-profile-b-token");
+        };
+        let status_a = agent_a
+            .handle_request(&json!({"action":"status", "profile_id":profile_a}))
+            .unwrap()
+            .0;
+        let status_b = agent_b
+            .handle_request(&json!({"action":"status", "profile_id":profile_b}))
+            .unwrap()
+            .0;
+        assert_eq!(status_a["profile_id"], profile_a);
+        assert_eq!(status_b["profile_id"], profile_b);
+        assert_eq!(status_a["connected"], false);
+        assert_eq!(status_b["connected"], false);
+        preserved_a();
+        preserved_b();
+        let generation_a = agent_a.state.lock().unwrap().active_generation;
+        assert!(
+            agent_a
+                .handle_request(&json!({"action":"logout", "profile_id":profile_b}))
+                .is_err()
+        );
+        assert_eq!(
+            agent_a.state.lock().unwrap().active_generation,
+            generation_a
+        );
+        preserved_a();
+        preserved_b();
+        let (logout, stopping) = agent_a
+            .handle_request(&json!({"action":"logout", "profile_id":profile_a}))
+            .unwrap();
+        assert_eq!(logout["logged_out"], true);
+        assert!(!stopping);
+        assert!(store_a.active_identity.lock().unwrap().is_none());
+        assert!(store_a.sessions.lock().unwrap().is_empty());
+        assert!(agent_a.state.lock().unwrap().session.is_none());
+        preserved_b();
+        assert!(
+            agent_b
+                .state
+                .lock()
+                .unwrap()
+                .session
+                .as_ref()
+                .unwrap()
+                .access_token
+                == "synthetic-profile-b-token"
+        );
+        agent_a.stop_and_join().unwrap();
+        agent_b.stop_and_join().unwrap();
+        drop(agent_a);
+        drop(agent_b);
+        assert!(store_a.active_identity.lock().unwrap().is_none());
+        assert!(store_a.sessions.lock().unwrap().is_empty());
+        preserved_b();
     }
 
     fn synthetic_session(server: &str, client_id: &str, expires_at: u64) -> auth::Session {
@@ -10659,6 +17280,46 @@ mod tests {
             last_refresh_at: None,
             proxy: raiun_opencloud::ProxyConfig::System,
         }
+    }
+
+    #[test]
+    fn proxy_rpc_is_profile_local_signed_out_only_and_preserves_retained_session() {
+        let store = Arc::new(MemoryStore::default());
+        let a = "profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let b = "profile-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let agent_a = Arc::new(WindowsAgent::new_for_profile(a, store.clone()).unwrap());
+        let agent_b = Arc::new(WindowsAgent::new_for_profile(b, store.clone()).unwrap());
+        let read = json!({"action":"network_proxy","profile_id":a});
+        let initial = agent_a.handle_request(&read).unwrap().0;
+        assert_eq!(initial["revision"], 1);
+        let update = json!({"action":"network_proxy_set","profile_id":a,"proxy":{"mode":"direct"},"expected_account_id":null,"expected_revision":1});
+        let saved = agent_a.handle_request(&update).unwrap().0;
+        assert_eq!(saved["revision"], 2);
+        assert!(agent_a.handle_request(&update).is_err());
+        assert_eq!(
+            agent_b
+                .handle_request(&json!({"action":"network_proxy","profile_id":b}))
+                .unwrap()
+                .0["revision"],
+            1
+        );
+        assert!(agent_b.handle_request(&update).is_err());
+        let before = store.load_proxy_settings(a).unwrap();
+        {
+            let mut state = agent_a.state.lock().unwrap();
+            state.session = Some(synthetic_session(
+                "https://fixture.invalid",
+                "synthetic-client",
+                unix_time_now() + 3600,
+            ));
+        }
+        let mut retained = update.clone();
+        retained["expected_revision"] = json!(2);
+        assert!(agent_a.handle_request(&retained).is_err());
+        assert_eq!(store.load_proxy_settings(a).unwrap(), before);
+        assert!(agent_a.state.lock().unwrap().session.is_some());
+        agent_a.stop_and_join().unwrap();
+        agent_b.stop_and_join().unwrap();
     }
 
     fn seed_active_session(store: &MemoryStore, scope: &str, session: auth::Session) {
@@ -10989,12 +17650,23 @@ mod tests {
         let store = Arc::new(MemoryStore::default());
         *store.fail_saves.lock().unwrap() = true;
         let agent = Arc::new(WindowsAgent {
+            source_admissions: None,
+            vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
+            profile_scope: "default".into(),
             session_store: store,
             state: Arc::new(Mutex::new(AccountState::default())),
             generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             provider: Arc::new(ProviderManager::new()),
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
+            fresh_close_worker: Mutex::new(None),
+            folder_lifecycle: Mutex::new(()),
+            vault_credential_operation: Mutex::new(()),
+            protected_recovery_tokens: Mutex::new(
+                super::windows_vault_capture_recovery::Tokens::default(),
+            ),
+            #[cfg(all(test, debug_assertions))]
+            synthetic_vault_completion_writer_probe: true,
         });
         let (server, fixture) = synthetic_oidc_server(true);
         let info = agent
@@ -11035,12 +17707,23 @@ mod tests {
         let (server, fixture) = synthetic_oidc_server(false);
         let store = Arc::new(MemoryStore::default());
         let agent = Arc::new(WindowsAgent {
+            source_admissions: None,
+            vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
+            profile_scope: "default".into(),
             session_store: store.clone(),
             state: Arc::new(Mutex::new(AccountState::default())),
             generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             provider: Arc::new(ProviderManager::new()),
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
+            fresh_close_worker: Mutex::new(None),
+            folder_lifecycle: Mutex::new(()),
+            vault_credential_operation: Mutex::new(()),
+            protected_recovery_tokens: Mutex::new(
+                super::windows_vault_capture_recovery::Tokens::default(),
+            ),
+            #[cfg(all(test, debug_assertions))]
+            synthetic_vault_completion_writer_probe: true,
         });
         let _info = agent
             .begin_auth(&json!({"server":server,"client_id":"synthetic-client"}))
@@ -11065,12 +17748,23 @@ mod tests {
             release: Mutex::new(release_rx),
         }));
         let agent = Arc::new(WindowsAgent {
+            source_admissions: None,
+            vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
+            profile_scope: "default".into(),
             session_store: store.clone(),
             state: Arc::new(Mutex::new(AccountState::default())),
             generation: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             provider: Arc::new(ProviderManager::new()),
             auth_thread: Mutex::new(None),
             refresh_thread: Mutex::new(None),
+            fresh_close_worker: Mutex::new(None),
+            folder_lifecycle: Mutex::new(()),
+            vault_credential_operation: Mutex::new(()),
+            protected_recovery_tokens: Mutex::new(
+                super::windows_vault_capture_recovery::Tokens::default(),
+            ),
+            #[cfg(all(test, debug_assertions))]
+            synthetic_vault_completion_writer_probe: true,
         });
         let info = agent
             .begin_auth(&json!({"server":server,"client_id":"synthetic-client"}))
@@ -11151,7 +17845,7 @@ mod tests {
         let state = Arc::new(Mutex::new(AccountState::default()));
         let store_trait: Arc<dyn SessionStore> = store.clone();
 
-        record_cleanup_failure(&state, &store_trait, &session);
+        record_cleanup_failure(&state, &store_trait, "default", &session);
 
         assert_eq!(store.sessions.lock().unwrap().len(), 1);
         assert!(store.active_identity.lock().unwrap().is_none());

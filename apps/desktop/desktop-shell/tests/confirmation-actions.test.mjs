@@ -6,7 +6,7 @@ import ts from 'typescript';
 
 const source = await readFile(new URL('../src/main.ts', import.meta.url), 'utf8');
 const tree = ts.createSourceFile('main.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-const wanted = new Set(['confirmAccountAction', 'isCurrentAccount', 'vaultPinContextCurrent', 'handleAction', 'run', 'removeVaultOfflinePin', 'lockVault', 'removePair', 'resolveConflict', 'disconnectSpaceFolderSync']);
+const wanted = new Set(['confirmAccountAction', 'isCurrentAccount', 'vaultPinContextCurrent', 'handleAction', 'run', 'removeVaultOfflinePin', 'lockVault', 'removePair', 'resolveConflict', 'disconnectSpaceFolderSync', 'nativeVaultAccess', 'vaultAppFeaturesAvailable']);
 const functions = new Map(tree.statements.filter(n => ts.isFunctionDeclaration(n) && n.name && wanted.has(n.name.text)).map(n => [n.name.text, n.getText(tree)]));
 assert.equal(functions.size, wanted.size, 'exercise actual production declarations');
 const compiled = ts.transpileModule(`${[...functions.values()].join('\n')}\nglobalThis.actions = { ${[...wanted].join(',')} };`, {

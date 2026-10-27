@@ -3174,3 +3174,66 @@ overnight automation was deleted after handoff so it does not reopen those
 cycles. The package has not been published; whole-category completion remains
 unclaimed. Candidate notes and local-beta-handoff-state.json under
 `outputs/linux-release-candidate-20261021-r200/` record the current boundaries.
+
+
+## Windows normal in-place vault source/native acceptance — 26 October
+
+Combined source `86f26d85…` enables normal generation-bound worker admission,
+per-file writable eligibility and limited in-place capability/UI reporting for
+verified existing vault files up to 512 KiB. Required source gates passed:
+formatting, strict Linux workspace/all-target lint, 1,109 tests with 14 ignored,
+and current GNU Windows binary/test/Cloud Files strict checks without warnings.
+Unchanged UI evidence from the normal-save candidate is reused; the new fix does
+not change that UI.
+
+- R31: full ordinary clean read, Lock, same-connection password re-unlock/read,
+  then Lock again. Both native caches were empty and keys locked; locked reads
+  failed without GET. Fresh hydration provenance was observed twice, with zero
+  edits, captures, NativeCompleted, PUT or DELETE.
+- R32: two changed-body in-place saves automatically completed conditional
+  encrypted PUT/readback, promoted ETags and two retained protected captures;
+  NativeCompleted and exact dirty resolution preceded clean Lock. Initial fresh
+  hydration authority and the subsequent edit authority both ran on this source.
+
+Both isolated ordinary-user MSVC cases passed with native/wrapper exit 0, owned
+counts 0, actual normal guest shutdown and cold preservation. Parent verification
+joined all 153 raw evidence files to exact source, build artifact, private task
+rendering/readback, SID/session and closure evidence. Source archive, reviews and
+parent acceptance receipts are in `outputs/desktop-next-20261021/windows-vault-clean-read-r1/`;
+raw runs are `agent-vault-clean-read-r31/` and `agent-vault-normal-save-r32/` under
+`outputs/local-windows-native-20261023-r1/`.
+
+Result: these focused source/native workflows pass. This is not exact-package
+or installed-application acceptance, broad namespace/offline/atomic-replacement
+support, partial-cache cleanup or whole C05/C10 completion. Nonempty partial or
+uncertain data remains retained and fail-closed. Installed r117 remains unchanged
+and closed; the test VMs are cold. No signing or publication is authorized here.
+
+## Windows installed existing-file save/Lock/reopen — 26 October 2026
+
+Result: **scoped installed functional workflow PASS**, with separately recorded
+finite-expiry closure. Source `079a6e44`, unsigned installer SHA256
+`f51584bd19078c59c141f4795c5c8f75a1a7eb8055c8745e0c5c0244d87479ee`.
+Normal ordinary-user installation, exact installed payload/version/process
+checks, manual UI unlock/re-unlock with Remember unchecked, full original read,
+one in-place edit, one conditional encrypted PUT/readback, full edited re-read,
+and two public-RPC Locks with explicit cleanup and locked-read refusal/noGET
+passed. Independent inspection remained locked/not-saved; its cleanup `unknown`
+was never treated as complete. Six ordinary operation children exited 0.
+
+Parent independently verified 96 primary and 47 supplemental pinned files,
+actual normal guest shutdown/cold state and zero remaining product/Node
+processes. Candidate installed; app/sidecar closed; both test VMs cold. The
+original explicit fixture-stop gate **failed** after natural finite expiry,
+and is retained alongside operator/caller failures. Reviewed alternate closure
+requires actual `lifetime_expired`, preserves that failed gate and performs no
+replay, restart, lifetime extension or force termination.
+
+Raw evidence: `outputs/local-windows-native-20261023-r1/integrated-package-installed-r35/`.
+Parent reviews and caller/closure receipts: `outputs/desktop-next-20261021/windows-integrated-package-r1/`.
+The unchanged Rust backend reuses its accepted Linux/GNU and R31/R32 evidence.
+This case does not accept a UI Lock click, native extent inspection, namespace
+operations, replacement editors, offline/restart/recovery flows or whole C05/C10.
+The 512 KiB eligibility bound and 128-reference protected-history limit remain.
+A subsequently prepared wording-only unlock explanation passed TypeScript/Vite
+in isolation and is outside this exact installed artifact. No publication.

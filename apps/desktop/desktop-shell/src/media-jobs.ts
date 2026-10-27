@@ -21,6 +21,8 @@ type RecoveryPanel = {
 };
 type Context = {
   key(): string; connected(): boolean; reachable(): boolean; blocked(): boolean;
+  supportsVerifyUpload?(): boolean;
+  loadWhileDisconnected?(): boolean;
   supported(): boolean; spaces(): { id: string; name: string; writable: boolean; encrypted: boolean }[];
   request<T>(action: string, args?: Record<string, unknown>): Promise<T>;
   chooseSource(): Promise<string | null>; confirm(message: string): Promise<boolean>; busy(value: boolean): void; render(): void;
@@ -43,7 +45,16 @@ export class MediaJobsView {
   private emptyDraft() { return { source: '', space: '', destination: '', filter: 'photos' as MediaJob['filter'], organization: 'preserve_relative_path' as MediaJob['organization'], interval: '3600' }; }
   reset() { this.revision++; this.recoveryRequestToken++; this.recovery = null; this.rows = []; this.loading = false; this.loaded = false; this.error = ''; this.loadError = ''; this.message = ''; this.draft = this.emptyDraft(); }
   async refresh() {
-    if (this.loading || this.saving || !this.context.reachable() || !this.context.supported()) return;
+    if (this.saving) return;
+    if (!this.context.connected() && this.context.loadWhileDisconnected?.() === false) {
+      // Windows listing requires a live account. Discard old responses instead
+      // of showing its folder-auth error as a media/agent availability problem.
+      this.revision++; this.recoveryRequestToken++; this.recovery = null;
+      this.rows = []; this.loaded = false; this.loading = false; this.loadError = '';
+      this.context.render();
+      return;
+    }
+    if (this.loading || !this.context.reachable() || !this.context.supported()) return;
     const key = this.context.key(); const revision = this.revision;
     this.loading = true;
     try {
@@ -66,7 +77,7 @@ export class MediaJobsView {
     return `<section class="media-backups" aria-label="Recurring media backups"><div class="section-heading"><div><div class="eyebrow">SOURCE-PRESERVING BACKUP</div><h1>Media backups</h1><p class="lede">Upload photos and videos for the active account. Originals stay on this computer.</p></div><button class="button subtle" data-media-refresh ${disabled(blocked || this.loading)}>Refresh backups</button></div>
       <p class="media-form-note">Backups follow Pause Sync. Uploads count as complete only after their cloud contents are verified. Name conflicts and uncertain uploads need attention; they are not silently overwritten.</p>
       ${this.error || this.loadError ? `<div class="media-warning" role="alert">${escape(this.error || this.loadError)}</div>` : ''}${this.message ? `<p role="status">${escape(this.message)}</p>` : ''}
-      <div class="media-job-list">${this.rows.map(row => this.row(row, blocked)).join('') || `<p class="media-empty-result">${this.loading ? 'Loading backups…' : this.loaded ? 'No media backups for this account yet.' : 'Connect to the background agent to load backups.'}</p>`}</div>
+      <div class="media-job-list">${this.rows.map(row => this.row(row, blocked)).join('') || `<p class="media-empty-result">${this.loading ? 'Loading backups…' : this.loaded ? 'No media backups for this account yet.' : !this.context.reachable() ? 'Start the Raiun background agent to load media backups.' : !this.context.connected() ? 'Sign in to your OpenCloud account to load and manage media backups.' : 'Refresh to load media backups.'}</p>`}</div>
       <form id="media-job-form" class="settings-card media-form"><h3>Add a media backup</h3>
       <div class="media-field"><label for="media-job-source">Source folder</label><div class="input-with-button"><input id="media-job-source" value="${escape(draft.source)}" readonly placeholder="Choose a local folder"/><button type="button" class="button subtle" data-media-source ${disabled(blocked)}>Browse</button></div></div>
       <div class="media-options"><div class="media-field"><label for="media-job-space">OpenCloud location</label><select id="media-job-space" ${disabled(createBlocked)}><option value="">Choose Personal or a Space</option>${spaces.map(s => `<option value="${escape(s.id)}" ${s.id === draft.space ? 'selected' : ''}>${escape(s.name)}</option>`).join('')}</select></div>
@@ -74,6 +85,7 @@ export class MediaJobsView {
       <div class="media-options"><div class="media-field"><label for="media-job-filter">Include</label><select id="media-job-filter" ${disabled(blocked)}>${(['photos','videos','all'] as const).map(value => `<option value="${value}" ${draft.filter === value ? 'selected' : ''}>${value === 'all' ? 'All files' : value === 'photos' ? 'Photos' : 'Videos'}</option>`).join('')}</select></div>
       <div class="media-field"><label for="media-job-organization">Destination organization</label><select id="media-job-organization" ${disabled(blocked)}><option value="preserve_relative_path" ${draft.organization === 'preserve_relative_path' ? 'selected' : ''}>Keep folders and filenames</option><option value="utc_year_month" ${draft.organization === 'utc_year_month' ? 'selected' : ''}>Filesystem modified date (UTC year/month)</option></select></div>
       <div class="media-field"><label for="media-job-interval">Check for new files</label><select id="media-job-interval" ${disabled(blocked)}>${[['60','Every minute'],['900','Every 15 minutes'],['3600','Every hour'],['86400','Every day']].map(([value,label]) => `<option value="${value}" ${draft.interval === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div></div>
+      <p class="media-form-note">Photos includes recognized images; Videos includes recognized videos. File contents determine the type, not the extension. All files also includes other regular files. Scans include subfolders and skip symbolic links.</p>
       <p class="media-form-note">Date organization uses filesystem modification time, not photo capture time. New files must remain unchanged across two scans at least ten seconds apart. Files larger than 8 GiB need a regular synced folder.</p>
       ${!this.context.connected() ? '<p>Sign in to choose and verify a destination.</p>' : ''}<button type="submit" class="button primary" ${disabled(createBlocked)}>${this.saving ? 'Saving…' : 'Enable backup'}</button></form></section>`;
   }
@@ -82,6 +94,7 @@ export class MediaJobsView {
     const label = !row.active_account ? 'Different signed-in account' : !job.enabled ? 'Paused' : row.queued ? 'Queued' : status?.state?.replaceAll('_',' ') || 'Waiting for first scan';
     const inspecting = this.recovery?.jobId === job.id && this.recovery.revision === job.revision && this.recovery.accountId === job.account_id;
     return `<article class="settings-card media-job-card"><div><h3>${escape(job.source_root.split(/[\\/]/).filter(Boolean).at(-1) || job.source_root)}</h3><span class="mode-pill">${escape(label)}</span></div><p><code>${escape(job.source_root)}</code> → <code>${escape(job.destination_root)}</code></p>
+      <p class="media-form-note">Include: ${job.filter === 'photos' ? 'Photos (recognized image files)' : job.filter === 'videos' ? 'Videos (recognized video files)' : 'All regular files'}. Includes subfolders; symbolic links are skipped.</p>
       ${status ? `<p role="status">${status.uploaded} uploaded · ${status.unchanged} already backed up · ${status.waiting_for_stability} waiting for stable files · ${status.conflicts + status.needs_attention} need attention</p>${status.last_error ? `<p class="exclusion-error">${escape(status.last_error)}</p>` : ''}` : ''}
       <div class="media-job-actions"><button class="button subtle" data-media-toggle="${escape(job.id)}" ${blocked || (!job.enabled && !row.active_account) ? 'disabled' : ''}>${job.enabled ? 'Pause backup' : 'Resume backup'}</button><button class="button subtle" data-media-run="${escape(job.id)}" ${blocked || active || !job.enabled || !row.active_account || !this.context.connected() ? 'disabled' : ''}>Check now</button><button class="button subtle" data-media-remove="${escape(job.id)}" ${blocked || active ? 'disabled' : ''}>Remove backup</button><button class="button subtle" data-media-recovery="${escape(job.id)}" ${blocked || !row.active_account || this.recovery?.loading ? 'disabled' : ''}>${inspecting ? 'Hide retained copies' : 'Inspect retained copies'}</button></div>${inspecting ? this.recoveryHtml(this.recovery!) : ''}</article>`;
   }
@@ -144,7 +157,7 @@ export class MediaJobsView {
     return `<section class="media-recovery" aria-label="Retained media copies"><p class="media-recovery-note">Read-only inspection: this shows local recovery metadata and whether a retained copy is present. It does not open, change, upload, or remove retained files.</p>${panel.error ? `<p class="media-recovery-error" role="alert">Could not inspect retained copies: ${escape(panel.error)}</p>` : ''}${panel.accountHasUnindexedStage ? '<p class="media-recovery-warning" role="status">Some local recovery data could not be safely matched to a backup record. Its name and contents are not shown here.</p>' : ''}${panel.loading && !panel.loaded ? '<p role="status">Loading retained-copy details…</p>' : ''}${panel.loaded && panel.items.length === 0 && !panel.accountHasUnindexedStage ? '<p class="media-empty-result">No retained copies or unresolved upload records were found for this backup.</p>' : ''}${panel.verificationMessage ? `<p role="status">${escape(panel.verificationMessage)}</p>` : ''}<p>A remote match does not resume backup or clear retained recovery.</p>${rows}${panel.loading && panel.loaded ? '<p role="status">Loading next page…</p>' : ''}${panel.hasMore ? `<button class="button subtle" data-media-recovery-more ${panel.loading || panel.verifying ? 'disabled' : ''}>Load next 100</button>` : ''}</section>`;
   }
   private canVerify(panel: RecoveryPanel, item: RecoveryItem) {
-    return item.upload_verification_available === true && item.state === 'uncertain'
+    return this.context.supportsVerifyUpload?.() !== false && item.upload_verification_available === true && item.state === 'uncertain'
       && item.configuration_revision === panel.revision && Number.isSafeInteger(item.attempt_generation) && item.attempt_generation! > 0
       && this.rows.some(row => row.job.id === panel.jobId && row.job.revision === panel.revision && row.job.account_id === panel.accountId
         && row.active_account && !row.queued && row.status?.state !== 'running');

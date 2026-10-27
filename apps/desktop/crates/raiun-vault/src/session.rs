@@ -8,10 +8,10 @@
 
 use std::{
     collections::HashMap,
-    io::Read,
+    io::{Read, Write},
     path::Path,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, MutexGuard, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -147,6 +147,29 @@ impl Drop for PendingVaultCreation<'_> {
     }
 }
 
+/// Opaque identity of one verified unlock. Lock and re-unlock invalidates it.
+/// Contains no key or password material.
+#[derive(Clone)]
+pub struct VaultSessionEpoch {
+    scope: VaultSessionScope,
+    generation: u64,
+    registry_identity: Weak<()>,
+}
+
+impl VaultSessionEpoch {
+    /// Historical numeric label only. This cannot authenticate a session,
+    /// reconstruct an epoch or replace the coordinator's opaque epoch lease.
+    pub fn historical_generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+/// Retained local-publication lease. It holds no independently usable key and
+/// exposes no registry or session references. Drop releases the session lock.
+pub struct VaultSessionEpochLease<'a> {
+    _state: MutexGuard<'a, RegistryState>,
+}
+
 /// Registry of at most 16 verified vault sessions. It owns all session keys;
 /// callers can request scoped metadata decoding but cannot clone or extract a
 /// session. No automatic expiry or persistence is provided.
@@ -159,6 +182,7 @@ pub struct VaultSessionRegistry {
 struct RegistryState {
     next_generation: u64,
     sessions: HashMap<VaultSessionScope, VerifiedVaultSession>,
+    session_epochs: HashMap<VaultSessionScope, u64>,
     pending: HashMap<VaultSessionScope, u64>,
 }
 
@@ -221,6 +245,9 @@ impl VaultSessionRegistry {
         }
         // Replacing a session drops the old verified codec and zeroizes its
         // retained key bundle when the returned old value leaves this scope.
+        state
+            .session_epochs
+            .insert(ticket.scope.clone(), ticket.generation);
         state.sessions.insert(ticket.scope, session);
         Ok(())
     }
@@ -258,6 +285,7 @@ impl VaultSessionRegistry {
         let removed = {
             let mut state = self.lock_state()?;
             state.pending.remove(scope);
+            state.session_epochs.remove(scope);
             state.sessions.remove(scope)
         };
         drop(removed);
@@ -271,6 +299,7 @@ impl VaultSessionRegistry {
         let removed = {
             let mut state = self.lock_state()?;
             state.pending.clear();
+            state.session_epochs.clear();
             std::mem::take(&mut state.sessions)
         };
         drop(removed);
@@ -290,7 +319,91 @@ impl VaultSessionRegistry {
         state
             .pending
             .retain(|scope, _| scope.account_id != account_id);
+        state
+            .session_epochs
+            .retain(|scope, _| scope.account_id != account_id);
         Ok(())
+    }
+
+    fn capture_session_epoch(
+        &self,
+        scope: &VaultSessionScope,
+    ) -> Result<VaultSessionEpoch, VaultError> {
+        let state = self.lock_state()?;
+        let generation = state
+            .session_epochs
+            .get(scope)
+            .filter(|_| state.sessions.contains_key(scope))
+            .ok_or_else(|| invalid("vault session is locked"))?;
+        Ok(VaultSessionEpoch {
+            scope: scope.clone(),
+            generation: *generation,
+            registry_identity: Arc::downgrade(&self.identity),
+        })
+    }
+
+    fn try_lock_session_epoch(
+        &self,
+        scope: &VaultSessionScope,
+        epoch: &VaultSessionEpoch,
+    ) -> Result<Option<VaultSessionEpochLease<'_>>, VaultError> {
+        let state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(invalid("vault session state unavailable"));
+            }
+        };
+        if scope != &epoch.scope
+            || !Weak::ptr_eq(&epoch.registry_identity, &Arc::downgrade(&self.identity))
+            || state.session_epochs.get(scope) != Some(&epoch.generation)
+            || !state.sessions.contains_key(scope)
+        {
+            return Err(invalid("vault session epoch is no longer current"));
+        }
+        Ok(Some(VaultSessionEpochLease { _state: state }))
+    }
+
+    fn with_session_epoch<T>(
+        &self,
+        scope: &VaultSessionScope,
+        epoch: &VaultSessionEpoch,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T, VaultError> {
+        let state = self.lock_state()?;
+        if scope != &epoch.scope
+            || !Weak::ptr_eq(&epoch.registry_identity, &Arc::downgrade(&self.identity))
+            || state.session_epochs.get(scope) != Some(&epoch.generation)
+            || !state.sessions.contains_key(scope)
+        {
+            return Err(invalid("vault session epoch is no longer current"));
+        }
+        // Keep the lock through local use, including a concurrent lock/logout.
+        let result = operation();
+        drop(state);
+        Ok(result)
+    }
+
+    // Private typed local-crypto seam: epoch validation and codec use share
+    // one registry lock. No session/key escapes and no network runs here.
+    fn with_exact_epoch_crypto<T>(
+        &self,
+        scope: &VaultSessionScope,
+        epoch: &VaultSessionEpoch,
+        operation: impl FnOnce(&VerifiedVaultSession) -> Result<T, VaultError>,
+    ) -> Result<T, VaultError> {
+        let state = self.lock_state()?;
+        if scope != &epoch.scope
+            || !Weak::ptr_eq(&epoch.registry_identity, &Arc::downgrade(&self.identity))
+            || state.session_epochs.get(scope) != Some(&epoch.generation)
+        {
+            return Err(invalid("vault session epoch is no longer current"));
+        }
+        let session = state
+            .sessions
+            .get(scope)
+            .ok_or_else(|| invalid("vault session is locked"))?;
+        operation(session)
     }
 
     /// Decode one name using only the session for the complete supplied scope.
@@ -450,6 +563,25 @@ impl VaultSessionRegistry {
             maximum_plaintext_bytes,
             expected_len,
         )
+    }
+
+    /// Authenticate a local ciphertext spool into unpublished private staging.
+    /// Retains the exact session lock through local crypto only. The caller must
+    /// not expose partial output on error or perform network I/O in either stream.
+    pub fn decrypt_file_to_private_writer<R: Read, W: Write + ?Sized>(
+        &self,
+        scope: &VaultSessionScope,
+        input: &mut R,
+        output: &mut W,
+        maximum_plaintext_bytes: u64,
+        expected_len: u64,
+    ) -> Result<u64, VaultError> {
+        let state = self.lock_state()?;
+        let session = state
+            .sessions
+            .get(scope)
+            .ok_or_else(|| invalid("vault session is locked"))?;
+        session.decrypt_file_to_private_writer(input, output, maximum_plaintext_bytes, expected_len)
     }
 
     /// Decrypt one complete, metadata-bounded file to a zeroizing memory
@@ -749,6 +881,39 @@ impl VaultSessionCoordinator {
         Ok(use_session(session))
     }
 
+    /// Capture the exact verified unlock for local publication checks.
+    /// This grants neither filesystem nor remote authorization.
+    pub fn capture_session_epoch(
+        &self,
+        scope: &VaultSessionScope,
+    ) -> Result<VaultSessionEpoch, VaultError> {
+        self.registry.capture_session_epoch(scope)
+    }
+
+    /// Try to retain an exact-unlock publication lease without waiting past a
+    /// native callback deadline. Acquire auth leases first; while held, do not
+    /// re-enter this coordinator, perform network I/O, or acquire auth locks.
+    pub fn try_lock_session_epoch(
+        &self,
+        scope: &VaultSessionScope,
+        epoch: &VaultSessionEpoch,
+    ) -> Result<Option<VaultSessionEpochLease<'_>>, VaultError> {
+        self.registry.try_lock_session_epoch(scope, epoch)
+    }
+
+    /// Run a short local operation only for this exact verified unlock.
+    /// Old epochs stay invalid after lock/logout/re-unlock. The closure must
+    /// not do network I/O, re-enter the coordinator, or acquire an auth lock;
+    /// acquire a token-generation lease before calling this method.
+    pub fn with_session_epoch<T>(
+        &self,
+        scope: &VaultSessionScope,
+        epoch: &VaultSessionEpoch,
+        operation: impl FnOnce() -> T,
+    ) -> Result<T, VaultError> {
+        self.registry.with_session_epoch(scope, epoch, operation)
+    }
+
     /// Check a freshly-read root token against the session for this exact scope.
     pub fn verify_integrity_token(
         &self,
@@ -795,6 +960,59 @@ impl VaultSessionCoordinator {
         )
     }
 
+    /// Encrypt a bounded LOCAL reader under this exact opaque unlock. The
+    /// registry lease covers local crypto only; callers must release it before HTTP.
+    pub fn encrypt_file_transactional_at_epoch<R: Read>(
+        &self,
+        scope: &VaultSessionScope,
+        epoch: &VaultSessionEpoch,
+        input: &mut R,
+        destination: &Path,
+        expected_len: u64,
+        maximum_plaintext_bytes: u64,
+    ) -> Result<u64, VaultError> {
+        self.registry
+            .with_exact_epoch_crypto(scope, epoch, |session| {
+                session.encrypt_file_transactional(
+                    input,
+                    destination,
+                    expected_len,
+                    maximum_plaintext_bytes,
+                )
+            })
+    }
+    /// Decode local path metadata under the exact unlock, never a numeric label.
+    pub fn decrypt_path_at_epoch(
+        &self,
+        scope: &VaultSessionScope,
+        epoch: &VaultSessionEpoch,
+        encoded: &str,
+    ) -> Result<PortableVaultPath, VaultError> {
+        self.registry
+            .with_exact_epoch_crypto(scope, epoch, |session| session.decrypt_path(encoded))
+    }
+    /// Authenticate an already-local bounded ciphertext spool into private
+    /// unpublished output. No network reader, callback or session handle escapes.
+    pub fn decrypt_file_to_private_writer_at_epoch<R: Read, W: Write + ?Sized>(
+        &self,
+        scope: &VaultSessionScope,
+        epoch: &VaultSessionEpoch,
+        input: &mut R,
+        output: &mut W,
+        maximum_plaintext_bytes: u64,
+        expected_len: u64,
+    ) -> Result<u64, VaultError> {
+        self.registry
+            .with_exact_epoch_crypto(scope, epoch, |session| {
+                session.decrypt_file_to_private_writer(
+                    input,
+                    output,
+                    maximum_plaintext_bytes,
+                    expected_len,
+                )
+            })
+    }
+
     /// Decrypt an already-local ciphertext spool through the exact scoped
     /// session. Keep network work outside this call; lock/logout waits for this
     /// local operation to finish.
@@ -810,6 +1028,26 @@ impl VaultSessionCoordinator {
             scope,
             input,
             destination,
+            maximum_plaintext_bytes,
+            expected_len,
+        )
+    }
+
+    /// Authenticate local ciphertext into unpublished private staging through
+    /// the exact unlocked scope. Errors may leave partial plaintext; no output
+    /// publication, flushing or filesystem cleanup is performed by this method.
+    pub fn decrypt_file_to_private_writer<R: Read, W: Write + ?Sized>(
+        &self,
+        scope: &VaultSessionScope,
+        input: &mut R,
+        output: &mut W,
+        maximum_plaintext_bytes: u64,
+        expected_len: u64,
+    ) -> Result<u64, VaultError> {
+        self.registry.decrypt_file_to_private_writer(
+            scope,
+            input,
+            output,
             maximum_plaintext_bytes,
             expected_len,
         )
@@ -1584,6 +1822,150 @@ mod tests {
                 .decrypt_path(&scope, "um9jr7t436jbmsgpub5sfni4qk")
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn exact_session_epoch_refuses_reunlock_foreign_registry_and_logout() {
+        let coordinator = VaultSessionCoordinator::new();
+        let own = scope("account-one", "vault-one");
+        let foreign = scope("account-one", "vault-two");
+        unlock(&coordinator.registry, &own).unwrap();
+        unlock(&coordinator.registry, &foreign).unwrap();
+        let first = coordinator.capture_session_epoch(&own).unwrap();
+        let mut publications = 0;
+        assert_eq!(
+            coordinator
+                .with_session_epoch(&own, &first, || {
+                    // The short local publication step retains the exact registry lock.
+                    assert!(coordinator.registry.state.try_lock().is_err());
+                    publications += 1;
+                    "local publication"
+                })
+                .unwrap(),
+            "local publication"
+        );
+        assert_eq!(publications, 1);
+
+        coordinator.lock(&own).unwrap();
+        unlock(&coordinator.registry, &own).unwrap();
+        assert!(
+            coordinator
+                .with_session_epoch(&own, &first, || publications += 1)
+                .is_err()
+        );
+        assert_eq!(publications, 1);
+        let current = coordinator.capture_session_epoch(&own).unwrap();
+        coordinator
+            .with_session_epoch(&own, &current, || publications += 1)
+            .unwrap();
+        assert_eq!(publications, 2);
+        // Foreign scope is itself unlocked, so refusal proves exact scope join.
+        assert!(
+            coordinator
+                .with_session_epoch(&foreign, &current, || publications += 1)
+                .is_err()
+        );
+        let other = VaultSessionCoordinator::new();
+        unlock(&other.registry, &own).unwrap();
+        // Same scope and initial generation in another live registry is not authority.
+        assert!(
+            other
+                .with_session_epoch(&own, &first, || publications += 1)
+                .is_err()
+        );
+        assert_eq!(publications, 2);
+
+        coordinator.logout_account(own.account_id()).unwrap();
+        assert!(
+            coordinator
+                .with_session_epoch(&own, &current, || publications += 1)
+                .is_err()
+        );
+        assert_eq!(publications, 2);
+    }
+
+    #[test]
+    fn private_writer_requires_complete_authentication_and_exact_unlocked_scope() {
+        let coordinator = VaultSessionCoordinator::new();
+        let own = scope("account-one", "vault-one");
+        let foreign = scope("account-two", "vault-one");
+        unlock(&coordinator.registry, &own).unwrap();
+        // Existing web fixture spans two authenticated blocks; no extra KDF.
+        let ciphertext = include_bytes!("../tests/fixtures/web-65537.bin");
+        let expected: Vec<u8> = (0..65537).map(|index| (index * 31 + 7) as u8).collect();
+        let length = expected.len() as u64;
+        let mut output = Vec::new();
+        assert_eq!(
+            coordinator
+                .decrypt_file_to_private_writer(
+                    &own,
+                    &mut std::io::Cursor::new(ciphertext),
+                    &mut output,
+                    length,
+                    length
+                )
+                .unwrap(),
+            length
+        );
+        assert_eq!(output, expected);
+
+        let mut tampered = ciphertext.to_vec();
+        *tampered.last_mut().unwrap() ^= 1;
+        let mut unpublished = Vec::new();
+        assert!(
+            coordinator
+                .decrypt_file_to_private_writer(
+                    &own,
+                    &mut std::io::Cursor::new(tampered),
+                    &mut unpublished,
+                    length,
+                    length
+                )
+                .is_err()
+        );
+        assert_eq!(unpublished, expected[..65536]);
+        // Even a fully written private buffer is not successful when the
+        // trusted expected length disagrees; callers must not publish it.
+        let mut wrong_length = Vec::new();
+        assert!(
+            coordinator
+                .decrypt_file_to_private_writer(
+                    &own,
+                    &mut std::io::Cursor::new(ciphertext),
+                    &mut wrong_length,
+                    length,
+                    length - 1
+                )
+                .is_err()
+        );
+        assert_eq!(wrong_length, expected);
+
+        let mut forbidden = Vec::new();
+        assert!(
+            coordinator
+                .decrypt_file_to_private_writer(
+                    &foreign,
+                    &mut std::io::Cursor::new(ciphertext),
+                    &mut forbidden,
+                    length,
+                    length
+                )
+                .is_err()
+        );
+        assert!(forbidden.is_empty());
+        coordinator.lock(&own).unwrap();
+        assert!(
+            coordinator
+                .decrypt_file_to_private_writer(
+                    &own,
+                    &mut std::io::Cursor::new(ciphertext),
+                    &mut forbidden,
+                    length,
+                    length
+                )
+                .is_err()
+        );
+        assert!(forbidden.is_empty());
     }
 
     #[test]

@@ -70,3 +70,19 @@ test('actual feature callers refuse unsupported operations but still identify en
   state.status={provider_supported:true};
   for(const field of ['folder_sync_supported','media_jobs_supported','vaults_supported','account_switch_supported','pause_supported']) assert.equal(context.featureAvailable(field),true);
 });
+
+test('Windows disconnected collection policy skips requests but connected and legacy reads remain intact', async () => {
+  const requests=[];
+  const request=async action=>{requests.push(action);return action==='pairs'?[{id:'pair'}]:[{id:'transfer'}];};
+  assert.deepEqual(await loadProviderSyncData(true,false,request,true,false),{pairs:[],transfers:[]});
+  assert.deepEqual(requests,[]);
+  let releasePairs;
+  const pendingPairs=new Promise(resolve=>{releasePairs=resolve;});
+  const connected=loadProviderSyncData(true,true,action=>{requests.push(action);return action==='pairs'?pendingPairs:Promise.resolve([{id:'transfer'}]);},true,false);
+  assert.deepEqual(requests,['pairs','transfers'],'both connected requests start before pairs resolves');
+  releasePairs([{id:'pair'}]);
+  assert.deepEqual(await connected,{pairs:[{id:'pair'}],transfers:[{id:'transfer'}]});
+  requests.length=0;
+  assert.deepEqual(await loadProviderSyncData(undefined,false,request),{pairs:[{id:'pair'}],transfers:[]});
+  assert.deepEqual(requests,['pairs'],'omitted policy preserves disconnected Linux/legacy pair reads');
+});

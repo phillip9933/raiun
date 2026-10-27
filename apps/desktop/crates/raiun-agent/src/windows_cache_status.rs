@@ -200,6 +200,33 @@ pub(super) fn inspect_worker_folder_page(
     serde_json::to_value(page).map_err(|_| "The folder list is unavailable".to_owned())
 }
 
+pub(super) fn inspect_worker_device_cache_usage(
+    generation: u64,
+    expected: &ActiveProviderBinding,
+    active: Option<&ActiveProviderBinding>,
+    connected: bool,
+    backend: Option<&raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
+) -> Result<Value, String> {
+    if generation == 0
+        || generation != expected.generation
+        || !connected
+        || active != Some(expected)
+    {
+        return Err("The Windows drive changed; refresh cache usage".into());
+    }
+    let usage = backend
+        .filter(|backend| !backend.is_revoked())
+        .ok_or("The Windows drive is disconnected")?
+        .device_cache_usage()
+        .map_err(|_| "Device cache usage is unavailable")?;
+    Ok(
+        json!({"scope":"device_all_accounts", "read_only":true, "last_observed":true,
+        "atomic_snapshot":false, "quota_bytes":usage.quota_bytes, "used_bytes":usage.used_bytes,
+        "pinned_bytes":usage.pinned_bytes, "protected_bytes":usage.protected_bytes,
+        "over_quota":usage.over_quota}),
+    )
+}
+
 pub(super) fn inspect_worker_cache_status(
     generation: u64,
     expected: &ActiveProviderBinding,
@@ -259,6 +286,10 @@ impl Drop for CancelFilePageOnDrop {
 }
 
 impl WindowsAgent {
+    pub(super) fn windows_device_cache_usage(&self, request: &Value) -> Result<Value, String> {
+        self.windows_file_request(request, Some("device_usage"))
+    }
+
     pub(super) fn windows_file_cache_status(&self, request: &Value) -> Result<Value, String> {
         self.windows_file_request(request, None)
     }
@@ -294,7 +325,7 @@ impl WindowsAgent {
         request: &Value,
         operation: Option<&str>,
     ) -> Result<Value, String> {
-        if request.get("profile_id").and_then(Value::as_str) != Some("default") {
+        if request.get("profile_id").and_then(Value::as_str) != Some(self.profile_scope.as_str()) {
             return Err("Select the current Windows account".into());
         }
         let generation = request
@@ -364,6 +395,21 @@ impl WindowsAgent {
                 .ok_or("Refresh the Windows drive identity")?,
         };
         let (cache_status, job_status) = match operation {
+            Some("device_usage") => {
+                let (response, result) = std::sync::mpsc::sync_channel(1);
+                self.provider
+                    .commands
+                    .try_send(ProviderCommand::DeviceCacheUsage { binding, response })
+                    .map_err(|_| "Device cache inspection is unavailable")?;
+                (
+                    None,
+                    Some(
+                        result
+                            .recv_timeout(Duration::from_secs(30))
+                            .map_err(|_| "Device cache inspection stopped")??,
+                    ),
+                )
+            }
             Some("list" | "folder_list") => {
                 let cursor = match request.get("cursor") {
                     None | Some(Value::Null) => None,
@@ -523,9 +569,9 @@ impl WindowsAgent {
             return Err("The account changed; refresh the file status".into());
         }
         if let Some(mut status) = job_status {
-            if matches!(operation, Some("list" | "folder_list")) {
+            if matches!(operation, Some("list" | "folder_list" | "device_usage")) {
                 // Attach scope only after the account/session/root postflight.
-                status["profile_id"] = json!("default");
+                status["profile_id"] = json!(self.profile_scope.as_str());
                 status["auth_generation"] = json!(generation);
                 status["recovery_scope_token"] = json!(token);
             }
@@ -537,12 +583,14 @@ impl WindowsAgent {
             raiun_cache::AvailabilityPolicy::AlwaysOffline => "always_offline",
             raiun_cache::AvailabilityPolicy::CloudOnly => "cloud_only",
         };
-        Ok(json!({"profile_id":"default", "auth_generation":generation,
+        Ok(
+            json!({"profile_id":self.profile_scope.as_str(), "auth_generation":generation,
             "recovery_scope_token":token, "read_only":true, "last_observed":true,
             "atomic_snapshot":false, "policy":policy,
             "pending_offline_intent":status.pending_offline_intent,
             "recorded_complete_version":status.recorded_complete_version,
-            "recorded_bytes":status.recorded_bytes}))
+            "recorded_bytes":status.recorded_bytes}),
+        )
     }
 
     pub(super) fn check_cache_status_account(
@@ -570,7 +618,7 @@ impl WindowsAgent {
             .ok_or("Choose the Windows drive")?;
         if session.expires_at <= unix_time_now().saturating_add(30)
             || !configuration.valid
-            || configuration.profile_scope != "default"
+            || configuration.profile_scope != self.profile_scope
             || configuration.server != session.server
             || configuration.client_id != session.client_id
         {
@@ -698,6 +746,16 @@ mod tests {
         let mut other = binding.clone();
         other.personal_root_resource_id = "different".into();
         assert!(inspect_worker_cache_status(7, &binding, Some(&other), true, None, &row).is_err());
+        assert!(inspect_worker_device_cache_usage(7, &binding, None, false, None).is_err());
+        assert!(
+            inspect_worker_device_cache_usage(8, &binding, Some(&binding), true, None).is_err()
+        );
+        assert!(inspect_worker_device_cache_usage(7, &binding, Some(&other), true, None).is_err());
+        // Aggregate usage also refuses absent storage rather than inventing a
+        // zero-byte device total for a matching live drive.
+        assert!(
+            inspect_worker_device_cache_usage(7, &binding, Some(&binding), true, None).is_err()
+        );
         // Even an otherwise matching connection cannot default missing storage
         // to Recent/zero bytes or synthesize a successful status.
         assert!(

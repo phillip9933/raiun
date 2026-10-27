@@ -13,7 +13,10 @@ use std::{
         io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
     },
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use sha2::{Digest, Sha256};
@@ -48,6 +51,7 @@ const ENVELOPE_MAGIC: &[u8] = b"RAIUN-DPAPI-SESSION\0\x01";
 const ACTIVE_POINTER_MAGIC: &[u8] = b"RAIUN-DPAPI-ACTIVE\0\x01";
 const MAX_ACTIVE_POINTER_BYTES: usize = 16 * 1024;
 const MAX_ROOT_CONFIG_BYTES: usize = 16 * 1024;
+const MAX_PROFILE_REGISTRY_BYTES: usize = 1024 * 1024;
 const MAX_EDIT_RECORD_PLAINTEXT_BYTES: usize = 17 * 1024 * 1024;
 const MAX_EDIT_RECORD_CIPHERTEXT_BYTES: usize = 18 * 1024 * 1024;
 const SDDL_REVISION_1: u32 = 1;
@@ -59,6 +63,9 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone)]
 pub struct DpapiSessionStore {
     root: PathBuf,
+    // Derived profile stores retain exact private directory/ancestor pins.
+    // Their OI/CI policy is verified, never rewritten by legacy root repair.
+    profile_directory: Option<Arc<crate::PrivateDirectory>>,
 }
 
 impl DpapiSessionStore {
@@ -98,9 +105,622 @@ impl DpapiSessionStore {
             ));
         }
         let root = local.join("Raiun").join("sessions");
-        let store = Self { root };
+        let store = Self {
+            root,
+            profile_directory: None,
+        };
         store.ensure_private_root()?;
         Ok(store)
+    }
+
+    /// Derive independent private storage for a trusted registry profile.
+    /// Default retains the existing location for upgrade compatibility. This
+    /// only creates/validates storage; it does not select, restore or sign in.
+    /// Callers must still pass the same trusted profile to identity-scoped
+    /// session/root APIs and validate restored account identity; directory
+    /// separation does not replace those checks.
+    pub fn for_profile(&self, profile: &str) -> io::Result<Self> {
+        if self.profile_directory.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Derive profiles from the base store",
+            ));
+        }
+        if profile == "default" {
+            return Ok(self.clone());
+        }
+        if !profile.strip_prefix("profile-").is_some_and(|suffix| {
+            suffix.len() == 32
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid profile identity",
+            ));
+        }
+        // Reuse pinned private-directory admission. Existing children must
+        // already have the exact private policy; never repair them here.
+        let parent = crate::PinnedDirectory::open(&self.root)?;
+        let child =
+            crate::PrivateDirectory::create_or_open_under(&parent, std::ffi::OsStr::new(profile))?;
+        child.verify_path()?;
+        Ok(Self {
+            root: child.path().to_path_buf(),
+            profile_directory: Some(Arc::new(child)),
+        })
+    }
+
+    /// Inventory only bounded, protected root-configuration metadata for a trusted
+    /// profile. This preserves reservations after logout removes the active
+    /// session pointer. It never reads/decrypts session files or grants account
+    /// authority; the broker must fully decode ownership before using a record.
+    /// The broker must serialize inventory with root-config mutations (normally
+    /// before starting runtimes). Any malformed, foreign, unreadable or excessive
+    /// inventory fails closed.
+    pub fn load_root_config_inventory(&self, expected_profile: &str) -> io::Result<Vec<Vec<u8>>> {
+        validate_identity(Some(expected_profile), "inventory", "inventory")?;
+        if !self.ensure_existing_private_root()? {
+            return Ok(Vec::new());
+        }
+        let parent = crate::PinnedDirectory::open(&self.root)?;
+        let mut records = Vec::new();
+        for (index, entry) in std::fs::read_dir(&self.root)?.enumerate() {
+            if index >= 4096 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Root metadata inventory exceeds its entry limit",
+                ));
+            }
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name_text) = name.to_str() else {
+                continue;
+            };
+            if !name_text.to_ascii_lowercase().ends_with(".root-config") {
+                continue;
+            }
+            let digest = name_text.strip_suffix(".root-config").ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Root metadata filename is not canonical",
+                )
+            })?;
+            if records.len() >= 64
+                || digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Root metadata inventory is invalid",
+                ));
+            }
+            let (mut file, _) = parent.open_immutable_regular_file(&name)?;
+            crate::private_directory::verify_private_metadata_file(&file)?;
+            if file.metadata()?.len() > MAX_ROOT_CONFIG_BYTES as u64 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Stored root configuration exceeds the storage limit",
+                ));
+            }
+            let mut bytes = Vec::new();
+            Read::by_ref(&mut file)
+                .take((MAX_ROOT_CONFIG_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            if bytes.is_empty() || bytes.len() > MAX_ROOT_CONFIG_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Stored root configuration has an invalid size",
+                ));
+            }
+            let metadata: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Stored root configuration is invalid",
+                )
+            })?;
+            let scope = metadata
+                .get("profile_scope")
+                .and_then(serde_json::Value::as_str);
+            let server = metadata.get("server").and_then(serde_json::Value::as_str);
+            let client = metadata
+                .get("client_id")
+                .and_then(serde_json::Value::as_str);
+            let (Some(scope), Some(server), Some(client)) = (scope, server, client) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Root metadata identity is invalid",
+                ));
+            };
+            validate_identity(Some(scope), server, client)?;
+            if scope != expected_profile
+                || hex(&identity_digest(Some(scope), server, client)) != digest
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Root metadata identity does not match",
+                ));
+            }
+            crate::private_directory::verify_private_metadata_file(&file)?;
+            parent.verify_path()?;
+            records.push(bytes);
+        }
+        parent.verify_path()?;
+        Ok(records)
+    }
+
+    /// Acquire the persistent broker ownership lock before registry access.
+    /// The returned exact-file/directory lease must outlive every account
+    /// runtime and all shutdown joins. Existing lock files are never reset.
+    pub fn lock_profile_registry(&self) -> io::Result<crate::OwnedPrivateReader> {
+        let directory = self.profile_registry_directory()?;
+        match directory.create_new_file(std::ffi::OsStr::new("broker.lock")) {
+            Ok((file, _)) => drop(file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+            Err(error) => return Err(error),
+        }
+        let mut lease = directory.open_owned_immutable_file(std::ffi::OsStr::new("broker.lock"))?;
+        lease.try_lock_exclusive()?;
+        Ok(lease)
+    }
+
+    /// Read the fixed non-secret account registry without scanning credentials.
+    /// Only verified absence returns None; malformed content remains the caller's
+    /// responsibility and must never be interpreted as a default migration.
+    pub fn load_profile_registry(&self) -> io::Result<Option<Vec<u8>>> {
+        let directory = self.profile_registry_directory()?;
+        let mut reader =
+            match directory.open_owned_immutable_file(std::ffi::OsStr::new("registry.json")) {
+                Ok(reader) => reader,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error),
+            };
+        if reader.metadata()?.len() > MAX_PROFILE_REGISTRY_BYTES as u64 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Account registry exceeds the storage limit",
+            ));
+        }
+        let mut bytes = Vec::new();
+        reader
+            .by_ref()
+            .take((MAX_PROFILE_REGISTRY_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        reader.verify()?;
+        if bytes.is_empty() || bytes.len() > MAX_PROFILE_REGISTRY_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Account registry has an invalid size",
+            ));
+        }
+        Ok(Some(bytes))
+    }
+
+    /// Atomically replace only the fixed non-secret account registry. The broker
+    /// must validate the document and serialize mutations before this call, and
+    /// publish its in-memory selection only after success. No session is moved.
+    pub fn save_profile_registry(&self, bytes: &[u8]) -> io::Result<()> {
+        if bytes.is_empty() || bytes.len() > MAX_PROFILE_REGISTRY_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Account registry has an invalid size",
+            ));
+        }
+        let directory = self.profile_registry_directory()?;
+        // Validate any existing destination without repairing its ACL. Release
+        // the immutable pin before atomic replacement, retaining directory pins.
+        match directory.open_owned_immutable_file(std::ffi::OsStr::new("registry.json")) {
+            Ok(reader) => reader.verify()?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error),
+        }
+        let destination = directory.path().join("registry.json");
+        let temporary = self.write_temp(&destination, bytes)?;
+        let result = (|| {
+            directory.verify_path()?;
+            let from = wide_path(&temporary)?;
+            let to = wide_path(&destination)?;
+            // SAFETY: both fixed sibling paths are within the retained private
+            // directory. Same atomic write-through replacement as session data;
+            // this renames the entry rather than following a destination link.
+            let moved = unsafe {
+                MoveFileExW(
+                    from.as_ptr(),
+                    to.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            };
+            if moved == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            directory.verify_path()
+        })();
+        if result.is_err() {
+            let _ = remove_exact_file(&temporary);
+        }
+        result
+    }
+
+    fn profile_registry_directory(&self) -> io::Result<Arc<crate::PrivateDirectory>> {
+        if self.profile_directory.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Account registry belongs to the base store",
+            ));
+        }
+        self.ensure_private_root()?;
+        let parent = crate::PinnedDirectory::open(&self.root)?;
+        let directory = crate::PrivateDirectory::create_or_open_under(
+            &parent,
+            std::ffi::OsStr::new("profiles"),
+        )?;
+        directory.verify_path()?;
+        Ok(Arc::new(directory))
+    }
+
+    /// Opt-in secret document, separated from durable sensitive vault custody.
+    pub fn load_vault_credentials(&self, profile: &str) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+        self.load_vault_document(VaultDocumentKind::Credentials, profile.as_bytes())
+    }
+    pub fn compare_exchange_vault_credentials(
+        &self,
+        profile: &str,
+        expected: Option<&[u8]>,
+        next: &[u8],
+    ) -> io::Result<()> {
+        self.compare_exchange_vault_document(
+            VaultDocumentKind::Credentials,
+            profile.as_bytes(),
+            expected,
+            next,
+        )
+    }
+    /// Protected sensitive metadata only: never a password, key, or unlock grant.
+    /// Caller supplies and validates the canonical full account/vault/root scope.
+    /// A missing read creates no directory and must not be treated as clean history.
+    pub fn load_vault_custody(&self, scope: &[u8]) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+        self.load_vault_document(VaultDocumentKind::Custody, scope)
+    }
+    /// Durable full-byte CAS; failure may mean publication is uncertain. Custody
+    /// survives Forget saved key and is never stored in the credential document.
+    pub fn compare_exchange_vault_custody(
+        &self,
+        scope: &[u8],
+        expected: Option<&[u8]>,
+        next: &[u8],
+    ) -> io::Result<()> {
+        self.compare_exchange_vault_document(VaultDocumentKind::Custody, scope, expected, next)
+    }
+
+    /// Protected immutable existing-edit capture bytes. The caller supplies and
+    /// validates the exact opaque account/vault/root/capture scope and document;
+    /// a stored capture alone never authorizes upload, recovery or cleanup.
+    /// A missing read creates no directory.
+    pub fn load_vault_existing_edit_capture(
+        &self,
+        scope: &[u8],
+    ) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+        self.load_vault_document(VaultDocumentKind::ExistingEditCapture, scope)
+    }
+
+    /// Publish a new capture only if its exact scope has no document. There is
+    /// deliberately no replacement or deletion API, including for equal bytes.
+    /// An error after publication may leave the capture stored and must never be
+    /// interpreted as success or proof that no capture exists.
+    pub fn put_new_vault_existing_edit_capture(&self, scope: &[u8], next: &[u8]) -> io::Result<()> {
+        self.compare_exchange_vault_document(
+            VaultDocumentKind::ExistingEditCapture,
+            scope,
+            None,
+            next,
+        )
+    }
+
+    /// Immutable completed-history segment, addressable only through the
+    /// authenticated per-vault child tip. This store never enumerates segments.
+    pub fn load_vault_completed_history_segment(
+        &self,
+        binding: &[u8],
+    ) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+        self.load_vault_document(VaultDocumentKind::CompletedHistorySegment, binding)
+    }
+    pub fn put_new_vault_completed_history_segment(
+        &self,
+        binding: &[u8],
+        next: &[u8],
+    ) -> io::Result<()> {
+        self.compare_exchange_vault_document(
+            VaultDocumentKind::CompletedHistorySegment,
+            binding,
+            None,
+            next,
+        )
+    }
+
+    /// Private protected document read. The caller validates embedded authority;
+    /// these bytes alone never authorize a session, history, or native cleanup.
+    fn load_vault_document(
+        &self,
+        kind: VaultDocumentKind,
+        scope: &[u8],
+    ) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+        let digest = kind.digest(scope)?;
+        let Some(directory) = self.vault_document_directory(kind, &digest, false)? else {
+            return Ok(None);
+        };
+        read_vault_document(&directory, kind, &digest)
+    }
+
+    /// Durable full-byte protected document CAS. The private lease spans read/decrypt,
+    /// comparison, sealing and write-through publication. No user callback is
+    /// invoked while it is held. A failed postcheck can mean publication was
+    /// completed; callers must not claim the old state was preserved.
+    fn compare_exchange_vault_document(
+        &self,
+        kind: VaultDocumentKind,
+        scope: &[u8],
+        expected: Option<&[u8]>,
+        next: &[u8],
+    ) -> io::Result<()> {
+        let digest = kind.digest(scope)?;
+        if next.is_empty()
+            || next.len() > VAULT_DOCUMENT_MAX_PLAIN
+            || expected.is_some_and(|v| v.is_empty() || v.len() > VAULT_DOCUMENT_MAX_PLAIN)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid protected vault document size",
+            ));
+        }
+        let directory = self
+            .vault_document_directory(kind, &digest, true)?
+            .ok_or_else(|| io::Error::other("Protected vault document storage unavailable"))?;
+        let lock_name = std::ffi::OsStr::new(kind.lock_name());
+        match directory.create_new_file(lock_name) {
+            Ok((file, _)) => drop(file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+            Err(error) => return Err(error),
+        }
+        let mut lease = directory.open_owned_immutable_file(lock_name)?;
+        lease.try_lock_exclusive()?;
+        let current = read_vault_document(&directory, kind, &digest)?;
+        if current.as_ref().map(|v| v.as_slice()) != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Protected vault document changed",
+            ));
+        }
+        let sealed = protect_bounded(next, &digest, VAULT_DOCUMENT_MAX_CIPHER)?;
+        let mut envelope = Vec::with_capacity(kind.envelope().len() + sealed.len());
+        envelope.extend_from_slice(kind.envelope());
+        envelope.extend_from_slice(&sealed);
+        let destination = directory.path().join(kind.file_name());
+        let temporary = self.write_temp(&destination, &envelope)?;
+        let result = (|| {
+            directory.verify_path()?;
+            let from = wide_path(&temporary)?;
+            let to = wide_path(&destination)?;
+            // SAFETY: same fixed private directory retained throughout CAS;
+            // temporary is created by write_temp and destination never traversed.
+            if unsafe {
+                MoveFileExW(
+                    from.as_ptr(),
+                    to.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            directory.verify_path()?;
+            let published = read_vault_document(&directory, kind, &digest)?;
+            if published.as_ref().map(|v| v.as_slice()) != Some(next) {
+                return Err(io::Error::other(
+                    "Protected vault document publication is uncertain",
+                ));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = remove_exact_file(&temporary);
+        }
+        result
+    }
+
+    fn vault_document_directory(
+        &self,
+        kind: VaultDocumentKind,
+        digest: &[u8; 32],
+        create: bool,
+    ) -> io::Result<Option<Arc<crate::PrivateDirectory>>> {
+        if create {
+            self.ensure_private_root()?;
+        } else if !self.ensure_existing_private_root()? {
+            return Ok(None);
+        }
+        let parent = crate::PinnedDirectory::open(&self.root)?;
+        let name = std::ffi::OsStr::new(kind.directory());
+        let first = if create {
+            crate::PrivateDirectory::create_or_open_under(&parent, name)
+        } else {
+            crate::PrivateDirectory::open_under(&parent, name)
+        };
+        let first = match first {
+            Ok(v) => v,
+            Err(e) if !create && e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let pinned = crate::PinnedDirectory::open(first.path())?;
+        let name = hex(digest);
+        let directory = if create {
+            crate::PrivateDirectory::create_or_open_under(&pinned, std::ffi::OsStr::new(&name))
+        } else {
+            crate::PrivateDirectory::open_under(&pinned, std::ffi::OsStr::new(&name))
+        };
+        let directory = match directory {
+            Ok(v) => v,
+            Err(e) if !create && e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        first.verify_path()?;
+        directory.verify_path()?;
+        Ok(Some(Arc::new(directory)))
+    }
+
+    pub fn load_bandwidth_settings(&self, scope: &[u8]) -> io::Result<Option<Vec<u8>>> {
+        self.load_preferences(PreferenceKind::Bandwidth, scope)
+    }
+    pub fn compare_exchange_bandwidth_settings(
+        &self,
+        scope: &[u8],
+        expected: Option<&[u8]>,
+        next: &[u8],
+    ) -> io::Result<()> {
+        self.compare_exchange_preferences(PreferenceKind::Bandwidth, scope, expected, next)
+    }
+    /// Nonsecret reconnect-only proxy policy, separated from account rate limits.
+    /// Caller must validate this exact trusted local profile before invoking it.
+    pub fn load_proxy_settings(&self, profile: &str) -> io::Result<Option<Vec<u8>>> {
+        self.load_preferences(PreferenceKind::Proxy, profile.as_bytes())
+    }
+    pub fn compare_exchange_proxy_settings(
+        &self,
+        profile: &str,
+        expected: Option<&[u8]>,
+        next: &[u8],
+    ) -> io::Result<()> {
+        self.compare_exchange_preferences(PreferenceKind::Proxy, profile.as_bytes(), expected, next)
+    }
+
+    /// Bounded preferences for the caller-validated full account scope. Missing
+    /// data does not create directories; malformed protected data is an error.
+    fn load_preferences(&self, kind: PreferenceKind, scope: &[u8]) -> io::Result<Option<Vec<u8>>> {
+        let digest = preferences_digest(kind, scope)?;
+        let Some(directory) = self.preferences_directory(kind, &digest, false)? else {
+            return Ok(None);
+        };
+        read_preferences(&directory, kind, &digest)
+    }
+
+    /// Full-byte CAS under the existing private-file locking policy. The scope
+    /// must be canonical authenticated AccountScope bytes, never request data.
+    fn compare_exchange_preferences(
+        &self,
+        kind: PreferenceKind,
+        scope: &[u8],
+        expected: Option<&[u8]>,
+        next: &[u8],
+    ) -> io::Result<()> {
+        let digest = preferences_digest(kind, scope)?;
+        if next.is_empty()
+            || next.len() > 16 * 1024
+            || expected.is_some_and(|b| b.is_empty() || b.len() > 16 * 1024)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid transport preferences size",
+            ));
+        }
+        let directory = self
+            .preferences_directory(kind, &digest, true)?
+            .ok_or_else(|| io::Error::other("Private transport directory unavailable"))?;
+        let lock_name = std::ffi::OsStr::new("preferences.lock");
+        match directory.create_new_file(lock_name) {
+            Ok((file, _)) => drop(file),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => (),
+            Err(error) => return Err(error),
+        }
+        let mut lease = directory.open_owned_immutable_file(lock_name)?;
+        lease.try_lock_exclusive()?;
+        if read_preferences(&directory, kind, &digest)?.as_deref() != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Transport preferences changed",
+            ));
+        }
+        let sealed = protect(next, &digest)?;
+        if sealed.is_empty() || sealed.len() > 64 * 1024 {
+            return Err(io::Error::other(
+                "Protected transport preferences exceed limit",
+            ));
+        }
+        let mut envelope = kind.envelope().to_vec();
+        envelope.extend_from_slice(&sealed);
+        let destination = directory.path().join("preferences.bin");
+        let temporary = self.write_temp(&destination, &envelope)?;
+        let result = (|| {
+            directory.verify_path()?;
+            let from = wide_path(&temporary)?;
+            let to = wide_path(&destination)?;
+            // SAFETY: fixed sibling entries below the retained private scope
+            // directory; exact CAS lease held; rename replaces without traversal.
+            if unsafe {
+                MoveFileExW(
+                    from.as_ptr(),
+                    to.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            directory.verify_path()?;
+            if read_preferences(&directory, kind, &digest)?.as_deref() != Some(next) {
+                return Err(io::Error::other(
+                    "Transport preferences publication is uncertain",
+                ));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = remove_exact_file(&temporary);
+        }
+        result
+    }
+
+    fn preferences_directory(
+        &self,
+        kind: PreferenceKind,
+        digest: &[u8; 32],
+        create: bool,
+    ) -> io::Result<Option<Arc<crate::PrivateDirectory>>> {
+        if create {
+            self.ensure_private_root()?;
+        } else if !self.ensure_existing_private_root()? {
+            return Ok(None);
+        }
+        let parent = crate::PinnedDirectory::open(&self.root)?;
+        let first = if create {
+            crate::PrivateDirectory::create_or_open_under(
+                &parent,
+                std::ffi::OsStr::new(kind.directory()),
+            )
+        } else {
+            crate::PrivateDirectory::open_under(&parent, std::ffi::OsStr::new(kind.directory()))
+        };
+        let first = match first {
+            Ok(value) => value,
+            Err(error) if !create && error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let pinned = crate::PinnedDirectory::open(first.path())?;
+        let name = hex(digest);
+        let directory = if create {
+            crate::PrivateDirectory::create_or_open_under(&pinned, std::ffi::OsStr::new(&name))
+        } else {
+            crate::PrivateDirectory::open_under(&pinned, std::ffi::OsStr::new(&name))
+        };
+        let directory = match directory {
+            Ok(value) => value,
+            Err(error) if !create && error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        first.verify_path()?;
+        directory.verify_path()?;
+        Ok(Some(Arc::new(directory)))
     }
 
     /// Private per-user application state directory used for protected local
@@ -546,6 +1166,9 @@ impl DpapiSessionStore {
     }
 
     fn ensure_private_root(&self) -> io::Result<()> {
+        if let Some(directory) = &self.profile_directory {
+            return directory.verify_path();
+        }
         let sid = super::win32::current_user_sid_for_storage()?;
         let sddl = wide(&format!("D:P(A;;FA;;;{sid})"));
         let descriptor = security_descriptor(&sddl)?;
@@ -565,6 +1188,10 @@ impl DpapiSessionStore {
     }
 
     fn ensure_existing_private_root(&self) -> io::Result<bool> {
+        if let Some(directory) = &self.profile_directory {
+            directory.verify_path()?;
+            return Ok(true);
+        }
         let sid = super::win32::current_user_sid_for_storage()?;
         let sddl = wide(&format!("D:P(A;;FA;;;{sid})"));
         let descriptor = security_descriptor(&sddl)?;
@@ -807,6 +1434,240 @@ fn remove_exact_file(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+const VAULT_DOCUMENT_MAX_PLAIN: usize = 1024 * 1024;
+const VAULT_DOCUMENT_MAX_CIPHER: usize = VAULT_DOCUMENT_MAX_PLAIN + 64 * 1024;
+const VAULT_CREDENTIALS_ENVELOPE: &[u8] = b"RAIUN-VAULT-CREDENTIALS-DPAPI\0\x01";
+#[derive(Clone, Copy)]
+enum VaultDocumentKind {
+    Credentials,
+    Custody,
+    ExistingEditCapture,
+    CompletedHistorySegment,
+}
+impl VaultDocumentKind {
+    fn directory(self) -> &'static str {
+        match self {
+            Self::Credentials => "vault-credentials",
+            Self::Custody => "vault-custody",
+            Self::ExistingEditCapture => "vault-existing-edit-captures",
+            Self::CompletedHistorySegment => "vault-completed-history-segments",
+        }
+    }
+    fn file_name(self) -> &'static str {
+        match self {
+            Self::Credentials => "credentials.bin",
+            Self::Custody => "custody.bin",
+            Self::ExistingEditCapture => "existing-edit-capture.bin",
+            Self::CompletedHistorySegment => "completed-history-segment.bin",
+        }
+    }
+    fn lock_name(self) -> &'static str {
+        match self {
+            Self::Credentials => "credentials.lock",
+            Self::Custody => "custody.lock",
+            Self::ExistingEditCapture => "existing-edit-capture.lock",
+            Self::CompletedHistorySegment => "completed-history-segment.lock",
+        }
+    }
+    fn envelope(self) -> &'static [u8] {
+        match self {
+            Self::Credentials => VAULT_CREDENTIALS_ENVELOPE,
+            Self::Custody => b"RAIUN-VAULT-CUSTODY-DPAPI\0\x01",
+            Self::ExistingEditCapture => b"RAIUN-VAULT-EXISTING-EDIT-CAPTURE-DPAPI\0\x01",
+            Self::CompletedHistorySegment => b"RAIUN-VAULT-COMPLETED-HISTORY-SEGMENT-DPAPI\0\x01",
+        }
+    }
+    fn digest(self, scope: &[u8]) -> io::Result<[u8; 32]> {
+        match self {
+            Self::Credentials => vault_credentials_digest(
+                std::str::from_utf8(scope)
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid profile"))?,
+            ),
+            Self::Custody => {
+                if scope.is_empty() || scope.len() > 32 * 1024 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Invalid custody scope",
+                    ));
+                }
+                let mut hash = Sha256::new();
+                hash.update(b"raiun-vault-custody-dpapi-v1\0");
+                hash.update(scope);
+                Ok(hash.finalize().into())
+            }
+            Self::ExistingEditCapture => {
+                if scope.is_empty() || scope.len() > 32 * 1024 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Invalid existing-edit capture scope",
+                    ));
+                }
+                let mut hash = Sha256::new();
+                hash.update(b"raiun-vault-existing-edit-capture-dpapi-v1\0");
+                hash.update(scope);
+                Ok(hash.finalize().into())
+            }
+            Self::CompletedHistorySegment => {
+                if scope.is_empty() || scope.len() > 64 * 1024 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Invalid completed-history segment binding",
+                    ));
+                }
+                let mut hash = Sha256::new();
+                hash.update(b"raiun-vault-completed-history-segment-dpapi-v1\0");
+                hash.update(scope);
+                Ok(hash.finalize().into())
+            }
+        }
+    }
+}
+
+fn vault_credentials_digest(profile: &str) -> io::Result<[u8; 32]> {
+    if profile != "default"
+        && !(profile.len() == 40
+            && profile.starts_with("profile-")
+            && profile[8..]
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid vault credential profile",
+        ));
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"raiun-vault-credentials-dpapi-v1\0");
+    hash.update(profile.as_bytes());
+    Ok(hash.finalize().into())
+}
+fn read_vault_document(
+    directory: &Arc<crate::PrivateDirectory>,
+    kind: VaultDocumentKind,
+    digest: &[u8; 32],
+) -> io::Result<Option<Zeroizing<Vec<u8>>>> {
+    let mut reader =
+        match directory.open_owned_immutable_file(std::ffi::OsStr::new(kind.file_name())) {
+            Ok(v) => v,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+    let max = kind.envelope().len() + VAULT_DOCUMENT_MAX_CIPHER;
+    if reader.metadata()?.len() > max as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Protected protected vault documents exceed limit",
+        ));
+    }
+    // This buffer contains ciphertext only; plaintext is returned zeroized by DPAPI helper.
+    let mut envelope = Vec::new();
+    reader
+        .by_ref()
+        .take((max + 1) as u64)
+        .read_to_end(&mut envelope)?;
+    reader.verify()?;
+    directory.verify_path()?;
+    if envelope.len() > max {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Protected protected vault documents exceed limit",
+        ));
+    }
+    let ciphertext = envelope.strip_prefix(kind.envelope()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Invalid protected vault document envelope",
+        )
+    })?;
+    let plaintext = unprotect_bounded(
+        ciphertext,
+        digest,
+        VAULT_DOCUMENT_MAX_CIPHER,
+        VAULT_DOCUMENT_MAX_PLAIN,
+    )?;
+    Ok(Some(plaintext))
+}
+
+#[derive(Clone, Copy)]
+enum PreferenceKind {
+    Bandwidth,
+    Proxy,
+}
+impl PreferenceKind {
+    fn directory(self) -> &'static str {
+        match self {
+            Self::Bandwidth => "bandwidth",
+            Self::Proxy => "network-proxy",
+        }
+    }
+    fn domain(self) -> &'static [u8] {
+        match self {
+            Self::Bandwidth => b"raiun-bandwidth-preferences-v1\0",
+            Self::Proxy => b"raiun-network-proxy-preferences-v1\0",
+        }
+    }
+    fn envelope(self) -> &'static [u8] {
+        match self {
+            Self::Bandwidth => b"RAIUN-BANDWIDTH\0\x01",
+            Self::Proxy => b"RAIUN-PROXY\0\x01",
+        }
+    }
+}
+fn preferences_digest(kind: PreferenceKind, scope: &[u8]) -> io::Result<[u8; 32]> {
+    if scope.is_empty() || scope.len() > 16 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid bandwidth scope",
+        ));
+    }
+    let mut hash = Sha256::new();
+    hash.update(kind.domain());
+    hash.update(scope);
+    Ok(hash.finalize().into())
+}
+fn read_preferences(
+    directory: &Arc<crate::PrivateDirectory>,
+    kind: PreferenceKind,
+    digest: &[u8; 32],
+) -> io::Result<Option<Vec<u8>>> {
+    let mut reader =
+        match directory.open_owned_immutable_file(std::ffi::OsStr::new("preferences.bin")) {
+            Ok(reader) => reader,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+    if reader.metadata()?.len() > 65_600 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Protected bandwidth preferences exceed limit",
+        ));
+    }
+    let mut envelope = Vec::new();
+    reader.by_ref().take(65_601).read_to_end(&mut envelope)?;
+    reader.verify()?;
+    directory.verify_path()?;
+    let ciphertext = envelope.strip_prefix(kind.envelope()).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Invalid bandwidth preferences envelope",
+        )
+    })?;
+    if ciphertext.is_empty() || ciphertext.len() > 64 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Invalid bandwidth preferences envelope",
+        ));
+    }
+    let plaintext = unprotect(ciphertext, digest)?;
+    if plaintext.is_empty() || plaintext.len() > 16 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Invalid bandwidth preferences size",
+        ));
+    }
+    Ok(Some(plaintext.to_vec()))
+}
+
 fn protect(plaintext: &[u8], entropy: &[u8; 32]) -> io::Result<Vec<u8>> {
     protect_bounded(plaintext, entropy, MAX_CIPHERTEXT_BYTES)
 }
@@ -1022,6 +1883,796 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser and native DPAPI/private-storage ACL support; synthetic temp-root only"]
+    fn protected_vault_credential_document_cas_reopen_and_profile_isolation() {
+        assert_eq!(std::env::var("USERNAME").as_deref(), Ok("RaiunLabUser"));
+        let root = std::env::temp_dir().join(format!(
+            "raiun-synthetic-credential-document-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        eprintln!("synthetic_credential_document_root={}", root.display());
+        // Only this owned temporary fixture: no current_user, LOCALAPPDATA,
+        // session access, vault unlock, native root, network, or startup action.
+        let base = DpapiSessionStore {
+            root: root.join("sessions"),
+            profile_directory: None,
+        };
+        let profile = "default";
+        let foreign_profile = "profile-11111111111111111111111111111111";
+        assert!(base.load_vault_credentials(profile).unwrap().is_none());
+        assert!(!base.root.exists(), "missing read must not create storage");
+        // These opaque placeholder documents are explicitly nonsecret and are
+        // NOT valid passwords, sessions, or account/vault authority records.
+        let first = Zeroizing::new(b"nonsecret synthetic document\0revision-one".to_vec());
+        let second = Zeroizing::new(b"nonsecret synthetic document\0revision-two".to_vec());
+        base.compare_exchange_vault_credentials(profile, None, &first)
+            .unwrap();
+        base.compare_exchange_vault_credentials(profile, Some(&first), &second)
+            .unwrap();
+        let path = base
+            .root
+            .join("vault-credentials")
+            .join(hex(&vault_credentials_digest(profile).unwrap()))
+            .join("credentials.bin");
+        let protected_before = std::fs::read(&path).unwrap();
+        assert!(protected_before.starts_with(VAULT_CREDENTIALS_ENVELOPE));
+        assert!(
+            base.compare_exchange_vault_credentials(profile, Some(&first), &first)
+                .is_err()
+        );
+        let oversize = Zeroizing::new(vec![0; VAULT_DOCUMENT_MAX_PLAIN + 1]);
+        assert!(
+            base.compare_exchange_vault_credentials(profile, Some(&second), &oversize)
+                .is_err()
+        );
+        assert!(
+            base.compare_exchange_vault_credentials(profile, Some(&second), b"")
+                .is_err()
+        );
+        assert!(std::fs::read(&path).unwrap() == protected_before);
+        assert!(
+            base.load_vault_credentials(foreign_profile)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !base
+                .root
+                .join("vault-credentials")
+                .join(hex(&vault_credentials_digest(foreign_profile).unwrap()))
+                .exists()
+        );
+        let store_root = base.root.clone();
+        drop(base);
+        let reopened = DpapiSessionStore {
+            root: store_root,
+            profile_directory: None,
+        };
+        let loaded: Zeroizing<Vec<u8>> = reopened.load_vault_credentials(profile).unwrap().unwrap();
+        assert!(loaded.as_slice() == second.as_slice());
+        assert!(
+            reopened
+                .load_vault_credentials(foreign_profile)
+                .unwrap()
+                .is_none()
+        );
+        assert!(std::fs::read(&path).unwrap() == protected_before);
+        drop(loaded);
+        drop(reopened);
+        // Any panic retains the printed fixture; only complete success removes
+        // this exact owned root after all store/file/directory pins are dropped.
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser and native DPAPI/private-storage ACL support; synthetic temp-root only"]
+    fn protected_vault_custody_cas_reopen_and_credential_separation() {
+        assert_eq!(std::env::var("USERNAME").as_deref(), Ok("RaiunLabUser"));
+        let root = std::env::temp_dir().join(format!(
+            "raiun-synthetic-custody-document-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        eprintln!("synthetic_custody_document_root={}", root.display());
+        // Exact owned fixture only, no current_user, session, real vault,
+        // LOCALAPPDATA change, startup, network or registered root access.
+        let base = DpapiSessionStore {
+            root: root.join("sessions"),
+            profile_directory: None,
+        };
+        let scope = b"nonsecret synthetic exact-account-vault-root-scope";
+        let foreign = b"nonsecret synthetic different-account-vault-root-scope";
+        assert!(base.load_vault_custody(scope).unwrap().is_none());
+        assert!(!base.root.exists());
+        assert!(base.load_vault_custody(b"").is_err());
+        let first = Zeroizing::new(b"nonsecret synthetic pending-custody revision one".to_vec());
+        let second = Zeroizing::new(b"nonsecret synthetic pending-custody revision two".to_vec());
+        base.compare_exchange_vault_custody(scope, None, &first)
+            .unwrap();
+        base.compare_exchange_vault_custody(scope, Some(&first), &second)
+            .unwrap();
+        let path = base
+            .root
+            .join("vault-custody")
+            .join(hex(&VaultDocumentKind::Custody.digest(scope).unwrap()))
+            .join("custody.bin");
+        let protected = std::fs::read(&path).unwrap();
+        assert!(protected.starts_with(VaultDocumentKind::Custody.envelope()));
+        assert!(
+            base.compare_exchange_vault_custody(scope, Some(&first), &first)
+                .is_err()
+        );
+        assert!(
+            base.compare_exchange_vault_custody(scope, Some(&second), b"")
+                .is_err()
+        );
+        assert!(
+            base.compare_exchange_vault_custody(
+                scope,
+                Some(&second),
+                &vec![0; VAULT_DOCUMENT_MAX_PLAIN + 1]
+            )
+            .is_err()
+        );
+        assert!(base.load_vault_custody(foreign).unwrap().is_none());
+        assert_eq!(std::fs::read(&path).unwrap(), protected);
+        let credential = b"nonsecret synthetic credential-shaped document";
+        base.compare_exchange_vault_credentials("default", None, credential)
+            .unwrap();
+        base.compare_exchange_vault_credentials(
+            "default",
+            Some(credential),
+            b"nonsecret synthetic forgotten credentials",
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            protected,
+            "credential edits must not alter custody"
+        );
+        let store_root = base.root.clone();
+        drop(base);
+        let reopened = DpapiSessionStore {
+            root: store_root,
+            profile_directory: None,
+        };
+        assert_eq!(
+            reopened
+                .load_vault_custody(scope)
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            second.as_slice()
+        );
+        // A copied valid ciphertext cannot cross exact scope or credential domain.
+        reopened
+            .compare_exchange_vault_custody(foreign, None, &first)
+            .unwrap();
+        let foreign_path = reopened
+            .root
+            .join("vault-custody")
+            .join(hex(&VaultDocumentKind::Custody.digest(foreign).unwrap()))
+            .join("custody.bin");
+        std::fs::write(&foreign_path, &protected).unwrap();
+        assert!(reopened.load_vault_custody(foreign).is_err());
+        let credential_path = reopened
+            .root
+            .join("vault-credentials")
+            .join(hex(&vault_credentials_digest("default").unwrap()))
+            .join("credentials.bin");
+        let mut transplanted = VAULT_CREDENTIALS_ENVELOPE.to_vec();
+        transplanted.extend_from_slice(
+            protected
+                .strip_prefix(VaultDocumentKind::Custody.envelope())
+                .unwrap(),
+        );
+        std::fs::write(&credential_path, &transplanted).unwrap();
+        assert!(reopened.load_vault_credentials("default").is_err());
+        let mut corrupt = protected.clone();
+        *corrupt.last_mut().unwrap() ^= 1;
+        std::fs::write(&path, &corrupt).unwrap();
+        assert!(reopened.load_vault_custody(scope).is_err());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            corrupt,
+            "refusal must retain corrupt evidence"
+        );
+        drop(reopened);
+        // Panic retains fixture; success removes only this exact owned directory.
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser and native DPAPI/private-storage ACL support; synthetic temp-root only"]
+    fn protected_vault_existing_edit_capture_put_new_reopen_and_binding() {
+        assert_eq!(std::env::var("USERNAME").as_deref(), Ok("RaiunLabUser"));
+        let root = std::env::temp_dir().join(format!(
+            "raiun-synthetic-existing-edit-capture-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        eprintln!("synthetic_existing_edit_capture_root={}", root.display());
+        // Only this self-created fixture: no current_user, profile/session load,
+        // registered root, real vault or environment mutation.
+        let base = DpapiSessionStore {
+            root: root.join("sessions"),
+            profile_directory: None,
+        };
+        let scope = b"synthetic-account-vault-root-capture\0\xff";
+        let foreign = b"synthetic-account-vault-root-capture\0\xfe";
+        let first = Zeroizing::new(b"synthetic exact capture bytes\0\xff".to_vec());
+        assert!(
+            base.load_vault_existing_edit_capture(scope)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!base.root.exists());
+        for invalid_scope in [b"".as_slice(), &vec![0; 32 * 1024 + 1]] {
+            assert!(
+                base.load_vault_existing_edit_capture(invalid_scope)
+                    .is_err()
+            );
+            assert!(
+                base.put_new_vault_existing_edit_capture(invalid_scope, &first)
+                    .is_err()
+            );
+        }
+        assert!(
+            base.put_new_vault_existing_edit_capture(scope, b"")
+                .is_err()
+        );
+        assert!(
+            base.put_new_vault_existing_edit_capture(scope, &vec![0; VAULT_DOCUMENT_MAX_PLAIN + 1])
+                .is_err()
+        );
+        assert!(!base.root.exists(), "invalid input must not create storage");
+        base.put_new_vault_existing_edit_capture(scope, &first)
+            .unwrap();
+        let path = base
+            .root
+            .join(VaultDocumentKind::ExistingEditCapture.directory())
+            .join(hex(&VaultDocumentKind::ExistingEditCapture
+                .digest(scope)
+                .unwrap()))
+            .join(VaultDocumentKind::ExistingEditCapture.file_name());
+        let protected = std::fs::read(&path).unwrap();
+        assert!(protected.starts_with(VaultDocumentKind::ExistingEditCapture.envelope()));
+        assert!(
+            base.put_new_vault_existing_edit_capture(scope, &first)
+                .is_err()
+        );
+        assert!(
+            base.put_new_vault_existing_edit_capture(scope, b"different capture")
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), protected);
+        let store_root = base.root.clone();
+        drop(base);
+        let reopened = DpapiSessionStore {
+            root: store_root,
+            profile_directory: None,
+        };
+        assert_eq!(
+            reopened
+                .load_vault_existing_edit_capture(scope)
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            first.as_slice()
+        );
+        assert!(
+            reopened
+                .load_vault_existing_edit_capture(foreign)
+                .unwrap()
+                .is_none()
+        );
+        reopened
+            .put_new_vault_existing_edit_capture(foreign, &first)
+            .unwrap();
+        let foreign_path = reopened
+            .root
+            .join(VaultDocumentKind::ExistingEditCapture.directory())
+            .join(hex(&VaultDocumentKind::ExistingEditCapture
+                .digest(foreign)
+                .unwrap()))
+            .join(VaultDocumentKind::ExistingEditCapture.file_name());
+        std::fs::write(&foreign_path, &protected).unwrap();
+        assert!(reopened.load_vault_existing_edit_capture(foreign).is_err());
+        assert!(
+            reopened
+                .put_new_vault_existing_edit_capture(foreign, &first)
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&foreign_path).unwrap(), protected);
+        // Rewrap valid ciphertext for the destination envelope: the DPAPI
+        // entropy must still prevent crossing custody and credential domains.
+        reopened
+            .put_new_vault_existing_edit_capture(b"default", &first)
+            .unwrap();
+        let domain_path = reopened
+            .root
+            .join(VaultDocumentKind::ExistingEditCapture.directory())
+            .join(hex(&VaultDocumentKind::ExistingEditCapture
+                .digest(b"default")
+                .unwrap()))
+            .join(VaultDocumentKind::ExistingEditCapture.file_name());
+        let domain_protected = std::fs::read(&domain_path).unwrap();
+        let cipher = domain_protected
+            .strip_prefix(VaultDocumentKind::ExistingEditCapture.envelope())
+            .unwrap();
+        for kind in [VaultDocumentKind::Custody, VaultDocumentKind::Credentials] {
+            let digest = kind.digest(b"default").unwrap();
+            assert_ne!(
+                digest,
+                VaultDocumentKind::ExistingEditCapture
+                    .digest(b"default")
+                    .unwrap()
+            );
+            let directory = reopened
+                .vault_document_directory(kind, &digest, true)
+                .unwrap()
+                .unwrap();
+            let destination = directory.path().join(kind.file_name());
+            let mut transplanted = kind.envelope().to_vec();
+            transplanted.extend_from_slice(cipher);
+            std::fs::write(&destination, &transplanted).unwrap();
+            assert!(reopened.load_vault_document(kind, b"default").is_err());
+            assert_eq!(std::fs::read(&destination).unwrap(), transplanted);
+        }
+        let mut corrupt = protected.clone();
+        *corrupt.last_mut().unwrap() ^= 1;
+        std::fs::write(&path, &corrupt).unwrap();
+        assert!(reopened.load_vault_existing_edit_capture(scope).is_err());
+        assert!(
+            reopened
+                .put_new_vault_existing_edit_capture(scope, &first)
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            corrupt,
+            "refusal must retain corrupt evidence"
+        );
+        drop(reopened);
+        // Panic retains evidence; success removes only the self-created root.
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires isolated ordinary RaiunLabUser and native DPAPI/private-storage ACL support; synthetic temp-root only"]
+    fn protected_transport_preferences_cas_reopen_and_preserve_domains() {
+        assert_eq!(std::env::var("USERNAME").as_deref(), Ok("RaiunLabUser"));
+        let root = std::env::temp_dir().join(format!(
+            "raiun-transport-preferences-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        eprintln!("synthetic_transport_preferences_root={}", root.display());
+        // Own fixture construction: never resolve current_user/LOCALAPPDATA,
+        // create an account, decrypt a session, or touch a real profile.
+        let base = DpapiSessionStore {
+            root: root.join("sessions"),
+            profile_directory: None,
+        };
+        let scope_a = br#"{"profile":"default","server":"https://synthetic.invalid/","client":"synthetic-client","issuer":null,"subject":"synthetic-a"}"#;
+        let scope_b = br#"{"profile":"default","server":"https://synthetic.invalid/","client":"synthetic-client","issuer":null,"subject":"synthetic-b"}"#;
+        assert!(base.load_bandwidth_settings(scope_a).unwrap().is_none());
+        assert!(base.load_proxy_settings("default").unwrap().is_none());
+        assert!(!base.root.join("bandwidth").exists());
+        assert!(!base.root.join("network-proxy").exists());
+        base.ensure_private_root().unwrap();
+        let sentinel = base.root.join("unrelated-synthetic.bin");
+        let temporary = base
+            .write_temp(&sentinel, b"unrelated synthetic bytes")
+            .unwrap();
+        std::fs::rename(temporary, &sentinel).unwrap();
+        let before = std::fs::read(&sentinel).unwrap();
+        // The storage adapter intentionally treats validated preference records
+        // as opaque bytes; their schema/scope rules are exercised by Agent tests.
+        let first = br#"{"version":1,"revision":2,"synthetic":"first"}"#;
+        let second = br#"{"version":1,"revision":3,"synthetic":"second"}"#;
+        base.compare_exchange_bandwidth_settings(scope_a, None, first)
+            .unwrap();
+        base.compare_exchange_proxy_settings("default", None, first)
+            .unwrap();
+        base.compare_exchange_bandwidth_settings(scope_a, Some(first), second)
+            .unwrap();
+        base.compare_exchange_proxy_settings("default", Some(first), second)
+            .unwrap();
+        assert!(
+            base.compare_exchange_bandwidth_settings(scope_a, None, first)
+                .is_err()
+        );
+        assert!(
+            base.compare_exchange_proxy_settings("default", Some(first), first)
+                .is_err()
+        );
+        assert!(
+            base.compare_exchange_bandwidth_settings(scope_a, Some(second), b"")
+                .is_err()
+        );
+        assert!(
+            base.compare_exchange_proxy_settings(
+                "default",
+                Some(second),
+                &vec![b'x'; 16 * 1024 + 1]
+            )
+            .is_err()
+        );
+        assert!(base.load_bandwidth_settings(scope_b).unwrap().is_none());
+        base.compare_exchange_bandwidth_settings(scope_b, None, first)
+            .unwrap();
+        let bandwidth_path = base
+            .root
+            .join("bandwidth")
+            .join(hex(
+                &preferences_digest(PreferenceKind::Bandwidth, scope_a).unwrap()
+            ))
+            .join("preferences.bin");
+        let proxy_path = base
+            .root
+            .join("network-proxy")
+            .join(hex(
+                &preferences_digest(PreferenceKind::Proxy, b"default").unwrap()
+            ))
+            .join("preferences.bin");
+        assert_ne!(bandwidth_path, proxy_path);
+        let bandwidth_sealed = std::fs::read(&bandwidth_path).unwrap();
+        let proxy_sealed = std::fs::read(&proxy_path).unwrap();
+        assert!(bandwidth_sealed.starts_with(b"RAIUN-BANDWIDTH\0\x01"));
+        assert!(proxy_sealed.starts_with(b"RAIUN-PROXY\0\x01"));
+        assert_ne!(bandwidth_sealed, proxy_sealed);
+        let store_root = base.root.clone();
+        drop(base);
+        let reopened = DpapiSessionStore {
+            root: store_root,
+            profile_directory: None,
+        };
+        assert_eq!(
+            reopened
+                .load_bandwidth_settings(scope_a)
+                .unwrap()
+                .as_deref(),
+            Some(second.as_slice())
+        );
+        assert_eq!(
+            reopened.load_proxy_settings("default").unwrap().as_deref(),
+            Some(second.as_slice())
+        );
+        assert_eq!(
+            reopened
+                .load_bandwidth_settings(scope_b)
+                .unwrap()
+                .as_deref(),
+            Some(first.as_slice())
+        );
+        assert_eq!(std::fs::read(&bandwidth_path).unwrap(), bandwidth_sealed);
+        assert_eq!(std::fs::read(&proxy_path).unwrap(), proxy_sealed);
+        assert_eq!(std::fs::read(&sentinel).unwrap(), before);
+        drop(reopened);
+        // Preserve the owned fixture on any panic. Cleanup occurs only after
+        // every assertion passes and all store/directory/file pins are dropped.
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires isolated ordinary Windows user and native private-storage ACL support"]
+    fn registry_broker_lock_excludes_a_second_owner_until_release() {
+        let root = std::env::temp_dir().join(format!(
+            "raiun-broker-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        eprintln!("synthetic_broker_lock_fixture={}", root.display());
+        let store = DpapiSessionStore {
+            root: root.join("sessions"),
+            profile_directory: None,
+        };
+        let first = store.lock_profile_registry().unwrap();
+        let identity = first.identity();
+        assert!(store.lock_profile_registry().is_err());
+        first.verify().unwrap();
+        let path = store.root.join("profiles").join("broker.lock");
+        assert!(std::fs::rename(&path, path.with_extension("replacement")).is_err());
+        first.verify().unwrap();
+        drop(first);
+        let second = store.lock_profile_registry().unwrap();
+        assert_eq!(
+            second.identity(),
+            identity,
+            "reacquisition must retain the persistent lock entry"
+        );
+        assert!(store.lock_profile_registry().is_err());
+        drop(second);
+        drop(store);
+        // Success-only cleanup after every lock and directory pin is released.
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires isolated ordinary Windows user and native private-storage ACL support"]
+    fn root_inventory_survives_logout_pointer_removal() {
+        let root = std::env::temp_dir().join(format!(
+            "raiun-root-inventory-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        eprintln!("synthetic_root_inventory_fixture={}", root.display());
+        let store = DpapiSessionStore {
+            root: root.join("sessions"),
+            profile_directory: None,
+        };
+        store.ensure_private_root().unwrap();
+        let server = "https://synthetic.invalid";
+        let client = "synthetic-client";
+        let metadata = serde_json::to_vec(&serde_json::json!({"version":2,"profile_scope":"default","server":server,"client_id":client,"path":"C:\\Synthetic"})).unwrap();
+        store
+            .save_root_config("default", server, client, &metadata)
+            .unwrap();
+        // If inventory tried to read credentials instead of metadata, these
+        // deliberately invalid opaque session bytes could not be decrypted.
+        let session_path = store.session_path(&identity_digest(Some("default"), server, client));
+        let sentinel = b"synthetic non-session sentinel";
+        let temporary = store.write_temp(&session_path, sentinel).unwrap();
+        std::fs::rename(temporary, &session_path).unwrap();
+        store
+            .set_active_identity("default", server, client)
+            .unwrap();
+        store.clear_active_identity().unwrap();
+        assert!(store.active_identity().unwrap().is_none());
+        assert_eq!(
+            store.load_root_config_inventory("default").unwrap(),
+            vec![metadata.clone()]
+        );
+        assert!(
+            store
+                .load_root_config_inventory("profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&session_path).unwrap(), sentinel);
+        assert_eq!(
+            store.load_root_config("default", server, client).unwrap(),
+            Some(metadata)
+        );
+        let canonical = store.root_config_path(&identity_digest(Some("default"), server, client));
+        let intermediate = canonical.with_extension("case-probe");
+        let alternate = canonical.with_extension("ROOT-CONFIG");
+        std::fs::rename(&canonical, &intermediate).unwrap();
+        std::fs::rename(&intermediate, &alternate).unwrap();
+        assert!(store.load_root_config_inventory("default").is_err());
+        drop(store);
+        // Success-only cleanup of the exact newly-created fixture.
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires isolated ordinary Windows user and native private-storage ACL support"]
+    fn profile_registry_replaces_reopens_and_preserves_other_storage() {
+        let root = std::env::temp_dir().join(format!(
+            "raiun-profile-registry-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        eprintln!("synthetic_profile_registry_root={}", root.display());
+        // Direct fixture construction, never current_user() or real LOCALAPPDATA.
+        let base = DpapiSessionStore {
+            root: root.join("sessions"),
+            profile_directory: None,
+        };
+        base.ensure_private_root().unwrap();
+        let server = "https://synthetic.invalid";
+        let client = "synthetic-client";
+        let identity = identity_digest(Some("default"), server, client);
+        let session_path = base.session_path(&identity);
+        assert!(!session_path.exists());
+        // Opaque sibling bytes only: exercise preservation without invoking DPAPI
+        // or pretending these bytes constitute a decryptable session envelope.
+        let temporary = base
+            .write_temp(&session_path, b"synthetic opaque session sentinel")
+            .unwrap();
+        std::fs::rename(temporary, &session_path).unwrap();
+        base.set_active_identity("default", server, client).unwrap();
+        base.save_root_config("default", server, client, b"synthetic root metadata")
+            .unwrap();
+        let siblings = [
+            session_path,
+            base.active_pointer_path(),
+            base.root_config_path(&identity),
+        ];
+        let before = siblings
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+        assert!(base.load_profile_registry().unwrap().is_none());
+        let first =
+            br#"{"version":1,"selected":"default","profiles":{"default":{"label":"Default"}}}"#;
+        let second = br#"{"version":1,"selected":"profile-11111111111111111111111111111111","profiles":{"default":{"label":"Default"},"profile-11111111111111111111111111111111":{"label":"Work"}}}"#;
+        base.save_profile_registry(first).unwrap();
+        assert_eq!(
+            base.load_profile_registry().unwrap().as_deref(),
+            Some(first.as_slice())
+        );
+        base.save_profile_registry(second).unwrap();
+        assert_eq!(
+            base.load_profile_registry().unwrap().as_deref(),
+            Some(second.as_slice())
+        );
+        assert!(base.save_profile_registry(b"").is_err());
+        assert!(base.save_profile_registry(&vec![b'x'; 1_048_577]).is_err());
+        assert_eq!(
+            base.load_profile_registry().unwrap().as_deref(),
+            Some(second.as_slice())
+        );
+        let derived = base
+            .for_profile("profile-11111111111111111111111111111111")
+            .unwrap();
+        assert!(derived.load_profile_registry().is_err());
+        assert!(derived.save_profile_registry(first).is_err());
+        assert_eq!(
+            base.load_profile_registry().unwrap().as_deref(),
+            Some(second.as_slice())
+        );
+        drop(derived);
+        let store_root = base.root.clone();
+        drop(base);
+        let reopened = DpapiSessionStore {
+            root: store_root,
+            profile_directory: None,
+        };
+        assert_eq!(
+            reopened.load_profile_registry().unwrap().as_deref(),
+            Some(second.as_slice())
+        );
+        assert_eq!(
+            reopened.active_identity().unwrap(),
+            Some(("default".into(), server.into(), client.into()))
+        );
+        assert_eq!(
+            reopened
+                .load_root_config("default", server, client)
+                .unwrap()
+                .as_deref(),
+            Some(b"synthetic root metadata".as_slice())
+        );
+        let after = siblings
+            .iter()
+            .map(|path| std::fs::read(path).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            before == after,
+            "registry operations must preserve exact sibling bytes"
+        );
+        drop(reopened);
+        // Only this CREATE_NEW fixture root is removed, after every assertion and
+        // after dropping all private pins. Panic leaves the whole fixture intact.
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_stores_preserve_default_and_separate_restore_pointers_and_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "raiun-profile-store-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        eprintln!("synthetic_profile_store_root={}", root.display());
+        let base = DpapiSessionStore {
+            root: root.join("sessions"),
+            profile_directory: None,
+        };
+        base.ensure_private_root().unwrap();
+        let a = "profile-00000000000000000000000000000000";
+        let b = "profile-11111111111111111111111111111111";
+        assert_eq!(base.for_profile("default").unwrap().root, base.root);
+        for invalid in [
+            "",
+            "../other",
+            "profile-other",
+            "profile-0000000000000000000000000000000A",
+        ] {
+            assert!(base.for_profile(invalid).is_err());
+        }
+        let first = base.for_profile(a).unwrap();
+        let second = base.for_profile(b).unwrap();
+        assert!(first.for_profile("default").is_err());
+        assert!(first.for_profile(b).is_err());
+        first
+            .save(
+                Some(a),
+                "https://synthetic.invalid",
+                "client",
+                b"first synthetic",
+            )
+            .unwrap();
+        first
+            .set_active_identity(a, "https://synthetic.invalid", "client")
+            .unwrap();
+        first
+            .save_root_config(a, "https://synthetic.invalid", "client", b"{}")
+            .unwrap();
+        assert!(base.active_identity().unwrap().is_none());
+        assert!(second.active_identity().unwrap().is_none());
+        assert!(
+            second
+                .load(Some(a), "https://synthetic.invalid", "client")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            second
+                .load_root_config(a, "https://synthetic.invalid", "client")
+                .unwrap()
+                .is_none()
+        );
+        second
+            .save(
+                Some(b),
+                "https://synthetic.invalid",
+                "client",
+                b"second synthetic",
+            )
+            .unwrap();
+        second
+            .set_active_identity(b, "https://synthetic.invalid", "client")
+            .unwrap();
+        first.clear_active_identity().unwrap();
+        assert_eq!(second.active_identity().unwrap().unwrap().0, b);
+        assert!(first.active_identity().unwrap().is_none());
+        assert_eq!(
+            &*base
+                .for_profile(a)
+                .unwrap()
+                .load(Some(a), "https://synthetic.invalid", "client")
+                .unwrap()
+                .unwrap(),
+            b"first synthetic"
+        );
+        assert_eq!(
+            &*second
+                .load(Some(b), "https://synthetic.invalid", "client")
+                .unwrap()
+                .unwrap(),
+            b"second synthetic"
+        );
+        drop((first, second, base));
+        // Only the exact fresh synthetic scope is removed after full success.
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn identity_digest_does_not_disclose_server_or_client_labels() {
         let digest = hex(&identity_digest(
             Some("profile-7"),
@@ -1206,6 +2857,7 @@ mod tests {
             .join(format!("root-config-test-{}", std::process::id()));
         let store = DpapiSessionStore {
             root: isolated_root.join("sessions"),
+            profile_directory: None,
         };
         let config = br#"{"version":1,"root":"C:\\synthetic"}"#;
         store
@@ -1256,6 +2908,7 @@ mod tests {
             .join(format!("pointer-test-{}", std::process::id()));
         let store = DpapiSessionStore {
             root: isolated_root.join("sessions"),
+            profile_directory: None,
         };
         let profile = format!("synthetic-pointer-{}", std::process::id());
         store

@@ -109,6 +109,19 @@ pub(super) struct LiveInitialRemote<'a> {
 }
 
 impl LiveInitialRemote<'_> {
+    fn authorize_path(&self, scope: &EditJournalScope, path: &str) -> Result<(), CloudError> {
+        self.authorize(scope)?;
+        let absolute = format!("/{}", path.trim_start_matches('/'));
+        self.backend
+            .ensure_ordinary_location(&scope.space_id, &absolute)
+            .map_err(|_| {
+                CloudError::new(
+                    ErrorKind::Forbidden,
+                    "Ordinary writes cannot address a known vault",
+                )
+            })
+    }
+
     pub(super) fn authorize(&self, scope: &EditJournalScope) -> Result<(), CloudError> {
         self.backend.ensure_active().map_err(|_| {
             CloudError::new(ErrorKind::Unauthorized, "the connected backend changed")
@@ -130,7 +143,7 @@ impl RecoveryRemote for LiveInitialRemote<'_> {
         scope: &EditJournalScope,
         path: &str,
     ) -> Result<RecoveryRemoteVersion, CloudError> {
-        self.authorize(scope)?;
+        self.authorize_path(scope, path)?;
         self.inner.stat(scope, path)
     }
     fn conditional_upload(
@@ -142,7 +155,7 @@ impl RecoveryRemote for LiveInitialRemote<'_> {
         condition: WriteCondition,
         size: u64,
     ) -> Result<RecoveryRemoteVersion, CloudError> {
-        self.authorize(scope)?;
+        self.authorize_path(scope, path)?;
         self.inner
             .conditional_upload(scope, path, content, id, condition, size)
     }
@@ -154,7 +167,7 @@ impl RecoveryRemote for LiveInitialRemote<'_> {
         etag: Option<&str>,
         max_bytes: usize,
     ) -> Result<RecoveryRemoteBody, CloudError> {
-        self.authorize(scope)?;
+        self.authorize_path(scope, path)?;
         self.inner.readback(scope, path, id, etag, max_bytes)
     }
 }

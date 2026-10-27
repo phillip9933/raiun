@@ -45,3 +45,25 @@ test('proxy changes are disabled while connected, offline, authenticating, or sa
   }
   assert.equal(proxyEditorEnabled({ ...disconnected, reachable: false }), false);
 });
+
+test('Windows proxy settings preserve scope fencing and pre-sign-in defaults', () => {
+  const reply = { proxy: { mode: 'system' }, account_id: 'account-a', revision: 1, apply_requires_reconnect: true };
+  assert.throws(() => parseProxySettings(reply, true));
+  const scope_token = 'b'.repeat(64);
+  assert.equal(parseProxySettings({ ...reply, scope_token }, true).scope_token, scope_token);
+  for (const token of [null, '', 'b'.repeat(63), scope_token + '\n', 'B'.repeat(64)]) {
+    assert.throws(() => parseProxySettings({ ...reply, scope_token: token }, true));
+  }
+  const pending = parseProxySettings({ ...reply, account_id: null, scope_token: null }, true);
+  assert.equal(pending.account_id, null);
+  assert.equal(pending.scope_token, undefined);
+  assert.equal(parseProxySettings(reply).account_id, 'account-a');
+});
+
+
+test('retained Windows credentials require sign-out even when disconnected', () => {
+  const idle = { reachable: true, connected: false, offlineNamespace: false, authenticating: false, saving: false };
+  assert.equal(proxyEditorEnabled(idle), true);
+  assert.equal(proxyEditorEnabled({ ...idle, requiresSignOut: true }), false);
+  assert.equal(proxyEditorEnabled({ ...idle, requiresSignOut: false }), true);
+});

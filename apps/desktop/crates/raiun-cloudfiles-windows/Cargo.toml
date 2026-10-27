@@ -26,6 +26,7 @@ fs2 = "0.4"
 tempfile.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+raiun-vault = { path = "../raiun-vault" }
 raiun-control-windows = { path = "../raiun-control-windows" }
 
 [lints.rust]

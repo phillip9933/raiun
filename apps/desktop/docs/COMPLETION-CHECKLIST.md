@@ -92,3 +92,42 @@ Owner update, 21 October 2026: resume the next Linux and Windows release at a
 token-frugal pace. Stop work and delegated agents when less than 10% of the
 weekly allowance remains (weekly usedPercent > 90), until explicit owner resume.
 This supersedes the earlier spending thresholds without expanding feature scope.
+
+## Desktop updater — owner addition, 26 October 2026
+
+Before the next beta, both Windows and Linux must detect newer compatible
+Desktop releases on GitHub, download and install verified updates, and show
+dismissible update notices, following the Android client's update workflow.
+Provide automatic checks and a manual App updates screen. Later dismisses that
+release without hiding the manual update controls; a newer release can notify
+again. Download and installation require explicit user actions.
+
+Keep Desktop and Android release selection separate in the shared repository.
+Preserve account settings, credentials, dirty edits and recovery during upgrade;
+verify safe agent shutdown before replacing a running installation. Validate
+platform/package/version and update signatures before installation, with focused
+Windows and Linux package-upgrade acceptance. Missing release trust metadata
+must fail closed. Signing-key setup and publication remain separately authorized
+operations. This addition belongs to C10 delivery and adds no whole-category
+completion claim. Source implementation and focused source checks pass. Both
+beta.2 update artifacts are signed; isolated Linux signed-package upgrade and
+retention checks pass. The Windows signed-package native checks, exact installed
+payload/version verification, synthetic settings/document/DPAPI retention,
+signed-out App updates UI and normal app closure now pass. The passive installer
+UI was not captured; its exact process and normal exit 0 were verified. Receipt
+preservation and normal ordinary-process exit 0 are recorded. The final ordinary test session exited normally with numeric 0; its installed
+app and synthetic data are retained. Windows sustained-save acceptance
+completed all 129 saves, rollover, Lock read refusal and recovery listing
+(100+29 items). The original complete case remains failed at its final Save Copy.
+The registered cloud-root pin repair now passes focused native Save Copy on the
+preserved locked 129-edit custody: exact 65,553-byte content, no-clobber refusal,
+unchanged custody, and both root/destination negative tests. The continuation
+uses the production Save Copy path; the earlier public RPC listing/Lock evidence
+is paired separately. The corrected signed Windows package now also passes its
+exact-package native upgrade: installed shell/Agent/CLI hashes and beta.2 version,
+settings/document/DPAPI retention, visible App updates and normal Quit. Harness
+and NSIS installer exits are both numeric 0 with retained handles; the passive
+installer finish UI was not observed. The Linux and Windows practical beta
+acceptance gates are met. Final signed candidate packaging, exact metadata checks and parent evidence
+review are complete; neither beta.2 candidate is published. Offline release-fixture checks
+do not establish a live GitHub update offer.

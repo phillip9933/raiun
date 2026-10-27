@@ -28,7 +28,41 @@ use rusqlite::{
 };
 
 const DATABASE_NAME: &str = "cache.sqlite3";
+#[cfg(test)]
 const JOURNAL_SUFFIX: &str = "-journal";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DatabasePurpose {
+    Cache,
+    #[cfg(feature = "trusted-engine-integration")]
+    Engine,
+}
+
+impl DatabasePurpose {
+    fn database_name(self) -> &'static str {
+        match self {
+            Self::Cache => DATABASE_NAME,
+            #[cfg(feature = "trusted-engine-integration")]
+            Self::Engine => "engine.sqlite3",
+        }
+    }
+
+    fn wal_name(self) -> &'static str {
+        match self {
+            Self::Cache => "cache.sqlite3-wal",
+            #[cfg(feature = "trusted-engine-integration")]
+            Self::Engine => "engine.sqlite3-wal",
+        }
+    }
+
+    fn journal_name(self) -> &'static str {
+        match self {
+            Self::Cache => "cache.sqlite3-journal",
+            #[cfg(feature = "trusted-engine-integration")]
+            Self::Engine => "engine.sqlite3-journal",
+        }
+    }
+}
 
 static NEXT_VFS_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -39,10 +73,10 @@ enum FixedFile {
 }
 
 impl FixedFile {
-    fn name(self) -> &'static OsStr {
+    fn name(self, purpose: DatabasePurpose) -> &'static OsStr {
         match self {
-            Self::Database => OsStr::new(DATABASE_NAME),
-            Self::Journal => OsStr::new("cache.sqlite3-journal"),
+            Self::Database => OsStr::new(purpose.database_name()),
+            Self::Journal => OsStr::new(purpose.journal_name()),
         }
     }
 
@@ -113,6 +147,7 @@ impl Drop for LowerFilenames {
 }
 
 struct VfsContext {
+    purpose: DatabasePurpose,
     directory: PrivateDirectory,
     database_path: CString,
     journal_path: CString,
@@ -200,18 +235,48 @@ struct VfsRegistration {
 impl RegisteredRollbackDb {
     /// Open the fixed test database beneath a validated private directory.
     pub fn open(directory: PrivateDirectory) -> rusqlite::Result<Self> {
-        let registration = VfsRegistration::new(directory)?;
+        Self::open_for(directory, DatabasePurpose::Cache)
+    }
+
+    /// Open only engine.sqlite3 and its rollback journal beneath the held
+    /// private directory. This does not admit WAL, other databases, or paths.
+    #[cfg(feature = "trusted-engine-integration")]
+    pub fn open_engine(directory: PrivateDirectory) -> rusqlite::Result<Self> {
+        Self::open_for(directory, DatabasePurpose::Engine)
+    }
+
+    /// Open an existing engine database without creating it or initializing
+    /// engine schema. This is protected rollback-mode access, not physically
+    /// read-only: SQLite may recover an existing hot journal. Callers performing
+    /// inventory must issue only bounded reads and never treat saved scope as auth.
+    #[cfg(feature = "trusted-engine-integration")]
+    pub fn open_engine_existing(directory: PrivateDirectory) -> rusqlite::Result<Self> {
+        Self::open_for_with_creation(directory, DatabasePurpose::Engine, false)
+    }
+
+    fn open_for(directory: PrivateDirectory, purpose: DatabasePurpose) -> rusqlite::Result<Self> {
+        Self::open_for_with_creation(directory, purpose, true)
+    }
+
+    fn open_for_with_creation(
+        directory: PrivateDirectory,
+        purpose: DatabasePurpose,
+        create: bool,
+    ) -> rusqlite::Result<Self> {
+        let registration = VfsRegistration::new_for(directory, purpose)?;
         let context = &*registration.context;
-        let db_path = context
-            .database_path
-            .to_str()
-            .map_err(|_| rusqlite::Error::InvalidPath(PathBuf::from(DATABASE_NAME)))?;
+        let db_path = context.database_path.to_str().map_err(|_| {
+            rusqlite::Error::InvalidPath(PathBuf::from(context.purpose.database_name()))
+        })?;
+        let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+        if create {
+            flags |= OpenFlags::SQLITE_OPEN_CREATE;
+        }
         let connection = Connection::open_with_flags_and_vfs(
             db_path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            flags,
             context.vfs_name.to_str().unwrap_or_default(),
         )?;
         let journal_mode: String =
@@ -276,6 +341,17 @@ impl RegisteredRollbackDb {
     /// that share it must serialize every operation with an external mutex.
     #[cfg(feature = "trusted-cache-integration")]
     pub fn borrow_cache_connection(&self) -> &Connection {
+        self.connection
+            .as_ref()
+            .expect("registered connection is live")
+    }
+
+    /// Lend the fixed engine connection while this owner retains its VFS and
+    /// directory pins. Mutable extraction and ownership escape are unavailable.
+    #[cfg(feature = "trusted-engine-integration")]
+    pub fn borrow_engine_connection(&self) -> &Connection {
+        assert!(self.registration.as_ref().is_some_and(|registration|
+            registration.context.purpose == DatabasePurpose::Engine));
         self.connection
             .as_ref()
             .expect("registered connection is live")
@@ -353,15 +429,18 @@ impl Drop for RegisteredRollbackDb {
 }
 
 impl VfsRegistration {
+    #[cfg(test)]
     fn new(directory: PrivateDirectory) -> rusqlite::Result<Self> {
+        Self::new_for(directory, DatabasePurpose::Cache)
+    }
+
+    fn new_for(directory: PrivateDirectory, purpose: DatabasePurpose) -> rusqlite::Result<Self> {
         directory
             .verify_path()
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        let database_path_buf = directory.path().join(DATABASE_NAME);
+        let database_path_buf = directory.path().join(purpose.database_name());
         let database_path = path_to_c_string(&database_path_buf)?;
-        let mut journal_path_buf = database_path_buf.as_os_str().to_os_string();
-        journal_path_buf.push(JOURNAL_SUFFIX);
-        let journal_path = path_to_c_string(Path::new(&journal_path_buf))?;
+        let journal_path = path_to_c_string(&directory.path().join(purpose.journal_name()))?;
         // Keep public path matching in the original DOS spelling. Only the
         // trusted lower Win32 open receives a canonical extended-length alias.
         // Held directory pins and both verifications reject path replacement.
@@ -376,12 +455,11 @@ impl VfsRegistration {
         directory
             .verify_path()
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        let database_lower_path = path_to_c_string(&lower_root.join(DATABASE_NAME))?;
-        let journal_lower_path =
-            path_to_c_string(&lower_root.join(format!("{DATABASE_NAME}{JOURNAL_SUFFIX}")))?;
+        let database_lower_path = path_to_c_string(&lower_root.join(purpose.database_name()))?;
+        let journal_lower_path = path_to_c_string(&lower_root.join(purpose.journal_name()))?;
         // SQLite's metadata allocation contains all three fixed names even
         // though this adapter never admits WAL opens.
-        let wal_lower_path = path_to_c_string(&lower_root.join(format!("{DATABASE_NAME}-wal")))?;
+        let wal_lower_path = path_to_c_string(&lower_root.join(purpose.wal_name()))?;
         let lower_filenames =
             LowerFilenames::new(&database_lower_path, &journal_lower_path, &wal_lower_path)?;
         // The process default can be replaced by another registered shim or
@@ -401,6 +479,7 @@ impl VfsRegistration {
         let vfs_name = CString::new(format!("raiun_rollback_test_{id}"))
             .expect("generated VFS name has no NUL");
         let context = Arc::new(VfsContext {
+            purpose,
             directory,
             database_path,
             journal_path,
@@ -612,16 +691,22 @@ fn pinned_file(
     // before the registration. This is the lifetime invariant for the erased
     // borrow stored in the C-allocated sqlite3_file.
     let directory = unsafe { &*directory };
-    let existing = directory.open_pinned_file(kind.name(), PinnedPrivateFileAccess::ReadWrite);
+    let existing = directory.open_pinned_file(
+        kind.name(context.purpose),
+        PinnedPrivateFileAccess::ReadWrite,
+    );
     let (pin, created) = match existing {
         Ok(_pin) if exclusive => return Err(ffi::SQLITE_CANTOPEN),
         Ok(pin) => (pin, false),
         Err(error) if error.kind() == io::ErrorKind::NotFound && wants_create => {
-            match directory.create_new_pinned_file(kind.name()) {
+            match directory.create_new_pinned_file(kind.name(context.purpose)) {
                 Ok(pin) => (pin, true),
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists && !exclusive => {
                     let pin = directory
-                        .open_pinned_file(kind.name(), PinnedPrivateFileAccess::ReadWrite)
+                        .open_pinned_file(
+                            kind.name(context.purpose),
+                            PinnedPrivateFileAccess::ReadWrite,
+                        )
                         .map_err(|error| map_io_error(&error))?;
                     (pin, false)
                 }
@@ -880,7 +965,7 @@ fn delete_expected(
     }
     let candidate = context
         .directory
-        .open_delete_candidate(kind.name(), expected)?;
+        .open_delete_candidate(kind.name(context.purpose), expected)?;
     candidate.delete()?;
     let mut identities = context
         .identities
@@ -1006,7 +1091,7 @@ unsafe extern "C" fn vfs_access(
         wal_name.extend_from_slice(b"-wal");
         if flags == ffi::SQLITE_ACCESS_EXISTS && requested.to_bytes() == wal_name {
             return match context.directory.open_pinned_file(
-                OsStr::new("cache.sqlite3-wal"),
+                OsStr::new(context.purpose.wal_name()),
                 PinnedPrivateFileAccess::ReadOnly,
             ) {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => ffi::SQLITE_OK,
@@ -1023,7 +1108,10 @@ unsafe extern "C" fn vfs_access(
         } else {
             return ffi::SQLITE_IOERR_ACCESS;
         };
-        match context.directory.open_pinned_file(kind.name(), access) {
+        match context
+            .directory
+            .open_pinned_file(kind.name(context.purpose), access)
+        {
             Ok(pin) => {
                 let mut identities = context
                     .identities
@@ -1058,7 +1146,7 @@ unsafe extern "C" fn vfs_full_pathname(
             return ffi::SQLITE_MISUSE;
         };
         let requested = unsafe { CStr::from_ptr(name) };
-        let alias_matches = requested.to_bytes() == DATABASE_NAME.as_bytes()
+        let alias_matches = requested.to_bytes() == context.purpose.database_name().as_bytes()
             || requested == context.database_path.as_c_str();
         if !alias_matches {
             return ffi::SQLITE_CANTOPEN;
@@ -2131,5 +2219,181 @@ mod tests {
             .execute_batch("BEGIN EXCLUSIVE; UPDATE sample SET value=99;")
             .expect("write uncommitted child transaction");
         std::process::exit(0);
+    }
+    #[cfg(feature = "trusted-engine-integration")]
+    #[test]
+    fn trusted_engine_bridge_commits_rolls_back_and_reopens_fixed_database() {
+        let root = tempfile::tempdir().unwrap();
+        let (_parent, private) = private_directory(root.path());
+        assert!(RegisteredRollbackDb::open_engine_existing(private).is_err());
+        assert!(!root.path().join("private/engine.sqlite3").exists());
+        assert!(!root.path().join("private/engine.sqlite3-journal").exists());
+        let (_parent, private) = reopen_private_directory(root.path());
+        let db = RegisteredRollbackDb::open_engine(private).unwrap();
+        let connection = db.borrow_engine_connection();
+        connection.execute_batch("CREATE TABLE engine_probe(value INTEGER NOT NULL); INSERT INTO engine_probe VALUES (7);").unwrap();
+        let transaction = connection.unchecked_transaction().unwrap();
+        transaction
+            .execute("INSERT INTO engine_probe VALUES (99)", [])
+            .unwrap();
+        assert!(root.path().join("private/engine.sqlite3-journal").is_file());
+        assert!(!root.path().join("private/cache.sqlite3").exists());
+        transaction.rollback().unwrap();
+        assert!(db.close().is_ok());
+        let (_parent, private) = reopen_private_directory(root.path());
+        let db = RegisteredRollbackDb::open_engine_existing(private).unwrap();
+        let values: (i64, i64) = db
+            .borrow_engine_connection()
+            .query_row("SELECT count(*), sum(value) FROM engine_probe", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(values, (1, 7));
+        assert!(db.close().is_ok());
+        assert!(!root.path().join("private/engine.sqlite3-journal").exists());
+    }
+
+    #[cfg(feature = "trusted-engine-integration")]
+    #[test]
+    fn trusted_engine_preserves_rollback_only_authorizer_policy() {
+        let root = tempfile::tempdir().unwrap();
+        let (_parent, private) = private_directory(root.path());
+        let db = RegisteredRollbackDb::open_engine(private).unwrap();
+        let connection = db.borrow_engine_connection();
+        let mode: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(mode.to_ascii_lowercase(), "delete");
+        for sql in [
+            "PRAGMA journal_mode=WAL",
+            "PRAGMA synchronous=OFF",
+            "PRAGMA temp_store=FILE",
+            "CREATE TEMP TABLE forbidden(value INTEGER)",
+            "ATTACH DATABASE 'cache.sqlite3' AS cache",
+            "ATTACH DATABASE ':memory:' AS memory",
+        ] {
+            assert!(connection.execute_batch(sql).is_err(), "must refuse {sql}");
+        }
+        connection
+            .execute_batch(
+                "CREATE TABLE still_usable(value INTEGER); INSERT INTO still_usable VALUES (1);",
+            )
+            .unwrap();
+        assert!(db.close().is_ok());
+        assert!(!root.path().join("private/engine.sqlite3-wal").exists());
+        assert!(!root.path().join("private/cache.sqlite3").exists());
+    }
+
+    #[cfg(feature = "trusted-engine-integration")]
+    #[test]
+    fn trusted_engine_and_default_cache_keep_distinct_fixed_basenames() {
+        let root = tempfile::tempdir().unwrap();
+        let (_parent, private) = private_directory(root.path());
+        let engine = RegisteredRollbackDb::open_engine(private).unwrap();
+        engine
+            .borrow_engine_connection()
+            .execute_batch(
+                "CREATE TABLE purpose(value TEXT); INSERT INTO purpose VALUES ('engine');",
+            )
+            .unwrap();
+        let (_parent, private) = reopen_private_directory(root.path());
+        let cache = RegisteredRollbackDb::open(private).unwrap();
+        cache
+            .connection()
+            .execute_batch(
+                "CREATE TABLE purpose(value TEXT); INSERT INTO purpose VALUES ('cache');",
+            )
+            .unwrap();
+        for (db, expected) in [(&engine, "engine"), (&cache, "cache")] {
+            let value: String = db
+                .connection()
+                .query_row("SELECT value FROM purpose", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(value, expected);
+            let registration = db.registration.as_ref().unwrap();
+            assert_eq!(
+                super::file_kind_for_name(
+                    &registration.context,
+                    registration.context.database_path.as_c_str()
+                ),
+                Some(super::FixedFile::Database)
+            );
+            assert_eq!(
+                super::file_kind_for_name(
+                    &registration.context,
+                    registration.context.journal_path.as_c_str()
+                ),
+                Some(super::FixedFile::Journal)
+            );
+            let other = if expected == "engine" {
+                "cache.sqlite3"
+            } else {
+                "engine.sqlite3"
+            };
+            let other = super::path_to_c_string(&root.path().join("private").join(other)).unwrap();
+            assert_eq!(
+                super::file_kind_for_name(&registration.context, &other),
+                None
+            );
+        }
+        assert!(engine.close().is_ok());
+        assert!(cache.close().is_ok());
+        for engine_purpose in [false, true] {
+            let (_parent, private) = reopen_private_directory(root.path());
+            let db = if engine_purpose {
+                RegisteredRollbackDb::open_engine(private)
+            } else {
+                RegisteredRollbackDb::open(private)
+            }
+            .unwrap();
+            let value: String = db
+                .connection()
+                .query_row("SELECT value FROM purpose", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(value, if engine_purpose { "engine" } else { "cache" });
+            assert!(db.close().is_ok());
+        }
+    }
+    #[cfg(feature = "trusted-engine-integration")]
+    #[test]
+    fn engine_wal_probe_reports_only_verified_absence() {
+        let root = tempfile::tempdir().unwrap();
+        let (_parent, private) = private_directory(root.path());
+        let mut registration =
+            super::VfsRegistration::new_for(private, super::DatabasePurpose::Engine).unwrap();
+        let wal_path = registration
+            .context
+            .directory
+            .path()
+            .join("engine.sqlite3-wal");
+        let name = super::path_to_c_string(&wal_path).unwrap();
+        let mut exists = -1;
+        assert_eq!(
+            unsafe {
+                super::vfs_access(
+                    &mut *registration.vfs,
+                    name.as_ptr(),
+                    ffi::SQLITE_ACCESS_EXISTS,
+                    &mut exists,
+                )
+            },
+            ffi::SQLITE_OK
+        );
+        assert_eq!(exists, 0);
+        let retained = b"preserve engine WAL recovery";
+        std::fs::write(&wal_path, retained).unwrap();
+        exists = -1;
+        assert_eq!(
+            unsafe {
+                super::vfs_access(
+                    &mut *registration.vfs,
+                    name.as_ptr(),
+                    ffi::SQLITE_ACCESS_EXISTS,
+                    &mut exists,
+                )
+            },
+            ffi::SQLITE_CANTOPEN
+        );
+        assert_eq!(std::fs::read(&wal_path).unwrap(), retained);
     }
 }

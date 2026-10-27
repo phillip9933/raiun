@@ -12,8 +12,12 @@ const accessibilityCompiled = ts.transpileModule(accessibilitySource, {
 const { isVaultPasswordValidationError } = await import(
   `data:text/javascript;base64,${Buffer.from(accessibilityCompiled).toString('base64')}`
 );
+const cleanupSource = await readFile(new URL('../src/vault-lock-state.ts', import.meta.url), 'utf8');
+const cleanup = await import(`data:text/javascript;base64,${Buffer.from(ts.transpileModule(cleanupSource, {
+  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 }
+}).outputText).toString('base64')}`);
 const sourceFile = ts.createSourceFile('main.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-const wanted = new Set(['confirmAccountAction', 'forgetSavedVault', 'lockVault', 'unlockVault']);
+const wanted = new Set(['confirmAccountAction', 'forgetSavedVault', 'lockVault', 'unlockVault', 'nativeVaultAccess', 'nativeVaultLockIncomplete', 'nativeVaultLockScope', 'updateNativeVaultLockCleanup', 'reconcileVaultLockStatus', 'checkVaultLockStatus', 'vaultDialog', 'nativeVaultDrivePanel']);
 const functions = new Map();
 for (const statement of sourceFile.statements) {
   if (ts.isFunctionDeclaration(statement) && statement.name && wanted.has(statement.name.text)) {
@@ -22,10 +26,11 @@ for (const statement of sourceFile.statements) {
 }
 assert.equal(functions.size, wanted.size, 'the exercised production functions must remain directly extractable');
 
-function makeHarness({ requestImpl = async () => ({}), unlockImpl = async () => ({ unlocked: true, remembered: false, remembered_status: 'not_saved' }) } = {}) {
+function makeHarness({ nativeMode = false, requestImpl = async () => ({}), unlockImpl = async () => ({ unlocked: true, remembered: false, remembered_status: 'not_saved' }) } = {}) {
   const input = { value: 'synthetic password' };
   const calls = [];
   const state = {
+    status: nativeMode ? { vault_access_mode: 'native_read_only' } : {},
     accountEpoch: 7,
     selectedAccount: 'profile-a',
     nativeDialogBusy: false,
@@ -43,6 +48,10 @@ function makeHarness({ requestImpl = async () => ({}), unlockImpl = async () => 
   };
   const context = {
     state,
+    ...cleanup,
+    esc: value => String(value), svg: () => '', vaultPasswordErrorAttributes: () => '',
+    nativeVaultLockWarnings: new Set(),
+    vaultAppFeaturesAvailable: () => !nativeMode,
     app: { querySelector: selector => selector === '#vault-password' ? input : null },
     confirmDialog: async () => true,
     render() {},
@@ -71,11 +80,11 @@ function makeHarness({ requestImpl = async () => ({}), unlockImpl = async () => 
   };
   const declarations = [...functions.values()].join('\n');
   const compiled = ts.transpileModule(
-    `${declarations}\nglobalThis.__vaultActions = { forgetSavedVault, lockVault, unlockVault };`,
+    `${declarations}\nglobalThis.__vaultActions = { forgetSavedVault, lockVault, unlockVault, reconcileVaultLockStatus, checkVaultLockStatus, vaultDialog };`,
     { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }
   ).outputText;
   vm.runInNewContext(compiled, context, { timeout: 1000 });
-  return { ...context.__vaultActions, state, input, calls };
+  return { ...context.__vaultActions, state, input, calls, context };
 }
 
 test('forget then lock does not remember a later password unlock unless the user opts in again', async () => {
@@ -181,4 +190,90 @@ test('transport failure stays a general alert without marking the password inval
   assert.equal(harness.input.value, '');
   assert.equal(harness.state.vaultDialog.error, 'connection reset by peer');
   assert.equal(harness.state.vaultDialog.passwordError, '');
+});
+
+test('native read-only manual/saved/forget/lock workflow never starts app browsing or offline work', async () => {
+  const harness = makeHarness({nativeMode:true,
+    requestImpl:async action => action === 'vault_forget' ? {remembered:false, remembered_status:'not_saved'} : {vault_mount_ready:false,vault_mount_writable:false},
+    unlockImpl:async () => ({unlocked:true,remembered:true,remembered_status:'known_saved',vault_mount_ready:true,vault_mount_writable:false})});
+  harness.state.vaultDialog.unlocked=false;
+  await harness.unlockVault(false);
+  await harness.lockVault();
+  await harness.unlockVault(true);
+  await harness.forgetSavedVault();
+  assert.equal(harness.state.vaultDialog.unlocked,true,'forget keeps the session open');
+  await harness.lockVault();
+  assert.deepEqual(harness.calls.map(c=>c.action),['vault_unlock','vault_lock','vault_unlock','vault_forget','vault_lock']);
+  assert.equal(harness.calls[2].payload.use_saved,true);
+  assert.equal(harness.state.vaultDialog.unlocked,false);
+  assert.equal(harness.state.vaultDialog.rememberedStatus,'not_saved');
+});
+
+test('native mode refuses an unconfirmed unlock without enabling session or drive readiness', async()=>{
+  for(const response of [{unlocked:false,vault_mount_ready:true},{vault_mount_ready:true}]){
+    const h=makeHarness({nativeMode:true,unlockImpl:async()=>response});h.state.vaultDialog.unlocked=false;
+    await h.unlockVault(false);
+    assert.equal(h.state.vaultDialog.unlocked,false);assert.equal(h.state.vaultDialog.vaultMountReady,false);
+    assert.equal(h.state.vaultDialog.statusUnknown,true);assert.equal(h.state.vaultDialog.vaultMountWritable,false);
+    assert.equal(h.input.value,'');assert.match(h.state.vaultDialog.error,/did not confirm/);
+    assert.deepEqual(h.calls.map(c=>c.action),['vault_unlock']);
+  }
+});
+
+
+test('failed native cleanup stays incomplete after key-only inspection and dialog reopen; explicit retry clears it', async () => {
+  let fail = true;
+  const h = makeHarness({ nativeMode: true, requestImpl: async action => {
+    if (action === 'vault_lock') {
+      if (fail) throw new Error('Vault reads stopped, but local cleanup is incomplete; edits and retry state were preserved');
+      return { unlocked: false, vault_lock_cleanup_status: 'complete', vault_mount_ready: false };
+    }
+    return { root_path: '/Private.vault', root_resource_id: 'root-a', initialized: true,
+      unlocked: false, vault_mount_ready: false, vault_lock_cleanup_status: 'unknown', remembered_status: 'not_saved' };
+  } });
+  Object.assign(h.state.status, { profile_id: 'profile-a', server: 'https://example.test', client_id: 'client',
+    cloud_root: 'C:\\Synthetic', root_configuration: { recovery_scope_token: 'a'.repeat(64) } });
+  await h.lockVault();
+  assert.equal(h.state.vaultDialog.unlocked, false);
+  assert.equal(h.state.vaultDialog.lockCleanupStatus, 'incomplete');
+  assert.match(h.state.message, /Local files may still be accessible/);
+  assert.match(h.vaultDialog(), /Lock incomplete/);
+  assert.match(h.vaultDialog(), /Retry Lock/);
+  assert.doesNotMatch(h.vaultDialog(), /Locked · unlock|data-vault-action="unlock"/);
+  assert.deepEqual(h.calls.map(c => c.action), ['vault_lock', 'vault_inspect']);
+  const old = h.state.vaultDialog;
+  h.state.vaultGeneration++;
+  h.state.vaultDialog = { ...old, lockCleanupStatus: 'unknown', error: '', generation: h.state.vaultGeneration };
+  await h.reconcileVaultLockStatus(h.state.vaultDialog, h.state.accountEpoch, h.state.vaultGeneration);
+  assert.equal(h.state.vaultDialog.lockCleanupStatus, 'incomplete', 'same root warning survives a new dialog');
+  assert.match(h.vaultDialog(), /Local files may still be accessible/);
+  await h.unlockVault(false);
+  assert.equal(h.calls.some(c => c.kind === 'secret'), false, 'cleanup refusal cannot silently unlock again');
+  fail = false;
+  await h.lockVault();
+  assert.equal(h.state.vaultDialog.lockCleanupStatus, 'complete');
+  assert.match(h.state.message, /confirmed local cleanup/);
+  await h.reconcileVaultLockStatus(h.state.vaultDialog, h.state.accountEpoch, h.state.vaultGeneration);
+  assert.equal(h.state.vaultDialog.lockCleanupStatus, 'unknown', 'later key-only metadata is not a new cleanup proof');
+});
+
+test('backend incomplete is restored in a fresh renderer; unrelated scope and stale Lock response cannot clear it', async () => {
+  const h = makeHarness({ nativeMode: true, requestImpl: async () => ({ root_path: '/Private.vault', root_resource_id: 'root-a', initialized: true,
+    unlocked: false, vault_mount_ready: false, vault_lock_cleanup_status: 'incomplete' }) });
+  h.state.vaultDialog.lockCleanupStatus = 'unknown';
+  await h.reconcileVaultLockStatus(h.state.vaultDialog, h.state.accountEpoch, h.state.vaultGeneration);
+  assert.equal(h.state.vaultDialog.lockCleanupStatus, 'incomplete');
+  const other = makeHarness({ nativeMode: true, requestImpl: async () => ({ root_path: '/Private.vault', root_resource_id: 'foreign-root', initialized: true, unlocked: false, vault_lock_cleanup_status: 'unknown' }) });
+  await other.reconcileVaultLockStatus(other.state.vaultDialog, other.state.accountEpoch, other.state.vaultGeneration);
+  assert.equal(other.state.vaultDialog.statusUnknown, true, 'root mismatch cannot rebind cleanup status');
+  let finish;
+  const stale = makeHarness({ nativeMode: true, requestImpl: () => new Promise(resolve => { finish = resolve; }) });
+  const pending = stale.lockVault();
+  await new Promise(resolve => setImmediate(resolve));
+  const current = { ...stale.state.vaultDialog, lockCleanupStatus: 'incomplete', generation: ++stale.state.vaultGeneration };
+  stale.state.vaultDialog = current;
+  finish({ unlocked: false, vault_lock_cleanup_status: 'complete' });
+  await pending;
+  assert.equal(current.lockCleanupStatus, 'incomplete');
+  assert.equal(stale.state.message, '');
 });

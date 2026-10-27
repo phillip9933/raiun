@@ -34,3 +34,20 @@ user account. Remote
 client rejection is set at pipe creation; VM tests do not claim that a remote
 host was connected. The adapter does not make the Windows agent or filesystem
 provider supported by itself.
+
+Vault custody metadata uses a separate `vault-custody` document domain, file
+and scope-derived DPAPI entropy. It shares the existing credential document's
+bounded, pinned private-file CAS implementation; credential directory names,
+entropy and envelope bytes remain compatible. Both document payloads are
+limited to one MiB and decrypted buffers are zeroized. Missing custody reads
+create no directories. Writes hold the private lock through exact plaintext
+comparison, encryption, write-through replacement and protected readback; a
+failed write/readback does not promise that the old document survived.
+
+Custody records contain sensitive names and ownership metadata, never saved
+passwords or keys. Forgetting a saved key does not erase this separate history.
+The caller must validate canonical full account/vault/physical-root scope and
+establish complete write-ahead history; this opaque storage API provides no
+unlock, native-file ownership, or cleanup authority. Production vault access
+remains disabled. The new isolated native custody regression is pending; GNU
+all-target compilation and strict linting alone do not verify DPAPI execution.

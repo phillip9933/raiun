@@ -303,6 +303,21 @@ impl VaultCipher {
         Ok(size)
     }
 
+    /// Authenticate a complete local ciphertext into caller-owned private staging.
+    /// The writer must remain unpublished until this returns successfully and
+    /// the caller completes its account/root checks. Errors can leave a verified
+    /// prefix in the writer: this API neither rolls back nor publishes output.
+    /// Never pass a network stream or an externally visible destination here.
+    pub fn decrypt_file_to_private_writer<R: Read, W: Write + ?Sized>(
+        &self,
+        input: &mut R,
+        output: &mut W,
+        maximum_plaintext_bytes: u64,
+        expected_len: u64,
+    ) -> Result<u64, VaultError> {
+        self.decrypt_bytes(input, output, maximum_plaintext_bytes, Some(expected_len))
+    }
+
     /// Decrypt a complete file into a bounded zeroizing memory buffer.
     /// Callers must provide a trusted expected length and a small maximum;
     /// this is intended for explicit cross-vault copies, not general reads.
@@ -381,7 +396,7 @@ impl VaultCipher {
         Ok(prefix)
     }
 
-    fn decrypt_bytes<W: Write>(
+    fn decrypt_bytes<W: Write + ?Sized>(
         &self,
         input: &mut impl Read,
         output: &mut W,
@@ -596,6 +611,23 @@ impl VerifiedVaultSession {
         self.cipher.decrypt_file_transactional(
             input,
             destination,
+            maximum_plaintext_bytes,
+            expected_len,
+        )
+    }
+
+    /// Authenticate local ciphertext into unpublished caller-owned staging.
+    /// On failure partial plaintext may remain; the caller owns its cleanup.
+    pub fn decrypt_file_to_private_writer<R: Read, W: Write + ?Sized>(
+        &self,
+        input: &mut R,
+        output: &mut W,
+        maximum_plaintext_bytes: u64,
+        expected_len: u64,
+    ) -> Result<u64, VaultError> {
+        self.cipher.decrypt_file_to_private_writer(
+            input,
+            output,
             maximum_plaintext_bytes,
             expected_len,
         )

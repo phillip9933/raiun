@@ -466,6 +466,8 @@ pub struct OpenCloudPlaceholderBackend {
     local_root_identity: Option<crate::ConfiguredRootIdentity>,
     identity_catalog: Option<Arc<dyn ProviderIdentityCatalog>>,
     catalog_scope: Mutex<Option<ProviderIdentityCatalogScope>>,
+    #[cfg(windows)]
+    vault_routes: Option<Arc<crate::vault_routes::VaultRouteRegistry>>,
     token_generation: u64,
     revoked: AtomicBool,
     lease_gate: RwLock<()>,
@@ -539,6 +541,13 @@ impl OpenCloudPlaceholderBackend {
             backend_id: NEXT_BACKEND_ID.fetch_add(1, Ordering::Relaxed),
             client,
             cache: None,
+            #[cfg(windows)]
+            vault_routes: local_root_identity.map(|root| {
+                Arc::new(crate::vault_routes::VaultRouteRegistry::new(
+                    scope.clone(),
+                    root,
+                ))
+            }),
             scope,
             local_root_identity,
             identity_catalog,
@@ -763,6 +772,22 @@ impl OpenCloudPlaceholderBackend {
         };
         for binding in bindings {
             let identity = validate_catalog_binding(&catalog_scope, &binding)?;
+            #[cfg(windows)]
+            match &binding {
+                ProviderIdentityBinding::Directory { space_id, path, .. }
+                | ProviderIdentityBinding::File { space_id, path, .. } => {
+                    if self
+                        .vault_routes
+                        .as_ref()
+                        .is_some_and(|routes| routes.covers_path(space_id, path).unwrap_or(true))
+                    {
+                        // Keep durable evidence unchanged, but never restore an
+                        // ordinary identity for a historically encrypted path.
+                        continue;
+                    }
+                }
+                ProviderIdentityBinding::SpacesNamespace { .. } => {}
+            }
             if identity_in_use(&loaded, identity) {
                 return Err(BackendError::Unavailable);
             }
@@ -1103,6 +1128,64 @@ impl OpenCloudPlaceholderBackend {
         Ok(())
     }
 
+    /// Snapshot for the trusted agent's vault preparation, never UI authority.
+    #[cfg(windows)]
+    pub fn vault_read_context(
+        &self,
+        expected_root: crate::ConfiguredRootIdentity,
+    ) -> Result<(Arc<OpenCloudClient>, ProviderScope), BackendError> {
+        self.ensure_active()?;
+        if self.local_root_identity != Some(expected_root) {
+            return Err(BackendError::Unavailable);
+        }
+        Ok((self.client.clone(), self.scope.clone()))
+    }
+
+    #[cfg(windows)]
+    pub fn has_vault_root(&self, space: &str, root_id: &str) -> Result<bool, BackendError> {
+        self.ensure_active()?;
+        match &self.vault_routes {
+            Some(routes) => routes.has_root_id(space, root_id),
+            None => Err(BackendError::Unavailable),
+        }
+    }
+
+    /// Current exact-route capability only; it does not grant a caller native
+    /// mutation authority or change any previously published file attributes.
+    #[cfg(windows)]
+    pub fn vault_existing_file_saves_active(
+        &self,
+        expected_root: crate::ConfiguredRootIdentity,
+        space: &str,
+        root_id: &str,
+        root_path: &str,
+    ) -> Result<bool, BackendError> {
+        let _lease = self
+            .lease_gate
+            .read()
+            .map_err(|_| BackendError::Unavailable)?;
+        self.ensure_active()?;
+        if self.local_root_identity != Some(expected_root) {
+            return Err(BackendError::Unavailable);
+        }
+        let Some(route) = self
+            .vault_routes
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?
+            .exact_root(space, root_path, root_id)?
+        else {
+            return Ok(false);
+        };
+        if route.local_root() != expected_root {
+            return Err(BackendError::Unavailable);
+        }
+        route
+            .backend()
+            .binding()
+            .with_publication(|| Ok(route.backend().existing_file_saves_active()))
+            .map_err(|_| BackendError::Unavailable)
+    }
+
     pub fn scope(&self) -> &ProviderScope {
         &self.scope
     }
@@ -1148,6 +1231,668 @@ impl OpenCloudPlaceholderBackend {
         identity
     }
 
+    /// Seed durable encrypted-location exclusions before loading the ordinary
+    /// identity catalogue or registering native callbacks. This grants no unlock.
+    #[cfg(windows)]
+    pub fn restore_vault_exclusions(
+        &self,
+        expected_root: crate::ConfiguredRootIdentity,
+        locations: &[(String, String)],
+    ) -> Result<(), BackendError> {
+        let _drained = self
+            .lease_gate
+            .write()
+            .map_err(|_| BackendError::Unavailable)?;
+        let _publication = self
+            .publish_gate
+            .lock()
+            .map_err(|_| BackendError::Unavailable)?;
+        self.ensure_active()?;
+        if self
+            .catalog_scope
+            .lock()
+            .map_err(|_| BackendError::Unavailable)?
+            .is_some()
+        {
+            return Err(BackendError::Unavailable);
+        }
+        self.vault_routes
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?
+            .restore_exclusions(expected_root, locations)
+    }
+
+    #[cfg(windows)]
+    pub fn retire_vault_route(
+        &self,
+        space: &str,
+        root_id: &str,
+        root_path: &str,
+    ) -> Result<Option<Arc<crate::vault_routes::VerifiedVaultRoute>>, BackendError> {
+        self.ensure_active()?;
+        self.vault_routes
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?
+            .retire_one(space, root_id, root_path)
+    }
+
+    /// Retain revoked route ownership for native plaintext cleanup on disconnect.
+    /// Taking the inventory grants no unlock and blocks further vault admission.
+    #[cfg(windows)]
+    pub fn retire_vault_routes(
+        &self,
+    ) -> Result<Vec<Arc<crate::vault_routes::VerifiedVaultRoute>>, BackendError> {
+        match &self.vault_routes {
+            Some(routes) => routes.retire_all(),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Publish a durable encrypted-location exclusion to this live backend
+    /// before fallible unlock-route admission. Retained ordinary leases drain
+    /// first, and known paths stay excluded even if active route setup fails.
+    #[cfg(windows)]
+    pub fn reserve_live_vault_exclusion(
+        &self,
+        expected_root: crate::ConfiguredRootIdentity,
+        space: &str,
+        path: &str,
+    ) -> Result<(), BackendError> {
+        let _drained = self
+            .lease_gate
+            .write()
+            .map_err(|_| BackendError::Unavailable)?;
+        let _publication = self
+            .publish_gate
+            .lock()
+            .map_err(|_| BackendError::Unavailable)?;
+        self.ensure_active()?;
+        self.vault_routes
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?
+            .restore_exclusions(expected_root, &[(space.to_owned(), path.to_owned())])
+    }
+
+    /// Request future parent enumeration, never removal of existing children.
+    /// The live provider fences and exact native identity remain held together.
+    #[cfg(windows)]
+    pub fn refresh_vault_parent_population(
+        &self,
+        connection: &crate::ConfiguredRootConnection,
+        expected_root: crate::ConfiguredRootIdentity,
+        space_id: &str,
+        root_id: &str,
+        root_path: &str,
+    ) -> Result<(), BackendError> {
+        let _lease = self
+            .lease_gate
+            .read()
+            .map_err(|_| BackendError::Unavailable)?;
+        let route = self
+            .vault_routes
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?
+            .exact_root(space_id, root_path, root_id)?
+            .ok_or(BackendError::NotFound)?;
+        if route.local_root() != expected_root {
+            return Err(BackendError::Unavailable);
+        }
+        let (parent, components) =
+            self.vault_parent_population_descriptor(space_id, root_id, root_path)?;
+        let cancellation = CancellationToken::new();
+        let _publication = self.begin_scoped_publish(&cancellation)?;
+        let references = components.iter().map(String::as_str).collect::<Vec<_>>();
+        connection
+            .inner
+            .refresh_namespace_parent_population(expected_root, &references, &parent)
+            .map_err(|_| BackendError::Unavailable)
+    }
+
+    /// Resolve only a currently verified vault route's immediate namespace
+    /// parent. Components are locators; native code must pin and verify the
+    /// returned opaque directory identity before requesting population.
+    #[cfg(windows)]
+    fn vault_parent_population_descriptor(
+        &self,
+        space_id: &str,
+        vault_root_resource_id: &str,
+        vault_root_path: &str,
+    ) -> Result<(PlaceholderChild, Vec<String>), BackendError> {
+        self.ensure_active()?;
+        let routes = self
+            .vault_routes
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?;
+        let route = routes
+            .exact_root(space_id, vault_root_path, vault_root_resource_id)?
+            .ok_or(BackendError::NotFound)?;
+        let path = route.root_path();
+        let state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
+        self.client
+            .with_token_generation(self.token_generation, || {
+                if self.revoked.load(Ordering::Acquire) {
+                    return Err(BackendError::Unavailable);
+                }
+                let mut roots =
+                    state
+                        .namespace_directories
+                        .values()
+                        .filter_map(|entry| match entry {
+                            NamespaceDirectory::Root {
+                                account_id,
+                                personal_space_id,
+                                personal_root_id,
+                            } if account_id == self.scope.account_id() => {
+                                Some((personal_space_id, personal_root_id))
+                            }
+                            _ => None,
+                        });
+                let (personal_space, personal_root) =
+                    roots.next().ok_or(BackendError::Unavailable)?;
+                if roots.next().is_some()
+                    || state
+                        .location_labels
+                        .get(&(personal_space.clone(), personal_root.clone()))
+                        .map(String::as_str)
+                        != Some("Personal")
+                {
+                    // Restored catalogue entries alone do not prove a current label.
+                    return Err(BackendError::Unavailable);
+                }
+                let (identity, name, components) =
+                    if path == "/" {
+                        // An entire Personal location is directly beneath the native
+                        // sync root, which this child-directory API cannot refresh.
+                        if space_id == personal_space {
+                            return Err(BackendError::Unavailable);
+                        }
+                        let mut matches = state.namespace_directories.iter().filter_map(
+                            |(id, entry)| match entry {
+                                NamespaceDirectory::Spaces {
+                                    account_id,
+                                    personal_space_id,
+                                    personal_root_id,
+                                } if account_id == self.scope.account_id()
+                                    && personal_space_id == personal_space
+                                    && personal_root_id == personal_root =>
+                                {
+                                    Some(*id)
+                                }
+                                _ => None,
+                            },
+                        );
+                        let id = matches.next().ok_or(BackendError::Unavailable)?;
+                        if matches.next().is_some() {
+                            return Err(BackendError::Unavailable);
+                        }
+                        (id, "Spaces".to_owned(), vec!["Spaces".to_owned()])
+                    } else {
+                        // No normalization/trimming: the exact verified route must
+                        // already use canonical remote components representable on Windows.
+                        let remote = path.strip_prefix('/').ok_or(BackendError::Unavailable)?;
+                        let segments = remote.split('/').collect::<Vec<_>>();
+                        if path.len() > 32_000
+                            || segments.len() > 256
+                            || segments.iter().any(|part| !valid_windows_component(part))
+                        {
+                            return Err(BackendError::Unavailable);
+                        }
+                        let (prefix, _) = path.rsplit_once('/').ok_or(BackendError::Unavailable)?;
+                        let parent_path = if prefix.is_empty() { "/" } else { prefix };
+                        let mut matches = state.directories.iter().filter(|(_, entry)| {
+                            entry.space_id == space_id
+                                && entry.path == parent_path
+                                && valid_remote_id(&entry.root_resource_id)
+                                && valid_remote_id(&entry.remote_id)
+                                && (parent_path != "/" || entry.remote_id == entry.root_resource_id)
+                        });
+                        let (id, directory) = matches.next().ok_or(BackendError::Unavailable)?;
+                        if matches.next().is_some() {
+                            return Err(BackendError::Unavailable);
+                        }
+                        let label = state
+                            .location_labels
+                            .get(&(
+                                directory.space_id.clone(),
+                                directory.root_resource_id.clone(),
+                            ))
+                            .ok_or(BackendError::Unavailable)?;
+                        let mut components = if space_id == personal_space
+                            && directory.root_resource_id == *personal_root
+                            && label == "Personal"
+                        {
+                            vec!["Personal".to_owned()]
+                        } else {
+                            let name = label
+                                .strip_prefix("Spaces / ")
+                                .ok_or(BackendError::Unavailable)?;
+                            if !valid_windows_component(name) {
+                                return Err(BackendError::Unavailable);
+                            }
+                            vec!["Spaces".to_owned(), name.to_owned()]
+                        };
+                        // Existing directory bindings can be restored. They locate an
+                        // exact opaque parent, not fresh remote metadata or read authority.
+                        // Native pins that identity; later enumeration revalidates the server.
+                        if parent_path != "/" {
+                            components.extend(parent_path[1..].split('/').map(str::to_owned));
+                        }
+                        if components.len() > 256
+                            || components
+                                .iter()
+                                .map(String::len)
+                                .sum::<usize>()
+                                .saturating_add(components.len())
+                                > 32_000
+                        {
+                            return Err(BackendError::Unavailable);
+                        }
+                        let name = components
+                            .last()
+                            .cloned()
+                            .ok_or(BackendError::Unavailable)?;
+                        (*id, name, components)
+                    };
+                if components.iter().any(|part| !valid_windows_component(part)) {
+                    return Err(BackendError::Unavailable);
+                }
+                Ok((
+                    PlaceholderChild {
+                        name,
+                        identity: identity.as_bytes().to_vec(),
+                        metadata: PlaceholderMetadata {
+                            is_directory: true,
+                            length: 0,
+                        },
+                        last_write_time: 0,
+                    },
+                    components,
+                ))
+            })
+            .map_err(|error| self.reject_cached_cloud_error(error))?
+    }
+
+    /// Admit a verified vault beneath this exact retained native root. This
+    /// does not register a second root or enable an agent vault capability.
+    #[cfg(windows)]
+    pub fn install_vault_route(
+        &self,
+        backend: Arc<crate::vault_placeholder::WindowsVaultPlaceholderBackend>,
+        expected_root: crate::ConfiguredRootIdentity,
+    ) -> Result<Arc<crate::vault_routes::VerifiedVaultRoute>, BackendError> {
+        // Drain every pre-admission ordinary session/prepared object (including
+        // edit recovery leases) before classifying a location as encrypted.
+        let _drained = self
+            .lease_gate
+            .write()
+            .map_err(|_| BackendError::Unavailable)?;
+        let _publication = self
+            .publish_gate
+            .lock()
+            .map_err(|_| BackendError::Unavailable)?;
+        self.ensure_active()?;
+        // No token lock is held here: route admission acquires its own exact
+        // token/session publication leases after the ordinary publication gate.
+        self.vault_routes
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?
+            .install(backend, expected_root)
+    }
+
+    /// Validate a fresh close event against its original live route before any
+    /// durable attempt is created. This performs only current local admission;
+    /// the upload repeats the same binding check before its network operation.
+    #[cfg(windows)]
+    pub fn validate_fresh_vault_capture_dispatch(
+        &self,
+        target: &crate::ExistingVaultUploadTarget,
+    ) -> Result<(), raiun_core::backend::CloudError> {
+        use raiun_core::backend::CloudError;
+        let refused = || CloudError::new(ErrorKind::Forbidden, "fresh vault close route changed");
+        let _lease = self.lease_gate.read().map_err(|_| refused())?;
+        self.ensure_active().map_err(|_| refused())?;
+        if target.dispatch().is_none()
+            || target.owner() != &self.scope
+            || self.local_root_identity != Some(target.root())
+        {
+            return Err(refused());
+        }
+        let route = self
+            .vault_for_identity(target.identity())
+            .map_err(|_| refused())?
+            .ok_or_else(refused)?;
+        if route.local_root() != target.root()
+            || route.space_id() != target.vault().space_id()
+            || route.root_resource_id() != target.vault().resource_id()
+            || route.root_path() != target.remote_root()
+        {
+            return Err(refused());
+        }
+        route.backend().validate_capture_dispatch_target(target)
+    }
+
+    /// Broker-only hot-route upload seam. Caller authenticates the exact retained
+    /// frame/index and holds its real registered-root pin and admitted attempt.
+    /// No HTTP runs under the account/root lease or a native publication fence.
+    /// Cancellation must use local pins/atomics only, never HTTP or backend reentry.
+    /// The portable result is historical remote evidence, never native ack.
+    #[cfg(windows)]
+    pub fn upload_existing_vault_capture<R: std::io::Read + std::io::Seek>(
+        &self,
+        target: &crate::ExistingVaultUploadTarget,
+        source: &mut R,
+        edited_len: u64,
+        provider_generation: Arc<AtomicU64>,
+        expected_provider_generation: u64,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<
+        raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome,
+        raiun_core::backend::CloudError,
+    > {
+        use raiun_core::backend::CloudError;
+        use raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome;
+        let refused =
+            || CloudError::new(ErrorKind::Forbidden, "live vault upload route unavailable");
+        let route = {
+            let _lease = self.lease_gate.read().map_err(|_| refused())?;
+            self.ensure_active().map_err(|_| refused())?;
+            if target.owner() != &self.scope
+                || self.local_root_identity != Some(target.root())
+                || expected_provider_generation == 0
+                || provider_generation.load(Ordering::Acquire) != expected_provider_generation
+                || cancelled()
+            {
+                return Err(refused());
+            }
+            let route = self
+                .vault_for_identity(target.identity())
+                .map_err(|_| refused())?
+                .ok_or_else(refused)?;
+            if route.local_root() != target.root()
+                || route.space_id() != target.vault().space_id()
+                || route.root_resource_id() != target.vault().resource_id()
+                || route.root_path() != target.remote_root()
+            {
+                return Err(refused());
+            }
+            route
+        }; // The exact Arc is retained; the account/root lease is DROPPED here.
+        let stop = || self.is_revoked() || cancelled();
+        let cancellation = crate::vault_custody::VaultUploadCancellation {
+            generation: provider_generation,
+            expected: expected_provider_generation,
+            cancelled: &stop,
+        };
+        let result =
+            route
+                .backend()
+                .upload_existing_capture(target, source, edited_len, &cancellation);
+        match result {
+            Ok(VaultExistingOverwriteOutcome::Verified(_)) if cancellation.is_cancelled() => {
+                Ok(VaultExistingOverwriteOutcome::NeedsReconciliation {
+                    reason: ErrorKind::Forbidden,
+                })
+            }
+            other => other,
+        }
+    }
+
+    /// Alternative owned live continuation; preserves the remote-only API.
+    #[cfg(windows)]
+    pub fn upload_existing_vault_capture_live<R: std::io::Read + std::io::Seek>(
+        self: &Arc<Self>,
+        target: crate::ExistingVaultUploadTarget,
+        source: &mut R,
+        edited_len: u64,
+        control: crate::VaultUploadControl,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<crate::VaultLiveUploadOutcome, raiun_core::backend::CloudError> {
+        use raiun_core::backend::CloudError;
+        use raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome;
+        let refused =
+            || CloudError::new(ErrorKind::Forbidden, "live upload continuation unavailable");
+        let route = {
+            let _lease = self.lease_gate.read().map_err(|_| refused())?;
+            self.ensure_active().map_err(|_| refused())?;
+            if target.owner() != &self.scope
+                || self.local_root_identity != Some(target.root())
+                || control.is_cancelled()
+                || cancelled()
+            {
+                return Err(refused());
+            }
+            let route = self
+                .vault_for_identity(target.identity())
+                .map_err(|_| refused())?
+                .ok_or_else(refused)?;
+            if route.local_root() != target.root()
+                || route.space_id() != target.vault().space_id()
+                || route.root_resource_id() != target.vault().resource_id()
+                || route.root_path() != target.remote_root()
+            {
+                return Err(refused());
+            }
+            route
+        }; // No lease survives the HTTP delegation.
+        let stop = || {
+            self.is_revoked()
+                || route.backend().binding().is_revoked()
+                || control.is_cancelled()
+                || cancelled()
+        };
+        let cancellation = crate::vault_custody::VaultUploadCancellation {
+            generation: control.generation(),
+            expected: control.expected(),
+            cancelled: &stop,
+        };
+        match route
+            .backend()
+            .upload_existing_capture(&target, source, edited_len, &cancellation)?
+        {
+            VaultExistingOverwriteOutcome::Verified(verified) => {
+                if stop() {
+                    return Ok(crate::VaultLiveUploadOutcome::NeedsReconciliation {
+                        reason: ErrorKind::Forbidden,
+                    });
+                }
+                Ok(crate::VaultLiveUploadOutcome::Verified(
+                    crate::FreshVaultUpload {
+                        composite: Arc::clone(self),
+                        route,
+                        target: Box::new(target),
+                        verified: Box::new(verified),
+                        control,
+                    },
+                ))
+            }
+            VaultExistingOverwriteOutcome::NeedsReconciliation { reason } => {
+                Ok(crate::VaultLiveUploadOutcome::NeedsReconciliation { reason })
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn with_vault_completion<T>(
+        &self,
+        upload: &crate::FreshVaultUpload,
+        operation: impl FnOnce() -> Result<T, crate::Error>,
+    ) -> Result<T, crate::Error> {
+        let refused = || crate::Error::EditRecoveryUnavailable;
+        let _lease = self.lease_gate.read().map_err(|_| refused())?;
+        self.ensure_active().map_err(|_| refused())?;
+        upload.check_current()?;
+        if !std::ptr::eq(self, Arc::as_ptr(&upload.composite)) {
+            return Err(refused());
+        }
+        let route = self
+            .vault_for_identity(upload.target.identity())
+            .map_err(|_| refused())?
+            .ok_or_else(refused)?;
+        if !Arc::ptr_eq(&route, &upload.route) {
+            return Err(refused());
+        }
+        // Drain this exact vault route, then retain auth and opaque epoch through
+        // bounded local native proof and both durable callbacks. Never HTTP.
+        route
+            .backend()
+            .binding()
+            .with_exclusive_completion(operation)
+    }
+
+    #[cfg(windows)]
+    pub fn remove_vault_route(&self, space: &str, root_id: &str) -> Result<bool, BackendError> {
+        self.vault_routes
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?
+            .remove(space, root_id)
+    }
+
+    #[cfg(windows)]
+    fn vault_for_identity(
+        &self,
+        identity: &[u8],
+    ) -> Result<Option<Arc<crate::vault_routes::VerifiedVaultRoute>>, BackendError> {
+        self.ensure_active()?;
+        let Some(routes) = &self.vault_routes else {
+            return Ok(None);
+        };
+        if let Some(route) = routes.resolve_identity(identity)? {
+            return Ok(Some(route));
+        }
+        // Old ordinary identities must not bypass a newly admitted vault, even
+        // when the server omits an encryption marker or the vault was locked.
+        let location = {
+            let state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
+            let id: [u8; 16] = match identity.try_into() {
+                Ok(id) => id,
+                Err(_) => return Ok(None),
+            };
+            state
+                .files
+                .get(&OpaqueIdentity(id))
+                .map(|entry| (entry.space_id.clone(), entry.path.clone()))
+                .or_else(|| {
+                    state
+                        .directories
+                        .get(&OpaqueIdentity(id))
+                        .map(|entry| (entry.space_id.clone(), entry.path.clone()))
+                })
+        };
+        if let Some((space, path)) = location {
+            if routes.covers_path(&space, &path)? {
+                return Err(BackendError::Unavailable);
+            }
+        }
+        Ok(None)
+    }
+
+    #[cfg(windows)]
+    fn vault_root(
+        &self,
+        space: &str,
+        entry: &raiun_core::backend::RemoteEntry,
+    ) -> Result<Option<Arc<crate::vault_routes::VerifiedVaultRoute>>, BackendError> {
+        if !entry.directory {
+            return Ok(None);
+        }
+        self.ensure_active()?;
+        match &self.vault_routes {
+            Some(routes) => routes.exact_root(space, &entry.path, &entry.id),
+            None => Ok(None),
+        }
+    }
+
+    fn ensure_ordinary_location(&self, space: &str, path: &str) -> Result<(), BackendError> {
+        #[cfg(windows)]
+        if let Some(routes) = &self.vault_routes {
+            if routes.covers_path(space, path)? {
+                return Err(BackendError::Unavailable);
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = (space, path);
+        Ok(())
+    }
+
+    fn known_vault_root(&self, space: &str, path: &str) -> Result<bool, BackendError> {
+        #[cfg(windows)]
+        {
+            match &self.vault_routes {
+                Some(routes) => routes.is_known_root(space, path),
+                None => Ok(false),
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (space, path);
+            Ok(false)
+        }
+    }
+
+    fn has_vault_space_root(&self, space: &str) -> Result<bool, BackendError> {
+        #[cfg(windows)]
+        {
+            match &self.vault_routes {
+                Some(routes) => routes.has_space_root(space),
+                None => Ok(false),
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = space;
+            Ok(false)
+        }
+    }
+
+    fn vault_root_identity(
+        &self,
+        space: &str,
+        entry: &raiun_core::backend::RemoteEntry,
+    ) -> Result<Option<Vec<u8>>, BackendError> {
+        #[cfg(windows)]
+        {
+            Ok(self
+                .vault_root(space, entry)?
+                .map(|route| route.backend().root_identity().to_vec()))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (space, entry);
+            Ok(None)
+        }
+    }
+
+    fn accepted_encrypted_root(
+        &self,
+        space: &str,
+        entry: &raiun_core::backend::RemoteEntry,
+    ) -> Result<bool, BackendError> {
+        #[cfg(windows)]
+        {
+            Ok(self.vault_root(space, entry)?.is_some())
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (space, entry);
+            Ok(false)
+        }
+    }
+
+    fn vault_parent_uncached(&self, space: &str, path: &str) -> Result<bool, BackendError> {
+        #[cfg(windows)]
+        {
+            match &self.vault_routes {
+                Some(routes) => routes.has_direct_child(space, path),
+                None => Ok(false),
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (space, path);
+            Ok(false)
+        }
+    }
+
     /// Whether this backend has been revoked and must not accept new work.
     pub fn is_revoked(&self) -> bool {
         self.revoked.load(Ordering::Acquire)
@@ -1163,6 +1908,11 @@ impl OpenCloudPlaceholderBackend {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.revoked.store(true, Ordering::Release);
+        }
+        #[cfg(windows)]
+        if let Some(routes) = &self.vault_routes {
+            // Every later vault permit fails before auth owner changes keys.
+            let _ = routes.revoke_all();
         }
         // Wait for current bounded reads to finish or observe revocation. This
         // makes return from revoke a barrier before the auth owner mutates the
@@ -1216,6 +1966,33 @@ impl OpenCloudPlaceholderBackend {
         cancellation: &CancellationToken,
     ) -> Result<Vec<PlaceholderChild>, BackendError> {
         check_cancel(cancellation)?;
+        // Callers retain the ordinary read lease through catalogue admission.
+        self.ensure_ordinary_location(&directory.space_id, &directory.path)?;
+        #[cfg(windows)]
+        let vault_children = {
+            let mut children = HashMap::new();
+            for (_, entry) in &entries {
+                if entry.directory {
+                    if let Some(route) = self.vault_root(&directory.space_id, entry)? {
+                        children.insert(
+                            (entry.path.clone(), entry.id.clone()),
+                            route.backend().root_identity(),
+                        );
+                        continue;
+                    }
+                }
+                if entry.encrypted
+                    || self.vault_routes.as_ref().is_some_and(|routes| {
+                        routes
+                            .is_known_root(&directory.space_id, &entry.path)
+                            .unwrap_or(true)
+                    })
+                {
+                    return Err(BackendError::Unavailable);
+                }
+            }
+            children
+        };
         let catalog_scope = self.catalog_scope_snapshot()?;
         let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
         self.client
@@ -1226,6 +2003,21 @@ impl OpenCloudPlaceholderBackend {
                 let mut children = Vec::with_capacity(entries.len());
                 for (name, entry) in entries {
                     check_cancel(cancellation)?;
+                    #[cfg(windows)]
+                    if let Some(identity) =
+                        vault_children.get(&(entry.path.clone(), entry.id.clone()))
+                    {
+                        children.push(PlaceholderChild {
+                            name,
+                            identity: identity.to_vec(),
+                            metadata: PlaceholderMetadata {
+                                is_directory: true,
+                                length: 0,
+                            },
+                            last_write_time: 0,
+                        });
+                        continue; // never persist a vault route in the ordinary catalogue
+                    }
                     let durable_binding = catalog_scope.as_ref().map(|scope| {
                         if entry.directory {
                             let identity = binding_identity(
@@ -1374,11 +2166,11 @@ impl OpenCloudPlaceholderBackend {
         let staged_space_roots = if matches!(&namespace, NamespaceDirectory::Spaces { .. }) {
             let mut names = std::collections::HashSet::new();
             let mut staged = Vec::new();
-            for space in spaces
-                .iter()
-                .filter(|space| !space.personal && !space.encrypted)
-            {
+            for space in spaces.iter().filter(|space| !space.personal) {
                 check_cancel(cancellation)?;
+                if space.encrypted && !self.has_vault_space_root(&space.id)? {
+                    continue;
+                }
                 let root = self
                     .client
                     .stat_discovered_space_root_with_context(
@@ -1389,14 +2181,19 @@ impl OpenCloudPlaceholderBackend {
                         },
                     )
                     .map_err(|error| self.reject_cached_cloud_error(error))?;
-                if root.encrypted {
+                let vault_identity = self.vault_root_identity(&space.id, &root)?;
+                let known_vault = self.known_vault_root(&space.id, "/")?;
+                if known_vault && vault_identity.is_none() {
+                    return Err(BackendError::Unavailable);
+                }
+                if (space.encrypted || root.encrypted) && vault_identity.is_none() {
                     continue;
                 }
                 if !root.directory || !valid_remote_id(&root.id) {
                     return Err(BackendError::Unavailable);
                 }
                 let name = checked_space_display_name(&space.name, &space.id, &mut names)?;
-                staged.push((space.id.clone(), root.id, name));
+                staged.push((space.id.clone(), root.id, name, vault_identity));
                 if staged.len() > MAX_DIRECTORY_CHILDREN {
                     return Err(BackendError::Unavailable);
                 }
@@ -1409,7 +2206,7 @@ impl OpenCloudPlaceholderBackend {
                 personal_root_id,
                 deadline,
             )?;
-            for (space_id, root_id, _) in &staged {
+            for (space_id, root_id, _, vault_identity) in &staged {
                 check_cancel(cancellation)?;
                 let spaces_by_id = spaces
                     .iter()
@@ -1425,8 +2222,19 @@ impl OpenCloudPlaceholderBackend {
                         },
                     )
                     .map_err(|error| self.reject_cached_cloud_error(error))?;
-                if !root_after.directory || root_after.encrypted || root_after.id != *root_id {
+                if !root_after.directory
+                    || root_after.id != *root_id
+                    || (vault_identity.is_none()
+                        && (spaces_by_id.encrypted
+                            || root_after.encrypted
+                            || self.known_vault_root(space_id, "/")?))
+                {
                     return Err(BackendError::Unavailable);
+                }
+                if let Some(expected) = vault_identity {
+                    if self.vault_root_identity(space_id, &root_after)?.as_ref() != Some(expected) {
+                        return Err(BackendError::Unavailable);
+                    }
                 }
             }
             Some(staged)
@@ -1575,8 +2383,22 @@ impl OpenCloudPlaceholderBackend {
                             space == &personal_space_id && root == &personal_root_id
                         });
                         let mut children = Vec::new();
-                        for (space_id, root_id, name) in staged_space_roots.unwrap_or_default() {
+                        for (space_id, root_id, name, vault_identity) in
+                            staged_space_roots.unwrap_or_default()
+                        {
                             check_cancel(cancellation)?;
+                            if let Some(identity) = vault_identity {
+                                children.push(PlaceholderChild {
+                                    name,
+                                    identity,
+                                    metadata: PlaceholderMetadata {
+                                        is_directory: true,
+                                        length: 0,
+                                    },
+                                    last_write_time: 0,
+                                });
+                                continue; // verified vault route never enters ordinary persistence
+                            }
                             state.location_labels.insert(
                                 (space_id.clone(), root_id.clone()),
                                 format!("Spaces / {name}"),
@@ -1753,10 +2575,39 @@ impl OpenCloudPlaceholderBackend {
 }
 
 impl PlaceholderBackend for OpenCloudPlaceholderBackend {
+    #[cfg(windows)]
+    fn with_vault_edit_capture(
+        &self,
+        identity: &[u8],
+        callback: &mut dyn FnMut(&dyn crate::ExistingVaultEditCapture) -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        // Keep account/root replacement and new encrypted-route admission
+        // drained through the callback and protected durable readback. Resolve
+        // the exact Arc only after this outer lease; inner guards stay lexical.
+        let _lease = self
+            .lease_gate
+            .read()
+            .map_err(|_| BackendError::Unavailable)?;
+        self.ensure_active()?;
+        let route = self
+            .vault_for_identity(identity)?
+            .ok_or(BackendError::Unavailable)?;
+        route.backend().with_vault_edit_capture(identity, callback)
+    }
+
+    #[cfg(windows)]
+    fn requires_hydration_inventory(&self, identity: &[u8]) -> Result<bool, BackendError> {
+        Ok(self.vault_for_identity(identity)?.is_some())
+    }
+
     fn prepare_edit_binding<'a>(
         &'a self,
         identity: &[u8],
     ) -> Result<Box<dyn PreparedEditBinding + 'a>, BackendError> {
+        #[cfg(windows)]
+        if self.vault_for_identity(identity)?.is_some() {
+            return Err(BackendError::Unavailable);
+        }
         let lease = self
             .lease_gate
             .read()
@@ -1799,6 +2650,10 @@ impl PlaceholderBackend for OpenCloudPlaceholderBackend {
     }
 
     fn lookup(&self, identity: &[u8]) -> Result<Option<PlaceholderMetadata>, BackendError> {
+        #[cfg(windows)]
+        if let Some(route) = self.vault_for_identity(identity)? {
+            return route.backend().lookup(identity);
+        }
         let _lease = self
             .lease_gate
             .read()
@@ -1845,6 +2700,12 @@ impl PlaceholderBackend for OpenCloudPlaceholderBackend {
         identity: &[u8],
         cancellation: &CancellationToken,
     ) -> Result<Box<dyn PreparedEnumeration + 'a>, BackendError> {
+        #[cfg(windows)]
+        if let Some(route) = self.vault_for_identity(identity)? {
+            return route
+                .backend()
+                .prepare_enumeration_owned(identity, cancellation);
+        }
         let lease = self
             .lease_gate
             .read()
@@ -1864,6 +2725,12 @@ impl PlaceholderBackend for OpenCloudPlaceholderBackend {
         output: &mut [u8],
         cancellation: &CancellationToken,
     ) -> Result<usize, BackendError> {
+        #[cfg(windows)]
+        if let Some(route) = self.vault_for_identity(identity)? {
+            return route
+                .backend()
+                .read_range(identity, offset, output, cancellation);
+        }
         let _lease = self
             .lease_gate
             .read()
@@ -1950,6 +2817,12 @@ impl PlaceholderBackend for OpenCloudPlaceholderBackend {
         identity: &[u8],
         cancellation: &CancellationToken,
     ) -> Result<Box<dyn PreparedFetchSession + 'a>, BackendError> {
+        #[cfg(windows)]
+        if let Some(route) = self.vault_for_identity(identity)? {
+            return route
+                .backend()
+                .prepare_fetch_session_owned(identity, cancellation);
+        }
         let lease = self
             .lease_gate
             .read()
@@ -1983,6 +2856,12 @@ impl PlaceholderBackend for OpenCloudPlaceholderBackend {
         range: FetchRange,
         cancellation: &CancellationToken,
     ) -> Result<Box<dyn PreparedFetch + 'a>, BackendError> {
+        #[cfg(windows)]
+        if let Some(route) = self.vault_for_identity(identity)? {
+            return route
+                .backend()
+                .prepare_fetch_owned(identity, range, cancellation);
+        }
         let lease = self
             .lease_gate
             .read()
@@ -2022,6 +2901,7 @@ impl OpenCloudPlaceholderBackend {
             return Err(BackendError::Unavailable);
         }
         self.ensure_active()?;
+        self.ensure_ordinary_location(&binding.space_id, &binding.path)?;
         if range.end < range.offset || range.len() > MAX_REQUEST_BYTES {
             return Err(BackendError::InvalidRange);
         }
@@ -2443,7 +3323,7 @@ fn valid_remote_path(space_id: &str, root_id: &str, path: &str, allow_root: bool
                 && !path.split('/').any(|part| matches!(part, "." | "..")))
 }
 
-fn direct_child_name<'a>(parent: &str, child: &'a str) -> Option<&'a str> {
+pub(crate) fn direct_child_name<'a>(parent: &str, child: &'a str) -> Option<&'a str> {
     let parent = parent.trim_end_matches('/');
     let child = child.trim_end_matches('/');
     let remainder = if parent.is_empty() {
@@ -2458,7 +3338,7 @@ fn direct_child_name<'a>(parent: &str, child: &'a str) -> Option<&'a str> {
     }
 }
 
-fn valid_windows_component(value: &str) -> bool {
+pub(crate) fn valid_windows_component(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 255
         && value != "."
@@ -2739,6 +3619,110 @@ mod namespace_tests {
             backend.register_composite_root(),
             Err(BackendError::Unavailable)
         );
+        stop.store(true, Ordering::Release);
+        worker.join().unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn restored_vault_exclusions_skip_ordinary_catalog_without_unlocking() {
+        let (server, worker, stop) = start_namespace_fixture();
+        let client = Arc::new(OpenCloudClient::new(&server, "test-token".into()).unwrap());
+        let provider = ProviderScope::new(
+            &client,
+            "profile-test".into(),
+            derive_account_id(&server, "personal-drive"),
+            client.server_origin().unwrap(),
+        )
+        .unwrap();
+        let local_root = crate::ConfiguredRootIdentity {
+            volume_serial: 7,
+            file_index: 19,
+        };
+        let scope = ProviderIdentityCatalogScope::new(
+            &provider,
+            local_root,
+            "personal-drive",
+            "personal-root",
+        )
+        .unwrap();
+        let binding = |path: &str, resource: &str| {
+            let identity = binding_identity(
+                &scope,
+                "file",
+                &["personal-drive", "personal-root", path, resource],
+            );
+            ProviderIdentityBinding::File {
+                identity: *identity.as_bytes(),
+                space_id: "personal-drive".into(),
+                root_resource_id: "personal-root".into(),
+                path: path.into(),
+                remote_id: resource.into(),
+                etag: "\"v1\"".into(),
+                size: 3,
+            }
+        };
+        let covered = binding("/Vault/secret.txt", "covered-resource");
+        let sibling = binding("/ordinary.txt", "ordinary-resource");
+        let covered_id = validate_catalog_binding(&scope, &covered).unwrap();
+        let sibling_id = validate_catalog_binding(&scope, &sibling).unwrap();
+        let catalogue = Arc::new(MemoryIdentityCatalog::default());
+        catalogue.upsert(&scope, &covered).unwrap();
+        catalogue.upsert(&scope, &sibling).unwrap();
+        let backend = OpenCloudPlaceholderBackend::new_with_identity_catalog(
+            client,
+            provider,
+            local_root,
+            catalogue.clone(),
+        )
+        .unwrap();
+        backend
+            .restore_vault_exclusions(local_root, &[("personal-drive".into(), "/Vault".into())])
+            .unwrap();
+        backend.register_composite_root().unwrap();
+        assert!(backend.lookup(covered_id.as_bytes()).unwrap().is_none());
+        assert!(
+            backend
+                .prepare_fetch_session(covered_id.as_bytes(), &CancellationToken::new())
+                .is_err()
+        );
+        assert_eq!(
+            backend
+                .lookup(sibling_id.as_bytes())
+                .unwrap()
+                .unwrap()
+                .length,
+            3
+        );
+        let routes = backend.vault_routes.as_ref().unwrap();
+        assert!(
+            routes
+                .covers_path("personal-drive", "/Vault/secret.txt")
+                .unwrap()
+        );
+        assert!(
+            routes
+                .resolve_identity(covered_id.as_bytes())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            routes
+                .exact_root("personal-drive", "/Vault", "covered-resource")
+                .unwrap()
+                .is_none()
+        );
+        let durable = catalogue.load(&scope).unwrap();
+        for original in [&covered, &sibling] {
+            let actual = durable
+                .iter()
+                .find(|row| row.identity() == original.identity())
+                .unwrap();
+            assert_eq!(
+                serde_json::to_vec(actual).unwrap(),
+                serde_json::to_vec(original).unwrap()
+            );
+        }
         stop.store(true, Ordering::Release);
         worker.join().unwrap();
     }

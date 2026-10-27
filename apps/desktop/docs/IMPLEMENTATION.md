@@ -10,6 +10,255 @@ below are historical engineering evidence, not semantic release versions or
 claims that each workflow is verified on this beta. Local evidence/output paths
 refer to maintainer archives that are not part of this public source tree.
 
+## Isolated Desktop updater source — 26 October 2026
+
+The isolated updater source adds daily and manual checks for strict
+`desktop-v<SemVer>` GitHub releases, a beta/stable preference, a per-tag Later
+choice, release notes displayed as plain text, and explicit Download and Install
+actions. It validates the selected release's bounded `desktop-update.json`,
+requires an exact OS/architecture/bundle target and asset URL, and uses Tauri's
+version-bound signature verification. Install waits for the existing agent
+shutdown, socket-removal, and owned-process-exit checks before invoking Tauri.
+The release protocol and setup limits are in
+[Desktop app updates](DESKTOP-UPDATES.md).
+
+Linux verification passed for rustfmt, strict all-target Clippy, 36 Tauri tests,
+210 shell tests, and the TypeScript/Vite build. An offline Windows-target
+type-check stopped in `aws-lc-sys` before reaching app source because the host
+does not have `x86_64-w64-mingw32-gcc`; no toolchain was installed. The published
+`desktop-v0.7.0-beta.1` assets have no updater manifest or signed update package,
+and this isolated source has no public key configured. Therefore no signed
+download/install or package-upgrade claim is made. The active repository,
+installed apps, and public releases remain unchanged.
+
+## Latest local source work — 25 October 2026 JST
+
+Windows vault access remains disabled in production. The isolated native broker
+has passed manual remember, lock, saved unlock, pathless Forget while staying
+unlocked, and final lock. That component run used no encrypted file payload;
+broker payload and ordinary lock/reopen acceptance remain pending. The native
+registered-vault component now passes external enumeration, a verified 65,537-byte
+decrypted read, route retirement and cleanup with the final on-disk range query
+empty. Its exclusive cleanup-handle writer exclusion check also passes. The
+source accepts only the documented Cloud tag family while retaining file
+identity, clean-state and custody checks.
+
+The same run stopped at the dirty negative fixture: its provider-process write
+produced no additional observed close notification. The cleanup-refusal and dirty
+byte-preservation assertions were not reached, and the Agent payload case did
+not run. A fixture-only correction now performs the real edit in a bounded
+external client; native verification is pending. The prior empty-environment and
+stale drive-letter harness failures are retained separately. The successful run
+verified original executable hashes, ordinary-user context, zero owned processes
+at closure and normal guest shutdown; no package or restart pass is inferred.
+
+A normal process restart is a concrete remaining activation blocker. Retained
+registrations deliberately start with incomplete hydration history, and vault
+opaque callback identities are currently held only in memory. The existing
+reconnect scan cannot establish ownership or complete custody. Protected,
+account/vault/physical-root-bound write-ahead records and validated restore
+integration are required; the incomplete-history guard stays in place.
+
+The local source now contains a native-read-only Windows vault interface,
+including manual/saved unlock, Forget, Lock and a guarded existing drive opener.
+Unsupported in-app browsing, encrypted offline copies and edit/copy actions are
+suppressed only for the explicit native mode; Linux behavior is unchanged.
+TypeScript, the 195-case UI candidate suite and UI build pass. The optional mode
+is not advertised by the disabled production backend. A separate bounded DPAPI
+custody document primitive also compiles and passes strict GNU linting; native
+storage execution and its write-ahead/restore integration remain pending.
+
+The latest isolated installed Windows candidate is installer SHA256
+`2955f944e48af9a982d5f33a11948dc095c3488a1e3e76b7ebe7451c864786f1`.
+Its offline Media wording, proxy persistence and normal tray Quit checks passed;
+the app is installed and closed. These later source changes are not installed,
+and no new laptop installation or publication is implied. Earlier dated entries
+below describe their own frozen candidates and do not supersede this status.
+
+## Local next-release packages — 23 October 2026 JST
+
+The frozen `4fb6b43` candidate now has an unsigned Windows installer built from
+non-test Agent/CLI/Tauri binaries. An isolated ordinary-user fresh installation
+passed installed-file hash/version checks, offline account creation/switching,
+selection persistence after relaunch and two normal tray quits. The app and
+agent were absent afterward and the VM shut down normally. This does not verify
+prior-version upgrade or authenticated cloud/file-manager use. Earlier native
+save/lifecycle and account-isolation component evidence remains separate.
+
+The same source built a Linux tarball and AppImage on Ubuntu 24.04/glibc 2.39.
+Exact tarball and extracted AppImage payloads displayed the revised Transfers
+and Media Include explanations in isolated UI checks, with no remote writes.
+Normal Quit and independent closure were verified. Original harness failures
+(counter comparison and cleanup permissions) remain recorded; they are not
+reported as an overall successful test run. Direct AppImage FUSE/file-manager
+integration was not exercised. These packages are local candidates, with no
+publication or new laptop installation.
+
+Later source changes are separate from these frozen packages. Six focused
+ordinary-user native checks now pass for protected existing-store inventory,
+SQLite reopen, exact source receipts, account/source separation, folder sync and
+media worker operations. The first test's wrapper parser failure is preserved
+separately from its verified native pass; it was not rerun. The VM shut down
+normally. Source exclusions include disabled media jobs and restored pairs.
+
+The non-test candidate now enables folder sync, media backup and their existing
+pause controls. Unit-test builds remain inactive. Final source gates and an
+exact installer upgrade/offline GUI check are next; the previously accepted b7
+installer remains installed and closed in the VM. This is not authenticated
+packaged cloud acceptance or whole-category completion. Vault unlock remains
+unavailable in that Windows package and its capability stays disabled.
+
+## Latest local Windows acceptance — 24 October 2026 JST
+
+The corrected non-test folder/media candidate (`4a60be3c` source archive,
+installer SHA256 `2704c192a8c2718505b0ab92a5925c8c8ef5b3b80652523e8617affdadfdc22a`)
+passed an ordinary-user offline upgrade, exact installed payload/version checks,
+sign-in-required startup, account selection and persistence after reopening.
+Both normal tray quits left zero Raiun processes; the VM shut down normally.
+It remains installed and closed in that isolated VM. This supersedes b7 as the
+latest local installed candidate, with earlier binaries and failure evidence
+preserved. Nothing new is published or installed on the laptop.
+
+The first activated package exposed a signed-out collection refresh error; the
+corrected UI skips authenticated pair queries for disconnected Windows accounts
+while preserving Linux behavior. Signed-out Media secondary wording is still
+confusing and is a nonblocking known limitation. Connected packaged transfers
+were not tested. The six native component passes and full source gates remain
+separate evidence; Windows encrypted native access is still incomplete.
+
+## Local Windows encryption work — 24 October 2026 JST
+
+The next source batch connects verified vault reads to the existing single drive
+backend, keeps historical encrypted locations out of the ordinary identity
+catalogue, and shares one vault-session coordinator across account profiles.
+Focused Windows component checks passed for verified reading and catalogue
+exclusions. The hydration source also passed formatting, full workspace linting
+and 959 Linux tests (14 ignored), with Windows cross-compilation tracked
+separately. These checks do not establish packaged or native mounted-vault use.
+
+Native hydration now records exact local file ownership before transferring
+plaintext. Disconnect retains revoked routes through local cleanup and refuses
+success when edits, uncertain state or cleanup errors remain. This lifecycle is
+joined to typed broker unlock/lock requests behind a disabled production gate.
+Unlock verifies current account/root and fresh vault metadata, persists the
+historical exclusion before route installation, and clears the session on a
+failed preparation. Per-vault lock retains cleanup ownership on failure and
+clears scoped keys even when local cleanup cannot finish. Windows compilation
+and strict linting passed for that request/cleanup batch.
+
+The following source adds a pinned parent-directory population request after
+route installation. It requests a future enumeration; it does not prove an
+immediate Explorer refresh or remove cached children. The next source also resolves nested remote parents only through an exact
+catalogue identity and current root label; native identity and fresh server
+revalidation remain required. Native refresh, a complete mounted read/lock workflow,
+cached decrypted-name visibility and restart cleanup coverage remain open.
+A retained registration starts with unknown historical hydration custody, and
+new vault activation is refused before password verification in that state.
+This conservative guard prevents falsely certifying empty cleanup; it does not
+remove or hide old plaintext/names. Durable historical custody is still pending.
+User-facing vault unlock/lock stays disabled. No new installer or public release
+is implied. The installed, closed VM candidate remains the 2704 build.
+
+The next-source Media wording now distinguishes a reachable signed-out agent
+from an unavailable agent; 22 focused UI tests and the UI build passed. That
+wording correction is not yet part of the installed candidate above.
+
+## Local Windows startup control — 24 October 2026 JST
+
+The next source connects the existing Start at login control to an explicit
+current-user opt-in. Status only reads the setting; installation, startup and
+these tests never enable it. The command targets the actual packaged
+`raiun-desktop-shell.exe`, is fully quoted, and respects the Windows Run command
+length limit. Unknown or foreign entries are not overwritten or removed.
+Concurrent changes can make the outcome uncertain; an error does not promise
+that every attempted change was rolled back.
+
+Four pure policy/format tests and Windows compilation/linting pass. The combined
+Linux workspace gates pass with 963 tests and 14 ignored. Actual Windows startup
+activation and packaged GUI acceptance remain unverified; the installed 2704
+candidate is unchanged. The encrypted-folder native diagnostic now observes
+successful directory population, but its external content read still fails;
+read and lock-cleanup acceptance are not complete.
+
+## Windows cloud-drive candidate — 23 October 2026 JST
+
+The isolated ordinary-user Windows save and conditional lifecycle checks passed
+on the exact 9219 source: ordinary OS saving reached verified remote readback,
+native in-sync marking, all identity postchecks and protected local completion;
+reopen/lifecycle also passed. The non-test candidate now enables the existing
+account-bound provider and verified-save path. Ordinary unit tests remain
+kernel-inactive and ignored native fixtures retain explicit per-instance opt-in.
+Actual non-test package installation and offline GUI checks passed as described
+above; authenticated native file-manager package acceptance remains unclaimed. No new Windows release has been published, and no real
+cloud account or files were used for acceptance. Folder/media candidate activation is described above. Vault capability remains disabled.
+
+## Windows accounts — 23 October 2026 JST
+
+The non-test candidate broker now routes independent profile runtimes, persists
+selection before publishing it, refreshes every account and joins every runtime
+on shutdown. Selecting an account does not log out the others. A persistent
+private-file ownership lock spans registry access, pipe reconnections and all
+shutdown joins. Configure requires an authenticated session before reserving a
+root; exclusions are persisted before configuration and retained after failure
+or logout. Protected metadata inventory includes logged-out registered roots;
+metadata alone cannot authorize account restoration or native registration.
+
+Native component tests have passed profile/session isolation, foreign-scope
+refusal and registry replacement/reopen. Four focused native checks also passed
+logged-out root inventory, lifetime owner exclusion, issuer-bound metadata decoding
+and integrated broker routing/persistence/reopen. Account switching is now exposed
+only by the non-test broker; ordinary unit builds remain inactive. The exact
+non-test installer and sign-in-first account dialog passed focused offline
+package acceptance; authenticated live-account acceptance remains unclaimed. Cross-account folder/media source admission now has focused native acceptance;
+exact candidate package acceptance remains pending.
+These source changes are unpublished and do not change the installed beta.
+
+## Windows folder and media integration — 23 October 2026 JST
+
+The Windows engine retains private state, cache and media-staging directories
+with its guarded SQLite owner. Its fixed `engine.sqlite3` uses rollback
+journaling; Linux retains WAL. The account-scoped settings document compares
+exact previous bytes, full account identity and revision before publication,
+preserving folder pairs, pause settings, media jobs and retired pair IDs.
+
+The existing Windows command worker owns ordinary-folder operations independently
+of Cloud Files registration. One focused ordinary-user native workflow passed
+initial download, conditional edit upload, pause/resume, exclusion, removal and
+runtime reopen while preserving local data. This is component acceptance;
+non-test candidate capability flags are enabled and packaged GUI acceptance is pending.
+Account transitions revoke subsequent writes and drain the worker before
+credential replacement. Source and destination handles reject reparse points;
+immutable source handles span upload and verified readback.
+
+Media source traversal uses a duplicate of a pinned directory handle. Protected
+staging uses existing private-file APIs, flushes and no-replace publication,
+then retains an immutable reader through attempt creation, upload, readback and
+receipt commit. Cleanup checks the exact file identity; uncertain results retain
+recovery. Local recovery can use the held account-bound engine database instead
+of reopening SQLite by path. Existing Windows recovery RPCs check the saved job,
+account and revision before and after the read.
+
+Explicit media runs now have gated prepare → queued acknowledgement → execution
+on that same worker. Preparation checks enabled state, global/Space pause,
+recovery, overlap and the live destination identity. The admitted source pin
+stays held, and Engine compares its identity with the opened root before scanning.
+Cancellation checks account generation, revocation and source-path validity.
+Idle media selection also reuses this worker, durable run status and existing
+intervals; it does not replay uncertain attempts or create another scheduler.
+Fresh admission does not claim persisted historical source identity across restarts.
+
+Early Windows compilation now covers idle scheduling. Two ordinary-user MSVC
+engine cases passed normal media import/verified updates and collision/lost-response
+recovery across engine reopen. The actual ordinary-user worker-control case also passed stability waiting,
+verified upload, pause and account-scoped recovery checks. This is not GUI or
+packaged acceptance. Media execution and its UI capability are enabled in the non-test candidate;
+exact package acceptance is pending and no new public release is claimed.
+
+Windows also has a read-only vault-inspection path using existing authenticated
+Graph/DAV metadata. It grants no unlocked session, remembered password, verified
+cryptographic state or decrypted native route; the vault UI capability stays off.
+Inspection does not unlock a vault or authorize encrypted transfers.
+
 ## Next-release Windows save-back work — 23 October 2026 JST
 
 Windows save-back now has a fresh, read-only verification result that binds the
@@ -18,9 +267,12 @@ and content hash, with authorization checked again after readback. An upload
 success or cached journal outcome cannot construct this result. A leased
 existing-identity catalog refresh and guarded native completion operation build
 on that proof. The native operation pins the exact local file, checks its full
-hash and saved nonzero USN, then asks Windows to mark it in sync only if the USN
-still matches. Catalog publication and OS completion share the existing
-revocation/token fence. The fresh callback now carries its actual pinned local
+hash and two matching positive USN observations. The current candidate holds
+the existing publication/token fence before opening an exclusive protected file
+handle and retains both through proof, OS marking and durable acknowledgement.
+The shared fence also excludes provider payload writes; the protected reference
+excludes ordinary writers. OS marking passes a null optional USN pointer without a USN
+comparison as this design's sole path, never a failure fallback or retry. The fresh callback now carries its actual pinned local
 path and opaque identity, separately from the remote path. The worker joins that
 handoff to a fresh readback proof, native completion, and a protected terminal
 local-acknowledgement event. That event resolves only the exact immutable record;
@@ -29,8 +281,21 @@ same account generation. Remote verification alone leaves recovery unresolved.
 Publication, OS completion, and the durable event share the same account fence;
 a partial failure keeps recovery available. Retained acknowledged snapshots still
 count toward the existing journal quota; this change does not delete them. Focused portable integration checks
-pass. The joined source still requires native compile and focused save/restart
-acceptance before production activation; both activation switches remain off.
+pass. Actual MSVC compilation and linking now pass, but the focused ordinary-user
+save case still fails at Windows' final in-sync comparison (`0x80070179`) after
+verified upload/readback. An access-mask experiment did not resolve it and was
+reverted. Recovery remains retained, lifecycle acceptance was not advanced after
+the failure, and both activation switches remain off. Actual numeric diagnostics
+showed both pre-CAS reads at USN 150231648 and a single read after refusal at
+150240984. This establishes journal movement, not the reason or a successful fix.
+Posting pending NTFS journal reasons before the first snapshot was tested and
+also failed at the same comparison; that experiment has been removed. The close
+callback was captured and journaled successfully in that run. A later protected
+handle with the same OS comparison also refused completion. The current combined
+content-exclusion design is independently reviewed but still requires native
+writer-exclusion, normal save and lifecycle acceptance. Recovery remains retained;
+there is no post-proof refresh or retry, and no successful native completion is
+claimed.
 
 ## Next-release media recovery — 23 October 2026 JST
 
@@ -45,8 +310,10 @@ and compares its bytes with the saved attempt hash without reading or changing
 the original/staged copy. A match is a point-in-time observation; it does not
 commit a receipt, resume the schedule, clear recovery, or replay an upload.
 Legacy/unbound attempts remain inspection-only. Focused engine, agent and UI
-checks pass; exact-package native acceptance remains pending. This work is not
-in the published beta or the frozen Windows installer candidate.
+checks pass. The exact Linux candidate's single native action passed with source
+and recovery unchanged, no additional PUT/MOVE/DELETE, and normal app closure.
+That acceptance is scoped to this action. This work is not in the published beta
+or the older frozen Windows installer candidate.
 
 
 ## Current recorded state — R180 installed and left closed, 18 October 2026 JST
@@ -1899,3 +2166,928 @@ No whole completion-checklist category is promoted by these results.
 ### 21 October 2026, 08:50 UTC — laptop test candidate R200
 
 The exact R200 archive (`bd7df5c8c1e0a5f58e50748b65ed4401ba2164f150052ee685739f8670b5d6f4`) is now installed on the laptop after source gates, isolated exact-package installer qualification and bounded native VM checks. Installed app, agent, CLI, icon and manifest hashes match the approved archive. Previous R180 binaries, icon, manifest and desktop entry are preserved under `outputs/install-candidates/r200/20261021T085000Z/previous-R180/`. The app was not launched; no matching product process was observed before or after installation. Six same-UID executable links were unreadable, so the process-image scan was not exhaustive. No accounts, credentials, cache contents or cloud files were changed by this installation. This is an installed test candidate, not a claim of complete beta or C01–C10 acceptance. Receipt: `outputs/install-candidates/r200/20261021T085000Z/installed-state.json`.
+
+### Windows bandwidth controls (local next-release work, 24 October)
+
+Windows now implements the existing upload/download limits editor and account-bound
+control requests. Content clients for the drive, folder/media work and recovery
+share one transfer budget; sign-in and metadata requests remain outside that
+budget. Preferences use a separate protected record with exact account-scope and
+revision checks. A newly signed-out or not-yet-verified account shows unlimited
+defaults and cannot save limits. Already verified offline accounts may edit their
+own retained preferences.
+
+Source checks and the focused portable service test pass. Native Windows
+preferences persistence, effective aggregate throttling and installed-package
+acceptance are still pending; this source work has not been released.
+
+### Windows proxy settings (local next-release work, 24 October)
+
+The Windows settings page now supports a proxy choice while signed out. Save a
+system, direct or credential-free HTTP(S) proxy route before the next sign-in.
+An existing session keeps its immutable route through token refresh and content
+requests; changing the preference requires signing out first. Drive, folder/media,
+recovery and Personal verification clients now consistently use that session route.
+
+Preferences have a separate protected, revision-checked record. A pending choice
+binds only after verified account metadata. A previous account's bound preference
+is preserved but remains inactive for a new sign-in until an explicit signed-out
+settings change replaces it. This does not import Windows proxy policy beyond the
+existing HTTP client's system-proxy behavior.
+
+Source checks and two focused portable preference tests pass. The Windows agent
+RPC test compiles but has not run natively. Native routing, protected persistence
+and installed-package acceptance remain pending; this work is unpublished.
+
+### Windows practical beta acceptance queue (updated 25 October)
+
+The next candidate remains unpublished. Startup control, bandwidth limits and
+signed-out proxy settings have source and focused native component evidence.
+The installed unsigned candidate `2955f944…` passed the signed-out controls/tray
+package checks below and is closed. Startup was never activated. This package
+predates the current vault changes and does not establish their package acceptance.
+
+Encrypted cleanup (C05) now has an actual Windows writer-exclusion pass and
+clean-file cleanup pass. The native fixture read and verified 65,537 bytes,
+retired the route, and proved the file had no remaining on-disk ranges. Earlier
+USN/tag-check failures and their roots remain preserved. The original dirty-edit
+fixture failed before its cleanup assertion because its provider-process write
+did not produce the required close notification. Its external-client replacement
+now passes natively (r105), with real modified-file detection and exact bytes
+preserved. No production dirty check or cleanup guard was relaxed.
+
+The cleanup method holds continuous exclusive protected file access and checks
+identity, dirty ranges, route retirement and post-cleanup residency. Its single
+update omits the optional atomic metadata-USN comparison; that limitation remains
+explicit in the Cloud Files crate's `SAFETY.md`. There is no production fallback
+or force-dehydrate. After r107 native acceptance, the local non-test candidate
+enables read-only native vault capability; the new exact package is still under
+verification. The older installed candidate remains closed.
+
+Retained-root catalogue and hydration-history restoration is now implemented
+and source-qualified; protected storage also passed native tests. The r107
+broker fixture passed normal new-Agent reconnection after completed Lock, with
+no forgotten secret restored and a new verified read/Lock. Missing or incomplete
+history still refuses vault admission. A process/crash restart with resident
+plaintext is not claimed.
+
+Remembered unlock (C06) now has the disabled source foundation and native
+credential-custody component evidence below. The actual broker lifecycle fixture now passes the
+credential/session flow, including saved unlock and Forget. Its empty lock
+inventory cannot establish payload cleanup or full C06 completion. The current
+r107 payload run now passes manual/saved reads, explicit locked-read refusal,
+manual reopening/second Lock and normal new-Agent reconnection/read/Lock.
+Earlier locked-read and later-close failures remain preserved with their fixes. Reuse unchanged evidence and preserve failed roots,
+recovery and the installed app. No testing-agent permission restriction remains;
+source checks still do not substitute for native or exact-package results.
+
+Windows controls component acceptance (24 October): five focused tests now pass
+under the isolated ordinary Windows test user. They cover proxy RPC/profile and
+revision checks, pending proxy ownership/validation, shared bandwidth-controller
+updates/cancellation, and synthetic protected-preferences DPAPI CAS/reopen/domain
+isolation. The VM shut down normally afterward. This advances the runtime evidence
+above; it does not prove measured network throughput, on-wire proxy routing,
+startup activation or installed-package behavior. The encrypted-access test remains
+separate and stopped.
+
+Windows offline package acceptance (24 October): the local unsigned candidate
+built from source `f4b1b24` installed successfully over the prior isolated-VM
+candidate. Exact installed payloads were verified. Synthetic profiles and selection
+survived, Media showed correct signed-out guidance, proxy System-to-Direct save
+survived one reopen, and unbound bandwidth remained unlimited with saving disabled.
+Both normal tray quits left zero application processes. Neither startup entry was
+enabled; Windows shut down normally and the prior candidate remains preserved for
+rollback. This candidate is installed and closed only in the isolated VM. No
+publication, laptop installation, connected transfer or encrypted-file acceptance
+is implied.
+
+Windows transport component acceptance (24 October): four existing tests now pass
+under the isolated ordinary Windows user. Synthetic loopback requests verify the
+explicit proxy route for WebFinger/OIDC/code exchange/refresh, Graph/DAV, and an
+asynchronous seven-byte content body. Two shared-budget consumers complete the
+existing aggregate-bucket test in 2.01 seconds against its 1.7-second lower bound.
+This verifies the budget algorithm rather than measured multi-socket throughput.
+The Agent test executable was reused, only the OpenCloud test executable was
+linked, and Windows shut down normally. The installed candidate stayed closed and
+unchanged; packaged account networking and encrypted access remain separate.
+
+### Windows remembered-unlock foundation (local, disabled; 24 October)
+
+Windows now has a gated credential-custody implementation for explicit per-vault
+remembering. The protected record binds the full account identity and exact vault
+identity. Forget and profile revocation invalidate captured save tickets through
+atomic authority changes; lock preserves the remembered choice. Password buffers
+are zeroized and never serialized as JSON strings.
+
+The gated manual/saved/forget request paths use a separate operation fence through
+fresh metadata and password verification, session publication and credential
+changes. A saved password is only verification input, never unlock authority.
+Rejected sign-in requests do not revoke credentials, and account changes during
+forget return an uncertain result rather than reporting success for a new account.
+
+Windows source compile/lint and Linux workspace gates pass (963 tests, 14 ignored).
+Three custody-model and seven decoder checks passed in their portable candidate
+harnesses. Native protected persistence component acceptance is recorded below; integrated
+saved-unlock lifecycle acceptance remains pending. The production vault gate
+stays disabled. The corrected encrypted-file read now passes, while safe payload
+cleanup remains unresolved. This is not completed C06 acceptance or a published
+feature.
+
+Windows credential-custody component acceptance (24 October): all eleven focused
+checks now pass as the isolated ordinary Windows user: three custody-model checks,
+seven typed request checks, and one synthetic protected-document CAS/reopen/profile
+isolation test. A full output disk interrupted artifact export before any test ran;
+the failure was preserved, a larger output disk was supplied, and the same compiled
+executables were validated and reused without rebuilding. The original compiler
+numeric exit was not retained; recovery validation and all test exits succeeded.
+Windows shut down normally afterward. This proves the stated components, not an
+actual saved-password unlock, lock cleanup, native vault projection or C05/C06
+whole-category completion. Production vault exposure remains disabled.
+
+Remembered-unlock UI contract repairs (local, still disabled): the broker now
+accepts the existing `vault_forget` action with the UI's Space/root-ID-only payload;
+lock and unlock still require a valid root path. Gated inspection can report
+saved-password presence for the freshly inspected vault and verified account,
+while unlock state comes only from the session coordinator. Neither presence nor
+metadata grants a route. Windows compile/lint and the active three model/seven
+decoder checks pass; unchanged Linux evidence is reused. These source repairs do
+not establish native saved-unlock acceptance or enable the feature.
+
+
+### Windows remembered-unlock broker fixture (25 October 2026)
+
+A single ignored native fixture now exercises the actual private broker dispatch
+for manual unlock with explicit remember, lock, saved unlock, and canonical
+pathless Forget. It uses Windows DPAPI, fresh verified synthetic account/vault
+metadata and the public encryption fixture. Production RPC admission remains
+disabled. The shared implementation retains its existing account, operation,
+reservation and publication fences; only the private test entry skips the
+production capability gate.
+
+The native child must receive a fresh, explicitly owned `LOCALAPPDATA` path under
+`C:\RaiunLab\c06-broker-lifecycle-<32 lowercase hex>\appdata` in its own process
+environment. The test checks the exact synthetic user, canonical path, empty
+fixture and pinned directory before opening storage. It never changes the
+global environment or uses a real profile fallback. Existing profiles and the
+installed package remain outside this scope.
+
+The first actual broker execution reached the initial manual remember request,
+then refused its account binding before KDF or credential storage. Preparation
+canonicalized the issuer URL for the account reservation but reconstructed the
+remembered scope from the raw authentication issuer, whose valid origin spelling
+can omit a trailing slash. The fix reuses the exact validated canonical account
+bytes for both reservation and credential scope. Authentication issuer equality
+and strict account/vault validation remain unchanged. A focused regression now
+passes the canonical spelling join, saved-password round-trip and foreign-account
+isolation; Windows-target compile, strict lint and formatting also pass. The
+changed-source native broker rerun now passes as the isolated ordinary Windows
+user: manual remember, lock, saved unlock, Forget without locking, verification
+that the protected saved record is absent, and final lock. The actual test passed
+in 5.15 seconds, followed by owned-process closure and normal Windows shutdown;
+the original failure remains retained.
+
+This fixture does not enumerate or hydrate a vault file: its lock inventory is empty. It can qualify credential/KDF,
+persistence, status and session behavior independently, but it cannot qualify
+plaintext cleanup, restart behavior or full C06 completion. The separate C05
+read-and-cleanup fixture still owns payload cleanup acceptance. Its original
+ignore-label dependency is superseded for this narrower component acceptance.
+
+### Windows protected history storage acceptance (25 October 2026)
+
+Two focused native tests passed as the isolated ordinary Windows user: existing
+credential document compatibility/CAS/reopen/profile isolation, and separate
+protected custody history CAS/reopen/credential-domain isolation. The original
+successful MSVC artifact was reused without another build. Both tests returned
+zero; the owned processes exited, and guest shutdown and cold preservation were
+confirmed. Evidence is retained outside Git in
+`outputs/local-windows-native-20261023-r1/c06-custody-store-two-continuation-actual-r1/`.
+
+This establishes the protected storage primitive only. It does not establish
+write-before-hydration integration, restart completeness, full C06 acceptance or
+acceptance of a newer installed package. The original launcher-state mismatch
+was a pre-execution harness failure; it remains preserved alongside the corrected
+run. No additional owner permission was needed.
+
+### Protected write-before-publication join (local, disabled; 25 October)
+
+The Windows broker now prepares an exact-account/root-bound protected history
+service before connecting a new native root. Vault unlock requires that service.
+A missing or corrupt retained manifest leaves ordinary drive connectivity
+independent while refusing vault admission. Stable catalogue IDs are restored
+only behind a fresh verified vault session, and metadata changes are persisted
+before their names are published. Each native file transfer records its pinned
+hydration intent before plaintext publication. Lock and Forget retain history.
+
+Windows GNU Agent and Cloud all-target compilation and strict lint pass, as do
+19 focused portable model/service checks. The actual default Linux workspace
+run passed 959 tests with 14 ignored; strict lint and formatting pass. The initial
+sandbox run could not bind local test sockets and is retained separately from
+the successful authorized host run. Initial combined Windows compilation/lint
+failures were corrected and retained. None of these source checks establish the
+new protected broker path's native acceptance or safe restart reconciliation;
+retained-root vault admission and the production vault capability remain off.
+
+### Retained vault history reconciliation source (local, disabled; 25 October)
+
+The native connection now consumes authenticated provider-publication history
+after obtaining the exclusive root connection and before becoming ready. It
+validates and cleans every recorded file through the existing protected native
+primitive. Its private proof can satisfy initial unknown history while preserving
+all sticky runtime failures. A missing, corrupt, dirty or mismatched history keeps
+vault admission blocked without preventing independent ordinary drive operation.
+Unknown user copies are preserved; this is not arbitrary-namespace cleanup or
+same-user protected-document anti-rollback protection.
+
+The new source passes combined Windows GNU Cloud/Agent all-target compilation,
+strict lint and formatting. Twenty-one portable model/service tests and three
+actual extracted inventory-state tests pass. The unchanged Linux regression
+evidence is reused. The payload fixture now also opens a new Agent/coordinator/
+native connection with the same protected profile, checks locked read refusal
+and continued absence of forgotten credentials, then verifies a new manual read
+and Lock. That normal reconnection follows an already successful Lock; it does
+not establish a full process/crash restart with resident plaintext. Current-source native execution reached the broker lock workflow, as recorded
+below; reconnection and exact-package acceptance remain pending. The public vault
+capability is still disabled.
+
+
+### Current Windows payload acceptance (25 October, r105)
+
+Both current-source MSVC test artifacts built successfully with all 1,193 source
+files unchanged. The external dirty-file case passed: cleanup refused the real
+modified placeholder and preserved its exact bytes. This supersedes the earlier
+fixture failure without discarding that evidence.
+
+The broker payload case verified the ordinary external read and saved-unlock
+read of 65,537 bytes, then successfully removed the hydrated data during Lock.
+The following locked read timed out. Manual reopening and normal reconnection
+were not reached, so this is partial acceptance only. The owned test images
+exited, actual guest shutdown was captured, and cold evidence was preserved in
+`outputs/local-windows-native-20261023-r1/c05-c06-restart-two-actual-r1/`.
+
+Source investigation found that failed fetch completions supplied a zero-length
+range. Windows fails pending reads only where the error response overlaps their
+range. The local correction supplies the checked remaining range and records the
+native completion result, while retaining the existing read deadline and
+fail-closed access rules. Source checks and a focused native broker rerun must
+qualify the correction before capability activation or package acceptance.
+
+
+The combined local correction and native readiness/status join pass Windows GNU
+Cloud/Agent all-target checks, strict lint and formatting. The focused extracted
+transfer-parameter regression passes. The Linux workspace passed 963 tests with
+14 ignored, with strict lint and formatting passing. Readiness now derives from
+the current bound native route and accepted pinned-parent refresh; it does not
+assert that every child has already materialized. These source checks do not
+replace the pending native broker workflow or exact-package acceptance. The
+public Windows vault capability remains disabled.
+
+
+### Locked-read failure response and later close check (25 October, r106)
+
+The corrected failed-fetch response built and ran natively. A locked ordinary
+read now fails promptly with no ciphertext download; the native failure response
+covered all 65,537 bytes and returned success. Manual unlock then read and
+verified the same file again. The next Lock refused cleanup before the journal
+stage, preserving the file and retry state. Normal reconnection was not reached.
+The failure and normal shutdown/cold evidence remain retained in
+`outputs/local-windows-native-20261023-r1/c06-fetch-failure-agent-actual-r1/`.
+
+Source investigation found that close verification opened the data stream before
+querying modified ranges, potentially demanding hydration from a deliberately
+locked route. The exact r106 close refusal stage was not captured, so it is not
+claimed as proven. The local correction queries modified ranges through the
+already pinned metadata handle first. Only a successful empty-range query with
+an unchanged post-snapshot can return clean without opening data. Modified,
+partial or uncertain files retain the dirty/recovery refusal path. No sticky
+failure counters are cleared, and native cleanup still requires its separate
+exclusive protected handle and post-cleanup proof. Dirty-file and broker native
+acceptance must qualify this change before activation.
+
+
+### Windows native vault lifecycle accepted; candidate activation (25 October, r107)
+
+The current two-case native run passed both cases with unchanged source and
+successful MSVC links. The external dirty edit was detected and its exact bytes
+were preserved. The broker verified manual and saved payload reads, explicit
+post-Lock read refusal without another download, manual reopening and a second
+successful Lock. A new Agent/coordinator/native connection reopened the same
+protected profile with no forgotten secret restored, then completed another
+manual read and Lock. Each cleanup proved no remaining on-disk file ranges.
+Normal shutdown and cold evidence are retained in
+`outputs/local-windows-native-20261023-r1/c05-c06-close-metadata-two-actual-r1/`.
+
+This is normal new-Agent reconnection after prior successful cleanup, in the same
+test process. It is not a process/crash restart with resident plaintext. The
+original r105/r106 failures remain preserved. The metadata-first close fix also
+retained the dirty-file refusal in the same run.
+
+The local non-test candidate now enables Windows vault capability and the
+existing `native_read_only` UI mode together. Native encrypted access remains
+read-only, with all guarded account/vault/physical-root checks and protected
+history requirements intact. This is candidate source activation, not package
+acceptance, publication or whole-category C05/C06 completion. The older installed
+unsigned package remains closed and unchanged until the new package is verified.
+
+
+### Installed Windows workflow caught incomplete Lock (25 October, r108)
+
+The enabled candidate built and upgraded successfully in the isolated Windows
+VM, with all three installed payload hashes matching its manifest. Normal public
+RPC AuthFlow with the finite synthetic loopback server connected the account;
+this does not qualify renderer HTTPS sign-in. The installed UI unlocked the
+public vault with explicit remembered-password opt-in, opened the drive, read
+and verified the full 65,537-byte file, and forgot the saved password while
+keeping the session unlocked.
+
+With Explorer still open, Lock returned incomplete cleanup. The UI nevertheless
+showed Locked, and a fresh ordinary file read succeeded. This candidate is not
+accepted. The failed workflow and public root are preserved; no cleanup retry,
+forced dehydration or real cloud mutation was performed. The exact refusal
+cause is unproven: shipping diagnostics did not expose native cleanup errors
+or close-validation counters. Directory navigation alone is not established as
+the cause. Next work adds bounded, value-free support diagnostics and makes
+incomplete Lock explicit and retryable, retaining all dirty/history and
+exclusive-cleanup safeguards. Native component r107 evidence remains valid
+within its narrower scope, but does not supersede this installed failure.
+
+### Follow-up installed Windows run (25 October, r109)
+
+The candidate with incomplete-Lock status and bounded cleanup diagnostics built,
+upgraded, and connected through the same public synthetic AuthFlow. All three
+installed payloads matched the manifest. Drive configuration then refused with
+`Reserved folder changed`; the new profile remained without a root. Unlock,
+file reading, Forget, Lock, and cleanup diagnostics were therefore not exercised.
+Normal fixture stop, application quit, zero owned processes, OS shutdown, and
+cold evidence were recorded. The prior configured root and rollback payloads
+remain preserved. This is a partial failure, not package acceptance.
+
+A test-helper argument-quoting defect was subsequently found: it doubles JSON
+backslashes before passing requests to the Windows process. The saved public
+root projection contains doubled separators. Whether this explains the native
+reservation refusal is being checked using harmless argument roundtrips and
+fresh temporary directories. No existing reservation is discarded or rebound,
+and no native identity or cleanup guard has been relaxed.
+
+
+The harmless Windows argument roundtrip subsequently passed all six corrected
+cases and reproduced the old helper's corruption. An isolated native directory
+test then opened the same physical directory through both spellings: normal
+spelling verified, while doubled separators failed verification with Win32
+error 123 (`InvalidFilename`). The test passed as an observation of that defect;
+it was not a corrected-behavior pass. Both failures and normal shutdown/cold
+records are preserved.
+
+The narrow correction stores the exact pathname rebuilt by the successful
+component walk alongside its existing pinned handles. Verification and child
+operations reuse that spelling. Parent traversal rejection, no-follow opens,
+reparse/type checks, held ancestors and physical identity checks are unchanged;
+saved account/root reservations are not rewritten. The corrected native test
+passed: both spellings opened and verified the same identity. Windows GNU checks,
+strict lint and formatting passed; fresh Linux verification passed 963 tests
+with 14 ignored and strict workspace lint. Installed workflow acceptance remains
+pending. This does not establish the cause or resolution of the earlier
+incomplete-Lock failure.
+
+
+### Installed encrypted-file workflow passes (25 October, r115)
+
+The exact unsigned candidate built from frozen source `924eaa17…` passed the
+ordinary per-user upgrade in r114. The same installed package then passed the
+focused r115 workflow without rebuilding or reinstalling: fresh public RPC
+AuthFlow, exact requested root mounted with normal separators, explicit GUI
+account selection, Personal/Travel.vault browsing, manual unlock with explicit
+Remember opt-in, and an ordinary external read of all 65,537 bytes. The SHA-256
+matched the fixture. Forget removed the saved key while leaving the current
+session unlocked.
+
+With Explorer still open, the first Lock reported confirmed local cleanup. A
+fresh bounded reader then refused access, without a retry or process termination.
+The scoped cleanup snapshot reported complete inventory, no modified or
+unverifiable closes, no pool refusals/deleted closes, and no cleanup error. The
+finite server stopped explicitly with one ciphertext fetch and zero cloud
+mutations; normal application quit, zero owned processes, guest shutdown and
+cold preservation were verified. Prior malformed roots and failed evidence
+remain preserved; they were not reset or silently rebound.
+
+Maintainer evidence: `installed-ui1800-actual-r1/handoff.json` under
+`outputs/local-windows-native-20261023-r1/` (SHA-256
+`2ab802d4a6eacf59e6455699c2c9d3728e7158e18b60627dccea3c599280adc4`).
+This qualifies the installed read-only encrypted-file sequence, not encrypted
+editing, renderer HTTPS sign-in, crash recovery or an OS-process restart.
+Remembered-key/Forget behavior across an ordinary process restart is the next
+focused check. The published beta is unchanged.
+
+
+### Keep the first encrypted-folder picker stable (25 October)
+
+Passive refresh now remains blocked while the first Unlock account/Space picker
+is open, including when focus moves from the Space select to Browse or Cancel.
+Previously this modal was omitted from the shared refresh blockers, allowing a
+background refresh to replace its controls. A regression exercises the actual
+main blocker mapping and verifies queued and periodic refresh remain blocked
+until the picker closes. All 201 UI tests and the TypeScript/Vite build pass.
+The 179 Rust/Cargo files and all four lock files are byte-identical to the
+qualified `924eaa17…` source, so its Rust gates and native component evidence
+are reused. The refreshed installer and ordinary-process restart acceptance
+remain pending. This fixes a demonstrated policy gap; it does not establish
+that refresh caused the r116 observed Browse activation failure.
+
+
+### Installed remembered-key and Forget process restarts pass (25 October, r117)
+
+Frozen UI successor `e7fa52c1…` built and upgraded successfully as an unsigned
+Windows candidate. The first Browse activation advanced to the encrypted-folder
+picker. Manual Unlock with explicit Remember was followed by normal Quit without
+a payload read. A newly created broker, bound to the same installed image, user,
+account, origin and exact root, reported `unlocked=false` and
+`remembered_status=known_saved`. The app required explicit saved-key unlock.
+
+That unlock passed a full 65,537-byte SHA-256 read. Forget left the current
+session unlocked; the first Lock confirmed cleanup and a fresh bounded reader
+refused access. After another normal Quit and new broker, metadata and UI
+reported `unlocked=false` and `remembered_status=not_saved`. No password, unlock
+or read followed that second restart. Cleanup metadata after each restart stayed
+`unknown`; this is not proof of completed cleanup after restart.
+
+The final fixture stopped explicitly with one ciphertext fetch, two refreshes
+and zero cloud mutations. Normal Quit, zero owned processes, actual guest
+shutdown and cold preservation were verified. The candidate remains installed
+in the isolated VM and is not running; rollback and earlier failures remain
+preserved. Parent and independent review verified the saved evidence.
+
+Evidence: `frontdoor-installed-restart-actual-r1/handoff.json` under
+`outputs/local-windows-native-20261023-r1/`, SHA-256
+`65d196be7e5bfbc18caa04932b389fcec99c2a45a77eaa039097d47460ba7f90`.
+This qualifies normal app-process restart and the read-only encrypted workflow,
+not OS reboot, crash recovery, encrypted editing, renderer HTTPS sign-in or
+whole-category completion. The published beta is unchanged.
+
+
+### Windows immutable protected edit-capture storage (25 October)
+
+A new existing-file capture component binds immutable retained bytes to the
+validated account/vault/root scope, opaque file, strong baseline, native identity
+and historical unlock/token labels. The body is zeroized in memory and stored
+through a distinct DPAPI/private-directory document domain. Put-new never
+overwrites an existing capture; uncertain publication remains an error, while
+historical bytes remain available for explicit recovery. Captures carry no
+upload, live-session or cleanup authority. The current body limit is 512 KiB.
+
+Formatting, strict workspace lint and the full Linux workspace suite pass
+(977 passed, 14 ignored). Fresh Windows GNU Agent compilation and Control test
+lint pass with actual current-source compiler evidence. One exact native MSVC
+Control test passed under the isolated ordinary user, covering exact-byte reopen,
+duplicate preservation, bounds, foreign binding/domain separation and tamper
+refusal. Normal shutdown and cold preservation followed. Initial restricted
+loopback failures and cached-only GNU observations remain preserved separately.
+
+Evidence: `windows-vault-edit-protected-r2/handoff.json` under
+`outputs/desktop-next-20261021/`; native evidence is
+`outputs/local-windows-native-20261023-r1/existing-edit-capture-native-r1/`.
+This is a storage prerequisite. The native save callback and conditional
+encrypted upload are not connected; Windows vault access remains read-only.
+Neither crash/reboot recovery nor installed writable-app acceptance is claimed.
+
+
+### Index-first vault capture retention (25 October)
+
+Capture retention now commits a bounded discovery reference in the exact
+protected vault child before publishing its body. The reference binds the
+existing catalogue/hydration entry and complete encoded-frame digest and length.
+Only an acknowledged new CAS and exact readback creates a single-use enrollment
+ticket. Existing or recovered references can reopen matching bytes; a missing
+body is refused and never filled automatically. Failed or uncertain writes leave
+the reference pending and discoverable. Pending captures cannot supply complete
+publication history or readiness, even when their bodies exist.
+
+Read-only reopening preserves existing v1 bytes. First capture enrollment
+explicitly writes strict v2 history; missing/null/empty/foreign capture metadata
+is refused. Older readers fail closed on that new history.
+
+Formatting, strict workspace lint and all 983 workspace tests pass (14 ignored).
+Six focused service tests exercise ordering, interrupted/uncertain publication,
+missing-body refusal, context/frame conflicts, schema compatibility and bounds.
+Fresh Windows Agent compilation passes with actual current-source compiler
+evidence; the unchanged protected-store native proof is reused. Evidence is
+`windows-vault-capture-index-r1/handoff.json` under
+`outputs/desktop-next-20261021/`, source `999a6321…`.
+This models interruption safely; it is not an actual crash/reboot qualification.
+The native callback and encrypted upload remain disconnected, and writable vault
+access remains disabled.
+
+
+### Native Windows indexed edit capture (25 October)
+
+Modified closes for known vault files now retain an immutable recovery body through
+the scoped backend and existing protected custody child. Route, token generation
+and the exact opaque unlock remain fenced through the local read, index/body CAS
+and readback. The original protected catalogue entry, native identity and edited
+bytes remain bound together. No ordinary journal, upload or cleanup authority is
+created; vault publication remains read-only.
+
+The native changed-length fixture exposed stale callback FileSize metadata after
+an edit. Initial close admission now observes the pinned current size; fetch,
+cleanup/completion and final post-read validation retain exact-size checks. Root,
+file identity, no-follow ancestry, Cloud Files tag/state and full stable edited
+snapshot checks remain required. A size change without confirmed modified ranges
+refuses a clean result and remains unresolved, including truncation to zero.
+
+Formatting, strict Linux workspace lint and all 985 workspace tests pass (14
+ignored). Fresh Windows GNU Agent binary/test compilation and Cloud Files strict
+lint pass with actual current-source compiler evidence. Two added Windows unit
+tests compile in those checks; they were not executed separately. The exact MSVC
+Agent native test passed under the isolated ordinary user: a 65,537-byte baseline
+grew to 65,553 bytes, and exact protected index/frame/body plus original binding
+were verified. Ordinary journal and PUT counts stayed zero. Lock removed keys,
+while dirty bytes and incomplete cleanup remained preserved. Native and wrapper
+exits were zero, followed by actual normal guest shutdown and cold preservation.
+
+Evidence: `windows-vault-native-capture-r1/` under
+`outputs/desktop-next-20261021/`; exact native evidence is
+`outputs/local-windows-native-20261023-r1/agent-vault-indexed-capture-sizefix-native-r5/`.
+Source archive: `a885d7f2…`. Earlier native failures and the diagnostic proving the
+size mismatch remain preserved as r3/r4 evidence. The 512 KiB capture bound remains;
+zero-length capture, crash/reboot recovery, conditional upload, native disposition
+and installed writable-app acceptance are not established by this test. The r117
+installed candidate is unchanged and closed; no package or release was produced.
+
+
+### Guarded explicit Windows vault upload (25 October)
+
+An internal hot-route worker now authenticates the exact protected capture and
+full canonical current account (including OAuth client, issuer and subject),
+retains the registered native-root pin, and durably claims one upload attempt
+before dispatch. Strict custody v3 stores bounded attempt subrecords through the
+existing whole-child protected CAS. Read-only v1/v2 bytes remain unchanged;
+interrupted or uncertain attempts cannot silently replay. Immutable capture
+references and bodies remain available for recovery.
+
+The live bridge releases all provider/custody/auth/session publication guards
+before HTTP. It uses the binding-owned opaque unlock epoch and current token and
+provider generations. It preserves the original resource ID, logical path and
+strong If-Match validator, prepares the ciphertext locator at fresh admission,
+encrypts bounded immutable input, then authenticates full remote byte readback.
+Only a new strong version matching the same resource and exact bytes can produce
+historical verification. Cancellation or uncertainty after possible dispatch
+requires reconciliation. No saved numeric label or persisted readback record
+confers live upload, retry or native-cleanup authority.
+
+The exact combined source passes formatting, strict Linux workspace lint and
+1,040 workspace tests (14 ignored). Fresh Windows GNU Agent binary/test checks
+and Cloud Files all-target strict lint pass with no warnings and actual compiler
+invocation evidence. The exact MSVC Agent fixture passed under the isolated
+ordinary user: a captured 65,553-byte edit caused one conditional ciphertext PUT,
+one authenticated readback GET, and an exact protected verification record. A
+second explicit invocation refused without another PUT. The original frame,
+local bytes and catalogue baseline remained preserved; ordinary PUT/journal
+counts stayed zero. Native and wrapper exits were zero, followed by actual normal
+guest shutdown and cold preservation. Initial missing-import and nested-test-path
+compile failures remain preserved with the narrow fixes.
+
+Evidence: `windows-vault-explicit-upload-r1/` under
+`outputs/desktop-next-20261021/`; exact native evidence is
+`outputs/local-windows-native-20261023-r1/agent-vault-explicit-upload-native-r6/`.
+Source archive: `38ba031c…`. Public upload RPC is compiled but remains disabled;
+normal writable publication, automatic dispatch, native acknowledgement, baseline
+promotion and clean Lock are not established by this explicit fixture. The
+512 KiB bound and separate post-lock/restart reconciliation gap remain. No product
+package, host installation or publication was performed; r117 remains installed
+and closed only in the isolated VM.
+
+### Fresh-close guarded Windows vault upload (26 October)
+
+The internal native close path can now send a newly acknowledged protected
+capture to a bounded, off-provider worker. The notification is published only
+after retention readback, sticky dirty accounting, and release of the callback,
+file, custody and publication guards. It carries weak process-local identities
+for the original custody and unlock binding, rather than keys or a reusable
+permission. The worker rechecks the exact account, root, route and generation
+before claiming its one durable attempt. Queue saturation, cancellation or
+uncertainty preserves the capture; there is no history scan or automatic retry.
+
+The exact source passes Linux formatting, strict workspace lint and 1,044 tests
+(14 ignored), and the GNU Windows binary/test and Cloud Files strict checks
+without warnings. The selected MSVC ordinary-user native fixture passed: a fresh
+65,553-byte edit caused one conditional encrypted PUT and authenticated full
+readback automatically, with no manual upload call. Reopening the protected
+history and an identical modified close caused no additional attempt. The
+original frame and local bytes remained intact, ordinary PUT/journal counts stayed zero,
+and native confirmation remained false. Dirty Lock/stop cleanup correctly
+remained incomplete. Native/wrapper exits and owned process counts were zero,
+followed by normal guest shutdown and cold preservation.
+
+Evidence: `windows-vault-fresh-close-r1/combined-r3/` and `gnu-r3/` under
+`outputs/desktop-next-20261021/`; native evidence is
+`outputs/local-windows-native-20261023-r1/agent-vault-fresh-close-native-r24/`.
+Source archive: `85198080…`. The initial GNU unused-adapter warning and its
+narrow default-path repair are preserved, along with the R23 native failure at
+an unsupported read-close observer. The corrected fixture uses a second
+identical write and validates two successful native retention notifications.
+This accepts the private fresh-close remote-upload bridge only. Normal automatic dispatch, public upload RPC and
+writable publication remain disabled; baseline promotion, native completion,
+clean Lock and post-lock/restart reconciliation are still separate gaps. No new
+package, host installation or publication occurred; r117 remains installed and
+closed in the isolated VM.
+
+### Explicit writable-byte native completion (26 October)
+
+A separate private completion mode now verifies and completes writable file
+bytes without requesting a filesystem-metadata overwrite. It retains the live
+account/root/token/opaque-unlock capability, exclusive native reference,
+complete current body/hash, positive USN brackets, native identity and in-sync
+postproof. Protected preparation promotes the catalogue/hydration baseline;
+durable NativeCompleted and exact per-file dirty resolution remain inside the
+same live fences. Captures and immutable original frames remain available.
+Stored completion is historical evidence, never current cleanup authority.
+
+The operation is selected before any native action. It performs the legitimate
+in-sync Mark, samples its actual platform effects, and preserves the coherent
+post-Mark metadata through completion. It omits the entire metadata-update
+operation. The existing readonly path still performs its guarded update; there
+is no retry or removal of a USN comparison from a metadata write. The accepted
+fresh-close automatic bridge continues to request remote-only verification.
+
+The exact combined source passes formatting, strict Linux workspace lint and
+1,094 tests (14 ignored), plus the current GNU Windows binary/test and Cloud
+Files strict checks without warnings. The selected ordinary-user MSVC/native
+fixture passed: one conditional encrypted PUT and authenticated full readback
+of 65,553 bytes, protected baseline promotion and NativeCompleted, native
+in-sync proof, and exact dirty resolution. Raw stages confirmed writable
+postproof through durable completion, with no readonly metadata update. Original
+frames and bytes survived. Native and wrapper exits and owned process counts
+were zero, followed by normal guest shutdown and cold preservation.
+
+READONLY remained false. Lock revoked the session and refused a new unlock
+epoch, but correctly reported cleanup incomplete and preserved native and
+protected bytes; ordinary resident-file read refusal is not claimed. Existing
+readonly cleanup guards remain unchanged. Safe writable cache cleanup and its
+late-writer/quiescence boundary require a separate current-native proof.
+
+Evidence: `windows-vault-writable-bytes-r1/combined-r1/` and `gnu-r1/` under
+`outputs/desktop-next-20261021/`; native evidence is
+`outputs/local-windows-native-20261023-r1/agent-vault-writable-bytes-native-r25/`.
+Source archive: `5f2be5b0…`. Normal automatic dispatch, writable publication and
+public upload RPC remain disabled. This is native byte-completion acceptance,
+not a complete writable-vault or clean-Lock workflow. No new package,
+installation or publication occurred; r117 remains installed and closed in the
+isolated VM.
+
+
+### Writable-save Lock and cache eviction (26 October)
+
+A separate writable cleanup path now uses bounded, process-local completion
+receipts minted only after the exact live native save completes. Historical
+NativeCompleted records do not recreate cleanup authority. Fresh native file,
+root, opaque identity, body hash, in-sync state and modified-range checks precede
+byte-only cache eviction. This removes cached plaintext, never the cloud file
+or protected recovery frame. Existing readonly metadata and eviction guards
+remain unchanged.
+
+Lock retires and drains the route, holds all writable native file references
+through coordinator key revocation, then verifies current empty ONDISK ranges
+and unresolved-activity state before completing. Holds expire or release on
+caller loss, failure and teardown. Dirty or uncertain activity invalidates
+receipts; aborted and uncertain operations retain incomplete status. The proof
+covers that operation boundary. Later external activity can change status; it
+does not promise permanent write exclusion. Missing volatile receipts after a
+restart conservatively refuse writable cleanup rather than trusting history.
+
+The exact source passes formatting, strict Linux workspace lint and 1,098 tests
+(14 ignored), plus current GNU Windows binary/test and Cloud Files strict
+checks without warnings. Ordinary-user MSVC/native R28 passed one encrypted
+save followed by clean Lock: keys locked, native cache empty, a new ordinary
+read refused without GET, original protected frame retained, and stop complete.
+The single late-write probe returned cloud-file error 389 with unchanged
+metadata and no observed mutation. Only the clean-close counter increased;
+modified/unverifiable counters and pending status stayed unchanged. The final
+fixture verified one conditional encrypted PUT and one authenticated readback,
+without replay. This does not exercise a successful late external mutation.
+Native/wrapper exits and owned process counts were zero; normal guest shutdown
+and cold preservation completed.
+
+Earlier GNU R1 and native R26/R27 failures remain preserved. The GNU correction
+converted a key-clear error to String. Native fixture corrections recognized the
+actual cloud-file error and stopped treating clean callback telemetry as dirty
+activity; production guards and remaining native postconditions were unchanged.
+
+Evidence: `windows-vault-writable-cleanup-r1/combined-r4/` and `gnu-r4/` under
+`outputs/desktop-next-20261021/`; native evidence is
+`outputs/local-windows-native-20261023-r1/agent-vault-writable-cleanup-native-r28/`.
+Source archive: `0a4bbd9c…`. This closes the private writable-save cleanup gap
+reported above. Normal automatic dispatch, writable publication and public
+upload RPC remain disabled; shipping workflow and exact-package acceptance
+remain pending. No new package, installation or publication occurred. The r117
+beta remains installed and closed; the test VM is shut down and cold.
+
+
+### Automatic fresh-close native save and Lock (26 October)
+
+The private fresh-close worker now joins the accepted encrypted upload and
+writable native completion paths. Its policy is fixed before the worker starts;
+the default remains remote-only. The original worker cancellation identity
+travels directly from the consumer through HTTP into the owned native
+continuation. A replacement worker cannot renew it. Existing account, root,
+origin, dispatch stamp, token, opaque unlock epoch and durable-attempt checks
+remain mandatory. Native completion checks the live continuation again before
+publishing its ephemeral cleanup receipt, after final work and the end hook.
+Observed cancellation or uncertainty before completion leaves work retained
+without cleanup rights.
+
+The exact source passes formatting, strict Linux workspace lint and 1,098 tests
+(14 ignored), current GNU Windows binary/test and Cloud Files strict checks
+without warnings, six focused worker tests and two focused control tests.
+Ordinary-user MSVC/native R29 passed: an actual modified close automatically
+queued one encrypted conditional PUT and authenticated readback off the provider
+and caller threads, durably completed NativeCompleted and promoted the baseline,
+resolved the exact dirty observation, then completed Lock with keys locked,
+empty ONDISK ranges and ordinary read refusal without another GET. The original
+protected capture frame remained available. No manual upload or repeated
+late-write probe ran. Native/wrapper exits and owned counts were zero, followed
+by normal guest shutdown and cold preservation.
+
+Evidence: `windows-vault-fresh-native-r1/combined-r1/` and `gnu-r1/` under
+`outputs/desktop-next-20261021/`; native evidence is
+`outputs/local-windows-native-20261023-r1/agent-vault-fresh-native-r29/`.
+Source archive: `f509a00e…`. This qualifies one private automatic save and Lock;
+it does not qualify repeated saves, recovered/restarted adoption or a shipping
+package. Normal worker startup, writable placeholder publication, capability/UI
+exposure and public upload RPC remain disabled. The next normal workflow needs
+explicit per-file publication eligibility and generation-bound worker rearming,
+without rewriting protected metadata or broadening unsupported operations. No
+new package, host installation or publication occurred; r117 remains installed
+and closed, with the test VM shut down and cold.
+
+
+### Normal bounded in-place saves and clean-read Lock (26 October)
+
+Normal Windows source startup now admits the generation-bound save worker and
+publishes individual eligible existing vault files as writable. Eligibility is
+limited to the current verified original entry, strong ETag and at most 512 KiB.
+The capability/UI path reports that limited in-place access. Protected catalogue
+metadata is preserved; no broad namespace writing, public upload RPC, offline
+editing or atomic-replacement support is advertised.
+
+Clean reads now carry a one-use, connection-local fingerprint of the full
+bounded authenticated stage. Native cleanup authority is reserved before the
+first plaintext transfer and acknowledged only after successful CfExecute and
+exact request commitment under the original publication permits. Transfer of a
+requested range does not prove full residency: Lock independently verifies
+current complete ONDISK coverage before reading the native body, then verifies
+its full fingerprint, identity, USN, in-sync and clean state. Existing referenced
+handles remain held through key clear and empty-cache confirmation. A confirmed
+empty receipt can be enrolled for a fresh unlock binding only after exact logical
+and native context checks, current empty proof and a new-generation CAS. Reads
+never create an edit capture or NativeCompleted record. Nonempty partial caches
+and uncertain data remain fail-closed; Lock does not hydrate missing bytes.
+
+The exact combined source archive `86f26d85…` passes formatting, strict Linux
+workspace/all-target lint, 1,109 tests (14 ignored), and current GNU Windows
+binary/test and Cloud Files strict checks without warnings. Ordinary-user MSVC
+native R31 passed full read, Lock, same-connection re-unlock/full read and second
+Lock with zero PUT, DELETE, edit captures or NativeCompleted records. Fresh
+missing-reservation/acknowledgement and confirmed-empty re-enrollment/acknowledgement
+were observed. Both Locks left keys locked and native cache empty; ordinary reads
+were refused without further GET. Native R32 passed two automatic conditional
+encrypted saves and authenticated readbacks, promoted ETags, two distinct retained
+captures and NativeCompleted records, dirty resolution and clean Lock. Both runs
+had native/wrapper exits and owned process counts zero, normal guest shutdown
+and cold preservation. Parent review independently verified all 153 raw evidence
+files and the source/artifact/authorization/ordinary-user chains.
+
+Evidence: `windows-vault-clean-read-r1/` under `outputs/desktop-next-20261021/`;
+native evidence is `agent-vault-clean-read-r31/` and `agent-vault-normal-save-r32/`
+under `outputs/local-windows-native-20261023-r1/`. R30's earlier scoped two-save
+pass and its clean-read limitation remain preserved. This closes that observed
+full-read Lock gap in source/native tests. Restart/recovery adoption, partial-cache
+cleanup, unsupported namespace operations and whole-category completion are not
+established by these cases. Exact-package/installed-app acceptance remains
+pending. No new package, installation, signing or publication occurred; r117
+remains installed and closed, with both test VMs shut down and cold.
+
+## Installed Windows encrypted-save candidate — 26 October 2026
+
+Unsigned installer SHA256 `f51584bd19078c59c141f4795c5c8f75a1a7eb8055c8745e0c5c0244d87479ee`
+was built from integrated source `079a6e44` (filtered archive `27d8baaeed7f2cc86a421faf0469df67bbbb6b3c9dfb699da6b7b8bef60ee43c`).
+R35 installed it once as the ordinary isolated Windows user and verified all
+three installed payloads, CLI version and running shell/sidecar identities.
+The normal UI manually unlocked and later re-unlocked the same vault with
+Remember unchecked; independent inspection reported `not_saved`. An ordinary
+65537-byte full read, one 65553-byte in-place edit, one conditional encrypted
+PUT with authenticated readback, and the subsequent full edited-file read
+passed. Both ordinary public-RPC Locks returned explicit cleanup completion;
+independent inspection showed locked/not-saved and ordinary locked reads were
+refused without GET. Inspection's `unknown` cleanup value was never promoted
+to completion: the actual Lock replies supplied that proof.
+
+Parent verification checked 96 primary plus 47 supplemental pinned files,
+exact source/package/installed-process bindings, six successful ordinary child
+exits, zero remaining app/Node processes, actual normal guest shutdown and cold
+preservation. The candidate remains installed and closed. The finite fixture
+expired before its explicit stop request; that original stop gate failed and
+remains preserved. A separately reviewed expiry closure records this honestly,
+without replay, restart, extension or process termination. Evidence is
+`integrated-package-installed-r35/` under `outputs/local-windows-native-20261023-r1/`
+and `windows-integrated-package-r1/` under `outputs/desktop-next-20261021/`.
+
+This accepts the bounded installed existing-file workflow, with manual UI
+unlock/re-unlock and public-RPC Lock. It does not accept a UI Lock click,
+independent native extent inspection, restart recovery or whole C05/C10.
+Existing-file in-place saves remain limited to eligible files up to 512 KiB;
+replacement editors, new files, rename/move/delete and offline editing remain
+unsupported. The protected per-vault index still caps at 128 retained capture
+references, with a separate byte bound that can refuse earlier; completed
+history lifecycle and protected-edit recovery access remain open work.
+
+The unlock dialog's blanket editing-denial sentence is corrected in subsequent
+source to defer save support to the capability shown after unlock. Its isolated
+TypeScript/Vite build passed with unchanged package/lock files. This wording-only
+change is not included in the installer above; no runtime capability changes.
+No signing, publication, Android changes or whole-category completion occurred.
+
+## 26 October 2026 — integrated next-beta candidate
+
+The development candidate now combines completed-save history rollover,
+read-only Windows encrypted-save recovery with explicit Save Copy, and Desktop
+GitHub update discovery, download and installation controls. Completed history
+rollover retains original saved bodies and uncertain or pending work; it does
+not increase the active-index limit, delete cloud files or replay uploads.
+
+Update notices can be dismissed per release while App updates retains manual
+controls. Startup, visibility and hourly triggers use the daily check policy.
+Downloading and installing remain separate explicit actions. Installation
+requires a shell-owned agent, normal shutdown and a successful process exit;
+unproven shutdown or invalid signatures prevent installation.
+
+Integrated source checks passed: core formatting and strict Clippy, 1,124 core
+tests with 14 ignored, shell formatting and strict Clippy, 42 shell Rust tests,
+211 interface tests, the frontend production build, nine update-metadata tests,
+eight release-packaging checks and the existing Windows packaging dry-run.
+The earlier temporary-directory symlink test failure is retained in development
+evidence; the corrected real-directory run passed without a product-code change.
+
+The 0.7.0-beta.2 Linux AppImage and Windows NSIS update archive are built and
+signed with the owner-authorized dedicated Desktop update key. The private key
+stays outside Git and build VMs; only its public verification key is in source.
+Independent verification accepts the signed Windows archive and rejects altered
+bytes and an incorrect announced version. The Windows installer itself has no
+Authenticode signature; updater archive verification is a separate trust check.
+
+The exact Linux AppImage passed an isolated native update installation, actual
+beta.2 GUI and App updates checks, synthetic document retention and normal
+shutdown. This used an offline future-release fixture, not a live GitHub offer.
+The candidate remains unpublished. The exact Windows signed archive now passed
+native signature and signed-version checks, tamper and wrong-version refusal,
+and the NSIS installation adapter. The retained installer process exited 0;
+its passive completion UI was not captured. Installed shell and resource hashes,
+beta.2 version, synthetic settings/document retention and same-user DPAPI
+round-trip passed. The actual signed-out beta.2 app displayed App updates and
+quit normally with no owned app or installer processes remaining. Public receipt
+preservation completed as one bounded, field-projected public JSON export
+(SHA256 `86b5e6382b9687c2329b77a962286bb70242ecdcbaddff8483e7944a4ad1e85e`).
+The ordinary updater test process exited normally with code 0. The isolated
+The final ordinary test session exited normally with numeric 0 after corrected-package acceptance; its installed app and synthetic data are preserved.
+
+The corrected sustained-save run completed all 129 saves, verified history
+rollover, rejected file reads after Lock, and listed protected recovery in two
+pages of 100 and 29 unique tokens. The complete case still failed: final Save
+Copy tried to pin the valid registered Cloud Files root using the generic
+plain-directory API, which rejects its legitimate cloud reparse state. The
+129-save profile and failure evidence are preserved. A narrow production fix
+uses the existing exact-identity registered-root lease and repeats registration
+validation while retaining strict no-reparse destination checks. Formatting and
+strict source gates pass; required portable coverage completed with 1,124 passed
+and 14 ignored after exact retries of two retained unchanged fixture failures.
+The original complete native case remains exit 101. Focused R9 continuation now
+passes under the same ordinary SID and preserved locked custody: 129 edits stay
+unchanged, pages remain 100+29, Save Copy matches all 65,553 bytes (SHA256
+`7408ec79a798c5afd39d2c0bec9e91e0eaa53a8fc277b0742fdcdfeb91aad978`),
+no-clobber is enforced, and both registered-root/destination negative tests pass.
+The continuation process and both negative-test processes have retained handles
+and numeric exit 0. This directly exercises production Save Copy, paired with
+the earlier public RPC listing and Lock evidence; no public RPC was replayed.
+The three bounded public receipts are preserved in maintainer-local evidence
+`outputs/desktop-next-20261021/windows-recovery-continuation-r9b/actual-native-public-r1/`
+(result SHA256 `96492421212f16b09a99efc174a5a61a44cddb957e1acfc0b2fc8b98b4c5a155`).
+
+The corrected Windows production archive is
+`c393e9a11b9f7bdd6a03632ffbf137940293f783b1578f84d3f1bb9dbec0f66a`;
+its rebuilt updater ZIP
+`f4babbc5ecc396182e971d0741e0f21360e7aee3cba66a8e8d9d313e078f9926`
+and signature `c7440cfdfe7dc0ccda66afc0751a67c12a2fe6914fe814ce0f79f7208d90aaf5`
+pass independent verification and exact-package native upgrade acceptance.
+The fresh ordinary Lab3 identity retained its two settings files, synthetic
+document and same-user DPAPI canary across the real beta.1-to-beta.2 upgrade.
+Baseline installation and app launch exited 0. The updater harness (PID 984)
+and exact NSIS installer (PID 2004) both exited 0 with retained handles.
+Installed beta.2 shell, Agent and CLI hashes match the admitted package; the
+signed-out GUI displays beta.2 and App updates, then quits normally with exit 0.
+The passive NSIS finish UI was not observed and remains recorded as false.
+The public receipt is maintainer-local
+`outputs/desktop-next-20261021/windows-corrected-updater-media-r4/actual-native-upgrade-public-r1/acceptance-public-r3.json`,
+state `WINDOWS_SIGNED_BETA2_NATIVE_UPGRADE_PASS`.
+
+Linux and Windows practical beta acceptance gates are met. Final public
+candidate packaging, exact metadata checks and parent evidence review are complete;
+this evidence update does not publish a release. Earlier setup, observer and
+original whole-case failures remain failures, paired with the focused passing
+recovery evidence rather than retroactively relabeled.
