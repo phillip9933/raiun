@@ -2,6 +2,15 @@
 
 Android and desktop have independent versions and release pages.
 
+## Coordinated release — 2026-10-27
+
+- Android **1.2.0/code 49**: clearer update notices, bounded large-folder browsing,
+  supported server connection options, library updates and settings fixes.
+- Linux and Windows Desktop **0.7.0-beta.2**: matching Desktop versions, verified
+  GitHub updater packages, Windows encrypted-save history and Save Copy recovery.
+- Existing Android application/signing identity and independent Desktop identities
+  are preserved; release notes describe remaining device/deployment and beta limits.
+
 ## Android 1.1.0 — 2026-10-25
 
 Add in-app updates, bulk cancellation of upload conflicts, encrypted upload recovery and safer large-folder refreshes. See the [Android release notes](apps/android/docs/RELEASE-NOTES-1.1.0.md). Desktop versions are unchanged.

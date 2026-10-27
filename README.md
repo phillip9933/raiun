@@ -8,10 +8,11 @@ I build projects to solve problems I run into in my own life. I share them becau
 
 | Platform | Source and setup | Release status |
 | --- | --- | --- |
-| Android | [apps/android](apps/android/README.md) | 1.1.0 |
-| Linux Desktop | [apps/desktop](apps/desktop/README.md) | 0.7.0-beta.1; early beta |
+| Android | [apps/android](apps/android/README.md) | [1.2.0](https://github.com/phillip9933/raiun/releases/tag/android-v1.2.0) |
+| Linux Desktop | [apps/desktop](apps/desktop/README.md) | [0.7.0-beta.2](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.0-beta.2); early beta |
+| Windows Desktop | [apps/desktop](apps/desktop/README.md) | [0.7.0-beta.2](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.0-beta.2); early beta |
 
-Android and desktop have independent versions and release pages. Android 1.1.0 is the latest Android release; Linux Desktop remains on the separate 0.7 beta. Windows and macOS are not released.
+Android and desktop have independent versions and release pages. Android 1.2.0 is the latest Android release. Linux and Windows share Desktop 0.7.0-beta.2; macOS is not released.
 
 Android includes Personal files and Spaces, encrypted folders and Spaces, offline access, transfers, folder/camera backup and document scanning. See its [features and limitations](apps/android/README.md), [privacy notice](apps/android/PRIVACY.md) and [changelog](apps/android/CHANGELOG.md).
 
@@ -65,7 +66,7 @@ resources and packaging.
 
 ## Releases and security
 
-Download Android APKs and Linux desktop packages from [GitHub Releases](https://github.com/phillip9933/raiun/releases). Install a release signed with the original identity over an existing Raiun installation to preserve app data. Read the app's limitations and keep independent backups.
+Download Android APKs and Linux/Windows desktop packages from [GitHub Releases](https://github.com/phillip9933/raiun/releases). Install a release signed with the original identity over an existing Raiun installation to preserve app data. Read the app's limitations and keep independent backups.
 
 New releases will use platform-specific tags and assets so Android and desktop can version independently. Existing tags remain unchanged. See [Releasing](docs/RELEASING.md), [version history](CHANGELOG.md), [security reporting](SECURITY.md), [privacy](PRIVACY.md) and [third-party notices](THIRD-PARTY-NOTICES.md).
 
