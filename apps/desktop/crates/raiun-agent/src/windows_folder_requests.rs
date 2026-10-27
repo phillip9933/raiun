@@ -137,7 +137,7 @@ pub fn decode(request: &Value) -> Result<FolderRequest, String> {
             let candidate = FolderPair {
                 mode,
                 content_filter,
-                exclusions,
+                exclusions: exclusions.clone(),
                 excluded_paths: excluded_paths.clone(),
                 ..expected_pair.clone()
             };

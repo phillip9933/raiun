@@ -148,6 +148,7 @@ fn ordinary_media_worker_observes_uploads_pauses_and_reads_local_recovery() {
         destination_root: "/RecoveryRoot".into(),
         destination_root_resource_id: destination["id"].as_str().unwrap().into(),
         filter: MediaFilter::All,
+        exclusions: Vec::new(),
         organization: MediaOrganization::PreserveRelativePath,
         filesystem_mtime_utc: false,
         interval_seconds: 3600,

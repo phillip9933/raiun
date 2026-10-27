@@ -723,6 +723,7 @@ mod source_overlap_tests {
             destination_root: "/backup".into(),
             destination_root_resource_id: "synthetic-destination".into(),
             filter: raiun_core::MediaFilter::All,
+            exclusions: Vec::new(),
             organization: raiun_core::MediaOrganization::PreserveRelativePath,
             filesystem_mtime_utc: false,
             interval_seconds: 3600,

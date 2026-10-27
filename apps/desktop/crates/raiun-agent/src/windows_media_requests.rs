@@ -167,6 +167,7 @@ mod tests {
             destination_root: "/Photos".into(),
             destination_root_resource_id: "destination-id".into(),
             filter: raiun_core::MediaFilter::Photos,
+            exclusions: Vec::new(),
             organization: raiun_core::MediaOrganization::PreserveRelativePath,
             filesystem_mtime_utc: false,
             interval_seconds: 3600,
