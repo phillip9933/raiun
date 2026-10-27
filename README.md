@@ -9,10 +9,10 @@ I build projects to solve problems I run into in my own life. I share them becau
 | Platform | Source and setup | Release status |
 | --- | --- | --- |
 | Android | [apps/android](apps/android/README.md) | [1.2.0](https://github.com/phillip9933/raiun/releases/tag/android-v1.2.0) |
-| Linux Desktop | [apps/desktop](apps/desktop/README.md) | [0.7.0-beta.3](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.0-beta.3); early beta |
-| Windows Desktop | [apps/desktop](apps/desktop/README.md) | Temporarily withdrawn: sign-in/reconnection failure under investigation |
+| Linux Desktop | [apps/desktop](apps/desktop/README.md) | 0.7.4 Beta release prepared; final publication gates pending |
+| Windows Desktop | [apps/desktop](apps/desktop/README.md) | 0.7.4 Beta release prepared; final publication gates pending |
 
-Android and desktop have independent versions and release pages. Android 1.2.0 is the latest Android release. Linux Desktop 0.7.0-beta.3 remains available. Windows beta.2 and beta.3 downloads and update packages were withdrawn on 27 October 2026 after reported sign-in/reconnection failures, including with a newly added account. macOS is not released.
+Android and desktop have independent versions and release pages. Android 1.2.0 remains the current Android release. Desktop 0.7.4 is prepared as a numeric Beta release for Linux and Windows; final package and publication gates are still pending. The older Windows beta.2 and beta.3 downloads remain withdrawn. The 0.7.4 reconnect fixes passed owner-reported checks with both the Default and a newly added Windows account. macOS is not released.
 
 Android includes Personal files and Spaces, encrypted folders and Spaces, offline access, transfers, folder/camera backup and document scanning. See its [features and limitations](apps/android/README.md), [privacy notice](apps/android/PRIVACY.md) and [changelog](apps/android/CHANGELOG.md).
 

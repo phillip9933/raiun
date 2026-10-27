@@ -63,8 +63,9 @@ identity, account binding and conflict behavior are preserved.
 
 ## Accounts and Settings
 
-Settings groups appearance, account, storage, network and security controls.
-Account colors apply independently to the selected account's card and header.
+Settings groups appearance, accounts, sync and storage, network, security,
+diagnostics and update controls. Account colors apply independently to the
+selected account's card and header.
 Avatars, when available, come only from that account's authenticated OpenCloud
 server. Unsupported or unavailable photos use a local fallback.
 

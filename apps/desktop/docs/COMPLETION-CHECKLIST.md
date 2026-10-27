@@ -210,3 +210,16 @@ same reconnecting-saved-sign-in failure on a newly added account, and diagnostic
 export fails. The connection cause is not yet confirmed. Do not claim Windows
 public beta readiness from the earlier synthetic acceptance or restore these
 downloads without verified resolution and owner authorization.
+
+
+### Desktop 0.7.4 Beta preparation — 27 October 2026
+
+The prepared numeric Beta candidate targets Linux and Windows. The owner reports
+that the Windows reconnect issue was checked successfully for both the Default
+and a newly added account; this is scoped sign-in evidence, not certification of
+all native or advanced encrypted/offline workflows. The 0.7.4 candidate includes
+the Windows in-place installer, unified Sync Folders workspace, grouped settings,
+per-account appearance, and account removal/restoration. Its release documentation
+is prepared, but final package gates and publication are still pending. The
+previous beta.2/beta.3 Windows artifacts remain withdrawn. Permanent deletion of
+local copies is excluded. Whole C01–C10 completion remains unclaimed.
