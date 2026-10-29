@@ -62,7 +62,8 @@ pub use backend::{
     MAX_VAULT_EDIT_CAPTURE_BYTES, PlaceholderBackend, PlaceholderChild, PlaceholderEditBinding,
     PlaceholderMetadata, PreparedEditBinding, PreparedEditRecovery, PreparedEnumeration,
     PreparedFetch, PreparedFetchSession, PublishPermit, RequestPublicationGate,
-    RequestPublicationPermit, checked_fetch_range, next_chunk_len,
+    RequestPublicationPermit, StreamedRecoveryJob, StreamedRecoveryPolicy, checked_fetch_range,
+    next_chunk_len,
 };
 #[cfg(windows)]
 pub use edit_journal::DpapiEditRecordProtector;

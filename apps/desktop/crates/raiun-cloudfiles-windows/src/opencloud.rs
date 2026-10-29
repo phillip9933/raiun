@@ -2575,6 +2575,15 @@ impl OpenCloudPlaceholderBackend {
 }
 
 impl PlaceholderBackend for OpenCloudPlaceholderBackend {
+    fn recovery_job_revoked(&self) -> bool {
+        self.revoked.load(Ordering::Acquire)
+            || self.client.token_generation() != self.token_generation
+    }
+    fn recovery_transfer_cancellation(&self) -> Option<Arc<dyn Fn() -> bool + Send + Sync>> {
+        let cancellation = self.client.transfer_budget().cancellation();
+        Some(Arc::new(move || cancellation.is_cancelled()))
+    }
+
     #[cfg(windows)]
     fn with_vault_edit_capture(
         &self,

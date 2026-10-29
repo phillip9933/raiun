@@ -1229,3 +1229,6 @@ mod tests {
         );
     }
 }
+
+pub mod windows_recovery_policy;
+pub use windows_recovery_policy::WindowsRecoveryPolicy;

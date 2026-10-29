@@ -120,19 +120,35 @@ server URLs or credentials into this document.
   `ciphertext_epoch_change_during_pin_never_activates_the_partial_generation`
   before reaching its content-download checkpoint. Later passes do not erase it.
   The test's fixed readiness/delay timing has been replaced locally by an explicit
-  GET gate, with local full gates and independent source review passing. Native
-  Windows execution of the changed test remains pending; this is test-proof
-  hardening, not an established production root-cause fix.
+  GET gate, with local full gates, independent source review and one focused
+  native Windows execution passing. This is test-proof hardening, not an
+  established production root-cause fix for the original CI failure.
 - Independent isolated Ubuntu VM package checks passed for the CI merge build
   0e1e6555d5c4059295951fc28d64bbc7528860f3. GitHub comparison proved its complete
   source tree identical to c584b8f. Package/installed hashes, dependencies,
   isolated installer, CLI entry points and retained canary passed; GUI launch,
   accounts and mounted workflows were not exercised in that check.
-- CLI-owned streamed ordinary capture/recovery has a separately frozen,
-  source-tested integration. Production activation remains off and its first
-  Windows large-file native diagnostic failed at close-validation stage 19.
-  CLI owns diagnosis; neither this matrix nor host-test totals claim that the
-  16-MiB ordinary or 512-KiB encrypted Windows ceilings are removed in a release.
+- C13 diagnostic ordinary capture/recovery passed four separately focused
+  Windows cases: Personal/Space saves of 17 MiB + 7 bytes with verified readback
+  and independent-process recovery, plus refused saves retaining local dirty
+  bytes without replay. Earlier stage-19 failures remain retained.
+- The actual GUI DPAPI constructor's local storage compatibility passed a fresh
+  isolated Windows save/reopen fixture at the same size. Its strict shared-lock,
+  original-root identity, legacy sentinel and modern v2 child checks passed.
+  The first fixture's Busy assertion failure remains retained; its actual error
+  was unrecorded. A corrected candidate recognizes fs2's native contention code.
+  This establishes local storage compatibility, not installed GUI cloud saves.
+- The subsequent C14 job/policy closure is composed locally into the Desktop
+  source, with independent integration review, 1,309 host tests passing and
+  strict Linux/Windows checks. One original cancellation/deadline job follows
+  capture, queue, upload, independent readback and native completion. Default GUI
+  factory activation and settings/recovered-completion adaptation remain pending.
+  C13 native acceptance does not validate these newer C14 changes. C14's separate
+  observer fixture failed preparation with PermissionDenied; directory and paced
+  stages were not run in that invocation. The job closure excludes the observer,
+  so an independent paced-save cohort can proceed without repeating that failure.
+  Neither source totals nor these scoped tests remove the released 16-MiB
+  ordinary or 512-KiB encrypted Windows ceilings or establish full parity.
 
 These records are under `desktop-release-prep-20261029/windows-ci-c584b8f/`
 and `linux/c584b8f-vm-acceptance/` outside Git. Full file operations and GUI

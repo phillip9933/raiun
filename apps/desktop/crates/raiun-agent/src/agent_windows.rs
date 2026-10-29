@@ -5837,7 +5837,7 @@ fn dispatch_one_initial_edit(
     if root_lease.identity() != binding.identity {
         return Err("The Windows root changed".into());
     }
-    let Some(pending) = connection
+    let Some(mut pending) = connection
         .take_initial_edit()
         .map_err(|_| "The fresh edit handoff is unavailable".to_owned())?
     else {
@@ -5846,9 +5846,19 @@ fn dispatch_one_initial_edit(
     if !pending.matches_provider(backend.scope(), binding.identity) {
         return Err("The fresh edit belongs to a different provider".into());
     }
+    let expected = binding.generation;
+    let generation_check = Arc::clone(generation);
+    let backend_check = Arc::downgrade(backend);
+    pending.link_recovery_revocation(Arc::new(move || {
+        generation_check.load(Ordering::Acquire) != expected
+            || backend_check
+                .upgrade()
+                .is_none_or(|backend| backend.is_revoked())
+    }));
+    let job = pending.recovery_job().cloned();
     let scope = pending.scope().clone();
     backend
-        .with_initial_edit_session(&scope, |session| {
+        .with_initial_edit_session_for_job(&scope, job.as_ref(), |session| {
             let remote = AgentGenerationRecoveryRemote {
                 inner: RecoveryRemoteHandle::Borrowed(session.remote()),
                 authorized_generation: Arc::clone(generation),
@@ -5932,6 +5942,38 @@ impl AgentGenerationRecoveryRemote<'_> {
 }
 
 impl raiun_cloudfiles_windows::RecoveryRemote for AgentGenerationRecoveryRemote<'_> {
+    fn begin_recovery_job(
+        &self,
+        policy: raiun_cloudfiles_windows::StreamedRecoveryPolicy,
+    ) -> raiun_cloudfiles_windows::StreamedRecoveryJob {
+        let generation = Arc::clone(&self.authorized_generation);
+        let expected = self.expected_generation;
+        self.inner
+            .remote()
+            .begin_recovery_job(policy)
+            .with_revocation_check(Arc::new(move || {
+                expected == 0 || generation.load(Ordering::Acquire) != expected
+            }))
+    }
+    fn bind_recovery_job(
+        &self,
+        job: &raiun_cloudfiles_windows::StreamedRecoveryJob,
+    ) -> raiun_cloudfiles_windows::StreamedRecoveryJob {
+        let generation = Arc::clone(&self.authorized_generation);
+        let expected = self.expected_generation;
+        let job = self.inner.remote().bind_recovery_job(job);
+        job.with_revocation_check(Arc::new(move || {
+            expected == 0 || generation.load(Ordering::Acquire) != expected
+        }))
+    }
+    fn streamed_remote_for_job(
+        &self,
+        job: &raiun_cloudfiles_windows::StreamedRecoveryJob,
+    ) -> Option<Box<dyn raiun_cloudfiles_windows::streamed_reconcile::StreamedRecoveryRemote + '_>>
+    {
+        windows_streamed_remote::companion_for_job(self, job)
+    }
+
     fn streamed_remote(
         &self,
     ) -> Option<Box<dyn raiun_cloudfiles_windows::streamed_reconcile::StreamedRecoveryRemote + '_>>

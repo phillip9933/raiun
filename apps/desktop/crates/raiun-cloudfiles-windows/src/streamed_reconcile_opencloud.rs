@@ -10,6 +10,7 @@ pub struct OpenCloudStreamedRecoveryRemote {
     scope: EditJournalScope,
     root_path: String,
     context: RangeReadContext,
+    job: Option<crate::StreamedRecoveryJob>,
 }
 impl OpenCloudStreamedRecoveryRemote {
     /// Construct only from current prepared provider state, never journal or
@@ -38,7 +39,17 @@ impl OpenCloudStreamedRecoveryRemote {
             scope,
             root_path,
             context,
+            job: None,
         })
+    }
+    pub(crate) fn with_recovery_job(mut self, job: crate::StreamedRecoveryJob) -> Self {
+        self.context.deadline = self.context.deadline.min(job.deadline());
+        self.job = Some(job);
+        self
+    }
+    fn job_cancelled(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        let job = self.job.clone();
+        Arc::new(move || job.as_ref().is_some_and(|job| job.is_stopped()))
     }
     fn check(&self, scope: &EditJournalScope) -> Result<(), CloudError> {
         self.ensure_authorized(scope, self.context.token_generation)
@@ -76,7 +87,8 @@ impl StreamedRecoveryRemote for OpenCloudStreamedRecoveryRemote {
         scope: &EditJournalScope,
         generation: u64,
     ) -> Result<(), CloudError> {
-        if scope != &self.scope
+        if self.job.as_ref().is_some_and(|job| job.is_stopped())
+            || scope != &self.scope
             || generation != self.context.token_generation
             || self.client.token_generation() != generation
             || self.context.deadline <= Instant::now()
@@ -98,7 +110,13 @@ impl StreamedRecoveryRemote for OpenCloudStreamedRecoveryRemote {
             &self.root_path,
             &scope.root_resource_id,
             path,
-            self.context,
+            RangeReadContext {
+                deadline: self
+                    .context
+                    .deadline
+                    .min(Instant::now() + std::time::Duration::from_secs(30)),
+                token_generation: self.context.token_generation,
+            },
         )?;
         self.check(scope)?;
         Ok(version(entry))
@@ -113,19 +131,22 @@ impl StreamedRecoveryRemote for OpenCloudStreamedRecoveryRemote {
         sha256: [u8; 32],
     ) -> Result<StreamedRemoteDigest, CloudError> {
         self.check(scope)?;
-        let proof = self.client.recovery_upload_blocking_reader_with_context(
-            &scope.space_id,
-            &self.root_path,
-            &scope.root_resource_id,
-            path,
-            &baseline.resource_id,
-            &baseline.etag,
-            baseline.byte_len,
-            source,
-            length,
-            sha256,
-            self.context,
-        )?;
+        let proof = self
+            .client
+            .recovery_upload_blocking_reader_cancellable_with_context(
+                &scope.space_id,
+                &self.root_path,
+                &scope.root_resource_id,
+                path,
+                &baseline.resource_id,
+                &baseline.etag,
+                baseline.byte_len,
+                source,
+                length,
+                sha256,
+                self.context,
+                self.job_cancelled(),
+            )?;
         self.check(scope)?;
         Ok(evidence(proof))
     }
@@ -139,7 +160,7 @@ impl StreamedRecoveryRemote for OpenCloudStreamedRecoveryRemote {
         sha256: [u8; 32],
     ) -> Result<StreamedRemoteDigest, CloudError> {
         self.check(scope)?;
-        let proof = self.client.recovery_read_digest_with_context(
+        let proof = self.client.recovery_read_digest_cancellable_with_context(
             &scope.space_id,
             &self.root_path,
             &scope.root_resource_id,
@@ -149,6 +170,7 @@ impl StreamedRecoveryRemote for OpenCloudStreamedRecoveryRemote {
             length,
             sha256,
             self.context,
+            self.job_cancelled(),
         )?;
         self.check(scope)?;
         Ok(evidence(proof))

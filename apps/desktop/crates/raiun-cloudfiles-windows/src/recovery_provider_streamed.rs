@@ -31,6 +31,13 @@ impl DurablePreparedEditRecovery {
         if self.streamed.is_none() {
             return Ok(None);
         }
+        let policy = self
+            .streamed
+            .as_ref()
+            .ok_or(crate::JournalError::InvalidState)?
+            .transfer_policy;
+        let job = remote.begin_recovery_job(policy);
+        job.check().map_err(|_| crate::JournalError::InvalidState)?;
         if !valid_scope_binding(&self.scope, self.root_identity)
             || record_id.len() != 32
             || !record_id
@@ -53,21 +60,24 @@ impl DurablePreparedEditRecovery {
             return Err(crate::JournalError::ScopeMismatch);
         }
         let adapter = remote
-            .streamed_remote()
+            .streamed_remote_for_job(&job)
             .ok_or(crate::JournalError::InvalidState)?;
+        let local_job = job.clone();
         let result = crate::streamed_reconcile::reconcile_recovered_streamed_edit(
             &selected.store,
             &selected.key,
             selected.key.scope(),
             &*adapter,
             approval,
-            Arc::new(|| false),
+            Arc::new(move || local_job.is_stopped()),
         )
         .map_err(crate::edit_journal::admission_error)?;
         let proof = result
             .verified
             .map(crate::VerifiedEditReadback::from_streamed)
-            .transpose()?;
+            .transpose()?
+            .map(|proof| proof.with_recovery_job(job.clone()));
+        job.check().map_err(|_| crate::JournalError::InvalidState)?;
         Ok(Some((result.outcome, proof)))
     }
 

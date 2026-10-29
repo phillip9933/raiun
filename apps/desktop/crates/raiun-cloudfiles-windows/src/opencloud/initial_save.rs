@@ -27,6 +27,18 @@ impl OpenCloudPlaceholderBackend {
         scope: &EditJournalScope,
         run: impl FnOnce(&InitialEditSession<'_>) -> T,
     ) -> Result<T, BackendError> {
+        self.with_initial_edit_session_for_job(scope, None, run)
+    }
+
+    pub fn with_initial_edit_session_for_job<T>(
+        &self,
+        scope: &EditJournalScope,
+        job: Option<&crate::StreamedRecoveryJob>,
+        run: impl FnOnce(&InitialEditSession<'_>) -> T,
+    ) -> Result<T, BackendError> {
+        if let Some(job) = job {
+            job.check()?;
+        }
         let _lease = self
             .lease_gate
             .read()
@@ -46,12 +58,17 @@ impl OpenCloudPlaceholderBackend {
         {
             return Err(BackendError::Unavailable);
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = job.map_or_else(
+            || std::time::Instant::now() + std::time::Duration::from_secs(30),
+            |job| job.deadline(),
+        );
+        let metadata_deadline =
+            deadline.min(std::time::Instant::now() + std::time::Duration::from_secs(30));
         let spaces = self.validate_namespace_scope(
             self.scope.account_id(),
             catalog.personal_space_id(),
             catalog.personal_root_resource_id(),
-            deadline,
+            metadata_deadline,
         )?;
         let space = spaces
             .iter()
@@ -63,7 +80,7 @@ impl OpenCloudPlaceholderBackend {
             .stat_discovered_space_root_with_context(
                 space,
                 RangeReadContext {
-                    deadline,
+                    deadline: metadata_deadline,
                     token_generation: self.token_generation,
                 },
             )
@@ -131,6 +148,28 @@ impl LiveInitialRemote<'_> {
 }
 
 impl RecoveryRemote for LiveInitialRemote<'_> {
+    fn begin_recovery_job(
+        &self,
+        policy: crate::StreamedRecoveryPolicy,
+    ) -> crate::StreamedRecoveryJob {
+        self.inner.begin_recovery_job(policy)
+    }
+    fn bind_recovery_job(&self, job: &crate::StreamedRecoveryJob) -> crate::StreamedRecoveryJob {
+        self.inner.bind_recovery_job(job)
+    }
+    #[cfg(any(windows, test))]
+    fn streamed_remote_for_job(
+        &self,
+        job: &crate::StreamedRecoveryJob,
+    ) -> Option<Box<dyn crate::streamed_reconcile::StreamedRecoveryRemote + '_>> {
+        self.backend.ensure_active().ok()?;
+        let inner = self.inner.streamed_remote_for_job(job)?;
+        Some(Box::new(LiveStreamedRemote {
+            backend: self.backend,
+            inner,
+        }))
+    }
+
     #[cfg(any(windows, test))]
     fn streamed_remote(
         &self,

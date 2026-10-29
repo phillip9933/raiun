@@ -124,6 +124,28 @@ where
     Ok(Box::pin(initial.chain(rest)))
 }
 
+fn stream_metadata_context(context: RangeReadContext) -> RangeReadContext {
+    RangeReadContext {
+        deadline: context
+            .deadline
+            .min(Instant::now() + Duration::from_secs(30)),
+        token_generation: context.token_generation,
+    }
+}
+
+fn stream_metadata_step<T>(
+    client: &OpenCloudClient,
+    context: RangeReadContext,
+    operation: impl FnOnce() -> Result<T, CloudError>,
+) -> Result<T, CloudError> {
+    let child = stream_metadata_context(context);
+    client.ensure_context_current(child)?;
+    let _guard = RangeContextGuard::enter(child);
+    let result = operation()?;
+    client.ensure_context_current(child)?;
+    Ok(result)
+}
+
 impl OpenCloudClient {
     fn stream_context_current(&self, context: RangeReadContext) -> Result<(), CloudError> {
         self.ensure_context_current(context)?;
@@ -184,10 +206,7 @@ impl OpenCloudClient {
     where
         R: std::io::Read + Send + 'static,
     {
-        let cancellation = self.transfer_budget.cancellation();
-        let (mut worker, reader) = crate::blocking_reader::start(reader)
-            .map_err(|_| invalid("recovery source worker could not start"))?;
-        let result = self.recovery_upload_reader_with_context(
+        self.recovery_upload_blocking_reader_cancellable_with_context(
             space,
             remote_root_path,
             expected_root_id,
@@ -199,6 +218,45 @@ impl OpenCloudClient {
             content_length,
             expected_sha256,
             context,
+            Arc::new(|| false),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn recovery_upload_blocking_reader_cancellable_with_context<R>(
+        &self,
+        space: &str,
+        remote_root_path: &str,
+        expected_root_id: &str,
+        relative_path: &str,
+        expected_resource_id: &str,
+        expected_etag: &str,
+        expected_size: u64,
+        reader: R,
+        content_length: u64,
+        expected_sha256: [u8; 32],
+        context: RangeReadContext,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<RecoveryStreamReadback, CloudError>
+    where
+        R: std::io::Read + Send + 'static,
+    {
+        let cancellation = self.transfer_budget.cancellation();
+        let (mut worker, reader) = crate::blocking_reader::start(reader)
+            .map_err(|_| invalid("recovery source worker could not start"))?;
+        let result = self.recovery_upload_reader_cancellable_with_context(
+            space,
+            remote_root_path,
+            expected_root_id,
+            relative_path,
+            expected_resource_id,
+            expected_etag,
+            expected_size,
+            reader,
+            content_length,
+            expected_sha256,
+            context,
+            Arc::clone(&cancelled),
         );
         // Always join, including admission/transport/readback failures. Never
         // replace an existing transport error with a later shutdown diagnosis.
@@ -207,6 +265,7 @@ impl OpenCloudClient {
             Err(error) => Err(error),
             Ok(proof) if completion == crate::blocking_reader::WorkerCompletion::Eof => {
                 self.stream_context_current(context)?;
+                ensure_not_cancelled(&|| cancelled())?;
                 ensure_not_cancelled(&|| cancellation.is_cancelled())?;
                 Ok(proof)
             }
@@ -235,21 +294,65 @@ impl OpenCloudClient {
     where
         R: AsyncRead + Unpin + Send + 'static,
     {
-        stream_metadata(expected_resource_id, expected_etag)?;
-        self.stream_context_current(context)?;
-        let _guard = RangeContextGuard::enter(context);
-        let path = recovery_target_path(remote_root_path, relative_path)?;
-        self.validate_recovery_root(space, remote_root_path, expected_root_id)?;
-        self.stream_entry(
+        self.recovery_upload_reader_cancellable_with_context(
             space,
-            &path,
+            remote_root_path,
+            expected_root_id,
+            relative_path,
             expected_resource_id,
             expected_etag,
             expected_size,
-        )?;
-        let (selected, url) = self.transfer_url(space, &path)?;
-        self.ensure_writable_target(&selected, &url, &path)?;
+            reader,
+            content_length,
+            expected_sha256,
+            context,
+            Arc::new(|| false),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn recovery_upload_reader_cancellable_with_context<R>(
+        &self,
+        space: &str,
+        remote_root_path: &str,
+        expected_root_id: &str,
+        relative_path: &str,
+        expected_resource_id: &str,
+        expected_etag: &str,
+        expected_size: u64,
+        reader: R,
+        content_length: u64,
+        expected_sha256: [u8; 32],
+        context: RangeReadContext,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<RecoveryStreamReadback, CloudError>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+    {
+        stream_metadata(expected_resource_id, expected_etag)?;
         self.stream_context_current(context)?;
+        ensure_not_cancelled(&|| cancelled())?;
+        let _guard = RangeContextGuard::enter(context);
+        let path = recovery_target_path(remote_root_path, relative_path)?;
+        stream_metadata_step(self, context, || {
+            self.validate_recovery_root(space, remote_root_path, expected_root_id)
+        })?;
+        stream_metadata_step(self, context, || {
+            self.stream_entry(
+                space,
+                &path,
+                expected_resource_id,
+                expected_etag,
+                expected_size,
+            )
+        })?;
+        let (selected, url) =
+            stream_metadata_step(self, context, || self.transfer_url(space, &path))?;
+        stream_metadata_step(self, context, || {
+            self.ensure_writable_target(&selected, &url, &path)
+        })?;
+        self.stream_context_current(context)?;
+        ensure_not_cancelled(&|| cancelled())?;
         let (request, token) = self.request_async(Method::PUT, &url)?;
         let budget = self.transfer_budget.clone();
         let cancel = budget.cancellation();
@@ -257,6 +360,7 @@ impl OpenCloudClient {
         let body_cancel = cancel.clone();
         let generation = Arc::clone(&self.token_generation);
         let body_generation = Arc::clone(&generation);
+        let body_job_cancelled = Arc::clone(&cancelled);
         let timeout = transfer_timeout_for_context(
             context,
             &budget,
@@ -269,7 +373,8 @@ impl OpenCloudClient {
             self.body_idle_timeout,
             timeout,
             || {
-                pause_budget.is_paused()
+                cancelled()
+                    || pause_budget.is_paused()
                     || cancel.is_cancelled()
                     || generation.load(Ordering::Acquire) != context.token_generation
             },
@@ -281,7 +386,8 @@ impl OpenCloudClient {
                     digest: expected_sha256,
                     budget,
                     cancelled: move || {
-                        body_cancel.is_cancelled()
+                        body_job_cancelled()
+                            || body_cancel.is_cancelled()
                             || body_generation.load(Ordering::Acquire) != context.token_generation
                     },
                     progress,
@@ -307,13 +413,16 @@ impl OpenCloudClient {
             },
         );
         self.stream_context_current(context)?;
+        ensure_not_cancelled(&|| cancelled())?;
         ensure_not_cancelled(&|| cancel.is_cancelled())?;
         result?;
         if !verified.load(Ordering::Acquire) {
             return Err(invalid("recovery source was not completely consumed"));
         }
-        self.validate_recovery_root(space, remote_root_path, expected_root_id)?;
-        let after = CloudBackend::stat(self, space, &path)?;
+        stream_metadata_step(self, context, || {
+            self.validate_recovery_root(space, remote_root_path, expected_root_id)
+        })?;
+        let after = stream_metadata_step(self, context, || CloudBackend::stat(self, space, &path))?;
         validate_recovery_entry(&after, &path)?;
         stream_metadata(expected_resource_id, &after.etag)?;
         if after.id != expected_resource_id
@@ -324,7 +433,7 @@ impl OpenCloudClient {
         {
             return Err(conflict("recovery upload could not be verified"));
         }
-        let readback = self.recovery_read_digest_with_context(
+        let readback = self.recovery_read_digest_cancellable_with_context(
             space,
             remote_root_path,
             expected_root_id,
@@ -334,8 +443,10 @@ impl OpenCloudClient {
             content_length,
             expected_sha256,
             context,
+            Arc::clone(&cancelled),
         )?;
         self.stream_context_current(context)?;
+        ensure_not_cancelled(&|| cancelled())?;
         ensure_not_cancelled(&|| cancel.is_cancelled())?;
         Ok(readback)
     }
@@ -356,21 +467,58 @@ impl OpenCloudClient {
         expected_sha256: [u8; 32],
         context: RangeReadContext,
     ) -> Result<RecoveryStreamReadback, CloudError> {
-        stream_metadata(expected_resource_id, expected_etag)?;
-        self.stream_context_current(context)?;
-        let _guard = RangeContextGuard::enter(context);
-        let path = recovery_target_path(remote_root_path, relative_path)?;
-        self.validate_recovery_root(space, remote_root_path, expected_root_id)?;
-        self.stream_entry(
+        self.recovery_read_digest_cancellable_with_context(
             space,
-            &path,
+            remote_root_path,
+            expected_root_id,
+            relative_path,
             expected_resource_id,
             expected_etag,
             expected_size,
-        )?;
-        let (selected, url) = self.transfer_url(space, &path)?;
-        self.ensure_writable_target(&selected, &url, &path)?;
+            expected_sha256,
+            context,
+            Arc::new(|| false),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn recovery_read_digest_cancellable_with_context(
+        &self,
+        space: &str,
+        remote_root_path: &str,
+        expected_root_id: &str,
+        relative_path: &str,
+        expected_resource_id: &str,
+        expected_etag: &str,
+        expected_size: u64,
+        expected_sha256: [u8; 32],
+        context: RangeReadContext,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<RecoveryStreamReadback, CloudError> {
+        stream_metadata(expected_resource_id, expected_etag)?;
         self.stream_context_current(context)?;
+        ensure_not_cancelled(&|| cancelled())?;
+        let _guard = RangeContextGuard::enter(context);
+        let path = recovery_target_path(remote_root_path, relative_path)?;
+        stream_metadata_step(self, context, || {
+            self.validate_recovery_root(space, remote_root_path, expected_root_id)
+        })?;
+        stream_metadata_step(self, context, || {
+            self.stream_entry(
+                space,
+                &path,
+                expected_resource_id,
+                expected_etag,
+                expected_size,
+            )
+        })?;
+        let (selected, url) =
+            stream_metadata_step(self, context, || self.transfer_url(space, &path))?;
+        stream_metadata_step(self, context, || {
+            self.ensure_writable_target(&selected, &url, &path)
+        })?;
+        self.stream_context_current(context)?;
+        ensure_not_cancelled(&|| cancelled())?;
         let (request, token) = self.request_async(Method::GET, &url)?;
         let budget = self.transfer_budget.clone();
         let cancel = budget.cancellation();
@@ -378,6 +526,7 @@ impl OpenCloudClient {
         let body_cancel = cancel.clone();
         let generation = Arc::clone(&self.token_generation);
         let body_generation = Arc::clone(&generation);
+        let body_job_cancelled = Arc::clone(&cancelled);
         let timeout = transfer_timeout_for_context(
             context,
             &budget,
@@ -388,7 +537,8 @@ impl OpenCloudClient {
             self.body_idle_timeout,
             timeout,
             || {
-                pause_budget.is_paused()
+                cancelled()
+                    || pause_budget.is_paused()
                     || cancel.is_cancelled()
                     || generation.load(Ordering::Acquire) != context.token_generation
             },
@@ -422,7 +572,8 @@ impl OpenCloudClient {
                     let mut offset = 0;
                     while offset < chunk.len() {
                         let cancelled = || {
-                            body_cancel.is_cancelled()
+                            body_job_cancelled()
+                                || body_cancel.is_cancelled()
                                 || body_generation.load(Ordering::Acquire)
                                     != context.token_generation
                         };
@@ -454,17 +605,23 @@ impl OpenCloudClient {
             },
         );
         self.stream_context_current(context)?;
+        ensure_not_cancelled(&|| cancelled())?;
         ensure_not_cancelled(&|| cancel.is_cancelled())?;
         result?;
-        self.validate_recovery_root(space, remote_root_path, expected_root_id)?;
-        let entry = self.stream_entry(
-            space,
-            &path,
-            expected_resource_id,
-            expected_etag,
-            expected_size,
-        )?;
+        stream_metadata_step(self, context, || {
+            self.validate_recovery_root(space, remote_root_path, expected_root_id)
+        })?;
+        let entry = stream_metadata_step(self, context, || {
+            self.stream_entry(
+                space,
+                &path,
+                expected_resource_id,
+                expected_etag,
+                expected_size,
+            )
+        })?;
         self.stream_context_current(context)?;
+        ensure_not_cancelled(&|| cancelled())?;
         ensure_not_cancelled(&|| cancel.is_cancelled())?;
         Ok(RecoveryStreamReadback {
             entry,

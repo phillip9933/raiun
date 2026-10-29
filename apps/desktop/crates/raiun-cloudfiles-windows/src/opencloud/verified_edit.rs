@@ -146,7 +146,13 @@ impl VerifiedEditPublication<'_, '_> {
     ) -> Result<T, crate::Error> {
         let unavailable = || crate::Error::EditRecoveryUnavailable;
         let backend = self.session.remote.backend;
-        let cancellation = CancellationToken::new();
+        let cancellation = self
+            .proof
+            .recovery_job()
+            .map_or_else(CancellationToken::new, |job| job.cancellation().clone());
+        if cancellation.is_cancelled() || cancellation.is_expired() {
+            return Err(unavailable());
+        }
         // Existing publication/token fence also blocks revoke() setting its
         // flag. Keep it through the OS completion, not merely catalog writes.
         let _permit = backend
@@ -182,7 +188,14 @@ impl VerifiedEditPublication<'_, '_> {
         updated.etag = version.etag.clone();
         updated.size = version.size;
         state.files.insert(self.identity, updated);
-        complete()
+        if cancellation.is_cancelled() || cancellation.is_expired() {
+            return Err(unavailable());
+        }
+        let result = complete()?;
+        if cancellation.is_cancelled() || cancellation.is_expired() {
+            return Err(unavailable());
+        }
+        Ok(result)
     }
 }
 

@@ -75,6 +75,27 @@ pub trait RecoveryRemote: Send + Sync {
         None
     }
 
+    /// Capture one explicit invocation. Production adapters snapshot their
+    /// cancellation epoch BEFORE the monotonic time origin.
+    fn begin_recovery_job(
+        &self,
+        policy: crate::StreamedRecoveryPolicy,
+    ) -> crate::StreamedRecoveryJob {
+        crate::CancellationToken::for_recovery_job(policy)
+    }
+
+    fn bind_recovery_job(&self, job: &crate::StreamedRecoveryJob) -> crate::StreamedRecoveryJob {
+        job.clone()
+    }
+
+    #[cfg(any(windows, test))]
+    fn streamed_remote_for_job(
+        &self,
+        _job: &crate::StreamedRecoveryJob,
+    ) -> Option<Box<dyn crate::streamed_reconcile::StreamedRecoveryRemote + '_>> {
+        None
+    }
+
     /// Verify the caller's serialized active-session/root generation. The
     /// default is suitable only for test remotes; production adapters should
     /// check their provider manager's revocation generation here and in the
@@ -192,6 +213,45 @@ impl OpenCloudRecoveryRemote {
 }
 
 impl RecoveryRemote for OpenCloudRecoveryRemote {
+    fn begin_recovery_job(
+        &self,
+        policy: crate::StreamedRecoveryPolicy,
+    ) -> crate::StreamedRecoveryJob {
+        let cancellation = self.client.transfer_budget().cancellation();
+        crate::CancellationToken::for_recovery_job_with_deadline(policy, self.dispatch_deadline)
+            .with_revocation_check(Arc::new(move || cancellation.is_cancelled()))
+    }
+    fn bind_recovery_job(&self, job: &crate::StreamedRecoveryJob) -> crate::StreamedRecoveryJob {
+        let cancellation = self.client.transfer_budget().cancellation();
+        let original = self.dispatch_deadline;
+        job.with_revocation_check(Arc::new(move || {
+            cancellation.is_cancelled()
+                || original.is_some_and(|deadline| Instant::now() >= deadline)
+        }))
+    }
+    #[cfg(any(windows, test))]
+    fn streamed_remote_for_job(
+        &self,
+        job: &crate::StreamedRecoveryJob,
+    ) -> Option<Box<dyn crate::streamed_reconcile::StreamedRecoveryRemote + '_>> {
+        let deadline = self
+            .dispatch_deadline
+            .map_or(job.deadline(), |original| original.min(job.deadline()));
+        crate::streamed_reconcile::OpenCloudStreamedRecoveryRemote::new(
+            Arc::clone(&self.client),
+            self.scope.clone(),
+            self.remote_root_path.clone(),
+            RangeReadContext {
+                deadline,
+                token_generation: self.token_generation,
+            },
+        )
+        .ok()
+        .map(|remote| {
+            Box::new(remote.with_recovery_job(job.clone()))
+                as Box<dyn crate::streamed_reconcile::StreamedRecoveryRemote>
+        })
+    }
     #[cfg(any(windows, test))]
     fn streamed_remote(
         &self,
@@ -341,11 +401,21 @@ pub enum ReconciliationIssue {
 pub struct VerifiedEditReadback {
     metadata: crate::LocalEditMetadata,
     version: RecoveryRemoteVersion,
+    job: Option<crate::StreamedRecoveryJob>,
     #[cfg(any(windows, test))]
     streamed: Option<Arc<std::sync::Mutex<crate::streamed_reconcile::VerifiedStreamedReadback>>>,
 }
 
 impl VerifiedEditReadback {
+    pub fn recovery_job(&self) -> Option<&crate::StreamedRecoveryJob> {
+        self.job.as_ref()
+    }
+    #[cfg(any(windows, test))]
+    pub(crate) fn with_recovery_job(mut self, job: crate::StreamedRecoveryJob) -> Self {
+        self.job = Some(job);
+        self
+    }
+
     pub fn metadata(&self) -> &crate::LocalEditMetadata {
         &self.metadata
     }
@@ -401,6 +471,7 @@ impl VerifiedEditReadback {
             metadata,
             version,
             streamed: Some(Arc::new(std::sync::Mutex::new(proof))),
+            job: None,
         })
     }
 }
@@ -408,6 +479,45 @@ impl VerifiedEditReadback {
 #[cfg(all(test, unix))]
 mod verified_streamed_bridge_tests {
     use super::*;
+
+    #[test]
+    fn explicit_job_retains_original_budget_epoch_across_pause_and_resume() {
+        let client = Arc::new(
+            OpenCloudClient::new("https://synthetic.invalid", "synthetic".into()).unwrap(),
+        );
+        let scope = crate::EditJournalScope {
+            profile_id: "profile".into(),
+            server_origin: "https://synthetic.invalid".into(),
+            account_subject: "subject".into(),
+            space_id: "space".into(),
+            root_resource_id: "root".into(),
+            root_volume_serial: 1,
+            root_file_index: 2,
+        };
+        let remote = OpenCloudRecoveryRemote::new(
+            client.clone(),
+            scope.clone(),
+            "/".into(),
+            client.token_generation(),
+        )
+        .unwrap();
+        let outer_deadline = Instant::now() + Duration::from_secs(30);
+        let remote = remote.with_dispatch_deadline(outer_deadline);
+        let job = remote.begin_recovery_job(crate::StreamedRecoveryPolicy::default());
+        let deadline = job.deadline();
+        assert_eq!(deadline, outer_deadline);
+        client.transfer_budget().set_paused(true);
+        client.transfer_budget().cancel_waiters();
+        client.transfer_budget().set_paused(false);
+        assert!(job.is_stopped());
+        assert_eq!(job.clone().deadline(), deadline);
+        let adapter = remote.streamed_remote_for_job(&job).unwrap();
+        assert!(
+            adapter
+                .ensure_authorized(&scope, client.token_generation())
+                .is_err()
+        );
+    }
 
     #[test]
     fn legacy_view_has_no_streamed_backing_or_native_streamed_key() {
@@ -420,12 +530,23 @@ mod verified_streamed_bridge_tests {
             metadata,
             version,
             streamed: None,
+            job: None,
         };
+        let job =
+            crate::CancellationToken::for_recovery_job(crate::StreamedRecoveryPolicy::default());
+        let deadline = job.deadline();
+        let legacy = legacy.with_recovery_job(job);
+        assert_eq!(legacy.recovery_job().unwrap().deadline(), deadline);
+        assert!(!legacy.recovery_job().unwrap().is_stopped());
         assert!(!legacy.is_streamed());
         assert!(legacy.streamed_backing().is_none());
         let completion =
             crate::CompletedLocalEdit::from_verified_native_completion(&legacy).unwrap();
         assert!(completion.streamed_key().is_none());
+        let expired = legacy.with_recovery_job(crate::StreamedRecoveryJob::for_test_timeout(
+            std::time::Duration::ZERO,
+        ));
+        assert!(crate::CompletedLocalEdit::from_verified_native_completion(&expired).is_err());
     }
 
     #[test]
@@ -557,6 +678,7 @@ pub fn verify_edit_readback(
         return Err(ReconciliationOutcome::Deferred);
     }
     Ok(VerifiedEditReadback {
+        job: None,
         metadata: record.metadata.clone(),
         version: body.version.clone(),
         #[cfg(any(windows, test))]

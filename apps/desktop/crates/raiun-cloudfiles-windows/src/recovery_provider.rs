@@ -66,6 +66,7 @@ struct StreamedRecoveryContext {
     state: Arc<crate::recovery_state::RecoveryStateRoot>,
     admission: Arc<crate::recovery_admission::RecoveryAdmission>,
     policy: crate::streamed_store::StorePolicy,
+    transfer_policy: crate::StreamedRecoveryPolicy,
 }
 
 impl DurableEditRecoveryProvider {
@@ -93,8 +94,17 @@ impl DurableEditRecoveryProvider {
     /// Windows state root. Native capture activation remains a separate gate.
     #[cfg(windows)]
     pub fn with_streamed_recovery(
+        self,
+        policy: crate::streamed_store::StorePolicy,
+    ) -> Result<Self, crate::JournalError> {
+        self.with_streamed_recovery_policy(policy, crate::StreamedRecoveryPolicy::default())
+    }
+
+    #[cfg(windows)]
+    pub fn with_streamed_recovery_policy(
         mut self,
         policy: crate::streamed_store::StorePolicy,
+        transfer_policy: crate::StreamedRecoveryPolicy,
     ) -> Result<Self, crate::JournalError> {
         let parent_path = self
             .state_directory
@@ -122,21 +132,31 @@ impl DurableEditRecoveryProvider {
             state: crate::recovery_state::RecoveryStateRoot::modern(state),
             admission,
             policy,
+            transfer_policy,
         });
         Ok(self)
     }
 
-    /// Explicit GUI compatibility admission at the unchanged DPAPI state root.
-    /// Existing root ACLs/records are only inspected; payload authority remains
-    /// confined to the strict modern v2 child and shared canonical quota lock.
+    /// Explicit compatibility admission at the existing GUI DPAPI state root.
+    /// The original root and records retain their permissions; only the strict
+    /// modern v2 child grants payload storage authority.
     #[cfg(windows)]
     pub fn with_gui_streamed_recovery(
         self,
         policy: crate::streamed_store::StorePolicy,
     ) -> Result<Self, crate::JournalError> {
+        self.with_gui_streamed_recovery_policy(policy, crate::StreamedRecoveryPolicy::default())
+    }
+
+    #[cfg(windows)]
+    pub fn with_gui_streamed_recovery_policy(
+        self,
+        policy: crate::streamed_store::StorePolicy,
+        transfer_policy: crate::StreamedRecoveryPolicy,
+    ) -> Result<Self, crate::JournalError> {
         let state = crate::recovery_state::RecoveryStateRoot::existing_gui(&self.state_directory)
             .map_err(|_| crate::JournalError::ProtectionFailed)?;
-        self.attach_streamed_recovery(state, policy)
+        self.attach_streamed_recovery(state, policy, transfer_policy)
     }
 
     #[cfg(windows)]
@@ -144,6 +164,7 @@ impl DurableEditRecoveryProvider {
         mut self,
         state: Arc<crate::recovery_state::RecoveryStateRoot>,
         policy: crate::streamed_store::StorePolicy,
+        transfer_policy: crate::StreamedRecoveryPolicy,
     ) -> Result<Self, crate::JournalError> {
         let admission = Arc::new(
             crate::recovery_admission::RecoveryAdmission::new_admitted(
@@ -157,6 +178,7 @@ impl DurableEditRecoveryProvider {
             state,
             admission,
             policy,
+            transfer_policy,
         });
         Ok(self)
     }
@@ -1017,6 +1039,7 @@ impl EditRecoveryProvider for DurableEditRecoveryProvider {
 pub struct InitialEditReceipt {
     owner: Arc<()>,
     metadata: LocalEditMetadata,
+    job: Option<crate::StreamedRecoveryJob>,
     #[cfg(windows)]
     streamed: Option<crate::streamed_store::StreamedRecordKey>,
 }
@@ -1028,10 +1051,30 @@ pub struct StagedStreamedEdit {
     owner: Arc<()>,
     store: Arc<crate::streamed_store::SnapshotStore>,
     stage: crate::streamed_store::StagedSnapshot,
+    job: crate::StreamedRecoveryJob,
     binding: crate::streamed_snapshot::SnapshotBinding,
 }
 
 impl InitialEditReceipt {
+    #[cfg(test)]
+    pub(crate) fn with_test_job(mut self, job: crate::StreamedRecoveryJob) -> Self {
+        self.job = Some(job);
+        self
+    }
+
+    pub fn recovery_job(&self) -> Option<&crate::StreamedRecoveryJob> {
+        self.job.as_ref()
+    }
+    pub(crate) fn link_recovery_revocation(
+        &mut self,
+        revoked: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) {
+        self.job = self
+            .job
+            .as_ref()
+            .map(|job| job.with_revocation_check(revoked));
+    }
+
     #[cfg(any(windows, test))]
     pub(crate) fn record_key(&self) -> (&str, u64) {
         (&self.metadata.record_id, self.metadata.generation)
@@ -1058,6 +1101,7 @@ impl InitialEditReceipt {
 /// the OS accepts its nonzero-USN comparison. Not a remote-only receipt.
 pub struct CompletedLocalEdit {
     metadata: LocalEditMetadata,
+    job: Option<crate::StreamedRecoveryJob>,
     #[cfg(any(windows, test))]
     streamed: Option<Arc<Mutex<crate::streamed_reconcile::VerifiedStreamedReadback>>>,
     #[cfg(any(windows, test))]
@@ -1069,6 +1113,7 @@ impl CompletedLocalEdit {
     pub(crate) fn from_native_completion(metadata: &LocalEditMetadata) -> Self {
         Self {
             metadata: metadata.clone(),
+            job: None,
             streamed: None,
             streamed_key: None,
         }
@@ -1090,6 +1135,9 @@ impl CompletedLocalEdit {
     pub(crate) fn from_verified_native_completion(
         proof: &crate::VerifiedEditReadback,
     ) -> Result<Self, crate::JournalError> {
+        if proof.recovery_job().is_some_and(|job| job.is_stopped()) {
+            return Err(crate::JournalError::InvalidState);
+        }
         let streamed = proof.streamed_backing().cloned();
         let streamed_key = streamed
             .as_ref()
@@ -1102,6 +1150,7 @@ impl CompletedLocalEdit {
             .transpose()?;
         Ok(Self {
             metadata: proof.metadata().clone(),
+            job: proof.recovery_job().cloned(),
             streamed,
             streamed_key,
         })
@@ -1281,22 +1330,32 @@ impl DurablePreparedEditRecovery {
         {
             return Err(crate::JournalError::ScopeMismatch);
         }
+        let job = remote.bind_recovery_job(
+            receipt
+                .job
+                .as_ref()
+                .ok_or(crate::JournalError::InvalidState)?,
+        );
+        job.check().map_err(|_| crate::JournalError::InvalidState)?;
         let remote = remote
-            .streamed_remote()
+            .streamed_remote_for_job(&job)
             .ok_or(crate::JournalError::InvalidState)?;
+        let local_job = job.clone();
         let result = crate::streamed_reconcile::reconcile_streamed_edit(
             &store,
             &key,
             &receipt.metadata.scope,
             &*remote,
             crate::streamed_reconcile::StreamedAdmission::Fresh,
-            Arc::new(|| false),
+            Arc::new(move || local_job.is_stopped()),
         )
         .map_err(crate::edit_journal::admission_error)?;
         let proof = result
             .verified
             .map(crate::VerifiedEditReadback::from_streamed)
-            .transpose()?;
+            .transpose()?
+            .map(|proof| proof.with_recovery_job(job.clone()));
+        job.check().map_err(|_| crate::JournalError::InvalidState)?;
         Ok((result.outcome, proof))
     }
 }
@@ -1317,6 +1376,13 @@ fn streamed_capture_error(
 
 impl PreparedEditRecovery for DurablePreparedEditRecovery {
     #[cfg(windows)]
+    fn begin_streamed_job(&self) -> Option<crate::StreamedRecoveryJob> {
+        self.streamed
+            .as_ref()
+            .map(|context| crate::CancellationToken::for_recovery_job(context.transfer_policy))
+    }
+
+    #[cfg(windows)]
     fn supports_streamed_capture(&self) -> bool {
         self.streamed.is_some()
     }
@@ -1329,9 +1395,11 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
         local_file: crate::LocalFileIdentity,
         relative_path: &str,
         content_len: u64,
+        job: &crate::StreamedRecoveryJob,
         source: &mut dyn Read,
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<StagedStreamedEdit, BackendError> {
+        job.check()?;
         let context = self.streamed.as_ref().ok_or(BackendError::Unavailable)?;
         if root_identity != self.root_identity
             || binding.profile_id != self.scope.profile_id()
@@ -1374,12 +1442,13 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
             .map_err(|error| streamed_capture_error("capture_reservation", error))?;
         let binding = reservation.binding().clone();
         let stage = reservation
-            .capture(source, cancelled)
+            .capture(source, &mut || job.is_stopped() || cancelled())
             .map_err(|error| streamed_capture_error("capture_body", error))?;
         Ok(StagedStreamedEdit {
             owner: Arc::clone(&self.receipt_owner),
             store,
             stage,
+            job: job.clone(),
             binding,
         })
     }
@@ -1397,9 +1466,10 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
         {
             return Err(BackendError::Unavailable);
         }
+        stage.job.check()?;
         let committed = stage
             .stage
-            .verify_and_commit(cancelled)
+            .verify_and_commit(&mut || stage.job.is_stopped() || cancelled())
             .map_err(|error| streamed_capture_error("verify_commit", error))?;
         if committed.manifest().binding() != &stage.binding {
             return Err(BackendError::Unavailable);
@@ -1414,6 +1484,7 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
             owner: Arc::clone(&self.receipt_owner),
             metadata,
             streamed: Some(key),
+            job: Some(stage.job),
         }))
     }
 
@@ -1497,6 +1568,7 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
             .map_err(|_| BackendError::Unavailable)?;
         self.add_pending(&metadata);
         Ok(Some(InitialEditReceipt {
+            job: None,
             owner: Arc::clone(&self.receipt_owner),
             metadata,
             #[cfg(windows)]
@@ -1592,6 +1664,9 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
         &self,
         completion: CompletedLocalEdit,
     ) -> Result<(), crate::JournalError> {
+        if completion.job.as_ref().is_some_and(|job| job.is_stopped()) {
+            return Err(crate::JournalError::InvalidState);
+        }
         let metadata = completion.metadata.clone();
         if metadata.generation != self.scope.token_generation()
             || !scope_matches_provider(&metadata.scope, &self.scope, self.root_identity)
@@ -1608,6 +1683,9 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
                 .map_err(|_| crate::JournalError::InvalidState)?
                 .acknowledge_native(&completion)
                 .map_err(crate::edit_journal::admission_error)?;
+            if completion.job.as_ref().is_some_and(|job| job.is_stopped()) {
+                return Err(crate::JournalError::InvalidState);
+            }
             if let Ok(mut pending) = self.pending.lock()
                 && let Some(records) = pending.as_mut()
             {
@@ -3156,6 +3234,7 @@ mod tests {
         let metadata = first.metadata.clone();
         // A forged duplicate is possible only inside this private test module.
         let duplicate = InitialEditReceipt {
+            job: None,
             owner: Arc::clone(&first.owner),
             metadata: metadata.clone(),
             #[cfg(windows)]

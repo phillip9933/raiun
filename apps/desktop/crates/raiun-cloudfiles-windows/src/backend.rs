@@ -288,6 +288,11 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
     }
 
     #[cfg(windows)]
+    fn begin_streamed_job(&self) -> Option<StreamedRecoveryJob> {
+        None
+    }
+
+    #[cfg(windows)]
     #[allow(clippy::too_many_arguments)]
     fn stage_streamed_edit(
         &self,
@@ -296,6 +301,7 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
         _local_file: crate::LocalFileIdentity,
         _relative_path: &str,
         _content_len: u64,
+        _job: &StreamedRecoveryJob,
         _source: &mut dyn std::io::Read,
         _cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<crate::StagedStreamedEdit, BackendError> {
@@ -559,10 +565,97 @@ impl PreparedFetch for StagedFetch {
 }
 
 /// Cooperative cancellation signal associated with one native request.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CancellationToken {
     cancelled: Arc<AtomicBool>,
     deadline: Instant,
+    owner_cancelled: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+}
+
+impl std::fmt::Debug for CancellationToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CancellationToken")
+            .field("deadline", &self.deadline)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Immutable transfer-job policy, separate from storage quota and fetch limits.
+#[derive(Clone, Copy, Debug)]
+pub struct StreamedRecoveryPolicy {
+    total_timeout: Duration,
+}
+
+impl StreamedRecoveryPolicy {
+    pub fn new(total_timeout: Duration) -> Result<Self, BackendError> {
+        if !(Duration::from_secs(60)..=Duration::from_secs(86_400)).contains(&total_timeout) {
+            return Err(BackendError::Unavailable);
+        }
+        Ok(Self { total_timeout })
+    }
+
+    pub fn total_timeout(self) -> Duration {
+        self.total_timeout
+    }
+}
+
+impl Default for StreamedRecoveryPolicy {
+    fn default() -> Self {
+        Self {
+            total_timeout: Duration::from_secs(21_600),
+        }
+    }
+}
+
+/// Ephemeral deadline/cancellation only; never upload or native ACK authority.
+/// Clones retain the original deadline and cancellation state, including queue
+/// wait, independent readback and joined source shutdown.
+#[derive(Clone, Debug)]
+pub struct StreamedRecoveryJob {
+    cancellation: CancellationToken,
+}
+
+impl StreamedRecoveryJob {
+    #[cfg(test)]
+    pub(crate) fn for_test_timeout(timeout: Duration) -> Self {
+        Self {
+            cancellation: CancellationToken {
+                cancelled: Arc::new(AtomicBool::new(false)),
+                deadline: Instant::now() + timeout,
+                owner_cancelled: None,
+            },
+        }
+    }
+    pub fn deadline(&self) -> Instant {
+        self.cancellation.deadline()
+    }
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+    pub fn is_stopped(&self) -> bool {
+        self.cancellation.is_cancelled() || self.cancellation.is_expired()
+    }
+    pub(crate) fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+    pub(crate) fn check(&self) -> Result<(), BackendError> {
+        if self.is_stopped() {
+            Err(BackendError::Unavailable)
+        } else {
+            Ok(())
+        }
+    }
+    /// Add revocation without dropping earlier owner checks or extending time.
+    /// Actual owner callbacks must be nonblocking atomic-only checks.
+    pub fn with_revocation_check(&self, revoked: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
+        let previous = self.cancellation.owner_cancelled.clone();
+        let mut job = self.clone();
+        job.cancellation.owner_cancelled = Some(Arc::new(move || {
+            previous.as_ref().is_some_and(|check| check()) || revoked()
+        }));
+        job
+    }
 }
 
 impl CancellationToken {
@@ -579,6 +672,25 @@ impl CancellationToken {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
             deadline: Instant::now() + bounded,
+            owner_cancelled: None,
+        }
+    }
+
+    pub fn for_recovery_job(policy: StreamedRecoveryPolicy) -> StreamedRecoveryJob {
+        Self::for_recovery_job_with_deadline(policy, None)
+    }
+
+    pub(crate) fn for_recovery_job_with_deadline(
+        policy: StreamedRecoveryPolicy,
+        original: Option<Instant>,
+    ) -> StreamedRecoveryJob {
+        let maximum = Instant::now() + policy.total_timeout;
+        StreamedRecoveryJob {
+            cancellation: Self {
+                cancelled: Arc::new(AtomicBool::new(false)),
+                deadline: original.map_or(maximum, |deadline| deadline.min(maximum)),
+                owner_cancelled: None,
+            },
         }
     }
 
@@ -588,6 +700,7 @@ impl CancellationToken {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
             deadline: Instant::now() + Duration::from_secs(60 * 60),
+            owner_cancelled: None,
         }
     }
 
@@ -605,6 +718,10 @@ impl CancellationToken {
 
     /// Check cancellation before starting or continuing backend work.
     pub fn is_cancelled(&self) -> bool {
+        if self.owner_cancelled.as_ref().is_some_and(|check| check()) {
+            // Revocation is sticky: a later reconnect/resume cannot revive it.
+            self.cancel();
+        }
         self.cancelled.load(Ordering::Acquire)
     }
 
@@ -775,6 +892,15 @@ pub trait PreparedFetchSession {
 /// expensive work. The callback bridge caps each staging window at
 /// [`MAX_REQUEST_BYTES`] and transfers data in [`MAX_RANGE_BYTES`] slices.
 pub trait PlaceholderBackend: Send + Sync + 'static {
+    /// Atomic-only, nonblocking owner fence for an ephemeral recovery job.
+    fn recovery_job_revoked(&self) -> bool {
+        true
+    }
+    /// Capture the original transfer cancellation epoch once at job creation.
+    fn recovery_transfer_cancellation(&self) -> Option<Arc<dyn Fn() -> bool + Send + Sync>> {
+        None
+    }
+
     /// Native bookkeeping is mandatory before publishing decrypted vault bytes.
     /// This classifies an already owned opaque identity; it grants no unlock.
     fn requires_hydration_inventory(&self, _identity: &[u8]) -> Result<bool, BackendError> {
@@ -1068,6 +1194,46 @@ mod tests {
         assert_eq!(checked_fetch_range(4096, 0, -1).unwrap().len(), 4096);
         assert_eq!(checked_fetch_range(4096, 0, 8192).unwrap().len(), 4096);
         assert_eq!(checked_fetch_range(0, 0, -1).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn streamed_job_policy_is_validated_and_clones_never_reset_time() {
+        use super::{CancellationToken, StreamedRecoveryJob, StreamedRecoveryPolicy};
+        use std::time::Duration;
+        assert!(StreamedRecoveryPolicy::new(Duration::from_secs(59)).is_err());
+        assert!(StreamedRecoveryPolicy::new(Duration::from_secs(86401)).is_err());
+        assert_eq!(
+            StreamedRecoveryPolicy::default().total_timeout(),
+            Duration::from_secs(21600)
+        );
+        let job = CancellationToken::for_recovery_job(StreamedRecoveryPolicy::default());
+        assert_eq!(job.deadline(), job.clone().deadline());
+        assert!(job.cancellation().remaining().unwrap() > Duration::from_secs(30));
+        let expired = StreamedRecoveryJob::for_test_timeout(Duration::ZERO);
+        assert!(expired.check().is_err());
+        assert!(expired.is_stopped());
+    }
+
+    #[test]
+    fn streamed_job_owner_revocation_is_sticky_and_additive() {
+        use super::{CancellationToken, StreamedRecoveryPolicy};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let first = Arc::new(AtomicBool::new(false));
+        let second = Arc::new(AtomicBool::new(false));
+        let job = CancellationToken::for_recovery_job(StreamedRecoveryPolicy::default());
+        let observed = first.clone();
+        let job = job.with_revocation_check(Arc::new(move || observed.load(Ordering::Acquire)));
+        let observed = second.clone();
+        let linked = job.with_revocation_check(Arc::new(move || observed.load(Ordering::Acquire)));
+        assert_eq!(job.deadline(), linked.deadline());
+        first.store(true, Ordering::Release);
+        assert!(linked.is_stopped());
+        first.store(false, Ordering::Release);
+        assert!(job.is_stopped());
+        assert!(linked.is_stopped());
     }
 
     #[test]

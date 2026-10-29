@@ -529,3 +529,47 @@ fn fresh_changed_revision_can_verify_zero_put_without_rebasing_or_false_digest()
         }
     }
 }
+
+#[test]
+fn expired_job_and_revocation_during_local_container_verification_do_no_http() {
+    use std::sync::atomic::AtomicU64;
+    let (_dir, store) = synthetic_test_store(policy());
+    let key = capture(&store, 17 * 1024 * 1024 + 7, 3);
+    let remote = Remote::new(&store, &key, &[Behavior::Apply]);
+    let job = crate::StreamedRecoveryJob::for_test_timeout(std::time::Duration::ZERO);
+    assert!(
+        reconcile_streamed_edit(
+            &store,
+            &key,
+            &scope(),
+            &remote,
+            StreamedAdmission::Fresh,
+            Arc::new(move || job.is_stopped())
+        )
+        .is_err()
+    );
+    let calls = Arc::new(AtomicU64::new(0));
+    let observed = calls.clone();
+    let job = crate::CancellationToken::for_recovery_job(crate::StreamedRecoveryPolicy::default())
+        .with_revocation_check(Arc::new(move || {
+            observed.fetch_add(1, Ordering::AcqRel) >= 100
+        }));
+    assert!(
+        reconcile_streamed_edit(
+            &store,
+            &key,
+            &scope(),
+            &remote,
+            StreamedAdmission::Fresh,
+            Arc::new(move || job.is_stopped())
+        )
+        .is_err()
+    );
+    assert!(calls.load(Ordering::Acquire) >= 100);
+    let state = remote.state.lock().unwrap();
+    assert_eq!(state.puts, 0);
+    assert_eq!(state.stats, 0);
+    assert_eq!(state.reads, 0);
+    drop(state);
+    assert_eq!(store.record_key(key.record_id()).unwrap(), key);
+}

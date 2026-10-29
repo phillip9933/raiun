@@ -5,6 +5,37 @@ use zeroize::Zeroizing;
 
 const DIGEST_CHUNK_BYTES: usize = 64 * 1024;
 
+/// Eligibility only, never a capture receipt or native completion authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CaptureKind {
+    Vault,
+    Legacy,
+    Streamed,
+}
+
+pub(super) fn select_capture_kind(
+    length: u64,
+    streamed_admitted: bool,
+    vault: bool,
+) -> Result<CaptureKind, Error> {
+    if length > crate::MAX_FILE_BYTES {
+        return Err(Error::EditRecoveryUnavailable);
+    }
+    if vault {
+        if length > crate::MAX_REQUEST_BYTES {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        return Ok(CaptureKind::Vault);
+    }
+    if streamed_admitted {
+        return Ok(CaptureKind::Streamed);
+    }
+    if length > crate::MAX_REQUEST_BYTES {
+        return Err(Error::EditRecoveryUnavailable);
+    }
+    Ok(CaptureKind::Legacy)
+}
+
 #[cfg(any(windows, test))]
 fn offset_words(offset: u64) -> (u32, u32) {
     (offset as u32, (offset >> 32) as u32)
@@ -279,6 +310,67 @@ mod tests {
             assert_eq!(actual, format!("{:x}", expected.finalize()));
             assert!(max_request <= DIGEST_CHUNK_BYTES);
         }
+    }
+
+    #[test]
+    fn streamed_selection_covers_every_new_ordinary_length_without_vault_fallback() {
+        for length in [
+            0,
+            1,
+            2 * 1024 * 1024 + 7,
+            crate::MAX_REQUEST_BYTES,
+            crate::MAX_REQUEST_BYTES + 1,
+            crate::MAX_FILE_BYTES,
+        ] {
+            assert_eq!(
+                select_capture_kind(length, true, false).unwrap(),
+                CaptureKind::Streamed
+            );
+        }
+        for length in [0, 1, crate::MAX_REQUEST_BYTES] {
+            assert_eq!(
+                select_capture_kind(length, false, false).unwrap(),
+                CaptureKind::Legacy
+            );
+            assert_eq!(
+                select_capture_kind(length, true, true).unwrap(),
+                CaptureKind::Vault
+            );
+            assert_eq!(
+                select_capture_kind(length, false, true).unwrap(),
+                CaptureKind::Vault
+            );
+        }
+        assert!(select_capture_kind(crate::MAX_REQUEST_BYTES + 1, false, false).is_err());
+        assert!(select_capture_kind(crate::MAX_REQUEST_BYTES + 1, true, true).is_err());
+        assert!(select_capture_kind(crate::MAX_FILE_BYTES + 1, true, false).is_err());
+        assert!(select_capture_kind(crate::MAX_FILE_BYTES + 1, true, true).is_err());
+    }
+
+    #[test]
+    fn recovery_job_cancel_after_first_native_hash_chunk_never_finishes_digest() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let stopped = Arc::new(AtomicBool::new(false));
+        let observed = stopped.clone();
+        let job =
+            crate::CancellationToken::for_recovery_job(crate::StreamedRecoveryPolicy::default())
+                .with_revocation_check(Arc::new(move || observed.load(Ordering::Acquire)));
+        let calls = Cell::new(0);
+        let result = digest_bounded(
+            65537,
+            || job.is_stopped(),
+            |_, buffer, _| {
+                calls.set(calls.get() + 1);
+                stopped.store(true, Ordering::Release);
+                Ok(buffer.len())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(calls.get(), 1);
+        assert!(job.is_stopped());
     }
 
     #[test]

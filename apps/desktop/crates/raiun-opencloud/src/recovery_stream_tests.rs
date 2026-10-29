@@ -707,3 +707,273 @@ fn blocking_source_shutdown_rechecks_generation_and_cancel_epoch_before_proof() 
         );
     }
 }
+
+#[test]
+fn metadata_children_never_extend_the_job_and_expired_jobs_do_no_work() {
+    let client = OpenCloudClient::new_with_proxy(
+        "http://127.0.0.1:1",
+        "synthetic".into(),
+        &ProxyConfig::Direct,
+    )
+    .unwrap();
+    let short = RangeReadContext {
+        deadline: Instant::now() + Duration::from_secs(1),
+        token_generation: client.token_generation(),
+    };
+    assert_eq!(stream_metadata_context(short).deadline, short.deadline);
+    let long = RangeReadContext {
+        deadline: Instant::now() + Duration::from_secs(120),
+        ..short
+    };
+    stream_metadata_step(&client, long, || {
+        let child = ACTIVE_RANGE_CONTEXT.with(Cell::get).unwrap();
+        assert!(child.deadline <= long.deadline);
+        assert!(child.deadline <= Instant::now() + Duration::from_secs(30));
+        Ok(())
+    })
+    .unwrap();
+    let expired = RangeReadContext {
+        deadline: Instant::now(),
+        ..short
+    };
+    assert!(
+        stream_metadata_step(&client, expired, || -> Result<(), CloudError> {
+            panic!("expired metadata must not start")
+        })
+        .is_err()
+    );
+}
+
+#[test]
+fn independent_job_cancel_interrupts_active_put_and_full_get_and_joins_source() {
+    use crate::transfer_budget::TransferLimits;
+    use std::num::NonZeroU64;
+    for cancel_get in [false, true] {
+        let size = 1024 * 1024 + 1;
+        let dropped = Arc::new(AtomicU64::new(0));
+        let fixture = Fixture::with_pin_observer(size, Fault::None, Some(dropped.clone()));
+        let client =
+            OpenCloudClient::new_with_proxy(&fixture.url, "synthetic".into(), &ProxyConfig::Direct)
+                .unwrap();
+        client.transfer_budget.set_limits(TransferLimits {
+            upload_bytes_per_second: (!cancel_get).then(|| NonZeroU64::new(1).unwrap()),
+            download_bytes_per_second: cancel_get.then(|| NonZeroU64::new(1).unwrap()),
+        });
+        let stopped = Arc::new(AtomicBool::new(false));
+        let observed = if cancel_get {
+            fixture.gets.clone()
+        } else {
+            fixture.puts.clone()
+        };
+        let stop = stopped.clone();
+        let controller = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while observed.load(Ordering::Acquire) == 0 {
+                assert!(
+                    Instant::now() < deadline,
+                    "real body operation did not reach fixture"
+                );
+                thread::sleep(Duration::from_millis(2));
+            }
+            stop.store(true, Ordering::Release);
+        });
+        let check = stopped.clone();
+        let started = Instant::now();
+        let result = client.recovery_upload_blocking_reader_cancellable_with_context(
+            "drive-1",
+            "/",
+            "root",
+            "file.bin",
+            "file",
+            "\"v1\"",
+            1,
+            BlockingGenerated {
+                remaining: size,
+                dropped: dropped.clone(),
+                max_read: Arc::new(AtomicU64::new(0)),
+                panic_on_drop: false,
+            },
+            size,
+            digest(size),
+            RangeReadContext {
+                deadline: started + Duration::from_secs(120),
+                token_generation: client.token_generation(),
+            },
+            Arc::new(move || check.load(Ordering::Acquire)),
+        );
+        controller.join().unwrap();
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(dropped.load(Ordering::Acquire), 1);
+        assert_eq!(fixture.puts.load(Ordering::Acquire), 1);
+        assert_eq!(fixture.gets.load(Ordering::Acquire), u64::from(cancel_get));
+        assert!(!client.transfer_budget.is_paused());
+    }
+}
+
+struct CancelJobOnDrop {
+    source: BlockingGenerated,
+    stopped: Arc<AtomicBool>,
+}
+impl Read for CancelJobOnDrop {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        self.source.read(output)
+    }
+}
+impl Drop for CancelJobOnDrop {
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::Release);
+    }
+}
+
+#[test]
+fn independent_job_cancel_during_join_never_returns_transport_proof() {
+    let dropped = Arc::new(AtomicU64::new(0));
+    let fixture = Fixture::with_pin_observer(1, Fault::None, Some(dropped.clone()));
+    let client =
+        OpenCloudClient::new_with_proxy(&fixture.url, "synthetic".into(), &ProxyConfig::Direct)
+            .unwrap();
+    let stopped = Arc::new(AtomicBool::new(false));
+    let check = stopped.clone();
+    let result = client.recovery_upload_blocking_reader_cancellable_with_context(
+        "drive-1",
+        "/",
+        "root",
+        "file.bin",
+        "file",
+        "\"v1\"",
+        1,
+        CancelJobOnDrop {
+            source: BlockingGenerated {
+                remaining: 1,
+                dropped: dropped.clone(),
+                max_read: Arc::new(AtomicU64::new(0)),
+                panic_on_drop: false,
+            },
+            stopped,
+        },
+        1,
+        digest(1),
+        RangeReadContext {
+            deadline: Instant::now() + Duration::from_secs(10),
+            token_generation: client.token_generation(),
+        },
+        Arc::new(move || check.load(Ordering::Acquire)),
+    );
+    assert!(result.is_err());
+    assert_eq!(fixture.gets.load(Ordering::Acquire), 1);
+    assert_eq!(dropped.load(Ordering::Acquire), 1);
+}
+
+#[test]
+#[ignore = "explicit paced loopback acceptance: real PUT and independent GET exceed30s, bounded120s total; no native execution"]
+fn paced_put_and_independent_get_cross_thirty_seconds_without_resetting_deadline() {
+    use crate::transfer_budget::TransferLimits;
+    use std::num::NonZeroU64;
+    let size = 17 * CHUNK as u64 + 1;
+    let dropped = Arc::new(AtomicU64::new(0));
+    let max_read = Arc::new(AtomicU64::new(0));
+    let fixture = Fixture::with_pin_observer(size, Fault::None, Some(dropped.clone()));
+    let client =
+        OpenCloudClient::new_with_proxy(&fixture.url, "synthetic".into(), &ProxyConfig::Direct)
+            .unwrap();
+    let rate = NonZeroU64::new(CHUNK as u64).unwrap();
+    client.transfer_budget.set_limits(TransferLimits {
+        upload_bytes_per_second: Some(rate),
+        download_bytes_per_second: Some(rate),
+    });
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(120);
+    let proof = client
+        .recovery_upload_blocking_reader_cancellable_with_context(
+            "drive-1",
+            "/",
+            "root",
+            "file.bin",
+            "file",
+            "\"v1\"",
+            1,
+            BlockingGenerated {
+                remaining: size,
+                dropped: dropped.clone(),
+                max_read: max_read.clone(),
+                panic_on_drop: false,
+            },
+            size,
+            digest(size),
+            RangeReadContext {
+                deadline,
+                token_generation: client.token_generation(),
+            },
+            Arc::new(move || Instant::now() >= deadline),
+        )
+        .unwrap();
+    assert_eq!(proof.bytes, size);
+    assert_eq!(proof.sha256, digest(size));
+    assert!(started.elapsed() >= Duration::from_secs(30));
+    assert!(Instant::now() < deadline);
+    assert_eq!(fixture.puts.load(Ordering::Acquire), 1);
+    assert_eq!(fixture.gets.load(Ordering::Acquire), 1);
+    assert_eq!(dropped.load(Ordering::Acquire), 1);
+    assert!(max_read.load(Ordering::Acquire) <= CHUNK as u64);
+}
+
+struct ExpireDuringJoinedDrop {
+    source: BlockingGenerated,
+    deadline: Instant,
+}
+impl Read for ExpireDuringJoinedDrop {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        self.source.read(output)
+    }
+}
+impl Drop for ExpireDuringJoinedDrop {
+    fn drop(&mut self) {
+        // The fixture's GET/metadata observations establish operation order.
+        // This timer only crosses the original immutable monotonic deadline.
+        while let Some(remaining) = self.deadline.checked_duration_since(Instant::now()) {
+            thread::park_timeout(remaining);
+        }
+    }
+}
+#[test]
+fn original_deadline_expiring_during_join_retains_source_until_actual_shutdown() {
+    let dropped = Arc::new(AtomicU64::new(0));
+    let fixture = Fixture::with_pin_observer(1, Fault::None, Some(dropped.clone()));
+    let client =
+        OpenCloudClient::new_with_proxy(&fixture.url, "synthetic".into(), &ProxyConfig::Direct)
+            .unwrap();
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(5);
+    let result = client.recovery_upload_blocking_reader_cancellable_with_context(
+        "drive-1",
+        "/",
+        "root",
+        "file.bin",
+        "file",
+        "\"v1\"",
+        1,
+        ExpireDuringJoinedDrop {
+            source: BlockingGenerated {
+                remaining: 1,
+                dropped: dropped.clone(),
+                max_read: Arc::new(AtomicU64::new(0)),
+                panic_on_drop: false,
+            },
+            deadline,
+        },
+        1,
+        digest(1),
+        RangeReadContext {
+            deadline,
+            token_generation: client.token_generation(),
+        },
+        Arc::new(|| false),
+    );
+    assert!(result.is_err());
+    assert!(Instant::now() >= deadline);
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(fixture.gets.load(Ordering::Acquire), 1);
+    assert!(fixture.pin_observations.load(Ordering::Acquire) > 1);
+    assert_eq!(dropped.load(Ordering::Acquire), 1);
+}

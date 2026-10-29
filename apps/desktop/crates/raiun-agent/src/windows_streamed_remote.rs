@@ -16,12 +16,30 @@ use std::{
 pub(super) fn companion<'a>(
     owner: &'a super::AgentGenerationRecoveryRemote<'_>,
 ) -> Option<Box<dyn StreamedRecoveryRemote + 'a>> {
+    companion_inner(owner, None)
+}
+
+pub(super) fn companion_for_job<'a>(
+    owner: &'a super::AgentGenerationRecoveryRemote<'_>,
+    job: &raiun_cloudfiles_windows::StreamedRecoveryJob,
+) -> Option<Box<dyn StreamedRecoveryRemote + 'a>> {
+    companion_inner(owner, Some(job))
+}
+
+fn companion_inner<'a>(
+    owner: &'a super::AgentGenerationRecoveryRemote<'_>,
+    job: Option<&raiun_cloudfiles_windows::StreamedRecoveryJob>,
+) -> Option<Box<dyn StreamedRecoveryRemote + 'a>> {
     let expected = owner.expected_generation;
     if expected == 0 || owner.authorized_generation.load(Ordering::Acquire) != expected {
         return None;
     }
     let legacy = owner.inner.remote();
-    let inner = legacy.streamed_remote()?;
+    let inner = if let Some(job) = job {
+        legacy.streamed_remote_for_job(job)?
+    } else {
+        legacy.streamed_remote()?
+    };
     if owner.authorized_generation.load(Ordering::Acquire) != expected {
         return None;
     }

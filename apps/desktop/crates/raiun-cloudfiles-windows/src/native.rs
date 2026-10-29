@@ -3037,14 +3037,26 @@ impl ConfiguredRootConnection {
             .as_ref()
             .ok_or(Error::EditRecoveryUnavailable)?;
         let metadata = publication.proof().metadata();
+        let recovery_job = publication.proof().recovery_job();
+        if publication.proof().is_streamed() && recovery_job.is_none() {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        let check_job = || {
+            if recovery_job.is_some_and(|job| job.is_stopped()) {
+                Err(Error::EditRecoveryUnavailable)
+            } else {
+                Ok(())
+            }
+        };
+        check_job()?;
         if recovery.provider_scope() != publication.provider_scope()
             || metadata.generation != publication.provider_scope().token_generation()
             || metadata.scope.root_volume_serial != root.identity.volume_serial
             || metadata.scope.root_file_index != root.identity.file_index
             || metadata.local_file.volume_serial != root.identity.volume_serial
             || metadata.content_len > MAX_FILE_BYTES
-            || (metadata.content_len > MAX_REQUEST_BYTES
-                && (!publication.proof().is_streamed() || !recovery.supports_streamed_capture()))
+            || (metadata.content_len > MAX_REQUEST_BYTES && !publication.proof().is_streamed())
+            || (publication.proof().is_streamed() && !recovery.supports_streamed_capture())
         {
             return Err(Error::EditRecoveryUnavailable);
         }
@@ -3103,7 +3115,11 @@ impl ConfiguredRootConnection {
             let saved_usn = completion_usn(file.raw, metadata.local_file.file_index)?;
             #[cfg(feature = "synthetic-agent-integration")]
             eprintln!("synthetic_save_completion_usn_first={saved_usn}");
-            let digest = file.digest_complete(metadata.content_len, None)?;
+            let digest = file.digest_complete(
+                metadata.content_len,
+                recovery_job.map(|job| job.cancellation()),
+            )?;
+            check_job()?;
             if digest != metadata.content_sha256
                 || !same_edit_snapshot(opened, root_snapshot(file.raw)?)
                 || {
@@ -3128,7 +3144,9 @@ impl ConfiguredRootConnection {
             // closure. No USN comparison/output is requested: the retained
             // combined content fence is the authority, not an optional output.
             // Windows may leave a zero-input USN untouched even on S_OK.
+            check_job()?;
             let result = unsafe { CfSetInSyncState(file.protected, 1, 0, null_mut()) };
+            check_job()?;
             #[cfg(feature = "synthetic-agent-integration")]
             eprintln!("synthetic_save_completion_no_usn_comparison hresult={result}");
             if result < 0 {
@@ -3148,6 +3166,7 @@ impl ConfiguredRootConnection {
             // handle: record only this exact native-completed snapshot. If
             // persistence fails, its encrypted body remains unresolved.
             observe_completion!("persist_local_completion");
+            check_job()?;
             let completed =
                 crate::CompletedLocalEdit::from_verified_native_completion(publication.proof())
                     .map_err(|_| Error::EditRecoveryUnavailable)?;
@@ -3159,7 +3178,8 @@ impl ConfiguredRootConnection {
                     #[cfg(not(feature = "synthetic-agent-integration"))]
                     let _ = error;
                     Error::EditRecoveryUnavailable
-                })
+                })?;
+            check_job()
         })
     }
     pub(super) fn take_initial_edit(&self) -> Result<Option<crate::PendingInitialEdit>, Error> {
@@ -5270,7 +5290,7 @@ struct CallbackState {
     fetch_validation_stage: AtomicUsize,
     hydrated_files: Mutex<hydration_inventory::HydratedFileInventory>,
     writable_cleanup: Mutex<crate::writable_cleanup_receipts::Receipts<WritableCleanupReceipt>>,
-    readiness: std::sync::atomic::AtomicU8,
+    readiness: Arc<std::sync::atomic::AtomicU8>,
     readiness_fetch_rejections: AtomicUsize,
     activity: Mutex<CallbackActivity>,
     drained: Condvar,
@@ -5356,7 +5376,7 @@ impl CallbackState {
             fetch_validation_stage: AtomicUsize::new(0),
             hydrated_files: Mutex::new(hydration_inventory::HydratedFileInventory::new()),
             writable_cleanup: Mutex::new(crate::writable_cleanup_receipts::Receipts::default()),
-            readiness: std::sync::atomic::AtomicU8::new(readiness),
+            readiness: Arc::new(std::sync::atomic::AtomicU8::new(readiness)),
             readiness_fetch_rejections: AtomicUsize::new(0),
             activity: Mutex::new(CallbackActivity {
                 active_callbacks: 0,
@@ -5678,6 +5698,7 @@ impl CallbackState {
         let path = &callback_guard.path;
         let path_wide = wide_path(path).map_err(|_| (6, 0, false))?;
         let snapshot = callback_guard.snapshot;
+
         if snapshot.identity.volume_serial != root_identity.volume_serial
             || snapshot.identity.file_index != info.file_id as u64
             || snapshot.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0
@@ -5760,18 +5781,47 @@ impl CallbackState {
         if snapshot.placeholder_state & CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK != 0 {
             return Err((9, 0, true));
         }
-        if snapshot.file_size > MAX_REQUEST_BYTES
-            && (self
+        // Classify through the live opaque backend before any content open.
+        // Clean metadata-only closes above retain their previous behavior.
+        let vault_capture = self
+            .backend
+            .requires_hydration_inventory(identity)
+            .map_err(|_| (60, 0, true))?;
+        let streamed_requested = self
+            .recovery
+            .as_ref()
+            .is_some_and(|recovery| recovery.supports_streamed_capture());
+        let capture_kind = native_streamed_io::select_capture_kind(
+            snapshot.file_size,
+            streamed_requested,
+            vault_capture,
+        )
+        .map_err(|_| (9, 0, true))?;
+        let streamed_job = if capture_kind == native_streamed_io::CaptureKind::Streamed {
+            // Snapshot the original epoch before capturing this job's clock.
+            let epoch = self.backend.recovery_transfer_cancellation();
+            let job = self
                 .recovery
                 .as_ref()
-                .is_none_or(|recovery| !recovery.supports_streamed_capture())
-                || self
-                    .backend
-                    .requires_hydration_inventory(identity)
-                    .map_err(|_| (60, 0, true))?)
-        {
-            return Err((9, 0, true));
-        }
+                .ok_or((18, 0, true))?
+                .begin_streamed_job()
+                .ok_or((19, 0, true))?;
+            let readiness = Arc::downgrade(&self.readiness);
+            let backend = Arc::downgrade(&self.backend);
+            let job = job.with_revocation_check(Arc::new(move || {
+                readiness
+                    .upgrade()
+                    .is_none_or(|ready| ready.load(Ordering::Acquire) != CALLBACK_READY)
+                    || backend
+                        .upgrade()
+                        .is_none_or(|backend| backend.recovery_job_revoked())
+                    || epoch.as_ref().is_none_or(|cancelled| cancelled())
+            }));
+            job.check().map_err(|_| (19, 0, true))?;
+            Some(job)
+        } else {
+            None
+        };
         // Keep the no-follow entry guard open without FILE_SHARE_DELETE, then
         // open the Cloud Files data stream normally. The guard prevents name
         // substitution; the second handle is checked against the guard's file
@@ -5812,11 +5862,14 @@ impl CallbackState {
         // fall through to the ordinary journal or automatic edit dispatch.
         // All backend/session fences are acquired lexically before the body
         // read and retained through protected index/body publication/readback.
-        if self
+        let current_vault_capture = self
             .backend
             .requires_hydration_inventory(identity)
-            .map_err(|_| (60, 0, true))?
-        {
+            .map_err(|_| (60, 0, true))?;
+        if current_vault_capture != vault_capture {
+            return Err((60, 0, true));
+        }
+        if current_vault_capture {
             // The legacy global cap still applies to every vault capture.
             // Large ordinary opt-in above never raises this policy.
             if snapshot.file_size > MAX_REQUEST_BYTES {
@@ -6001,14 +6054,18 @@ impl CallbackState {
             .filter(|relative| !relative.is_empty())
             .ok_or((17, 0, true))?;
         let recovery = self.recovery.as_ref().ok_or((18, 0, true))?;
-        let cancellation = CancellationToken::new();
+        let cancellation = streamed_job
+            .as_ref()
+            .map_or_else(CancellationToken::new, |job| job.cancellation().clone());
         let mut cancelled = || {
             self.readiness.load(Ordering::Acquire) != CALLBACK_READY
                 || cancellation.is_cancelled()
                 || cancellation.is_expired()
         };
         let mut streamed_file = None;
-        let (content, staged, after_read) = if snapshot.file_size > MAX_REQUEST_BYTES {
+        let (content, staged, after_read) = if capture_kind
+            == native_streamed_io::CaptureKind::Streamed
+        {
             #[cfg(feature = "synthetic-agent-integration")]
             eprintln!(
                 "synthetic_streamed_close_phase=guard support={} ready={} cancelled={} expired={}",
@@ -6043,6 +6100,7 @@ impl CallbackState {
                     },
                     relative_path,
                     snapshot.file_size,
+                    streamed_job.as_ref().ok_or((19, 0, true))?,
                     &mut file,
                     &mut cancelled,
                 )
