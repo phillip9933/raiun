@@ -32,9 +32,49 @@ pub(crate) struct Request {
     update: Option<OwnedShareUpdate>,
 }
 impl Request {
+    // Unix account routing extracts the raw password into a wiping owner
+    // before resolving profiles. Transfer that allocation into this typed
+    // request (whose Drop wipes it), without weakening the vault boundary.
+    #[cfg(unix)]
+    pub(crate) fn with_public_link_password(
+        mut self,
+        password: Option<zeroize::Zeroizing<String>>,
+    ) -> Result<Self, String> {
+        if self.action != "sharing_link_create" || self.password.is_some() {
+            return Err("A link password is accepted only when creating a public link".into());
+        }
+        self.password = password.map(|mut value| std::mem::take(&mut *value));
+        if self
+            .password
+            .as_ref()
+            .is_some_and(|value| value.is_empty() || value.len() > 72)
+        {
+            return Err("A link password must contain 1 to 72 UTF-8 bytes".into());
+        }
+        Ok(self)
+    }
+
     pub fn parse(value: &Value) -> Result<Self, String> {
-        let r: Self =
-            serde_json::from_value(value.clone()).map_err(|_| "Invalid sharing request")?;
+        if value.get("password").is_some_and(|password| {
+            password
+                .as_str()
+                .is_none_or(|value| value.is_empty() || value.len() > 72)
+        }) {
+            return Err("A link password must contain 1 to 72 UTF-8 bytes".into());
+        }
+        let mut fields = value.clone();
+        // Own the parser copy before any remaining field can fail validation.
+        // The caller retains and wipes its original IPC request separately.
+        let password = match fields
+            .as_object_mut()
+            .and_then(|fields| fields.remove("password"))
+        {
+            Some(Value::String(value)) => Some(zeroize::Zeroizing::new(value)),
+            Some(_) => return Err("A link password must be text".into()),
+            None => None,
+        };
+        let mut r: Self = serde_json::from_value(fields).map_err(|_| "Invalid sharing request")?;
+        r.password = password.map(|mut value| std::mem::take(&mut *value));
         if !matches!(
             r.action.as_str(),
             "sharing_capabilities"
@@ -405,9 +445,13 @@ mod tests {
         let mut request = json!({"action":"sharing_link_create","profile_id":"p","expected_auth_generation":2,
             "space_id":"space","path":"/test","expected_item_id":"item","link_type":"view","password":"synthetic-secret"});
         assert!(Request::parse(&request).is_ok());
-        request["password"] = json!("é".repeat(37));
-        let error = Request::parse(&request).err().unwrap();
-        assert!(!error.contains('é'));
+        request["password"] = json!("é".repeat(36));
+        assert!(Request::parse(&request).is_ok());
+        for invalid in [json!("é".repeat(37)), json!(""), Value::Null, json!(false)] {
+            request["password"] = invalid;
+            let error = Request::parse(&request).err().unwrap();
+            assert!(!error.contains('é'));
+        }
         request["password"] = json!("synthetic-secret");
         request["action"] = json!("sharing_link_revoke");
         request["permission_id"] = json!("grant");

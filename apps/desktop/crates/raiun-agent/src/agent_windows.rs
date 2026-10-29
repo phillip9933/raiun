@@ -2892,7 +2892,7 @@ impl WindowsAgent {
         {
             return Err("The selected Windows profile does not own this request".into());
         }
-        reject_secret_request(request)?;
+        reject_control_secret_request(request)?;
         let action = request
             .get("action")
             .and_then(Value::as_str)
@@ -6689,6 +6689,17 @@ fn reject_secret_request(request: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// The Windows control channel may carry a public-link password only as part
+/// of a fully validated sharing-link create request. All other control and CLI
+/// requests retain the strict generic secret rejection.
+fn reject_control_secret_request(request: &Value) -> Result<(), String> {
+    if request.get("action").and_then(Value::as_str) == Some("sharing_link_create") {
+        crate::sharing_wire::Request::parse(request)?;
+        return Ok(());
+    }
+    reject_secret_request(request)
+}
+
 fn request_timeout(request: &Value) -> Duration {
     match request.get("action").and_then(Value::as_str).unwrap_or("") {
         "auth_begin" => Duration::from_secs(65),
@@ -6716,9 +6727,9 @@ pub(super) mod tests {
         AccountState, ActiveProviderBinding, AgentGenerationRecoveryRemote, CloudSpace,
         PROVIDER_UNAVAILABLE, RecoveryRemoteHandle, RegistrationOwnership, SessionStore,
         WindowsAgent, encode_root_configuration, load_root_configuration,
-        personal_account_identity, record_cleanup_failure, reject_secret_request, request_timeout,
-        unix_time_now, validate_registration_ownership, verified_account_roots,
-        verified_personal_identity_from_spaces, windows_paths_overlap,
+        personal_account_identity, record_cleanup_failure, reject_control_secret_request,
+        reject_secret_request, request_timeout, unix_time_now, validate_registration_ownership,
+        verified_account_roots, verified_personal_identity_from_spaces, windows_paths_overlap,
     };
     #[cfg(all(windows, debug_assertions))]
     use super::{
@@ -18281,6 +18292,50 @@ pub(super) mod tests {
             json!({"action":"vault_unlock_offline"}),
         ] {
             assert!(reject_secret_request(&request).is_err());
+        }
+    }
+
+    #[test]
+    fn control_secret_admission_allows_only_valid_public_link_create_passwords() {
+        let profile = "profile-0123456789abcdef0123456789abcdef";
+        let valid = json!({
+            "action":"sharing_link_create",
+            "profile_id":profile,
+            "expected_auth_generation":7,
+            "space_id":"space-1",
+            "path":"/folder",
+            "expected_item_id":"item-1",
+            "link_type":"view",
+            "password":"synthetic-link-password"
+        });
+        assert!(reject_control_secret_request(&valid).is_ok());
+        assert!(reject_secret_request(&valid).is_err(), "CLI remains strict");
+
+        for invalid in [
+            json!({
+                "action":"sharing_link_create",
+                "profile_id":profile,
+                "expected_auth_generation":7,
+                "space_id":"space-1",
+                "path":"/folder",
+                "expected_item_id":"item-1",
+                "link_type":"view",
+                "password":""
+            }),
+            json!({
+                "action":"sharing_link_create",
+                "profile_id":profile,
+                "expected_auth_generation":7,
+                "space_id":"space-1",
+                "path":"/folder",
+                "expected_item_id":"item-1",
+                "link_type":"view",
+                "password":"x".repeat(73)
+            }),
+            json!({"action":"sharing_invite","profile_id":profile,"password":"synthetic"}),
+            json!({"action":"vault_unlock","profile_id":profile,"password":"synthetic"}),
+        ] {
+            assert!(reject_control_secret_request(&invalid).is_err());
         }
     }
 

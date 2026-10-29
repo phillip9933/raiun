@@ -121,6 +121,11 @@ impl ProfileManager {
             Some(_) => return Err("Password must be text".into()),
             None => None,
         };
+        if request.get("action").and_then(Value::as_str) == Some("sharing_link_create") {
+            let sharing = crate::sharing_wire::Request::parse(&request)?
+                .with_public_link_password(password)?;
+            return self.execute_sharing(sharing);
+        }
         if request
             .get("action")
             .and_then(Value::as_str)
@@ -164,16 +169,34 @@ impl ProfileManager {
             "account_select" => self.select_account(&request),
             "account_rename" => self.rename_account(&request),
             "account_avatar" => self.account_avatar(&request),
-            "guest_permissions" | "guest_invite" | "guest_update" | "guest_revoke" => self.guest_sharing(&request),
-            "sharing_capabilities" | "sharing_inventory"
-                | "sharing_owned_settings" | "sharing_owned_update" | "sharing_owned_revoke" | "sharing_permissions" | "sharing_recipients" | "sharing_invite" | "sharing_update" | "sharing_revoke" | "sharing_link_create" | "sharing_link_revoke" => self.sharing(&request),
+            "guest_permissions" | "guest_invite" | "guest_update" | "guest_revoke" => {
+                self.guest_sharing(&request)
+            }
+            "sharing_capabilities"
+            | "sharing_inventory"
+            | "sharing_owned_settings"
+            | "sharing_owned_update"
+            | "sharing_owned_revoke"
+            | "sharing_permissions"
+            | "sharing_recipients"
+            | "sharing_invite"
+            | "sharing_update"
+            | "sharing_revoke"
+            | "sharing_link_create"
+            | "sharing_link_revoke" => self.sharing(&request),
             "cache_quota_set" => {
-                let _gate = self.mutation_gate.lock().map_err(|_| "Account changes are unavailable")?;
+                let _gate = self
+                    .mutation_gate
+                    .lock()
+                    .map_err(|_| "Account changes are unavailable")?;
                 self.ensure_running()?;
                 let (id, runtime) = self.resolve_runtime(&request)?;
                 if request.get("profile_id").and_then(Value::as_str) != Some(id.as_str())
-                    || self.selected_profile()?.as_deref() != Some(id.as_str()) {
-                    return Err("The selected account changed; review storage settings again".into());
+                    || self.selected_profile()?.as_deref() != Some(id.as_str())
+                {
+                    return Err(
+                        "The selected account changed; review storage settings again".into(),
+                    );
                 }
                 let mut result = runtime.handle(strip_profile_id(request))?;
                 result["profile_id"] = json!(id);
@@ -629,7 +652,9 @@ impl ProfileManager {
             .lock()
             .map_err(|_| "Account changes are unavailable")?;
         self.ensure_running()?;
-        if request.mutating() && self.selected_profile()?.as_deref() != Some(request.profile_id.as_str()) {
+        if request.mutating()
+            && self.selected_profile()?.as_deref() != Some(request.profile_id.as_str())
+        {
             return Err("The selected account changed; review guest access again".into());
         }
         let (_, runtime) = self.resolve_runtime(&json!({"profile_id":request.profile_id}))?;
@@ -681,12 +706,18 @@ impl ProfileManager {
 
     fn sharing(&self, request: &Value) -> Result<Value, String> {
         let request = crate::sharing_wire::Request::parse(request)?;
+        self.execute_sharing(request)
+    }
+
+    fn execute_sharing(&self, request: crate::sharing_wire::Request) -> Result<Value, String> {
         let _gate = self
             .mutation_gate
             .lock()
             .map_err(|_| "Account changes are unavailable")?;
         self.ensure_running()?;
-        if request.mutating() && self.selected_profile()?.as_deref() != Some(request.profile_id.as_str()) {
+        if request.mutating()
+            && self.selected_profile()?.as_deref() != Some(request.profile_id.as_str())
+        {
             return Err("The selected account changed; review sharing again".into());
         }
         let (_, runtime) = self.resolve_runtime(&json!({"profile_id":request.profile_id}))?;
@@ -739,22 +770,39 @@ impl ProfileManager {
     fn account_avatar(&self, request: &Value) -> Result<Value, String> {
         self.ensure_running()?;
         let (id, runtime) = self.resolve_runtime(request)?;
-        let expected = request.get("expected_auth_generation").and_then(Value::as_u64)
+        let expected = request
+            .get("expected_auth_generation")
+            .and_then(Value::as_u64)
             .ok_or("Refresh the account before loading its photo")?;
         let client = {
-            let state = runtime.auth_state.lock().map_err(|_| "Account state is unavailable")?;
-            if runtime.retiring.load(Ordering::Acquire) || runtime.shutdown.load(Ordering::Acquire)
+            let state = runtime
+                .auth_state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if runtime.retiring.load(Ordering::Acquire)
+                || runtime.shutdown.load(Ordering::Acquire)
                 || runtime.auth_transition.load(Ordering::Acquire)
-                || runtime.auth_generation.load(Ordering::Acquire) != expected {
+                || runtime.auth_generation.load(Ordering::Acquire) != expected
+            {
                 return Err("The account changed while loading its photo".into());
             }
-            state.client.clone().ok_or("Connect this account to load its photo")?
+            state
+                .client
+                .clone()
+                .ok_or("Connect this account to load its photo")?
         };
-        let image = client.account_avatar().map_err(|_| "The account photo is unavailable")?;
-        let _state = runtime.auth_state.lock().map_err(|_| "Account state is unavailable")?;
-        if runtime.retiring.load(Ordering::Acquire) || runtime.shutdown.load(Ordering::Acquire)
+        let image = client
+            .account_avatar()
+            .map_err(|_| "The account photo is unavailable")?;
+        let _state = runtime
+            .auth_state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?;
+        if runtime.retiring.load(Ordering::Acquire)
+            || runtime.shutdown.load(Ordering::Acquire)
             || runtime.auth_transition.load(Ordering::Acquire)
-            || runtime.auth_generation.load(Ordering::Acquire) != expected {
+            || runtime.auth_generation.load(Ordering::Acquire) != expected
+        {
             return Err("The account changed while loading its photo".into());
         }
         crate::account_avatar_wire::response(&id, expected, image)
@@ -1634,11 +1682,28 @@ mod tests {
         assert_eq!(removed["credentials_revoked"], true);
         assert_eq!(removed["vault_password_cleanup_uncertain"], true);
         assert_eq!(credentials.lock().unwrap().len(), 1);
-        assert!(manager.accounts().unwrap()["items"].as_array().unwrap().is_empty());
-        assert_eq!(manager.accounts().unwrap()["removed_items"][0]["id"], "default");
-        let restored = manager.handle(json!({"action":"account_restore","profile_id":"default","confirm":true})).unwrap();
+        assert!(
+            manager.accounts().unwrap()["items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            manager.accounts().unwrap()["removed_items"][0]["id"],
+            "default"
+        );
+        let restored = manager
+            .handle(json!({"action":"account_restore","profile_id":"default","confirm":true}))
+            .unwrap();
         assert_eq!(restored["sign_in_required"], true);
-        assert!(manager.state.lock().unwrap().runtimes[DEFAULT_ID].settings.lock().unwrap().server.is_none());
+        assert!(
+            manager.state.lock().unwrap().runtimes[DEFAULT_ID]
+                .settings
+                .lock()
+                .unwrap()
+                .server
+                .is_none()
+        );
         manager.request_shutdown().unwrap();
     }
 
@@ -1714,6 +1779,45 @@ mod tests {
             }))
             .unwrap_err();
         assert!(unknown.contains("Unknown profile"));
+    }
+
+    #[test]
+    fn public_link_password_reaches_account_fences_without_becoming_a_vault_request() {
+        let temp = tempdir().expect("state directory");
+        let manager = ProfileManager::open(temp.path().to_path_buf()).expect("profile manager");
+        let request = json!({
+            "action":"sharing_link_create", "profile_id":"default", "expected_auth_generation":0,
+            "space_id":"synthetic-space", "path":"/Empty test folder", "expected_item_id":"synthetic-item",
+            "link_type":"view", "password":"synthetic-link-password"
+        });
+        let error = manager.handle(request.clone()).unwrap_err();
+        assert_eq!(error, "Connect this account to manage sharing");
+        let mut stale = request.clone();
+        stale["expected_auth_generation"] = json!(99);
+        assert_eq!(
+            manager.handle(stale).unwrap_err(),
+            "The account changed; refresh sharing before continuing"
+        );
+        let mut foreign = request.clone();
+        foreign["profile_id"] = json!("unknown-profile");
+        assert_eq!(
+            manager.handle(foreign).unwrap_err(),
+            "The selected account changed; review sharing again"
+        );
+        for password in [json!(""), json!("é".repeat(37)), json!(false)] {
+            let mut invalid = request.clone();
+            invalid["password"] = password;
+            let error = manager.handle(invalid).unwrap_err();
+            assert_ne!(error, "Connect this account to manage sharing");
+            assert!(!error.contains("synthetic-link-password"));
+        }
+        assert_eq!(
+            manager
+                .handle(json!({"action":"status","password":"synthetic-link-password"}))
+                .unwrap_err(),
+            "Password is only accepted by a vault operation"
+        );
+        manager.request_shutdown().unwrap();
     }
 
     #[test]
@@ -2131,5 +2235,4 @@ mod tests {
         assert!(ensure_profiles_root(&state_dir).is_err());
     }
     include!("avatar_profile_tests.rs");
-
 }

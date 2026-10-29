@@ -451,7 +451,7 @@ impl WindowsProfiles {
     }
 
     pub(super) fn handle(&self, request: &Value) -> Result<(Value, bool), String> {
-        reject_secret_request(request)?;
+        reject_control_secret_request(request)?;
         let action = request
             .get("action")
             .and_then(Value::as_str)
@@ -1261,6 +1261,61 @@ pub(super) fn serve_profiles() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn broker_admits_only_valid_public_link_password_requests_to_the_selected_runtime() {
+        let registry = Registry::decode_or_default(None).unwrap();
+        let admissions = Arc::new(Mutex::new(Arc::new(registry.clone())));
+        let vault_sessions = Arc::new(raiun_vault::session::VaultSessionCoordinator::new());
+        let (runtime, _) = super::super::tests::synthetic_profile_runtime(
+            "default",
+            Some(admissions),
+            vault_sessions,
+        );
+        let generation = runtime
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        let broker =
+            WindowsProfiles::for_synthetic_lifecycle_fixture(registry, vec![runtime]).unwrap();
+        let valid = json!({
+            "action":"sharing_link_create",
+            "profile_id":"default",
+            "expected_auth_generation":generation,
+            "space_id":"space-1",
+            "path":"/folder",
+            "expected_item_id":"item-1",
+            "link_type":"view",
+            "password":"synthetic-link-password"
+        });
+        // The account-state gate is reached, proving the secret-bearing
+        // request passed broker admission; the offline synthetic runtime then
+        // refuses it before constructing a network client.
+        assert_eq!(
+            broker.handle(&valid).unwrap_err(),
+            "The account changed; refresh sharing before continuing"
+        );
+
+        for invalid in [
+            json!({
+                "action":"sharing_link_create",
+                "profile_id":"default",
+                "expected_auth_generation":generation,
+                "space_id":"space-1",
+                "path":"/folder",
+                "expected_item_id":"item-1",
+                "link_type":"view",
+                "password":"x".repeat(73)
+            }),
+            json!({"action":"sharing_invite","profile_id":"default","password":"synthetic"}),
+            json!({"action":"vault_unlock","profile_id":"default","password":"synthetic"}),
+        ] {
+            let error = broker.handle(&invalid).unwrap_err();
+            assert_ne!(
+                error,
+                "The account changed; refresh sharing before continuing"
+            );
+        }
+    }
 
     #[test]
     fn source_separation_refuses_cross_profile_and_same_account_drive_overlap() {
