@@ -54,6 +54,8 @@ mod windows_folder_requests;
 mod windows_folder_sync;
 #[path = "windows_media_requests.rs"]
 mod windows_media_requests;
+#[path = "windows_streamed_remote.rs"]
+mod windows_streamed_remote;
 #[path = "windows_vault_browse.rs"]
 mod windows_vault_browse;
 #[path = "windows_vault_requests.rs"]
@@ -5930,6 +5932,13 @@ impl AgentGenerationRecoveryRemote<'_> {
 }
 
 impl raiun_cloudfiles_windows::RecoveryRemote for AgentGenerationRecoveryRemote<'_> {
+    fn streamed_remote(
+        &self,
+    ) -> Option<Box<dyn raiun_cloudfiles_windows::streamed_reconcile::StreamedRecoveryRemote + '_>>
+    {
+        windows_streamed_remote::companion(self)
+    }
+
     fn server_origin(&self) -> Option<&str> {
         (self.authorized_generation.load(Ordering::Acquire) == self.expected_generation)
             .then(|| self.inner.remote().server_origin())

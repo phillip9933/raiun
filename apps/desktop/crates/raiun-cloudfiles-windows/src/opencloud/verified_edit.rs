@@ -15,6 +15,30 @@ pub struct VerifiedEditPublication<'session, 'backend> {
 }
 
 impl<'backend> InitialEditSession<'backend> {
+    /// Resolve exactly one already-admitted opaque identity. Remote paths are
+    /// compared as cloud identifiers only, never turned into local components.
+    pub fn prepare_recovered_edit<'session>(
+        &'session self,
+        proof: &'session VerifiedEditReadback,
+    ) -> Result<VerifiedEditPublication<'session, 'backend>, BackendError> {
+        self.remote
+            .authorize(&self.scope)
+            .map_err(|_| BackendError::Unavailable)?;
+        if proof.metadata().scope != self.scope {
+            return Err(BackendError::Unavailable);
+        }
+        let identity = {
+            let state = self
+                .remote
+                .backend
+                .state
+                .lock()
+                .map_err(|_| BackendError::Unavailable)?;
+            unique_recovered_identity(&state.files, proof.metadata(), proof.remote_version())?
+        };
+        self.prepare_verified_edit(identity.as_bytes(), proof)
+    }
+
     pub fn prepare_verified_edit<'session>(
         &'session self,
         identity: &[u8],
@@ -62,6 +86,41 @@ impl<'backend> InitialEditSession<'backend> {
             catalog,
         })
     }
+}
+
+fn matches_recovered_binding(
+    binding: &FileBinding,
+    metadata: &crate::LocalEditMetadata,
+    version: &crate::RecoveryRemoteVersion,
+) -> bool {
+    let Some(baseline) = metadata.remote.as_ref() else {
+        return false;
+    };
+    binding.space_id == metadata.scope.space_id
+        && binding.root_resource_id == metadata.scope.root_resource_id
+        && binding.path.strip_prefix('/') == Some(metadata.relative_path.as_str())
+        && binding.remote_id == baseline.resource_id
+        && binding.remote_id == version.resource_id
+        && ((binding.etag == baseline.etag && binding.size == baseline.byte_len)
+            || (binding.etag == version.etag && binding.size == version.size))
+}
+
+fn unique_recovered_identity(
+    files: &HashMap<OpaqueIdentity, FileBinding>,
+    metadata: &crate::LocalEditMetadata,
+    version: &crate::RecoveryRemoteVersion,
+) -> Result<OpaqueIdentity, BackendError> {
+    if files.len() > MAX_IDENTITY_CATALOG_ENTRIES {
+        return Err(BackendError::Unavailable);
+    }
+    let mut selected = files
+        .iter()
+        .filter(|(_, binding)| matches_recovered_binding(binding, metadata, version));
+    let identity = *selected.next().ok_or(BackendError::NotFound)?.0;
+    if selected.next().is_some() {
+        return Err(BackendError::Unavailable);
+    }
+    Ok(identity)
 }
 
 impl VerifiedEditPublication<'_, '_> {
@@ -124,5 +183,102 @@ impl VerifiedEditPublication<'_, '_> {
         updated.size = version.size;
         state.files.insert(self.identity, updated);
         complete()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn recovered_reverse_lookup_requires_one_exact_cloud_binding_and_version() {
+        let metadata = crate::LocalEditMetadata {
+            record_id: "0123456789abcdef".into(),
+            generation: 1,
+            scope: crate::EditJournalScope {
+                profile_id: "default".into(),
+                server_origin: "https://example.test".into(),
+                account_subject: "synthetic".into(),
+                space_id: "project".into(),
+                root_resource_id: "root".into(),
+                root_volume_serial: 1,
+                root_file_index: 2,
+            },
+            local_file: crate::LocalFileIdentity {
+                volume_serial: 1,
+                file_index: 3,
+            },
+            relative_path: "docs/file".into(),
+            remote: Some(crate::RemoteEditBaseline {
+                resource_id: "file-id".into(),
+                etag: "\"v1\"".into(),
+                byte_len: 4,
+            }),
+            content_len: 5,
+            content_sha256: "unused-test-hash".into(),
+            state: crate::LocalEditState::Dirty,
+        };
+        let version = crate::RecoveryRemoteVersion {
+            resource_id: "file-id".into(),
+            etag: "\"v2\"".into(),
+            size: 5,
+            is_directory: false,
+            encrypted: false,
+            writable: true,
+        };
+        let binding = FileBinding {
+            space_id: "project".into(),
+            root_resource_id: "root".into(),
+            path: "/docs/file".into(),
+            remote_id: "file-id".into(),
+            etag: "\"v1\"".into(),
+            size: 4,
+        };
+        let identity = OpaqueIdentity([1; 16]);
+        let mut files = HashMap::new();
+        files.insert(identity, binding.clone());
+        assert_eq!(
+            unique_recovered_identity(&files, &metadata, &version).unwrap(),
+            identity
+        );
+        files.insert(OpaqueIdentity([2; 16]), binding.clone());
+        assert!(unique_recovered_identity(&files, &metadata, &version).is_err());
+        files.remove(&OpaqueIdentity([2; 16]));
+        for invalid in [
+            FileBinding {
+                path: "/elsewhere".into(),
+                ..binding.clone()
+            },
+            FileBinding {
+                space_id: "other".into(),
+                ..binding.clone()
+            },
+            FileBinding {
+                root_resource_id: "replaced".into(),
+                ..binding.clone()
+            },
+            FileBinding {
+                remote_id: "other".into(),
+                ..binding.clone()
+            },
+            FileBinding {
+                etag: "\"v3\"".into(),
+                ..binding.clone()
+            },
+        ] {
+            files.insert(identity, invalid);
+            assert!(unique_recovered_identity(&files, &metadata, &version).is_err());
+        }
+        files.insert(
+            identity,
+            FileBinding {
+                etag: version.etag.clone(),
+                size: version.size,
+                ..binding
+            },
+        );
+        assert_eq!(
+            unique_recovered_identity(&files, &metadata, &version).unwrap(),
+            identity
+        );
     }
 }

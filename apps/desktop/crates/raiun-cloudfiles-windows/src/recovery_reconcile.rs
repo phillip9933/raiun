@@ -66,6 +66,15 @@ impl RecoveryRemoteBody {
 pub trait RecoveryRemote: Send + Sync {
     fn server_origin(&self) -> Option<&str>;
 
+    /// Optional bounded v2 transport for the same trusted route. Legacy/test
+    /// implementations cannot acquire streaming mutation authority by default.
+    #[cfg(any(windows, test))]
+    fn streamed_remote(
+        &self,
+    ) -> Option<Box<dyn crate::streamed_reconcile::StreamedRecoveryRemote + '_>> {
+        None
+    }
+
     /// Verify the caller's serialized active-session/root generation. The
     /// default is suitable only for test remotes; production adapters should
     /// check their provider manager's revocation generation here and in the
@@ -183,6 +192,22 @@ impl OpenCloudRecoveryRemote {
 }
 
 impl RecoveryRemote for OpenCloudRecoveryRemote {
+    #[cfg(any(windows, test))]
+    fn streamed_remote(
+        &self,
+    ) -> Option<Box<dyn crate::streamed_reconcile::StreamedRecoveryRemote + '_>> {
+        crate::streamed_reconcile::OpenCloudStreamedRecoveryRemote::new(
+            Arc::clone(&self.client),
+            self.scope.clone(),
+            self.remote_root_path.clone(),
+            self.context().ok()?,
+        )
+        .ok()
+        .map(|remote| {
+            Box::new(remote) as Box<dyn crate::streamed_reconcile::StreamedRecoveryRemote>
+        })
+    }
+
     fn server_origin(&self) -> Option<&str> {
         Some(&self.server_origin)
     }
@@ -316,6 +341,8 @@ pub enum ReconciliationIssue {
 pub struct VerifiedEditReadback {
     metadata: crate::LocalEditMetadata,
     version: RecoveryRemoteVersion,
+    #[cfg(any(windows, test))]
+    streamed: Option<Arc<std::sync::Mutex<crate::streamed_reconcile::VerifiedStreamedReadback>>>,
 }
 
 impl VerifiedEditReadback {
@@ -325,6 +352,118 @@ impl VerifiedEditReadback {
 
     pub fn remote_version(&self) -> &RecoveryRemoteVersion {
         &self.version
+    }
+
+    /// Informational format origin, never native completion authority.
+    pub fn is_streamed(&self) -> bool {
+        #[cfg(any(windows, test))]
+        {
+            self.streamed.is_some()
+        }
+        #[cfg(not(any(windows, test)))]
+        {
+            false
+        }
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn streamed_backing(
+        &self,
+    ) -> Option<&Arc<std::sync::Mutex<crate::streamed_reconcile::VerifiedStreamedReadback>>> {
+        self.streamed.as_ref()
+    }
+
+    /// Bridge only a freshly verified exact v2 capability. No body is loaded
+    /// into a legacy record: the master pin and dispatch lease remain owned.
+    #[cfg(any(windows, test))]
+    pub(crate) fn from_streamed(
+        proof: crate::streamed_reconcile::VerifiedStreamedReadback,
+    ) -> Result<Self, JournalError> {
+        let metadata = proof.metadata_view();
+        let version = proof.remote_version().clone();
+        if metadata.record_id != proof.key().record_id()
+            || metadata.generation != proof.key().generation()
+            || &metadata.scope != proof.key().scope()
+            || metadata
+                .remote
+                .as_ref()
+                .is_none_or(|baseline| baseline.resource_id != version.resource_id)
+            || version.size != metadata.content_len
+            || !valid_strong_etag(&version.etag)
+            || version.is_directory
+            || version.encrypted
+            || !version.writable
+        {
+            return Err(JournalError::InvalidEdit);
+        }
+        proof.verify_pin().map_err(|_| JournalError::InvalidState)?;
+        Ok(Self {
+            metadata,
+            version,
+            streamed: Some(Arc::new(std::sync::Mutex::new(proof))),
+        })
+    }
+}
+
+#[cfg(all(test, unix))]
+mod verified_streamed_bridge_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_view_has_no_streamed_backing_or_native_streamed_key() {
+        let (_directory, _store, _key, streamed) =
+            crate::streamed_reconcile::tests::bridge_fixture();
+        let metadata = streamed.metadata_view();
+        let version = streamed.remote_version().clone();
+        drop(streamed);
+        let legacy = VerifiedEditReadback {
+            metadata,
+            version,
+            streamed: None,
+        };
+        assert!(!legacy.is_streamed());
+        assert!(legacy.streamed_backing().is_none());
+        let completion =
+            crate::CompletedLocalEdit::from_verified_native_completion(&legacy).unwrap();
+        assert!(completion.streamed_key().is_none());
+    }
+
+    #[test]
+    fn exact_key_does_not_allow_mutated_native_completion_metadata() {
+        for field in 0..10 {
+            let (_directory, store, _key, streamed) =
+                crate::streamed_reconcile::tests::bridge_fixture();
+            let mut proof = VerifiedEditReadback::from_streamed(streamed).unwrap();
+            match field {
+                0 => proof.metadata.record_id.push('0'),
+                1 => proof.metadata.generation += 1,
+                2 => proof.metadata.scope.root_resource_id.push('x'),
+                3 => proof.metadata.local_file.file_index += 1,
+                4 => proof.metadata.relative_path.push('x'),
+                5 => proof.metadata.remote.as_mut().unwrap().etag.push('x'),
+                6 => proof.metadata.content_len += 1,
+                7 => proof.metadata.content_sha256.push('0'),
+                8 => proof.metadata.state = crate::LocalEditState::Uncertain,
+                _ => proof.metadata.remote = None,
+            }
+            // Synthetic use of the guarded-native constructor, not a native
+            // pass: exact original key still cannot admit altered metadata.
+            let completion =
+                crate::CompletedLocalEdit::from_verified_native_completion(&proof).unwrap();
+            assert_eq!(
+                proof
+                    .streamed_backing()
+                    .unwrap()
+                    .lock()
+                    .unwrap()
+                    .acknowledge_native(&completion),
+                Err(crate::streamed_store::StoreError::Invalid)
+            );
+            assert!(matches!(
+                store.discover_records().unwrap()[0].state,
+                crate::streamed_store::StreamedAttemptState::VerifiedApplied { .. }
+            ));
+        }
     }
 }
 
@@ -420,6 +559,8 @@ pub fn verify_edit_readback(
     Ok(VerifiedEditReadback {
         metadata: record.metadata.clone(),
         version: body.version.clone(),
+        #[cfg(any(windows, test))]
+        streamed: None,
     })
 }
 

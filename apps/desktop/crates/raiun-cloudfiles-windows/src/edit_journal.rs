@@ -22,6 +22,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
+#[cfg(windows)]
+use std::sync::Arc;
+
 const JOURNAL_DIR: &str = "cloud-files-edit-journal-v1";
 const RECORD_MAGIC: &[u8; 8] = b"RAIUNED1";
 const MAX_RECORDS: usize = 10_000;
@@ -244,6 +247,8 @@ pub struct DpapiEditRecordProtector {
 
 #[cfg(windows)]
 impl DpapiEditRecordProtector {
+    /// Inherit the session store's validated runtime state root, including an
+    /// explicitly selected headless root. Never reconstruct a Desktop path here.
     pub fn current_user() -> Result<Self, JournalError> {
         let store = raiun_control_windows::DpapiSessionStore::current_user()
             .map_err(|_| JournalError::ProtectionFailed)?;
@@ -321,6 +326,8 @@ pub struct EditJournal {
     _directory_guards: Vec<JournalDirectoryGuard>,
     scope: EditJournalScope,
     protector: Box<dyn EditRecordProtector>,
+    #[cfg(windows)]
+    admission: Option<Arc<crate::recovery_admission::RecoveryAdmission>>,
 }
 
 /// RAII ownership of one record's recovery-dispatch lock. This type is not
@@ -355,6 +362,8 @@ impl EditJournal {
         if !valid_record_id(record_id) {
             return Err(JournalError::InvalidEdit);
         }
+        #[cfg(windows)]
+        let admission = self.reserve_write(0, 1)?;
         trace_journal_stage(
             "lease_verify_before_open",
             self.directory_guard.verify_path(),
@@ -388,6 +397,9 @@ impl EditJournal {
         if metadata.len() != 0 {
             return Err(JournalError::CorruptRecord);
         }
+        // Never retain the state lock while acquiring a per-record lock.
+        #[cfg(windows)]
+        drop(admission);
         trace_journal_stage(
             "lease_lock_exclusive",
             file.try_lock_exclusive().map_err(|error| {
@@ -440,6 +452,8 @@ impl EditJournal {
             _directory_guards: vec![state_guard, root_guard],
             scope,
             protector: Box::new(protector),
+            #[cfg(windows)]
+            admission: None,
         })
     }
 
@@ -463,7 +477,41 @@ impl EditJournal {
             _directory_guards: vec![state_guard, root_guard],
             scope,
             protector: Box::new(protector),
+            #[cfg(windows)]
+            admission: None,
         })
+    }
+
+    /// Join cooperating Windows v1/v2 writers without changing legacy format.
+    /// A coordinator for a different physical state root cannot be attached.
+    #[cfg(windows)]
+    pub(crate) fn with_admission(
+        mut self,
+        admission: Arc<crate::recovery_admission::RecoveryAdmission>,
+    ) -> Result<Self, JournalError> {
+        let state = self._directory_guards.first().ok_or(JournalError::Io)?;
+        state.verify_path()?;
+        if state.pinned.identity() != admission.state_identity() {
+            return Err(JournalError::ScopeMismatch);
+        }
+        self.admission = Some(admission);
+        Ok(self)
+    }
+
+    #[cfg(windows)]
+    fn reserve_write(
+        &self,
+        bytes: u64,
+        entries: usize,
+    ) -> Result<Option<crate::recovery_admission::RecoveryAdmissionLease>, JournalError> {
+        self.admission
+            .as_ref()
+            .map(|admission| {
+                admission
+                    .try_reserve(&self.scope, bytes, entries)
+                    .map_err(admission_error)
+            })
+            .transpose()
     }
 
     /// Durably append a complete file snapshot. The temporary file is synced,
@@ -477,14 +525,6 @@ impl EditJournal {
         remote: Option<RemoteEditBaseline>,
         content: &[u8],
     ) -> Result<LocalEditMetadata, JournalError> {
-        // The agent is the sole writer for a selected profile. Serialize
-        // journal appends process-wide so concurrent close callbacks cannot
-        // each pass a stale quota scan and overrun the recovery bound.
-        static APPEND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _append_guard = APPEND_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .map_err(|_| JournalError::Io)?;
         validate_edit(
             &self.scope,
             generation,
@@ -493,6 +533,15 @@ impl EditJournal {
             &remote,
             content,
         )?;
+        // Coordinated writers retain state admission before the append mutex.
+        // Legacy-only callers keep the existing per-process serialization.
+        #[cfg(windows)]
+        let _admission = self.reserve_write(MAX_SEALED_BYTES as u64, 2)?;
+        static APPEND_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _append_guard = APPEND_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| JournalError::Io)?;
         let existing = self.recover_all()?;
         if existing.incomplete_staging_files != 0 {
             // We do not know whether a crashed staging file contains the
@@ -1032,6 +1081,8 @@ impl EditJournal {
     }
 
     fn append_recovery_event(&self, event: RecoveryEvent) -> Result<(), JournalError> {
+        #[cfg(windows)]
+        let _admission = self.reserve_write(MAX_RECOVERY_EVENT_BYTES as u64, 2)?;
         let body =
             Zeroizing::new(serde_json::to_vec(&event).map_err(|_| JournalError::InvalidEdit)?);
         if body.len() > MAX_RECOVERY_EVENT_BYTES {
@@ -1121,6 +1172,19 @@ impl EditJournal {
             return Err(JournalError::LimitExceeded);
         }
         Ok((sealed, associated_data(&self.scope, record_id)?))
+    }
+}
+
+#[cfg(windows)]
+pub(crate) fn admission_error(error: crate::streamed_store::StoreError) -> JournalError {
+    use crate::streamed_store::StoreError;
+    match error {
+        StoreError::Quota => JournalError::LimitExceeded,
+        StoreError::ScanLimit => JournalError::ScanLimit,
+        StoreError::Busy => JournalError::InvalidState,
+        StoreError::CorruptEvidence | StoreError::IncompleteEvidence => JournalError::CorruptRecord,
+        StoreError::Invalid => JournalError::InvalidScope,
+        _ => JournalError::Io,
     }
 }
 

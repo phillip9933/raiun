@@ -11,8 +11,15 @@ mod backend;
 mod edit_journal;
 mod initial_edit_queue;
 mod opencloud;
+#[cfg(windows)]
+pub(crate) mod recovery_admission;
 mod recovery_provider;
 mod recovery_reconcile;
+#[cfg(any(windows, test))]
+pub mod streamed_reconcile;
+pub mod streamed_snapshot;
+#[cfg(any(windows, test))]
+pub mod streamed_store;
 #[cfg(any(windows, test))]
 mod vault_capture_dispatch;
 #[cfg(any(windows, test))]
@@ -74,6 +81,8 @@ pub use opencloud::{
 pub use opencloud::{
     FolderCacheBindingExpectation, ListedFolderPage, ListedFolderRow, OfflineDownloadError,
 };
+#[cfg(windows)]
+pub use recovery_provider::StagedStreamedEdit;
 pub use recovery_provider::{CompletedLocalEdit, DurableEditRecoveryProvider, InitialEditReceipt};
 pub use recovery_reconcile::{
     MAX_RECOVERY_UPLOAD_ATTEMPTS, MAX_RECOVERY_UPLOAD_BYTES, OpenCloudRecoveryRemote,

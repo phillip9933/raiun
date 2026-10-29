@@ -4,6 +4,9 @@
 //! It never follows redirects, and keeps authorization values out of Debug output.
 
 mod async_body;
+mod blocking_reader;
+mod recovery_stream;
+pub use recovery_stream::RecoveryStreamReadback;
 pub mod avatar;
 pub mod guest_permissions;
 pub mod sharing_inventory;

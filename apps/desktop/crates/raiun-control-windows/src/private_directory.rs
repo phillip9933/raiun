@@ -381,6 +381,255 @@ impl PinnedDirectory {
     }
 }
 
+/// Read-only metadata accounting for legacy recovery trees. This capability
+/// accepts the exact historical protected owner-only directory policy (no
+/// inheritance), as well as the modern exact OICI policy. It never repairs ACLs
+/// or exposes file data, raw handles, writes, creation, publication or deletion.
+/// It cannot authenticate a recovery record or authorize dispatch/completion.
+pub struct LegacyRecoveryMetadataDirectory {
+    directory: PinnedDirectory,
+}
+impl LegacyRecoveryMetadataDirectory {
+    pub fn open_under(parent: &PinnedDirectory, name: &OsStr) -> io::Result<Self> {
+        validate_local_drive_path(&parent.path)?;
+        parent.verify_path()?;
+        validate_legacy_metadata_component(name)?;
+        let directory = PinnedDirectory::open(&parent.path.join(name))?;
+        validate_legacy_metadata_directory(&directory_handle(&directory)?)?;
+        parent.verify_path()?;
+        Ok(Self { directory })
+    }
+    pub fn open_child_directory(&self, name: &OsStr) -> io::Result<Self> {
+        self.verify_path()?;
+        let child = Self::open_under(&self.directory, name)?;
+        self.verify_path()?;
+        Ok(child)
+    }
+    pub fn path(&self) -> &Path {
+        &self.directory.path
+    }
+    pub fn verify_path(&self) -> io::Result<()> {
+        self.directory.verify_path()?;
+        let file = directory_handle(&self.directory)?;
+        if identity(&file)? != self.directory.identity {
+            return Err(private_policy_error());
+        }
+        validate_legacy_metadata_directory(&file)
+    }
+    /// Count one exact regular entry with metadata access only. Default legacy
+    /// file DACLs are not modern private-file authority and are never adopted as
+    /// such. No FILE_READ_DATA, generic read, write or DELETE access is requested.
+    pub fn file_length(&self, name: &OsStr) -> io::Result<u64> {
+        const FILE_READ_ATTRIBUTES_ACCESS: u32 = 0x80;
+        const READ_CONTROL_ACCESS: u32 = 0x0002_0000;
+        self.verify_path()?;
+        validate_legacy_metadata_component(name)?;
+        let file = open_file_handle_with_share(
+            &self.directory.path.join(name),
+            FILE_READ_ATTRIBUTES_ACCESS | READ_CONTROL_ACCESS,
+            OPEN_EXISTING,
+            FILE_SHARE_READ,
+        )?;
+        let before = legacy_metadata_file_info(&file)?;
+        let length = (u64::from(before.nFileSizeHigh) << 32) | u64::from(before.nFileSizeLow);
+        self.verify_path()?;
+        let after = legacy_metadata_file_info(&file)?;
+        if before.dwVolumeSerialNumber != after.dwVolumeSerialNumber
+            || before.nFileIndexHigh != after.nFileIndexHigh
+            || before.nFileIndexLow != after.nFileIndexLow
+            || before.dwFileAttributes != after.dwFileAttributes
+            || before.nFileSizeHigh != after.nFileSizeHigh
+            || before.nFileSizeLow != after.nFileSizeLow
+        {
+            return Err(private_policy_error());
+        }
+        // The same immutable no-write/no-delete-sharing handle is retained
+        // through both identity/owner/length checks and parent verification.
+        Ok(length)
+    }
+}
+fn validate_legacy_metadata_component(name: &OsStr) -> io::Result<()> {
+    if name.encode_wide().take(256).count() > 255 {
+        return Err(private_policy_error());
+    }
+    validate_component(name)
+}
+fn legacy_metadata_file_info(file: &File) -> io::Result<BY_HANDLE_FILE_INFORMATION> {
+    let info = file_info(file)?;
+    if info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
+        || info.nNumberOfLinks != 1
+        || (info.nFileIndexHigh == 0 && info.nFileIndexLow == 0)
+    {
+        return Err(private_policy_error());
+    }
+    let mut owner = std::ptr::null_mut();
+    let mut descriptor = std::ptr::null_mut();
+    // SAFETY: exact live metadata-only handle; OS allocates the descriptor,
+    // which the existing LocalFree guard owns through SID validation.
+    let status = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle() as HANDLE,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let _descriptor = SecurityDescriptor(descriptor);
+    let sid = current_user_sid_ptr()?;
+    if owner.is_null()
+        || unsafe { IsValidSid(owner) } == 0
+        || unsafe { EqualSid(owner, sid.0) } == 0
+    {
+        return Err(private_policy_error());
+    }
+    Ok(info)
+}
+fn legacy_metadata_directory_policy_valid(facts: PrivateAclFacts) -> bool {
+    if facts.ace_flags != 0 && facts.ace_flags != (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8
+    {
+        return false;
+    }
+    // Reuse the exact modern predicate for every other policy fact. The modern
+    // predicate itself is unchanged; only this read-only type admits flags0.
+    private_acl_policy_valid(
+        PrivateEntryKind::Directory,
+        PrivateAclFacts {
+            ace_flags: (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE) as u8,
+            ..facts
+        },
+    )
+}
+fn validate_legacy_metadata_directory(file: &File) -> io::Result<()> {
+    let info = file_info(file)?;
+    if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        || info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(private_policy_error());
+    }
+    if !legacy_metadata_directory_policy_valid(legacy_metadata_directory_acl_facts(file)?) {
+        return Err(private_policy_error());
+    }
+    Ok(())
+}
+// Keep the legacy query separate so the existing modern validator is not
+// relaxed/refactored. All descriptor/ACL/SID bounds match the modern query.
+fn legacy_metadata_directory_acl_facts(file: &File) -> io::Result<PrivateAclFacts> {
+    let mut owner = std::ptr::null_mut();
+    let mut dacl = std::ptr::null_mut();
+    let mut descriptor = std::ptr::null_mut();
+    let status = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle() as HANDLE,
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let descriptor = SecurityDescriptor(descriptor);
+    if owner.is_null() || dacl.is_null() || unsafe { IsValidSid(owner) } == 0 {
+        return Err(private_policy_error());
+    }
+
+    let current_sid = current_user_sid_ptr()?;
+    let owner_matches = unsafe { EqualSid(owner, current_sid.0) } != 0;
+
+    let mut dacl_present = 0;
+    let mut actual_dacl = std::ptr::null_mut();
+    let mut dacl_defaulted = 0;
+    if unsafe {
+        GetSecurityDescriptorDacl(
+            descriptor.0,
+            &mut dacl_present,
+            &mut actual_dacl,
+            &mut dacl_defaulted,
+        )
+    } == 0
+        || dacl_present == 0
+        || actual_dacl.is_null()
+        || dacl_defaulted != 0
+    {
+        return Err(private_policy_error());
+    }
+
+    let mut control = 0;
+    let mut revision = 0;
+    if unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) } == 0 {
+        return Err(private_policy_error());
+    }
+    let dacl_protected = control & SE_DACL_PROTECTED != 0;
+
+    let mut acl_size = ACL_SIZE_INFORMATION::default();
+    if unsafe {
+        GetAclInformation(
+            actual_dacl,
+            (&mut acl_size as *mut ACL_SIZE_INFORMATION).cast(),
+            std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    } == 0
+        || acl_size.AceCount != MAX_PRIVATE_ACES
+    {
+        return Err(private_policy_error());
+    }
+
+    let mut ace = std::ptr::null_mut();
+    if unsafe { GetAce(actual_dacl, 0, &mut ace) } == 0 || ace.is_null() {
+        return Err(private_policy_error());
+    }
+    let header = unsafe { &*ace.cast::<windows_sys::Win32::Security::ACE_HEADER>() };
+    let sid_offset = std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+    if header.AceType != ACCESS_ALLOWED_ACE_TYPE || usize::from(header.AceSize) < sid_offset + 8 {
+        return Err(private_policy_error());
+    }
+    let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
+    let sid_in_ace: *mut std::ffi::c_void = std::ptr::addr_of!(allowed.SidStart).cast_mut().cast();
+    // The standard allowed ACE has at least the fixed SID header above.
+    // Bound its variable subauthorities inside this ACE before any SID API.
+    let subauthorities = unsafe { *sid_in_ace.cast::<u8>().add(1) } as usize;
+    let bounded_sid_bytes = subauthorities
+        .checked_mul(4)
+        .and_then(|n| n.checked_add(8))
+        .ok_or_else(private_policy_error)?;
+    if bounded_sid_bytes > usize::from(header.AceSize).saturating_sub(sid_offset)
+        || unsafe { IsValidSid(sid_in_ace) } == 0
+    {
+        return Err(private_policy_error());
+    }
+    // GetLengthSid requires an already valid SID. Never reinterpret object or
+    // resource ACE payloads as a standard SID or call this before validation.
+    let sid_length = unsafe { GetLengthSid(sid_in_ace) } as usize;
+    if sid_length != bounded_sid_bytes {
+        return Err(private_policy_error());
+    }
+    let facts = PrivateAclFacts {
+        owner_matches,
+        dacl_present: dacl_present != 0,
+        dacl_non_null: !actual_dacl.is_null(),
+        dacl_defaulted: dacl_defaulted != 0,
+        dacl_protected,
+        ace_count: acl_size.AceCount,
+        ace_type: header.AceType,
+        ace_flags: header.AceFlags,
+        access_mask: allowed.Mask,
+        ace_sid_matches: unsafe { EqualSid(sid_in_ace, current_sid.0) } != 0,
+    };
+    Ok(facts)
+}
+
 /// A handle-pinned directory whose owner and protected DACL have been
 /// validated against the current Windows user. This API is deliberately
 /// separate from the journal directory primitives: callers must opt in to
@@ -1535,6 +1784,99 @@ mod tests {
         let private = PrivateDirectory::create_or_open_under(&parent, OsStr::new(&name))
             .expect("create current-user-only child");
         (parent, private)
+    }
+
+    #[test]
+    fn legacy_metadata_directory_policy_keeps_modern_policy_strict() {
+        let modern = valid_private_acl_facts(PrivateEntryKind::Directory);
+        assert!(private_acl_policy_valid(
+            PrivateEntryKind::Directory,
+            modern
+        ));
+        assert!(legacy_metadata_directory_policy_valid(modern));
+        let legacy = PrivateAclFacts {
+            ace_flags: 0,
+            ..modern
+        };
+        assert!(!private_acl_policy_valid(
+            PrivateEntryKind::Directory,
+            legacy
+        ));
+        assert!(legacy_metadata_directory_policy_valid(legacy));
+        for flags in [
+            OBJECT_INHERIT_ACE as u8,
+            CONTAINER_INHERIT_ACE as u8,
+            INHERITED_ACE as u8,
+            0x08,
+            0x10,
+            0xff,
+        ] {
+            assert!(!legacy_metadata_directory_policy_valid(PrivateAclFacts {
+                ace_flags: flags,
+                ..legacy
+            }));
+        }
+        for facts in [
+            PrivateAclFacts {
+                owner_matches: false,
+                ..legacy
+            },
+            PrivateAclFacts {
+                dacl_present: false,
+                ..legacy
+            },
+            PrivateAclFacts {
+                dacl_non_null: false,
+                ..legacy
+            },
+            PrivateAclFacts {
+                dacl_defaulted: true,
+                ..legacy
+            },
+            PrivateAclFacts {
+                dacl_protected: false,
+                ..legacy
+            },
+            PrivateAclFacts {
+                ace_count: 2,
+                ..legacy
+            },
+            PrivateAclFacts {
+                ace_type: 1,
+                ..legacy
+            },
+            PrivateAclFacts {
+                access_mask: FILE_ALL_ACCESS_MASK - 1,
+                ..legacy
+            },
+            PrivateAclFacts {
+                ace_sid_matches: false,
+                ..legacy
+            },
+        ] {
+            assert!(!legacy_metadata_directory_policy_valid(facts));
+        }
+        // Ordinary process-default flags0/unprotected file policy is NOT
+        // promoted into modern private-file admission by this compatibility API.
+        let default_file = PrivateAclFacts {
+            dacl_protected: false,
+            ace_flags: 0,
+            ..valid_private_acl_facts(PrivateEntryKind::File)
+        };
+        assert!(!private_acl_policy_valid(
+            PrivateEntryKind::File,
+            default_file
+        ));
+    }
+
+    #[test]
+    fn legacy_metadata_child_components_are_bounded_without_relaxing_names() {
+        for name in ["", ".", "..", "a/b", "a\\b", "a:b", "a\0b"] {
+            assert!(validate_legacy_metadata_component(OsStr::new(name)).is_err());
+        }
+        assert!(validate_legacy_metadata_component(OsStr::new(&"x".repeat(255))).is_ok());
+        assert!(validate_legacy_metadata_component(OsStr::new(&"x".repeat(256))).is_err());
+        assert!(validate_legacy_metadata_component(OsStr::new(&"😀".repeat(128))).is_err());
     }
 
     #[test]

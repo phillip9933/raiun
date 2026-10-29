@@ -3192,3 +3192,25 @@ also received independent source review. These source checks do not establish
 positive native Windows browsing or complete GUI parity. That package acceptance
 and the broader full-operation integration remain open. Evidence is under
 `outputs/desktop-release-prep-20261029/gui-parity/browse-integration-r1/` outside Git.
+
+### Shared ordinary streaming composition (29 October 2026)
+
+The GUI branch now composes the frozen C13 ordinary streaming modules using
+verified non-overlap patches and selected native/control/agent hunks. Existing
+Sharing, cache, vault browsing and test-hardening changes remain. The full local
+workspace passes 1,298 cases with 14 existing ignores, formatting and strict
+Linux/Windows cross-target Clippy. No new dependencies or lockfile changes.
+
+This composition does **not** enable streamed recovery in the GUI factory.
+Default GUI session bootstrap uses a protected owner-only directory with no
+inheritance, while the current streaming parent requires the modern inheritable
+layout. A separate pinned compatibility admission is required before activation;
+existing ACLs and legacy records must not be repaired, adopted or migrated.
+
+The independently tested C13 diagnostic passed four 17-MiB-plus existing-file
+cases across separate focused native Windows runs: Personal/Spaces saves and
+Personal/Spaces permission refusal with retained edits through restart. These
+results do not establish upgraded-GUI storage compatibility, replacement saves,
+namespace CRUD, encrypted writes or full parity. Evidence is outside Git in
+`outputs/desktop-release-prep-20261029/integration/c13-gui-compose-r1/` and
+`outputs/headless-mvp-acceptance-20261029/windows-candidate13/`.

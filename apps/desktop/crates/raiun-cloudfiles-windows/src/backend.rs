@@ -273,6 +273,46 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
     fn provider_scope(&self) -> &ProviderScope;
     fn root_identity(&self) -> ConfiguredRootIdentity;
 
+    /// A nonblocking cached count seeded by authenticated preflight. No disk,
+    /// body decryption or network work is permitted here. Unsupported, poisoned
+    /// or invalidated summaries return None, never a healthy zero.
+    fn cached_ordinary_pending_count(&self) -> Option<usize> {
+        None
+    }
+
+    /// Separate opt-in for the complete protected v2 capture pipeline. Legacy
+    /// providers cannot make a larger native read eligible by default.
+    #[cfg(windows)]
+    fn supports_streamed_capture(&self) -> bool {
+        false
+    }
+
+    #[cfg(windows)]
+    #[allow(clippy::too_many_arguments)]
+    fn stage_streamed_edit(
+        &self,
+        _binding: &PlaceholderEditBinding,
+        _root_identity: ConfiguredRootIdentity,
+        _local_file: crate::LocalFileIdentity,
+        _relative_path: &str,
+        _content_len: u64,
+        _source: &mut dyn std::io::Read,
+        _cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<crate::StagedStreamedEdit, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
+    /// Caller still owns its binding/source/path guards and has revalidated
+    /// them after capture. This cannot reconstruct initial admission from disk.
+    #[cfg(windows)]
+    fn commit_streamed_edit(
+        &self,
+        _stage: crate::StagedStreamedEdit,
+        _cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<Option<crate::InitialEditReceipt>, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
     /// Persist complete local bytes before a close callback is considered
     /// recovered. `binding` is obtained under the backend's revocation lease;
     /// the recovery implementation must validate its account/generation and
@@ -357,6 +397,26 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
         _approval: crate::ExplicitRecoveryApproval,
     ) -> Result<crate::ReconciliationOutcome, crate::JournalError> {
         Err(crate::JournalError::InvalidState)
+    }
+
+    /// Explicit recovery plus fresh remote readback authority for exact native
+    /// completion. Historical upload outcomes alone never authorize marking
+    /// local bytes clean. Older implementations safely return no proof.
+    fn dispatch_recovered_edit_verified(
+        &self,
+        record_id: &str,
+        generation: u64,
+        remote: &dyn crate::RecoveryRemote,
+        approval: crate::ExplicitRecoveryApproval,
+    ) -> Result<
+        (
+            crate::ReconciliationOutcome,
+            Option<crate::VerifiedEditReadback>,
+        ),
+        crate::JournalError,
+    > {
+        self.dispatch_recovered_edit(record_id, generation, remote, approval)
+            .map(|outcome| (outcome, None))
     }
 }
 

@@ -25,6 +25,10 @@ use crate::{
 };
 use crate::{ExplicitRecoveryApproval, ReconciliationOutcome, RecoveryRemote};
 
+#[cfg(windows)]
+#[path = "recovery_provider_streamed.rs"]
+mod streamed;
+
 const CATALOG_DIRECTORY: &str = "cloud-files-edit-scopes-v1";
 const CATALOG_SUFFIX: &str = ".scope";
 const CATALOG_AAD_PREFIX: &[u8] = b"raiun/windows-edit-scope-catalog/v1\0";
@@ -52,6 +56,16 @@ pub struct DurableEditRecoveryProvider {
     root_identity: ConfiguredRootIdentity,
     protector: Arc<dyn EditRecordProtector>,
     catalog_lock: Arc<Mutex<()>>,
+    #[cfg(windows)]
+    streamed: Option<StreamedRecoveryContext>,
+}
+
+#[cfg(windows)]
+#[derive(Clone)]
+struct StreamedRecoveryContext {
+    state: Arc<raiun_control_windows::PrivateDirectory>,
+    admission: Arc<crate::recovery_admission::RecoveryAdmission>,
+    policy: crate::streamed_store::StorePolicy,
 }
 
 impl DurableEditRecoveryProvider {
@@ -70,11 +84,52 @@ impl DurableEditRecoveryProvider {
             root_identity,
             protector: Arc::new(protector),
             catalog_lock: Arc::new(Mutex::new(())),
+            #[cfg(windows)]
+            streamed: None,
         }
     }
 
+    /// Opt in to coordinated v1/v2 storage for an already admitted private
+    /// Windows state root. Native capture activation remains a separate gate.
+    #[cfg(windows)]
+    pub fn with_streamed_recovery(
+        mut self,
+        policy: crate::streamed_store::StorePolicy,
+    ) -> Result<Self, crate::JournalError> {
+        let parent_path = self
+            .state_directory
+            .parent()
+            .ok_or(crate::JournalError::InvalidScope)?;
+        let name = self
+            .state_directory
+            .file_name()
+            .ok_or(crate::JournalError::InvalidScope)?;
+        let parent = raiun_control_windows::PinnedDirectory::open(parent_path)
+            .map_err(|_| crate::JournalError::ProtectionFailed)?;
+        let state = Arc::new(
+            raiun_control_windows::PrivateDirectory::open_under(&parent, name)
+                .map_err(|_| crate::JournalError::ProtectionFailed)?,
+        );
+        let admission = Arc::new(
+            crate::recovery_admission::RecoveryAdmission::new(
+                Arc::clone(&state),
+                Arc::clone(&self.protector),
+                policy,
+            )
+            .map_err(crate::edit_journal::admission_error)?,
+        );
+        self.streamed = Some(StreamedRecoveryContext {
+            state,
+            admission,
+            policy,
+        });
+        Ok(self)
+    }
+
     /// Build the production provider using current-user DPAPI and Raiun's
-    /// protected `%LOCALAPPDATA%` state directory.
+    /// protected current runtime state directory. Explicit headless context
+    /// inherits its isolated state root through the session-store constructor;
+    /// the Desktop default remains under `%LOCALAPPDATA%`.
     #[cfg(windows)]
     pub fn current_user(
         scope: ProviderScope,
@@ -90,6 +145,11 @@ impl DurableEditRecoveryProvider {
             state_directory: self.state_directory.clone(),
             protector: Arc::clone(&self.protector),
             lock: Arc::clone(&self.catalog_lock),
+            #[cfg(windows)]
+            admission: self
+                .streamed
+                .as_ref()
+                .map(|context| Arc::clone(&context.admission)),
         }
     }
 
@@ -104,8 +164,20 @@ impl DurableEditRecoveryProvider {
         let catalog = self.catalog();
         catalog
             .preflight(&self.scope, self.root_identity)
-            .and_then(|()| catalog.unresolved_edits(&self.scope, self.root_identity))
-            .map_err(|_| BackendError::Unavailable)
+            .map_err(|_| BackendError::Unavailable)?;
+        let metadata = catalog
+            .unresolved_edits(&self.scope, self.root_identity)
+            .map_err(|_| BackendError::Unavailable)?;
+        #[cfg(windows)]
+        let metadata = merge_streamed_metadata(
+            metadata,
+            self.streamed.as_ref(),
+            &self.protector,
+            &self.scope,
+            self.root_identity,
+        )
+        .map_err(|_| BackendError::Unavailable)?;
+        Ok(metadata)
     }
 
     /// Read-only discovery with an aggregate scan allowance. This authenticates
@@ -117,8 +189,18 @@ impl DurableEditRecoveryProvider {
         if !valid_scope_binding(&self.scope, self.root_identity) {
             return Err(crate::JournalError::InvalidScope);
         }
-        self.catalog()
-            .unresolved_metadata_bounded(&self.scope, self.root_identity)
+        let metadata = self
+            .catalog()
+            .unresolved_metadata_bounded(&self.scope, self.root_identity)?;
+        #[cfg(windows)]
+        let metadata = merge_streamed_metadata(
+            metadata,
+            self.streamed.as_ref(),
+            &self.protector,
+            &self.scope,
+            self.root_identity,
+        )?;
+        Ok(metadata)
     }
 
     /// Fail closed if a protected journal or incomplete staging record remains
@@ -130,8 +212,21 @@ impl DurableEditRecoveryProvider {
         let catalog = self.catalog();
         catalog
             .preflight(&self.scope, self.root_identity)
-            .and_then(|()| catalog.has_unresolved(&self.scope, self.root_identity))
-            .map_err(|_| BackendError::Unavailable)
+            .map_err(|_| BackendError::Unavailable)?;
+        let legacy = catalog
+            .has_unresolved(&self.scope, self.root_identity)
+            .map_err(|_| BackendError::Unavailable)?;
+        #[cfg(windows)]
+        let legacy = legacy
+            || !streamed_unresolved_metadata(
+                self.streamed.as_ref(),
+                &self.protector,
+                &self.scope,
+                self.root_identity,
+            )
+            .map_err(|_| BackendError::Unavailable)?
+            .is_empty();
+        Ok(legacy)
     }
 
     /// Return the current-user protected catalog used to resolve stable
@@ -848,14 +943,32 @@ impl EditRecoveryProvider for DurableEditRecoveryProvider {
             return Err(BackendError::Unavailable);
         }
         let catalog = self.catalog();
-        catalog
-            .preflight(&self.scope, self.root_identity)
+        let pending = catalog
+            .preflight_pending(&self.scope, self.root_identity)
             .map_err(|_| BackendError::Unavailable)?;
+        #[cfg(windows)]
+        let pending = {
+            let metadata = streamed_unresolved_metadata(
+                self.streamed.as_ref(),
+                &self.protector,
+                &self.scope,
+                self.root_identity,
+            )
+            .map_err(|_| BackendError::Unavailable)?;
+            let mut pending = pending;
+            for item in metadata {
+                insert_pending(&mut pending, &item);
+            }
+            pending
+        };
         Ok(Arc::new(DurablePreparedEditRecovery {
             scope: self.scope.clone(),
             root_identity: self.root_identity,
             catalog,
             receipt_owner: Arc::new(()),
+            pending: Mutex::new(pending),
+            #[cfg(windows)]
+            streamed: self.streamed.clone(),
         }))
     }
 
@@ -871,6 +984,18 @@ impl EditRecoveryProvider for DurableEditRecoveryProvider {
 pub struct InitialEditReceipt {
     owner: Arc<()>,
     metadata: LocalEditMetadata,
+    #[cfg(windows)]
+    streamed: Option<crate::streamed_store::StreamedRecordKey>,
+}
+
+/// Protected staged bytes tied to one prepared instance. Source-handle
+/// revalidation must occur before the native caller requests manifest commit.
+#[cfg(windows)]
+pub struct StagedStreamedEdit {
+    owner: Arc<()>,
+    store: Arc<crate::streamed_store::SnapshotStore>,
+    stage: crate::streamed_store::StagedSnapshot,
+    binding: crate::streamed_snapshot::SnapshotBinding,
 }
 
 impl InitialEditReceipt {
@@ -900,14 +1025,53 @@ impl InitialEditReceipt {
 /// the OS accepts its nonzero-USN comparison. Not a remote-only receipt.
 pub struct CompletedLocalEdit {
     metadata: LocalEditMetadata,
+    #[cfg(any(windows, test))]
+    streamed: Option<Arc<Mutex<crate::streamed_reconcile::VerifiedStreamedReadback>>>,
+    #[cfg(any(windows, test))]
+    streamed_key: Option<crate::streamed_store::StreamedRecordKey>,
 }
 
 impl CompletedLocalEdit {
-    #[cfg(any(windows, test))]
+    #[cfg(test)]
     pub(crate) fn from_native_completion(metadata: &LocalEditMetadata) -> Self {
         Self {
             metadata: metadata.clone(),
+            streamed: None,
+            streamed_key: None,
         }
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn metadata(&self) -> &LocalEditMetadata {
+        &self.metadata
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn streamed_key(&self) -> Option<&crate::streamed_store::StreamedRecordKey> {
+        self.streamed.as_ref()?;
+        self.streamed_key.as_ref()
+    }
+
+    /// Called only after guarded native in-sync success, not remote delivery.
+    #[cfg(any(windows, test))]
+    pub(crate) fn from_verified_native_completion(
+        proof: &crate::VerifiedEditReadback,
+    ) -> Result<Self, crate::JournalError> {
+        let streamed = proof.streamed_backing().cloned();
+        let streamed_key = streamed
+            .as_ref()
+            .map(|backing| {
+                backing
+                    .lock()
+                    .map(|proof| proof.key().clone())
+                    .map_err(|_| crate::JournalError::InvalidState)
+            })
+            .transpose()?;
+        Ok(Self {
+            metadata: proof.metadata().clone(),
+            streamed,
+            streamed_key,
+        })
     }
 }
 
@@ -916,9 +1080,317 @@ struct DurablePreparedEditRecovery {
     root_identity: ConfiguredRootIdentity,
     catalog: ScopeCatalog,
     receipt_owner: Arc<()>,
+    // Derived during existing authenticated preflight; never a persistent
+    // replacement for protected journals. None is sticky until a new prepare.
+    pending: Mutex<Option<std::collections::HashSet<(String, u64)>>>,
+    #[cfg(windows)]
+    streamed: Option<StreamedRecoveryContext>,
+}
+
+// None is sticky: a collision or exhausted allowance cannot become a healthy
+// zero merely because a later completion removes one tuple.
+fn insert_pending(
+    pending: &mut Option<std::collections::HashSet<(String, u64)>>,
+    metadata: &LocalEditMetadata,
+) {
+    if let Some(records) = pending.as_mut()
+        && (records.len() >= 2000
+            || !records.insert((metadata.record_id.clone(), metadata.generation)))
+    {
+        *pending = None;
+    }
+}
+
+#[cfg(windows)]
+fn streamed_manifest_metadata(
+    manifest: &crate::streamed_snapshot::SnapshotManifest,
+) -> LocalEditMetadata {
+    let binding = manifest.binding();
+    let content_sha256 = manifest
+        .content_sha256()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    LocalEditMetadata {
+        record_id: binding.record_id.clone(),
+        generation: binding.generation,
+        scope: binding.scope.clone(),
+        local_file: binding.local_file,
+        relative_path: binding.relative_path.clone(),
+        remote: binding.remote.clone(),
+        content_len: binding.content_len,
+        content_sha256,
+        state: crate::LocalEditState::Dirty,
+    }
+}
+
+#[cfg(windows)]
+fn streamed_unresolved_metadata(
+    context: Option<&StreamedRecoveryContext>,
+    protector: &Arc<dyn EditRecordProtector>,
+    scope: &ProviderScope,
+    root: ConfiguredRootIdentity,
+) -> Result<Vec<LocalEditMetadata>, crate::JournalError> {
+    let Some(context) = context else {
+        return Ok(Vec::new());
+    };
+    let mut scan_policy = context.policy;
+    scan_policy.max_entries = scan_policy.max_entries.min(20_000);
+    scan_policy.max_metadata_bytes_per_scan = scan_policy
+        .max_metadata_bytes_per_scan
+        .min(64 * 1024 * 1024);
+    let mut budget = crate::streamed_store::DiscoveryBudget::new(scan_policy);
+    let scopes = crate::streamed_store::SnapshotStore::discover_state_scopes_bounded(
+        Arc::clone(&context.state),
+        Arc::clone(protector),
+        scan_policy,
+        &mut budget,
+    )
+    .map_err(crate::edit_journal::admission_error)?;
+    if scopes.len() > MAX_DISCOVERY_CATALOG_SCOPES {
+        return Err(crate::JournalError::ScanLimit);
+    }
+    let mut output = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut scanned_records = 0usize;
+    for selected in scopes
+        .into_iter()
+        .filter(|item| scope_matches_provider(item, scope, root))
+    {
+        let store = crate::streamed_store::SnapshotStore::open_existing(
+            Arc::clone(&context.state),
+            selected,
+            Arc::clone(protector),
+            context.policy,
+        )
+        .map_err(crate::edit_journal::admission_error)?;
+        for record in store
+            .discover_records_bounded(&mut budget)
+            .map_err(crate::edit_journal::admission_error)?
+        {
+            scanned_records = scanned_records
+                .checked_add(1)
+                .ok_or(crate::JournalError::ScanLimit)?;
+            if scanned_records > 2000
+                || !seen.insert((record.key.record_id().to_owned(), record.key.generation()))
+            {
+                return Err(crate::JournalError::ScanLimit);
+            }
+            if !matches!(
+                record.state,
+                crate::streamed_store::StreamedAttemptState::LocallyAcknowledged { .. }
+            ) {
+                output.push(streamed_manifest_metadata(&record.manifest));
+            }
+        }
+    }
+    Ok(output)
+}
+
+#[cfg(windows)]
+fn merge_streamed_metadata(
+    mut metadata: Vec<LocalEditMetadata>,
+    context: Option<&StreamedRecoveryContext>,
+    protector: &Arc<dyn EditRecordProtector>,
+    scope: &ProviderScope,
+    root: ConfiguredRootIdentity,
+) -> Result<Vec<LocalEditMetadata>, crate::JournalError> {
+    metadata.extend(streamed_unresolved_metadata(
+        context, protector, scope, root,
+    )?);
+    let mut seen = std::collections::HashSet::new();
+    if metadata.len() > 2000
+        || metadata
+            .iter()
+            .any(|item| !seen.insert((item.record_id.clone(), item.generation)))
+    {
+        return Err(crate::JournalError::ScanLimit);
+    }
+    Ok(metadata)
+}
+
+impl DurablePreparedEditRecovery {
+    fn add_pending(&self, metadata: &LocalEditMetadata) {
+        if let Ok(mut pending) = self.pending.lock() {
+            insert_pending(&mut pending, metadata);
+        }
+    }
+
+    #[cfg(windows)]
+    fn dispatch_streamed_receipt(
+        &self,
+        receipt: InitialEditReceipt,
+        remote: &dyn RecoveryRemote,
+    ) -> Result<(ReconciliationOutcome, Option<crate::VerifiedEditReadback>), crate::JournalError>
+    {
+        if !Arc::ptr_eq(&receipt.owner, &self.receipt_owner)
+            || receipt.metadata.generation != self.scope.token_generation()
+            || !scope_matches_provider(&receipt.metadata.scope, &self.scope, self.root_identity)
+        {
+            return Err(crate::JournalError::ScopeMismatch);
+        }
+        let context = self
+            .streamed
+            .as_ref()
+            .ok_or(crate::JournalError::InvalidState)?;
+        let key = receipt.streamed.ok_or(crate::JournalError::InvalidState)?;
+        let store = crate::streamed_store::SnapshotStore::open_existing(
+            Arc::clone(&context.state),
+            receipt.metadata.scope.clone(),
+            Arc::clone(&self.catalog.protector),
+            context.policy,
+        )
+        .map_err(crate::edit_journal::admission_error)?;
+        if store
+            .record_key(&receipt.metadata.record_id)
+            .map_err(crate::edit_journal::admission_error)?
+            != key
+        {
+            return Err(crate::JournalError::ScopeMismatch);
+        }
+        let remote = remote
+            .streamed_remote()
+            .ok_or(crate::JournalError::InvalidState)?;
+        let result = crate::streamed_reconcile::reconcile_streamed_edit(
+            &store,
+            &key,
+            &receipt.metadata.scope,
+            &*remote,
+            crate::streamed_reconcile::StreamedAdmission::Fresh,
+            Arc::new(|| false),
+        )
+        .map_err(crate::edit_journal::admission_error)?;
+        let proof = result
+            .verified
+            .map(crate::VerifiedEditReadback::from_streamed)
+            .transpose()?;
+        Ok((result.outcome, proof))
+    }
+}
+
+#[cfg(windows)]
+fn streamed_capture_error(
+    stage: &'static str,
+    error: crate::streamed_store::StoreError,
+) -> BackendError {
+    // StoreError contains fixed variants only, never paths, account fields,
+    // plaintext, operating-system messages or credential material.
+    #[cfg(feature = "synthetic-agent-integration")]
+    eprintln!("synthetic streamed provider stage={stage} error={error:?}");
+    #[cfg(not(feature = "synthetic-agent-integration"))]
+    let _ = (stage, error);
+    BackendError::Unavailable
 }
 
 impl PreparedEditRecovery for DurablePreparedEditRecovery {
+    #[cfg(windows)]
+    fn supports_streamed_capture(&self) -> bool {
+        self.streamed.is_some()
+    }
+
+    #[cfg(windows)]
+    fn stage_streamed_edit(
+        &self,
+        binding: &PlaceholderEditBinding,
+        root_identity: ConfiguredRootIdentity,
+        local_file: crate::LocalFileIdentity,
+        relative_path: &str,
+        content_len: u64,
+        source: &mut dyn Read,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<StagedStreamedEdit, BackendError> {
+        let context = self.streamed.as_ref().ok_or(BackendError::Unavailable)?;
+        if root_identity != self.root_identity
+            || binding.profile_id != self.scope.profile_id()
+            || binding.server_origin != self.scope.server_origin()
+            || binding.account_subject != self.scope.account_id()
+            || binding.account_generation != self.scope.token_generation()
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let snapshot = crate::streamed_snapshot::SnapshotBinding {
+            record_id: String::new(),
+            scope: EditJournalScope {
+                profile_id: binding.profile_id.clone(),
+                server_origin: binding.server_origin.clone(),
+                account_subject: binding.account_subject.clone(),
+                space_id: binding.space_id.clone(),
+                root_resource_id: binding.root_resource_id.clone(),
+                root_volume_serial: root_identity.volume_serial,
+                root_file_index: root_identity.file_index,
+            },
+            generation: binding.account_generation,
+            local_file,
+            relative_path: relative_path.to_owned(),
+            remote: Some(crate::RemoteEditBaseline {
+                resource_id: binding.remote_resource_id.clone(),
+                etag: binding.base_etag.clone(),
+                byte_len: binding.base_size,
+            }),
+            content_len,
+        };
+        let store = crate::streamed_store::SnapshotStore::create_or_open(
+            Arc::clone(&context.state),
+            snapshot.scope.clone(),
+            Arc::clone(&self.catalog.protector),
+            context.policy,
+        )
+        .map_err(|error| streamed_capture_error("store_open", error))?;
+        let reservation = store
+            .try_begin_capture(snapshot)
+            .map_err(|error| streamed_capture_error("capture_reservation", error))?;
+        let binding = reservation.binding().clone();
+        let stage = reservation
+            .capture(source, cancelled)
+            .map_err(|error| streamed_capture_error("capture_body", error))?;
+        Ok(StagedStreamedEdit {
+            owner: Arc::clone(&self.receipt_owner),
+            store,
+            stage,
+            binding,
+        })
+    }
+
+    #[cfg(windows)]
+    fn commit_streamed_edit(
+        &self,
+        stage: StagedStreamedEdit,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<Option<InitialEditReceipt>, BackendError> {
+        if self.streamed.is_none()
+            || !Arc::ptr_eq(&stage.owner, &self.receipt_owner)
+            || stage.binding.generation != self.scope.token_generation()
+            || !scope_matches_provider(&stage.binding.scope, &self.scope, self.root_identity)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let committed = stage
+            .stage
+            .verify_and_commit(cancelled)
+            .map_err(|error| streamed_capture_error("verify_commit", error))?;
+        if committed.manifest().binding() != &stage.binding {
+            return Err(BackendError::Unavailable);
+        }
+        let metadata = streamed_manifest_metadata(committed.manifest());
+        let key = stage
+            .store
+            .record_key(&metadata.record_id)
+            .map_err(|error| streamed_capture_error("record_key", error))?;
+        self.add_pending(&metadata);
+        Ok(Some(InitialEditReceipt {
+            owner: Arc::clone(&self.receipt_owner),
+            metadata,
+            streamed: Some(key),
+        }))
+    }
+
+    fn cached_ordinary_pending_count(&self) -> Option<usize> {
+        self.pending
+            .try_lock()
+            .ok()?
+            .as_ref()
+            .map(std::collections::HashSet::len)
+    }
     fn provider_scope(&self) -> &ProviderScope {
         &self.scope
     }
@@ -990,9 +1462,12 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
                 content,
             )
             .map_err(|_| BackendError::Unavailable)?;
+        self.add_pending(&metadata);
         Ok(Some(InitialEditReceipt {
             owner: Arc::clone(&self.receipt_owner),
             metadata,
+            #[cfg(windows)]
+            streamed: None,
         }))
     }
 
@@ -1001,6 +1476,12 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
         receipt: InitialEditReceipt,
         remote: &dyn RecoveryRemote,
     ) -> Result<ReconciliationOutcome, crate::JournalError> {
+        #[cfg(windows)]
+        if receipt.streamed.is_some() {
+            return self
+                .dispatch_streamed_receipt(receipt, remote)
+                .map(|(outcome, _)| outcome);
+        }
         if !Arc::ptr_eq(&receipt.owner, &self.receipt_owner)
             || receipt.metadata.generation != self.scope.token_generation()
             || !scope_matches_provider(&receipt.metadata.scope, &self.scope, self.root_identity)
@@ -1039,6 +1520,10 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
         remote: &dyn RecoveryRemote,
     ) -> Result<(ReconciliationOutcome, Option<crate::VerifiedEditReadback>), crate::JournalError>
     {
+        #[cfg(windows)]
+        if receipt.streamed.is_some() {
+            return self.dispatch_streamed_receipt(receipt, remote);
+        }
         // The ordinary dispatch consumes and validates this instance's fresh
         // capability before any upload. Keep only its immutable metadata for
         // joining a new readback to that same protected record afterward.
@@ -1074,11 +1559,28 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
         &self,
         completion: CompletedLocalEdit,
     ) -> Result<(), crate::JournalError> {
-        let metadata = completion.metadata;
+        let metadata = completion.metadata.clone();
         if metadata.generation != self.scope.token_generation()
             || !scope_matches_provider(&metadata.scope, &self.scope, self.root_identity)
         {
             return Err(crate::JournalError::ScopeMismatch);
+        }
+        #[cfg(windows)]
+        if let Some(backing) = &completion.streamed {
+            if self.streamed.is_none() {
+                return Err(crate::JournalError::InvalidState);
+            }
+            backing
+                .lock()
+                .map_err(|_| crate::JournalError::InvalidState)?
+                .acknowledge_native(&completion)
+                .map_err(crate::edit_journal::admission_error)?;
+            if let Ok(mut pending) = self.pending.lock()
+                && let Some(records) = pending.as_mut()
+            {
+                records.remove(&(metadata.record_id, metadata.generation));
+            }
+            return Ok(());
         }
         let journal = self.catalog.journal_for_record(
             &self.scope,
@@ -1087,13 +1589,31 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
             metadata.generation,
         )?;
         let lease = journal.acquire_dispatch_lease(&metadata.record_id)?;
-        journal.acknowledge_local_completion(&lease, &metadata)
+        journal.acknowledge_local_completion(&lease, &metadata)?;
+        if let Ok(mut pending) = self.pending.lock()
+            && let Some(records) = pending.as_mut()
+        {
+            records.remove(&(metadata.record_id, metadata.generation));
+        }
+        Ok(())
     }
 
     fn has_unresolved(&self) -> Result<bool, BackendError> {
-        self.catalog
+        let legacy = self
+            .catalog
             .has_unresolved(&self.scope, self.root_identity)
-            .map_err(|_| BackendError::Unavailable)
+            .map_err(|_| BackendError::Unavailable)?;
+        #[cfg(windows)]
+        let legacy = legacy
+            || !streamed_unresolved_metadata(
+                self.streamed.as_ref(),
+                &self.catalog.protector,
+                &self.scope,
+                self.root_identity,
+            )
+            .map_err(|_| BackendError::Unavailable)?
+            .is_empty();
+        Ok(legacy)
     }
 
     fn dispatch_recovered_edit(
@@ -1103,6 +1623,12 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
         remote: &dyn RecoveryRemote,
         approval: ExplicitRecoveryApproval,
     ) -> Result<ReconciliationOutcome, crate::JournalError> {
+        #[cfg(windows)]
+        if let Some((outcome, _)) =
+            self.try_dispatch_recovered_streamed(record_id, generation, remote, approval)?
+        {
+            return Ok(outcome);
+        }
         if !valid_scope_binding(&self.scope, self.root_identity)
             || record_id.is_empty()
             || record_id.len() > 128
@@ -1127,6 +1653,46 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
             approval,
         )
     }
+
+    fn dispatch_recovered_edit_verified(
+        &self,
+        record_id: &str,
+        generation: u64,
+        remote: &dyn RecoveryRemote,
+        approval: ExplicitRecoveryApproval,
+    ) -> Result<(ReconciliationOutcome, Option<crate::VerifiedEditReadback>), crate::JournalError>
+    {
+        #[cfg(windows)]
+        if let Some(result) =
+            self.try_dispatch_recovered_streamed(record_id, generation, remote, approval)?
+        {
+            return Ok(result);
+        }
+        let outcome = self.dispatch_recovered_edit(record_id, generation, remote, approval)?;
+        if !matches!(outcome, ReconciliationOutcome::VerifiedApplied { .. }) {
+            return Ok((outcome, None));
+        }
+        let journal = self.catalog.journal_for_record(
+            &self.scope,
+            self.root_identity,
+            record_id,
+            generation,
+        )?;
+        let expected_scope = journal.scope().clone();
+        let mut selected = journal.recover_all()?.records.into_iter().filter(|record| {
+            record.metadata.record_id == record_id
+                && record.metadata.generation == generation
+                && record.metadata.scope == expected_scope
+        });
+        let record = selected.next().ok_or(crate::JournalError::ScopeMismatch)?;
+        if selected.next().is_some() {
+            return Err(crate::JournalError::ScopeMismatch);
+        }
+        match crate::verify_edit_readback(&record, &expected_scope, remote) {
+            Ok(proof) => Ok((outcome, Some(proof))),
+            Err(outcome) => Ok((outcome, None)),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1134,6 +1700,8 @@ struct ScopeCatalog {
     state_directory: PathBuf,
     protector: Arc<dyn EditRecordProtector>,
     lock: Arc<Mutex<()>>,
+    #[cfg(windows)]
+    admission: Option<Arc<crate::recovery_admission::RecoveryAdmission>>,
 }
 
 impl ScopeCatalog {
@@ -1146,6 +1714,25 @@ impl ScopeCatalog {
         current_scope: &ProviderScope,
         root_identity: ConfiguredRootIdentity,
     ) -> Result<(), crate::JournalError> {
+        self.preflight_pending(current_scope, root_identity)
+            .map(|_| ())
+    }
+
+    fn preflight_pending(
+        &self,
+        current_scope: &ProviderScope,
+        root_identity: ConfiguredRootIdentity,
+    ) -> Result<Option<std::collections::HashSet<(String, u64)>>, crate::JournalError> {
+        #[cfg(windows)]
+        let _admission = self
+            .admission
+            .as_ref()
+            .map(|admission| {
+                admission
+                    .try_reserve_unscoped(MAX_CATALOG_RECORD_BYTES as u64, 2)
+                    .map_err(crate::edit_journal::admission_error)
+            })
+            .transpose()?;
         let _guard = self.lock.lock().map_err(|_| crate::JournalError::Io)?;
         self.ensure_directory()?;
         // Check that current-user protection is functional before Cloud Files
@@ -1161,9 +1748,28 @@ impl ScopeCatalog {
 
         let scopes = self.enumerate_scopes()?;
         self.verify_journal_directory_set(&scopes)?;
+        let mut pending = Some(std::collections::HashSet::new());
         for scope in scopes {
             let journal = self.open_existing_journal(&scope)?;
             let snapshot = journal.recover_all()?;
+            if scope_matches_provider(&scope, current_scope, root_identity) {
+                if snapshot.incomplete_staging_files != 0 {
+                    pending = None;
+                }
+                if let Some(records) = pending.as_mut() {
+                    for record in &snapshot.records {
+                        if snapshot.is_unresolved(record)
+                            && (!records.insert((
+                                record.metadata.record_id.clone(),
+                                record.metadata.generation,
+                            )) || records.len() > 2000)
+                        {
+                            pending = None;
+                            break;
+                        }
+                    }
+                }
+            }
             // Recovering all scopes verifies DPAPI, associated data, record
             // bounds, and authenticated metadata before callbacks can run.
             drop_records(snapshot.records);
@@ -1174,7 +1780,7 @@ impl ScopeCatalog {
         if !valid_scope_binding(current_scope, root_identity) {
             return Err(crate::JournalError::InvalidScope);
         }
-        Ok(())
+        Ok(pending)
     }
 
     fn unresolved_metadata_bounded(
@@ -1266,6 +1872,17 @@ impl ScopeCatalog {
         record_id: &str,
         generation: u64,
     ) -> Result<EditJournal, crate::JournalError> {
+        self.find_journal_for_record(provider_scope, root_identity, record_id, generation)?
+            .ok_or(crate::JournalError::ScopeMismatch)
+    }
+
+    fn find_journal_for_record(
+        &self,
+        provider_scope: &ProviderScope,
+        root_identity: ConfiguredRootIdentity,
+        record_id: &str,
+        generation: u64,
+    ) -> Result<Option<EditJournal>, crate::JournalError> {
         let _guard = crate::edit_journal::trace_journal_stage(
             "provider_journal_catalog_lock",
             self.lock.lock().map_err(|_| crate::JournalError::Io),
@@ -1314,10 +1931,20 @@ impl ScopeCatalog {
                 found = Some(journal);
             }
         }
-        found.ok_or(crate::JournalError::ScopeMismatch)
+        Ok(found)
     }
 
     fn register_scope(&self, scope: &EditJournalScope) -> Result<(), crate::JournalError> {
+        #[cfg(windows)]
+        let _admission = self
+            .admission
+            .as_ref()
+            .map(|admission| {
+                admission
+                    .try_reserve(scope, MAX_CATALOG_RECORD_BYTES as u64, 3)
+                    .map_err(crate::edit_journal::admission_error)
+            })
+            .transpose()?;
         let _guard = self.lock.lock().map_err(|_| crate::JournalError::Io)?;
         self.ensure_directory()?;
         let scopes = self.enumerate_scopes()?;
@@ -1467,19 +2094,41 @@ impl ScopeCatalog {
         &self,
         scope: &EditJournalScope,
     ) -> Result<EditJournal, crate::JournalError> {
-        EditJournal::open_existing(
+        let journal = EditJournal::open_existing(
             &self.state_directory,
             scope.clone(),
             SharedProtector(Arc::clone(&self.protector)),
-        )
+        )?;
+        #[cfg(windows)]
+        if let Some(admission) = &self.admission {
+            return journal.with_admission(Arc::clone(admission));
+        }
+        Ok(journal)
     }
 
     fn open_journal(&self, scope: &EditJournalScope) -> Result<EditJournal, crate::JournalError> {
-        EditJournal::open(
+        // Creating the legacy root/scope is itself retained quota growth.
+        // Serialize it before attaching the coordinator to the new journal.
+        #[cfg(windows)]
+        let _admission = self
+            .admission
+            .as_ref()
+            .map(|admission| {
+                admission
+                    .try_reserve(scope, 0, 2)
+                    .map_err(crate::edit_journal::admission_error)
+            })
+            .transpose()?;
+        let journal = EditJournal::open(
             &self.state_directory,
             scope.clone(),
             SharedProtector(Arc::clone(&self.protector)),
-        )
+        )?;
+        #[cfg(windows)]
+        if let Some(admission) = &self.admission {
+            return journal.with_admission(Arc::clone(admission));
+        }
+        Ok(journal)
     }
 
     fn ensure_directory(&self) -> Result<(), crate::JournalError> {
@@ -2010,6 +2659,75 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn headless_current_user_recovery_constructor_uses_isolated_state() {
+        const CHILD: &str = "RAIUN_RECOVERY_HEADLESS_CONSTRUCTOR_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Child process environment is isolated from parallel tests. No
+            // session, root registration, provider activation or credentials.
+            let temp = tempfile::tempdir().unwrap();
+            let desktop_local = temp.path().join("desktop-local");
+            fs::create_dir(&desktop_local).unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "recovery_provider::tests::headless_current_user_recovery_constructor_uses_isolated_state",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("RAIUN_HEADLESS_CONTEXT", "1")
+                .env("RAIUN_STATE_DIR", temp.path().join("headless"))
+                // A synthetic conventional root is still needed for overlap
+                // rejection. It must remain untouched by these constructors.
+                .env("LOCALAPPDATA", &desktop_local)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            assert!(!desktop_local.join("Raiun").exists());
+            return;
+        }
+        let context = raiun_control_windows::headless_context().unwrap().unwrap();
+        let expected = context.state_root().join("sessions");
+        let protector = DpapiEditRecordProtector::current_user().unwrap();
+        assert_eq!(protector.local_state_directory(), expected);
+        let (scope, root) = fixture();
+        let provider = DurableEditRecoveryProvider::current_user(scope.clone(), root).unwrap();
+        assert_eq!(provider.state_directory, expected);
+        assert!(provider.unresolved_edits().unwrap().is_empty());
+        let journal_scope = EditJournalScope {
+            profile_id: scope.profile_id().into(),
+            server_origin: scope.server_origin().into(),
+            account_subject: scope.account_id().into(),
+            space_id: "personal".into(),
+            root_resource_id: "root-1".into(),
+            root_volume_serial: root.volume_serial,
+            root_file_index: root.file_index,
+        };
+        provider.catalog().register_scope(&journal_scope).unwrap();
+        let journal = EditJournal::open(&expected, journal_scope, protector.clone()).unwrap();
+        drop(journal);
+        // Real journal preparation must preserve the admitted sessions root's
+        // inheritable private ACL, so a later constructor can re-admit it.
+        assert_eq!(
+            DpapiEditRecordProtector::current_user()
+                .unwrap()
+                .local_state_directory(),
+            expected
+        );
+        // Synthetic DPAPI-only roundtrip verifies inherited protection without
+        // using a login or writing a session/token.
+        let aad = b"synthetic-headless-recovery-constructor-v1";
+        let body = b"synthetic local edit";
+        let sealed = protector.seal(aad, body).unwrap();
+        let restarted = DpapiEditRecordProtector::current_user().unwrap();
+        assert_eq!(restarted.local_state_directory(), expected);
+        assert_eq!(restarted.open(aad, &sealed).unwrap(), body);
+        let restarted = DurableEditRecoveryProvider::current_user(scope, root).unwrap();
+        assert_eq!(restarted.state_directory, expected);
+        assert!(restarted.unresolved_edits().unwrap().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn current_user_dpapi_identity_catalog_survives_provider_restart() {
         let protector = DpapiEditRecordProtector::current_user().unwrap();
         // The production protector intentionally applies DACLs only below
@@ -2116,8 +2834,10 @@ mod tests {
             path: &str,
         ) -> Result<crate::RecoveryRemoteVersion, raiun_core::backend::CloudError> {
             assert_eq!(path, "notes.txt");
-            self.calls.lock().unwrap().push("stat");
-            Ok(self.version(false))
+            let mut calls = self.calls.lock().unwrap();
+            let updated = calls.contains(&"upload");
+            calls.push("stat");
+            Ok(self.version(updated))
         }
         fn conditional_upload(
             &self,
@@ -2175,6 +2895,289 @@ mod tests {
     }
 
     #[test]
+    fn recovered_verified_proof_rechecks_remote_without_reupload_and_never_acknowledges_from_outcome()
+     {
+        let temp = private_tempdir();
+        let (scope, root) = fixture();
+        let provider = DurableEditRecoveryProvider::new(
+            temp.path().into(),
+            scope.clone(),
+            root,
+            TestProtector,
+        );
+        let prepared = provider.prepare(&scope, root).unwrap();
+        assert_eq!(prepared.cached_ordinary_pending_count(), Some(0));
+        let receipt = append_receipt(prepared.as_ref(), b"first");
+        let metadata = receipt.metadata.clone();
+        drop(receipt); // A recovered record cannot regain initial-dispatch authority.
+        assert_eq!(prepared.cached_ordinary_pending_count(), Some(1));
+        let mut remote = ReceiptRemote::new(b"first");
+        let (outcome, proof) = prepared
+            .dispatch_recovered_edit_verified(
+                &metadata.record_id,
+                metadata.generation,
+                &remote,
+                ExplicitRecoveryApproval::user_reviewed(),
+            )
+            .unwrap();
+        assert_eq!(
+            outcome,
+            ReconciliationOutcome::VerifiedApplied { attempts: 1 }
+        );
+        assert_eq!(proof.unwrap().metadata(), &metadata);
+        assert_eq!(
+            remote
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| **call == "upload")
+                .count(),
+            1
+        );
+        assert_eq!(
+            prepared.cached_ordinary_pending_count(),
+            Some(1),
+            "remote proof is not local completion"
+        );
+        // A historic VerifiedApplied receipt alone cannot authorize a new native
+        // completion: changed bytes must make the newly minted proof unavailable.
+        remote.expected = b"other".to_vec();
+        let (outcome, proof) = prepared
+            .dispatch_recovered_edit_verified(
+                &metadata.record_id,
+                metadata.generation,
+                &remote,
+                ExplicitRecoveryApproval::user_reviewed(),
+            )
+            .unwrap();
+        assert!(proof.is_none());
+        assert!(!matches!(
+            outcome,
+            ReconciliationOutcome::VerifiedApplied { .. }
+        ));
+        assert_eq!(
+            remote
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|call| **call == "upload")
+                .count(),
+            1
+        );
+        assert_eq!(prepared.cached_ordinary_pending_count(), Some(1));
+        assert!(provider.has_unresolved_edits().unwrap());
+    }
+
+    #[test]
+    fn pending_summary_collision_and_capacity_remain_unknown_after_more_records() {
+        let temp = private_tempdir();
+        let (scope, root) = fixture();
+        let provider = DurableEditRecoveryProvider::new(
+            temp.path().into(),
+            scope.clone(),
+            root,
+            TestProtector,
+        );
+        let prepared = provider.prepare(&scope, root).unwrap();
+        let receipt = append_receipt(prepared.as_ref(), b"retained");
+        let metadata = receipt.metadata;
+        let mut pending = Some(std::collections::HashSet::new());
+        insert_pending(&mut pending, &metadata);
+        assert_eq!(pending.as_ref().map(|items| items.len()), Some(1));
+        // A tuple collision must not collapse distinct protected records into
+        // a single pending item that one native completion could clear.
+        insert_pending(&mut pending, &metadata);
+        assert!(pending.is_none());
+        let mut another = metadata.clone();
+        another.record_id = "f".repeat(32);
+        insert_pending(&mut pending, &another);
+        assert!(pending.is_none());
+        let mut full = Some(
+            (0..2000)
+                .map(|id| (format!("{id:032x}"), metadata.generation))
+                .collect(),
+        );
+        insert_pending(&mut full, &another);
+        assert!(full.is_none());
+    }
+
+    #[test]
+    fn cached_pending_summary_reopens_authenticated_records_without_hot_scan_or_lock_wait() {
+        #[derive(Clone)]
+        struct CountingProtector(Arc<std::sync::atomic::AtomicUsize>);
+        impl EditRecordProtector for CountingProtector {
+            fn seal(&self, aad: &[u8], plain: &[u8]) -> Result<Vec<u8>, crate::JournalError> {
+                TestProtector.seal(aad, plain)
+            }
+            fn open(&self, aad: &[u8], sealed: &[u8]) -> Result<Vec<u8>, crate::JournalError> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                TestProtector.open(aad, sealed)
+            }
+        }
+        let temp = private_tempdir();
+        let (scope, root) = fixture();
+        let opens = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let provider = DurableEditRecoveryProvider::new(
+            temp.path().into(),
+            scope.clone(),
+            root,
+            CountingProtector(opens.clone()),
+        );
+        let prepared = provider.prepare(&scope, root).unwrap();
+        let receipt = append_receipt(prepared.as_ref(), b"first");
+        let metadata = receipt.metadata.clone();
+        drop(receipt);
+        let reopened = provider.prepare(&scope, root).unwrap();
+        assert_eq!(reopened.cached_ordinary_pending_count(), Some(1));
+        let journal = provider
+            .catalog()
+            .open_existing_journal(&metadata.scope)
+            .unwrap();
+        // Keep the exact local journal dispatch lock occupied. Cached status
+        // must not scan/decrypt records or wait for dispatch ownership.
+        let _lease = journal.acquire_dispatch_lease(&metadata.record_id).unwrap();
+        let before = opens.load(std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..100 {
+            assert_eq!(reopened.cached_ordinary_pending_count(), Some(1));
+        }
+        assert_eq!(
+            opens.load(std::sync::atomic::Ordering::SeqCst),
+            before,
+            "status cannot decrypt any body or metadata envelope"
+        );
+        let direct = DurablePreparedEditRecovery {
+            scope,
+            root_identity: root,
+            catalog: provider.catalog(),
+            receipt_owner: Arc::new(()),
+            pending: Mutex::new(Some(Default::default())),
+            #[cfg(windows)]
+            streamed: None,
+        };
+        let guard = direct.pending.lock().unwrap();
+        assert_eq!(direct.cached_ordinary_pending_count(), None);
+        drop(guard);
+        *direct.pending.lock().unwrap() = None;
+        assert_eq!(direct.cached_ordinary_pending_count(), None);
+    }
+
+    #[test]
+    fn recovered_old_generation_can_verify_remote_but_cannot_claim_current_local_completion() {
+        let temp = private_tempdir();
+        let (scope, root) = fixture();
+        let provider = DurableEditRecoveryProvider::new(
+            temp.path().into(),
+            scope.clone(),
+            root,
+            TestProtector,
+        );
+        let prepared = provider.prepare(&scope, root).unwrap();
+        let receipt = append_receipt(prepared.as_ref(), b"first");
+        let metadata = receipt.metadata.clone();
+        drop(receipt);
+        let remote = ReceiptRemote::new(b"first");
+        prepared
+            .dispatch_recovered_edit_verified(
+                &metadata.record_id,
+                metadata.generation,
+                &remote,
+                ExplicitRecoveryApproval::user_reviewed(),
+            )
+            .unwrap();
+        let client = OpenCloudClient::new("https://example.test", "fixture".into()).unwrap();
+        client.set_bearer_token("rotated-synthetic".into()).unwrap();
+        let next_scope = ProviderScope::new(
+            &client,
+            scope.profile_id().into(),
+            scope.account_id().into(),
+            scope.server_origin().into(),
+        )
+        .unwrap();
+        assert_ne!(metadata.generation, next_scope.token_generation());
+        let next_provider = DurableEditRecoveryProvider::new(
+            temp.path().into(),
+            next_scope.clone(),
+            root,
+            TestProtector,
+        );
+        let next = next_provider.prepare(&next_scope, root).unwrap();
+        let (_, proof) = next
+            .dispatch_recovered_edit_verified(
+                &metadata.record_id,
+                metadata.generation,
+                &remote,
+                ExplicitRecoveryApproval::user_reviewed(),
+            )
+            .unwrap();
+        let proof = proof.unwrap();
+        assert_eq!(proof.metadata(), &metadata);
+        // Only this crate's test can fabricate the native completion wrapper;
+        // the production caller must pass actual guarded native validation.
+        assert!(matches!(
+            next.record_local_completion(CompletedLocalEdit::from_native_completion(
+                proof.metadata()
+            )),
+            Err(crate::JournalError::ScopeMismatch)
+        ));
+        assert_eq!(next.cached_ordinary_pending_count(), Some(1));
+        assert!(next_provider.has_unresolved_edits().unwrap());
+    }
+
+    #[test]
+    fn incomplete_preflight_or_poisoned_cache_never_reports_healthy_zero() {
+        let temp = private_tempdir();
+        let (scope, root) = fixture();
+        let provider = DurableEditRecoveryProvider::new(
+            temp.path().into(),
+            scope.clone(),
+            root,
+            TestProtector,
+        );
+        let prepared = provider.prepare(&scope, root).unwrap();
+        let receipt = append_receipt(prepared.as_ref(), b"first");
+        let journal_scope = receipt.metadata.scope.clone();
+        drop(receipt);
+        let staging = EditJournal::storage_root(temp.path())
+            .join(EditJournal::scope_directory_key(&journal_scope).unwrap())
+            .join(".stage-incomplete-status");
+        fs::write(&staging, b"retained incomplete evidence").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert_eq!(
+            provider
+                .prepare(&scope, root)
+                .unwrap()
+                .cached_ordinary_pending_count(),
+            None
+        );
+        let direct = Arc::new(DurablePreparedEditRecovery {
+            scope,
+            root_identity: root,
+            catalog: provider.catalog(),
+            receipt_owner: Arc::new(()),
+            pending: Mutex::new(Some(Default::default())),
+            #[cfg(windows)]
+            streamed: None,
+        });
+        let other = direct.clone();
+        assert!(
+            std::thread::spawn(move || {
+                let _guard = other.pending.lock().unwrap();
+                panic!("synthetic poisoned status mutex");
+            })
+            .join()
+            .is_err()
+        );
+        assert_eq!(direct.cached_ordinary_pending_count(), None);
+        assert!(staging.exists(), "status never deletes incomplete evidence");
+    }
+
+    #[test]
     fn initial_receipt_selects_exact_append_and_cannot_replay_a_completed_attempt() {
         let temp = private_tempdir();
         let (scope, root) = fixture();
@@ -2191,6 +3194,8 @@ mod tests {
         let duplicate = InitialEditReceipt {
             owner: Arc::clone(&first.owner),
             metadata: metadata.clone(),
+            #[cfg(windows)]
+            streamed: None,
         };
         let second = append_receipt(prepared.as_ref(), b"second edit");
         assert_ne!(metadata.record_id, second.metadata.record_id);

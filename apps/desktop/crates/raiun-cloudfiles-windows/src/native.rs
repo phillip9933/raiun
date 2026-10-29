@@ -40,6 +40,9 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+#[path = "native_streamed_io.rs"]
+mod native_streamed_io;
+
 const CF_REGISTER_FLAG_DISABLE_ON_DEMAND_POPULATION_ON_ROOT: u32 = 0x2;
 const CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH: u32 = 0x4;
 const CALLBACK_INITIALIZING: u8 = 0;
@@ -3039,7 +3042,9 @@ impl ConfiguredRootConnection {
             || metadata.scope.root_volume_serial != root.identity.volume_serial
             || metadata.scope.root_file_index != root.identity.file_index
             || metadata.local_file.volume_serial != root.identity.volume_serial
-            || metadata.content_len > MAX_REQUEST_BYTES
+            || metadata.content_len > MAX_FILE_BYTES
+            || (metadata.content_len > MAX_REQUEST_BYTES
+                && (!publication.proof().is_streamed() || !recovery.supports_streamed_capture()))
         {
             return Err(Error::EditRecoveryUnavailable);
         }
@@ -3098,11 +3103,8 @@ impl ConfiguredRootConnection {
             let saved_usn = completion_usn(file.raw, metadata.local_file.file_index)?;
             #[cfg(feature = "synthetic-agent-integration")]
             eprintln!("synthetic_save_completion_usn_first={saved_usn}");
-            let len = usize::try_from(metadata.content_len)
-                .map_err(|_| Error::EditRecoveryUnavailable)?;
-            let mut bytes = Zeroizing::new(vec![0_u8; len]);
-            file.read_complete(&mut bytes)?;
-            if crate::recovery_reconcile::digest_hex(&bytes) != metadata.content_sha256
+            let digest = file.digest_complete(metadata.content_len, None)?;
+            if digest != metadata.content_sha256
                 || !same_edit_snapshot(opened, root_snapshot(file.raw)?)
                 || {
                     let observed_usn = completion_usn(file.raw, metadata.local_file.file_index)?;
@@ -3146,10 +3148,11 @@ impl ConfiguredRootConnection {
             // handle: record only this exact native-completed snapshot. If
             // persistence fails, its encrypted body remains unresolved.
             observe_completion!("persist_local_completion");
+            let completed =
+                crate::CompletedLocalEdit::from_verified_native_completion(publication.proof())
+                    .map_err(|_| Error::EditRecoveryUnavailable)?;
             recovery
-                .record_local_completion(crate::CompletedLocalEdit::from_native_completion(
-                    metadata,
-                ))
+                .record_local_completion(completed)
                 .map_err(|error| {
                     #[cfg(feature = "synthetic-agent-integration")]
                     eprintln!("synthetic_save_completion_journal_refused error={error:?}");
@@ -5682,7 +5685,7 @@ impl CallbackState {
             || snapshot.reparse_tag & IO_REPARSE_TAG_CLOUD_MASK
                 != (IO_REPARSE_TAG_CLOUD & IO_REPARSE_TAG_CLOUD_MASK)
             || snapshot.placeholder_state & CF_PLACEHOLDER_STATE_PLACEHOLDER == 0
-            || snapshot.file_size > MAX_REQUEST_BYTES
+            || snapshot.file_size > MAX_FILE_BYTES
         {
             return Err((9, 0, false));
         }
@@ -5757,7 +5760,18 @@ impl CallbackState {
         if snapshot.placeholder_state & CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK != 0 {
             return Err((9, 0, true));
         }
-        let len = usize::try_from(snapshot.file_size).map_err(|_| (15, 0, true))?;
+        if snapshot.file_size > MAX_REQUEST_BYTES
+            && (self
+                .recovery
+                .as_ref()
+                .is_none_or(|recovery| !recovery.supports_streamed_capture())
+                || self
+                    .backend
+                    .requires_hydration_inventory(identity)
+                    .map_err(|_| (60, 0, true))?)
+        {
+            return Err((9, 0, true));
+        }
         // Keep the no-follow entry guard open without FILE_SHARE_DELETE, then
         // open the Cloud Files data stream normally. The guard prevents name
         // substitution; the second handle is checked against the guard's file
@@ -5803,6 +5817,12 @@ impl CallbackState {
             .requires_hydration_inventory(identity)
             .map_err(|_| (60, 0, true))?
         {
+            // The legacy global cap still applies to every vault capture.
+            // Large ordinary opt-in above never raises this policy.
+            if snapshot.file_size > MAX_REQUEST_BYTES {
+                return Err((61, 0, true));
+            }
+            let len = usize::try_from(snapshot.file_size).map_err(|_| (15, 0, true))?;
             if len > crate::MAX_VAULT_EDIT_CAPTURE_BYTES {
                 return Err((61, 0, true));
             }
@@ -5975,8 +5995,79 @@ impl CallbackState {
         {
             return Err((29, 0, true));
         }
-        let (content, after_read) = read_placeholder_for_recovery(content_handle, len)
-            .map_err(|(stage, hresult)| (stage, hresult, true))?;
+        let relative_path = binding
+            .virtual_path
+            .strip_prefix('/')
+            .filter(|relative| !relative.is_empty())
+            .ok_or((17, 0, true))?;
+        let recovery = self.recovery.as_ref().ok_or((18, 0, true))?;
+        let cancellation = CancellationToken::new();
+        let mut cancelled = || {
+            self.readiness.load(Ordering::Acquire) != CALLBACK_READY
+                || cancellation.is_cancelled()
+                || cancellation.is_expired()
+        };
+        let mut streamed_file = None;
+        let (content, staged, after_read) = if snapshot.file_size > MAX_REQUEST_BYTES {
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!(
+                "synthetic_streamed_close_phase=guard support={} ready={} cancelled={} expired={}",
+                recovery.supports_streamed_capture(),
+                self.readiness.load(Ordering::Acquire) == CALLBACK_READY,
+                cancellation.is_cancelled(),
+                cancellation.is_expired()
+            );
+            if !recovery.supports_streamed_capture() || cancelled() {
+                #[cfg(feature = "synthetic-agent-integration")]
+                eprintln!("synthetic_streamed_close_phase=guard_refused");
+                return Err((19, 0, true));
+            }
+            let mut owned = content_handle;
+            let raw = std::mem::replace(&mut owned.0, null_mut());
+            // SAFETY: this is the owned synchronous read handle opened above,
+            // not a borrowed Cf protected handle. Ownership transfers exactly
+            // once, retaining its write/delete exclusions through commit.
+            let mut file = unsafe { std::fs::File::from_raw_handle(raw) };
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!("synthetic_streamed_close_phase=stage_begin");
+            let stage = recovery
+                .stage_streamed_edit(
+                    binding,
+                    crate::ConfiguredRootIdentity {
+                        volume_serial: root_identity.volume_serial,
+                        file_index: root_identity.file_index,
+                    },
+                    LocalFileIdentity {
+                        volume_serial: snapshot.identity.volume_serial,
+                        file_index: snapshot.identity.file_index,
+                    },
+                    relative_path,
+                    snapshot.file_size,
+                    &mut file,
+                    &mut cancelled,
+                )
+                .map_err(|_| {
+                    #[cfg(feature = "synthetic-agent-integration")]
+                    eprintln!("synthetic_streamed_close_phase=stage_refused ready={} cancelled={} expired={}",
+                        self.readiness.load(Ordering::Acquire) == CALLBACK_READY,
+                        cancellation.is_cancelled(), cancellation.is_expired());
+                    (19, 0, true)
+                })?;
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!("synthetic_streamed_close_phase=stage_complete");
+            let after = root_snapshot(file.as_raw_handle()).map_err(|_| (23, 0, true))?;
+            if !matches!(modified_ranges_for_handle(file.as_raw_handle()), Ok(true)) || cancelled()
+            {
+                return Err((24, 0, true));
+            }
+            streamed_file = Some(file);
+            (None, Some(stage), after)
+        } else {
+            let len = usize::try_from(snapshot.file_size).map_err(|_| (15, 0, true))?;
+            let (content, after) = read_placeholder_for_recovery(content_handle, len)
+                .map_err(|(stage, hresult)| (stage, hresult, true))?;
+            (Some(content), None, after)
+        };
         if after_read.identity != snapshot.identity
             || after_read.file_attributes != snapshot.file_attributes
             || after_read.reparse_tag != snapshot.reparse_tag
@@ -6011,27 +6102,62 @@ impl CallbackState {
             return Err((39, 0, true));
         }
 
-        let relative_path = binding
-            .virtual_path
-            .strip_prefix('/')
-            .filter(|relative| !relative.is_empty())
-            .ok_or((17, 0, true))?;
-        let recovery = self.recovery.as_ref().ok_or((18, 0, true))?;
-        let receipt = recovery
-            .append_edit_for_initial_dispatch(
-                binding,
-                crate::ConfiguredRootIdentity {
-                    volume_serial: root_identity.volume_serial,
-                    file_index: root_identity.file_index,
-                },
-                LocalFileIdentity {
-                    volume_serial: after_read.identity.volume_serial,
-                    file_index: after_read.identity.file_index,
-                },
-                relative_path,
-                &content,
-            )
-            .map_err(|_| (19, 0, true))?;
+        let receipt = if let Some(stage) = staged {
+            let Some(file) = streamed_file.as_ref() else {
+                #[cfg(feature = "synthetic-agent-integration")]
+                eprintln!("synthetic_streamed_close_phase=source_owner_missing");
+                return Err((19, 0, true));
+            };
+            if cancelled()
+                || !same_edit_snapshot(
+                    root_snapshot(file.as_raw_handle()).map_err(|_| (23, 0, true))?,
+                    snapshot,
+                )
+                || !matches!(modified_ranges_for_handle(file.as_raw_handle()), Ok(true))
+            {
+                #[cfg(feature = "synthetic-agent-integration")]
+                eprintln!(
+                    "synthetic_streamed_close_phase=precommit_refused ready={} cancelled={} expired={}",
+                    self.readiness.load(Ordering::Acquire) == CALLBACK_READY,
+                    cancellation.is_cancelled(),
+                    cancellation.is_expired()
+                );
+                return Err((24, 0, true));
+            }
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!("synthetic_streamed_close_phase=commit_begin");
+            let receipt = recovery
+                .commit_streamed_edit(stage, &mut cancelled)
+                .map_err(|_| {
+                    #[cfg(feature = "synthetic-agent-integration")]
+                    eprintln!("synthetic_streamed_close_phase=commit_refused ready={} cancelled={} expired={}",
+                        self.readiness.load(Ordering::Acquire) == CALLBACK_READY,
+                        cancellation.is_cancelled(), cancellation.is_expired());
+                    (19, 0, true)
+                })?;
+            #[cfg(feature = "synthetic-agent-integration")]
+            eprintln!(
+                "synthetic_streamed_close_phase=commit_complete receipt={}",
+                receipt.is_some()
+            );
+            receipt
+        } else {
+            recovery
+                .append_edit_for_initial_dispatch(
+                    binding,
+                    crate::ConfiguredRootIdentity {
+                        volume_serial: root_identity.volume_serial,
+                        file_index: root_identity.file_index,
+                    },
+                    LocalFileIdentity {
+                        volume_serial: after_read.identity.volume_serial,
+                        file_index: after_read.identity.file_index,
+                    },
+                    relative_path,
+                    content.as_ref().ok_or((19, 0, true))?,
+                )
+                .map_err(|_| (19, 0, true))?
+        };
         if let Some(receipt) = receipt {
             // Saturation/contention loses only automatic scheduling. The
             // immutable body was already durably retained for explicit review.
