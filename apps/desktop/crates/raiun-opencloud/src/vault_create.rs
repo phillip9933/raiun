@@ -13,6 +13,28 @@ use url::Url;
 pub struct NewRemoteVault {
     client: OpenCloudClient,
     listing: VaultRootListing,
+    parent_guard: Option<ParentIdentityGuard>,
+}
+
+struct ParentIdentityGuard {
+    path: String,
+    resource_id: String,
+}
+impl ParentIdentityGuard {
+    fn check(&self, client: &OpenCloudClient, space: &str) -> Result<(), CloudError> {
+        let parent = client.stat(space, &self.path)?;
+        if parent.id != self.resource_id
+            || !parent.directory
+            || !parent.writable
+            || parent.encrypted
+        {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "vault parent identity or access changed; any created folder was retained",
+            ));
+        }
+        Ok(())
+    }
 }
 impl NewRemoteVault {
     pub fn root(&self) -> &VaultRootListing {
@@ -41,6 +63,9 @@ impl NewRemoteVault {
                 ErrorKind::Conflict,
                 "new vault changed before initialization; no property was written",
             ));
+        }
+        if let Some(guard) = &self.parent_guard {
+            guard.check(&self.client, &self.listing.space_id)?;
         }
         let etag = current
             .root
@@ -77,6 +102,9 @@ impl NewRemoteVault {
                 "vault initialization was not confirmed; the folder was retained and remains locked",
             ));
         }
+        if let Some(guard) = &self.parent_guard {
+            guard.check(&self.client, &self.listing.space_id)?;
+        }
         Ok(verified)
     }
 }
@@ -88,6 +116,49 @@ pub fn create_folder_vault(
     space: &str,
     parent: &str,
     name: &str,
+) -> Result<NewRemoteVault, CloudError> {
+    create_folder_vault_inner(client, space, parent, name, None)
+}
+
+/// Create below the authenticated caller's expected parent resource identity.
+/// The parent must still be an ordinary writable directory when observed before
+/// MKCOL, after the new root is inspected, before its initial property write and
+/// after exact root/proof readback. These are observations, not an atomic remote
+/// parent compare-and-swap: a concurrent change between requests can still leave
+/// a partially created or initialized folder. Errors never delete that folder
+/// and never return a successful initialization for local session publication.
+pub fn create_folder_vault_with_parent_identity(
+    client: &OpenCloudClient,
+    space: &str,
+    parent: &str,
+    name: &str,
+    expected_parent_resource_id: &str,
+) -> Result<NewRemoteVault, CloudError> {
+    if expected_parent_resource_id.is_empty()
+        || expected_parent_resource_id.len() > 4096
+        || expected_parent_resource_id.trim() != expected_parent_resource_id
+        || expected_parent_resource_id.chars().any(char::is_control)
+    {
+        return Err(invalid("invalid expected vault parent resource identity"));
+    }
+    create_folder_vault_inner(
+        client,
+        space,
+        parent,
+        name,
+        Some(ParentIdentityGuard {
+            path: parent.to_owned(),
+            resource_id: expected_parent_resource_id.to_owned(),
+        }),
+    )
+}
+
+fn create_folder_vault_inner(
+    client: &OpenCloudClient,
+    space: &str,
+    parent: &str,
+    name: &str,
+    parent_guard: Option<ParentIdentityGuard>,
 ) -> Result<NewRemoteVault, CloudError> {
     crate::validate_logical_path(parent)?;
     if name.len() > 255
@@ -110,6 +181,15 @@ pub fn create_folder_vault(
             "vault parent must be an ordinary writable folder",
         ));
     }
+    if let Some(guard) = &parent_guard {
+        // Reuse the fresh parent observation above, without a second HTTP read.
+        if parent_entry.id != guard.resource_id {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "vault parent identity changed; no folder was created",
+            ));
+        }
+    }
     let path = format!("{}/{name}", parent.trim_end_matches('/'));
     let root = Url::parse(&selected.dav_url).map_err(|_| invalid("invalid Space root"))?;
     let url = append_logical_path(&root, &path)?;
@@ -124,8 +204,12 @@ pub fn create_folder_vault(
             "new vault is not empty; folder retained without initialization",
         ));
     }
+    if let Some(guard) = &parent_guard {
+        guard.check(client, space)?;
+    }
     Ok(NewRemoteVault {
         client: client.clone(),
         listing,
+        parent_guard,
     })
 }
