@@ -14,9 +14,9 @@
   },
   "gaps": [],
   "lock_sha256": {
-    "Cargo.lock": "2f3d869b4af0a86827478e8d8fedbe0a551b6eaf1a01e394d6db51334b83a636",
-    "desktop-shell/package-lock.json": "fa80c59e5a6265312d29aefe9278596d57182665c881feeb8fe94e6ab65c17f2",
-    "desktop-shell/src-tauri/Cargo.lock": "bfa155e29d8cfd05a6ced4800b73cdcd40c74777648959ff8ac7b61c53b885f6",
+    "Cargo.lock": "ab2d96cf08c100183cbb474a8d64e61d3ff7af5ff9ea36f33061c0959139d5e0",
+    "desktop-shell/package-lock.json": "d0965d09c758ed7e5f3d1dcc1b1d869d5113f836fdf30c0915ddc850d3387932",
+    "desktop-shell/src-tauri/Cargo.lock": "601b59218b2517a01a22c3826364d84122ab3b161a1e7e4c011bd814776d3875",
     "package-lock.json": "fc694dd4b238d9f55909d1a8229f1cfb8f063f042f2bb0256c20c73495dad64d"
   },
   "production_ui_packages": [

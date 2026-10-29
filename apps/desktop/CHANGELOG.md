@@ -1,5 +1,12 @@
 # Raiun Desktop changelog
 
+## 0.7.5 Beta — unreleased
+
+- Sharing brings Shared with me, Shared by me and Public links into one workspace, with shared items listed automatically.
+- Create sharing links and supported guest invitations, and edit supported settings on existing outgoing shares.
+- Offline files has a simpler layout, storage summaries and a configurable automatic-cache allowance. Options expand below their button without moving it.
+- More consistent colors, controls and transfer messages across the desktop app.
+
 ## 0.7.4 Beta — 2026-10-27
 
 - Windows installer upgrades existing same-user installations in place by default, without requiring a manual uninstall. Running program files block replacement with Retry/Cancel; the installer does not force Raiun to stop.

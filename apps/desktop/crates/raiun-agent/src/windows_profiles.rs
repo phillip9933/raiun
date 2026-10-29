@@ -535,6 +535,77 @@ impl WindowsProfiles {
                     false,
                 ))
             }
+            "guest_permissions" | "guest_invite" | "guest_update" | "guest_revoke" => {
+                let _gate = self
+                    .mutation_gate
+                    .lock()
+                    .map_err(|_| "Account changes are unavailable")?;
+                let (id, runtime) = self.resolve(request)?;
+                if action != "guest_permissions"
+                    && self
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?
+                        .registry
+                        .selected()
+                        != Some(id.as_str())
+                {
+                    return Err("The selected account changed; review guest access again".into());
+                }
+                runtime.handle_request(request)
+            }
+            "sharing_capabilities"
+            | "sharing_inventory"
+            | "sharing_owned_settings"
+            | "sharing_owned_update"
+            | "sharing_owned_revoke"
+            | "sharing_permissions"
+            | "sharing_recipients"
+            | "sharing_invite"
+            | "sharing_update"
+            | "sharing_revoke"
+            | "sharing_link_create"
+            | "sharing_link_revoke" => {
+                let parsed = crate::sharing_wire::Request::parse(request)?;
+                let _gate = self
+                    .mutation_gate
+                    .lock()
+                    .map_err(|_| "Account changes are unavailable")?;
+                let (id, runtime) = self.resolve(request)?;
+                if parsed.mutating()
+                    && self
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?
+                        .registry
+                        .selected()
+                        != Some(id.as_str())
+                {
+                    return Err("The selected account changed; review sharing again".into());
+                }
+                runtime.handle_request(request)
+            }
+            "windows_device_cache_quota_set" => {
+                let _gate = self
+                    .mutation_gate
+                    .lock()
+                    .map_err(|_| "Account changes are unavailable")?;
+                let (id, runtime) = self.resolve(request)?;
+                if request.get("profile_id").and_then(Value::as_str) != Some(id.as_str())
+                    || self
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?
+                        .registry
+                        .selected()
+                        != Some(id.as_str())
+                {
+                    return Err(
+                        "The selected account changed; review storage settings again".into(),
+                    );
+                }
+                runtime.handle_request(request)
+            }
             "account_select" => {
                 let _gate = self
                     .mutation_gate

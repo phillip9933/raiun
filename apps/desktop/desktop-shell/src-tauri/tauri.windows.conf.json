@@ -3,9 +3,13 @@
   "bundle": {
     "targets": ["nsis"],
     "icon": ["icons/icon.ico"],
+    "license": "AGPL-3.0-only",
+    "licenseFile": "../../LICENSE",
     "resources": {
       "../../target/windows-package-resources/raiun-agent.exe": "raiun-agent.exe",
-      "../../target/windows-package-resources/raiun.exe": "raiun.exe"
+      "../../target/windows-package-resources/raiun.exe": "raiun.exe",
+      "../../NOTICE": "NOTICE.txt",
+      "../../legal/windows": "licenses"
     },
     "windows": {
       "nsis": {

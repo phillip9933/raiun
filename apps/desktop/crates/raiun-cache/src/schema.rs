@@ -77,7 +77,10 @@ pub(super) fn initialize(db: &Connection, journal: JournalMode) -> Result<(), Ca
     // discards a tombstone merely to admit another operation. Schema v6 makes
     // older binaries refuse this database rather than bypass these fences.
     db.execute_batch(
-        "CREATE TABLE IF NOT EXISTS scopes(
+        "CREATE TABLE IF NOT EXISTS cache_settings(
+           setting TEXT PRIMARY KEY, value INTEGER NOT NULL CHECK(value>=0)
+         );
+         CREATE TABLE IF NOT EXISTS scopes(
            scope_key TEXT PRIMARY KEY, origin TEXT NOT NULL, account_id TEXT NOT NULL,
            space_id TEXT NOT NULL, root_resource_id TEXT NOT NULL,
            protection INTEGER NOT NULL

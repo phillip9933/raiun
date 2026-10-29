@@ -4,6 +4,11 @@ import { getVersion } from '@tauri-apps/api/app';
 import { open, confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
 import './style.css';
+import './raiun-tokens.css';
+import { transferPresentation, transferTabSummary, transferCounts, type TransferTab } from './transfer-presentation';
+import { parseCacheLimit, cacheLimitDraft, formatStorageBytes, validateCacheLimitReply, type CacheLimitUnit } from './offline-storage';
+import { pickerUsesModal } from './guest-sharing';
+import { SharingController } from './sharing-controller';
 import { MediaJobsView } from './media-jobs';
 import { folderCreationRoute, folderWorkspaceSpaceIds, type FolderDirection } from './folder-workspace';
 import { createPairSettingsDraft, discardPairSettingsDraft, normalizeFolderExclusion, pairSettingsUpdateRequest, persistedFolderPair, validateFolderExclusions, type FolderContentFilter, type FolderExclusion, type FolderExclusionKind, type PairSettingsDraft, type PersistedFolderPair } from './folder-settings';
@@ -96,16 +101,18 @@ function safeOfflineAvailabilityState(value: unknown): OfflineAvailabilityState 
   if (value === null || value === 'ready' || value === 'stale' || value === 'unavailable') return value;
   throw new Error('The agent returned an unknown offline-copy status.');
 }
-type Page = 'overview' | 'folders' | 'offline' | 'encrypted' | 'transfers' | 'settings';
+type Page = 'overview' | 'folders' | 'offline' | 'encrypted' | 'guest' | 'transfers' | 'settings';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 let appVersionLabel = isTauri() ? 'Loading…' : 'Browser layout preview';
 const offlineUi = { policies: new Map<string, OfflinePolicy>(), availabilityStates: new Map<string, OfflineAvailabilityState>(), policyLoading: new Set<string>(), policySaving: new Set<string>(), folderPolicies: new Map<string, 'recent' | 'cloud_only'>(), folderPolicyLoading: new Map<string, symbol>(), folderPolicySaving: new Map<string, symbol>(), folderListing: null as { epoch: number; generation: number; spaceId: string; path: string } | null, pins: new Map<string, PersistedOfflinePin[]>(), pinsLoading: new Set<string>(), pinsRemoving: new Set<string>(), pin: null as OfflinePinStatus | null, error: '', pollTimer: 0 as number };
+const offlineWorkspaceUi = { view: 'browse' as 'browse' | 'storage', windowsKind: 'folders' as 'folders' | 'files', disclosureScope: '', expanded: new Set<string>() };
 const pairExclusionsUi = { open: new Set<string>(), edits: new Map<string, PairSettingsDraft>(), drafts: new Map<string, string>(), kinds: new Map<string, FolderExclusionKind>(), errors: new Map<string, string>(), busy: new Set<string>() };
 const pendingWritesUi = { authGeneration: null as number | null, accountScope: null as string | null, items: [] as PendingOfflineWrite[], expandedScopes: new Set<string>(), nextAfter: null as string | null, pendingCount: 0, conflictCount: 0, truncated: false, loaded: false, loading: false, refreshQueued: false, error: '', accountEpoch: -1, generation: 0, retryingSpaces: new Set<string>(), exportingWrites: new Set<string>(), reconcileJobs: new Map<string, { job_id: string; space_id: string; accountEpoch: number }>(), retryTimers: new Map<string, number>() };
 const encryptedRetryLatestUi = { scopes: [] as { key: string; spaceId: string; rootResourceId: string }[], scopesTruncated: false, discoveryLoading: false, discoveryError: '', statuses: new Map<string, VaultEditLatestResult>(), errors: new Map<string, string>(), loading: new Set<string>(), accountEpoch: -1, generation: 0, timer: 0 as number, running: false };
 const windowsRecoveryController = new WindowsRecoveryController();
 const windowsOfflineFileController = new WindowsOfflineFileController();
+const cacheLimitUi = { scope: '', amount: '', unit: 'GiB' as CacheLimitUnit, original: 0, busy: false, error: '', notice: '' };
 const windowsDeviceCacheUi = { usage: null as WindowsDeviceCacheUsage | null, contextKey: '', sequence: 0, loading: false, error: '' };
 type WindowsOfflineFilesPage = { profile_id: string; auth_generation: number; recovery_scope_token: string; items: WindowsOfflineFileRow[]; next_cursor: string | null; unavailable_rows: number; read_only: true; last_observed: true; atomic_snapshot: false };
 type ProtectedVaultCaptureItem = { item_token: string; file_name: string; body_length: number };
@@ -134,10 +141,23 @@ const accountAvatarUi = new AccountAvatarCache(16);
 type InterruptedCreateRetryUi = { key: string; spaceId: string; rootResourceId: string; writeId: string; revision: number; retryGeneration: number; retryState: 'attempting' | 'recovery_attempting' | 'recovery_retrying'; jobId: string; profileId: string; accountEpoch: number; generation: number; busy: boolean; status: VaultEditReconcileStatus | null; error: string };
 const interruptedCreateRetryUi: { job: InterruptedCreateRetryUi | null; timer: number; generation: number } = { job: null, timer: 0, generation: 0 };
 const cachedVaultRootsUi = { roots: [] as CachedVaultRoot[], nextAfter: null as CachedVaultRootsPage['next_after'], truncated: false, loading: false, error: '', selected: '', generation: 0, accountEpoch: -1 };
-const state: { page: Page; status: Status | null; statusErrorDismissed: string; agentReachable: boolean; pairs: Pair[]; transfers: Transfer[]; conflicts: Record<string, ConflictPage>; resolvingConflict: boolean; recoveryPage: RecoveryPage | null; recoveryLoading: boolean; recoveryError: string; encryptedEditRecoveryPage: EncryptedEditRecoveryPage | null; encryptedEditRecoveryLoading: boolean; encryptedEditRecoveryError: string; spaces: Space[]; spacesServer: string | null; spacesLoading: boolean; spacesError: string; transferFilter: string; busy: boolean; addOpen: boolean; localPath: string; spaceId: string; remotePath: string; folderDirection: FolderDirection; existingCopyHandling: 'update_safe' | 'review'; folderAdvancedOpen: boolean; mediaFilter: MediaFilterValue; folderExclusions: FolderExclusion[]; folderExclusionKind: FolderExclusionKind; folderExclusionDraft: string; folderExclusionError: string; mediaOrganization: MediaOrganizationValue; mediaInterval: string; vaultBinding: VaultBinding | null; vaultWritable: boolean; vaultDialog: VaultDialogState | null; vaultGeneration: number; vaultAccessOpen: boolean; vaultAccessSpaceId: string; pickerPurpose: 'pair' | 'encrypted_access' | 'offline'; pickerGeneration: number; mode: SyncMode; pickerOpen: boolean; pickerPath: string; pickerEntries: RemoteEntry[]; pickerError: string; pickerWritable: Record<string, boolean>; pickerFolderName: string; pickerCreatingFolder: boolean; accounts: Account[]; removedAccounts: RemovedAccount[]; accountRemovalSupported: boolean; selectedAccount: string; accountEpoch: number; accountSwitching: boolean; accountsLoading: boolean; accountsError: string; accountSwitchTarget: string; mutationBusy: number; nativeDialogBusy: boolean; addAccountOpen: boolean; addAccountStep: 'details' | 'waiting'; addAccountLabel: string; addAccountRoot: string; addAccountServer: string; addAccountClientId: string; addAccountAuthMessage: string; addAccountAuthStarted: boolean; addAccountError: string; addAccountCreatedId: string; addAccountBusy: boolean; spaceActionBusy: Record<string, 'pause' | 'sync' | 'disconnect'>; message: string; error: string; autostart: boolean | null; server: string; serverEdited: boolean; statusServer: string; clientId: string; clientIdEditedServer: string | null; clientIdServer: string } = {
+
+const state: { page: Page; status: Status | null; statusErrorDismissed: string; agentReachable: boolean; pairs: Pair[]; transfers: Transfer[]; conflicts: Record<string, ConflictPage>; resolvingConflict: boolean; recoveryPage: RecoveryPage | null; recoveryLoading: boolean; recoveryError: string; encryptedEditRecoveryPage: EncryptedEditRecoveryPage | null; encryptedEditRecoveryLoading: boolean; encryptedEditRecoveryError: string; spaces: Space[]; spacesServer: string | null; spacesLoading: boolean; spacesError: string; transferFilter: string; busy: boolean; addOpen: boolean; localPath: string; spaceId: string; remotePath: string; folderDirection: FolderDirection; existingCopyHandling: 'update_safe' | 'review'; folderAdvancedOpen: boolean; mediaFilter: MediaFilterValue; folderExclusions: FolderExclusion[]; folderExclusionKind: FolderExclusionKind; folderExclusionDraft: string; folderExclusionError: string; mediaOrganization: MediaOrganizationValue; mediaInterval: string; vaultBinding: VaultBinding | null; vaultWritable: boolean; vaultDialog: VaultDialogState | null; vaultGeneration: number; vaultAccessOpen: boolean; vaultAccessSpaceId: string; pickerPurpose: 'pair' | 'encrypted_access' | 'offline' | 'guest'; pickerGeneration: number; mode: SyncMode; pickerOpen: boolean; pickerPath: string; pickerEntries: RemoteEntry[]; pickerError: string; pickerWritable: Record<string, boolean>; pickerFolderName: string; pickerCreatingFolder: boolean; accounts: Account[]; removedAccounts: RemovedAccount[]; accountRemovalSupported: boolean; selectedAccount: string; accountEpoch: number; accountSwitching: boolean; accountsLoading: boolean; accountsError: string; accountSwitchTarget: string; mutationBusy: number; nativeDialogBusy: boolean; addAccountOpen: boolean; addAccountStep: 'details' | 'waiting'; addAccountLabel: string; addAccountRoot: string; addAccountServer: string; addAccountClientId: string; addAccountAuthMessage: string; addAccountAuthStarted: boolean; addAccountError: string; addAccountCreatedId: string; addAccountBusy: boolean; spaceActionBusy: Record<string, 'pause' | 'sync' | 'disconnect'>; message: string; error: string; autostart: boolean | null; server: string; serverEdited: boolean; statusServer: string; clientId: string; clientIdEditedServer: string | null; clientIdServer: string } = {
   page: 'overview', status: null, statusErrorDismissed: '', agentReachable: false, pairs: [], transfers: [], spaces: [], spacesServer: null, spacesLoading: false, spacesError: '', transferFilter: 'active', busy: false, addOpen: false,
   conflicts: {}, resolvingConflict: false, recoveryPage: null, recoveryLoading: false, recoveryError: '', encryptedEditRecoveryPage: null, encryptedEditRecoveryLoading: false, encryptedEditRecoveryError: '', localPath: '', spaceId: '', remotePath: '', folderDirection: 'both_ways', existingCopyHandling: 'update_safe', folderAdvancedOpen: false, mediaFilter: 'all', folderExclusions: [], folderExclusionKind: 'path', folderExclusionDraft: '', folderExclusionError: '', mediaOrganization: 'preserve_relative_path', mediaInterval: '3600', vaultBinding: null, vaultWritable: false, vaultDialog: null, vaultGeneration: 0, vaultAccessOpen: false, vaultAccessSpaceId: '', pickerPurpose: 'pair', pickerGeneration: 0, mode: 'two_way', pickerOpen: false, pickerPath: '/', pickerEntries: [], pickerError: '', pickerWritable: {}, pickerFolderName: '', pickerCreatingFolder: false, accounts: [], removedAccounts: [], accountRemovalSupported: false, selectedAccount: '', accountEpoch: 0, accountSwitching: false, accountsLoading: false, accountsError: '', accountSwitchTarget: '', mutationBusy: 0, nativeDialogBusy: false, addAccountOpen: false, addAccountStep: 'details', addAccountLabel: '', addAccountRoot: '', addAccountServer: '', addAccountClientId: '', addAccountAuthMessage: '', addAccountAuthStarted: false, addAccountError: '', addAccountCreatedId: '', addAccountBusy: false, spaceActionBusy: {}, message: '', error: '', autostart: null, server: '', serverEdited: false, statusServer: '', clientId: '', clientIdEditedServer: null, clientIdServer: ''
 };
+const sharingWorkspace = new SharingController({
+  context: () => {
+    const generation = state.status?.auth_generation;
+    if (state.page !== 'guest' || state.accountSwitching || !state.selectedAccount || generation == null || state.status?.profile_id !== state.selectedAccount) return null;
+    return { server: state.status.server || '', profileId: state.selectedAccount, accountEpoch: state.accountEpoch, generation,
+      connected: state.agentReachable && state.status.connected, spaces: state.spaces };
+  },
+  rpc: (action, args) => request(action, args), render,
+  confirm: message => confirmDialog(message, {title:'Review sharing',kind:'warning',okLabel:'Confirm',cancelLabel:'Cancel'}),
+  focus: target => { const epoch = state.accountEpoch, profile = state.selectedAccount; queueMicrotask(() => { if (state.page !== 'guest' || !isCurrentAccount(epoch, profile)) return; const element = target === 'heading' ? app.querySelector<HTMLElement>('.sharing-flow h2') : app.querySelector<HTMLElement>('[data-sharing-action="new-share"]'); element?.focus({preventScroll:true}); }); },
+  copy: async value => { if (!navigator.clipboard) throw new Error('Clipboard is unavailable'); await navigator.clipboard.writeText(value); }
+});
 const mediaJobs = new MediaJobsView({
   key: () => `${state.accountEpoch}:${state.selectedAccount}`,
   connected: () => state.status?.connected === true,
@@ -537,7 +557,7 @@ async function refreshWindowsDeviceCacheUsage() {
 function windowsDeviceCacheCard(): string {
   if (!syncWindowsDeviceCacheContext()) return '';
   const usage = windowsDeviceCacheUi.usage;
-  return `<section class="settings-card windows-device-cache-card"><div class="settings-heading"><span class="settings-icon">${svg('download')}</span><div><h2>Device cache (all accounts)</h2><p>Shared by all Raiun accounts on this Windows device. These totals are not limited to the selected account.</p></div></div>${usage ? `<p role="status">Last observed: ${esc(formatBytes(usage.used_bytes))} used of ${esc(formatBytes(usage.quota_bytes))} · ${esc(formatBytes(usage.pinned_bytes))} pinned · ${esc(formatBytes(usage.protected_bytes))} protected.</p>${usage.over_quota ? '<p class="recovery-warning" role="status">The device cache is over its quota.</p>' : ''}` : '<p role="status">Device cache usage has not been checked.</p>'}${windowsDeviceCacheUi.error ? `<p class="recovery-warning" role="alert">${esc(windowsDeviceCacheUi.error)}</p>` : ''}<div class="button-group"><button class="button subtle" data-action="refresh-windows-device-cache" ${windowsDeviceCacheUi.loading ? 'disabled' : ''}>${windowsDeviceCacheUi.loading ? 'Checking…' : usage ? 'Refresh device cache usage' : 'Check device cache usage'}</button></div></section>`;
+  return `<section class="settings-card windows-device-cache-card"><div class="settings-heading"><span class="settings-icon">${svg('download')}</span><div><h2>Storage on this device</h2><p>Shared by all accounts on this Windows device.</p></div></div>${usage ? `<p role="status">Last observed: ${esc(formatStorageBytes(usage.used_bytes))} stored · ${esc(formatStorageBytes(usage.quota_bytes))} cache allowance · ${esc(formatStorageBytes(usage.pinned_bytes))} pinned · ${esc(formatStorageBytes(usage.protected_bytes))} protected.</p>${usage.over_quota ? '<p class="recovery-warning" role="status">The device cache is over its quota.</p>' : ''}` : '<p role="status">Device cache usage has not been checked.</p>'}${windowsDeviceCacheUi.error ? `<p class="recovery-warning" role="alert">${esc(windowsDeviceCacheUi.error)}</p>` : ''}<div class="button-group"><button class="button subtle" data-action="refresh-windows-device-cache" ${windowsDeviceCacheUi.loading ? 'disabled' : ''}>${windowsDeviceCacheUi.loading ? 'Checking…' : usage ? 'Refresh device cache usage' : 'Check device cache usage'}</button></div></section>`;
 }
 function windowsOfflineContextKey(context: WindowsOfflineFileContext): string {
   return JSON.stringify([context.accountEpoch, context.profileId, context.server, context.clientId, context.cloudRoot, context.authGeneration, context.recoveryScopeToken, context.flowGeneration]);
@@ -668,7 +688,7 @@ function windowsOfflineFilesCard() {
     ? state.status?.mounted !== true ? 'Open your Windows drive before using these controls.' : 'Connect this account and set up its Windows drive to choose files.'
     : !state.agentReachable ? 'Raiun is not connected.'
       : state.status?.connected !== true ? 'Connect this account before listing or saving files.' : '';
-  return `<section class="settings-card windows-offline-files-card"><div class="settings-heading"><span class="settings-icon">${svg('download')}</span><div><h2>Save individual files offline</h2><p>Choose a file already listed on this drive. Saved status may have changed since this page was loaded.</p></div></div><div class="settings-row"><div><b>Available files</b><small>Files from this account’s Windows drive.</small></div><div class="button-group"><button class="button subtle" data-action="refresh-windows-offline-files" ${!actionsAvailable || listLocked ? 'disabled' : ''}>${windowsOfflineFilesUi.loading ? 'Loading…' : windowsOfflineFilesUi.loaded ? 'Refresh files' : 'Load files'}</button><button class="button subtle" data-action="more-windows-offline-files" ${!actionsAvailable || listLocked || !windowsOfflineFilesUi.nextCursor ? 'disabled' : ''}>Load next page</button></div></div>${unavailable ? `<p class="recovery-hint" role="status">${esc(unavailable)}</p>` : ''}${windowsOfflineFilesUi.error ? `<div class="recovery-warning" role="alert">${esc(windowsOfflineFilesUi.error)}</div>` : ''}${windowsOfflineFilesUi.unavailableRows ? `<p class="recovery-hint" role="status">${windowsOfflineFilesUi.unavailableRows} files could not be shown. Refresh to check again.</p>` : ''}${windowsOfflineFilesUi.loaded ? windowsOfflineFilesUi.items.length ? `<div class="windows-offline-file-list">${windowsOfflineFilesUi.items.map(row => { const key = windowsOfflineRowKey(row); return `<button class="remote-entry ${windowsOfflineFilesUi.selectedKey === key ? 'selected' : ''}" data-windows-offline-row="${esc(key)}" ${listLocked ? 'disabled' : ''}><span>${esc(row.path.split('/').filter(Boolean).at(-1) || row.path)}</span><small>${esc(row.path)} · ${esc(formatBytes(row.size))}</small></button>`; }).join('')}</div>` : '<div class="recovery-empty" role="status">No files were returned in this listing.</div>' : ''}${file ? `<div class="windows-offline-file-detail"><div><b>${esc(file.path)}</b><small>${esc(spaceName(file.spaceId))}</small></div>${cache ? `<p role="status">Last saved status: ${{ recent: 'Automatically cached', always_offline: 'Keep offline', cloud_only: 'Cloud only' }[cache.policy]} · ${cache.recorded_complete_version ? `saved copy recorded (${esc(formatBytes(cache.recorded_bytes))})` : 'no complete saved copy recorded'}.</p>` : '<p role="status">Saved status has not been checked for this file.</p>'}${cache?.pending_offline_intent && !job ? '<p class="recovery-hint" role="status">A saved request to keep this version offline is unfinished. Choose Save this file offline to start a fresh download. Existing recovery data stays preserved.</p>' : ''}${controller.error ? `<div class="recovery-warning" role="alert">${esc(controller.error)}</div>` : ''}${job ? `<p role="status" aria-live="polite">${esc(windowsOfflineJobMessage(job))}</p><div class="button-group"><button class="button subtle" data-action="poll-windows-offline-file" ${controller.loading ? 'disabled' : ''}>Check job</button><button class="button subtle" data-action="cancel-windows-offline-file" ${controller.loading || job.state !== 'running' ? 'disabled' : ''}>Cancel download</button></div>` : `<button class="button primary" data-action="start-windows-offline-file" ${!actionsAvailable || controller.loading || controller.admissionUncertain ? 'disabled' : ''}>${controller.loading ? 'Starting…' : controller.admissionUncertain ? 'Download status unknown' : 'Save this file offline'}</button>`}${controller.admissionUncertain ? '<small role="status">The request may still be running. Reconnect the drive before trying another download.</small>' : ''}</div>` : ''}${windowsOfflineFilesUi.loaded ? '<small class="recovery-hint">Refresh to check for changes. New files appear after you browse their folder.</small>' : ''}</section>`;
+  return `<section class="settings-card windows-offline-files-card"><div class="settings-heading"><span class="settings-icon">${svg('download')}</span><div><h2>Choose files to keep offline</h2><p>Files already known to this account’s drive.</p></div></div><div class="settings-row"><div><b>Available files</b><small>Files from this account’s Windows drive.</small></div><div class="button-group"><button class="button subtle" data-action="refresh-windows-offline-files" ${!actionsAvailable || listLocked ? 'disabled' : ''}>${windowsOfflineFilesUi.loading ? 'Loading…' : windowsOfflineFilesUi.loaded ? 'Refresh files' : 'Load files'}</button><button class="button subtle" data-action="more-windows-offline-files" ${!actionsAvailable || listLocked || !windowsOfflineFilesUi.nextCursor ? 'disabled' : ''}>Load next page</button></div></div>${unavailable ? `<p class="recovery-hint" role="status">${esc(unavailable)}</p>` : ''}${windowsOfflineFilesUi.error ? `<div class="recovery-warning" role="alert">${esc(windowsOfflineFilesUi.error)}</div>` : ''}${windowsOfflineFilesUi.unavailableRows ? `<p class="recovery-hint" role="status">${windowsOfflineFilesUi.unavailableRows} files could not be shown. Refresh to check again.</p>` : ''}${windowsOfflineFilesUi.loaded ? windowsOfflineFilesUi.items.length ? `<div class="windows-offline-file-list">${windowsOfflineFilesUi.items.map(row => { const key = windowsOfflineRowKey(row); return `<button class="remote-entry ${windowsOfflineFilesUi.selectedKey === key ? 'selected' : ''}" data-windows-offline-row="${esc(key)}" ${listLocked ? 'disabled' : ''}><span>${esc(row.path.split('/').filter(Boolean).at(-1) || row.path)}</span><small>${esc(row.path)} · ${esc(formatBytes(row.size))}</small></button>`; }).join('')}</div>` : '<div class="recovery-empty" role="status">No files were returned in this listing.</div>' : ''}${file ? `<div class="windows-offline-file-detail"><div><b>${esc(file.path)}</b><small>${esc(spaceName(file.spaceId))}</small></div>${cache ? `<p role="status">Last saved status: ${{ recent: 'Automatically cached', always_offline: 'Keep offline', cloud_only: 'Cloud only' }[cache.policy]} · ${cache.recorded_complete_version ? `saved copy recorded (${esc(formatBytes(cache.recorded_bytes))})` : 'no complete saved copy recorded'}.</p>` : '<p role="status">Saved status has not been checked for this file.</p>'}${cache?.pending_offline_intent && !job ? '<p class="recovery-hint" role="status">A saved request to keep this version offline is unfinished. Choose Save this file offline to start a fresh download. Existing recovery data stays preserved.</p>' : ''}${controller.error ? `<div class="recovery-warning" role="alert">${esc(controller.error)}</div>` : ''}${job ? `<p role="status" aria-live="polite">${esc(windowsOfflineJobMessage(job))}</p><div class="button-group"><button class="button subtle" data-action="poll-windows-offline-file" ${controller.loading ? 'disabled' : ''}>Check job</button><button class="button subtle" data-action="cancel-windows-offline-file" ${controller.loading || job.state !== 'running' ? 'disabled' : ''}>Cancel download</button></div>` : `<button class="button primary" data-action="start-windows-offline-file" ${!actionsAvailable || controller.loading || controller.admissionUncertain ? 'disabled' : ''}>${controller.loading ? 'Starting…' : controller.admissionUncertain ? 'Download status unknown' : 'Save this file offline'}</button>`}${controller.admissionUncertain ? '<small role="status">The request may still be running. Reconnect the drive before trying another download.</small>' : ''}</div>` : ''}${windowsOfflineFilesUi.loaded ? '<small class="recovery-hint">Refresh to check for changes. New files appear after you browse their folder.</small>' : ''}</section>`;
 }
 const esc = (value: unknown) => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]!));
 const icon = (name: string) => ({
@@ -678,6 +698,7 @@ const icon = (name: string) => ({
   media: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9" r="1.5"/><path d="m21 15-5-5L5 20"/>',
   settings: '<path d="M19.24 10.06 21.33 10.19 21.33 13.81 19.24 13.94 18.5 15.75 19.88 17.31 17.31 19.88 15.75 18.5 13.94 19.24 13.81 21.33 10.19 21.33 10.06 19.24 8.25 18.5 6.69 19.88 4.12 17.31 5.5 15.75 4.76 13.94 2.67 13.81 2.67 10.19 4.76 10.06 5.5 8.25 4.12 6.69 6.69 4.12 8.25 5.5 10.06 4.76 10.19 2.67 13.81 2.67 13.94 4.76 15.75 5.5 17.31 4.12 19.88 6.69 18.5 8.25Z"/><circle cx="12" cy="12" r="3.2"/>',
   cloud: '<path d="M7 18h10a4 4 0 0 0 .5-8A5.5 5.5 0 0 0 7 8.5 4.8 4.8 0 0 0 7 18Z"/>',
+  users: '<path d="M16 20v-1.5a3.5 3.5 0 0 0-3.5-3.5h-5A3.5 3.5 0 0 0 4 18.5V20m6-9a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm5-6.5a3.5 3.5 0 0 1 0 6.8m2 3.2h.5a3.5 3.5 0 0 1 3.5 3.5V20"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   chevron: '<path d="m9 18 6-6-6-6"/>',
   folder: '<path d="M3 7h7l2 2h9v10H3z"/>',
@@ -732,7 +753,9 @@ function render() {
       direction: selectionDirection(active)
     }
     : null;
-  const stableButtonFocusKeys = ['action', 'page', 'accountId', 'pairId', 'spaceId', 'writeId', 'rootResourceId', 'vaultPinRemove', 'vaultPinStart'];
+  const focusedOfflineSummary = sameView && app.contains(active) && active instanceof HTMLElement && active.tagName === 'SUMMARY'
+    ? { key: active.parentElement?.dataset.offlineDisclosure, epoch: state.accountEpoch, profile: state.selectedAccount } : null;
+  const stableButtonFocusKeys = ['action', 'page', 'accountId', 'pairId', 'spaceId', 'writeId', 'rootResourceId', 'vaultPinRemove', 'vaultPinStart', 'offlineView', 'offlineKind', 'loadOfflinePolicy', 'pinOffline', 'unpinOffline', 'loadFolderPolicy', 'setFolderPolicy', 'folderPath', 'folderListingPath', 'folderCurrent', 'keepOfflineFile', 'offlineOptions', 'sharingAction', 'sharingId', 'sharingItemId', 'sharingRecipientId', 'sharingSection', 'sharingInventory', 'sharingMethod'];
   const focusedButton = app.contains(active) && active instanceof HTMLButtonElement
     && (!!active.id || stableButtonFocusKeys.some(key => key in active.dataset))
     ? {
@@ -757,7 +780,7 @@ function render() {
   const activeAccount = state.accounts.find(account => account.id === state.selectedAccount);
   const targetAccount = state.accounts.find(account => account.id === state.accountSwitchTarget);
   ensureAccountAvatars();
-  const nav = [['overview', 'Overview', 'overview'], ['folders', 'Sync Folders', 'folders'], ['offline', 'Offline files', 'download'], ['encrypted', 'Encrypted files', 'lock'], ['transfers', 'Transfers', 'transfers'], ['settings', 'Settings', 'settings']] as const;
+  const nav = [['overview', 'Overview', 'overview'], ['folders', 'Sync Folders', 'folders'], ['offline', 'Offline files', 'download'], ['encrypted', 'Encrypted files', 'lock'], ['guest', 'Sharing', 'users'], ['transfers', 'Transfers', 'transfers'], ['settings', 'Settings', 'settings']] as const;
   const markup = `
     <div class="shell">
       <aside class="sidebar">
@@ -787,7 +810,7 @@ function render() {
     ${state.message ? `<div class="toast success-toast" role="status"><span>${svg('check')}</span><div>${esc(state.message)}</div><button data-dismiss-message aria-label="Dismiss">${svg('close')}</button></div>` : ''}
     ${state.addOpen ? addModal() : ''}
     ${state.addAccountOpen ? addAccountModal() : ''}
-    ${state.pickerOpen && !(state.page === 'offline' && state.pickerPurpose === 'offline') ? pickerModal() : ''}
+    ${pickerModalShouldRender() ? pickerModal() : ''}
     ${state.vaultDialog ? vaultDialog() : ''}
     ${state.vaultAccessOpen && state.page !== 'encrypted' ? encryptedAccessModal() : ''}`;
   if (markup !== lastRenderedMarkup) {
@@ -805,7 +828,7 @@ function render() {
   }
   renderedPage = state.page;
   renderedAccount = state.selectedAccount;
-  if (focusedInput) {
+  if (sameView && focusedInput) {
     const replacement = document.getElementById(focusedInput.id);
     if (replacement instanceof HTMLInputElement || replacement instanceof HTMLTextAreaElement) {
       replacement.value = focusedInput.value;
@@ -815,7 +838,7 @@ function render() {
       }
     }
   }
-  if (focusedSelect) {
+  if (sameView && focusedSelect) {
     const replacement = document.getElementById(focusedSelect.id);
     if (replacement instanceof HTMLSelectElement) {
       if ([...replacement.options].some(option => option.value === focusedSelect.value)) replacement.value = focusedSelect.value;
@@ -828,6 +851,10 @@ function render() {
       : [...app.querySelectorAll<HTMLButtonElement>('button')].find(button =>
         Object.entries(focusedButton.dataset).every(([key, value]) => button.dataset[key] === value));
     if (replacement instanceof HTMLButtonElement && !replacement.disabled) replacement.focus({ preventScroll: true });
+  }
+  if (focusedOfflineSummary?.key && focusedOfflineSummary.epoch === state.accountEpoch && focusedOfflineSummary.profile === state.selectedAccount) {
+    const replacement = [...app.querySelectorAll<HTMLDetailsElement>('[data-offline-disclosure]')].find(el => el.dataset.offlineDisclosure === focusedOfflineSummary.key)?.querySelector('summary');
+    replacement?.focus({ preventScroll: true });
   }
   if (copyFocus && state.page === 'transfers' && copyFocus.accountEpoch === state.accountEpoch && copyFocus.profileId === state.selectedAccount) {
     const matchesBinding = (element: HTMLElement) =>
@@ -925,6 +952,7 @@ function pageMarkup(): string {
   if (state.page === 'folders') return syncWorkspacePage();
   if (state.page === 'offline') return offlineWorkspacePage();
   if (state.page === 'encrypted') return encryptedWorkspacePage();
+  if (state.page === 'guest') return guestSharingPage();
   if (state.page === 'transfers') return transfersPage();
   return settingsPage();
 }
@@ -938,6 +966,8 @@ function connectionFailureDetails(status: Status | null | undefined): string {
   const detail = typeof status?.error === 'string' ? status.error.trim() : '';
   return detail ? `<details class="connection-error-detail"><summary>Connection details</summary><p>${esc(detail)}</p></details>` : '';
 }
+function pickerModalShouldRender() { return pickerUsesModal(state.pickerOpen, state.pickerPurpose, state.page); }
+function guestSharingPage(): string { return sharingWorkspace.render(); }
 function syncWorkspacePage() {
   return foldersPage();
 }
@@ -959,26 +989,124 @@ function overviewPage() {
     <div class="cloud-root-card"><div class="cloud-root-icon">${svg('cloud')}</div><div class="root-copy"><b>OpenCloud drive</b><span>${reachable && state.status?.cloud_root ? esc(state.status.cloud_root) : 'Your cloud drive location will appear here'}</span></div><span class="root-badge ${reachable && state.status?.mounted ? 'mounted' : ''}">${reachable && state.status?.mounted ? 'Mounted' : !providerEnabled && reachable && state.status?.cloud_root ? 'Configured · disconnected' : 'Not mounted'}</span><button class="icon-button" data-action="open-cloud" ${providerEnabled && reachable && state.status?.mounted && (connected || state.status?.offline_namespace === true) && state.status?.cloud_root ? '' : 'disabled'} aria-label="Open cloud folder">${svg('chevron')}</button></div>${reachable ? `${encryptedAccessCard()}${connected ? offlineAvailabilityCard() : ''}` : ''}`;
 }
 function offlineAvailabilityCard() {
-  if (isWindowsAgentStatus(state.status)) return windowsDeviceCacheCard();
+  if (isWindowsAgentStatus(state.status)) {
+    const usage = syncWindowsDeviceCacheContext() ? windowsDeviceCacheUi.usage : null;
+    return `<section class="offline-availability-card"><div class="offline-availability-icon">${svg('download')}</div><div class="offline-availability-copy"><b>Offline files</b><span>Choose the files and folders kept on this device.</span><small>${usage ? `${esc(formatStorageBytes(usage.used_bytes))} used · ` : ''}Storage is shared by all accounts.</small></div><button class="button primary" data-page="offline">View offline files</button></section>`;
+  }
   const cache = state.status?.offline_cache;
   if (!cache) return '';
   const providerEnabled = providerAvailable(state.status?.provider_supported);
-  return `<section class="offline-availability-card"><div class="offline-availability-icon">${svg('download')}</div><div class="offline-availability-copy"><b>Offline files</b><span>${!providerEnabled ? 'Offline file access is unavailable because the Windows drive is not enabled.' : cache.available ? 'Choose files or folders to keep available offline. Raiun stores copies on this computer and must stay running to serve them from the drive.' : 'Offline storage is not available for this account yet.'}</span>${cache.available ? `<small>${esc(formatBytes(cache.used_bytes))} used of ${esc(formatBytes(cache.quota_bytes))} · ${esc(formatBytes(cache.pinned_bytes))} pinned</small>` : ''}</div><button class="button ${cache.available ? 'primary' : 'subtle'}" data-page="offline">View offline files</button></section>`;
+  return `<section class="offline-availability-card"><div class="offline-availability-icon">${svg('download')}</div><div class="offline-availability-copy"><b>Offline files</b><span>${!providerEnabled ? 'Offline file access is unavailable because the Windows drive is not enabled.' : cache.available ? 'Choose files or folders to keep available offline. Raiun stores copies on this computer and must stay running to serve them from the drive.' : 'Offline storage is not available for this account yet.'}</span>${cache.available ? `<small>${esc(formatStorageBytes(cache.used_bytes))} stored · ${esc(formatStorageBytes(cache.pinned_bytes))} kept offline</small>` : ''}</div><button class="button ${cache.available ? 'primary' : 'subtle'}" data-page="offline">View offline files</button></section>`;
+}
+function offlineDisclosureKey(name: string) {
+  const scope = JSON.stringify([state.accountEpoch, state.selectedAccount]);
+  if (offlineWorkspaceUi.disclosureScope !== scope) {
+    offlineWorkspaceUi.disclosureScope = scope;
+    offlineWorkspaceUi.expanded.clear();
+  }
+  return JSON.stringify([scope, state.spaceId, name]);
+}
+function offlineDetails(name: string, label: string, content: string, className = 'offline-section-details') {
+  const key = offlineDisclosureKey(name);
+  return `<details class="${className}" data-offline-disclosure="${esc(key)}" ${offlineWorkspaceUi.expanded.has(key) ? 'open' : ''}><summary>${esc(label)}</summary>${content}</details>`;
+}
+function offlineRowOptions(name: string, label: string, content: string, itemName: string) {
+  const key = offlineDisclosureKey(name);
+  const expanded = offlineWorkspaceUi.expanded.has(key);
+  const panelId = `offline-options-${encodeURIComponent(key)}`;
+  return `<button class="text-button offline-options-toggle" data-offline-options="${esc(key)}" aria-label="${esc(label)} for ${esc(itemName)}" aria-expanded="${expanded}" aria-controls="${esc(panelId)}">${esc(label)} <span aria-hidden="true">${expanded ? '▾' : '▸'}</span></button><div class="offline-options-panel" id="${esc(panelId)}" ${expanded ? '' : 'hidden'}>${content}</div>`;
+}
+function offlineStorageSummary(windows: boolean) {
+  const cache = windows
+    ? syncWindowsDeviceCacheContext() ? windowsDeviceCacheUi.usage : null
+    : state.status?.offline_cache?.available ? state.status.offline_cache : null;
+  return `<div class="offline-storage-summary"><b class="offline-storage-total">${cache ? `${esc(formatStorageBytes(cache.used_bytes))} used` : 'Storage usage unavailable'}</b><span class="offline-storage-limit">${windows ? 'This device · all accounts' : 'This account on this computer'}</span>${cache?.over_quota ? '<strong class="offline-storage-warning" role="status">Stored copies exceed the cache allowance</strong>' : ''}<button class="text-button" data-offline-view="storage">Storage details</button></div>`;
+}
+function cacheLimitScope() {
+  const windows = isWindowsAgentStatus(state.status);
+  const context = windows ? syncWindowsDeviceCacheContext() : null;
+  const profileId = state.selectedAccount;
+  const generation = state.status?.auth_generation;
+  if (!profileId || state.accountSwitching || generation == null || (windows && !context)) return null;
+  return { profileId, generation, windows, token: context?.recoveryScopeToken,
+    key: JSON.stringify([state.accountEpoch, profileId, generation, windows, context?.recoveryScopeToken]) };
+}
+function offlineStorageForm(windows: boolean) {
+  const scope = cacheLimitScope();
+  const quota = windows ? windowsDeviceCacheUi.usage?.quota_bytes : state.status?.offline_cache?.available ? state.status.offline_cache.quota_bytes : null;
+  if (!scope || quota == null) return '';
+  if (cacheLimitUi.scope !== scope.key) {
+    Object.assign(cacheLimitUi, { scope: scope.key, ...cacheLimitDraft(quota), original: quota, busy: false, error: '', notice: '' });
+  }
+  let bytes: number | null = null;
+  try { bytes = parseCacheLimit(cacheLimitUi.amount, cacheLimitUi.unit); } catch { /* Draft validation appears on Save. */ }
+  const changed = bytes !== cacheLimitUi.original;
+  return `<section class="settings-card offline-limit-card"><h2>${windows ? 'Device cache allowance' : 'Automatic cache allowance'}</h2><p>${windows ? 'Shared by all Raiun accounts on this device. This allowance also checks new offline downloads.' : 'For this account on this computer. Raiun can remove older temporary copies to stay within this allowance.'}</p><form id="offline-limit-form"><label class="field-label" for="offline-limit-amount">Cache allowance</label><div class="offline-limit-fields"><input id="offline-limit-amount" type="text" inputmode="decimal" required value="${esc(cacheLimitUi.amount)}" ${cacheLimitUi.busy ? 'disabled' : ''} aria-describedby="offline-limit-help"><select id="offline-limit-unit" aria-label="Cache allowance unit" ${cacheLimitUi.busy ? 'disabled' : ''}><option value="MiB" ${cacheLimitUi.unit === 'MiB' ? 'selected' : ''}>MiB</option><option value="GiB" ${cacheLimitUi.unit === 'GiB' ? 'selected' : ''}>GiB</option></select></div><p id="offline-limit-help">Choose 256 MiB to 1 TiB. Kept-offline copies, unsent edits and recovery data are protected separately and can exceed this allowance.</p>${bytes !== null && bytes < cacheLimitUi.original ? '<p>Reducing the allowance can limit new downloads and make older temporary copies eligible for cleanup. Saved files and protected edits stay safe.</p>' : ''}${cacheLimitUi.error ? `<p role="alert">${esc(cacheLimitUi.error)}</p>` : ''}${cacheLimitUi.notice ? `<p role="status">${esc(cacheLimitUi.notice)}</p>` : ''}<div class="button-group"><button type="button" class="button subtle" data-action="cancel-cache-limit" ${cacheLimitUi.busy || !changed ? 'disabled' : ''}>Cancel</button><button type="submit" class="button primary" ${cacheLimitUi.busy || !changed ? 'disabled' : ''}>${cacheLimitUi.busy ? 'Saving…' : 'Save limit'}</button></div></form></section>`;
+}
+async function saveCacheLimit(expectedScope: string) {
+  const scope = cacheLimitScope();
+  if (!scope || scope.key !== expectedScope || scope.key !== cacheLimitUi.scope || cacheLimitUi.busy) return;
+  let bytes: number;
+  try { bytes = parseCacheLimit(cacheLimitUi.amount, cacheLimitUi.unit); }
+  catch (error) { cacheLimitUi.error = messageOf(error); render(); return; }
+  cacheLimitUi.busy = true; cacheLimitUi.error = ''; cacheLimitUi.notice = ''; render();
+  const current = () => cacheLimitScope()?.key === scope.key && cacheLimitUi.scope === scope.key;
+  try {
+    const reply = await request(scope.windows ? 'windows_device_cache_quota_set' : 'cache_quota_set', {
+      profile_id: scope.profileId, quota_bytes: bytes,
+      ...(scope.windows ? { expected_generation: scope.generation, expected_recovery_scope_token: scope.token } : { expected_auth_generation: scope.generation })
+    });
+    if (!current()) return;
+    validateCacheLimitReply(reply, scope, bytes);
+    cacheLimitUi.original = bytes;
+    cacheLimitUi.notice = 'Cache allowance saved. No files were removed by this change.';
+    if (scope.windows && windowsDeviceCacheUi.usage) { windowsDeviceCacheUi.usage.quota_bytes = bytes; windowsDeviceCacheUi.usage.over_quota = windowsDeviceCacheUi.usage.used_bytes > bytes; }
+    else if (state.status?.offline_cache) { state.status.offline_cache.quota_bytes = bytes; state.status.offline_cache.over_quota = state.status.offline_cache.used_bytes > bytes; }
+  } catch (error) { if (current()) cacheLimitUi.error = isStaleAccountRequest(error) ? 'The account changed. Review storage before trying again.' : messageOf(error); }
+  finally { if (current()) { cacheLimitUi.busy = false; render(); } }
+}
+function offlineStoragePage(windows: boolean) {
+  const cache = state.status?.offline_cache;
+  const storage = windows ? windowsDeviceCacheCard() || '<section class="settings-card"><h2>Device storage</h2><p>Open this account’s Windows drive to check storage usage. Totals cover all accounts on this device.</p></section>'
+    : `<section class="settings-card"><h2>Storage on this computer</h2>${cache?.available ? `<dl class="offline-storage-grid"><div><dt>Used</dt><dd>${esc(formatStorageBytes(cache.used_bytes))}</dd></div><div><dt>Kept offline</dt><dd>${esc(formatStorageBytes(cache.pinned_bytes))}</dd></div><div><dt>Protected edits</dt><dd>${esc(formatStorageBytes(cache.protected_bytes))}</dd></div></dl><p class="recovery-hint">Automatic cache allowance: ${esc(formatStorageBytes(cache.quota_bytes))}. Kept-offline and protected totals can overlap.</p>` : '<p role="status">Storage usage is not available for this account.</p>'}<button class="button subtle" data-action="refresh">Refresh usage</button></section>`;
+  const help = `<ul><li>Keep Raiun running to use saved files through your OpenCloud drive.</li><li>Removing an offline copy or changing availability never deletes the cloud file.</li><li>Unsynced edits and recovery copies stay protected. A storage change may be refused until they are resolved.</li><li>${windows ? 'Refresh the file or folder list to check for changes. The lists contain items already known to this drive.' : 'Raiun checks saved folders for updates about every five minutes while connected. Refreshes can be delayed when offline.'}</li><li>Encrypted locations have separate offline and recovery controls under Encrypted files.</li></ul>`;
+  const policies = windows ? '' : offlineDetails('policies', 'Availability options explained', '<ul><li><b>Keep offline:</b> download and verify a copy for offline use.</li><li><b>Recently used:</b> cache files you open; Raiun may free this space later. This does not remove saved folder copies.</li><li><b>Cloud only:</b> use the online version. Conflicting saved copies or protected edits must be resolved first.</li></ul><p>File sizes in the browser describe cloud files. They are not a per-file measurement of local cache usage.</p>', 'offline-help-details');
+  return `${storage}${offlineStorageForm(windows)}<section class="settings-card">${offlineDetails('help', 'How offline files work', help, 'offline-help-details')}${policies}</section>`;
+}
+function offlineActivityNotice(windows: boolean) {
+  if (windows) {
+    if (offlineWorkspaceUi.view !== 'storage') return '';
+    const file = windowsOfflineFileController.state;
+    const folder = windowsOfflineFoldersPanel.controller.state;
+    const fileWork = file.admissionUncertain || file.job?.state === 'running' || file.job?.state === 'recovery_required' || file.job?.state === 'failed';
+    const folderWork = folder.admissionUncertain || folder.job?.state === 'running' || folder.job?.state === 'prepared' || folder.job?.state === 'recovery_required' || folder.job?.state === 'failed';
+    return fileWork || folderWork ? `<div class="offline-job-notice" role="status">A download has activity to review. <button class="text-button" data-offline-view="browse" data-offline-kind="${fileWork ? 'files' : 'folders'}">View download</button></div>` : '';
+  }
+  const pin = offlineUi.pin;
+  if (!pin || pin.accountEpoch !== state.accountEpoch || !['preparing', 'building', 'failed', 'stale', 'unavailable'].includes(pin.state) || (offlineWorkspaceUi.view === 'browse' && pin.space_id === state.spaceId)) return '';
+  const canShow = state.pickerOpen && state.pickerPurpose === 'offline' && state.status?.connected === true && state.spaces.some(space => space.id === pin.space_id && !space.encrypted);
+  return `<div class="offline-job-notice" role="status">${['preparing', 'building'].includes(pin.state) ? 'A folder download is in progress.' : 'A folder download needs review.'}${canShow ? ' <button class="text-button" data-offline-active>View download</button>' : ''}</div>`;
 }
 function offlineWorkspacePage() {
   const windows = isWindowsAgentStatus(state.status);
   const providerEnabled = providerAvailable(state.status?.provider_supported);
   const connected = state.status?.connected === true;
-  const cache = state.status?.offline_cache;
   const selectedSpace = state.spaces.find(space => space.id === state.spaceId);
-  const details = windows
-    ? `${windowsDeviceCacheCard()}${windowsOfflineFilesCard()}${windowsOfflineFoldersCard()}`
-    : !providerEnabled
-      ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Offline file access is unavailable</b><p>This agent does not provide the cloud drive needed for offline copies.</p></div></div>`
-      : !connected || !state.pickerOpen || state.pickerPurpose !== 'offline'
-        ? `<section class="settings-card"><div class="settings-heading"><span class="settings-icon">${svg('download')}</span><div><h2>Device storage</h2><p>Offline copies use space on this computer. Raiun must stay running to provide them from the mounted drive.</p></div></div>${cache ? `<div class="offline-cache-usage">${esc(formatBytes(cache.used_bytes))} used of ${esc(formatBytes(cache.quota_bytes))} · ${esc(formatBytes(cache.pinned_bytes))} pinned${cache.over_quota ? ' · over the current storage limit' : ''}</div>` : '<p class="recovery-hint">Storage usage is not available for this account.</p>'}<p class="recovery-hint">Connect this account to check saved folders and change offline availability.</p></section>`
-        : `<section class="settings-card offline-workspace-browser">${offlinePickerBody(selectedSpace)}</section>`;
-  return `<div class="page-title-row"><div><div class="eyebrow">ON THIS DEVICE</div><h1>Offline files</h1><p class="lede">Review device storage and choose the cloud files kept available here.</p></div></div><div class="settings-stack">${details}</div>`;
+  const view = offlineWorkspaceUi.view;
+  const windowsFiles = windows ? windowsOfflineFilesCard() : '';
+  const windowsFolders = windows ? windowsOfflineFoldersCard() : '';
+  let details: string;
+  if (view === 'storage') details = offlineStoragePage(windows);
+  else if (windows) {
+    const fileJob = windowsOfflineFileController.state;
+    const folderJob = windowsOfflineFoldersPanel.controller.state;
+    const hiddenFileWork = offlineWorkspaceUi.windowsKind === 'folders' && (fileJob.admissionUncertain || fileJob.job?.state === 'running' || fileJob.job?.state === 'recovery_required' || fileJob.job?.state === 'failed');
+    const hiddenFolderWork = offlineWorkspaceUi.windowsKind === 'files' && (folderJob.admissionUncertain || folderJob.job?.state === 'running' || folderJob.job?.state === 'prepared' || folderJob.job?.state === 'recovery_required' || folderJob.job?.state === 'failed');
+    details = `<div class="offline-windows-switch" role="group" aria-label="Choose files or folders">${(['folders', 'files'] as const).map(kind => `<button class="button ${offlineWorkspaceUi.windowsKind === kind ? 'primary' : 'subtle'}" data-offline-kind="${kind}" aria-pressed="${offlineWorkspaceUi.windowsKind === kind}">${kind === 'folders' ? 'Folders' : 'Files'}</button>`).join('')}</div>${hiddenFileWork || hiddenFolderWork ? `<div class="offline-job-notice" role="status">A ${hiddenFileWork ? 'file' : 'folder'} download has activity to review. <button class="text-button" data-offline-kind="${hiddenFileWork ? 'files' : 'folders'}">View status</button></div>` : ''}${offlineWorkspaceUi.windowsKind === 'files' ? windowsFiles : windowsFolders}`;
+  } else if (!providerEnabled) details = '<div class="notice-card offline" role="status"><div class="notice-copy"><b>Offline files are unavailable</b><p>This agent does not provide the cloud drive needed for offline copies.</p></div></div>';
+  else if (!connected || !state.pickerOpen || state.pickerPurpose !== 'offline') details = `<section class="settings-card"><h2>Connect to manage offline files</h2><p>Existing copies and protected edits stay on this computer.</p><button class="button subtle" data-action="refresh">Retry connection</button></section>`;
+  else details = `<section class="settings-card offline-workspace-browser" aria-label="Cloud files and folders">${offlinePickerBody(selectedSpace)}</section>`;
+  return `<div class="offline-workspace"><div class="page-title-row"><div><div class="eyebrow">ON THIS DEVICE</div><h1>Offline files</h1><p class="lede">Keep selected cloud files on this computer.</p></div></div>${offlineActivityNotice(windows)}${offlineStorageSummary(windows)}<div class="offline-workspace-tabs filter-tabs" role="group" aria-label="Offline files views"><button class="filter-tab ${view === 'browse' ? 'active' : ''}" data-offline-view="browse" aria-pressed="${view === 'browse'}">Files & folders</button><button class="filter-tab ${view === 'storage' ? 'active' : ''}" data-offline-view="storage" aria-pressed="${view === 'storage'}">Storage & help</button></div>${details}</div>`;
 }
 function encryptedAccessCard() {
   const providerEnabled = featureAvailable('vaults_supported');
@@ -1131,21 +1259,19 @@ function pendingOfflineWritesSection() {
 function transfersPage() {
   const providerEnabled = featureAvailable('folder_sync_supported');
   const connection = connectionMode(state.agentReachable, state.status);
-  const filters = [['active', 'Current & paused'], ['attention', 'Needs attention'], ['history', 'Finished']] as const;
-  const matching = state.transfers.filter(item => {
-    const status = (item.state || '').toLowerCase();
-    if (state.transferFilter === 'active') return ['queued', 'running', 'retry_wait', 'verifying', 'paused'].includes(status);
-    if (state.transferFilter === 'attention') return ['failed', 'conflict', 'awaiting_authentication'].includes(status);
-    return ['completed', 'cancelled'].includes(status);
-  });
+  const filters: TransferTab[] = ['active', 'attention', 'history'];
+  const filter: TransferTab = state.transferFilter === 'attention' || state.transferFilter === 'history' ? state.transferFilter : 'active';
+  const summary = transferTabSummary(filter);
+  const counts = transferCounts(state.transfers);
+  const matching = state.transfers.filter(item => transferPresentation(item.state, item.direction).tab === filter);
   return `<div class="page-title-row"><div><div class="eyebrow">ACTIVITY</div><h1>Transfers</h1><p class="lede">Follow folder-sync activity and review offline files or saved edits for this account.</p></div></div>
-    <div class="filter-tabs" role="tablist">${filters.map(([key,label]) => `<button class="filter-tab ${state.transferFilter === key ? 'active' : ''}" data-filter="${key}">${label}${key === 'attention' && attentionCount() ? `<span class="tab-badge">${attentionCount()}</span>` : ''}</button>`).join('')}</div>
-    <p class="helper-note">${state.transferFilter === 'active' ? 'Current & paused: queued, transferring, retrying, checking, and paused folder-sync transfers.' : state.transferFilter === 'attention' ? 'Needs attention: failed transfers, conflicts, and transfers waiting for sign-in.' : 'Finished: completed and cancelled folder-sync transfers.'} These tabs filter folder-sync activity only; offline files and saved edits stay visible below.</p>
+    <div class="filter-tabs" role="group" aria-label="Folder-sync transfer filters">${filters.map(key => `<button class="filter-tab ${filter === key ? 'active' : ''}" data-filter="${key}" aria-pressed="${filter === key}">${transferTabSummary(key).label}${providerEnabled && state.agentReachable && state.status?.connected ? `<span class="tab-badge">${counts[key]}</span>` : ''}</button>`).join('')}</div>
+    <p class="helper-note">${esc(summary.description)} These filters apply to folder-sync activity only; offline files and saved edits stay visible below.</p>
     ${!isWindowsAgentStatus(state.status) && state.agentReachable ? pendingOfflineWritesSection() : ''}
     ${vaultAppFeaturesAvailable() && state.agentReachable ? encryptedOperationsTransferSection() : ''}
     ${vaultAppFeaturesAvailable() && state.agentReachable ? encryptedRetryLatestSection() : ''}
     ${vaultAppFeaturesAvailable() && state.agentReachable ? encryptedEditsTransferSection() : ''}
-    ${!providerEnabled ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Transfer status is unavailable</b><p>Folder-sync transfer reporting is unavailable for this agent. Supported cloud-drive offline controls remain available above.</p></div></div>` : state.agentReachable && state.status?.connected ? matching.length ? `<div class="transfer-list">${matching.map(transferCard).join('')}</div>` : `<div class="empty-card transfer-empty"><span class="empty-icon">${svg(state.transferFilter === 'attention' ? 'check' : 'transfers')}</span><h3>${state.transferFilter === 'attention' ? 'No folder-sync transfers need attention' : state.transferFilter === 'history' ? 'No finished folder-sync transfers yet' : 'No current or paused folder-sync transfers'}</h3><p>${state.transferFilter === 'active' ? 'Queued and running transfers appear here, along with retries, checks, and paused transfers.' : state.transferFilter === 'attention' ? 'No failed transfers, conflicts, or sign-in requests have been reported in this list. Saved edits are shown separately above.' : 'Completed and cancelled transfers appear here with their final status.'}</p></div>` : connection === 'unavailable' ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Transfer status is unavailable</b><p>Start the Raiun agent to see transfer activity.</p></div><button class="button subtle" data-action="refresh">Refresh</button></div>` : connection === 'offline_reconnecting' ? `<div class="notice-card offline"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>${state.status?.refreshing ? 'Checking connection…' : 'Working offline — reconnecting to server'}</b><p>Transfer history will refresh when Raiun reconnects.</p>${connectionFailureDetails(state.status)}</div><button class="button subtle" data-action="refresh" ${state.status?.refreshing ? 'disabled' : ''}>${state.status?.refreshing ? 'Checking…' : 'Retry connection'}</button></div>` : `<div class="notice-card"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>Sign in to see transfer activity</b><p>Connect your OpenCloud account to load transfer status.</p></div><button class="button primary" data-action="sign-in">Sign in</button></div>`}`;
+    ${!providerEnabled ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Transfer status is unavailable</b><p>Folder-sync transfer reporting is unavailable for this agent. Supported cloud-drive offline controls remain available above.</p></div></div>` : state.agentReachable && state.status?.connected ? matching.length ? `<div class="transfer-list">${matching.map(transferCard).join('')}</div>` : `<div class="empty-card transfer-empty"><span class="empty-icon">${svg(state.transferFilter === 'attention' ? 'check' : 'transfers')}</span><h3>${esc(summary.emptyTitle)}</h3><p>${esc(summary.emptyHelp)}</p></div>` : connection === 'unavailable' ? `<div class="notice-card offline"><div class="notice-icon">${svg('alert')}</div><div class="notice-copy"><b>Transfer status is unavailable</b><p>Start the Raiun agent to see transfer activity.</p></div><button class="button subtle" data-action="refresh">Refresh</button></div>` : connection === 'offline_reconnecting' ? `<div class="notice-card offline"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>${state.status?.refreshing ? 'Checking connection…' : 'Working offline — reconnecting to server'}</b><p>Transfer history will refresh when Raiun reconnects.</p>${connectionFailureDetails(state.status)}</div><button class="button subtle" data-action="refresh" ${state.status?.refreshing ? 'disabled' : ''}>${state.status?.refreshing ? 'Checking…' : 'Retry connection'}</button></div>` : `<div class="notice-card"><div class="notice-icon">${svg('cloud')}</div><div class="notice-copy"><b>Sign in to see transfer activity</b><p>Connect your OpenCloud account to load transfer status.</p></div><button class="button primary" data-action="sign-in">Sign in</button></div>`}`;
 }
 function validateVaultEditLatest(value: unknown, spaceId: string, rootResourceId: string): VaultEditLatestResult {
   if (!value || typeof value !== 'object') throw new Error('The agent returned an invalid encrypted retry status.');
@@ -1850,16 +1976,16 @@ function encryptedEditsTransferSection() {
   return `<section class="pending-writes-card encrypted-edits-transfers"><div class="pending-writes-heading"><div><h2>Encrypted file working copies</h2>${summary}<p>Edits to existing encrypted files are saved as readable local working copies. Some may still be active or waiting to upload; local records do not confirm cloud completion. A “Local copy is still being prepared” entry is incomplete and cannot be uploaded or retried yet. Queued create, rename, delete, and folder-creation operations are listed separately; their local status does not confirm cloud completion.</p></div><button class="button subtle" data-action="load-encrypted-edit-recoveries" ${!state.agentReachable || loading ? 'disabled' : ''}>${loading ? 'Checking…' : page ? 'Refresh list' : 'Check saved edits'}</button></div>${state.encryptedEditRecoveryError ? `<div class="pending-writes-error" role="alert">${esc(state.encryptedEditRecoveryError)}</div>` : ''}${loading && !page?.items.length ? `<div class="pending-writes-empty" role="status"><span class="spinner"></span> Checking local encrypted-edit records…</div>` : !page ? `<div class="pending-writes-empty">Check local records to see edits awaiting upload or review.</div>` : `<div class="pending-writes-empty encrypted-edit-transfer-counts" role="status">${needsAttention ? `${needsAttention} record(s) may need attention.` : counts?.building ? `${counts.building} local copy reservation(s) are still being prepared; they are not upload-ready.` : 'No encrypted edits are waiting for review.'} Upload records are not verified against the server.</div>${page.truncated ? '<div class="recovery-warning" role="status">The scan reached its safety limit; this list may be incomplete.</div>' : ''}${rows}${page.next_after && !loading ? `<div class="recovery-more"><button class="button subtle" data-action="more-encrypted-edit-recoveries">Load more</button></div>` : ''}`}</section>`;
 }
 function transferCard(item: Transfer) {
-  const status = (item.state || 'unknown').toLowerCase();
-  const direction = (item.direction || '').toLowerCase();
-  const isUpload = direction.includes('upload') || direction === 'up';
-  const issue = ['failed', 'conflict', 'awaiting_authentication'].includes(status);
-  const statusLabel = status.replaceAll('_', ' ').replace(/\b\w/g, c => c.toUpperCase());
+  const status = (item.state || '').trim().toLowerCase();
+  const presentation = transferPresentation(item.state, item.direction);
+  const issue = presentation.tab === 'attention';
+  const directionLabel = presentation.direction === 'upload' ? 'Upload' : presentation.direction === 'download' ? 'Download' : 'Direction unavailable';
+  const directionIcon = presentation.direction === 'upload' ? 'arrowUp' : presentation.direction === 'download' ? 'arrowDown' : 'transfers';
   const subject = item.path || String(item.id) || 'Transfer';
-  const origin = ['completed', 'cancelled'].includes(status) ? 'This PC' : item.origin ? item.origin.replaceAll('_', ' ') : 'Sync folder';
-  const historyAccount = ['completed', 'cancelled'].includes(status) ? ` <span>·</span> ${esc(selectedAccountLabel())}` : '';
+  const origin = presentation.tab === 'history' ? 'This PC' : item.origin ? item.origin.replaceAll('_', ' ') : 'Sync folder';
+  const historyAccount = presentation.tab === 'history' ? ` <span>·</span> ${esc(selectedAccountLabel())}` : '';
   const byteText = item.bytes_total != null && item.bytes_total > 0 && item.bytes_done != null ? `${formatBytes(item.bytes_done)} of ${formatBytes(item.bytes_total)}` : item.bytes_total === 0 && status === 'completed' ? '0 bytes' : '';
-  return `<article class="transfer-card"><span class="transfer-direction ${isUpload ? 'up' : 'down'}">${svg(isUpload ? 'arrowUp' : 'arrowDown')}</span><div class="transfer-main"><div class="transfer-title"><b>${esc(lastPath(subject))}</b><span class="transfer-status ${issue ? 'issue' : ''}">${esc(statusLabel)}</span></div><div class="transfer-meta">${esc(origin)}${historyAccount} <span>·</span> ${esc(item.space_id ? spaceName(item.space_id) : 'OpenCloud')}${byteText ? `<span>·</span> ${esc(byteText)}` : ''}</div>${item.error ? `<p class="transfer-error">${esc(item.error)}</p>` : ''}</div><div class="transfer-actions">${issue && item.origin === 'folder_pair' ? `<button class="small-action" data-action="sync-now">Rescan folders</button>` : ''}</div></article>`;
+  return `<article class="transfer-card"><span class="transfer-direction" title="${directionLabel}" aria-label="${directionLabel}">${svg(directionIcon)}</span><div class="transfer-main"><div class="transfer-title"><b>${esc(lastPath(subject))}</b><span class="transfer-status" data-tone="${presentation.tone}">${esc(presentation.label)}</span></div><div class="transfer-meta">${directionLabel} <span>·</span> ${esc(origin)}${historyAccount} <span>·</span> ${esc(item.space_id ? spaceName(item.space_id) : 'OpenCloud')}${byteText ? `<span>·</span> ${esc(byteText)}` : ''}</div><p class="transfer-state-help">${esc(presentation.help)}</p>${item.error ? `<p class="transfer-error">${esc(item.error)}</p>` : ''}</div><div class="transfer-actions">${issue && item.origin === 'folder_pair' ? `<button class="small-action" data-action="sync-now">Rescan folders</button>` : ''}</div></article>`;
 }
 async function loadPendingOfflineWrites(reset: boolean) {
   if (isWindowsAgentStatus(state.status) || !providerAvailable(state.status?.provider_supported)) {
@@ -2333,6 +2459,10 @@ function desktopUpdateNotification() {
 }
 
 function leaveWorkspacePage(nextPage: Page) {
+  if (state.page === 'guest' && nextPage !== 'guest') {
+    sharingWorkspace.leave();
+    if (state.pickerPurpose === 'guest') { state.pickerGeneration++; state.pickerOpen = false; state.pickerPurpose = 'pair'; }
+  }
   if (state.page === 'offline' && nextPage !== 'offline') {
     state.pickerGeneration++;
     state.pickerOpen = false;
@@ -2351,6 +2481,7 @@ function navigateToPage(page: Page) {
   if (page === 'encrypted') { leaveWorkspacePage(page); void openEncryptedAccess(); return; }
   leaveWorkspacePage(page);
   state.page = page;
+  if (page === 'guest') { void loadSpaces(true); void sharingWorkspace.enter(); }
   if (page === 'folders') void mediaJobs.refresh();
   if (page === 'settings') { void loadNetworkProxySettings(); void loadBandwidthSettings(); }
   if (page === 'transfers') {
@@ -2525,10 +2656,17 @@ function offlinePickerBody(currentSpace: Space | undefined) {
       ? `${pin.files_done} of ${pin.files_total} files ready${pin.item_count ? ` · ${pin.item_count} items found` : ''}`
       : '';
   const pinCard = pin ? `<div class="offline-pin-status ${pin.state}" role="status" aria-live="polite"><div><b>${pin.state === 'ready' ? 'Folder snapshot verified' : pin.state === 'stale' ? 'Refreshing folder snapshot' : pin.state === 'unavailable' ? 'Folder copy unavailable offline' : pin.state === 'failed' ? 'Could not finish making this folder available offline' : pin.state === 'cancelled' ? 'Offline download cancelled' : pin.cancel_requested ? 'Cancelling offline download…' : 'Making folder available offline'}</b><small>${esc(pin.path)} · ${esc(pinProgress)}</small>${pin.error ? `<small>${esc(pin.error)}</small>` : ''}${pin.poll_error ? `<small>Progress update failed: ${esc(pin.poll_error)}</small>` : ''}</div>${pinRunning && !pin.cancel_requested ? '<button class="button subtle" data-action="cancel-offline-pin">Cancel</button>' : (pin.state === 'ready' || pin.state === 'stale' || pin.state === 'unavailable') && pin.pin_id ? `<button class="button subtle" data-unpin-offline="${esc(pin.pin_id)}">${pin.state === 'stale' ? 'Remove stale snapshot' : pin.state === 'unavailable' ? 'Remove unavailable copy' : 'Stop keeping offline'}</button>` : ''}</div>` : '';
-  const canPin = cache?.available === true && currentSpace?.encrypted === false && state.status?.connected === true && !!state.spaceId;
+  const canPin = cache?.available === true && currentSpace?.encrypted === false && state.status?.connected === true && !!state.spaceId && offlineFolderIsCurrent(state.pickerPath, state.pickerPath, true, state.spaceId);
   const pinsKey = offlinePinsKey(state.spaceId);
-  const entries = state.pickerEntries.length ? state.pickerEntries.slice(0, 300).map(entry => offlineEntryRow(entry)).join('') : `<div class="remote-empty">${state.pickerError ? 'Folder listing unavailable.' : 'No files or folders in this location.'}</div>`;
-  return `<p class="offline-browser-note">Offline copies use storage on this computer. Raiun checks for updates about every five minutes while it is running and connected; refreshes can be delayed while offline. Raiun must stay running to provide copies from the OpenCloud drive when you’re offline.</p>${state.status?.connected !== true ? '<div class="offline-cache-unavailable" role="status">Connect this account to change offline availability.</div>' : ''}<label class="field-label" for="offline-space">OpenCloud Space</label><select id="offline-space" ${state.spacesLoading || !state.spaces.length ? 'disabled' : ''}><option value="">${state.spacesLoading ? 'Loading Spaces…' : state.spacesError ? 'Spaces unavailable' : 'Choose a Space'}</option>${options}</select>${state.spacesError ? `<div class="picker-error" role="alert">${esc(state.spacesError)}</div>` : ''}${cache?.available !== true ? '<div class="offline-cache-unavailable" role="status">Offline storage is not available for this account.</div>' : `<div class="offline-cache-usage">${esc(formatBytes(cache.used_bytes))} used of ${esc(formatBytes(cache.quota_bytes))} · ${esc(formatBytes(cache.pinned_bytes))} pinned${cache.over_quota ? ' · over the current storage limit' : ''}</div>`}${offlineUi.pinsLoading.has(pinsKey) ? '<div class="offline-pin-list-loading" role="status">Checking saved folders…</div>' : ''}${offlineUi.error ? `<div class="picker-error" role="alert">${esc(offlineUi.error)}</div>` : ''}${persistedOfflinePins(currentSpace, pinsKey)}${pinCard}${currentSpace?.encrypted ? '<div class="offline-cache-unavailable" role="status">Encrypted Spaces cannot be cached offline yet. Their encrypted files stay online-only.</div>' : ''}${!currentSpace ? '<div class="remote-empty">Choose an unencrypted Space to manage offline files.</div>' : !currentSpace.encrypted ? `<div class="picker-breadcrumb">${svg('cloud')}<span>${esc(currentSpace.personal ? 'Personal' : currentSpace.name)}</span>${esc(state.pickerPath)}</div><div class="offline-folder-pin"><div><b>Keep this folder offline</b><small>Downloads the files in this folder and its subfolders. Raiun refreshes saved folders periodically while running and connected; changes can be delayed while offline.</small></div><button class="button subtle" data-pin-offline="${esc(state.pickerPath)}" ${!canPin || pinRunning ? 'disabled' : ''}>${pinRunning && pin?.path === state.pickerPath ? 'Preparing…' : 'Make available offline'}</button></div>${folderPolicyCurrentControl(state.pickerPath)}${state.pickerError ? `<div class="picker-error" role="alert">${svg('alert')} ${esc(state.pickerError)}</div>` : ''}<div class="offline-entry-list">${state.pickerPath !== '/' ? `<button class="remote-entry parent-entry" data-remote-path="${esc(parentPath(state.pickerPath))}">${svg('folder')}<span>..</span>${svg('chevron')}</button>` : ''}${entries}</div>${state.pickerEntries.length > 300 ? '<div class="offline-list-limit">Showing the first 300 entries. Open a subfolder to narrow the list.</div>' : ''}` : ''}<p class="offline-policy-note">“Recently used” changes folder cache policy only; it does not remove saved folder copies. Cloud only requires conflicting offline copies or file settings to be cleared first. Unsynced edits and recovery data stay protected.</p>`;
+  const pins = offlineUi.pins.get(pinsKey) || [];
+  const listingCurrent = offlineFolderIsCurrent(state.pickerPath, state.pickerPath, true, state.spaceId);
+  const entries = state.pickerEntries.length ? state.pickerEntries.slice(0, 300).map(entry => offlineEntryRow(entry)).join('') : `<div class="remote-empty" role="status">${state.pickerError ? 'Folder listing unavailable.' : !listingCurrent ? 'Loading files…' : 'This folder is empty.'}</div>`;
+  const showPin = pin && (pin.state !== 'ready' || !pins.some(saved => saved.pin_id === pin.pin_id));
+  const attentionPins = pins.filter(saved => saved.state === 'stale' || saved.state === 'unavailable').length;
+  const savedFolders = currentSpace && !currentSpace.encrypted && pins.length
+    ? offlineDetails('saved-folders', `Saved folders in ${currentSpace.personal ? 'Personal' : currentSpace.name} (${pins.length}${attentionPins ? ` · ${attentionPins} need review` : ''})`, persistedOfflinePins(currentSpace, pinsKey)) : '';
+  return `<div class="offline-browser-toolbar"><div class="offline-space-field"><label class="field-label" for="offline-space">Location</label><select id="offline-space" ${state.spacesLoading || !state.spaces.length ? 'disabled' : ''}><option value="">${state.spacesLoading ? 'Loading locations…' : state.spacesError ? 'Locations unavailable' : 'Choose a location'}</option>${options}</select></div><span class="recovery-hint">Changes affect this computer only.</span></div>${state.spacesError ? `<div class="picker-error" role="alert">${esc(state.spacesError)}</div>` : ''}${cache?.available !== true ? '<div class="offline-cache-unavailable" role="status">Offline storage is not available for this account.</div>' : ''}${offlineUi.pinsLoading.has(pinsKey) ? '<p role="status">Checking saved folders…</p>' : ''}${offlineUi.error ? `<div class="picker-error" role="alert">${esc(offlineUi.error)}</div>` : ''}${showPin ? pinCard : ''}${attentionPins ? `<p class="offline-storage-warning" role="status">${attentionPins} saved folder ${attentionPins === 1 ? 'copy needs' : 'copies need'} review. Open Saved folders below.</p>` : ''}${savedFolders}${currentSpace?.encrypted ? '<p role="status">Use Encrypted files to manage this location.</p>' : ''}${!currentSpace ? '<div class="remote-empty">Choose a location to browse files and folders.</div>' : !currentSpace.encrypted ? `<div class="offline-current-folder"><div class="picker-breadcrumb">${svg('cloud')}<span>${esc(currentSpace.personal ? 'Personal' : currentSpace.name)}</span><span>${esc(state.pickerPath)}</span></div><button class="button primary" data-pin-offline="${esc(state.pickerPath)}" ${!canPin || pinRunning ? 'disabled' : ''}>${pinRunning && pin?.path === state.pickerPath ? 'Downloading…' : 'Keep folder offline'}</button>${offlineRowOptions(`folder:${state.pickerPath}`, 'Folder options', folderPolicyCurrentControl(state.pickerPath), state.pickerPath)}</div>${state.pickerError ? `<div class="picker-error" role="alert">${svg('alert')} ${esc(state.pickerError)}</div>` : ''}<div class="offline-entry-list">${state.pickerPath !== '/' ? `<button class="remote-entry parent-entry" data-remote-path="${esc(parentPath(state.pickerPath))}" aria-label="Go to parent folder">${svg('folder')}<span>Up one folder</span>${svg('chevron')}</button>` : ''}${entries}</div>${state.pickerEntries.length > 300 ? '<p class="offline-list-limit">Showing the first 300 items. Open a subfolder to see more.</p>' : ''}` : ''}`;
+
 }
 function persistedOfflinePins(currentSpace: Space | undefined, pinsKey: string) {
   const pins = offlineUi.pins.get(pinsKey) || [];
@@ -2548,7 +2686,7 @@ function persistedOfflinePins(currentSpace: Space | undefined, pinsKey: string) 
     const button = pin.state === 'stale' ? 'Remove stale snapshot' : pin.state === 'building' ? 'Stop folder download' : pin.state === 'unavailable' ? 'Remove unavailable copy' : 'Stop keeping offline';
     return `<div class="offline-saved-pin ${pin.state}"><span><b>${esc(label)}</b><small>${esc(location)} · ${esc(progress)}</small></span><button class="button subtle" data-unpin-offline="${esc(pin.pin_id)}" ${removing || state.status?.connected !== true ? 'disabled' : ''}>${removing ? 'Removing…' : button}</button></div>`;
   }).join('');
-  return `<section class="offline-saved-pins" aria-label="Saved offline folder copies"><div><b>Saved folder copies</b><small>These are in ${esc(currentSpace.personal ? 'Personal' : currentSpace.name)}. You can remove a copy here, including one for the Space root.</small></div>${rows}</section>`;
+  return `<section class="offline-saved-pins" aria-label="Saved offline folder copies"><p class="recovery-hint">Stop keeping a folder offline here. Cloud files stay unchanged; recently used files may remain cached.</p>${rows}</section>`;
 }
 function offlineEntryRow(entry: RemoteEntry) {
   const name = esc(lastPath(entry.path));
@@ -2560,7 +2698,8 @@ function offlineEntryRow(entry: RemoteEntry) {
     const pinControl = pin
       ? `<span class="offline-folder-pin-state" role="status">${esc(pinLabel)}</span>${activeForEntry ? '<span class="offline-saving" role="status">Use Cancel above to stop</span>' : ''}`
       : `<button class="button subtle" data-pin-offline="${esc(entry.path)}" ${state.status?.connected !== true || state.status?.offline_cache?.available !== true || offlineUi.pin?.state === 'preparing' || offlineUi.pin?.state === 'building' ? 'disabled' : ''}>Keep offline</button>`;
-    return `<div class="offline-entry"><button class="remote-entry" data-remote-path="${esc(entry.path)}">${svg('folder')}<span>${name}${windowsPortabilityNote(entry)}</span>${svg('chevron')}</button>${folderPolicyRowControls(entry)}${pinControl}</div>`;
+    const removeCopy = pin ? `<p class="recovery-hint">Cloud files stay unchanged. Recently used files may remain cached.</p><button class="button subtle" data-unpin-offline="${esc(pin.pin_id)}" ${offlineUi.pinsRemoving.has(offlinePinRemovalKey(state.spaceId, pin.pin_id)) || state.status?.connected !== true ? 'disabled' : ''}>${pin.state === 'building' ? 'Stop folder download' : 'Stop keeping offline'}</button>` : '';
+    return `<div class="offline-entry"><button class="remote-entry" data-remote-path="${esc(entry.path)}">${svg('folder')}<span>${name}${windowsPortabilityNote(entry)}</span>${svg('chevron')}</button>${pinControl}${offlineRowOptions(`row:${entry.path}`, 'Options', `${folderPolicyRowControls(entry)}${removeCopy}`, lastPath(entry.path))}</div>`;
   }
   const key = offlinePolicyKey(entry.path);
   const policy = offlineUi.policies.get(key);
@@ -2570,7 +2709,10 @@ function offlineEntryRow(entry: RemoteEntry) {
   const policyControl = policy
     ? `<div class="offline-policy-control"><label class="offline-policy-select"><span class="sr-only">Offline availability for ${name}</span><select data-offline-policy-path="${esc(entry.path)}" ${saving || state.status?.connected !== true || state.status?.offline_cache?.available !== true ? 'disabled' : ''}><option value="cloud_only" ${policy === 'cloud_only' ? 'selected' : ''}>Cloud only</option><option value="recent" ${policy === 'recent' ? 'selected' : ''}>Recently used</option><option value="always_offline" ${policy === 'always_offline' ? 'selected' : ''}>Always available offline</option></select></label>${policy === 'always_offline' ? `<small class="offline-policy-state ${availabilityState || 'pending'}" role="status">${offlineAvailabilityLabel(availabilityState)}</small><button class="offline-check-status" data-load-offline-policy="${esc(entry.path)}" ${loading || state.status?.connected !== true ? 'disabled' : ''}>${loading ? 'Checking…' : 'Check status'}</button>` : ''}</div>`
     : `<button class="button subtle" data-load-offline-policy="${esc(entry.path)}" ${loading || state.status?.connected !== true || state.status?.offline_cache?.available !== true ? 'disabled' : ''}>${loading ? 'Checking…' : 'Set availability'}</button>`;
-  return `<div class="offline-entry file-entry"><span class="offline-file-icon">${svg('media')}</span><span class="offline-entry-name"><b>${name}</b><small>${entry.size == null ? 'File' : esc(formatBytes(entry.size))}</small>${windowsPortabilityNote(entry)}</span>${saving ? '<span class="offline-saving" role="status">Saving and verifying…</span>' : policyControl}</div>`;
+  const availability = policy === 'always_offline'
+    ? `<span class="offline-policy-state ${availabilityState || 'pending'}" role="status">${offlineAvailabilityLabel(availabilityState)}</span>`
+    : `<button class="button subtle" data-keep-offline-file="${esc(entry.path)}" aria-label="Keep ${name} offline" ${loading || saving || state.status?.connected !== true || state.status?.offline_cache?.available !== true ? 'disabled' : ''}>Keep offline</button>`;
+  return `<div class="offline-entry file-entry"><span class="offline-file-icon">${svg('media')}</span><span class="offline-entry-name"><b>${name}</b><small>${entry.size == null ? 'File' : esc(formatBytes(entry.size))}</small>${windowsPortabilityNote(entry)}</span>${saving ? '<span class="offline-saving" role="status">Saving and verifying…</span>' : availability}${offlineRowOptions(`file:${entry.path}`, 'Options', policyControl, lastPath(entry.path))}</div>`;
 }
 function folderPolicyControlsAvailable() {
   return !isWindowsAgentStatus(state.status) && providerAvailable(state.status?.provider_supported) && state.status?.offline_cache?.available === true;
@@ -2820,6 +2962,7 @@ function vaultDialog() {
 }
 
 function bind() {
+  const offlineControlScope = { epoch: state.accountEpoch, profileId: state.selectedAccount, spaceId: state.spaceId, generation: state.pickerGeneration, authGeneration: state.status?.auth_generation ?? null };
   mediaJobs.bind(app);
   app.querySelectorAll<HTMLElement>('[data-page]').forEach(el => el.addEventListener('click', () => navigateToPage(el.dataset.page as Page)));
   app.querySelector('#refresh')?.addEventListener('click', () => void refresh(true, true));
@@ -2884,6 +3027,57 @@ function bind() {
   app.querySelectorAll<HTMLElement>('[data-retry]').forEach(el => el.addEventListener('click', () => void transferAction('retry', el.dataset.retry || '')));
   app.querySelectorAll<HTMLElement>('[data-cancel]').forEach(el => el.addEventListener('click', () => void transferAction('cancel', el.dataset.cancel || '')));
   app.querySelectorAll<HTMLElement>('[data-remote-path]').forEach(el => el.addEventListener('click', () => { const path = el.dataset.remotePath || '/'; const entry = state.pickerEntries.find(item => item.path === path); if (entry) state.pickerWritable[path] = entry.writable === true && entry.encrypted !== true; void browseRemote(path); }));
+  app.querySelectorAll<HTMLElement>('[data-offline-view]').forEach(el => el.addEventListener('click', () => {
+    const view = el.dataset.offlineView;
+    if (view !== 'browse' && view !== 'storage') return;
+    offlineWorkspaceUi.view = view;
+    if (el.dataset.offlineKind === 'folders' || el.dataset.offlineKind === 'files') offlineWorkspaceUi.windowsKind = el.dataset.offlineKind;
+    render();
+  }));
+  app.querySelectorAll<HTMLElement>('[data-offline-active]').forEach(el => el.addEventListener('click', () => {
+    const pin = offlineUi.pin;
+    if (!pin || pin.accountEpoch !== state.accountEpoch || !state.spaces.some(space => space.id === pin.space_id && !space.encrypted)) return;
+    offlineWorkspaceUi.view = 'browse';
+    state.spaceId = pin.space_id;
+    void loadOfflinePins(pin.space_id);
+    void browseRemote(pin.path);
+  }));
+  app.querySelectorAll<HTMLElement>('[data-offline-kind]').forEach(el => el.addEventListener('click', () => {
+    const kind = el.dataset.offlineKind;
+    if (kind !== 'folders' && kind !== 'files') return;
+    offlineWorkspaceUi.windowsKind = kind;
+    render();
+  }));
+  if (state.page === 'guest') sharingWorkspace.bind(app);
+  const boundCacheScope = cacheLimitUi.scope;
+  app.querySelector<HTMLInputElement>('#offline-limit-amount')?.addEventListener('input', event => {
+    if (cacheLimitUi.scope !== boundCacheScope || cacheLimitUi.busy) return;
+    cacheLimitUi.amount = (event.currentTarget as HTMLInputElement).value;
+    cacheLimitUi.error = ''; cacheLimitUi.notice = ''; render();
+  });
+  app.querySelector<HTMLSelectElement>('#offline-limit-unit')?.addEventListener('change', event => {
+    if (cacheLimitUi.scope !== boundCacheScope || cacheLimitUi.busy) return;
+    cacheLimitUi.unit = (event.currentTarget as HTMLSelectElement).value === 'MiB' ? 'MiB' : 'GiB';
+    cacheLimitUi.error = ''; cacheLimitUi.notice = ''; render();
+  });
+  app.querySelector<HTMLFormElement>('#offline-limit-form')?.addEventListener('submit', event => { event.preventDefault(); void saveCacheLimit(boundCacheScope); });
+  app.querySelector<HTMLElement>('[data-action="cancel-cache-limit"]')?.addEventListener('click', () => {
+    if (cacheLimitUi.scope !== boundCacheScope || cacheLimitUi.busy) return;
+    Object.assign(cacheLimitUi, cacheLimitDraft(cacheLimitUi.original), { error: '', notice: '' }); render();
+  });
+  app.querySelectorAll<HTMLButtonElement>('[data-offline-options]').forEach(el => el.addEventListener('click', () => {
+    const key = el.dataset.offlineOptions;
+    if (!key || state.page !== 'offline') return;
+    if (offlineWorkspaceUi.expanded.has(key)) offlineWorkspaceUi.expanded.delete(key);
+    else offlineWorkspaceUi.expanded.add(key);
+    render();
+  }));
+  app.querySelectorAll<HTMLDetailsElement>('[data-offline-disclosure]').forEach(el => el.addEventListener('toggle', () => {
+    const key = el.dataset.offlineDisclosure;
+    if (!key) return;
+    if (el.open) offlineWorkspaceUi.expanded.add(key);
+    else offlineWorkspaceUi.expanded.delete(key);
+  }));
   app.querySelectorAll<HTMLElement>('[data-load-offline-policy]').forEach(el => el.addEventListener('click', () => void loadOfflinePolicy(el.dataset.loadOfflinePolicy || '')));
   app.querySelectorAll<HTMLElement>('[data-load-folder-policy]').forEach(el => el.addEventListener('click', () => {
     const path = el.dataset.loadFolderPolicy || '';
@@ -2897,6 +3091,7 @@ function bind() {
   }));
   app.querySelectorAll<HTMLElement>('[data-windows-offline-row]').forEach(el => el.addEventListener('click', () => selectWindowsOfflineFile(el.dataset.windowsOfflineRow || '')));
   app.querySelectorAll<HTMLElement>('[data-windows-offline-folder-row]').forEach(el => el.addEventListener('click', () => windowsOfflineFoldersPanel.select(el.dataset.windowsOfflineFolderRow || '')));
+  app.querySelectorAll<HTMLElement>('[data-keep-offline-file]').forEach(el => el.addEventListener('click', () => void keepOfflineFileFromView(el.dataset.keepOfflineFile || '', offlineControlScope)));
   app.querySelectorAll<HTMLSelectElement>('[data-offline-policy-path]').forEach(el => el.addEventListener('change', () => void setOfflinePolicy(el.dataset.offlinePolicyPath || '', el.value as OfflinePolicy)));
   app.querySelectorAll<HTMLElement>('[data-pin-offline]').forEach(el => el.addEventListener('click', () => void startOfflinePin(el.dataset.pinOffline || '')));
   app.querySelectorAll<HTMLElement>('[data-unpin-offline]').forEach(el => el.addEventListener('click', () => void stopOfflinePin(el.dataset.unpinOffline || '')));
@@ -3212,6 +3407,7 @@ async function handleAction(action: string, element?: HTMLElement) {
     case 'cancel-account-name': cancelAccountRename(); break;
     case 'save-account-name': await saveAccountRename(); break;
     case 'open-encrypted-access': if (featureAvailable('vaults_supported')) await openEncryptedAccess(); break;
+    case 'cancel-cache-limit': break;
     case 'refresh-windows-device-cache': await refreshWindowsDeviceCacheUsage(); break;
     case 'open-offline-files': if (providerAvailable(state.status?.provider_supported)) await openOfflineFiles(); break;
     case 'refresh-pending-writes': await loadPendingOfflineWrites(true); break;
@@ -3901,6 +4097,12 @@ async function loadOfflinePolicy(path: string) {
     offlineUi.policyLoading.delete(key);
     if (offlineRequestIsCurrent(epoch, generation, spaceId)) render();
   }
+}
+async function keepOfflineFileFromView(path: string, scope: { epoch: number; profileId: string | null; spaceId: string; generation: number; authGeneration: number | null }) {
+  if (state.page !== 'offline' || state.accountSwitching || scope.profileId === null || !isCurrentAccount(scope.epoch, scope.profileId) ||
+      state.spaceId !== scope.spaceId || state.pickerGeneration !== scope.generation ||
+      (state.status?.auth_generation ?? null) !== scope.authGeneration) return;
+  await setOfflinePolicy(path, 'always_offline');
 }
 async function setOfflinePolicy(path: string, policy: OfflinePolicy) {
   const spaceId = state.spaceId;
@@ -5636,7 +5838,7 @@ async function saveAccountRename() {
   }
 }
 function accountSwitchDisabled() {
-  const pickerModalOpen = state.pickerOpen && !(state.page === 'offline' && state.pickerPurpose === 'offline');
+  const pickerModalOpen = pickerModalShouldRender();
   const encryptedAccessModalOpen = state.vaultAccessOpen && state.page !== 'encrypted';
   return state.accountsLoading || state.accountSwitching || state.mutationBusy > 0 || state.nativeDialogBusy || state.addOpen || pickerModalOpen || state.vaultDialog !== null || encryptedAccessModalOpen || state.addAccountOpen || state.recoveryLoading || state.encryptedEditRecoveryLoading || state.resolvingConflict || state.pickerCreatingFolder;
 }
@@ -6300,7 +6502,7 @@ function lastPath(path: string) { return path.replace(/\\/g, '/').split('/').fil
 function parentPath(path: string) { const parts = path.split('/').filter(Boolean); parts.pop(); return parts.length ? `/${parts.join('/')}` : '/'; }
 function formatBytes(bytes: number) { if (bytes < 1024) return `${bytes} B`; const units = ['KB','MB','GB','TB']; let value = bytes / 1024; let index = 0; while (value >= 1024 && index < units.length - 1) { value /= 1024; index++; } return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[index]}`; }
 function activeCount() { return state.transfers.filter(t => ['queued','running','retry_wait','verifying'].includes((t.state || '').toLowerCase())).length; }
-function attentionCount() { return state.transfers.filter(t => ['failed','conflict','awaiting_authentication'].includes((t.state || '').toLowerCase())).length; }
+function attentionCount() { return transferCounts(state.transfers).attention; }
 
 void listen<string>('navigate', event => { if (['folders','transfers'].includes(event.payload)) navigateToPage(event.payload as Page); });
 void listen<{ source?: string; action?: string }>('raiun:status-changed', async event => {

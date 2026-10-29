@@ -22,6 +22,15 @@ the [Tauri CLI 2.12.1 NSIS template](https://github.com/tauri-apps/tauri/blob/ta
 pinned in `package-lock.json`: its install section copies mapped resources
 under `$INSTDIR`, and its uninstall section deletes those same target paths.
 
+Windows redistribution notices live under `legal/windows/`, separately from
+the Linux dependency inventory. Before staging payloads, the helper verifies
+the Windows target, all four current lockfile hashes, retained notice sizes and
+hashes, and WebView2 SDK provenance. Regenerate that inventory with
+`scripts/collect-runtime-notices.py --help` and the exact official SDK package
+when dependencies change. Packaging refuses unresolved gaps or stale proof;
+it leaves an existing staged payload intact on failure. The installer includes
+the first-party LICENSE/NOTICE and the Windows notice directory.
+
 The pinned template defaults a first-time version upgrade to the existing
 installation instead of selecting the uninstall option. Before copying any
 executable, the installer checks whether the installed shell, agent, or CLI

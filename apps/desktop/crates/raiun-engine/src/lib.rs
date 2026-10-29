@@ -1362,7 +1362,7 @@ impl Engine {
                     .publish_listing(&scope, &parent_id, &cache_entries, now_unix())
                     .is_ok()
                 {
-                    let _ = context.cache.evict_recent(context.cache.quota_bytes());
+                    let _ = context.cache.evict_to_quota();
                 }
                 self.overlay_pending_entries(&scope, &parent_id, &mut entries)?;
                 Ok(entries)
@@ -1796,6 +1796,17 @@ impl Engine {
             CloudError::new(ErrorKind::Unsupported, "offline cache is unavailable")
         })?;
         context.cache.usage().map_err(cache_cloud_error)
+    }
+
+    /// Persist the local cache admission allowance without deleting content.
+    pub fn set_offline_cache_quota(&self, quota_bytes: u64) -> Result<(), CloudError> {
+        let context = self.offline_cache.as_ref().ok_or_else(|| {
+            CloudError::new(ErrorKind::Unsupported, "offline cache is unavailable")
+        })?;
+        context
+            .cache
+            .set_quota_bytes(quota_bytes)
+            .map_err(cache_cloud_error)
     }
 
     /// Enumerate retained ordinary file edits for the active account entirely
@@ -2562,7 +2573,7 @@ impl Engine {
             .cache
             .refresh_pin(&pin.id)
             .map_err(cache_cloud_error)?;
-        let _ = context.cache.evict_recent(context.cache.quota_bytes());
+        let _ = context.cache.evict_to_quota();
         Ok(completed)
     }
 
@@ -2765,7 +2776,7 @@ impl Engine {
                 }
             }
         }
-        let _ = context.cache.evict_recent(context.cache.quota_bytes());
+        let _ = context.cache.evict_to_quota();
         Ok(report)
     }
 
@@ -3253,7 +3264,7 @@ impl Engine {
                     .publish_content(&scope, &version, &mut source, size, Retention::Recent)
                     .is_ok()
                 {
-                    let _ = context.cache.evict_recent(context.cache.quota_bytes());
+                    let _ = context.cache.evict_to_quota();
                 }
             }
             let mut file = snapshot.reopen().map_err(io_error)?;

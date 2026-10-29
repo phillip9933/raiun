@@ -1,0 +1,401 @@
+# Third-party notices (x86_64-pc-windows-gnullvm)
+
+Generated from the locked target Cargo dependency closure and cached production npm package metadata. This is a conservative dependency/notice inventory, not a claim that every listed crate is linked into each binary or that all binary redistributions have been cleared.
+
+Target: `x86_64-pc-windows-gnullvm`
+
+The exact target lock hashes, declared license expressions, source references, retained notice paths and unresolved gaps are recorded in `dependency-inventory.json`. Files listed there are retained under this folder. The first-party product license and attribution are distributed separately as `LICENSE` and `NOTICE.txt`.
+
+## Rust packages
+- `adler2 2.0.1` — 0BSD OR MIT OR Apache-2.0; `legal/windows-gnullvm/rust/adler2-2.0.1/LICENSE-0BSD`, `legal/windows-gnullvm/rust/adler2-2.0.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/adler2-2.0.1/LICENSE-MIT`
+- `aead 0.5.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/aead-0.5.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/aead-0.5.2/LICENSE-MIT`
+- `aes 0.8.4` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/aes-0.8.4/LICENSE-APACHE`, `legal/windows-gnullvm/rust/aes-0.8.4/LICENSE-MIT`
+- `ahash 0.8.12` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/ahash-0.8.12/LICENSE-APACHE`, `legal/windows-gnullvm/rust/ahash-0.8.12/LICENSE-MIT`
+- `aho-corasick 1.1.5` — Unlicense OR MIT; `legal/windows-gnullvm/rust/aho-corasick-1.1.5/COPYING`, `legal/windows-gnullvm/rust/aho-corasick-1.1.5/LICENSE-MIT`
+- `alloc-no-stdlib 3.0.0` — BSD-3-Clause; `legal/windows-gnullvm/rust/alloc-no-stdlib-3.0.0/LICENSE`
+- `alloc-stdlib 0.3.0` — BSD-3-Clause; `legal/windows-gnullvm/upstream/alloc-stdlib/LICENSE`, `legal/windows-gnullvm/upstream/alloc-stdlib/Cargo.toml.orig`, `legal/windows-gnullvm/upstream/alloc-stdlib/cargo-vcs-info.json`
+- `ambient-authority 0.0.2` — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/ambient-authority-0.0.2/COPYRIGHT`, `legal/windows-gnullvm/rust/ambient-authority-0.0.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/ambient-authority-0.0.2/LICENSE-Apache-2.0_WITH_LLVM-exception`, `legal/windows-gnullvm/rust/ambient-authority-0.0.2/LICENSE-MIT`
+- `anstream 1.0.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/anstream-1.0.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/anstream-1.0.0/LICENSE-MIT`
+- `anstyle 1.0.14` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/anstyle-1.0.14/LICENSE-APACHE`, `legal/windows-gnullvm/rust/anstyle-1.0.14/LICENSE-MIT`
+- `anstyle-parse 1.0.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/anstyle-parse-1.0.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/anstyle-parse-1.0.0/LICENSE-MIT`
+- `anstyle-query 1.1.5` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/anstyle-query-1.1.5/LICENSE-APACHE`, `legal/windows-gnullvm/rust/anstyle-query-1.1.5/LICENSE-MIT`
+- `anstyle-wincon 3.0.11` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/anstyle-wincon-3.0.11/LICENSE-APACHE`, `legal/windows-gnullvm/rust/anstyle-wincon-3.0.11/LICENSE-MIT`
+- `anyhow 1.0.104` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/anyhow-1.0.104/LICENSE-APACHE`, `legal/windows-gnullvm/rust/anyhow-1.0.104/LICENSE-MIT`
+- `atomic-waker 1.1.2` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/atomic-waker-1.1.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/atomic-waker-1.1.2/LICENSE-MIT`, `legal/windows-gnullvm/rust/atomic-waker-1.1.2/LICENSE-THIRD-PARTY`
+- `autocfg 1.5.1` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/autocfg-1.5.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/autocfg-1.5.1/LICENSE-MIT`
+- `aws-lc-rs 1.18.2` — ISC AND (Apache-2.0 OR ISC); `legal/windows-gnullvm/rust/aws-lc-rs-1.18.2/LICENSE`
+- `aws-lc-sys 0.46.0` — ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0); `legal/windows-gnullvm/rust/aws-lc-sys-0.46.0/LICENSE`, `legal/windows-gnullvm/rust/aws-lc-sys-0.46.0/aws-lc/LICENSE`, `legal/windows-gnullvm/rust/aws-lc-sys-0.46.0/aws-lc/third_party/fiat/LICENSE`
+- `base64 0.22.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/base64-0.22.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/base64-0.22.1/LICENSE-MIT`
+- `base64 0.23.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/base64-0.23.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/base64-0.23.1/LICENSE-MIT`
+- `base64ct 1.8.3` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/base64ct-1.8.3/LICENSE-APACHE`, `legal/windows-gnullvm/rust/base64ct-1.8.3/LICENSE-MIT`
+- `bit-set 0.8.0` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/bit-set-0.8.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/bit-set-0.8.0/LICENSE-MIT`
+- `bit-vec 0.8.0` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/bit-vec-0.8.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/bit-vec-0.8.0/LICENSE-MIT`
+- `bitflags 2.13.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/bitflags-2.13.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/bitflags-2.13.2/LICENSE-MIT`
+- `block-buffer 0.10.4` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/block-buffer-0.10.4/LICENSE-APACHE`, `legal/windows-gnullvm/rust/block-buffer-0.10.4/LICENSE-MIT`
+- `brotli 9.1.0` — BSD-3-Clause AND MIT; `legal/windows-gnullvm/rust/brotli-9.1.0/LICENSE.BSD-3-Clause`, `legal/windows-gnullvm/rust/brotli-9.1.0/LICENSE.MIT`
+- `brotli-decompressor 6.2.0` — BSD-3-Clause/MIT; `legal/windows-gnullvm/rust/brotli-decompressor-6.2.0/LICENSE`
+- `byteorder 1.5.0` — Unlicense OR MIT; `legal/windows-gnullvm/rust/byteorder-1.5.0/COPYING`, `legal/windows-gnullvm/rust/byteorder-1.5.0/LICENSE-MIT`
+- `bytes 1.12.1` — MIT; `legal/windows-gnullvm/rust/bytes-1.12.1/LICENSE`
+- `camino 1.2.6` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/camino-1.2.6/LICENSE-APACHE`, `legal/windows-gnullvm/rust/camino-1.2.6/LICENSE-MIT`
+- `cap-fs-ext 4.0.3` — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/cap-fs-ext-4.0.3/COPYRIGHT`, `legal/windows-gnullvm/rust/cap-fs-ext-4.0.3/LICENSE-APACHE`, `legal/windows-gnullvm/rust/cap-fs-ext-4.0.3/LICENSE-Apache-2.0_WITH_LLVM-exception`, `legal/windows-gnullvm/rust/cap-fs-ext-4.0.3/LICENSE-MIT`
+- `cap-primitives 4.0.3` — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/cap-primitives-4.0.3/COPYRIGHT`, `legal/windows-gnullvm/rust/cap-primitives-4.0.3/LICENSE-APACHE`, `legal/windows-gnullvm/rust/cap-primitives-4.0.3/LICENSE-Apache-2.0_WITH_LLVM-exception`, `legal/windows-gnullvm/rust/cap-primitives-4.0.3/LICENSE-MIT`
+- `cap-std 4.0.3` — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/cap-std-4.0.3/COPYRIGHT`, `legal/windows-gnullvm/rust/cap-std-4.0.3/LICENSE-APACHE`, `legal/windows-gnullvm/rust/cap-std-4.0.3/LICENSE-Apache-2.0_WITH_LLVM-exception`, `legal/windows-gnullvm/rust/cap-std-4.0.3/LICENSE-MIT`
+- `cargo-platform 0.1.9` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/cargo-platform-0.1.9/LICENSE-APACHE`, `legal/windows-gnullvm/rust/cargo-platform-0.1.9/LICENSE-MIT`
+- `cargo_metadata 0.19.2` — MIT; `legal/windows-gnullvm/rust/cargo_metadata-0.19.2/LICENSE-MIT`
+- `cargo_toml 1.0.1` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/cargo_toml-1.0.1/LICENSE`
+- `caseless 0.2.2` — MIT; `legal/windows-gnullvm/rust/caseless-0.2.2/LICENSE`
+- `cc 1.6.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/cc-1.6.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/cc-1.6.0/LICENSE-MIT`
+- `cfb 0.14.0` — MIT; `legal/windows-gnullvm/rust/cfb-0.14.0/LICENSE`
+- `cfb 0.7.3` — MIT; `legal/windows-gnullvm/rust/cfb-0.7.3/LICENSE`
+- `cfg-if 1.0.5` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/cfg-if-1.0.5/LICENSE-APACHE`, `legal/windows-gnullvm/rust/cfg-if-1.0.5/LICENSE-MIT`
+- `cfg_aliases 0.2.2` — MIT; `legal/windows-gnullvm/rust/cfg_aliases-0.2.2/LICENSE`
+- `chacha20 0.10.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/chacha20-0.10.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/chacha20-0.10.2/LICENSE-MIT`
+- `chrono 0.4.45` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/chrono-0.4.45/LICENSE.txt`
+- `cipher 0.4.4` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/cipher-0.4.4/LICENSE-APACHE`, `legal/windows-gnullvm/rust/cipher-0.4.4/LICENSE-MIT`
+- `clap 4.6.7` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/clap-4.6.7/LICENSE-APACHE`, `legal/windows-gnullvm/rust/clap-4.6.7/LICENSE-MIT`
+- `clap_builder 4.6.7` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/clap_builder-4.6.7/LICENSE-APACHE`, `legal/windows-gnullvm/rust/clap_builder-4.6.7/LICENSE-MIT`
+- `clap_derive 4.6.7` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/clap_derive-4.6.7/LICENSE-APACHE`, `legal/windows-gnullvm/rust/clap_derive-4.6.7/LICENSE-MIT`
+- `clap_lex 1.1.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/clap_lex-1.1.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/clap_lex-1.1.1/LICENSE-MIT`
+- `cmake 0.1.58` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/cmake-0.1.58/LICENSE-APACHE`, `legal/windows-gnullvm/rust/cmake-0.1.58/LICENSE-MIT`
+- `colorchoice 1.0.5` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/colorchoice-1.0.5/LICENSE-APACHE`, `legal/windows-gnullvm/rust/colorchoice-1.0.5/LICENSE-MIT`
+- `cookie 0.18.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/cookie-0.18.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/cookie-0.18.2/LICENSE-MIT`
+- `cpufeatures 0.2.17` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/cpufeatures-0.2.17/LICENSE-APACHE`, `legal/windows-gnullvm/rust/cpufeatures-0.2.17/LICENSE-MIT`
+- `cpufeatures 0.3.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/cpufeatures-0.3.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/cpufeatures-0.3.1/LICENSE-MIT`
+- `crc32fast 1.5.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/crc32fast-1.5.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/crc32fast-1.5.2/LICENSE-MIT`
+- `crossbeam-channel 0.5.17` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/crossbeam-channel-0.5.17/LICENSE-APACHE`, `legal/windows-gnullvm/rust/crossbeam-channel-0.5.17/LICENSE-MIT`, `legal/windows-gnullvm/rust/crossbeam-channel-0.5.17/LICENSE-THIRD-PARTY`
+- `crossbeam-utils 0.8.23` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/crossbeam-utils-0.8.23/LICENSE-APACHE`, `legal/windows-gnullvm/rust/crossbeam-utils-0.8.23/LICENSE-MIT`
+- `crypto-common 0.1.7` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/crypto-common-0.1.7/LICENSE-APACHE`, `legal/windows-gnullvm/rust/crypto-common-0.1.7/LICENSE-MIT`
+- `crypto_secretbox 0.1.1` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/crypto_secretbox-0.1.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/crypto_secretbox-0.1.1/LICENSE-MIT`
+- `cssparser 0.37.0` — MPL-2.0; `legal/windows-gnullvm/rust/cssparser-0.37.0/LICENSE`
+- `cssparser-macros 0.7.1` — MPL-2.0; `legal/windows-gnullvm/rust/cssparser-macros-0.7.1/LICENSE`
+- `ctor 1.0.13` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/ctor-1.0.13/LICENSE-APACHE`, `legal/windows-gnullvm/rust/ctor-1.0.13/LICENSE-MIT`
+- `darling 0.21.3` — MIT; `legal/windows-gnullvm/rust/darling-0.21.3/LICENSE`
+- `darling_core 0.21.3` — MIT; `legal/windows-gnullvm/rust/darling_core-0.21.3/LICENSE`
+- `darling_macro 0.21.3` — MIT; `legal/windows-gnullvm/rust/darling_macro-0.21.3/LICENSE`
+- `deranged 0.5.8` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/deranged-0.5.8/LICENSE-Apache`, `legal/windows-gnullvm/rust/deranged-0.5.8/LICENSE-MIT`
+- `derive_more 2.1.1` — MIT; `legal/windows-gnullvm/rust/derive_more-2.1.1/LICENSE`
+- `derive_more-impl 2.1.1` — MIT; `legal/windows-gnullvm/rust/derive_more-impl-2.1.1/LICENSE`
+- `digest 0.10.7` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/digest-0.10.7/LICENSE-APACHE`, `legal/windows-gnullvm/rust/digest-0.10.7/LICENSE-MIT`
+- `dirs 7.0.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/dirs-7.0.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/dirs-7.0.0/LICENSE-MIT`
+- `dirs-sys 0.5.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/dirs-sys-0.5.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/dirs-sys-0.5.0/LICENSE-MIT`
+- `displaydoc 0.2.7` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/displaydoc-0.2.7/LICENSE-APACHE`, `legal/windows-gnullvm/rust/displaydoc-0.2.7/LICENSE-MIT`
+- `dom_query 0.28.0` — MIT; `legal/windows-gnullvm/rust/dom_query-0.28.0/LICENSE`
+- `dpi 0.1.2` — Apache-2.0 AND MIT; `legal/windows-gnullvm/rust/dpi-0.1.2/LICENSE`, `legal/windows-gnullvm/rust/dpi-0.1.2/LICENSE-LIBM-MIT`
+- `dtoa 1.0.11` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/dtoa-1.0.11/LICENSE-APACHE`, `legal/windows-gnullvm/rust/dtoa-1.0.11/LICENSE-MIT`
+- `dtoa-short 0.3.5` — MPL-2.0; `legal/windows-gnullvm/rust/dtoa-short-0.3.5/LICENSE`
+- `dunce 1.0.5` — CC0-1.0 OR MIT-0 OR Apache-2.0; `legal/windows-gnullvm/rust/dunce-1.0.5/LICENSE`
+- `dyn-clone 1.0.20` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/dyn-clone-1.0.20/LICENSE-APACHE`, `legal/windows-gnullvm/rust/dyn-clone-1.0.20/LICENSE-MIT`
+- `embed-resource 3.0.12` — MIT; `legal/windows-gnullvm/rust/embed-resource-3.0.12/LICENSE`
+- `equivalent 1.0.2` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/equivalent-1.0.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/equivalent-1.0.2/LICENSE-MIT`
+- `erased-serde 0.4.10` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/erased-serde-0.4.10/LICENSE-APACHE`, `legal/windows-gnullvm/rust/erased-serde-0.4.10/LICENSE-MIT`
+- `fallible-iterator 0.3.0` — MIT/Apache-2.0; `legal/windows-gnullvm/rust/fallible-iterator-0.3.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/fallible-iterator-0.3.0/LICENSE-MIT`
+- `fallible-streaming-iterator 0.1.9` — MIT/Apache-2.0; `legal/windows-gnullvm/rust/fallible-streaming-iterator-0.1.9/LICENSE-APACHE`, `legal/windows-gnullvm/rust/fallible-streaming-iterator-0.1.9/LICENSE-MIT`
+- `fastrand 2.5.0` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/fastrand-2.5.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/fastrand-2.5.0/LICENSE-MIT`
+- `fdeflate 0.3.7` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/fdeflate-0.3.7/LICENSE-APACHE`, `legal/windows-gnullvm/rust/fdeflate-0.3.7/LICENSE-MIT`
+- `find-msvc-tools 0.1.14` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/find-msvc-tools-0.1.14/LICENSE-APACHE`, `legal/windows-gnullvm/rust/find-msvc-tools-0.1.14/LICENSE-MIT`
+- `flate2 1.1.10` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/flate2-1.1.10/LICENSE-APACHE`, `legal/windows-gnullvm/rust/flate2-1.1.10/LICENSE-MIT`
+- `fnv 1.0.7` — Apache-2.0 / MIT; `legal/windows-gnullvm/rust/fnv-1.0.7/LICENSE-APACHE`, `legal/windows-gnullvm/rust/fnv-1.0.7/LICENSE-MIT`
+- `foldhash 0.2.0` — Zlib; `legal/windows-gnullvm/rust/foldhash-0.2.0/LICENSE`
+- `form_urlencoded 1.2.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/form_urlencoded-1.2.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/form_urlencoded-1.2.2/LICENSE-MIT`
+- `fs-set-times 0.20.3` — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/fs-set-times-0.20.3/COPYRIGHT`, `legal/windows-gnullvm/rust/fs-set-times-0.20.3/LICENSE-APACHE`, `legal/windows-gnullvm/rust/fs-set-times-0.20.3/LICENSE-Apache-2.0_WITH_LLVM-exception`, `legal/windows-gnullvm/rust/fs-set-times-0.20.3/LICENSE-MIT`
+- `fs2 0.4.3` — MIT/Apache-2.0; `legal/windows-gnullvm/rust/fs2-0.4.3/LICENSE-APACHE`, `legal/windows-gnullvm/rust/fs2-0.4.3/LICENSE-MIT`
+- `fs_extra 1.3.0` — MIT; `legal/windows-gnullvm/rust/fs_extra-1.3.0/LICENSE`
+- `futures-channel 0.3.34` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/futures-channel-0.3.34/LICENSE-APACHE`, `legal/windows-gnullvm/rust/futures-channel-0.3.34/LICENSE-MIT`
+- `futures-core 0.3.34` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/futures-core-0.3.34/LICENSE-APACHE`, `legal/windows-gnullvm/rust/futures-core-0.3.34/LICENSE-MIT`
+- `futures-io 0.3.34` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/futures-io-0.3.34/LICENSE-APACHE`, `legal/windows-gnullvm/rust/futures-io-0.3.34/LICENSE-MIT`
+- `futures-macro 0.3.34` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/futures-macro-0.3.34/LICENSE-APACHE`, `legal/windows-gnullvm/rust/futures-macro-0.3.34/LICENSE-MIT`
+- `futures-sink 0.3.34` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/futures-sink-0.3.34/LICENSE-APACHE`, `legal/windows-gnullvm/rust/futures-sink-0.3.34/LICENSE-MIT`
+- `futures-task 0.3.34` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/futures-task-0.3.34/LICENSE-APACHE`, `legal/windows-gnullvm/rust/futures-task-0.3.34/LICENSE-MIT`
+- `futures-util 0.3.34` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/futures-util-0.3.34/LICENSE-APACHE`, `legal/windows-gnullvm/rust/futures-util-0.3.34/LICENSE-MIT`
+- `generic-array 0.14.7` — MIT; `legal/windows-gnullvm/rust/generic-array-0.14.7/LICENSE`
+- `getrandom 0.2.17` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/getrandom-0.2.17/LICENSE-APACHE`, `legal/windows-gnullvm/rust/getrandom-0.2.17/LICENSE-MIT`
+- `getrandom 0.3.4` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/getrandom-0.3.4/LICENSE-APACHE`, `legal/windows-gnullvm/rust/getrandom-0.3.4/LICENSE-MIT`
+- `getrandom 0.4.3` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/getrandom-0.4.3/LICENSE-APACHE`, `legal/windows-gnullvm/rust/getrandom-0.4.3/LICENSE-MIT`
+- `glob 0.3.4` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/glob-0.3.4/LICENSE-APACHE`, `legal/windows-gnullvm/rust/glob-0.3.4/LICENSE-MIT`
+- `hashbrown 0.12.3` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/hashbrown-0.12.3/LICENSE-APACHE`, `legal/windows-gnullvm/rust/hashbrown-0.12.3/LICENSE-MIT`
+- `hashbrown 0.14.5` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/hashbrown-0.14.5/LICENSE-APACHE`, `legal/windows-gnullvm/rust/hashbrown-0.14.5/LICENSE-MIT`
+- `hashbrown 0.17.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/hashbrown-0.17.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/hashbrown-0.17.1/LICENSE-MIT`
+- `hashlink 0.9.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/hashlink-0.9.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/hashlink-0.9.1/LICENSE-MIT`
+- `heck 0.5.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/heck-0.5.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/heck-0.5.0/LICENSE-MIT`
+- `hex 0.4.3` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/hex-0.4.3/LICENSE-APACHE`, `legal/windows-gnullvm/rust/hex-0.4.3/LICENSE-MIT`
+- `hmac 0.12.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/hmac-0.12.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/hmac-0.12.1/LICENSE-MIT`
+- `html5ever 0.39.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/html5ever-0.39.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/html5ever-0.39.0/LICENSE-MIT`
+- `http 1.5.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/http-1.5.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/http-1.5.0/LICENSE-MIT`
+- `http-body 1.1.0` — MIT; `legal/windows-gnullvm/rust/http-body-1.1.0/LICENSE`
+- `http-body-util 0.1.5` — MIT; `legal/windows-gnullvm/rust/http-body-util-0.1.5/LICENSE`
+- `httparse 1.10.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/httparse-1.10.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/httparse-1.10.1/LICENSE-MIT`
+- `hyper 1.12.0` — MIT; `legal/windows-gnullvm/rust/hyper-1.12.0/LICENSE`
+- `hyper-rustls 0.27.10` — Apache-2.0 OR ISC OR MIT; `legal/windows-gnullvm/rust/hyper-rustls-0.27.10/LICENSE-APACHE`, `legal/windows-gnullvm/rust/hyper-rustls-0.27.10/LICENSE-ISC`, `legal/windows-gnullvm/rust/hyper-rustls-0.27.10/LICENSE-MIT`
+- `hyper-util 0.1.21` — MIT; `legal/windows-gnullvm/rust/hyper-util-0.1.21/LICENSE`
+- `ico 0.6.0` — MIT; `legal/windows-gnullvm/rust/ico-0.6.0/LICENSE`
+- `icu_collections 2.1.1` — Unicode-3.0; `legal/windows-gnullvm/rust/icu_collections-2.1.1/LICENSE`
+- `icu_collections 2.3.0` — Unicode-3.0; `legal/windows-gnullvm/rust/icu_collections-2.3.0/LICENSE`
+- `icu_locale_core 2.1.1` — Unicode-3.0; `legal/windows-gnullvm/rust/icu_locale_core-2.1.1/LICENSE`
+- `icu_locale_core 2.3.0` — Unicode-3.0; `legal/windows-gnullvm/rust/icu_locale_core-2.3.0/LICENSE`
+- `icu_normalizer 2.1.1` — Unicode-3.0; `legal/windows-gnullvm/rust/icu_normalizer-2.1.1/LICENSE`
+- `icu_normalizer 2.3.0` — Unicode-3.0; `legal/windows-gnullvm/rust/icu_normalizer-2.3.0/LICENSE`
+- `icu_normalizer_data 2.1.1` — Unicode-3.0; `legal/windows-gnullvm/rust/icu_normalizer_data-2.1.1/LICENSE`
+- `icu_normalizer_data 2.3.0` — Unicode-3.0; `legal/windows-gnullvm/rust/icu_normalizer_data-2.3.0/LICENSE`
+- `icu_properties 2.1.2` — Unicode-3.0; `legal/windows-gnullvm/rust/icu_properties-2.1.2/LICENSE`
+- `icu_properties 2.3.0` — Unicode-3.0; `legal/windows-gnullvm/rust/icu_properties-2.3.0/LICENSE`
+- `icu_properties_data 2.1.2` — Unicode-3.0; `legal/windows-gnullvm/rust/icu_properties_data-2.1.2/LICENSE`
+- `icu_properties_data 2.3.0` — Unicode-3.0; `legal/windows-gnullvm/rust/icu_properties_data-2.3.0/LICENSE`
+- `icu_provider 2.1.1` — Unicode-3.0; `legal/windows-gnullvm/rust/icu_provider-2.1.1/LICENSE`
+- `icu_provider 2.3.1` — Unicode-3.0; `legal/windows-gnullvm/rust/icu_provider-2.3.1/LICENSE`
+- `ident_case 1.0.1` — MIT/Apache-2.0; `legal/windows-gnullvm/rust/ident_case-1.0.1/LICENSE`
+- `idna 1.1.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/idna-1.1.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/idna-1.1.0/LICENSE-MIT`
+- `idna_adapter 1.2.1` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/idna_adapter-1.2.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/idna_adapter-1.2.1/LICENSE-MIT`
+- `idna_adapter 1.2.2` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/idna_adapter-1.2.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/idna_adapter-1.2.2/LICENSE-MIT`
+- `indexmap 1.9.3` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/indexmap-1.9.3/LICENSE-APACHE`, `legal/windows-gnullvm/rust/indexmap-1.9.3/LICENSE-MIT`
+- `indexmap 2.14.2` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/indexmap-2.14.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/indexmap-2.14.2/LICENSE-MIT`
+- `infer 0.19.0` — MIT; `legal/windows-gnullvm/rust/infer-0.19.0/LICENSE`
+- `infer 0.22.0` — MIT; `legal/windows-gnullvm/rust/infer-0.22.0/LICENSE`
+- `inout 0.1.4` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/inout-0.1.4/LICENSE-APACHE`, `legal/windows-gnullvm/rust/inout-0.1.4/LICENSE-MIT`
+- `io-extras 0.19.0` — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/io-extras-0.19.0/COPYRIGHT`, `legal/windows-gnullvm/rust/io-extras-0.19.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/io-extras-0.19.0/LICENSE-Apache-2.0_WITH_LLVM-exception`, `legal/windows-gnullvm/rust/io-extras-0.19.0/LICENSE-MIT`
+- `io-lifetimes 2.0.4` — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/io-lifetimes-2.0.4/COPYRIGHT`, `legal/windows-gnullvm/rust/io-lifetimes-2.0.4/LICENSE-APACHE`, `legal/windows-gnullvm/rust/io-lifetimes-2.0.4/LICENSE-Apache-2.0_WITH_LLVM-exception`, `legal/windows-gnullvm/rust/io-lifetimes-2.0.4/LICENSE-MIT`
+- `io-lifetimes 3.0.1` — Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/io-lifetimes-3.0.1/COPYRIGHT`, `legal/windows-gnullvm/rust/io-lifetimes-3.0.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/io-lifetimes-3.0.1/LICENSE-Apache-2.0_WITH_LLVM-exception`, `legal/windows-gnullvm/rust/io-lifetimes-3.0.1/LICENSE-MIT`
+- `ipnet 2.12.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/ipnet-2.12.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/ipnet-2.12.2/LICENSE-MIT`
+- `is_terminal_polyfill 1.70.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/is_terminal_polyfill-1.70.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/is_terminal_polyfill-1.70.2/LICENSE-MIT`
+- `itoa 1.0.18` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/itoa-1.0.18/LICENSE-APACHE`, `legal/windows-gnullvm/rust/itoa-1.0.18/LICENSE-MIT`
+- `jobserver 0.1.35` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/jobserver-0.1.35/LICENSE-APACHE`, `legal/windows-gnullvm/rust/jobserver-0.1.35/LICENSE-MIT`
+- `json-patch 4.2.0` — MIT/Apache-2.0; `legal/windows-gnullvm/rust/json-patch-4.2.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/json-patch-4.2.0/LICENSE-MIT`
+- `jsonptr 0.7.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/jsonptr-0.7.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/jsonptr-0.7.1/LICENSE-MIT`
+- `keyboard-types 0.8.3` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/keyboard-types-0.8.3/LICENSE-APACHE`, `legal/windows-gnullvm/rust/keyboard-types-0.8.3/LICENSE-MIT`
+- `libc 0.2.190` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/libc-0.2.190/LICENSE-APACHE`, `legal/windows-gnullvm/rust/libc-0.2.190/LICENSE-MIT`
+- `libsqlite3-sys 0.30.1` — MIT; `legal/windows-gnullvm/rust/libsqlite3-sys-0.30.1/LICENSE`, `legal/windows-gnullvm/rust/libsqlite3-sys-0.30.1/sqlcipher/LICENSE`
+- `litemap 0.8.3` — Unicode-3.0; `legal/windows-gnullvm/rust/litemap-0.8.3/LICENSE`
+- `lock_api 0.4.14` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/lock_api-0.4.14/LICENSE-APACHE`, `legal/windows-gnullvm/rust/lock_api-0.4.14/LICENSE-MIT`
+- `log 0.4.34` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/log-0.4.34/LICENSE-APACHE`, `legal/windows-gnullvm/rust/log-0.4.34/LICENSE-MIT`
+- `lru-slab 0.1.3` — MIT OR Apache-2.0 OR Zlib; `legal/windows-gnullvm/rust/lru-slab-0.1.3/LICENSE-APACHE`, `legal/windows-gnullvm/rust/lru-slab-0.1.3/LICENSE-MIT`, `legal/windows-gnullvm/rust/lru-slab-0.1.3/LICENSE-ZLIB`
+- `markup5ever 0.39.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/markup5ever-0.39.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/markup5ever-0.39.0/LICENSE-MIT`
+- `maybe-owned 0.3.4` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/maybe-owned-0.3.4/LICENSE-APACHE`, `legal/windows-gnullvm/rust/maybe-owned-0.3.4/LICENSE-MIT`
+- `memchr 2.8.3` — Unlicense OR MIT; `legal/windows-gnullvm/rust/memchr-2.8.3/COPYING`, `legal/windows-gnullvm/rust/memchr-2.8.3/LICENSE-MIT`
+- `mime 0.3.17` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/mime-0.3.17/LICENSE-APACHE`, `legal/windows-gnullvm/rust/mime-0.3.17/LICENSE-MIT`
+- `minisign-verify 0.3.0` — MIT; `legal/windows-gnullvm/rust/minisign-verify-0.3.0/LICENSE`
+- `miniz_oxide 0.8.9` — MIT OR Zlib OR Apache-2.0; `legal/windows-gnullvm/rust/miniz_oxide-0.8.9/LICENSE`, `legal/windows-gnullvm/rust/miniz_oxide-0.8.9/LICENSE-APACHE.md`, `legal/windows-gnullvm/rust/miniz_oxide-0.8.9/LICENSE-MIT.md`, `legal/windows-gnullvm/rust/miniz_oxide-0.8.9/LICENSE-ZLIB.md`
+- `miniz_oxide 0.9.1` — MIT OR Zlib OR Apache-2.0; `legal/windows-gnullvm/rust/miniz_oxide-0.9.1/LICENSE`, `legal/windows-gnullvm/rust/miniz_oxide-0.9.1/LICENSE-APACHE.md`, `legal/windows-gnullvm/rust/miniz_oxide-0.9.1/LICENSE-MIT.md`, `legal/windows-gnullvm/rust/miniz_oxide-0.9.1/LICENSE-ZLIB.md`
+- `mio 1.2.4` — MIT; `legal/windows-gnullvm/rust/mio-1.2.4/LICENSE`
+- `muda 0.20.0` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/muda-0.20.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/muda-0.20.0/LICENSE-MIT`, `legal/windows-gnullvm/rust/muda-0.20.0/LICENSE.spdx`
+- `new_debug_unreachable 1.0.6` — MIT; `legal/windows-gnullvm/rust/new_debug_unreachable-1.0.6/LICENSE-MIT`
+- `num-conv 0.1.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/num-conv-0.1.0/LICENSE-Apache`, `legal/windows-gnullvm/rust/num-conv-0.1.0/LICENSE-MIT`
+- `num-traits 0.2.19` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/num-traits-0.2.19/LICENSE-APACHE`, `legal/windows-gnullvm/rust/num-traits-0.2.19/LICENSE-MIT`
+- `once_cell 1.21.4` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/once_cell-1.21.4/LICENSE-APACHE`, `legal/windows-gnullvm/rust/once_cell-1.21.4/LICENSE-MIT`
+- `once_cell_polyfill 1.70.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/once_cell_polyfill-1.70.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/once_cell_polyfill-1.70.2/LICENSE-MIT`
+- `opaque-debug 0.3.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/opaque-debug-0.3.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/opaque-debug-0.3.1/LICENSE-MIT`
+- `open 5.4.4` — MIT; `legal/windows-gnullvm/rust/open-5.4.4/LICENSE.md`
+- `option-ext 0.2.0` — MPL-2.0; `legal/windows-gnullvm/rust/option-ext-0.2.0/LICENSE.txt`
+- `parking_lot 0.12.5` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/parking_lot-0.12.5/LICENSE-APACHE`, `legal/windows-gnullvm/rust/parking_lot-0.12.5/LICENSE-MIT`
+- `parking_lot_core 0.9.12` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/parking_lot_core-0.9.12/LICENSE-APACHE`, `legal/windows-gnullvm/rust/parking_lot_core-0.9.12/LICENSE-MIT`
+- `password-hash 0.5.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/password-hash-0.5.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/password-hash-0.5.0/LICENSE-MIT`
+- `pbkdf2 0.12.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/pbkdf2-0.12.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/pbkdf2-0.12.2/LICENSE-MIT`
+- `percent-encoding 2.3.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/percent-encoding-2.3.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/percent-encoding-2.3.2/LICENSE-MIT`
+- `phf 0.13.1` — MIT; `legal/windows-gnullvm/rust/phf-0.13.1/LICENSE`
+- `phf_codegen 0.13.1` — MIT; `legal/windows-gnullvm/rust/phf_codegen-0.13.1/LICENSE`
+- `phf_generator 0.13.1` — MIT; `legal/windows-gnullvm/rust/phf_generator-0.13.1/LICENSE`
+- `phf_macros 0.13.1` — MIT; `legal/windows-gnullvm/rust/phf_macros-0.13.1/LICENSE`
+- `phf_shared 0.13.1` — MIT; `legal/windows-gnullvm/rust/phf_shared-0.13.1/LICENSE`
+- `pin-project-lite 0.2.17` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/pin-project-lite-0.2.17/LICENSE-APACHE`, `legal/windows-gnullvm/rust/pin-project-lite-0.2.17/LICENSE-MIT`
+- `pkg-config 0.3.34` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/pkg-config-0.3.34/LICENSE-APACHE`, `legal/windows-gnullvm/rust/pkg-config-0.3.34/LICENSE-MIT`
+- `plist 1.8.0` — MIT; `legal/windows-gnullvm/rust/plist-1.8.0/LICENCE`
+- `png 0.18.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/png-0.18.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/png-0.18.1/LICENSE-MIT`
+- `poly1305 0.8.0` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/poly1305-0.8.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/poly1305-0.8.0/LICENSE-MIT`
+- `potential_utf 0.1.6` — Unicode-3.0; `legal/windows-gnullvm/rust/potential_utf-0.1.6/LICENSE`
+- `powerfmt 0.2.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/powerfmt-0.2.1/LICENSE-Apache`, `legal/windows-gnullvm/rust/powerfmt-0.2.1/LICENSE-MIT`
+- `precomputed-hash 0.1.1` — MIT; `legal/windows-gnullvm/rust/precomputed-hash-0.1.1/LICENSE`
+- `proc-macro2 1.0.107` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/proc-macro2-1.0.107/LICENSE-APACHE`, `legal/windows-gnullvm/rust/proc-macro2-1.0.107/LICENSE-MIT`
+- `quick-xml 0.38.4` — MIT; `legal/windows-gnullvm/rust/quick-xml-0.38.4/LICENSE-MIT.md`
+- `quinn 0.11.12` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/quinn-0.11.12/LICENSE-APACHE`, `legal/windows-gnullvm/rust/quinn-0.11.12/LICENSE-MIT`
+- `quinn-proto 0.11.19` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/quinn-proto-0.11.19/LICENSE-APACHE`, `legal/windows-gnullvm/rust/quinn-proto-0.11.19/LICENSE-MIT`
+- `quinn-udp 0.5.16` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/quinn-udp-0.5.16/LICENSE-APACHE`, `legal/windows-gnullvm/rust/quinn-udp-0.5.16/LICENSE-MIT`
+- `quote 1.0.47` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/quote-1.0.47/LICENSE-APACHE`, `legal/windows-gnullvm/rust/quote-1.0.47/LICENSE-MIT`
+- `rand 0.10.3` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/rand-0.10.3/COPYRIGHT`, `legal/windows-gnullvm/rust/rand-0.10.3/LICENSE-APACHE`, `legal/windows-gnullvm/rust/rand-0.10.3/LICENSE-MIT`
+- `rand_core 0.10.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/rand_core-0.10.1/COPYRIGHT`, `legal/windows-gnullvm/rust/rand_core-0.10.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/rand_core-0.10.1/LICENSE-MIT`
+- `rand_core 0.6.4` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/rand_core-0.6.4/COPYRIGHT`, `legal/windows-gnullvm/rust/rand_core-0.6.4/LICENSE-APACHE`, `legal/windows-gnullvm/rust/rand_core-0.6.4/LICENSE-MIT`
+- `rand_pcg 0.10.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/rand_pcg-0.10.2/COPYRIGHT`, `legal/windows-gnullvm/rust/rand_pcg-0.10.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/rand_pcg-0.10.2/LICENSE-MIT`
+- `raw-window-handle 0.6.2` — MIT OR Apache-2.0 OR Zlib; `legal/windows-gnullvm/rust/raw-window-handle-0.6.2/LICENSE-APACHE.md`, `legal/windows-gnullvm/rust/raw-window-handle-0.6.2/LICENSE-MIT.md`, `legal/windows-gnullvm/rust/raw-window-handle-0.6.2/LICENSE-ZLIB.md`
+- `ref-cast 1.0.27` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/ref-cast-1.0.27/LICENSE-APACHE`, `legal/windows-gnullvm/rust/ref-cast-1.0.27/LICENSE-MIT`
+- `ref-cast-impl 1.0.27` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/ref-cast-impl-1.0.27/LICENSE-APACHE`, `legal/windows-gnullvm/rust/ref-cast-impl-1.0.27/LICENSE-MIT`
+- `regex 1.13.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/regex-1.13.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/regex-1.13.1/LICENSE-MIT`
+- `regex-automata 0.4.18` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/regex-automata-0.4.18/LICENSE-APACHE`, `legal/windows-gnullvm/rust/regex-automata-0.4.18/LICENSE-MIT`
+- `regex-syntax 0.8.11` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/regex-syntax-0.8.11/LICENSE-APACHE`, `legal/windows-gnullvm/rust/regex-syntax-0.8.11/LICENSE-MIT`, `legal/windows-gnullvm/rust/regex-syntax-0.8.11/src/unicode_tables/LICENSE-UNICODE`
+- `reqwest 0.12.28` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/reqwest-0.12.28/LICENSE-APACHE`, `legal/windows-gnullvm/rust/reqwest-0.12.28/LICENSE-MIT`
+- `reqwest 0.13.5` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/reqwest-0.13.5/LICENSE-APACHE`, `legal/windows-gnullvm/rust/reqwest-0.13.5/LICENSE-MIT`
+- `rfd 0.16.0` — MIT; `legal/windows-gnullvm/rust/rfd-0.16.0/LICENSE`
+- `ring 0.17.14` — Apache-2.0 AND ISC; `legal/windows-gnullvm/rust/ring-0.17.14/LICENSE`, `legal/windows-gnullvm/rust/ring-0.17.14/LICENSE-BoringSSL`, `legal/windows-gnullvm/rust/ring-0.17.14/LICENSE-other-bits`, `legal/windows-gnullvm/rust/ring-0.17.14/src/polyfill/once_cell/LICENSE-APACHE`, `legal/windows-gnullvm/rust/ring-0.17.14/src/polyfill/once_cell/LICENSE-MIT`, `legal/windows-gnullvm/rust/ring-0.17.14/third_party/fiat/LICENSE`
+- `rusqlite 0.32.1` — MIT; `legal/windows-gnullvm/rust/rusqlite-0.32.1/LICENSE`
+- `rustc-hash 2.1.3` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/rustc-hash-2.1.3/LICENSE-APACHE`, `legal/windows-gnullvm/rust/rustc-hash-2.1.3/LICENSE-MIT`
+- `rustc_version 0.4.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/rustc_version-0.4.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/rustc_version-0.4.1/LICENSE-MIT`
+- `rustls 0.23.45` — Apache-2.0 OR ISC OR MIT; `legal/windows-gnullvm/rust/rustls-0.23.45/LICENSE-APACHE`, `legal/windows-gnullvm/rust/rustls-0.23.45/LICENSE-ISC`, `legal/windows-gnullvm/rust/rustls-0.23.45/LICENSE-MIT`
+- `rustls 0.23.46` — Apache-2.0 OR ISC OR MIT; `legal/windows-gnullvm/rust/rustls-0.23.46/LICENSE-APACHE`, `legal/windows-gnullvm/rust/rustls-0.23.46/LICENSE-ISC`, `legal/windows-gnullvm/rust/rustls-0.23.46/LICENSE-MIT`
+- `rustls-pki-types 1.15.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/rustls-pki-types-1.15.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/rustls-pki-types-1.15.1/LICENSE-MIT`
+- `rustls-platform-verifier 0.7.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/rustls-platform-verifier-0.7.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/rustls-platform-verifier-0.7.1/LICENSE-MIT`
+- `rustls-webpki 0.103.15` — ISC; `legal/windows-gnullvm/rust/rustls-webpki-0.103.15/LICENSE`
+- `rustls-webpki 0.103.16` — ISC; `legal/windows-gnullvm/rust/rustls-webpki-0.103.16/LICENSE`
+- `ryu 1.0.23` — Apache-2.0 OR BSL-1.0; `legal/windows-gnullvm/rust/ryu-1.0.23/LICENSE-APACHE`, `legal/windows-gnullvm/rust/ryu-1.0.23/LICENSE-BOOST`
+- `salsa20 0.10.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/salsa20-0.10.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/salsa20-0.10.2/LICENSE-MIT`
+- `same-file 1.0.6` — Unlicense/MIT; `legal/windows-gnullvm/rust/same-file-1.0.6/COPYING`, `legal/windows-gnullvm/rust/same-file-1.0.6/LICENSE-MIT`
+- `schemars 0.8.22` — MIT; `legal/windows-gnullvm/rust/schemars-0.8.22/LICENSE`
+- `schemars 0.9.0` — MIT; `legal/windows-gnullvm/rust/schemars-0.9.0/LICENSE`
+- `schemars 1.2.2` — MIT; `legal/windows-gnullvm/rust/schemars-1.2.2/LICENSE`
+- `schemars_derive 0.8.22` — MIT; `legal/windows-gnullvm/rust/schemars_derive-0.8.22/LICENSE`
+- `scopeguard 1.2.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/scopeguard-1.2.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/scopeguard-1.2.0/LICENSE-MIT`
+- `scrypt 0.11.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/scrypt-0.11.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/scrypt-0.11.0/LICENSE-MIT`
+- `selectors 0.38.0` — MPL-2.0; `legal/windows-gnullvm/upstream/selectors/source-license-header.txt`, `legal/windows-gnullvm/upstream/selectors/MPL-2.0.txt`, `legal/windows-gnullvm/upstream/selectors/Cargo.toml.orig`, `legal/windows-gnullvm/upstream/selectors/cargo-vcs-info.json`
+- `semver 1.0.28` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/semver-1.0.28/LICENSE-APACHE`, `legal/windows-gnullvm/rust/semver-1.0.28/LICENSE-MIT`
+- `serde 1.0.229` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/serde-1.0.229/LICENSE-APACHE`, `legal/windows-gnullvm/rust/serde-1.0.229/LICENSE-MIT`
+- `serde-untagged 0.1.9` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/serde-untagged-0.1.9/LICENSE-APACHE`, `legal/windows-gnullvm/rust/serde-untagged-0.1.9/LICENSE-MIT`
+- `serde_core 1.0.229` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/serde_core-1.0.229/LICENSE-APACHE`, `legal/windows-gnullvm/rust/serde_core-1.0.229/LICENSE-MIT`
+- `serde_derive 1.0.229` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/serde_derive-1.0.229/LICENSE-APACHE`, `legal/windows-gnullvm/rust/serde_derive-1.0.229/LICENSE-MIT`
+- `serde_derive_internals 0.29.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/serde_derive_internals-0.29.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/serde_derive_internals-0.29.1/LICENSE-MIT`
+- `serde_json 1.0.151` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/serde_json-1.0.151/LICENSE-APACHE`, `legal/windows-gnullvm/rust/serde_json-1.0.151/LICENSE-MIT`
+- `serde_repr 0.1.21` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/serde_repr-0.1.21/LICENSE-APACHE`, `legal/windows-gnullvm/rust/serde_repr-0.1.21/LICENSE-MIT`
+- `serde_spanned 1.1.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/serde_spanned-1.1.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/serde_spanned-1.1.2/LICENSE-MIT`
+- `serde_urlencoded 0.7.1` — MIT/Apache-2.0; `legal/windows-gnullvm/rust/serde_urlencoded-0.7.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/serde_urlencoded-0.7.1/LICENSE-MIT`
+- `serde_with 3.17.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/serde_with-3.17.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/serde_with-3.17.0/LICENSE-MIT`
+- `serde_with_macros 3.17.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/serde_with_macros-3.17.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/serde_with_macros-3.17.0/LICENSE-MIT`
+- `serialize-to-javascript 0.1.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/serialize-to-javascript-0.1.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/serialize-to-javascript-0.1.2/LICENSE-MIT`
+- `serialize-to-javascript-impl 0.1.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/serialize-to-javascript-impl-0.1.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/serialize-to-javascript-impl-0.1.2/LICENSE-MIT`
+- `servo_arc 0.4.3` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/servo_arc-0.4.3/LICENSE-APACHE`, `legal/windows-gnullvm/rust/servo_arc-0.4.3/LICENSE-MIT`
+- `sha2 0.10.9` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/sha2-0.10.9/LICENSE-APACHE`, `legal/windows-gnullvm/rust/sha2-0.10.9/LICENSE-MIT`
+- `shlex 2.0.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/shlex-2.0.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/shlex-2.0.1/LICENSE-MIT`
+- `simd-adler32 0.3.10` — MIT; `legal/windows-gnullvm/rust/simd-adler32-0.3.10/LICENSE.md`
+- `siphasher 1.0.4` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/siphasher-1.0.4/COPYING`, `legal/windows-gnullvm/rust/siphasher-1.0.4/LICENSE-APACHE`, `legal/windows-gnullvm/rust/siphasher-1.0.4/LICENSE-MIT`
+- `slab 0.4.12` — MIT; `legal/windows-gnullvm/rust/slab-0.4.12/LICENSE`
+- `smallvec 1.16.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/smallvec-1.16.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/smallvec-1.16.2/LICENSE-MIT`
+- `socket2 0.6.5` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/socket2-0.6.5/LICENSE-APACHE`, `legal/windows-gnullvm/rust/socket2-0.6.5/LICENSE-MIT`
+- `softbuffer 0.4.8` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/softbuffer-0.4.8/LICENSE-APACHE`, `legal/windows-gnullvm/rust/softbuffer-0.4.8/LICENSE-MIT`
+- `stable_deref_trait 1.2.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/stable_deref_trait-1.2.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/stable_deref_trait-1.2.1/LICENSE-MIT`
+- `static_vcruntime 3.0.0` — MIT OR Apache-2.0 OR Zlib; `legal/windows-gnullvm/rust/static_vcruntime-3.0.0/LICENSE`, `legal/windows-gnullvm/rust/static_vcruntime-3.0.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/static_vcruntime-3.0.0/LICENSE-MIT`, `legal/windows-gnullvm/rust/static_vcruntime-3.0.0/LICENSE-ZLIB`
+- `string_cache 0.9.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/string_cache-0.9.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/string_cache-0.9.0/LICENSE-MIT`
+- `string_cache_codegen 0.6.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/string_cache_codegen-0.6.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/string_cache_codegen-0.6.1/LICENSE-MIT`
+- `strsim 0.11.1` — MIT; `legal/windows-gnullvm/rust/strsim-0.11.1/LICENSE`
+- `subtle 2.6.1` — BSD-3-Clause; `legal/windows-gnullvm/rust/subtle-2.6.1/LICENSE`
+- `syn 2.0.119` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/syn-2.0.119/LICENSE-APACHE`, `legal/windows-gnullvm/rust/syn-2.0.119/LICENSE-MIT`
+- `syn 3.0.6` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/syn-3.0.6/LICENSE-APACHE`, `legal/windows-gnullvm/rust/syn-3.0.6/LICENSE-MIT`
+- `sync_wrapper 1.0.2` — Apache-2.0; `legal/windows-gnullvm/rust/sync_wrapper-1.0.2/LICENSE`
+- `synstructure 0.14.0` — MIT; `legal/windows-gnullvm/rust/synstructure-0.14.0/LICENSE`
+- `tao 0.37.2` — Apache-2.0; `legal/windows-gnullvm/rust/tao-0.37.2/LICENSE`, `legal/windows-gnullvm/rust/tao-0.37.2/LICENSE.spdx`
+- `tauri 2.12.5` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tauri-2.12.5/LICENSE-APACHE-2.0`, `legal/windows-gnullvm/rust/tauri-2.12.5/LICENSE-MIT`
+- `tauri-build 2.7.4` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tauri-build-2.7.4/LICENSE-APACHE-2.0`, `legal/windows-gnullvm/rust/tauri-build-2.7.4/LICENSE-MIT`
+- `tauri-codegen 2.7.4` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tauri-codegen-2.7.4/LICENSE-APACHE-2.0`, `legal/windows-gnullvm/rust/tauri-codegen-2.7.4/LICENSE-MIT`
+- `tauri-macros 2.7.4` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tauri-macros-2.7.4/LICENSE-APACHE-2.0`, `legal/windows-gnullvm/rust/tauri-macros-2.7.4/LICENSE-MIT`
+- `tauri-plugin 2.7.2` — Apache-2.0 OR MIT; `legal/windows-gnullvm/upstream/tauri-plugin/LICENSE-MIT`, `legal/windows-gnullvm/upstream/tauri-plugin/LICENSE-APACHE-2.0`, `legal/windows-gnullvm/upstream/tauri-plugin/LICENSE.spdx`, `legal/windows-gnullvm/upstream/tauri-plugin/Cargo.toml.orig`, `legal/windows-gnullvm/upstream/tauri-plugin/cargo-vcs-info.json`
+- `tauri-plugin-dialog 2.7.3` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tauri-plugin-dialog-2.7.3/LICENSE.spdx`, `legal/windows-gnullvm/rust/tauri-plugin-dialog-2.7.3/LICENSE_APACHE-2.0`, `legal/windows-gnullvm/rust/tauri-plugin-dialog-2.7.3/LICENSE_MIT`
+- `tauri-plugin-fs 2.5.2` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tauri-plugin-fs-2.5.2/LICENSE.spdx`, `legal/windows-gnullvm/rust/tauri-plugin-fs-2.5.2/LICENSE_APACHE-2.0`, `legal/windows-gnullvm/rust/tauri-plugin-fs-2.5.2/LICENSE_MIT`
+- `tauri-plugin-opener 2.5.5` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tauri-plugin-opener-2.5.5/LICENSE.spdx`, `legal/windows-gnullvm/rust/tauri-plugin-opener-2.5.5/LICENSE_APACHE-2.0`, `legal/windows-gnullvm/rust/tauri-plugin-opener-2.5.5/LICENSE_MIT`
+- `tauri-plugin-single-instance 2.4.5` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tauri-plugin-single-instance-2.4.5/LICENSE.spdx`, `legal/windows-gnullvm/rust/tauri-plugin-single-instance-2.4.5/LICENSE_APACHE-2.0`, `legal/windows-gnullvm/rust/tauri-plugin-single-instance-2.4.5/LICENSE_MIT`
+- `tauri-plugin-updater 2.14.0` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tauri-plugin-updater-2.14.0/LICENSE.spdx`, `legal/windows-gnullvm/rust/tauri-plugin-updater-2.14.0/LICENSE_APACHE-2.0`, `legal/windows-gnullvm/rust/tauri-plugin-updater-2.14.0/LICENSE_MIT`
+- `tauri-runtime 2.12.2` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tauri-runtime-2.12.2/LICENSE-APACHE-2.0`, `legal/windows-gnullvm/rust/tauri-runtime-2.12.2/LICENSE-MIT`
+- `tauri-runtime-wry 2.12.3` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tauri-runtime-wry-2.12.3/LICENSE-APACHE-2.0`, `legal/windows-gnullvm/rust/tauri-runtime-wry-2.12.3/LICENSE-MIT`
+- `tauri-utils 2.10.2` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tauri-utils-2.10.2/LICENSE-APACHE-2.0`, `legal/windows-gnullvm/rust/tauri-utils-2.10.2/LICENSE-MIT`
+- `tauri-winres 0.3.6` — MIT; `legal/windows-gnullvm/rust/tauri-winres-0.3.6/LICENSE`
+- `tempfile 3.27.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/tempfile-3.27.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/tempfile-3.27.0/LICENSE-MIT`
+- `tendril 0.5.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/tendril-0.5.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/tendril-0.5.1/LICENSE-MIT`
+- `thiserror 2.0.21` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/thiserror-2.0.21/LICENSE-APACHE`, `legal/windows-gnullvm/rust/thiserror-2.0.21/LICENSE-MIT`
+- `thiserror-impl 2.0.21` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/thiserror-impl-2.0.21/LICENSE-APACHE`, `legal/windows-gnullvm/rust/thiserror-impl-2.0.21/LICENSE-MIT`
+- `time 0.3.45` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/time-0.3.45/LICENSE-Apache`, `legal/windows-gnullvm/rust/time-0.3.45/LICENSE-MIT`
+- `time-core 0.1.7` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/time-core-0.1.7/LICENSE-Apache`, `legal/windows-gnullvm/rust/time-core-0.1.7/LICENSE-MIT`
+- `time-macros 0.2.25` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/time-macros-0.2.25/LICENSE-Apache`, `legal/windows-gnullvm/rust/time-macros-0.2.25/LICENSE-MIT`
+- `tinystr 0.8.4` — Unicode-3.0; `legal/windows-gnullvm/rust/tinystr-0.8.4/LICENSE`
+- `tinyvec 1.13.3` — Zlib OR Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/tinyvec-1.13.3/LICENSE-APACHE.md`, `legal/windows-gnullvm/rust/tinyvec-1.13.3/LICENSE-MIT.md`, `legal/windows-gnullvm/rust/tinyvec-1.13.3/LICENSE-ZLIB.md`
+- `tokio 1.53.2` — MIT; `legal/windows-gnullvm/rust/tokio-1.53.2/LICENSE`
+- `tokio-rustls 0.26.6` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/tokio-rustls-0.26.6/LICENSE-APACHE`, `legal/windows-gnullvm/rust/tokio-rustls-0.26.6/LICENSE-MIT`
+- `tokio-util 0.7.19` — MIT; `legal/windows-gnullvm/rust/tokio-util-0.7.19/LICENSE`
+- `tokio-util 0.7.20` — MIT; `legal/windows-gnullvm/rust/tokio-util-0.7.20/LICENSE`
+- `toml 1.1.7+spec-1.1.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/toml-1.1.7+spec-1.1.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/toml-1.1.7+spec-1.1.0/LICENSE-MIT`
+- `toml_datetime 1.1.2+spec-1.1.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/toml_datetime-1.1.2+spec-1.1.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/toml_datetime-1.1.2+spec-1.1.0/LICENSE-MIT`
+- `toml_parser 1.1.4+spec-1.1.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/toml_parser-1.1.4+spec-1.1.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/toml_parser-1.1.4+spec-1.1.0/LICENSE-MIT`
+- `toml_writer 1.1.3+spec-1.1.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/toml_writer-1.1.3+spec-1.1.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/toml_writer-1.1.3+spec-1.1.0/LICENSE-MIT`
+- `tower 0.5.3` — MIT; `legal/windows-gnullvm/rust/tower-0.5.3/LICENSE`
+- `tower-http 0.6.11` — MIT; `legal/windows-gnullvm/rust/tower-http-0.6.11/LICENSE`
+- `tower-layer 0.3.3` — MIT; `legal/windows-gnullvm/rust/tower-layer-0.3.3/LICENSE`
+- `tower-service 0.3.3` — MIT; `legal/windows-gnullvm/rust/tower-service-0.3.3/LICENSE`
+- `tracing 0.1.44` — MIT; `legal/windows-gnullvm/rust/tracing-0.1.44/LICENSE`
+- `tracing-attributes 0.1.31` — MIT; `legal/windows-gnullvm/rust/tracing-attributes-0.1.31/LICENSE`
+- `tracing-core 0.1.36` — MIT; `legal/windows-gnullvm/rust/tracing-core-0.1.36/LICENSE`, `legal/windows-gnullvm/rust/tracing-core-0.1.36/src/spin/LICENSE`
+- `tray-icon 0.25.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/tray-icon-0.25.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/tray-icon-0.25.1/LICENSE-MIT`, `legal/windows-gnullvm/rust/tray-icon-0.25.1/LICENSE.spdx`
+- `try-lock 0.2.5` — MIT; `legal/windows-gnullvm/rust/try-lock-0.2.5/LICENSE`
+- `typeid 1.0.3` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/typeid-1.0.3/LICENSE-APACHE`, `legal/windows-gnullvm/rust/typeid-1.0.3/LICENSE-MIT`
+- `typenum 1.20.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/typenum-1.20.1/LICENSE`, `legal/windows-gnullvm/rust/typenum-1.20.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/typenum-1.20.1/LICENSE-MIT`
+- `unicode-ident 1.0.26` — (MIT OR Apache-2.0) AND Unicode-3.0; `legal/windows-gnullvm/rust/unicode-ident-1.0.26/LICENSE-APACHE`, `legal/windows-gnullvm/rust/unicode-ident-1.0.26/LICENSE-MIT`, `legal/windows-gnullvm/rust/unicode-ident-1.0.26/LICENSE-UNICODE`
+- `unicode-normalization 0.1.24` — MIT/Apache-2.0; `legal/windows-gnullvm/rust/unicode-normalization-0.1.24/COPYRIGHT`, `legal/windows-gnullvm/rust/unicode-normalization-0.1.24/LICENSE-APACHE`, `legal/windows-gnullvm/rust/unicode-normalization-0.1.24/LICENSE-MIT`
+- `unicode-segmentation 1.13.3` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/unicode-segmentation-1.13.3/COPYRIGHT`, `legal/windows-gnullvm/rust/unicode-segmentation-1.13.3/LICENSE-APACHE`, `legal/windows-gnullvm/rust/unicode-segmentation-1.13.3/LICENSE-MIT`
+- `universal-hash 0.5.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/universal-hash-0.5.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/universal-hash-0.5.1/LICENSE-MIT`
+- `untrusted 0.9.0` — ISC; `legal/windows-gnullvm/rust/untrusted-0.9.0/LICENSE.txt`
+- `url 2.5.8` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/url-2.5.8/LICENSE-APACHE`, `legal/windows-gnullvm/rust/url-2.5.8/LICENSE-MIT`
+- `urlpattern 0.6.0` — MIT; `legal/windows-gnullvm/rust/urlpattern-0.6.0/LICENSE`
+- `utf8_iter 1.0.4` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/utf8_iter-1.0.4/COPYRIGHT`, `legal/windows-gnullvm/rust/utf8_iter-1.0.4/LICENSE-APACHE`, `legal/windows-gnullvm/rust/utf8_iter-1.0.4/LICENSE-MIT`
+- `utf8parse 0.2.2` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/utf8parse-0.2.2/LICENSE-APACHE`, `legal/windows-gnullvm/rust/utf8parse-0.2.2/LICENSE-MIT`
+- `uuid 1.26.1` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/uuid-1.26.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/uuid-1.26.1/LICENSE-MIT`
+- `uuid 1.27.0` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/uuid-1.27.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/uuid-1.27.0/LICENSE-MIT`
+- `vcpkg 0.2.15` — MIT/Apache-2.0; `legal/windows-gnullvm/rust/vcpkg-0.2.15/LICENSE-APACHE`, `legal/windows-gnullvm/rust/vcpkg-0.2.15/LICENSE-MIT`
+- `version_check 0.9.5` — MIT/Apache-2.0; `legal/windows-gnullvm/rust/version_check-0.9.5/LICENSE-APACHE`, `legal/windows-gnullvm/rust/version_check-0.9.5/LICENSE-MIT`
+- `walkdir 2.5.0` — Unlicense/MIT; `legal/windows-gnullvm/rust/walkdir-2.5.0/COPYING`, `legal/windows-gnullvm/rust/walkdir-2.5.0/LICENSE-MIT`
+- `want 0.3.2` — MIT; `legal/windows-gnullvm/rust/want-0.3.2/LICENSE`
+- `web-time 1.1.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/web-time-1.1.0/LICENSE-APACHE`, `legal/windows-gnullvm/rust/web-time-1.1.0/LICENSE-MIT`
+- `web_atoms 0.2.6` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/web_atoms-0.2.6/LICENSE-APACHE`, `legal/windows-gnullvm/rust/web_atoms-0.2.6/LICENSE-MIT`
+- `webpki-roots 1.0.9` — CDLA-Permissive-2.0; `legal/windows-gnullvm/rust/webpki-roots-1.0.9/LICENSE`
+- `webview2-com 0.39.1` — MIT; `legal/windows-gnullvm/webview2-rs/LICENSE-MIT.txt`
+- `webview2-com-macros 0.8.1` — MIT; `legal/windows-gnullvm/webview2-rs/LICENSE-MIT.txt`
+- `webview2-com-sys 0.39.1` — MIT; `legal/windows-gnullvm/webview2-rs/LICENSE-MIT.txt`
+- `winapi 0.3.9` — MIT/Apache-2.0; `legal/windows-gnullvm/rust/winapi-0.3.9/LICENSE-APACHE`, `legal/windows-gnullvm/rust/winapi-0.3.9/LICENSE-MIT`
+- `winapi-util 0.1.11` — Unlicense OR MIT; `legal/windows-gnullvm/rust/winapi-util-0.1.11/COPYING`, `legal/windows-gnullvm/rust/winapi-util-0.1.11/LICENSE-MIT`
+- `window-vibrancy 0.8.1` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/window-vibrancy-0.8.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/window-vibrancy-0.8.1/LICENSE-MIT`, `legal/windows-gnullvm/rust/window-vibrancy-0.8.1/LICENSE.spdx`
+- `windows 0.61.3` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-0.61.3/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-0.61.3/license-mit`
+- `windows 0.62.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-0.62.2/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-0.62.2/license-mit`
+- `windows-collections 0.2.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-collections-0.2.0/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-collections-0.2.0/license-mit`
+- `windows-collections 0.3.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-collections-0.3.2/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-collections-0.3.2/license-mit`
+- `windows-core 0.61.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-core-0.61.2/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-core-0.61.2/license-mit`
+- `windows-core 0.62.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-core-0.62.2/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-core-0.62.2/license-mit`
+- `windows-future 0.2.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-future-0.2.1/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-future-0.2.1/license-mit`
+- `windows-future 0.3.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-future-0.3.2/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-future-0.3.2/license-mit`
+- `windows-implement 0.60.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-implement-0.60.2/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-implement-0.60.2/license-mit`
+- `windows-interface 0.59.3` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-interface-0.59.3/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-interface-0.59.3/license-mit`
+- `windows-link 0.1.3` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-link-0.1.3/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-link-0.1.3/license-mit`
+- `windows-link 0.2.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-link-0.2.1/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-link-0.2.1/license-mit`
+- `windows-numerics 0.2.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-numerics-0.2.0/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-numerics-0.2.0/license-mit`
+- `windows-numerics 0.3.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-numerics-0.3.1/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-numerics-0.3.1/license-mit`
+- `windows-registry 0.6.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-registry-0.6.1/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-registry-0.6.1/license-mit`
+- `windows-result 0.3.4` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-result-0.3.4/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-result-0.3.4/license-mit`
+- `windows-result 0.4.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-result-0.4.1/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-result-0.4.1/license-mit`
+- `windows-strings 0.4.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-strings-0.4.2/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-strings-0.4.2/license-mit`
+- `windows-strings 0.5.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-strings-0.5.1/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-strings-0.5.1/license-mit`
+- `windows-sys 0.52.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-sys-0.52.0/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-sys-0.52.0/license-mit`
+- `windows-sys 0.59.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-sys-0.59.0/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-sys-0.59.0/license-mit`
+- `windows-sys 0.60.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-sys-0.60.2/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-sys-0.60.2/license-mit`
+- `windows-sys 0.61.2` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-sys-0.61.2/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-sys-0.61.2/license-mit`
+- `windows-targets 0.52.6` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-targets-0.52.6/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-targets-0.52.6/license-mit`
+- `windows-targets 0.53.5` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-targets-0.53.5/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-targets-0.53.5/license-mit`
+- `windows-threading 0.1.0` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-threading-0.1.0/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-threading-0.1.0/license-mit`
+- `windows-threading 0.2.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-threading-0.2.1/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-threading-0.2.1/license-mit`
+- `windows-version 0.1.7` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows-version-0.1.7/license-apache-2.0`, `legal/windows-gnullvm/rust/windows-version-0.1.7/license-mit`
+- `windows_x86_64_gnullvm 0.52.6` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows_x86_64_gnullvm-0.52.6/license-apache-2.0`, `legal/windows-gnullvm/rust/windows_x86_64_gnullvm-0.52.6/license-mit`
+- `windows_x86_64_gnullvm 0.53.1` — MIT OR Apache-2.0; `legal/windows-gnullvm/rust/windows_x86_64_gnullvm-0.53.1/license-apache-2.0`, `legal/windows-gnullvm/rust/windows_x86_64_gnullvm-0.53.1/license-mit`
+- `winnow 1.0.4` — MIT; `legal/windows-gnullvm/rust/winnow-1.0.4/LICENSE-MIT`
+- `winx 0.36.4` — Apache-2.0 WITH LLVM-exception; `legal/windows-gnullvm/rust/winx-0.36.4/LICENSE`
+- `writeable 0.6.4` — Unicode-3.0; `legal/windows-gnullvm/rust/writeable-0.6.4/LICENSE`
+- `wry 0.57.1` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/wry-0.57.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/wry-0.57.1/LICENSE-MIT`, `legal/windows-gnullvm/rust/wry-0.57.1/LICENSE.spdx`
+- `yoke 0.8.3` — Unicode-3.0; `legal/windows-gnullvm/rust/yoke-0.8.3/LICENSE`
+- `yoke-derive 0.8.4` — Unicode-3.0; `legal/windows-gnullvm/rust/yoke-derive-0.8.4/LICENSE`
+- `zerocopy 0.8.61` — BSD-2-Clause OR Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/zerocopy-0.8.61/LICENSE-APACHE`, `legal/windows-gnullvm/rust/zerocopy-0.8.61/LICENSE-BSD`, `legal/windows-gnullvm/rust/zerocopy-0.8.61/LICENSE-MIT`
+- `zerocopy-derive 0.8.61` — BSD-2-Clause OR Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/zerocopy-derive-0.8.61/LICENSE-APACHE`, `legal/windows-gnullvm/rust/zerocopy-derive-0.8.61/LICENSE-BSD`, `legal/windows-gnullvm/rust/zerocopy-derive-0.8.61/LICENSE-MIT`
+- `zerofrom 0.1.8` — Unicode-3.0; `legal/windows-gnullvm/rust/zerofrom-0.1.8/LICENSE`
+- `zerofrom-derive 0.1.8` — Unicode-3.0; `legal/windows-gnullvm/rust/zerofrom-derive-0.1.8/LICENSE`
+- `zeroize 1.9.1` — Apache-2.0 OR MIT; `legal/windows-gnullvm/rust/zeroize-1.9.1/LICENSE-APACHE`, `legal/windows-gnullvm/rust/zeroize-1.9.1/LICENSE-MIT`
+- `zerotrie 0.2.5` — Unicode-3.0; `legal/windows-gnullvm/rust/zerotrie-0.2.5/LICENSE`
+- `zerovec 0.11.8` — Unicode-3.0; `legal/windows-gnullvm/rust/zerovec-0.11.8/LICENSE`
+- `zerovec-derive 0.11.6` — Unicode-3.0; `legal/windows-gnullvm/rust/zerovec-derive-0.11.6/LICENSE`
+- `zip 4.6.1` — MIT; `legal/windows-gnullvm/rust/zip-4.6.1/LICENSE`
+- `zlib-rs 0.6.8` — Zlib; `legal/windows-gnullvm/rust/zlib-rs-0.6.8/LICENSE`
+- `zmij 1.0.23` — MIT; `legal/windows-gnullvm/rust/zmij-1.0.23/LICENSE-MIT`
+
+## Production UI packages
+- `@tauri-apps/api 2.12.4` — Apache-2.0 OR MIT; `legal/windows-gnullvm/npm/@tauri-apps__api-2.12.4/LICENSE-APACHE-2.0`, `legal/windows-gnullvm/npm/@tauri-apps__api-2.12.4/LICENSE-MIT`, `legal/windows-gnullvm/npm/@tauri-apps__api-2.12.4/LICENSE.spdx`
+- `@tauri-apps/plugin-dialog 2.7.3` — MIT OR Apache-2.0; `legal/windows-gnullvm/npm/@tauri-apps__plugin-dialog-2.7.3/LICENSE.spdx`
+
+## Bundled external components
+- `WebView2Loader.dll` from `webview2-com-sys@0.39.1` matches `Microsoft.Web.WebView2 1.0.3800.47` (NuGet SHA-256 `56c9f26bdd07916a2d1949fb58a5c7e434dfa1173577dca879206050c4e718db`); retained its SDK license and notice texts.
+
+## Unresolved review items
+
+No unresolved item should be read as cleared for redistribution.

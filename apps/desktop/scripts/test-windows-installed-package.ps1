@@ -2,7 +2,11 @@
 param(
     [Parameter(Mandatory = $true)][string] $BaselineArtifactRoot,
     [Parameter(Mandatory = $true)][string] $FinalArtifactRoot,
-    [Parameter(Mandatory = $true)][string] $OutputDirectory
+    [Parameter(Mandatory = $true)][string] $OutputDirectory,
+    [ValidateSet('same-version-0.7.4', 'upgrade-0.7.4-to-0.7.5')][string] $AcceptanceMode = 'same-version-0.7.4',
+    [string] $ExpectedFinalSourceCommit,
+    [string] $ExpectedFinalInstallerSha256,
+    [string] $ExpectedFinalManifestSha256
 )
 
 Set-StrictMode -Version Latest
@@ -14,6 +18,16 @@ if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_OS -cne 'Windows' -or $env:R
     throw 'github_hosted_windows_required'
 }
 if (Test-Path -LiteralPath $OutputDirectory) { throw 'output_directory_already_exists' }
+if ($AcceptanceMode -ceq 'upgrade-0.7.4-to-0.7.5') {
+    if ($ExpectedFinalSourceCommit -notmatch '^[0-9a-f]{40,64}$' -or
+        $ExpectedFinalInstallerSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+        $ExpectedFinalManifestSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        throw 'final_artifact_binding_required'
+    }
+    if ($ExpectedFinalSourceCommit -ceq '26ccf130b3274d1f3ae9661b62bc19cb7cfd33b4') {
+        throw 'final_source_must_advance_baseline'
+    }
+}
 
 # CI fixture only: new objects use this process token's default owner.
 # Use its existing user SID without changing identity, groups, privileges or ACLs.
@@ -212,23 +226,35 @@ function Pin-File([string] $Path) {
     return [pscustomobject]@{ length = [long]$file.Length; sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
 }
 
-function Read-Candidate([string] $Root, [string] $SourceCommit) {
+function Read-Candidate([string] $Root, [string] $ExpectedSourceCommit, [string] $ExpectedVersion,
+    [string] $ExpectedInstallerSha256, [string] $ExpectedManifestSha256) {
     $manifests = @(Get-ChildItem -LiteralPath $Root -Filter '*.manifest.json' -File -Recurse)
     $setups = @(Get-ChildItem -LiteralPath $Root -Filter '*-setup.exe' -File -Recurse)
     $archives = @(Get-ChildItem -LiteralPath $Root -Filter '*.nsis.zip' -File -Recurse)
     if ($manifests.Count -ne 1 -or $setups.Count -ne 1 -or $archives.Count -ne 1) { throw 'artifact_layout_mismatch' }
+    $manifestPin = Pin-File $manifests[0].FullName
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedManifestSha256) -and
+        $manifestPin.sha256 -cne $ExpectedManifestSha256.ToLowerInvariant()) { throw 'artifact_manifest_hash_mismatch' }
     $manifest = Get-Content -LiteralPath $manifests[0].FullName -Raw | ConvertFrom-Json
     if ($manifest.format -cne 'raiun-windows-installer-v1' -or $manifest.target -cne 'x86_64-pc-windows-msvc' -or
-        $manifest.sourceCommit -cne $SourceCommit -or $manifest.sourceDirty -ne $false -or $manifest.signed -ne $false -or
-        $manifest.updaterArtifact.version -cne '0.7.4') { throw 'manifest_source_or_version_mismatch' }
+        $manifest.sourceCommit -cne $ExpectedSourceCommit -or $manifest.sourceDirty -ne $false -or $manifest.signed -ne $false -or
+        $manifest.updaterArtifact.version -cne $ExpectedVersion -or
+        $manifest.updaterArtifact.target -cne 'windows-x86_64-nsis' -or
+        $manifest.updaterArtifact.signatureStatus -cne 'not_signed' -or
+        $null -ne $manifest.versionOverride) { throw 'manifest_source_or_version_mismatch' }
     $setup = Pin-File $setups[0].FullName
     $archive = Pin-File $archives[0].FullName
-    $admitted = switch ($SourceCommit) {
+    $admitted = switch ($ExpectedSourceCommit) {
         '1c60b4e6d7084ff5c3ba3f96b547d028e4c171cc' { @('23c110a798abf8f4d844f047d29c729216e01bc8018eb15f61291ea5117fad6e', 'bde4244d54643f4af0e14a59637cb162bcf17e730e4b6bbefa0e9dc7d66128aa') }
         '26ccf130b3274d1f3ae9661b62bc19cb7cfd33b4' { @('389ee3fda30501d24c134713881beedbb91a6119d2e0e2b84885dcf876803231', 'bba0ec952d5e1bb1aac08ba5fe03288e931b4620f8fb99a98c0f53d74bd19b29') }
-        default { throw 'unadmitted_candidate_source' }
+        default { $null }
     }
-    if ($setup.sha256 -cne $admitted[0] -or $archive.sha256 -cne $admitted[1]) { throw 'unadmitted_candidate_hash' }
+    if ($null -ne $admitted -and ($setup.sha256 -cne $admitted[0] -or $archive.sha256 -cne $admitted[1])) { throw 'unadmitted_candidate_hash' }
+    if ([string]::IsNullOrWhiteSpace($ExpectedInstallerSha256)) {
+        if ($null -eq $admitted) { throw 'unadmitted_candidate_source' }
+        $ExpectedInstallerSha256 = $admitted[0]
+    }
+    if ($setup.sha256 -cne $ExpectedInstallerSha256.ToLowerInvariant()) { throw 'expected_installer_hash_mismatch' }
     if ($setups[0].Name -cne $manifest.installer.name -or $setup.length -ne [long]$manifest.installer.length -or
         $setup.sha256 -cne [string]$manifest.installer.sha256 -or
         $archive.length -ne [long]$manifest.updaterArtifact.length -or
@@ -253,7 +279,7 @@ function Read-Candidate([string] $Root, [string] $SourceCommit) {
         throw 'manifest_payload_layout_mismatch'
     }
     return [pscustomobject]@{
-        sourceCommit = $SourceCommit
+        sourceCommit = $ExpectedSourceCommit
         version = [string]$manifest.updaterArtifact.version
         installerPath = $setups[0].FullName
         installerSha256 = $setup.sha256
@@ -450,7 +476,7 @@ function Get-AccountSnapshot([string] $AgentPath) {
     return [pscustomobject]@{ count = $ids.Count; ids = $ids; fingerprint = Hash-Bytes ([Text.Encoding]::UTF8.GetBytes($canonical)); noConnectedProfiles = $true; noMountedProfiles = $true }
 }
 
-function Check-InstallRegistration {
+function Check-InstallRegistration([string] $ExpectedVersion) {
     $uninstall = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
     $matches = @()
     if (Test-Path -LiteralPath $uninstall) {
@@ -460,7 +486,7 @@ function Check-InstallRegistration {
             if ($null -ne $displayName -and [string]$displayName.Value -ceq 'Raiun Desktop') { $matches += $value }
         }
     }
-    if ($matches.Count -ne 1 -or [string]$matches[0].DisplayVersion -cne '0.7.4') { throw 'installed_app_registration_mismatch' }
+    if ($matches.Count -ne 1 -or [string]$matches[0].DisplayVersion -cne $ExpectedVersion) { throw 'installed_app_registration_mismatch' }
     $location = ([string]$matches[0].InstallLocation).Trim('"').TrimEnd('\')
     if (-not [string]::Equals($location, $script:installRoot.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) { throw 'install_location_mismatch' }
     return [pscustomobject]@{ entries = $matches.Count; version = [string]$matches[0].DisplayVersion; currentUser = $true }
@@ -531,8 +557,21 @@ try {
     }
     Add-Event 'runner_token_context' 'diagnostic' $script:tokenFacts
     $script:phase = 'artifact_manifest_validation'
-    $script:baseline = Read-Candidate -Root $BaselineArtifactRoot -SourceCommit '1c60b4e6d7084ff5c3ba3f96b547d028e4c171cc'
-    $script:final = Read-Candidate -Root $FinalArtifactRoot -SourceCommit '26ccf130b3274d1f3ae9661b62bc19cb7cfd33b4'
+    if ($AcceptanceMode -ceq 'upgrade-0.7.4-to-0.7.5') {
+        $script:baseline = Read-Candidate -Root $BaselineArtifactRoot `
+            -ExpectedSourceCommit '26ccf130b3274d1f3ae9661b62bc19cb7cfd33b4' -ExpectedVersion '0.7.4' `
+            -ExpectedInstallerSha256 '389ee3fda30501d24c134713881beedbb91a6119d2e0e2b84885dcf876803231' -ExpectedManifestSha256 ''
+        $script:final = Read-Candidate -Root $FinalArtifactRoot `
+            -ExpectedSourceCommit $ExpectedFinalSourceCommit -ExpectedVersion '0.7.5' `
+            -ExpectedInstallerSha256 $ExpectedFinalInstallerSha256 -ExpectedManifestSha256 $ExpectedFinalManifestSha256
+    } else {
+        $script:baseline = Read-Candidate -Root $BaselineArtifactRoot `
+            -ExpectedSourceCommit '1c60b4e6d7084ff5c3ba3f96b547d028e4c171cc' -ExpectedVersion '0.7.4' `
+            -ExpectedInstallerSha256 '' -ExpectedManifestSha256 ''
+        $script:final = Read-Candidate -Root $FinalArtifactRoot `
+            -ExpectedSourceCommit '26ccf130b3274d1f3ae9661b62bc19cb7cfd33b4' -ExpectedVersion '0.7.4' `
+            -ExpectedInstallerSha256 '' -ExpectedManifestSha256 ''
+    }
     Add-Event 'artifact_manifest_validation' 'passed' @{ baselineInstallerSha256 = $script:baseline.installerSha256; finalInstallerSha256 = $script:final.installerSha256 }
 
     $testRoot = Join-Path $env:RUNNER_TEMP ('raiun-074-acceptance-' + [guid]::NewGuid().ToString('N'))
@@ -584,7 +623,7 @@ try {
     $script:baselineInstallExit = $baselineResult.exitCode
     if ($script:baselineInstallExit -ne 0) { throw 'baseline_installer_failed' }
     $script:baselineFiles = Check-InstalledFiles $script:baseline
-    $script:registration.baseline = Check-InstallRegistration
+    $script:registration.baseline = Check-InstallRegistration $script:baseline.version
     $script:shortcutCounts.baseline = Check-StartMenuShortcut
     Add-Event 'baseline_install' 'passed' @{ exitCode = $script:baselineInstallExit; installedPayloadCount = $script:baselineFiles.Count; uninstallEntryCount = $script:registration.baseline.entries; startMenuShortcuts = $script:shortcutCounts.baseline }
 
@@ -626,7 +665,7 @@ try {
     $script:phase = 'busy_synthetic_data_retention'
     $busyData = Check-DataRetention
     $script:phase = 'busy_registry_check'
-    $script:registration.baseline = Check-InstallRegistration
+    $script:registration.baseline = Check-InstallRegistration $script:baseline.version
     $script:phase = 'busy_agent_postattempt_status'
     $script:baselineStatus = Check-OfflineStatus (Invoke-Control $baselineAgent ([ordered]@{ action = 'status' }))
     $script:phase = 'busy_guard_receipt'
@@ -642,7 +681,7 @@ try {
     $script:finalInstallExit = $upgrade.exitCode
     if ($script:finalInstallExit -ne 0) { throw 'final_installer_failed' }
     $script:finalFiles = Check-InstalledFiles $script:final
-    $script:registration.final = Check-InstallRegistration
+    $script:registration.final = Check-InstallRegistration $script:final.version
     $script:shortcutCounts.final = Check-StartMenuShortcut
     $script:retained = Check-DataRetention
     Add-Event 'final_in_place_upgrade' 'passed' @{ exitCode = $script:finalInstallExit; installedPayloadCount = $script:finalFiles.Count; uninstallEntryCount = $script:registration.final.entries; startMenuShortcuts = $script:shortcutCounts.final; dpapiDecryptSucceeded = $true; settingsRetained = $true; syntheticDocumentRetained = $true }
@@ -683,7 +722,8 @@ try {
     if ($script:finalAgentExit -ne 0) { throw 'final_agent_shutdown_failed' }
     Add-Event 'final_agent_shutdown' 'passed' @{ exitCode = $script:finalAgentExit }
     $script:result = 'passed'
-    Add-Event 'acceptance' 'passed' @{ transition = 'same-version candidate-to-final'; version = '0.7.4' }
+    $transition = if ($script:baseline.version -eq $script:final.version) { 'same-version candidate-to-final' } else { "$($script:baseline.version)-to-$($script:final.version) in-place upgrade" }
+    Add-Event 'acceptance' 'passed' @{ transition = $transition; version = $script:final.version }
 } catch {
     $script:failure = $script:phase + ':' + $_.Exception.GetType().Name
     Add-Event $script:phase 'failed' @{ exceptionType = $_.Exception.GetType().Name }
@@ -733,11 +773,15 @@ try {
     if ($null -ne $script:startupLocalAppData) { $env:LOCALAPPDATA = $script:startupLocalAppData }
     $receipt = [ordered]@{
         schema = 'raiun-windows-installed-package-acceptance-v1'
+        acceptanceMode = $AcceptanceMode
         result = $script:result
         failure = $script:failure
         platform = 'windows-2022-github-hosted'
-        baselineSourceCommit = if ($script:baseline) { $script:baseline.sourceCommit } else { '1c60b4e6d7084ff5c3ba3f96b547d028e4c171cc' }
-        finalSourceCommit = if ($script:final) { $script:final.sourceCommit } else { '26ccf130b3274d1f3ae9661b62bc19cb7cfd33b4' }
+        baselineSourceCommit = if ($script:baseline) { $script:baseline.sourceCommit } elseif ($AcceptanceMode -ceq 'upgrade-0.7.4-to-0.7.5') { '26ccf130b3274d1f3ae9661b62bc19cb7cfd33b4' } else { '1c60b4e6d7084ff5c3ba3f96b547d028e4c171cc' }
+        finalSourceCommit = if ($script:final) { $script:final.sourceCommit } elseif ($AcceptanceMode -ceq 'upgrade-0.7.4-to-0.7.5') { $ExpectedFinalSourceCommit } else { '26ccf130b3274d1f3ae9661b62bc19cb7cfd33b4' }
+        expectedFinalSourceCommit = if ($AcceptanceMode -ceq 'upgrade-0.7.4-to-0.7.5') { $ExpectedFinalSourceCommit } else { $null }
+        expectedFinalInstallerSha256 = if ($AcceptanceMode -ceq 'upgrade-0.7.4-to-0.7.5') { $ExpectedFinalInstallerSha256.ToLowerInvariant() } else { $null }
+        expectedFinalManifestSha256 = if ($AcceptanceMode -ceq 'upgrade-0.7.4-to-0.7.5') { $ExpectedFinalManifestSha256.ToLowerInvariant() } else { $null }
         baselineInstallerSha256 = if ($script:baseline) { $script:baseline.installerSha256 } else { $null }
         finalInstallerSha256 = if ($script:final) { $script:final.installerSha256 } else { $null }
         baselineInstallerExitCode = $script:baselineInstallExit
@@ -761,8 +805,8 @@ try {
         baselineAgentExitCode = $script:baselineAgentExit
         finalAgentExitCode = $script:finalAgentExit
         artifacts = [ordered]@{
-            baseline = [ordered]@{ runId = 40463700987; artifactId = 12716153861; digest = 'sha256:dbe40aaad17370605aea25409e2a93ca30f879901502d21a7b458f7a30d962c5' }
-            final = [ordered]@{ runId = 40504819643; artifactId = 12736215723; digest = 'sha256:25be0807fbdecfb12afa6eb8462873dae2460fd8aaa1d89362da31190d12e063' }
+            baseline = if ($AcceptanceMode -ceq 'upgrade-0.7.4-to-0.7.5') { [ordered]@{ runId = 40504819643; artifactId = 12736215723; digest = 'sha256:25be0807fbdecfb12afa6eb8462873dae2460fd8aaa1d89362da31190d12e063' } } else { [ordered]@{ runId = 40463700987; artifactId = 12716153861; digest = 'sha256:dbe40aaad17370605aea25409e2a93ca30f879901502d21a7b458f7a30d962c5' } }
+            final = if ($AcceptanceMode -ceq 'upgrade-0.7.4-to-0.7.5') { [ordered]@{ sourceCommit = $ExpectedFinalSourceCommit; manifestSha256 = $ExpectedFinalManifestSha256.ToLowerInvariant(); installerSha256 = $ExpectedFinalInstallerSha256.ToLowerInvariant() } } else { [ordered]@{ runId = 40504819643; artifactId = 12736215723; digest = 'sha256:25be0807fbdecfb12afa6eb8462873dae2460fd8aaa1d89362da31190d12e063' } }
         }
         events = @($script:events.ToArray())
     }

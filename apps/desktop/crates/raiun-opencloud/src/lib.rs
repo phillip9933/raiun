@@ -5,6 +5,8 @@
 
 mod async_body;
 pub mod avatar;
+pub mod guest_permissions;
+pub mod sharing_inventory;
 pub mod transfer_budget;
 pub mod vault;
 pub mod vault_backend;
@@ -267,6 +269,37 @@ impl std::fmt::Debug for OpenCloudClient {
 }
 
 impl OpenCloudClient {
+    /// A separate account-authenticated client for explicitly requested guest
+    /// sharing. Transport retries are disabled so invitations are never resent.
+    pub fn new_for_guest_sharing(
+        server: &str,
+        bearer_token: String,
+        proxy: &ProxyConfig,
+    ) -> Result<Self, CloudError> {
+        let mut client = Self::new_with_proxy(server, bearer_token, proxy)?;
+        client.http = proxy
+            .apply_to_client_builder(
+                Client::builder()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .retry(reqwest::retry::never())
+                    .connect_timeout(Duration::from_secs(5))
+                    .timeout(Duration::from_secs(15)),
+            )?
+            .build()
+            .map_err(|_| invalid("guest sharing transport is unavailable"))?;
+        Ok(client)
+    }
+
+    /// Bound synchronous guest sharing, including DAV identity resolution,
+    /// to one token generation and an absolute deadline.
+    pub fn with_guest_sharing_deadline<T>(&self, operation: impl FnOnce() -> T) -> T {
+        let _context = RangeContextGuard::enter(RangeReadContext {
+            deadline: Instant::now() + Duration::from_secs(45),
+            token_generation: self.token_generation(),
+        });
+        operation()
+    }
+
     fn validate_identity_addressed_root(
         &self,
         selected: &CloudSpace,

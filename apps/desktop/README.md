@@ -41,6 +41,15 @@ Browser layout previews of the Desktop interface; no account connected. These sh
   separate verified backend; ordinary sync and the on-demand mount retain
   encrypted-area guards. See [encrypted sync](docs/ENCRYPTED-SYNC.md).
 
+## Shared visual design
+
+The [Raiun design reference](../../design/raiun/DESIGN-SYSTEM.md) defines neutral
+information panels, semantic status colors, account identity, light/dark tokens
+and a per-platform review scorecard. Use its [component catalog](../../design/raiun/reference.html)
+for comparison. Run `python3 scripts/design-tokens.py --check` from this directory;
+regenerate Desktop CSS and the catalog token embed with `--write` after token edits.
+Token checks do not certify runtime accessibility, keyboard operation or reflow.
+
 ## Build and test
 
 Install Rust stable, Node.js/npm, GTK 3, WebKitGTK 4.1, Ayatana AppIndicator,

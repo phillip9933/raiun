@@ -602,6 +602,11 @@ enum ProviderCommand {
         row: windows_cache_status::CacheStatusRow,
         response: std::sync::mpsc::SyncSender<Result<Value, String>>,
     },
+    SetDeviceCacheQuota {
+        binding: ActiveProviderBinding,
+        quota_bytes: u64,
+        response: std::sync::mpsc::SyncSender<Result<Value, String>>,
+    },
     DeviceCacheUsage {
         binding: ActiveProviderBinding,
         response: std::sync::mpsc::SyncSender<Result<Value, String>>,
@@ -961,6 +966,19 @@ impl ProviderManager {
                                         }
                                         backend.download_file_offline_for_binding(&row.expectation(), cancellation).map(|_| ())
                                     })
+                                });
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::SetDeviceCacheQuota { binding, quota_bytes, response } => {
+                            let result = windows_cache_status::inspect_worker_device_cache_usage(
+                                worker_generation.load(Ordering::Acquire), &binding,
+                                active_binding.as_ref(), connection.is_some(), backend.as_deref())
+                                .and_then(|_| {
+                                    backend.as_ref().ok_or("The Windows drive is disconnected")?
+                                        .set_device_cache_quota(quota_bytes)
+                                        .map_err(|_| "Could not save the device cache limit")?;
+                                    Ok(json!({"scope":"device_all_accounts","saved":true,
+                                        "eviction_performed":false,"quota_bytes":quota_bytes}))
                                 });
                             let _ = response.send(result);
                         }
@@ -2746,6 +2764,76 @@ impl WindowsAgent {
         }
     }
 
+    fn guest_sharing(&self, value: &Value) -> Result<Value, String> {
+        let request = crate::guest_sharing_wire::Request::parse(value)?;
+        if request.profile_id != self.profile_scope {
+            return Err("The selected account does not own this request".into());
+        }
+        // The account-state lease serializes sign-out, refresh and replacement
+        // with this explicitly confirmed operation. No credentials enter IPC.
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?;
+        if state.retiring
+            || state.logout_pending
+            || state.authenticating
+            || state.refreshing
+            || !state.online_authenticated
+            || state.active_generation != request.expected_auth_generation
+            || self.generation.load(Ordering::Acquire) != request.expected_auth_generation
+        {
+            return Err("The account changed; refresh guest access before continuing".into());
+        }
+        let session = state
+            .session
+            .as_ref()
+            .filter(|s| s.expires_at > unix_time_now())
+            .ok_or("Reconnect this account to manage guest access")?;
+        let client = OpenCloudClient::new_for_guest_sharing(
+            &session.server,
+            session.access_token.clone(),
+            &session.proxy,
+        )
+        .map_err(|_| "Could not prepare guest access")?;
+        request.execute(&client)
+    }
+
+    fn sharing(&self, value: &Value) -> Result<Value, String> {
+        let request = crate::sharing_wire::Request::parse(value)?;
+        if request.profile_id != self.profile_scope {
+            return Err("The selected account does not own this request".into());
+        }
+        // The account-state lease serializes sign-out, refresh and replacement
+        // with this explicitly confirmed operation. No credentials enter IPC.
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?;
+        if state.retiring
+            || state.logout_pending
+            || state.authenticating
+            || state.refreshing
+            || !state.online_authenticated
+            || state.active_generation != request.expected_auth_generation
+            || self.generation.load(Ordering::Acquire) != request.expected_auth_generation
+        {
+            return Err("The account changed; refresh sharing before continuing".into());
+        }
+        let session = state
+            .session
+            .as_ref()
+            .filter(|s| s.expires_at > unix_time_now())
+            .ok_or("Reconnect this account to manage sharing")?;
+        let client = OpenCloudClient::new_for_guest_sharing(
+            &session.server,
+            session.access_token.clone(),
+            &session.proxy,
+        )
+        .map_err(|_| "Could not prepare sharing")?;
+        request.execute(&client)
+    }
+
     fn account_avatar(&self, request: &Value) -> Result<Value, String> {
         let expected = request
             .get("expected_auth_generation")
@@ -2821,6 +2909,21 @@ impl WindowsAgent {
         match action {
             "status" => Ok((self.status()?, false)),
             "account_avatar" => Ok((self.account_avatar(request)?, false)),
+            "guest_permissions" | "guest_invite" | "guest_update" | "guest_revoke" => {
+                Ok((self.guest_sharing(request)?, false))
+            }
+            "sharing_capabilities"
+            | "sharing_inventory"
+            | "sharing_owned_settings"
+            | "sharing_owned_update"
+            | "sharing_owned_revoke"
+            | "sharing_permissions"
+            | "sharing_recipients"
+            | "sharing_invite"
+            | "sharing_update"
+            | "sharing_revoke"
+            | "sharing_link_create"
+            | "sharing_link_revoke" => Ok((self.sharing(request)?, false)),
             "network_proxy" => Ok((self.proxy_settings(None)?, false)),
             "network_proxy_set" => Ok((self.proxy_settings(Some(request))?, false)),
             "bandwidth_limits" => Ok((self.bandwidth_settings(None)?, false)),
@@ -2862,6 +2965,9 @@ impl WindowsAgent {
                 Ok((self.upload_windows_vault_capture_request(request)?, false))
             }
             "windows_recovery_retry" => Ok((self.retry_recovered_edit(request)?, false)),
+            "windows_device_cache_quota_set" => {
+                Ok((self.windows_device_cache_quota_set(request)?, false))
+            }
             "windows_device_cache_usage" => Ok((self.windows_device_cache_usage(request)?, false)),
             "windows_file_cache_status" => Ok((self.windows_file_cache_status(request)?, false)),
             "windows_offline_folders" => {

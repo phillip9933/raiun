@@ -164,6 +164,21 @@ impl ProfileManager {
             "account_select" => self.select_account(&request),
             "account_rename" => self.rename_account(&request),
             "account_avatar" => self.account_avatar(&request),
+            "guest_permissions" | "guest_invite" | "guest_update" | "guest_revoke" => self.guest_sharing(&request),
+            "sharing_capabilities" | "sharing_inventory"
+                | "sharing_owned_settings" | "sharing_owned_update" | "sharing_owned_revoke" | "sharing_permissions" | "sharing_recipients" | "sharing_invite" | "sharing_update" | "sharing_revoke" | "sharing_link_create" | "sharing_link_revoke" => self.sharing(&request),
+            "cache_quota_set" => {
+                let _gate = self.mutation_gate.lock().map_err(|_| "Account changes are unavailable")?;
+                self.ensure_running()?;
+                let (id, runtime) = self.resolve_runtime(&request)?;
+                if request.get("profile_id").and_then(Value::as_str) != Some(id.as_str())
+                    || self.selected_profile()?.as_deref() != Some(id.as_str()) {
+                    return Err("The selected account changed; review storage settings again".into());
+                }
+                let mut result = runtime.handle(strip_profile_id(request))?;
+                result["profile_id"] = json!(id);
+                Ok(result)
+            }
             "account_remove" => self.remove_account(&request),
             "account_restore" => self.restore_account(&request),
             "shutdown" => self.request_shutdown(),
@@ -605,6 +620,120 @@ impl ProfileManager {
         } else {
             Ok(())
         }
+    }
+
+    fn guest_sharing(&self, request: &Value) -> Result<Value, String> {
+        let request = crate::guest_sharing_wire::Request::parse(request)?;
+        let _gate = self
+            .mutation_gate
+            .lock()
+            .map_err(|_| "Account changes are unavailable")?;
+        self.ensure_running()?;
+        if request.mutating() && self.selected_profile()?.as_deref() != Some(request.profile_id.as_str()) {
+            return Err("The selected account changed; review guest access again".into());
+        }
+        let (_, runtime) = self.resolve_runtime(&json!({"profile_id":request.profile_id}))?;
+        // AuthTransition serializes explicit invitations with logout/replacement.
+        // The state lease also fences background token refresh until completion.
+        let _transition = if request.mutating() {
+            Some(super::AuthTransition::begin(&runtime.auth_transition)?)
+        } else {
+            None
+        };
+        let auth = runtime
+            .auth_state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?;
+        if runtime.retiring.load(Ordering::Acquire)
+            || runtime.shutdown.load(Ordering::Acquire)
+            || (!request.mutating() && runtime.auth_transition.load(Ordering::Acquire))
+            || runtime.auth_generation.load(Ordering::Acquire) != request.expected_auth_generation
+        {
+            return Err("The account changed; refresh guest access before continuing".into());
+        }
+        let session = auth
+            .session
+            .as_ref()
+            .ok_or("Connect this account to manage guest access")?;
+        if session.expires_at
+            <= std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| "System clock is unavailable")?
+                .as_secs()
+        {
+            return Err("Reconnect this account to manage guest access".into());
+        }
+        if auth.client.is_none() {
+            return Err("Connect this account to manage guest access".into());
+        }
+        let client = raiun_opencloud::OpenCloudClient::new_for_guest_sharing(
+            &session.server,
+            session.access_token.clone(),
+            &session.proxy,
+        )
+        .map_err(|_| "Could not prepare guest access")?;
+        let result = request.execute(&client)?;
+        if runtime.auth_generation.load(Ordering::Acquire) != request.expected_auth_generation {
+            return Err("The account changed; refresh guest access before continuing".into());
+        }
+        Ok(result)
+    }
+
+    fn sharing(&self, request: &Value) -> Result<Value, String> {
+        let request = crate::sharing_wire::Request::parse(request)?;
+        let _gate = self
+            .mutation_gate
+            .lock()
+            .map_err(|_| "Account changes are unavailable")?;
+        self.ensure_running()?;
+        if request.mutating() && self.selected_profile()?.as_deref() != Some(request.profile_id.as_str()) {
+            return Err("The selected account changed; review sharing again".into());
+        }
+        let (_, runtime) = self.resolve_runtime(&json!({"profile_id":request.profile_id}))?;
+        // AuthTransition serializes explicit invitations with logout/replacement.
+        // The state lease also fences background token refresh until completion.
+        let _transition = if request.mutating() {
+            Some(super::AuthTransition::begin(&runtime.auth_transition)?)
+        } else {
+            None
+        };
+        let auth = runtime
+            .auth_state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?;
+        if runtime.retiring.load(Ordering::Acquire)
+            || runtime.shutdown.load(Ordering::Acquire)
+            || (!request.mutating() && runtime.auth_transition.load(Ordering::Acquire))
+            || runtime.auth_generation.load(Ordering::Acquire) != request.expected_auth_generation
+        {
+            return Err("The account changed; refresh sharing before continuing".into());
+        }
+        let session = auth
+            .session
+            .as_ref()
+            .ok_or("Connect this account to manage sharing")?;
+        if session.expires_at
+            <= std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|_| "System clock is unavailable")?
+                .as_secs()
+        {
+            return Err("Reconnect this account to manage sharing".into());
+        }
+        if auth.client.is_none() {
+            return Err("Connect this account to manage sharing".into());
+        }
+        let client = raiun_opencloud::OpenCloudClient::new_for_guest_sharing(
+            &session.server,
+            session.access_token.clone(),
+            &session.proxy,
+        )
+        .map_err(|_| "Could not prepare sharing")?;
+        let result = request.execute(&client)?;
+        if runtime.auth_generation.load(Ordering::Acquire) != request.expected_auth_generation {
+            return Err("The account changed; refresh sharing before continuing".into());
+        }
+        Ok(result)
     }
 
     fn account_avatar(&self, request: &Value) -> Result<Value, String> {
