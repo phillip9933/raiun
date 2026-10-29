@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en" data-theme="system">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark"><title>Raiun · Design reference draft v1</title>
+<style>
+:root{font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif;color-scheme:light dark;--space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:24px;--space-6:32px;--space-7:48px;--r-control:8px;--r-panel:12px}
+*{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--text)}button,select,input{font:inherit}button{cursor:pointer}button:disabled{opacity:.55;cursor:not-allowed}a{color:var(--primary)}:focus-visible{outline:3px solid var(--focus);outline-offset:3px}.wrap{max-width:1120px;margin:auto;padding:32px clamp(16px,4vw,48px) 64px}.mast{display:flex;align-items:center;justify-content:space-between;gap:24px;padding-bottom:24px;border-bottom:1px solid var(--border)}.brand{display:flex;align-items:center;gap:12px}.mark{width:40px;height:40px;border-radius:12px;background:var(--primary);color:var(--onPrimary);display:grid;place-items:center;font-weight:800}.brand strong{font-size:20px;letter-spacing:-.04em}.brand small{display:block;color:var(--muted);font-size:12px;letter-spacing:.08em}.controls{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.controls label{font-size:13px;color:var(--muted)}select,input{background:var(--surface);color:var(--text);border:1px solid var(--controlBorder);border-radius:var(--r-control);padding:8px 10px;min-height:40px}h1{font-size:clamp(28px,4vw,42px);letter-spacing:-.04em;line-height:1.12;margin:36px 0 12px}.intro{max-width:760px;color:var(--muted);margin:0 0 28px}.header-account{display:flex;align-items:center;gap:8px;background:var(--accent);color:#fff;border-radius:var(--r-control);padding:7px 10px;font-size:13px;font-weight:650}.account{display:flex;align-items:center;gap:12px;background:var(--accent);color:#fff;border:1px solid var(--accent);border-radius:var(--r-panel);padding:14px 16px;margin:20px 0 36px}.account .badge{width:36px;height:36px;border-radius:10px;background:#0000001a;color:#fff;display:grid;place-items:center;font-weight:750}.account p{margin:0}.account small{display:block;color:#fff}.account .active{margin-left:auto;border-left:1px solid #ffffffa6;padding-left:10px;color:#fff;font-size:13px}section{margin:38px 0}h2{font-size:22px;margin:0 0 6px;letter-spacing:-.025em}h3{font-size:16px;margin:0 0 5px} .hint{color:var(--muted);margin:0 0 16px;font-size:14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:16px}.panel{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-panel);padding:18px}.inset{background:var(--inset);border-radius:var(--r-control);padding:12px}.row{display:flex;align-items:center;gap:12px}.spread{justify-content:space-between}.muted{color:var(--muted)}.buttons{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}.btn{min-height:40px;border-radius:var(--r-control);border:1px solid var(--controlBorder);background:var(--surface);color:var(--text);padding:8px 14px;font-weight:650}.btn.primary{background:var(--primary);border-color:var(--primary);color:var(--onPrimary)}.btn.danger{color:var(--danger);border-color:var(--danger)}.btn.link{border-color:transparent;background:transparent;color:var(--primary)}.notice{display:grid;grid-template-columns:22px 1fr;gap:10px;align-items:start;padding:13px 14px;margin:10px 0;border:1px solid var(--border);border-left:3px solid var(--info);border-radius:var(--r-control);background:var(--surface)}.notice .symbol{font-weight:800;color:var(--info)}.notice.success{border-left-color:var(--success)}.notice.success .symbol{color:var(--success)}.notice.warning{border-left-color:var(--warning)}.notice.warning .symbol{color:var(--warning)}.notice.error{border-left-color:var(--danger)}.notice.error .symbol{color:var(--danger)}.notice p{margin:0}.notice small{display:block;color:var(--muted);margin-top:2px}.field{display:grid;gap:5px;margin:12px 0}.field label{font-size:14px;font-weight:650}.field small{color:var(--muted)}.field.error input{border-color:var(--danger)}.field.error small{color:var(--danger)}.transfer{display:grid;grid-template-columns:auto 1fr auto;gap:12px;align-items:center;padding:12px 0;border-bottom:1px solid var(--border)}.fileicon{width:36px;height:36px;border-radius:9px;background:var(--inset);display:grid;place-items:center}.transfer p{margin:0}.transfer small{color:var(--muted)}.chip{border-radius:999px;padding:3px 9px;background:var(--inset);font-size:12px;font-weight:650}.chip.good{color:var(--success)}.chip.warn{color:var(--warning)}.chip.bad{color:var(--danger)}progress{width:100%;height:8px;accent-color:var(--primary);margin-top:7px}.minirow{display:flex;align-items:center;gap:12px;padding:12px;border-bottom:1px solid var(--border)}.minirow:last-child{border:0}.minirow .grow{flex:1;min-width:0}.empty{padding:22px;text-align:center}.empty .symbol{font-size:28px;color:var(--muted)}.state{display:flex;gap:12px;align-items:flex-start}.spinner{width:20px;height:20px;border:2px solid var(--border);border-top-color:var(--primary);border-radius:50%;animation:spin .9s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}.swatches{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}.swatch{border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--surface)}.swatch i{display:block;height:36px;background:var(--swatch)}.swatch span{display:block;padding:6px 8px;font-size:12px}.callout{font-size:13px;color:var(--muted)}@media(max-width:620px){.mast{align-items:flex-start;flex-direction:column}.account .active{display:none}.wrap{padding-top:18px}}
+</style></head>
+<body><main class="wrap">
+<header class="mast"><div class="brand"><img class="mark" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMDggMTA4Ij48cmVjdCB3aWR0aD0iMTA4IiBoZWlnaHQ9IjEwOCIgcng9IjI0IiBmaWxsPSIjMTgyMzI2Ii8+PGcgdHJhbnNmb3JtPSJ0cmFuc2xhdGUoMTYuMiAxNi4yKSBzY2FsZSgwLjcgMC43KSI+PHBhdGggZmlsbD0iI0E5QjhFOCIgZmlsbC1ydWxlPSJldmVub2RkIiBkPSJNMjMgNDhDMjMgNDAgMjkgMzUgMzcgMzZDNDAgMjYgNDggMjMgNTUgMjZDNjMgMjQgNzEgMzAgNzMgMzhDODAgMzggODYgNDMgODYgNTBWNTNIMjNaTTIzIDYwSDg2Qzg0IDY1IDgyIDY4IDc4IDcxSDMxQzI3IDY4IDI1IDY1IDIzIDYwWk0zNyA3OEg3MkM2MSA4NiA0OCA4NiAzNyA3OFoiLz48L2c+PC9zdmc+Cg==" alt="" /><div><strong>raiun</strong><small>SHARED DESIGN REFERENCE · DRAFT V1</small></div></div><div class="controls"><label for="theme">Appearance</label><select id="theme" aria-label="Appearance"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select><label for="accent">Account accent</label><select id="accent" aria-label="Account accent"></select><span class="header-account"><span aria-hidden="true">N</span> Northwind Cloud</span></div></header>
+<h1>One calm, clear language<br>across Raiun.</h1><p class="intro">A practical shared vocabulary for Desktop on Linux and Windows and Android. The sample keeps cards neutral, status colors local, and account color attached to account identity. Native apps should keep their platform fonts, controls, and interaction patterns.</p>
+<div class="account"><div class="badge" aria-hidden="true">N</div><p><strong>Northwind Cloud</strong><small>alex@example.org · Connected</small></p><span class="active">Current account</span></div>
+<section><h2>Semantic palette</h2><p class="hint">Light and dark variants follow the semantic token names. Status colors are accents, not panel fills.</p><div class="swatches" id="swatches"></div></section>
+<section><h2>Information and status</h2><p class="hint">Each message has a neutral surface, an explicit heading, and a narrow state cue.</p><div class="grid"><article class="panel"><div class="notice"><span class="symbol">i</span><p><strong>Connection details</strong><small>Your files stay available while Raiun reconnects.</small></p></div><div class="notice success"><span class="symbol">✓</span><p><strong>Backup verified</strong><small>All 18 items are available in your cloud folder.</small></p></div><div class="notice warning"><span class="symbol">!</span><p><strong>Storage is nearly full</strong><small>Review large files or choose another destination.</small></p></div><div class="notice error"><span class="symbol">×</span><p><strong>Couldn’t reach this folder</strong><small>Check the connection and try again.</small></p></div></article><article class="panel"><h3>Helpful next step</h3><p class="muted">A help panel uses the same surface as other content. Its icon and heading carry meaning without turning the whole panel blue.</p><div class="inset" style="margin-top:14px"><strong>Tip</strong><div class="muted">You can pause syncing from the account menu.</div></div></article></div></section>
+<section><h2>Actions and fields</h2><p class="hint">Prominence, labels, and state remain clear in both themes and at larger text sizes.</p><div class="grid"><article class="panel"><h3>Buttons</h3><p class="muted">Keep the main action obvious and destructive action explicit.</p><div class="buttons"><button class="btn primary">Save changes</button><button class="btn">Cancel</button><button class="btn danger">Remove account</button><button class="btn" disabled>Unavailable</button></div></article><article class="panel"><h3>Form fields</h3><div class="field"><label for="server">Server address</label><input id="server" value="https://cloud.example.org"><small>Use the address provided by your organization.</small></div><div class="field error"><label for="folder">Folder name</label><input id="folder" value="/Shared"><small>This folder name isn’t available. Choose another name.</small></div></article></div></section>
+<section><h2>Persistent account context</h2><p class="hint">The selected account card and persistent header identity use the account accent; other application surfaces remain neutral.</p><article class="panel"><div class="minirow"><div class="badge">N</div><div class="grow"><strong>Northwind Cloud</strong><div class="muted">alex@example.org</div></div><span class="chip good">Connected</span></div><div class="minirow"><div class="badge" style="background:var(--inset);color:var(--muted)">P</div><div class="grow"><strong>Personal files</strong><div class="muted">Available on this device</div></div><button class="btn">Open</button></div></article></section>
+<section><h2>Transfers and rows</h2><p class="hint">Direction, progress, and result are distinct. Successful completion is stated only after verification.</p><article class="panel"><div class="transfer"><div class="fileicon">↑</div><div><p><strong>Q3-planning.pdf</strong></p><small>Uploading · 8.4 MB of 12 MB</small><progress value="70" max="100" aria-label="Upload 70 percent complete"></progress></div><span class="chip">70%</span></div><div class="transfer"><div class="fileicon">↓</div><div><p><strong>Brand-assets.zip</strong></p><small>Download verified · 42 MB</small></div><span class="chip good">Complete</span></div><div class="transfer"><div class="fileicon">↑</div><div><p><strong>Meeting-notes.docx</strong></p><small>Could not upload · Connection interrupted</small></div><span class="chip bad">Retry</span></div></article></section>
+<section><h2>Loading, empty, and error</h2><p class="hint">Explain what is happening and offer the next useful action without conflating empty with failed.</p><div class="grid"><article class="panel state"><span class="spinner" aria-hidden="true"></span><div><strong>Loading your files</strong><div class="muted">This usually takes a few seconds.</div></div></article><article class="panel empty"><div class="symbol" aria-hidden="true">□</div><h3>No files here yet</h3><p class="muted">Files added to this folder will appear here.</p><button class="btn primary" style="margin-top:12px">Choose folder</button></article><article class="panel"><div class="notice error"><span class="symbol">!</span><p><strong>Files couldn’t be loaded</strong><small>Your account is still selected. Check your connection, then try again.</small></p></div><button class="btn">Try again</button></article></div></section>
+<section><h2>Review notes</h2><div class="panel"><p class="callout">This standalone catalog is a visual proposal, not proof of production implementation. Review each platform in light and dark appearance, at compact and typical sizes, with keyboard/focus and larger text settings. See <a href="DESIGN-SYSTEM.md">the scorecard and verification guidance</a>.</p></div></section>
+</main><script id="raiun-reference-tokens" type="application/json">
+{
+  "version": 1,
+  "status": "draft",
+  "color": {
+    "light": {
+      "canvas": "#f6f8fa",
+      "surface": "#ffffff",
+      "inset": "#f1f4f6",
+      "border": "#dce3e7",
+      "controlBorder": "#7b8c95",
+      "text": "#192b32",
+      "muted": "#52636d",
+      "primary": "#00677f",
+      "primaryHover": "#005568",
+      "onPrimary": "#ffffff",
+      "success": "#22664f",
+      "warning": "#805100",
+      "danger": "#a22e35",
+      "info": "#005c73",
+      "focus": "#00677f"
+    },
+    "dark": {
+      "canvas": "#11181c",
+      "surface": "#192327",
+      "inset": "#212d32",
+      "border": "#34464e",
+      "controlBorder": "#7a919c",
+      "text": "#edf3f6",
+      "muted": "#adbec6",
+      "primary": "#83d1e5",
+      "primaryHover": "#a4dfed",
+      "onPrimary": "#003543",
+      "success": "#8ed4b1",
+      "warning": "#f0c37c",
+      "danger": "#ffb4ab",
+      "info": "#8cd6ed",
+      "focus": "#83d1e5"
+    }
+  },
+  "space": [
+    4,
+    8,
+    12,
+    16,
+    24,
+    32,
+    48
+  ],
+  "radius": {
+    "control": 8,
+    "panel": 12
+  },
+  "accountAccent": [
+    "#00677f",
+    "#267a68",
+    "#7057a5",
+    "#a94f6d",
+    "#9a6416",
+    "#345b9e",
+    "#34634d",
+    "#843e75"
+  ],
+  "contract": {
+    "statusTextMinimumContrast": 4.5,
+    "textMinimumContrast": 4.5,
+    "controlBorderMinimumContrast": 3,
+    "focusMinimumContrast": 3,
+    "platformFontsAndControls": "native"
+  }
+}
+</script><script>
+const tokens=JSON.parse(document.querySelector('#raiun-reference-tokens').textContent);
+const theme=document.querySelector('#theme'),accent=document.querySelector('#accent'),root=document.documentElement;
+const accentNames=['Ocean','Teal','Violet','Rose','Amber','Indigo','Forest','Plum'];tokens.accountAccent.forEach((color,index)=>{const option=document.createElement('option');option.value=color;option.textContent=accentNames[index];accent.append(option)})
+function apply(){root.dataset.theme=theme.value;const dark=theme.value==='dark'||(theme.value==='system'&&matchMedia('(prefers-color-scheme: dark)').matches);const set=dark?'dark':'light';root.style.colorScheme=set;for(const [key,value] of Object.entries(tokens.color[set]))root.style.setProperty(`--${key}`,value);root.style.setProperty('--accent',accent.value||tokens.color.light.primary);document.querySelector('#swatches').innerHTML=Object.entries(tokens.color[set]).map(([k,v])=>`<div class="swatch"><i style="--swatch:${v}"></i><span>${k} · ${v}</span></div>`).join('')}
+theme.addEventListener('change',apply);accent.addEventListener('change',apply);matchMedia('(prefers-color-scheme: dark)').addEventListener('change',apply);apply();
+</script></body></html>

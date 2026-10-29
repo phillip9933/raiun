@@ -1,6 +1,12 @@
 name: Desktop Windows candidate
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - '.gitattributes'
+      - 'apps/desktop/**'
+      - 'design/raiun/**'
+      - '.github/workflows/desktop-windows.yml'
 permissions:
   contents: read
 defaults:
@@ -11,8 +17,14 @@ jobs:
   windows:
     runs-on: windows-2022
     timeout-minutes: 60
+    outputs:
+      source-commit: ${{ steps.candidate-pins.outputs.source-commit }}
+      installer-sha256: ${{ steps.candidate-pins.outputs.installer-sha256 }}
+      manifest-sha256: ${{ steps.candidate-pins.outputs.manifest-sha256 }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: rustfmt, clippy
@@ -55,6 +67,21 @@ jobs:
           & (Join-Path $installation 'Common7/Tools/Launch-VsDevShell.ps1') -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
           if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) { throw 'MSVC environment was not initialized.' }
           ./scripts/build-windows-package.ps1 -UpdaterArtifacts
+      - name: Bind candidate acceptance to these exact build outputs
+        id: candidate-pins
+        run: |
+          $manifests = @(Get-ChildItem desktop-shell/src-tauri/target -Filter '*-setup.exe.manifest.json' -File -Recurse)
+          if ($manifests.Count -ne 1) { throw 'Expected one installer manifest.' }
+          $manifest = Get-Content -LiteralPath $manifests[0].FullName -Raw | ConvertFrom-Json
+          $source = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $source -cne $manifest.sourceCommit -or $manifest.sourceDirty -ne $false) { throw 'Candidate source does not match this clean checkout.' }
+          $setup = Join-Path $manifests[0].Directory.FullName $manifest.installer.name
+          $installerHash = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($installerHash -cne $manifest.installer.sha256) { throw 'Installer hash changed after packaging.' }
+          $manifestHash = (Get-FileHash -LiteralPath $manifests[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "source-commit=$source" >> $env:GITHUB_OUTPUT
+          "installer-sha256=$installerHash" >> $env:GITHUB_OUTPUT
+          "manifest-sha256=$manifestHash" >> $env:GITHUB_OUTPUT
       - name: Upload candidate and provenance
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -77,3 +104,51 @@ jobs:
             apps/desktop/desktop-shell/src-tauri/target/release/deps
             apps/desktop/desktop-shell/src-tauri/target/release/build
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
+  installed-package-acceptance:
+    if: github.head_ref == 'work/desktop-0.7.5' || github.ref_name == 'work/desktop-0.7.5'
+    needs: windows
+    runs-on: windows-2022
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Download the verified 0.7.4 baseline
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: raiun-desktop-windows-x86_64-candidate
+          repository: phillip9933/raiun
+          run-id: 40504819643
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/raiun-baseline-candidate
+      - name: Download this workflow's new candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: raiun-desktop-windows-x86_64-candidate
+          path: ${{ runner.temp }}/raiun-final-candidate
+      - name: Verify 0.7.4 to 0.7.5 in-place upgrade and retained state
+        env:
+          RAIUN_TEST_SOURCE: ${{ needs.windows.outputs.source-commit }}
+          RAIUN_TEST_INSTALLER_SHA256: ${{ needs.windows.outputs.installer-sha256 }}
+          RAIUN_TEST_MANIFEST_SHA256: ${{ needs.windows.outputs.manifest-sha256 }}
+        run: >-
+          ./scripts/test-windows-installed-package.ps1
+          -BaselineArtifactRoot "${{ runner.temp }}/raiun-baseline-candidate"
+          -FinalArtifactRoot "${{ runner.temp }}/raiun-final-candidate"
+          -OutputDirectory "${{ github.workspace }}/windows-acceptance-output"
+          -AcceptanceMode upgrade-0.7.4-to-0.7.5
+          -ExpectedFinalSourceCommit $env:RAIUN_TEST_SOURCE
+          -ExpectedFinalInstallerSha256 $env:RAIUN_TEST_INSTALLER_SHA256
+          -ExpectedFinalManifestSha256 $env:RAIUN_TEST_MANIFEST_SHA256
+      - name: Upload bounded upgrade acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: raiun-desktop-0.7.5-windows-upgrade-acceptance
+          path: ${{ github.workspace }}/windows-acceptance-output/*
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,5 +1,12 @@
 # Raiun Desktop changelog
 
+## 0.7.5 Beta — unreleased
+
+- Sharing brings Shared with me, Shared by me and Public links into one workspace, with shared items listed automatically.
+- Create password-protected sharing links and supported guest invitations, and edit supported settings on existing outgoing shares. Public-link passwords are not saved locally.
+- Offline files has a simpler layout, storage summaries and a configurable automatic-cache allowance. Options expand below their button without moving it.
+- More consistent colors, controls and transfer messages across the desktop app.
+
 ## 0.7.4 Beta — 2026-10-27
 
 - Windows installer upgrades existing same-user installations in place by default, without requiring a manual uninstall. Running program files block replacement with Retry/Cancel; the installer does not force Raiun to stop.
@@ -15,7 +22,7 @@
 - Windows refresh scheduling uses a 30-second lead instead of 300 seconds, avoiding an immediate repeated-refresh cycle for five-minute access tokens.
 - Reconnect failure details remain available inline after a toast is dismissed. Redacted diagnostics accept legitimate disconnected Windows status, omit cleanup extension data and report app/agent versions separately.
 
-This numeric `0.7.4` release remains on the Beta channel and retains the beta.3 sign-in/Space fixes. The owner verified Windows reconnect behavior with the Default and a newly added account. Exact package hashes and version-bound update signatures were verified. Focused native Windows preview-to-final installation preserved settings, profile metadata and same-user DPAPI data; the busy guard refused replacement without killing the agent. Headless/CLI distribution and MSI packaging are outside this release.
+This numeric `0.7.4` release remains on the Beta channel and retains the beta.3 sign-in/Space fixes. Headless/CLI distribution and MSI packaging are outside this release.
 
 ## 0.7.0-beta.3 — 2026-10-27
 

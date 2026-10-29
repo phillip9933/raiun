@@ -3151,3 +3151,44 @@ they do not silently replace this tested candidate. The earlier browser preview
 was stopped after automatic approval denial; separate previously authorized
 packaged-app VM checks proceed independently. Test/harness failures are retained
 under the external task evidence directory rather than represented as passes.
+
+## Next-release GUI parity gate — 29 October 2026
+
+The owner's next-release requirement now includes full ordinary Windows file
+operations, Linux/Windows GUI feature parity and the practical headless CLI MVP.
+The [current parity matrix](GUI-PARITY.md) identifies source seams, missing
+capabilities and scoped native acceptance. [Issue #46](https://github.com/phillip9933/raiun/issues/46)
+tracks the shared release gate; successful Sharing or installer checks alone do
+not establish readiness. The independent CLI work owns ordinary provider
+streaming/namespace implementation; Desktop owns GUI/encrypted parity and
+security integration. Reviewed frozen patches preserve each checkout's work.
+
+The Sharing follow-up fixes canonical LibreGraph link names and redacts public
+capability-bearing OCS identifiers from debug output. Source checks cover the
+real response field and conflicting aliases; corrected-package confirmation is
+still required. A prior explicitly approved empty-folder live test confirmed
+protected creation, name/access changes and exact revocation, preserving the
+other grant and leaving the folder empty. Its creation acknowledgement was
+incorrectly uncertain before the name parser fix; that failure is retained.
+
+At source `77ba21c`, Linux packages passed isolated launch/normal Quit and the
+Windows native suite and synthetic 0.7.4-to-0.7.5 installed upgrade passed. The
+Windows run used a hosted interactive administrator, not an ordinary-user
+laptop. These are regression baselines, not full operation or GUI parity proof.
+
+### Windows encrypted-folder browsing integration (29 October 2026)
+
+The local candidate now adds online, read-only encrypted directory browsing to
+Windows using the existing identity-bound vault reader. Selected account,
+authentication generation, physical registered root and unlock epoch are checked
+before publication. Lock/account transitions clear pending names in the UI.
+Root inspection and listing share a twenty-second metadata budget, preserving
+shorter outer deadlines and rejecting expired or rotated-session results.
+Native writes, offline pins and cross-vault copy are not enabled by this slice.
+
+All 43 frontend test files and the production build pass. Rust workspace tests,
+formatting and strict Linux/Windows cross-target Clippy pass; the deadline helper
+also received independent source review. These source checks do not establish
+positive native Windows browsing or complete GUI parity. That package acceptance
+and the broader full-operation integration remain open. Evidence is under
+`outputs/desktop-release-prep-20261029/gui-parity/browse-integration-r1/` outside Git.

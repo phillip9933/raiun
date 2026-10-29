@@ -1,6 +1,6 @@
 [package]
 name = "raiun-desktop-shell"
-version = "0.7.4"
+version = "0.7.5"
 edition = "2024"
 rust-version = "1.90"
 publish = false

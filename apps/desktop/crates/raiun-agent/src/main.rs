@@ -4,6 +4,10 @@
 // of simulating a drive.
 #[cfg(any(unix, windows))]
 mod account_avatar_wire;
+#[cfg(any(unix, windows))]
+mod guest_sharing_wire;
+#[cfg(any(unix, windows))]
+mod sharing_wire;
 
 #[cfg(unix)]
 include!("agent_unix.rs");

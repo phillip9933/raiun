@@ -54,6 +54,8 @@ mod pin_snapshot_tests;
 #[cfg(test)]
 mod policy_intent_revision_tests;
 #[cfg(test)]
+mod quota_settings_tests;
+#[cfg(test)]
 mod recent_budget_tests;
 #[cfg(any(windows, test))]
 mod stage_name;
@@ -105,6 +107,8 @@ const MAX_CONTENT_RECORDS: usize = 1_000_000;
 const MAX_PIN_RECORDS: usize = 10_000;
 const MAX_TOTAL_PIN_ITEMS: usize = 1_000_000;
 const MAX_CONTENT_BYTES: u64 = 1 << 40;
+/// User-configurable automatic-cache allowance minimum (256 MiB).
+pub const MIN_CACHE_QUOTA_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_CIPHERTEXT_PINS: usize = 10_000;
 const MAX_CIPHERTEXT_PIN_GENERATIONS: usize = 100_000;
 const MAX_CIPHERTEXT_PIN_ITEMS: usize = 1_000_000;
@@ -644,6 +648,8 @@ pub struct EvictionReport {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CacheUsage {
     pub quota_bytes: u64,
+    /// Logical content/inventory bytes, not filesystem allocated blocks or a
+    /// Windows device-wide Cloud Files snapshot.
     pub used_bytes: u64,
     pub pinned_bytes: u64,
     pub protected_bytes: u64,
@@ -710,7 +716,7 @@ struct Inner {
     root: PathBuf,
     content_dir: PathBuf,
     db: Mutex<DbOwner>,
-    quota_bytes: u64,
+    quota_bytes: AtomicU64,
     #[cfg(windows)]
     windows_content: windows_blob::WindowsBlobStore,
     #[cfg(windows)]
@@ -758,12 +764,13 @@ impl Cache {
             prepare_db_file(&db_path)?;
             let db = Connection::open(&db_path).map_err(db_error)?;
             schema::initialize(&db, schema::JournalMode::Wal)?;
+            let quota_bytes = load_or_seed_quota(&db, quota_bytes)?;
             let cache = Self {
                 inner: Arc::new(Inner {
                     root,
                     content_dir,
                     db: Mutex::new(DbOwner::Portable(db)),
-                    quota_bytes,
+                    quota_bytes: AtomicU64::new(quota_bytes),
                 }),
             };
             cache.remove_unindexed_content()?;
@@ -2773,7 +2780,7 @@ impl Cache {
         }
         tx.commit().map_err(db_error)?;
         drop(db);
-        let _ = self.evict_recent(self.quota_bytes());
+        let _ = self.evict_to_quota();
         Ok(())
     }
 
@@ -3231,7 +3238,7 @@ impl Cache {
             });
         }
         drop(db);
-        let _ = self.evict_recent(self.quota_bytes());
+        let _ = self.evict_to_quota();
         Ok(())
     }
 
@@ -3274,7 +3281,7 @@ impl Cache {
         }
         tx.commit().map_err(db_error)?;
         drop(db);
-        let _ = self.evict_recent(self.quota_bytes());
+        let _ = self.evict_to_quota();
         Ok(())
     }
 
@@ -3325,7 +3332,7 @@ impl Cache {
         }
         tx.commit().map_err(db_error)?;
         drop(db);
-        let _ = self.evict_recent(self.quota_bytes());
+        let _ = self.evict_to_quota();
         Ok(())
     }
 
@@ -3963,7 +3970,40 @@ impl Cache {
     }
 
     pub fn quota_bytes(&self) -> u64 {
-        self.inner.quota_bytes
+        self.try_quota_bytes()
+            .unwrap_or_else(|_| self.inner.quota_bytes.load(Ordering::Acquire))
+    }
+
+    /// Read the durable configured quota, propagating database failures.
+    /// Use this fallible form for admission, eviction planning, or decisions
+    /// that can alter cache contents; `quota_bytes` is retained for displays.
+    pub fn try_quota_bytes(&self) -> Result<u64, CacheError> {
+        let db = self.lock_db()?;
+        let quota_bytes = configured_quota_bytes(&db)?;
+        self.inner.quota_bytes.store(quota_bytes, Ordering::Release);
+        Ok(quota_bytes)
+    }
+
+    /// Persist a configurable automatic-cache admission allowance. Saving a
+    /// limit never evicts immediately; call `evict_to_quota` separately and
+    /// report its outcome independently. Existing handles read the shared DB
+    /// setting on every getter/admission/usage operation.
+    pub fn set_quota_bytes(&self, quota_bytes: u64) -> Result<(), CacheError> {
+        if !(MIN_CACHE_QUOTA_BYTES..=MAX_CONTENT_BYTES).contains(&quota_bytes) {
+            return Err(CacheError::LimitExceeded);
+        }
+        #[cfg(windows)]
+        let _lease = self.inner.windows_content.publication_lease()?;
+        #[cfg(not(windows))]
+        let _lease = self.lock_content_deletion()?;
+        let db = self.lock_db()?;
+        db.execute(
+            "INSERT INTO cache_settings(setting,value) VALUES('quota_bytes',?1) ON CONFLICT(setting) DO UPDATE SET value=excluded.value",
+            params![i64_from_u64(quota_bytes)?],
+        )
+        .map_err(db_error)?;
+        self.inner.quota_bytes.store(quota_bytes, Ordering::Release);
+        Ok(())
     }
 
     /// Read-only usage accounting. This does not trigger eviction or remove
@@ -3992,12 +4032,14 @@ impl Cache {
             }
             _ => (used_bytes, protected_bytes),
         };
+        let quota_bytes = configured_quota_bytes(&db)?;
+        self.inner.quota_bytes.store(quota_bytes, Ordering::Release);
         Ok(CacheUsage {
-            quota_bytes: self.inner.quota_bytes,
+            quota_bytes,
             used_bytes,
             pinned_bytes,
             protected_bytes,
-            over_quota: used_bytes > self.inner.quota_bytes,
+            over_quota: used_bytes > quota_bytes,
         })
     }
 
@@ -4823,10 +4865,12 @@ impl Cache {
                 };
                 // Reusing an indexed immutable version allocates no new bytes.
                 // Existing Dirty/Recovery content may legitimately exceed quota.
+                let quota_bytes = configured_quota_bytes(&db)?;
+                self.inner.quota_bytes.store(quota_bytes, Ordering::Release);
                 if !existing
                     && used
                         .checked_add(expected_len)
-                        .is_none_or(|total| total > self.inner.quota_bytes)
+                        .is_none_or(|total| total > quota_bytes)
                 {
                     return Err(CacheError::InsufficientSpace);
                 }
@@ -5185,7 +5229,7 @@ impl Cache {
         if max_candidates == 0 || max_candidates > 64 {
             return Err(CacheError::LimitExceeded);
         }
-        self.evict_recent_with_limits(target_quota, max_candidates, || {})
+        self.evict_recent_with_limits(Some(target_quota), max_candidates, || {})
     }
 
     fn evict_recent_with_hook(
@@ -5193,12 +5237,20 @@ impl Cache {
         target_quota: u64,
         after_commit: impl FnMut(),
     ) -> Result<EvictionReport, CacheError> {
-        self.evict_recent_with_limits(target_quota, MAX_CONTENT_RECORDS, after_commit)
+        self.evict_recent_with_limits(Some(target_quota), MAX_CONTENT_RECORDS, after_commit)
+    }
+
+    fn evict_recent_configured_with_limits(
+        &self,
+        max_candidates: usize,
+        after_commit: impl FnMut(),
+    ) -> Result<EvictionReport, CacheError> {
+        self.evict_recent_with_limits(None, max_candidates, after_commit)
     }
 
     fn evict_recent_with_limits(
         &self,
-        target_quota: u64,
+        target_quota: Option<u64>,
         max_candidates: usize,
         mut after_commit: impl FnMut(),
     ) -> Result<EvictionReport, CacheError> {
@@ -5217,6 +5269,13 @@ impl Cache {
         #[cfg(not(windows))]
         let _deletion_lease = self.lock_content_deletion()?;
         let mut db = self.lock_db()?;
+        let target_quota = match target_quota {
+            Some(target) => target,
+            None => configured_quota_bytes(&db)?,
+        };
+        self.inner
+            .quota_bytes
+            .store(target_quota, Ordering::Release);
         let mut used = total_content_bytes(&db)?;
         #[cfg(windows)]
         if let (Some(store), Some(lease)) = (windows_store, windows_lease.as_ref()) {
@@ -5331,7 +5390,7 @@ impl Cache {
     }
 
     pub fn evict_to_quota(&self) -> Result<EvictionReport, CacheError> {
-        self.evict_recent(self.inner.quota_bytes)
+        self.evict_recent_configured_with_limits(MAX_CONTENT_RECORDS, || {})
     }
 
     /// Pin a complete recursive metadata manifest. Every directory snapshot in
@@ -8030,6 +8089,33 @@ fn now_unix() -> i64 {
 }
 fn db_error(error: rusqlite::Error) -> CacheError {
     CacheError::Database(error.to_string())
+}
+
+pub(crate) fn load_or_seed_quota(db: &Connection, default_bytes: u64) -> Result<u64, CacheError> {
+    if default_bytes > MAX_CONTENT_BYTES {
+        return Err(CacheError::LimitExceeded);
+    }
+    db.execute(
+        "INSERT OR IGNORE INTO cache_settings(setting,value) VALUES('quota_bytes',?1)",
+        params![i64_from_u64(default_bytes)?],
+    )
+    .map_err(db_error)?;
+    configured_quota_bytes(db)
+}
+
+pub(crate) fn configured_quota_bytes(db: &Connection) -> Result<u64, CacheError> {
+    let value: i64 = db
+        .query_row(
+            "SELECT value FROM cache_settings WHERE setting='quota_bytes'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    let value = u64::try_from(value).map_err(|_| CacheError::Corrupt)?;
+    if value > MAX_CONTENT_BYTES {
+        return Err(CacheError::Corrupt);
+    }
+    Ok(value)
 }
 fn io_error(error: io::Error) -> CacheError {
     CacheError::Io(error.to_string())

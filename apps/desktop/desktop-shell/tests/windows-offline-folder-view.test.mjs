@@ -37,7 +37,8 @@ test('view exposes accessible folder selection, exact four-field row key, and pr
     folderRows: [row(), row({ spaceLabel: 'Spaces / Research', spaceId: 'space-research', rootResourceId: 'space-root', path: '/', resourceId: 'space-root' }), row({ path: '/', resourceId: 'personal-root' })],
     knownJobRow: row(), controller: { job: runningJob(), loading: false, error: '', admissionUncertain: false }
   }));
-  assert.match(html, /<h2>Save folders offline<\/h2>/);
+  assert.match(html, /<h2>Folders<\/h2>/);
+  assert.match(html, /<svg viewBox="0 0 24 24"[^>]*aria-hidden="true"/);
   assert.match(html, /data-windows-offline-folder-row="\{&quot;space_id&quot;:&quot;personal-space&quot;,&quot;root_resource_id&quot;:&quot;personal-root&quot;,&quot;path&quot;:&quot;\/Documents&quot;,&quot;resource_id&quot;:&quot;folder-123&quot;\}"/);
   assert.match(html, /aria-pressed="true"/);
   assert.match(html, /Personal · Documents/);
@@ -47,6 +48,19 @@ test('view exposes accessible folder selection, exact four-field row key, and pr
   assert.match(html, /1 of 2 files verified so far/);
   assert.match(html, /data-action="poll-windows-offline-folder"/);
   assert.match(html, /data-action="cancel-windows-offline-folder"/);
+  assert.match(html, />Cancel download<\/button>/);
+});
+
+test('folder actions use short labels while retaining exact action hooks', () => {
+  const initial = renderWindowsOfflineFolderPanel(props({
+    canResume: true, resumePinId: 'c'.repeat(64),
+    canRefresh: true, refreshActivePinId: 'd'.repeat(64), refreshStagingPinId: 'e'.repeat(64)
+  }));
+  assert.match(initial, />Keep folder offline<\/button>/);
+  assert.match(initial, />Continue download<\/button>/);
+  assert.match(initial, />Refresh copy<\/button>/);
+  assert.match(initial, /data-action="refresh-windows-offline-folders"[^>]*>Refresh list<\/button>/);
+  assert.match(initial, /data-action="more-windows-offline-folders"[^>]*>Load more<\/button>/);
 });
 
 test('view escapes listed folder metadata and error text', () => {

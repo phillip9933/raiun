@@ -39,7 +39,29 @@ pub(crate) fn agent_action_waits_for_completion(action: &str) -> bool {
 }
 
 pub(crate) fn agent_response_timeout(action: &str) -> Duration {
-    if action == "auth_begin" {
+    if action == "auth_begin"
+        || matches!(
+            action,
+            "guest_permissions"
+                | "guest_invite"
+                | "guest_update"
+                | "guest_revoke"
+                | "sharing_capabilities"
+                | "sharing_inventory"
+                | "sharing_owned_settings"
+                | "sharing_owned_update"
+                | "sharing_owned_revoke"
+                | "sharing_permissions"
+                | "sharing_recipients"
+                | "sharing_invite"
+                | "sharing_update"
+                | "sharing_revoke"
+                | "sharing_link_create"
+                | "sharing_link_revoke"
+                | "cache_quota_set"
+                | "windows_device_cache_quota_set"
+        )
+    {
         Duration::from_secs(65)
     } else {
         Duration::from_secs(10)

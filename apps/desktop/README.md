@@ -14,7 +14,7 @@ OpenCloud/
 
 The 0.7.4 numeric version remains on the Beta update channel. Compatible installed clients can check for releases and explicitly download/install verified updates; see [Desktop updates](docs/DESKTOP-UPDATES.md) for channels and trust.
 
-The app provides an OpenCloud drive, folder sync, offline caching, encrypted file access, account controls, transfers and recovery. The Sync Folders workspace presents ordinary sync folders and upload-only media folders together; Sync Folders supports two-way and one-way directions, Photos/Videos filters and editable exclusions. Settings include Light/Dark/System themes, per-account colors, account rename/removal/restore and grouped storage, network and security controls. Windows uses an in-place installer upgrade by default. The owner verified the reconnect fix with both the Default and a newly added Windows account. These checks do not certify every native account/file-manager workflow or all advanced encrypted/offline behavior. Media import runs remain bounded by documented stability, file-size and conflict rules; source files stay in place and older cloud versions are not automatically retained. See the [beta changelog](CHANGELOG.md), [Sync Folders guide](docs/SYNC-FOLDERS.md) and [acceptance records](docs/MVP-ACCEPTANCE.md).
+The app provides an OpenCloud drive, folder sync, offline caching, encrypted file access, account controls, transfers and recovery. The Sync Folders workspace presents ordinary sync folders and upload-only media folders together; Sync Folders supports two-way and one-way directions, Photos/Videos filters and editable exclusions. Settings include Light/Dark/System themes, per-account colors, account rename/removal/restore and grouped storage, network and security controls. Windows uses an in-place installer upgrade by default. Media import runs remain bounded by documented stability, file-size and conflict rules; source files stay in place and older cloud versions are not automatically retained. See the [beta changelog](CHANGELOG.md), [Sync Folders guide](docs/SYNC-FOLDERS.md) and [acceptance records](docs/MVP-ACCEPTANCE.md).
 
 ## Screenshots
 
@@ -40,6 +40,15 @@ Browser layout previews of the Desktop interface; no account connected. These sh
   and portable directory validation. Explicit encrypted folder pairs use a
   separate verified backend; ordinary sync and the on-demand mount retain
   encrypted-area guards. See [encrypted sync](docs/ENCRYPTED-SYNC.md).
+
+## Shared visual design
+
+The [Raiun design reference](../../design/raiun/DESIGN-SYSTEM.md) defines neutral
+information panels, semantic status colors, account identity, light/dark tokens
+and a per-platform review scorecard. Use its [component catalog](../../design/raiun/reference.html)
+for comparison. Run `python3 scripts/design-tokens.py --check` from this directory;
+regenerate Desktop CSS and the catalog token embed with `--write` after token edits.
+Token checks do not certify runtime accessibility, keyboard operation or reflow.
 
 ## Build and test
 

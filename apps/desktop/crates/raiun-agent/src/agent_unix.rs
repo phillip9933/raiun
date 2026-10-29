@@ -3384,6 +3384,23 @@ impl Runtime {
                     .list(text("space_id")?, text("path")?)
                     .map_err(|e| e.to_string())?,
             ),
+            "cache_quota_set" => {
+                let expected = request.get("expected_auth_generation").and_then(Value::as_u64)
+                    .ok_or("Refresh this account before changing storage settings")?;
+                let quota = request.get("quota_bytes").and_then(Value::as_u64)
+                    .ok_or("Enter a valid cache limit")?;
+                let auth = self.auth_state.lock().map_err(|_| "Account state is unavailable")?;
+                if self.auth_generation.load(Ordering::Acquire) != expected
+                    || self.auth_transition.load(Ordering::Acquire)
+                    || self.retiring.load(Ordering::Acquire)
+                    || self.shutdown.load(Ordering::Acquire) {
+                    return Err("The account changed; review storage settings again".into());
+                }
+                let engine = auth.engine.as_ref().ok_or("Reconnect this account before changing its cache limit")?;
+                engine.set_offline_cache_quota(quota).map_err(|_| "Could not confirm the saved limit; refresh storage before trying again")?;
+                Ok(json!({"auth_generation":expected,"scope":"account","saved":true,
+                    "eviction_performed":false,"quota_bytes":quota}))
+            }
             "cache_policy_set" => {
                 let generation = self.operation_generation()?;
                 let space = text("space_id")?;

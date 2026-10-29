@@ -451,7 +451,7 @@ impl WindowsProfiles {
     }
 
     pub(super) fn handle(&self, request: &Value) -> Result<(Value, bool), String> {
-        reject_secret_request(request)?;
+        reject_control_secret_request(request)?;
         let action = request
             .get("action")
             .and_then(Value::as_str)
@@ -535,6 +535,77 @@ impl WindowsProfiles {
                     false,
                 ))
             }
+            "guest_permissions" | "guest_invite" | "guest_update" | "guest_revoke" => {
+                let _gate = self
+                    .mutation_gate
+                    .lock()
+                    .map_err(|_| "Account changes are unavailable")?;
+                let (id, runtime) = self.resolve(request)?;
+                if action != "guest_permissions"
+                    && self
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?
+                        .registry
+                        .selected()
+                        != Some(id.as_str())
+                {
+                    return Err("The selected account changed; review guest access again".into());
+                }
+                runtime.handle_request(request)
+            }
+            "sharing_capabilities"
+            | "sharing_inventory"
+            | "sharing_owned_settings"
+            | "sharing_owned_update"
+            | "sharing_owned_revoke"
+            | "sharing_permissions"
+            | "sharing_recipients"
+            | "sharing_invite"
+            | "sharing_update"
+            | "sharing_revoke"
+            | "sharing_link_create"
+            | "sharing_link_revoke" => {
+                let parsed = crate::sharing_wire::Request::parse(request)?;
+                let _gate = self
+                    .mutation_gate
+                    .lock()
+                    .map_err(|_| "Account changes are unavailable")?;
+                let (id, runtime) = self.resolve(request)?;
+                if parsed.mutating()
+                    && self
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?
+                        .registry
+                        .selected()
+                        != Some(id.as_str())
+                {
+                    return Err("The selected account changed; review sharing again".into());
+                }
+                runtime.handle_request(request)
+            }
+            "windows_device_cache_quota_set" => {
+                let _gate = self
+                    .mutation_gate
+                    .lock()
+                    .map_err(|_| "Account changes are unavailable")?;
+                let (id, runtime) = self.resolve(request)?;
+                if request.get("profile_id").and_then(Value::as_str) != Some(id.as_str())
+                    || self
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?
+                        .registry
+                        .selected()
+                        != Some(id.as_str())
+                {
+                    return Err(
+                        "The selected account changed; review storage settings again".into(),
+                    );
+                }
+                runtime.handle_request(request)
+            }
             "account_select" => {
                 let _gate = self
                     .mutation_gate
@@ -553,6 +624,26 @@ impl WindowsProfiles {
                 state.registry = next;
                 // Selection neither revokes credentials nor drains any runtime.
                 Ok((json!({}), false))
+            }
+            "vault_list" => {
+                // Hold selection/removal stable through read-only publication.
+                let _gate = self
+                    .mutation_gate
+                    .lock()
+                    .map_err(|_| "Encrypted folder browsing is unavailable")?;
+                let (id, runtime) = self.resolve(request)?;
+                {
+                    let state = self
+                        .state
+                        .lock()
+                        .map_err(|_| "Encrypted folder browsing is unavailable")?;
+                    if state.registry.selected() != Some(id.as_str()) {
+                        return Err(
+                            "Encrypted folder browsing requires the selected account".into()
+                        );
+                    }
+                }
+                Ok((runtime.browse_windows_vault(request)?, false))
             }
             "account_rename" => {
                 let _gate = self
@@ -1190,6 +1281,91 @@ pub(super) fn serve_profiles() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn broker_routes_strict_vault_listing_to_exact_selected_runtime() {
+        let registry = Registry::decode_or_default(None).unwrap();
+        let admissions = Arc::new(Mutex::new(Arc::new(registry.clone())));
+        let (runtime, _) = super::super::tests::synthetic_profile_runtime(
+            "default",
+            Some(admissions),
+            Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
+        );
+        let broker =
+            WindowsProfiles::for_synthetic_lifecycle_fixture(registry, vec![runtime]).unwrap();
+        let request = json!({"action":"vault_list","profile_id":"default","expected_auth_generation":1,"space_id":"space","root_path":"/Vault","root_resource_id":"root","path":"/"});
+        // Signed-out fixtures reach the dedicated read-only handler, which
+        // refuses before any remote or native enumeration work.
+        assert_eq!(
+            broker.handle(&request).unwrap_err(),
+            "Encrypted folder browsing is unavailable; reconnect and unlock this location"
+        );
+        let mut invalid = request.clone();
+        invalid["offline"] = json!(false);
+        assert_eq!(
+            broker.handle(&invalid).unwrap_err(),
+            "Invalid encrypted folder browsing request"
+        );
+        invalid = request;
+        invalid["profile_id"] = json!("profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert!(broker.handle(&invalid).is_err());
+        broker.stop_all().unwrap();
+    }
+
+    #[test]
+    fn broker_admits_only_valid_public_link_password_requests_to_the_selected_runtime() {
+        let registry = Registry::decode_or_default(None).unwrap();
+        let admissions = Arc::new(Mutex::new(Arc::new(registry.clone())));
+        let vault_sessions = Arc::new(raiun_vault::session::VaultSessionCoordinator::new());
+        let (runtime, _) = super::super::tests::synthetic_profile_runtime(
+            "default",
+            Some(admissions),
+            vault_sessions,
+        );
+        let generation = runtime
+            .generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        let broker =
+            WindowsProfiles::for_synthetic_lifecycle_fixture(registry, vec![runtime]).unwrap();
+        let valid = json!({
+            "action":"sharing_link_create",
+            "profile_id":"default",
+            "expected_auth_generation":generation,
+            "space_id":"space-1",
+            "path":"/folder",
+            "expected_item_id":"item-1",
+            "link_type":"view",
+            "password":"synthetic-link-password"
+        });
+        // The account-state gate is reached, proving the secret-bearing
+        // request passed broker admission; the offline synthetic runtime then
+        // refuses it before constructing a network client.
+        assert_eq!(
+            broker.handle(&valid).unwrap_err(),
+            "The account changed; refresh sharing before continuing"
+        );
+
+        for invalid in [
+            json!({
+                "action":"sharing_link_create",
+                "profile_id":"default",
+                "expected_auth_generation":generation,
+                "space_id":"space-1",
+                "path":"/folder",
+                "expected_item_id":"item-1",
+                "link_type":"view",
+                "password":"x".repeat(73)
+            }),
+            json!({"action":"sharing_invite","profile_id":"default","password":"synthetic"}),
+            json!({"action":"vault_unlock","profile_id":"default","password":"synthetic"}),
+        ] {
+            let error = broker.handle(&invalid).unwrap_err();
+            assert_ne!(
+                error,
+                "The account changed; refresh sharing before continuing"
+            );
+        }
+    }
 
     #[test]
     fn source_separation_refuses_cross_profile_and_same_account_drive_overlap() {
