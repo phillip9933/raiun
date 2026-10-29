@@ -300,6 +300,31 @@ impl OpenCloudClient {
         operation()
     }
 
+    /// Bound synchronous encrypted-root inspection and directory metadata to
+    /// one token generation and at most twenty seconds. Nested callers retain
+    /// the outer generation and any shorter deadline. Not for payload transfers.
+    pub fn with_vault_metadata_deadline<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, CloudError>,
+    ) -> Result<T, CloudError> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let context = ACTIVE_RANGE_CONTEXT.with(Cell::get).map_or_else(
+            || RangeReadContext {
+                deadline,
+                token_generation: self.token_generation(),
+            },
+            |outer| RangeReadContext {
+                deadline: outer.deadline.min(deadline),
+                token_generation: outer.token_generation,
+            },
+        );
+        let _guard = RangeContextGuard::enter(context);
+        self.ensure_context_current(context)?;
+        let result = operation()?;
+        self.ensure_context_current(context)?;
+        Ok(result)
+    }
+
     fn validate_identity_addressed_root(
         &self,
         selected: &CloudSpace,
@@ -3296,6 +3321,104 @@ mod tests {
         sync::mpsc,
         thread,
     };
+
+    #[test]
+    fn vault_metadata_deadline_preserves_shorter_outer_context_and_restores_it() {
+        let client = OpenCloudClient::new("https://synthetic.invalid", "synthetic".into()).unwrap();
+        let outer = RangeReadContext {
+            deadline: Instant::now() + Duration::from_secs(2),
+            token_generation: client.token_generation(),
+        };
+        assert!(ACTIVE_RANGE_CONTEXT.with(Cell::get).is_none());
+        {
+            let _guard = RangeContextGuard::enter(outer);
+            client
+                .with_vault_metadata_deadline(|| {
+                    let current = ACTIVE_RANGE_CONTEXT.with(Cell::get).unwrap();
+                    assert_eq!(current.deadline, outer.deadline);
+                    assert_eq!(current.token_generation, outer.token_generation);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                ACTIVE_RANGE_CONTEXT.with(Cell::get).unwrap().deadline,
+                outer.deadline
+            );
+        }
+        assert!(ACTIVE_RANGE_CONTEXT.with(Cell::get).is_none());
+    }
+
+    #[test]
+    fn vault_metadata_deadline_refuses_expired_or_stale_outer_before_operation() {
+        let client = OpenCloudClient::new("https://synthetic.invalid", "synthetic".into()).unwrap();
+        for context in [
+            RangeReadContext {
+                deadline: Instant::now() - Duration::from_secs(1),
+                token_generation: client.token_generation(),
+            },
+            RangeReadContext {
+                deadline: Instant::now() + Duration::from_secs(2),
+                token_generation: client.token_generation() + 1,
+            },
+        ] {
+            {
+                let _guard = RangeContextGuard::enter(context);
+                let result = client.with_vault_metadata_deadline(|| -> Result<(), CloudError> {
+                    panic!("stale admission must not run")
+                });
+                assert_eq!(result.unwrap_err().kind, ErrorKind::Unauthorized);
+                let restored = ACTIVE_RANGE_CONTEXT.with(Cell::get).unwrap();
+                assert_eq!(restored.deadline, context.deadline);
+                assert_eq!(restored.token_generation, context.token_generation);
+            }
+            assert!(ACTIVE_RANGE_CONTEXT.with(Cell::get).is_none());
+        }
+    }
+
+    #[test]
+    fn vault_metadata_deadline_refuses_final_rotation_and_restores_context() {
+        let client = OpenCloudClient::new("https://synthetic.invalid", "synthetic".into()).unwrap();
+        let result = client.with_vault_metadata_deadline(|| {
+            client.set_bearer_token("synthetic-rotated".into())?;
+            Ok("must not publish")
+        });
+        assert_eq!(result.unwrap_err().kind, ErrorKind::Unauthorized);
+        assert!(ACTIVE_RANGE_CONTEXT.with(Cell::get).is_none());
+    }
+
+    #[test]
+    fn vault_metadata_deadline_refuses_final_expiry_and_preserves_operation_errors() {
+        let client = OpenCloudClient::new("https://synthetic.invalid", "synthetic".into()).unwrap();
+        let outer = RangeReadContext {
+            deadline: Instant::now() + Duration::from_millis(200),
+            token_generation: client.token_generation(),
+        };
+        {
+            let _guard = RangeContextGuard::enter(outer);
+            let mut operation_entered = false;
+            let result = client.with_vault_metadata_deadline(|| {
+                operation_entered = true;
+                thread::sleep(
+                    outer.deadline.saturating_duration_since(Instant::now())
+                        + Duration::from_millis(1),
+                );
+                Ok("must not publish")
+            });
+            assert!(
+                operation_entered,
+                "must exercise post-operation expiry refusal"
+            );
+            assert_eq!(result.unwrap_err().kind, ErrorKind::Unauthorized);
+            assert_eq!(
+                ACTIVE_RANGE_CONTEXT.with(Cell::get).unwrap().deadline,
+                outer.deadline
+            );
+        }
+        let result: Result<(), CloudError> =
+            client.with_vault_metadata_deadline(|| Err(conflict("synthetic operation failed")));
+        assert_eq!(result.unwrap_err().kind, ErrorKind::Conflict);
+        assert!(ACTIVE_RANGE_CONTEXT.with(Cell::get).is_none());
+    }
 
     #[test]
     fn token_generation_completion_lease_serializes_rotation_and_shared_clients() {

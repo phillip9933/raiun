@@ -625,6 +625,26 @@ impl WindowsProfiles {
                 // Selection neither revokes credentials nor drains any runtime.
                 Ok((json!({}), false))
             }
+            "vault_list" => {
+                // Hold selection/removal stable through read-only publication.
+                let _gate = self
+                    .mutation_gate
+                    .lock()
+                    .map_err(|_| "Encrypted folder browsing is unavailable")?;
+                let (id, runtime) = self.resolve(request)?;
+                {
+                    let state = self
+                        .state
+                        .lock()
+                        .map_err(|_| "Encrypted folder browsing is unavailable")?;
+                    if state.registry.selected() != Some(id.as_str()) {
+                        return Err(
+                            "Encrypted folder browsing requires the selected account".into()
+                        );
+                    }
+                }
+                Ok((runtime.browse_windows_vault(request)?, false))
+            }
             "account_rename" => {
                 let _gate = self
                     .mutation_gate
@@ -1261,6 +1281,36 @@ pub(super) fn serve_profiles() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn broker_routes_strict_vault_listing_to_exact_selected_runtime() {
+        let registry = Registry::decode_or_default(None).unwrap();
+        let admissions = Arc::new(Mutex::new(Arc::new(registry.clone())));
+        let (runtime, _) = super::super::tests::synthetic_profile_runtime(
+            "default",
+            Some(admissions),
+            Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
+        );
+        let broker =
+            WindowsProfiles::for_synthetic_lifecycle_fixture(registry, vec![runtime]).unwrap();
+        let request = json!({"action":"vault_list","profile_id":"default","expected_auth_generation":1,"space_id":"space","root_path":"/Vault","root_resource_id":"root","path":"/"});
+        // Signed-out fixtures reach the dedicated read-only handler, which
+        // refuses before any remote or native enumeration work.
+        assert_eq!(
+            broker.handle(&request).unwrap_err(),
+            "Encrypted folder browsing is unavailable; reconnect and unlock this location"
+        );
+        let mut invalid = request.clone();
+        invalid["offline"] = json!(false);
+        assert_eq!(
+            broker.handle(&invalid).unwrap_err(),
+            "Invalid encrypted folder browsing request"
+        );
+        invalid = request;
+        invalid["profile_id"] = json!("profile-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert!(broker.handle(&invalid).is_err());
+        broker.stop_all().unwrap();
+    }
 
     #[test]
     fn broker_admits_only_valid_public_link_password_requests_to_the_selected_runtime() {

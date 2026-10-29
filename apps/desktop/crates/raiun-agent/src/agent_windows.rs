@@ -54,6 +54,8 @@ mod windows_folder_requests;
 mod windows_folder_sync;
 #[path = "windows_media_requests.rs"]
 mod windows_media_requests;
+#[path = "windows_vault_browse.rs"]
+mod windows_vault_browse;
 #[path = "windows_vault_requests.rs"]
 mod windows_vault_requests;
 
@@ -2955,6 +2957,7 @@ impl WindowsAgent {
             }
             // Inspection is read-only and grants no session, key or native route.
             "vault_inspect" => Ok((self.inspect_windows_vault(request)?, false)),
+            "vault_list" => Ok((self.browse_windows_vault(request)?, false)),
             "vault_upload_capture" => {
                 if !WINDOWS_VAULT_EDIT_UPLOAD_ENABLED {
                     return Err(
@@ -3323,6 +3326,7 @@ impl WindowsAgent {
             "proxy_edit_requires_sign_out": state.session.is_some(),
             "media_jobs_supported": WINDOWS_MEDIA_METADATA_ENABLED,
             "vaults_supported": WINDOWS_VAULT_SESSIONS_ENABLED,
+            "vault_in_app_browse_supported": true,
             "account_switch_supported": false,
             "pause_supported": WINDOWS_FOLDER_SYNC_ENABLED,
             "authenticating": state.authenticating,

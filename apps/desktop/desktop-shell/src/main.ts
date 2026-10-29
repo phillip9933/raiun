@@ -37,7 +37,7 @@ import { isVaultPasswordValidationError, shouldAnnounceVaultCloseBlocked, vaultD
 import raiunLogo from '../src-tauri/icons/raiun.svg';
 
 type OfflineCacheSummary = { available: boolean; quota_bytes: number; used_bytes: number; pinned_bytes: number; protected_bytes: number; over_quota: boolean; unavailable_reason?: string | null };
-type Status = { connected: boolean; offline?: boolean; offline_namespace?: boolean; refreshing?: boolean; agent_version?: string | null; server?: string | null; client_id?: string | null; paused?: boolean; paused_space_ids?: string[]; mounted?: boolean; cloud_root?: string | null; error?: string | null; autostart?: boolean | null; recovery_folder?: string | null; encrypted_edit_recovery_available?: boolean; offline_cache?: OfflineCacheSummary | null; profile_id?: string | null; profile_label?: string | null; auth_generation?: number; root_configuration?: { valid: boolean; identity_bound: boolean; registration_state: string | null; recovery_scope_token?: unknown } | null; stopped?: boolean; authenticating?: boolean; provider_supported?: boolean; folder_sync_supported?: boolean; folder_settings_supported?: boolean; media_jobs_supported?: boolean; vaults_supported?: boolean; vault_access_mode?: 'native_read_only'; account_switch_supported?: boolean; account_setup_requires_sign_in?: boolean; pause_supported?: boolean; bandwidth_limits_supported?: boolean; network_proxy_supported?: boolean; proxy_edit_requires_sign_out?: boolean; session_cleanup_uncertain?: boolean };
+type Status = { connected: boolean; offline?: boolean; offline_namespace?: boolean; refreshing?: boolean; agent_version?: string | null; server?: string | null; client_id?: string | null; paused?: boolean; paused_space_ids?: string[]; mounted?: boolean; cloud_root?: string | null; error?: string | null; autostart?: boolean | null; recovery_folder?: string | null; encrypted_edit_recovery_available?: boolean; offline_cache?: OfflineCacheSummary | null; profile_id?: string | null; profile_label?: string | null; auth_generation?: number; root_configuration?: { valid: boolean; identity_bound: boolean; registration_state: string | null; recovery_scope_token?: unknown } | null; stopped?: boolean; authenticating?: boolean; provider_supported?: boolean; folder_sync_supported?: boolean; folder_settings_supported?: boolean; media_jobs_supported?: boolean; vaults_supported?: boolean; vault_access_mode?: 'native_read_only'; vault_in_app_browse_supported?: boolean; account_switch_supported?: boolean; account_setup_requires_sign_in?: boolean; pause_supported?: boolean; bandwidth_limits_supported?: boolean; network_proxy_supported?: boolean; proxy_edit_requires_sign_out?: boolean; session_cleanup_uncertain?: boolean };
 type Account = { id: string; label: string; status: Status; avatar_data_url?: string | null };
 type RemovedAccount = { id: string; label: string; local_data_preserved: true };
 type DesktopUpdateStatus = { state: 'idle' | 'current' | 'available' | 'unavailable' | 'downloaded' | 'dismissed' | 'error'; version: string | null; tag: string | null; release_url: string | null; notes: string | null; error: string | null; automatic_checks: boolean; channel: 'stable' | 'beta'; dismissed_tag: string | null; last_check_unix: number | null; key_configured: boolean; downloaded: boolean };
@@ -79,7 +79,7 @@ type VaultOperationsPage = { space_id: string; root_resource_id: string; auth_ge
 type VaultOperationsScope = { key: string; spaceId: string; rootResourceId: string; authGeneration: number; items: VaultOperation[]; nextAfter: string | null; truncated: boolean; loading: boolean; error: string; accountEpoch: number };
 type CopyVerifyJobUi = { key: string; binding: CopyVerifyBinding; jobId: string | null; status: CopyVerifyStatus | null; busy: boolean; cancelBusy: boolean; error: string; generation: number; timer: number };
 type VaultDirectoryBinding = { resourceId: string; etag: string };
-type VaultDialogState = { lockCleanupStatus: VaultLockCleanupStatus; intent: 'add' | 'manage' | 'browse' | 'create'; spaceId: string; rootPath: string; rootResourceId: string; rootEtag: string; directoryBindings: Map<string, VaultDirectoryBinding>; currentDirectoryBinding: VaultDirectoryBinding | null; offlinePinId?: string; offlinePinGeneration?: number; path: string; entries: RemoteEntry[]; unlocked: boolean; statusUnknown: boolean; initialized: boolean; writable: boolean; offlineUnlockOnly: boolean; vaultMountReady: boolean; vaultMountWritable: boolean | null; vaultMountWriteUnavailableReason: VaultMountWriteUnavailableReason | null; vaultMountExistingFileOverwrite: boolean; vaultMountExistingFileInPlace: boolean; vaultMountExistingFileOverwriteReason: VaultExistingOverwriteReason | null; rememberedStatus: RememberedStatus | null; rememberOnDevice: boolean; pins: VaultPin[]; pinsNextAfter: string | null; pinsTruncated: boolean; pinsLoading: boolean; pinsError: string; pinBusy: boolean; pinJob: VaultPinJob | null; pinGeneration: number; pinPollTimer: number; editRetryBusy: boolean; editRetryError: string; editRetryJob: VaultEditReconcileStatus | null; editRetryGeneration: number; editRetryPollTimer: number; loading: boolean; error: string; passwordError: string; closeBlockedNotice: string; generation: number; accountEpoch: number; pairId?: string };
+type VaultDialogState = { browseRevision?: number; browseAuthGeneration?: number; lockCleanupStatus: VaultLockCleanupStatus; intent: 'add' | 'manage' | 'browse' | 'create'; spaceId: string; rootPath: string; rootResourceId: string; rootEtag: string; directoryBindings: Map<string, VaultDirectoryBinding>; currentDirectoryBinding: VaultDirectoryBinding | null; offlinePinId?: string; offlinePinGeneration?: number; path: string; entries: RemoteEntry[]; unlocked: boolean; statusUnknown: boolean; initialized: boolean; writable: boolean; offlineUnlockOnly: boolean; vaultMountReady: boolean; vaultMountWritable: boolean | null; vaultMountWriteUnavailableReason: VaultMountWriteUnavailableReason | null; vaultMountExistingFileOverwrite: boolean; vaultMountExistingFileInPlace: boolean; vaultMountExistingFileOverwriteReason: VaultExistingOverwriteReason | null; rememberedStatus: RememberedStatus | null; rememberOnDevice: boolean; pins: VaultPin[]; pinsNextAfter: string | null; pinsTruncated: boolean; pinsLoading: boolean; pinsError: string; pinBusy: boolean; pinJob: VaultPinJob | null; pinGeneration: number; pinPollTimer: number; editRetryBusy: boolean; editRetryError: string; editRetryJob: VaultEditReconcileStatus | null; editRetryGeneration: number; editRetryPollTimer: number; loading: boolean; error: string; passwordError: string; closeBlockedNotice: string; generation: number; accountEpoch: number; pairId?: string };
 type CopyProducerSource = { expectation: CopyProducerSourceExpectation; profileId: string; accountEpoch: number; authGeneration: number; rootPath: string; displayName: string; size: number };
 type CopyProducerUi = { source: CopyProducerSource | null; generation: number; flowGeneration: number; context: CopyProducerContext | null; destination: CopyProducerDestinationExpectation | null; jobId: string | null; status: CopyProducerStatus | null; busy: boolean; admissionUncertain: boolean; error: string; timer: number; pollError: string };
 type MediaFilterValue = 'photos' | 'videos' | 'all';
@@ -214,6 +214,7 @@ function updateNativeVaultLockCleanup(flow: VaultDialogState, observed: unknown,
   const scope = nativeVaultLockScope(flow);
   if (expectedScope !== undefined && expectedScope !== scope) {
     flow.statusUnknown = true;
+    clearVaultBrowse(flow);
     flow.vaultMountReady = false;
     return;
   }
@@ -226,8 +227,33 @@ function nativeVaultLockIncomplete(flow: VaultDialogState) { return nativeVaultA
 
 function nativeVaultAccess() { return state.status?.vault_access_mode === 'native_read_only'; }
 function vaultAppFeaturesAvailable() { return featureAvailable('vaults_supported') && !nativeVaultAccess(); }
+function nativeVaultBrowseAvailable(flow = state.vaultDialog): boolean {
+  const status = state.status;
+  return nativeVaultAccess() && status?.vault_in_app_browse_supported === true &&
+    status.connected === true && status.offline !== true && status.mounted === true &&
+    Number.isSafeInteger(status.auth_generation) && status.auth_generation! >= 0 &&
+    !state.accountSwitching && !!flow && isCurrentAccount(flow.accountEpoch) &&
+    state.vaultGeneration === flow.generation && flow.unlocked && !flow.statusUnknown &&
+    !flow.offlineUnlockOnly && flow.vaultMountReady && !nativeVaultLockIncomplete(flow) && !!flow.rootResourceId;
+}
+function clearVaultBrowse(flow: VaultDialogState) {
+  flow.browseRevision = (flow.browseRevision ?? 0) + 1;
+  flow.entries = [];
+  flow.path = '/';
+  flow.directoryBindings.clear();
+  flow.currentDirectoryBinding = null;
+  flow.browseAuthGeneration = undefined;
+}
+function invalidateUnavailableNativeVaultBrowse() {
+  const flow = state.vaultDialog;
+  if (flow && (flow.browseAuthGeneration !== undefined || nativeVaultAccess()) &&
+      (!nativeVaultBrowseAvailable(flow) || (flow.browseAuthGeneration !== undefined && flow.browseAuthGeneration !== state.status?.auth_generation))) {
+    if (flow.browseAuthGeneration !== undefined) flow.loading = false;
+    clearVaultBrowse(flow);
+  }
+}
 function nativeVaultActionAllowed(action: string) {
-  return !nativeVaultAccess() || ((!action.startsWith('vault_') && !action.startsWith('encrypted_edit_')) || ['vault_inspect', 'vault_unlock', 'vault_lock', 'vault_forget'].includes(action));
+  return !nativeVaultAccess() || (action === 'vault_list' && nativeVaultBrowseAvailable()) || ((!action.startsWith('vault_') && !action.startsWith('encrypted_edit_')) || ['vault_inspect', 'vault_unlock', 'vault_lock', 'vault_forget'].includes(action));
 }
 function windowsSignInPending() { return isWindowsAgentStatus(state.status) && state.status?.authenticating === true; }
 
@@ -720,6 +746,7 @@ const svg = (name: string, cls = '') => `<svg class="icon ${cls}" viewBox="0 0 2
 const spaceName = (id: string) => state.spaces.find(s => s.id === id)?.name ?? (id ? 'OpenCloud location' : 'OpenCloud');
 
 function render() {
+  invalidateUnavailableNativeVaultBrowse();
   const sameView = renderedPage === state.page && renderedAccount === state.selectedAccount;
   const previousMainScroll = sameView ? app.querySelector<HTMLElement>('.main-area')?.scrollTop ?? 0 : 0;
   const previousSidebarScroll = sameView ? app.querySelector<HTMLElement>('.sidebar')?.scrollTop ?? 0 : 0;
@@ -2855,12 +2882,16 @@ function nativeExistingFileSaveMessage() {
 function nativeVaultDrivePanel(flow: VaultDialogState, busy: boolean) {
   const ready = !flow.statusUnknown && flow.unlocked && !nativeVaultLockIncomplete(flow) && flow.vaultMountReady && state.status?.mounted === true && state.status?.connected === true;
   const existingFileSaves = ready && flow.vaultMountExistingFileInPlace;
-  return `<section class="vault-native-read-only"><b>${existingFileSaves ? 'Windows drive access · supported file saves' : 'Read-only Windows drive access'}</b><p>${nativeVaultLockIncomplete(flow) ? esc(nativeVaultLockMessage(flow.lockCleanupStatus, flow.unlocked)) : existingFileSaves ? nativeExistingFileSaveMessage() : ready ? 'Open the OpenCloud drive and navigate to this encrypted location to read its files. Files cannot be edited here.' : 'The encrypted location is unlocked, but native drive access has not been confirmed. Close and reopen this dialog to check drive access.'}</p><button class="button primary" data-vault-action="open-native" ${busy || !ready ? 'disabled' : ''}>Open OpenCloud drive</button><small>In-app browsing and encrypted offline copies are unavailable. Locking denies new reads; it cannot retract copies already read by other apps.</small></section>`;
+  return `<section class="vault-native-read-only"><b>${existingFileSaves ? 'Windows drive access · supported file saves' : 'Read-only Windows drive access'}</b><p>${nativeVaultLockIncomplete(flow) ? esc(nativeVaultLockMessage(flow.lockCleanupStatus, flow.unlocked)) : existingFileSaves ? nativeExistingFileSaveMessage() : ready ? 'Open the OpenCloud drive and navigate to this encrypted location to read its files. Files cannot be edited here.' : 'The encrypted location is unlocked, but native drive access has not been confirmed. Close and reopen this dialog to check drive access.'}</p><button class="button primary" data-vault-action="open-native" ${busy || !ready ? 'disabled' : ''}>Open OpenCloud drive</button><small>${nativeVaultBrowseAvailable(flow) ? 'In-app browsing is read-only. Encrypted offline copies are unavailable.' : 'In-app browsing and encrypted offline copies are unavailable.'} Locking denies new reads; it cannot retract copies already read by other apps.</small></section>`;
 }
 async function openNativeVaultDrive() {
   const flow = state.vaultDialog;
   if (!nativeVaultAccess() || !featureAvailable('vaults_supported') || !flow || nativeVaultLockIncomplete(flow) || !flow.unlocked || flow.statusUnknown || !flow.vaultMountReady || flow.loading || state.status?.mounted !== true || state.status.connected !== true || !isCurrentAccount(flow.accountEpoch) || state.vaultGeneration !== flow.generation || state.accountSwitching) return;
   await openAccountFolder('open_cloud_folder');
+}
+function vaultDirectoryRows(flow: VaultDialogState, busy: boolean, copyChoosingDestination: boolean) {
+  return (!nativeVaultAccess() || nativeVaultBrowseAvailable(flow)) && flow.unlocked && !flow.statusUnknown
+    ? `<div class="vault-directory-list">${flow.path !== '/' ? `<button class="vault-directory-row" data-vault-path="${esc(parentPath(flow.path))}" ${busy || (!nativeVaultAccess() && copyProducerUi.admissionUncertain) ? 'disabled' : ''}>${svg('folder')}<span>..</span>${svg('chevron')}</button>` : ''}${flow.entries.filter(entry => entry.directory).map(entry => `<button class="vault-directory-row" data-vault-path="${esc(entry.path)}" ${busy || (!nativeVaultAccess() && copyProducerUi.admissionUncertain) ? 'disabled' : ''}>${svg('folder')}<span>${esc(lastPath(entry.path))}</span>${svg('chevron')}</button>`).join('') || `<div class="vault-empty">No folders in this encrypted location.</div>`}${copyChoosingDestination ? '' : flow.entries.filter(entry => !entry.directory).map(entry => `<div class="vault-file-row"><span class="vault-file-name">${svg('media')}<b>${esc(lastPath(entry.path))}</b><small>${entry.size == null ? 'File' : esc(formatBytes(entry.size))}</small></span>${canStartVaultCopyFrom(flow, entry) ? `<button class="small-action" data-copy-source-index="${flow.entries.indexOf(entry)}" aria-label="Copy ${esc(lastPath(entry.path))} to another encrypted location">Copy to…</button>` : ''}</div>`).join('')}</div>` : '';
 }
 function vaultDialog() {
   const flow = state.vaultDialog!;
@@ -2874,8 +2905,7 @@ function vaultDialog() {
   const closeDisabled = busy || vaultWorkPending || (copyChoosingDestination && copyProducerUi.busy);
   if (!closeDisabled) flow.closeBlockedNotice = '';
   const title = flow.intent === 'create' ? 'Create encrypted folder' : flow.intent === 'manage' ? 'Encrypted folder' : flow.intent === 'browse' ? 'Unlock encrypted files' : 'Choose encrypted folder';
-  const directoryRows = !nativeVaultAccess() && flow.unlocked && !flow.statusUnknown
-    ? `<div class="vault-directory-list">${flow.path !== '/' ? `<button class="vault-directory-row" data-vault-path="${esc(parentPath(flow.path))}" ${copyProducerUi.admissionUncertain ? 'disabled' : ''}>${svg('folder')}<span>..</span>${svg('chevron')}</button>` : ''}${flow.entries.filter(entry => entry.directory).map(entry => `<button class="vault-directory-row" data-vault-path="${esc(entry.path)}" ${copyProducerUi.admissionUncertain ? 'disabled' : ''}>${svg('folder')}<span>${esc(lastPath(entry.path))}</span>${svg('chevron')}</button>`).join('') || `<div class="vault-empty">No folders in this encrypted location.</div>`}${copyChoosingDestination ? '' : flow.entries.filter(entry => !entry.directory).map(entry => `<div class="vault-file-row"><span class="vault-file-name">${svg('media')}<b>${esc(lastPath(entry.path))}</b><small>${entry.size == null ? 'File' : esc(formatBytes(entry.size))}</small></span>${canStartVaultCopyFrom(flow, entry) ? `<button class="small-action" data-copy-source-index="${flow.entries.indexOf(entry)}" aria-label="Copy ${esc(lastPath(entry.path))} to another encrypted location">Copy to…</button>` : ''}</div>`).join('')}</div>` : '';
+  const directoryRows = vaultDirectoryRows(flow, busy, copyChoosingDestination);
   const createForm = flow.intent === 'create'
     ? `<label class="field-label" for="vault-create-name">Folder name</label><input class="vault-input" id="vault-create-name" value="${esc(state.pickerFolderName)}" placeholder="For example, Private" maxlength="240" ${busy ? 'disabled' : ''}/><small class="vault-hint">Raiun adds the .vault suffix when needed. Folder creation can be partially completed by the server; if an error appears, check the remote location before retrying.</small><label class="field-label" for="vault-create-password">Vault password</label><input class="vault-input" id="vault-create-password" type="password" autocomplete="new-password" ${busy ? 'disabled' : ''}/><label class="field-label" for="vault-create-confirm">Confirm password</label><input class="vault-input" id="vault-create-confirm" type="password" autocomplete="new-password" ${busy ? 'disabled' : ''}/>`
     : !flow.unlocked && flow.initialized && !flow.statusUnknown && !nativeVaultLockIncomplete(flow)
@@ -2958,7 +2988,7 @@ function vaultDialog() {
     : copyChoosingDestination && flow.unlocked && !flow.statusUnknown
       ? `<div class="vault-hint" role="status">${flow.writable ? 'A stable folder version is unavailable here, or this is the source location. Choose a different folder.' : 'This location is read-only. Choose an unlocked writable encrypted location.'}</div>`
       : '';
-  return `<div class="modal-backdrop" data-backdrop="vault"><section class="modal vault-modal" role="dialog" aria-modal="true" aria-labelledby="vault-title" tabindex="-1"><div class="modal-top"><div><div class="eyebrow">END-TO-END ENCRYPTION</div><h2 id="vault-title">${copyChoosingDestination ? 'Choose copy destination' : title}</h2></div><button class="icon-button" data-vault-action="close" aria-label="Close" ${closeDisabled || copyActive ? 'disabled' : ''}>${svg('close')}</button></div><p class="modal-lede">${copyChoosingDestination ? 'Choose an unlocked writable encrypted folder. Raiun creates a new file there and keeps the original in place.' : browseExplanation}</p><div class="vault-root">${svg('lock')}<code>${esc(flow.offlineUnlockOnly ? opaqueOfflineLabel : rootDisplay)}</code></div>${flow.error ? `<div class="vault-error" ${passwordErrorActive ? 'id="vault-password-error" ' : ''}role="alert">${svg('alert')}<span>${esc(flow.error)}</span></div>` : ''}${flow.closeBlockedNotice ? `<div class="vault-state" role="status" aria-live="polite" aria-atomic="true">${esc(flow.closeBlockedNotice)}</div>` : ''}${flow.intent !== 'create'? `<div class="vault-state ${flow.unlocked && !flow.statusUnknown ? 'unlocked' : ''}" role="status" aria-live="polite" aria-atomic="true">${liveLockState}</div>` : ''}${createForm}${rememberedNote}${flow.unlocked && !flow.statusUnknown ? nativeVaultAccess() ? nativeVaultDrivePanel(flow, busy) : `<div class="vault-browse-label">${copyChoosingDestination ? 'Destination folder' : 'Folders inside this encrypted location'} <code>${esc(flow.path)}</code></div>${flow.loading ? '<div class="vault-empty" role="status"><span class="spinner"></span> Loading encrypted folder…</div>' : directoryRows}${destinationAction}${copyPanel}${!copyChoosingDestination ? `${vaultOfflinePinPanel(flow)}${vaultEditRetryPanel(flow)}` : ''}` : copyPanel}${protectedRecoveryPanel}<div class="helper-note">Your vault password is not saved unless you choose “Remember on this device.” After an opted-in successful unlock, Raiun stores the password in the operating system’s protected credential store for this account and vault. Locking the vault does not remove it; use “Forget saved key” separately. If a vault password is lost, its encrypted cloud contents cannot be recovered by Raiun.</div>${flow.intent !== 'create' ? `<div class="helper-note">${esc(mountedAvailability)}</div>` : ''}<div class="modal-actions"><button class="button subtle" data-vault-action="close" ${closeDisabled || copyActive ? 'disabled' : ''}>Close</button>${unlockButton}${savedUnlockButton}${lockButton}${flow.offlineUnlockOnly ? '' : forgetButton}${statusButton}${useButton}${!nativeVaultAccess() && flow.intent === 'create' ? `<button class="button primary" data-vault-action="create" ${busy ? 'disabled' : ''}>${busy ? 'Creating…' : 'Create vault'}</button>` : ''}</div></section></div>`;
+  return `<div class="modal-backdrop" data-backdrop="vault"><section class="modal vault-modal" role="dialog" aria-modal="true" aria-labelledby="vault-title" tabindex="-1"><div class="modal-top"><div><div class="eyebrow">END-TO-END ENCRYPTION</div><h2 id="vault-title">${copyChoosingDestination ? 'Choose copy destination' : title}</h2></div><button class="icon-button" data-vault-action="close" aria-label="Close" ${closeDisabled || copyActive ? 'disabled' : ''}>${svg('close')}</button></div><p class="modal-lede">${copyChoosingDestination ? 'Choose an unlocked writable encrypted folder. Raiun creates a new file there and keeps the original in place.' : browseExplanation}</p><div class="vault-root">${svg('lock')}<code>${esc(flow.offlineUnlockOnly ? opaqueOfflineLabel : rootDisplay)}</code></div>${flow.error ? `<div class="vault-error" ${passwordErrorActive ? 'id="vault-password-error" ' : ''}role="alert">${svg('alert')}<span>${esc(flow.error)}</span></div>` : ''}${flow.closeBlockedNotice ? `<div class="vault-state" role="status" aria-live="polite" aria-atomic="true">${esc(flow.closeBlockedNotice)}</div>` : ''}${flow.intent !== 'create'? `<div class="vault-state ${flow.unlocked && !flow.statusUnknown ? 'unlocked' : ''}" role="status" aria-live="polite" aria-atomic="true">${liveLockState}</div>` : ''}${createForm}${rememberedNote}${flow.unlocked && !flow.statusUnknown ? nativeVaultAccess() ? `${nativeVaultDrivePanel(flow, busy)}${nativeVaultBrowseAvailable(flow) ? `<div class="vault-browse-label">Read-only encrypted folder <code>${esc(flow.path)}</code></div>${flow.loading ? '<div class="vault-empty" role="status"><span class="spinner"></span> Loading encrypted folder…</div>' : directoryRows}` : ''}` : `<div class="vault-browse-label">${copyChoosingDestination ? 'Destination folder' : 'Folders inside this encrypted location'} <code>${esc(flow.path)}</code></div>${flow.loading ? '<div class="vault-empty" role="status"><span class="spinner"></span> Loading encrypted folder…</div>' : directoryRows}${destinationAction}${copyPanel}${!copyChoosingDestination ? `${vaultOfflinePinPanel(flow)}${vaultEditRetryPanel(flow)}` : ''}` : copyPanel}${protectedRecoveryPanel}<div class="helper-note">Your vault password is not saved unless you choose “Remember on this device.” After an opted-in successful unlock, Raiun stores the password in the operating system’s protected credential store for this account and vault. Locking the vault does not remove it; use “Forget saved key” separately. If a vault password is lost, its encrypted cloud contents cannot be recovered by Raiun.</div>${flow.intent !== 'create' ? `<div class="helper-note">${esc(mountedAvailability)}</div>` : ''}<div class="modal-actions"><button class="button subtle" data-vault-action="close" ${closeDisabled || copyActive ? 'disabled' : ''}>Close</button>${unlockButton}${savedUnlockButton}${lockButton}${flow.offlineUnlockOnly ? '' : forgetButton}${statusButton}${useButton}${!nativeVaultAccess() && flow.intent === 'create' ? `<button class="button primary" data-vault-action="create" ${busy ? 'disabled' : ''}>${busy ? 'Creating…' : 'Create vault'}</button>` : ''}</div></section></div>`;
 }
 
 function bind() {
@@ -4309,8 +4339,8 @@ async function openVaultFlow(intent: VaultDialogState['intent'], spaceId: string
     updateNativeVaultLockCleanup(flow, inspected.vault_lock_cleanup_status, inspected.unlocked ? 'unlock' : 'inspect');
     if (typeof inspected.writable === 'boolean') flow.writable = !nativeVaultAccess() && selectedSpaceWritable && inspected.writable;
     flow.loading = false;
-    if (flow.unlocked && !nativeVaultAccess()) {
-      if (!nativeVaultAccess()) await loadVaultPath(flow, '/');
+    if (flow.unlocked && (!nativeVaultAccess() || nativeVaultBrowseAvailable(flow))) {
+      if (!nativeVaultAccess() || nativeVaultBrowseAvailable(flow)) await loadVaultPath(flow, '/');
       if (!nativeVaultAccess() && isCurrentAccount(accountEpoch) && state.vaultDialog === flow && flow.unlocked && !flow.statusUnknown) await loadVaultPins(flow, true);
     }
     else render();
@@ -4318,16 +4348,25 @@ async function openVaultFlow(intent: VaultDialogState['intent'], spaceId: string
     if (isCurrentAccount(accountEpoch) && state.vaultDialog === flow && !isStaleAccountRequest(error)) {
       flow.error = messageOf(error);
       flow.statusUnknown = true;
+      clearVaultBrowse(flow);
       flow.loading = false;
       render();
     }
   }
 }
 async function loadVaultPath(flow: VaultDialogState, path: string) {
-  if (nativeVaultAccess()) return;
+  const native = nativeVaultAccess();
+  if (native && !nativeVaultBrowseAvailable(flow)) return;
   const accountEpoch = flow.accountEpoch;
   const generation = flow.generation;
-  if (!flow.unlocked || !flow.rootResourceId || flow.loading) return;
+  if (!flow.unlocked || flow.statusUnknown || !flow.rootResourceId || flow.loading || !isCurrentAccount(accountEpoch) || state.vaultDialog !== flow || state.vaultGeneration !== generation) return;
+  const revision = (flow.browseRevision ?? 0) + 1;
+  flow.browseRevision = revision;
+  const authGeneration = native ? state.status!.auth_generation : undefined;
+  if (native) flow.browseAuthGeneration = authGeneration;
+  const current = () => isCurrentAccount(accountEpoch) && state.vaultDialog === flow && state.vaultGeneration === generation && flow.browseRevision === revision;
+  const readable = () => current() && flow.unlocked && !flow.statusUnknown && (!native || (nativeVaultBrowseAvailable(flow) && state.status?.auth_generation === authGeneration));
+  flow.entries = [];
   flow.loading = true;
   flow.error = '';
   flow.path = path;
@@ -4339,18 +4378,19 @@ async function loadVaultPath(flow: VaultDialogState, path: string) {
     const entries = await request<RemoteEntry[]>('vault_list', {
       space_id: flow.spaceId, root_path: flow.rootPath,
       root_resource_id: flow.rootResourceId, path,
-      ...(flow.offlineUnlockOnly ? { offline: true } : {})
+      ...(flow.offlineUnlockOnly ? { offline: true } : {}),
+      ...(native ? { expected_auth_generation: authGeneration } : {})
     });
-    if (!isCurrentAccount(accountEpoch) || state.vaultDialog !== flow || state.vaultGeneration !== generation) return;
+    if (!readable()) return;
     flow.entries = entries;
     if (!flow.directoryBindings.has('/') && flow.rootResourceId && isStrongVaultEtag(flow.rootEtag)) {
       flow.directoryBindings.set('/', { resourceId: flow.rootResourceId, etag: flow.rootEtag });
     }
   } catch (error) {
-    if (!isCurrentAccount(accountEpoch) || state.vaultDialog !== flow || isStaleAccountRequest(error)) return;
+    if (!readable() || isStaleAccountRequest(error)) return;
     flow.error = messageOf(error);
   } finally {
-    if (isCurrentAccount(accountEpoch) && state.vaultDialog === flow && state.vaultGeneration === generation) {
+    if (current()) {
       flow.loading = false;
       render();
     }
@@ -4987,7 +5027,7 @@ function closeVaultDialog() {
     }
   }
   state.vaultGeneration++;
-  if (state.vaultDialog) clearVaultPinUi(state.vaultDialog);
+  if (state.vaultDialog) { clearVaultBrowse(state.vaultDialog); clearVaultPinUi(state.vaultDialog); }
   state.vaultDialog = null;
   if (copyProducerUi.source) resetCopyProducerFlow();
   render();
@@ -5031,6 +5071,7 @@ async function unlockVault(useSaved = false) {
     if (nativeVaultAccess() && unlocked.unlocked !== true) {
       flow.unlocked = false;
       flow.statusUnknown = true;
+      clearVaultBrowse(flow);
       flow.vaultMountReady = false;
       flow.vaultMountWritable = false;
       flow.vaultMountExistingFileOverwrite = false;
@@ -5058,7 +5099,7 @@ async function unlockVault(useSaved = false) {
       unlockNotice = 'The vault unlocked, but no saved key was confirmed. Check the saved-key status before relying on it.';
     }
     flow.loading = false;
-    if (!nativeVaultAccess()) await loadVaultPath(flow, '/');
+    if (!nativeVaultAccess() || nativeVaultBrowseAvailable(flow)) await loadVaultPath(flow, '/');
     if (!nativeVaultAccess() && isCurrentAccount(accountEpoch) && state.vaultDialog === flow && flow.unlocked && !flow.statusUnknown) await loadVaultPins(flow, true);
     if (unlockNotice && isCurrentAccount(accountEpoch) && state.vaultDialog === flow && state.vaultGeneration === generation) {
       flow.error = flow.error ? `${flow.error} ${unlockNotice}` : unlockNotice;
@@ -5183,6 +5224,7 @@ async function lockVault() {
   if (nativeVaultAccess()) state.message = '';
   flow.error = '';
   flow.statusUnknown = true;
+  clearVaultBrowse(flow);
   flow.entries = [];
   flow.path = '/';
   flow.vaultMountReady = false;
@@ -5254,7 +5296,7 @@ async function reconcileVaultLockStatus(flow: VaultDialogState, accountEpoch: nu
     flow.loading = false;
     if (flow.unlocked) {
       const lockError = flow.error;
-      if (!nativeVaultAccess()) await loadVaultPath(flow, '/');
+      if (!nativeVaultAccess() || nativeVaultBrowseAvailable(flow)) await loadVaultPath(flow, '/');
       if (isCurrentAccount(accountEpoch) && state.vaultDialog === flow && state.vaultGeneration === generation && !flow.error) {
         flow.error = lockError;
       }
@@ -5267,6 +5309,7 @@ async function reconcileVaultLockStatus(flow: VaultDialogState, accountEpoch: nu
   } catch {
     if (!isCurrentAccount(accountEpoch) || state.vaultDialog !== flow || state.vaultGeneration !== generation) return;
     flow.statusUnknown = true;
+    clearVaultBrowse(flow);
     flow.unlocked = false;
     flow.entries = [];
     flow.path = '/';
@@ -5922,7 +5965,7 @@ function activateAccount(profileId: string) {
   state.spaceId = '';
   state.remotePath = '';
   state.vaultGeneration++;
-  if (state.vaultDialog) clearVaultPinUi(state.vaultDialog);
+  if (state.vaultDialog) { clearVaultBrowse(state.vaultDialog); clearVaultPinUi(state.vaultDialog); }
   state.vaultDialog = null;
   state.vaultAccessOpen = false;
   state.vaultAccessSpaceId = '';

@@ -1319,7 +1319,20 @@ fn parse_public_link(row: &Value) -> Result<PublicShareLink, CloudError> {
         string(link, "type").ok_or_else(|| invalid("server returned invalid link metadata"))?;
     validate_segment(permission_id)?;
     validate_link_type(link_type)?;
-    let display_name = match link.get("displayName") {
+    // LibreGraph names its response extension differently from createLink's
+    // displayName input. Accept the legacy response alias only when it does
+    // not conflict with the canonical field.
+    let name = match (
+        link.get("@libre.graph.displayName"),
+        link.get("displayName"),
+    ) {
+        (Some(canonical), Some(legacy)) if canonical != legacy => {
+            return Err(invalid("server returned conflicting link names"));
+        }
+        (Some(canonical), _) => Some(canonical),
+        (None, legacy) => legacy,
+    };
+    let display_name = match name {
         None | Some(Value::Null) => None,
         Some(Value::String(value))
             if value.len() <= 256 && !value.chars().any(char::is_control) =>
@@ -2038,6 +2051,39 @@ mod tests {
     }
 
     #[test]
+    fn public_link_names_accept_canonical_and_legacy_fields_without_ambiguity() {
+        let base = json!({"id":"link-1","hasPassword":true,"link":{"type":"view"}});
+        for fields in [
+            json!({"@libre.graph.displayName":"Trip"}),
+            json!({"displayName":"Trip"}),
+            json!({"@libre.graph.displayName":"Trip","displayName":"Trip"}),
+        ] {
+            let mut row = base.clone();
+            row["link"]
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            let link = parse_public_link(&row).unwrap();
+            assert_eq!(link.display_name.as_deref(), Some("Trip"));
+            assert_eq!(link.password_protected, Some(true));
+        }
+        for fields in [
+            json!({"@libre.graph.displayName":"Trip","displayName":"Other"}),
+            json!({"@libre.graph.displayName":null,"displayName":"Trip"}),
+            json!({"@libre.graph.displayName":false}),
+            json!({"@libre.graph.displayName":"x".repeat(257)}),
+            json!({"@libre.graph.displayName":"bad\nname"}),
+        ] {
+            let mut row = base.clone();
+            row["link"]
+                .as_object_mut()
+                .unwrap()
+                .extend(fields.as_object().unwrap().clone());
+            assert!(parse_public_link(&row).is_err());
+        }
+    }
+
+    #[test]
     fn inherited_permissions_are_visible_but_marked_read_only() {
         let mut data: Value = serde_json::from_str(ORDINARY_ROWS).unwrap();
         data["value"][0]["inheritedFrom"] = json!({"driveId":"parent-drive","id":"parent-item"});
@@ -2181,7 +2227,7 @@ mod tests {
             respond(
                 &mut stream,
                 "200 OK",
-                r#"{"id":"protected-link","hasPassword":true,"link":{"type":"view","displayName":"Trip","webUrl":"https://cloud.example/s/protected"}}"#,
+                r#"{"id":"protected-link","hasPassword":true,"link":{"type":"view","@libre.graph.displayName":"Trip","webUrl":"https://cloud.example/s/protected"}}"#,
             );
         });
         let client = OpenCloudClient::new_with_proxy(
@@ -2201,6 +2247,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(link.password_protected, Some(true));
+        assert_eq!(link.display_name.as_deref(), Some("Trip"));
         assert!(!format!("{link:?}").contains("synthetic-link-secret"));
         worker.join().unwrap();
     }

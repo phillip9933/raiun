@@ -65,7 +65,7 @@ pub struct OwnedShareInventory {
 }
 
 /// Exact OCS state that must still match before a settings update is sent.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OwnedShareBaseline {
     pub ocs_share_id: String,
@@ -80,6 +80,18 @@ pub struct OwnedShareBaseline {
     pub permissions: Option<u64>,
     pub expires_at: Option<String>,
     pub label: Option<String>,
+}
+
+impl fmt::Debug for OwnedShareBaseline {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // OpenCloud can use the public URL token as its OCS share ID. The
+        // baseline must retain that identity for CAS, but never print it.
+        f.debug_struct("OwnedShareBaseline")
+            .field("ocs_share_id", &"[redacted]")
+            .field("kind", &self.kind)
+            .field("permissions", &self.permissions)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -285,7 +297,7 @@ pub struct OwnedShare {
 impl fmt::Debug for OwnedShare {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OwnedShare")
-            .field("ocs_share_id", &self.ocs_share_id)
+            .field("ocs_share_id", &"[redacted]")
             .field("kind", &self.kind)
             .field("path", &self.path)
             .field("file_target", &self.file_target)
@@ -1915,6 +1927,22 @@ mod tests {
         assert_eq!(links.items[0].kind, OcsShareKind::PublicLink);
         assert!(!format!("{:?}", links.items[0]).contains("secret-link"));
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn public_capability_share_ids_are_redacted_in_debug_but_preserved_for_cas() {
+        let mut row = fixture_owned_row("ocs-link-grant");
+        row.kind = OcsShareKind::PublicLink;
+        row.ocs_share_id = "synthetic-public-token".into();
+        row.public_url = Some("https://cloud.example/s/synthetic-public-token".into());
+        let baseline = baseline_for(&row);
+        assert!(!format!("{row:?}").contains("synthetic-public-token"));
+        assert!(!format!("{baseline:?}").contains("synthetic-public-token"));
+        assert_eq!(baseline.ocs_share_id, row.ocs_share_id);
+        assert_eq!(
+            serde_json::to_value(&baseline).unwrap()["ocs_share_id"],
+            row.ocs_share_id
+        );
     }
 
     #[test]
