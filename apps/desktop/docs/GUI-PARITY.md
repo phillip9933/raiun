@@ -141,14 +141,35 @@ server URLs or credentials into this document.
 - The subsequent C14 job/policy closure is composed locally into the Desktop
   source, with independent integration review, 1,309 host tests passing and
   strict Linux/Windows checks. One original cancellation/deadline job follows
-  capture, queue, upload, independent readback and native completion. Default GUI
-  factory activation and settings/recovered-completion adaptation remain pending.
+  capture, queue, upload, independent readback and native completion. The next
+  local GUI candidate now wires both current-user factories through the admitted
+  streaming policy and retains the live job through explicit recovery completion.
+  Its fresh isolated Windows factory prepare/reopen and three pure guard tests
+  passed; this does not establish installed GUI cloud saves or native retry ACK.
+  The default policy is 1 GiB per file, 8 GiB retained recovery state and a six-hour
+  job. User-configurable GUI policy settings remain unimplemented.
   C13 native acceptance does not validate these newer C14 changes. C14's separate
   observer fixture failed preparation with PermissionDenied; directory and paced
   stages were not run in that invocation. The job closure excludes the observer,
   so an independent paced-save cohort can proceed without repeating that failure.
   Neither source totals nor these scoped tests remove the released 16-MiB
   ordinary or 512-KiB encrypted Windows ceilings or establish full parity.
+
+- The independent C14 paced cohort passed existing-file saves of 2 MiB + 7 and
+  17 MiB + 7 with conditioned readbacks lasting 32/34 seconds, exact native
+  completion and independent DPAPI restart. The directory primitive passed only
+  its Personal case; Space setup failed before mutation and the other three
+  cases did not run. C15's corrected observer still failed with AccessDenied at
+  reopen; connected-observer and expiry stages did not run. These failures stay
+  separate from the successful paced-save evidence.
+- The local Windows saved-edits UI now has explicit confirmed Retry behind an
+  exact agent capability. Requests and replies bind profile, sign-in generation
+  and recovery-root token; stale confirmations/results are discarded. Cloud
+  verification and local completion are reported separately; immutable recovery
+  records remain retained. There is no automatic retry or export action. This
+  paired integration passed 1,311 host tests, 363 named frontend tests and strict
+  Linux/Windows checks with independent review. Actual GUI retry and native ACK
+  acceptance remain pending; the installed laptop remains c584b8f.
 
 These records are under `desktop-release-prep-20261029/windows-ci-c584b8f/`
 and `linux/c584b8f-vm-acceptance/` outside Git. Full file operations and GUI

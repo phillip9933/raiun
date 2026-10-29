@@ -535,6 +535,23 @@ impl WindowsProfiles {
                     false,
                 ))
             }
+            "windows_recovery_retry" => {
+                let (id, runtime) = self.resolve(request)?;
+                if self
+                    .state
+                    .lock()
+                    .map_err(|_| "Account state is unavailable")?
+                    .registry
+                    .selected()
+                    != Some(id.as_str())
+                {
+                    return Err("The selected account changed; review saved edits again".into());
+                }
+                // Do not hold broker mutation/state locks through a file
+                // transfer. Runtime generation/root fences govern the admitted
+                // operation, and account shutdown must remain able to revoke it.
+                runtime.handle_request(request)
+            }
             "guest_permissions" | "guest_invite" | "guest_update" | "guest_revoke" => {
                 let _gate = self
                     .mutation_gate
@@ -1281,6 +1298,46 @@ pub(super) fn serve_profiles() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_edit_retry_must_target_the_selected_account_before_dispatch() {
+        let other = "profile-0123456789abcdef0123456789abcdef";
+        let registry = Registry::decode_or_default(None)
+            .unwrap()
+            .with_added(other, "Synthetic Work")
+            .unwrap()
+            .with_selected("default")
+            .unwrap();
+        let admissions = Arc::new(Mutex::new(Arc::new(registry.clone())));
+        let vaults = Arc::new(raiun_vault::session::VaultSessionCoordinator::new());
+        let (default_runtime, _) = super::super::tests::synthetic_profile_runtime(
+            "default",
+            Some(admissions.clone()),
+            vaults.clone(),
+        );
+        let (other_runtime, _) =
+            super::super::tests::synthetic_profile_runtime(other, Some(admissions), vaults);
+        let broker = WindowsProfiles::for_synthetic_lifecycle_fixture(
+            registry,
+            vec![default_runtime, other_runtime],
+        )
+        .unwrap();
+        let mut request = json!({"action":"windows_recovery_retry","profile_id":other,
+            "expected_generation":1,"expected_recovery_scope_token":"a".repeat(64),
+            "record_id":"aabbccdd","generation":1});
+        assert_eq!(
+            broker.handle(&request).unwrap_err(),
+            "The selected account changed; review saved edits again"
+        );
+        request["profile_id"] = json!("default");
+        assert!(
+            broker
+                .handle(&request)
+                .unwrap_err()
+                .contains("Connect this account")
+        );
+        broker.stop_all().unwrap();
+    }
 
     #[test]
     fn broker_routes_strict_vault_listing_to_exact_selected_runtime() {

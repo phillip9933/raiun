@@ -52,6 +52,8 @@ mod windows_offline_jobs;
 mod windows_folder_requests;
 #[path = "windows_folder_sync.rs"]
 mod windows_folder_sync;
+#[path = "windows_gui_recovery.rs"]
+mod windows_gui_recovery;
 #[path = "windows_media_requests.rs"]
 mod windows_media_requests;
 #[path = "windows_streamed_remote.rs"]
@@ -708,9 +710,8 @@ enum ProviderCommand {
         record_id: String,
         record_generation: u64,
         remote: Arc<dyn raiun_cloudfiles_windows::RecoveryRemote>,
-        response: std::sync::mpsc::SyncSender<
-            Result<raiun_cloudfiles_windows::ReconciliationOutcome, String>,
-        >,
+        response:
+            std::sync::mpsc::SyncSender<Result<windows_gui_recovery::RecoveryCompletion, String>>,
     },
     #[cfg(all(test, debug_assertions))]
     RevokeBackendForTest(std::sync::mpsc::SyncSender<Result<(), String>>),
@@ -1422,18 +1423,19 @@ impl ProviderManager {
                             {
                                 Err("The account changed before recovery could start".to_owned())
                             } else {
-                                recovery
-                                    .dispatch_recovered_edit(
-                                        &record_id,
-                                        record_generation,
-                                        remote.as_ref(),
-                                        raiun_cloudfiles_windows::ExplicitRecoveryApproval::user_reviewed(),
-                                    )
-                                    .map_err(|_error| {
-                                        #[cfg(test)]
-                                        eprintln!("windows_recovery_dispatch_error={_error:?}");
-                                        "Could not safely complete the selected recovery attempt".to_owned()
-                                    })
+                                windows_gui_recovery::dispatch_and_complete(
+                                    windows_gui_recovery::CompletionContext {
+                                        connection: connection.as_ref(),
+                                        backend: backend.as_ref(),
+                                        binding: active_binding.as_ref(),
+                                        generation: &worker_generation,
+                                        expected_generation: agent_generation,
+                                    },
+                                    recovery.as_ref(),
+                                    &record_id,
+                                    record_generation,
+                                    remote.as_ref(),
+                                )
                             };
                             let _ = response.send(result);
                         }
@@ -2191,7 +2193,7 @@ impl ProviderManager {
         record_id: String,
         record_generation: u64,
         remote: Arc<dyn raiun_cloudfiles_windows::RecoveryRemote>,
-    ) -> Result<raiun_cloudfiles_windows::ReconciliationOutcome, String> {
+    ) -> Result<windows_gui_recovery::RecoveryCompletion, String> {
         let (response, result) = std::sync::mpsc::sync_channel(1);
         self.commands
             .send(ProviderCommand::DispatchRecovery {
@@ -3325,6 +3327,7 @@ impl WindowsAgent {
             "folder_settings_supported": WINDOWS_FOLDER_SYNC_ENABLED,
             "bandwidth_limits_supported": true,
             "network_proxy_supported": true,
+            "windows_recovery_retry_supported": true,
             "proxy_edit_requires_sign_out": state.session.is_some(),
             "media_jobs_supported": WINDOWS_MEDIA_METADATA_ENABLED,
             "vaults_supported": WINDOWS_VAULT_SESSIONS_ENABLED,
@@ -3786,11 +3789,8 @@ impl WindowsAgent {
         )
         .map_err(|_| "Could not bind recovery to the connected account")?;
         let recovery_provider =
-            raiun_cloudfiles_windows::DurableEditRecoveryProvider::current_user(
-                provider_scope.clone(),
-                local_root_identity,
-            )
-            .map_err(|_| "Protected recovery storage is unavailable")?;
+            windows_gui_recovery::current_user(provider_scope.clone(), local_root_identity, None)
+                .map_err(|_| "Protected recovery storage is unavailable")?;
         Ok(WindowsRecoveryContext {
             session,
             agent_generation,
@@ -3839,6 +3839,17 @@ impl WindowsAgent {
             context,
             recovery_provider,
         } = self.prepare_recovery_context()?;
+        let recovery_scope_token = self.provider.recovery_cursor_context(
+            &provider_scope,
+            local_root_identity,
+            agent_generation,
+        )?;
+        crate::windows_recovery_request::validate(
+            request,
+            &self.profile_scope,
+            agent_generation,
+            &recovery_scope_token,
+        )?;
         let candidates = recovery_provider
             .unresolved_edits()
             .map_err(|_| "Protected recovery records could not be verified")?;
@@ -3916,7 +3927,7 @@ impl WindowsAgent {
                 return Err("The account changed; reopen Transfers and try again".into());
             }
         }
-        let outcome = self.provider.dispatch_recovery(
+        let completion = self.provider.dispatch_recovery(
             agent_generation,
             prepared,
             record_id.to_owned(),
@@ -3926,7 +3937,36 @@ impl WindowsAgent {
         if self.generation.load(Ordering::Acquire) != agent_generation {
             return Err("The account changed while the recovery attempt was running".into());
         }
-        Ok(recovery_outcome_json(outcome))
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?;
+        if state.active_generation != agent_generation
+            || self.provider.authorized_generation.load(Ordering::Acquire) != agent_generation
+            || !state.online_authenticated
+            || state.authenticating
+            || state.refreshing
+            || state.needs_refresh
+            || state.root_configuration.as_ref() != Some(&configuration)
+            || state.session.as_ref().is_none_or(|current| {
+                current.server != session.server
+                    || current.client_id != session.client_id
+                    || current.access_token != session.access_token
+            })
+            || !self
+                .provider
+                .configuration_recovery_scope_token(&configuration, agent_generation)
+                .is_ok_and(|token| token == recovery_scope_token)
+        {
+            return Err("The account or drive changed; reopen saved edits".into());
+        }
+        let mut result = recovery_outcome_json(completion.outcome);
+        result["profile_id"] = json!(self.profile_scope);
+        result["auth_generation"] = json!(agent_generation);
+        result["recovery_scope_token"] = json!(recovery_scope_token);
+        result["remote_verified"] = json!(completion.remote_verified);
+        result["local_completion"] = json!(completion.local_completion);
+        Ok(result)
     }
 
     /// Prepare exclusion metadata from the live authenticated account, never
@@ -4625,11 +4665,8 @@ impl WindowsAgent {
             return Err("The authenticated Windows provider generation is invalid".into());
         }
         let recovery: Arc<dyn raiun_cloudfiles_windows::EditRecoveryProvider> = Arc::new(
-            raiun_cloudfiles_windows::DurableEditRecoveryProvider::current_user(
-                scope.clone(),
-                identity,
-            )
-            .map_err(|_| "Could not prepare current-user durable edit recovery")?,
+            windows_gui_recovery::current_user(scope.clone(), identity, None)
+                .map_err(|_| "Could not prepare current-user durable edit recovery")?,
         );
         let identity_catalog = recovery
             .identity_catalog()
@@ -7594,7 +7631,8 @@ pub(super) mod tests {
         assert!(matches!(
             manager
                 .dispatch_recovery(1, recovery.clone(), "aabbccdd".into(), 9, remote.clone(),)
-                .expect("current generation reaches prepared dispatch"),
+                .expect("current generation reaches prepared dispatch")
+                .outcome,
             raiun_cloudfiles_windows::ReconciliationOutcome::Deferred
         ));
         assert_eq!(recovery.calls.load(Ordering::SeqCst), 1);
@@ -14274,7 +14312,7 @@ pub(super) mod tests {
             }
         };
         assert!(matches!(
-            outcome,
+            outcome.outcome,
             raiun_cloudfiles_windows::ReconciliationOutcome::VerifiedApplied { attempts: 1 }
         ));
         emit_stage("conditional_readback_verified");
@@ -14506,7 +14544,7 @@ pub(super) mod tests {
             )
             .expect("post-reconnect recovery dispatch returns a durable conflict result");
         assert_eq!(
-            conflict_outcome,
+            conflict_outcome.outcome,
             raiun_cloudfiles_windows::ReconciliationOutcome::Conflict(
                 raiun_cloudfiles_windows::ReconciliationIssue::ContentMismatch
             )
@@ -15881,7 +15919,7 @@ pub(super) mod tests {
                             record.record_id.clone(),
                             record.generation,
                             remote.clone(),
-                        ).expect("agent-generation-fenced recovery dispatch must durably complete or fail closed");
+                        ).expect("agent-generation-fenced recovery dispatch must durably complete or fail closed").outcome;
                         if successful_duplicate_dispatch {
                             let attempts = match outcome {
                                 raiun_cloudfiles_windows::ReconciliationOutcome::VerifiedApplied { attempts } => attempts,

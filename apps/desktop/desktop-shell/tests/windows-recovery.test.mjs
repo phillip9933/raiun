@@ -7,7 +7,7 @@ const source = await readFile(new URL('../src/windows-recovery.ts', import.meta.
 const compiled = ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 }
 }).outputText;
-const { validateWindowsRecoveryPage, windowsRecoveryEligibility, WINDOWS_RECOVERY_PAGE_LIMIT } = await import(
+const { validateWindowsRecoveryPage, windowsRecoveryEligibility, WINDOWS_RECOVERY_PAGE_LIMIT, validateWindowsRecoveryRetryResult, windowsRecoveryRetryMessage } = await import(
   `data:text/javascript;base64,${Buffer.from(compiled).toString('base64')}`
 );
 const mainSource = await readFile(new URL('../src/main.ts', import.meta.url), 'utf8');
@@ -201,4 +201,42 @@ test('added profile eligibility and recovery pages stay bound to the exact selec
       available: false, reason: 'wrong_profile'
     });
   }
+});
+
+const retryResult = (changes = {}) => ({
+  profile_id: 'default', auth_generation: 7, recovery_scope_token: 'b'.repeat(64),
+  state: 'verified_applied', retained: true, remote_verified: true,
+  local_completion: 'completed', attempts: 1, ...changes
+});
+
+test('retry results reject wrong account bindings and malformed state-specific proof', () => {
+  assert.equal(validateWindowsRecoveryRetryResult(retryResult(), expectation).state, 'verified_applied');
+  for (const changes of [
+    { profile_id: 'profile-' + '1'.repeat(32) }, { auth_generation: 8 },
+    { recovery_scope_token: 'c'.repeat(64) }, { retained: false }, { extra: true },
+    { attempts: 0 }, { attempts: 256 }, { attempts: 1.5 }, { attempts: undefined },
+    { reason: 'remote_changed' }, { remote_verified: 'true' },
+    { remote_verified: false }, { remote_verified: false, local_completion: 'uncertain' }, { local_completion: ['uncertain'] }, { state: ['not_completed'] }
+  ]) assert.throws(() => validateWindowsRecoveryRetryResult(retryResult(changes), expectation));
+  for (const state of ['conflict', 'outcome_unknown', 'not_completed']) {
+    const value = { ...retryResult(), state, remote_verified: false, local_completion: 'unavailable' };
+    delete value.attempts;
+    if (state === 'conflict') value.reason = 'remote_changed';
+    assert.equal(validateWindowsRecoveryRetryResult(value, expectation).state, state);
+    assert.throws(() => validateWindowsRecoveryRetryResult({ ...value, attempts: 1 }, expectation));
+    assert.throws(() => validateWindowsRecoveryRetryResult({ ...value, local_completion: 'completed' }, expectation));
+    if (state === 'conflict') {
+      assert.throws(() => validateWindowsRecoveryRetryResult({ ...value, reason: 'unknown' }, expectation));
+    } else assert.throws(() => validateWindowsRecoveryRetryResult({ ...value, reason: 'remote_changed' }, expectation));
+  }
+});
+
+test('retry copy separates cloud verification from uncertain or unavailable local completion', () => {
+  assert.match(windowsRecoveryRetryMessage(retryResult()), /Cloud save verified and local completion confirmed/);
+  for (const local_completion of ['uncertain', 'unavailable']) {
+    const result = validateWindowsRecoveryRetryResult(retryResult({ local_completion }), expectation);
+    assert.match(windowsRecoveryRetryMessage(result), /Cloud save verified\. Local completion is not confirmed/);
+  }
+  const noProof = validateWindowsRecoveryRetryResult(retryResult({ remote_verified: false, local_completion: 'unavailable' }), expectation);
+  assert.match(windowsRecoveryRetryMessage(noProof), /Cloud save is not confirmed/);
 });

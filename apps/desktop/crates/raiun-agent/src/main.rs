@@ -1,7 +1,5 @@
-// The complete mount-capable agent remains a Unix implementation until a
-// native Windows Cloud Files provider is available. Windows builds use the
-// separate named-pipe entry point, which reports the missing provider instead
-// of simulating a drive.
+// Platform entry points share protocol helpers; native capabilities are
+// implemented and validated by their respective Unix and Windows adapters.
 #[cfg(any(unix, windows))]
 mod account_avatar_wire;
 #[cfg(any(unix, windows))]
@@ -11,6 +9,9 @@ mod sharing_wire;
 
 #[cfg(unix)]
 include!("agent_unix.rs");
+
+#[cfg(any(windows, test))]
+mod windows_recovery_request;
 
 #[cfg(windows)]
 mod agent_windows;

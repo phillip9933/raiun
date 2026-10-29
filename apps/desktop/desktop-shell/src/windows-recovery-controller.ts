@@ -1,10 +1,12 @@
 import {
   validateWindowsRecoveryPage,
+  validateWindowsRecoveryRetryResult,
   windowsRecoveryEligibility,
   WINDOWS_RECOVERY_PAGE_LIMIT,
   type WindowsRecoveryAgentStatus,
   type WindowsRecoveryEligibility,
   type WindowsRecoveryPage,
+  type WindowsRecoveryRetryResult,
   type WindowsRecoveryPageExpectation
 } from './windows-recovery';
 
@@ -22,6 +24,8 @@ export type WindowsRecoveryControllerState = {
   page: WindowsRecoveryPage | null;
   loading: boolean;
   error: string;
+  retrying: boolean;
+  retryResult: WindowsRecoveryRetryResult | null;
 };
 
 export type WindowsRecoveryRequest = (action: string, args: Record<string, unknown>) => Promise<unknown>;
@@ -39,9 +43,10 @@ export function windowsRecoveryContextKey(context: WindowsRecoveryContext): stri
 }
 
 export class WindowsRecoveryController {
-  readonly state: WindowsRecoveryControllerState = { page: null, loading: false, error: '' };
+  readonly state: WindowsRecoveryControllerState = { page: null, loading: false, error: '', retrying: false, retryResult: null };
   private activeKey: string | null = null;
   private requestSequence = 0;
+  private mutationInFlight = false;
 
   setContext(context: WindowsRecoveryContext | null): void {
     const nextKey = context ? windowsRecoveryContextKey(context) : null;
@@ -51,6 +56,8 @@ export class WindowsRecoveryController {
     this.state.page = null;
     this.state.loading = false;
     this.state.error = '';
+    this.state.retrying = false;
+    this.state.retryResult = null;
   }
 
   async load(
@@ -58,6 +65,7 @@ export class WindowsRecoveryController {
     request: WindowsRecoveryRequest,
     isCurrentContext: () => boolean
   ): Promise<void> {
+    if (this.state.retrying) return;
     this.setContext(context);
     const key = windowsRecoveryContextKey(context);
     const sequence = ++this.requestSequence;
@@ -93,6 +101,57 @@ export class WindowsRecoveryController {
       } else if (sameRequest) {
         this.state.loading = false;
       }
+    }
+  }
+
+  async retry(
+    context: WindowsRecoveryContext,
+    recordId: string,
+    generation: number,
+    retrySupported: boolean,
+    request: WindowsRecoveryRequest,
+    confirm: () => Promise<boolean>,
+    isCurrentContext: () => boolean
+  ): Promise<void> {
+    if (this.mutationInFlight || this.state.loading || retrySupported !== true || !isCurrentContext()) return;
+    const key = windowsRecoveryContextKey(context);
+    const page = this.state.page;
+    if (this.activeKey !== key || !page ||
+        !page.items.some(item => item.record_id === recordId && item.generation === generation)) return;
+    const sequence = this.requestSequence;
+    const current = () => this.activeKey === key && this.requestSequence === sequence &&
+      this.state.page === page && isCurrentContext();
+    this.mutationInFlight = true;
+    this.state.retrying = true;
+    this.state.retryResult = null;
+    this.state.error = '';
+    try {
+      if (await confirm() !== true || !current()) return;
+      const value = await request('windows_recovery_retry', {
+        profile_id: context.profileId,
+        expected_generation: context.authGeneration,
+        expected_recovery_scope_token: context.recoveryScopeToken,
+        record_id: recordId,
+        generation
+      });
+      const result = validateWindowsRecoveryRetryResult(value, {
+        profileId: context.profileId,
+        authGeneration: context.authGeneration,
+        recoveryScopeToken: context.recoveryScopeToken
+      });
+      if (!current()) return;
+      this.state.retryResult = result;
+      this.state.retrying = false;
+      await this.load(context, request, isCurrentContext);
+    } catch {
+      if (current()) {
+        this.state.error = 'Retry outcome could not be confirmed. The original saved edit is retained; refresh before trying again.';
+        this.state.page = null;
+      }
+    } finally {
+      this.mutationInFlight = false;
+      if (this.activeKey === key && !isCurrentContext()) this.setContext(null);
+      if (this.activeKey === key) this.state.retrying = false;
     }
   }
 }
