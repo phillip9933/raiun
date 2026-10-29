@@ -3,7 +3,7 @@
 ## 0.7.5 Beta — unreleased
 
 - Sharing brings Shared with me, Shared by me and Public links into one workspace, with shared items listed automatically.
-- Create sharing links and supported guest invitations, and edit supported settings on existing outgoing shares.
+- Create password-protected sharing links and supported guest invitations, and edit supported settings on existing outgoing shares. Public-link passwords are not saved locally.
 - Offline files has a simpler layout, storage summaries and a configurable automatic-cache allowance. Options expand below their button without moving it.
 - More consistent colors, controls and transfer messages across the desktop app.
 

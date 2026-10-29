@@ -28,7 +28,17 @@ action; received guest-link redemption and native guest accounts remain deferred
 People/group creation uses bounded server identity lookup and verifies the
 selected identity. Public-link creation respects actual supported file/folder
 link types and declared password/expiration policy. Known disabled expiration
-permits a non-expiring link. Password setup is not part of this candidate.
+permits a non-expiring link. Public-link creation accepts a transient password;
+it is required when the server's global or per-role policy requires one. The
+client treats any stricter write-category policy as requiring a password for
+write links. Unknown/malformed policy blocks creation. OpenCloud 9's unsupported
+`blocksDownload` creation type is not offered.
+
+The password is sent only in the authenticated create request, never in a URL
+or local settings. It is excluded from rendered HTML, draft fingerprints and
+error details, and cleared from the form on submission or context changes.
+Recipients need the password separately. Passwords may contain up to 72 UTF-8
+bytes; server complexity/banned-password rules remain authoritative.
 
 ## Inventory identity and management boundaries
 
@@ -66,7 +76,8 @@ User/group grants with known file/folder and recipient identities can change
 access and expiration. Public links can change name, supported access and
 expiration where the server capability policy permits it. Existing public URLs
 and passwords are preserved; this editor does not set or clear passwords.
-Public edits remain disabled if password enforcement is unknown or enabled.
+Public edits remain disabled if password policy is unknown. Editing submits no
+password field, including when the existing link is password-protected.
 Incoming items and unrecognized/missing identities remain read-only.
 
 Only changed fields are submitted. Leaving an expiration unchanged preserves

@@ -24,6 +24,7 @@ pub(crate) struct Request {
     link_type: Option<String>,
     display_name: Option<String>,
     expiration_date_time: Option<String>,
+    password: Option<String>,
     query: Option<String>,
     inventory: Option<String>,
     expected_resource_id: Option<String>,
@@ -121,6 +122,11 @@ impl Request {
             && !r.link_type.as_deref().is_some_and(|s| valid(s, 128))
         {
             return Err("Choose a link permission".into());
+        }
+        if r.password.as_ref().is_some_and(|password| {
+            r.action != "sharing_link_create" || password.is_empty() || password.len() > 72
+        }) {
+            return Err("A link password is accepted only when creating a public link and must contain 1 to 72 UTF-8 bytes".into());
         }
         if r.action == "sharing_owned_update" && (r.baseline.is_none() || r.update.is_none()) {
             return Err("Refresh this share before changing its settings".into());
@@ -308,11 +314,12 @@ impl Request {
             }
             "sharing_link_create" => {
                 client
-                    .create_public_link(
+                    .create_public_link_with_password(
                         &target,
                         self.link_type.as_deref().unwrap_or_default(),
                         self.display_name.as_deref(),
                         self.expiration_date_time.as_deref(),
+                        self.password.as_deref(),
                     )
                     .map_err(|e| error_text(e, true))?;
             }
@@ -340,18 +347,48 @@ impl Request {
         )
     }
 }
+impl Drop for Request {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        if let Some(password) = &mut self.password {
+            password.zeroize();
+        }
+    }
+}
 fn valid(value: &str, max: usize) -> bool {
     !value.trim().is_empty() && value.len() <= max && !value.chars().any(char::is_control)
 }
 fn error_text(e: CloudError, mutating: bool) -> String {
+    let status = sharing_http_status(&e.message)
+        .map(|status| format!(" (HTTP {status})"))
+        .unwrap_or_default();
     match e.kind {
-        ErrorKind::Forbidden=>"Server denied this sharing operation".into(),
-        ErrorKind::Unauthorized=>"Reconnect this account before managing sharing".into(),
-        ErrorKind::Unsupported=>"This sharing operation is unavailable for this server or item".into(),
-        ErrorKind::NotFound=>"This item or share is no longer available".into(),
-        _ if mutating=>"Could not confirm the sharing result. Refresh before trying again; the server may have applied the change".into(),
-        _=>"Could not load sharing. Check the connection and refresh".into()
+        ErrorKind::Forbidden => "Server denied this sharing operation".into(),
+        ErrorKind::Unauthorized => "Reconnect this account before managing sharing".into(),
+        ErrorKind::Unsupported => {
+            "This sharing operation is unavailable for this server or item".into()
+        }
+        ErrorKind::NotFound => "This item or share is no longer available".into(),
+        _ if mutating => format!(
+            "Could not confirm the sharing result. Refresh before trying again; the server may have applied the change{status}"
+        ),
+        _ => format!("Could not load sharing. Check the connection and refresh{status}"),
     }
+}
+
+// Preserve only the status from our HTTP adapter's fixed message format. Never
+// expose the upstream body, URL, error code, request identifier or credential.
+fn sharing_http_status(message: &str) -> Option<u16> {
+    let rest = message
+        .strip_prefix("OpenCloud WebDAV request failed with HTTP ")
+        .or_else(|| message.strip_prefix("OpenCloud Graph discovery request failed with HTTP "))?;
+    let code = rest.split_whitespace().next()?;
+    if code.len() != 3 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    code.parse()
+        .ok()
+        .filter(|value| (100..=599).contains(value))
 }
 #[cfg(test)]
 mod tests {
@@ -362,6 +399,48 @@ mod tests {
         net::{TcpListener, TcpStream},
         thread,
     };
+
+    #[test]
+    fn password_input_is_creation_only_and_bounded_by_utf8_bytes() {
+        let mut request = json!({"action":"sharing_link_create","profile_id":"p","expected_auth_generation":2,
+            "space_id":"space","path":"/test","expected_item_id":"item","link_type":"view","password":"synthetic-secret"});
+        assert!(Request::parse(&request).is_ok());
+        request["password"] = json!("é".repeat(37));
+        let error = Request::parse(&request).err().unwrap();
+        assert!(!error.contains('é'));
+        request["password"] = json!("synthetic-secret");
+        request["action"] = json!("sharing_link_revoke");
+        request["permission_id"] = json!("grant");
+        let error = Request::parse(&request).err().unwrap();
+        assert!(!error.contains("synthetic-secret"));
+    }
+
+    #[test]
+    fn sharing_failure_preserves_only_http_status_and_uncertain_outcome() {
+        for mutating in [false, true] {
+            let error = error_text(
+                CloudError::new(
+                    ErrorKind::InvalidResponse,
+                    "OpenCloud WebDAV request failed with HTTP 400 (code=private-body request_id=private-id https://private.example/s/private-link)",
+                ),
+                mutating,
+            );
+            assert!(error.ends_with("(HTTP 400)"));
+            assert!(!error.contains("private"));
+            if mutating {
+                assert!(error.contains("server may have applied the change"));
+            }
+        }
+        assert_eq!(sharing_http_status("untrusted HTTP 400 secret"), None);
+        assert_eq!(
+            sharing_http_status("OpenCloud WebDAV request failed with HTTP 400secret"),
+            None
+        );
+        assert_eq!(
+            sharing_http_status("OpenCloud WebDAV request failed with HTTP 999"),
+            None
+        );
+    }
 
     fn read_request(stream: &mut TcpStream) -> (String, String) {
         let mut header = Vec::new();

@@ -12,6 +12,7 @@ export type SharingMethodCapability = {
   copyLink: boolean;
   expiration: boolean;
   password: boolean;
+  createUnavailableMessage?: string;
 };
 export type SharingCoverage = {
   scope: 'account' | 'item' | 'recently-managed' | null;
@@ -98,8 +99,10 @@ export type SharingWorkspaceProps = {
   linkName?: string;
   expiry?: string;
   passwordRequired?: boolean;
+  passwordPolicyKnown?: boolean;
+  passwordPresent?: boolean;
+  passwordLengthValid?: boolean;
   expirationRequired?: boolean;
-  password?: string;
   recipientQuery?: string;
   recipientResults?: readonly SharingRecipientOption[];
   recipientSearchStatus?: 'idle' | 'loading' | 'ready' | 'error';
@@ -129,6 +132,7 @@ const inventoryFor = (props: SharingWorkspaceProps): SharingInventory => props.i
 const methodFor = (props: SharingWorkspaceProps): SharingSection => props.creationMethod || props.section || 'guests';
 
 function capabilityMessage(capability: SharingMethodCapability): string {
+  if (capability.createUnavailableMessage) return capability.createUnavailableMessage;
   if (capability.server === 'unsupported') return 'This server does not support this sharing method.';
   if (capability.server === 'unknown') return 'Server support for this sharing method has not been confirmed.';
   if (capability.adapter === 'missing') return 'Raiun does not manage this sharing method yet.';
@@ -279,7 +283,7 @@ function accessForm(props: SharingWorkspaceProps): string {
       ? `<div class="sharing-field"><label for="sharing-expiry">Expiration${props.expirationRequired ? '' : ' (optional)'}</label><input id="sharing-expiry" type="datetime-local" value="${esc(props.expiry)}" ${props.expirationRequired ? 'required' : ''} ${props.busy ? 'disabled' : ''} data-sharing-field="expiry"></div>`
       : `<div class="sharing-fixed-recipient"><span>Expiration</span><b>${esc(props.selectedShare?.expiresAt ? formatExpiry(props.selectedShare.expiresAt) : 'None')}</b></div>`
     : (props.capability.expiration || props.expirationRequired ? `<div class="sharing-field"><label for="sharing-expiry">Expiration${props.expirationRequired ? '' : ' (optional)'}</label><input id="sharing-expiry" type="datetime-local" value="${esc(props.expiry)}" ${props.expirationRequired ? 'required' : ''} ${props.busy ? 'disabled' : ''} data-sharing-field="expiry"></div>` : '');
-  const password = !editing && method === 'links' && (props.capability.password || props.passwordRequired) ? `<div class="sharing-field"><label for="sharing-password">${props.passwordRequired ? 'Password' : 'Password (optional)'}</label><input id="sharing-password" type="password" autocomplete="new-password" value="${esc(props.password)}" ${props.passwordRequired ? 'required' : ''} ${props.busy ? 'disabled' : ''} data-sharing-field="password"></div>` : '';
+  const password = !editing && method === 'links' && (props.capability.password || props.passwordRequired) ? `<div class="sharing-field"><label for="sharing-password">Password${props.passwordRequired ? ' (required)' : ' (optional)'}</label><input id="sharing-password" type="password" autocomplete="new-password" maxlength="72" spellcheck="false" ${props.passwordRequired ? 'required' : ''} ${props.busy ? 'disabled' : ''} data-sharing-field="password"><small class="sharing-field-hint">Recipients need this password; Raiun does not save it locally.</small></div>` : '';
   const roleSelect = editing && !editable.access
     ? `<div class="sharing-fixed-recipient"><span>Access</span><b>${esc(props.selectedShare?.role || 'Access level unknown')}</b></div>`
     : `<div class="sharing-field"><label for="sharing-role">Access</label><select id="sharing-role" data-sharing-field="role" ${!roleAvailable || props.busy ? 'disabled' : ''}><option value="">${roleAvailable ? 'Choose access' : 'No access roles available'}</option>${roles}</select>${props.roles?.find(role => role.id === props.roleId)?.explanation ? `<small class="sharing-field-hint">${esc(props.roles.find(role => role.id === props.roleId)?.explanation)}</small>` : ''}</div>`;
@@ -294,16 +298,26 @@ function accessForm(props: SharingWorkspaceProps): string {
     : method === 'guests'
     ? `This gives ${subject} ${role} access to ${item.name} and sends an invitation email.`
     : method === 'links'
-      ? `Anyone who obtains this link may use it with the access shown for ${item.name}.`
+      ? props.passwordRequired || props.passwordPresent
+        ? `Anyone with this link and its password can use the access shown for ${item.name}.`
+        : `Anyone who obtains this link may use it with the access shown for ${item.name}.`
       : `This gives ${subject} ${role} access to ${item.name}.`;
-  const requiredFieldsValid = (!props.expirationRequired || (editing && !editable.expiration) || !!props.expiry?.trim()) && (!props.passwordRequired || editing || !!props.password?.trim());
+  const requiredFieldsValid = (!props.expirationRequired || (editing && !editable.expiration) || !!props.expiry?.trim()) && (!props.passwordRequired || editing || !!props.passwordPresent) && (props.passwordLengthValid ?? true);
   const recipientValid = editing ? (method !== 'links' || !editable.name || !!props.linkName?.trim()) : (method === 'links' ? !!props.linkName?.trim() : method === 'people' ? !!props.recipientSelectedId : !!props.recipient?.trim());
   const accessValid = editing && !editable.access ? true : roleAvailable && !!props.roleId;
   const hasEditableField = !editing || editable.access || editable.expiration || (method === 'links' && editable.name);
-  const canSubmit = props.connected && !props.busy && !props.outcomeUnknown && hasEditableField && accessValid && requiredFieldsValid && recipientValid;
+  const passwordPolicyNotice = !editing && method === 'links' && props.passwordPolicyKnown === false ? '<p class="sharing-state" role="status">The server password requirements for this link type are unknown. Refresh sharing information before creating the link.</p>' : '';
+  const canSubmit = props.connected && !props.busy && !props.outcomeUnknown && hasEditableField && accessValid && requiredFieldsValid && recipientValid && (editing || method !== 'links' || props.passwordPolicyKnown !== false);
   const validationMessage = props.outcomeUnknown && props.validationMessage?.includes('Could not confirm the result') ? '' : props.validationMessage;
   const unknownOutcome = props.outcomeUnknown ? `<div class="sharing-state-error sharing-unknown-outcome" role="alert"><p>Could not confirm the result. Refresh before trying again.</p><button type="button" class="button subtle" data-sharing-action="refresh" aria-label="Refresh share details" ${props.busy ? 'disabled' : ''}>Refresh</button></div>` : '';
-  return `<section class="sharing-flow"><h2 tabindex="-1">${editing ? 'Edit share' : 'Review access'}</h2><div class="sharing-item-summary"><div><b>${esc(item.name)}</b><span>${esc(item.location)}</span></div>${editing ? '' : `<button type="button" class="button subtle" data-sharing-action="change-item" ${props.busy ? 'disabled' : ''}>Change item</button>`}</div><div class="sharing-fields"><div class="sharing-field">${recipientField}</div>${roleSelect}${expiration}${password}</div><p class="sharing-consequence">${esc(consequence)}</p>${unknownOutcome}${validationMessage ? `<p class="sharing-state-error" role="alert">${esc(validationMessage)}</p>` : ''}<p class="sharing-disclosure">${editing ? 'Changes apply to this share only; they do not delete the file or folder.' : method === 'guests' ? 'Sending creates an invitation and emails the recipient.' : method === 'links' ? 'Anyone who obtains this link may use it with the access shown.' : 'Access is managed by this server.'}</p><div class="sharing-flow-actions"><button type="button" class="button subtle" data-sharing-action="cancel" ${props.busy ? 'disabled' : ''}>Cancel</button><button type="button" class="button primary" data-sharing-action="save-access" ${!canSubmit ? 'disabled' : ''}>${props.busy ? 'Working…' : editing ? 'Save changes' : finalAction[method]}</button></div></section>`;
+  const disclosure = editing
+    ? 'Changes apply to this share only; they do not delete the file or folder.'
+    : method === 'guests'
+      ? 'Sending creates an invitation and emails the recipient.'
+      : method === 'links'
+        ? ''
+        : 'Access is managed by this server.';
+  return `<section class="sharing-flow"><h2 tabindex="-1">${editing ? 'Edit share' : 'Review access'}</h2><div class="sharing-item-summary"><div><b>${esc(item.name)}</b><span>${esc(item.location)}</span></div>${editing ? '' : `<button type="button" class="button subtle" data-sharing-action="change-item" ${props.busy ? 'disabled' : ''}>Change item</button>`}</div><div class="sharing-fields"><div class="sharing-field">${recipientField}</div>${roleSelect}${expiration}${password}</div><p class="sharing-consequence">${esc(consequence)}</p>${unknownOutcome}${validationMessage ? `<p class="sharing-state-error" role="alert">${esc(validationMessage)}</p>` : ''}${passwordPolicyNotice}${disclosure ? `<p class="sharing-disclosure">${disclosure}</p>` : ''}<div class="sharing-flow-actions"><button type="button" class="button subtle" data-sharing-action="cancel" ${props.busy ? 'disabled' : ''}>Cancel</button><button type="button" class="button primary" data-sharing-action="save-access" ${!canSubmit ? 'disabled' : ''}>${props.busy ? 'Working…' : editing ? 'Save changes' : finalAction[method]}</button></div></section>`;
 }
 function detailPanel(props: SharingWorkspaceProps): string {
   const row = props.selectedShare;

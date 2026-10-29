@@ -536,7 +536,7 @@ impl OpenCloudClient {
                         "server public link capability is unavailable",
                     ));
                 }
-                if capabilities.public_password_enforced != Some(false) {
+                if capabilities.public_password_required_for.is_none() {
                     return Err(unsupported_capabilities(
                         "public link settings cannot be changed without a known password policy",
                     ));
@@ -753,12 +753,11 @@ impl OpenCloudClient {
                     fields.push(OwnedShareEditableField::Expiration);
                 }
                 OcsShareKind::PublicLink
-                    if caps.public_links_enabled
-                        && caps.public_password_enforced == Some(false) =>
+                    if caps.public_links_enabled && caps.public_password_required_for.is_some() =>
                 {
                     fields.push(OwnedShareEditableField::Name);
                     choices = public_permission_choices(&row, &caps);
-                    if caps.public_password_enforced == Some(false) && !choices.is_empty() {
+                    if caps.public_password_required_for.is_some() && !choices.is_empty() {
                         fields.push(OwnedShareEditableField::Access);
                     }
                     if caps.public_expiration_enabled == Some(true)

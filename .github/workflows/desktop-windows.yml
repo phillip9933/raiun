@@ -3,6 +3,7 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
+      - '.gitattributes'
       - 'apps/desktop/**'
       - 'design/raiun/**'
       - '.github/workflows/desktop-windows.yml'

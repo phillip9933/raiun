@@ -16,7 +16,7 @@ function setup(override={}){
  const ack=()=>({profile_id:c.profileId,auth_generation:c.generation});
  const deps={context:()=>c,render:()=>{},confirm:async message=>{confirmations.push(message);return override.confirm?override.confirm(message):true;},copy:async value=>{copied.push(value);},rpc:async(action,args)=>{
   calls.push({action,args});if(override.rpc){const v=await override.rpc(action,args);if(v!==undefined)return v;}
-  if(action==='sharing_capabilities')return{...ack(),capabilities:{files_sharing_enabled:true,groups_enabled:false,public_links_enabled:true,public_link_creation_supported:true},guest_invitations:true};
+  if(action==='sharing_capabilities')return{...ack(),capabilities:{files_sharing_enabled:true,groups_enabled:false,public_links_enabled:true,public_link_creation_supported:true,public_password_required_for:[]},guest_invitations:true};
   if(action==='sharing_inventory')return{...ack(),inventory:args.inventory,read_only:true,snapshot:{scope:{account_id:c.profileId,server_url:'https://cloud.example.test/',token_generation:1,response_complete:true},items:args.inventory==='with-me'?[{shared_item_id:'incoming-1',name:'Shared project folder',is_folder:true,remote_item:{id:'target',created_by:{user_display_name:'Casey'}}}]:args.inventory==='by-me'?[owned(),...(mutations?[{...owned('guest-created'),recipient_display_name:'guest@example.test'}]:[])]:[{...owned('link'),kind:{kind:'public_link'},public_url:'https://cloud.example.test/s/synthetic'}]}};
   if(action==='list')return[{id:'resource',path:'/Folder',directory:true,encrypted:false,writable:true},{path:'/secret',directory:true,encrypted:true,writable:true}];
   if(action==='guest_permissions')return{...ack(),available:true,item_id:'resource',roles:[{id:'view',name:'Can view'}],guests:[]};
@@ -32,8 +32,10 @@ function setup(override={}){
   throw new Error('Unexpected RPC '+action);
  }};
  const ctrl=new SharingController(deps);
- const input=(field,value,select=false)=>{const el=select?new HTMLSelectElement(field,value):new Field(field,value);ctrl.bind({querySelectorAll:s=>s==='[data-sharing-field]'?[el]:[]});el.handlers[select?'change':'input']();};
- return{ctrl,calls,copied,confirmations,input,setContext:next=>{c=next;},context:()=>c};
+ const fieldRoot=el=>({querySelectorAll:s=>s==='[data-sharing-field]'?[el]:[]});
+ const input=(field,value,select=false)=>{const el=select?new HTMLSelectElement(field,value):new Field(field,field==='password'?'':value);ctrl.bind(fieldRoot(el));if(field==='password')el.value=value;el.handlers[select?'change':'input']();};
+ const passwordValue=()=>{const el=new Field('password','');ctrl.bind(fieldRoot(el));return el.value;};
+ return{ctrl,calls,copied,confirmations,input,passwordValue,setContext:next=>{c=next;},context:()=>c};
 }
 const settle=()=>new Promise(done=>setTimeout(done,0));
 async function choose(h,method='guests'){await h.ctrl.enter();await h.ctrl.handle({type:'set-inventory',inventory:'by-me'});await h.ctrl.handle({type:'new-share'});await h.ctrl.handle({type:'choose-method',method});h.input('space','space',true);await settle();await h.ctrl.handle({type:'select-item',itemId:'/Folder'});await h.ctrl.handle({type:'use-item'});}
@@ -130,5 +132,52 @@ test('public-link creation sends the chosen link access and name after the item 
  h.input('space','space',true);await settle();await h.ctrl.handle({type:'select-item',itemId:'/Folder'});await h.ctrl.handle({type:'use-item'});
  h.input('role','view',true);h.input('link-name','Project handoff');await h.ctrl.handle({type:'save-access'});
  const call=h.calls.find(c=>c.action==='sharing_link_create');assert.ok(call);assert.equal(call.args.link_type,'view');assert.equal(call.args.display_name,'Project handoff');assert.equal(call.args.expected_item_id,'resource');assert.equal(call.args.path,'/Folder');assert.equal('recipient_id'in call.args,false);
+ assert.equal('password' in call.args,false);
  assert.equal(h.copied.length,0);assert.match(h.ctrl.render(),/Sharing change saved/);
+});
+
+test('required public-link password stays outside rendered HTML and is consumed once after create',async()=>{
+ const h=setup({rpc:async(action,args)=>{
+  if(action==='sharing_capabilities')return{profile_id:'test',auth_generation:3,capabilities:{files_sharing_enabled:true,groups_enabled:false,public_links_enabled:true,public_link_creation_supported:true,public_password_required_for:['view']},guest_invitations:true};
+  if(action==='sharing_link_create')return{profile_id:'test',auth_generation:3,accepted:true};
+ }});
+ await choose(h,'links');h.input('role','view',true);
+ let html=h.ctrl.render();assert.match(html,/Password \(required\)/);assert.match(html,/id="sharing-password"[^>]*type="password"[^>]*autocomplete="new-password"[^>]*maxlength="72"[^>]*required/);assert.match(html,/data-sharing-action="save-access" disabled/);
+ const secret='synth-only-password';h.input('password',secret);html=h.ctrl.render();assert.doesNotMatch(html,new RegExp(secret));assert.equal(h.passwordValue(),secret);
+ await h.ctrl.handle({type:'save-access'});const call=h.calls.find(v=>v.action==='sharing_link_create');assert.equal(call.args.password,secret);assert.doesNotMatch(h.ctrl.render(),new RegExp(secret));assert.equal(h.passwordValue(),'');
+});
+
+test('unknown public-link password policy blocks link creation at the capability and action layers',async()=>{
+ const h=setup({rpc:async action=>action==='sharing_capabilities'?{profile_id:'test',auth_generation:3,capabilities:{files_sharing_enabled:true,groups_enabled:false,public_links_enabled:true,public_link_creation_supported:true,public_password_required_for:null},guest_invitations:true}:undefined});
+ await h.ctrl.enter();await h.ctrl.handle({type:'set-inventory',inventory:'by-me'});await h.ctrl.handle({type:'new-share'});
+ let html=h.ctrl.render();assert.match(html,/server password requirements for links are unknown/i);assert.match(html,/data-sharing-method="links"[^>]*disabled/);
+ const before=h.calls.length;await h.ctrl.handle({type:'choose-method',method:'links'});
+ assert.equal(h.calls.length,before);assert.doesNotMatch(h.ctrl.render(),/id="sharing-password"/);
+ assert.equal(h.calls.some(call=>call.action==='sharing_link_create'),false);
+});
+
+test('server-echoed password errors are redacted and cannot trigger a second automatic submission',async()=>{
+ const h=setup({rpc:async(action,args)=>{
+  if(action==='sharing_capabilities')return{profile_id:'test',auth_generation:3,capabilities:{files_sharing_enabled:true,groups_enabled:false,public_links_enabled:true,public_link_creation_supported:true,public_password_required_for:['view']},guest_invitations:true};
+  if(action==='sharing_link_create')throw new Error(`rejected secret ${args.password}`);
+ }});
+ await choose(h,'links');h.input('role','view',true);const secret='do-not-render-this-secret';h.input('password',secret);
+ await h.ctrl.handle({type:'save-access'});await h.ctrl.handle({type:'save-access'});
+ assert.equal(h.calls.filter(v=>v.action==='sharing_link_create').length,1);assert.doesNotMatch(h.ctrl.render(),new RegExp(secret));assert.match(h.ctrl.render(),/\[redacted\]/);assert.equal(h.passwordValue(),'');
+});
+
+test('link password draft clears on access-type, method, item, cancel and account changes',async()=>{
+ const h=setup({rpc:async action=>action==='sharing_capabilities'?{profile_id:'test',auth_generation:3,capabilities:{files_sharing_enabled:true,groups_enabled:false,public_links_enabled:true,public_link_creation_supported:true,public_password_required_for:['view']},guest_invitations:true}:undefined});
+ await choose(h,'links');h.input('role','view',true);h.input('password','type-change-secret');h.input('role','edit',true);assert.equal(h.passwordValue(),'');
+ h.input('role','view',true);h.input('password','method-change-secret');await h.ctrl.handle({type:'choose-method',method:'people'});assert.equal(h.passwordValue(),'');
+ await h.ctrl.handle({type:'choose-method',method:'links'});h.input('space','space',true);await settle();await h.ctrl.handle({type:'select-item',itemId:'/Folder'});await h.ctrl.handle({type:'use-item'});h.input('role','view',true);h.input('password','item-change-secret');await h.ctrl.handle({type:'change-item'});assert.equal(h.passwordValue(),'');
+ await h.ctrl.handle({type:'choose-item'});h.input('space','space',true);await settle();await h.ctrl.handle({type:'select-item',itemId:'/Folder'});await h.ctrl.handle({type:'use-item'});h.input('role','view',true);h.input('password','cancel-secret');await h.ctrl.handle({type:'cancel'});assert.equal(h.passwordValue(),'');
+ await choose(h,'links');h.input('role','view',true);h.input('password','account-secret');h.setContext({...h.context(),profileId:'another',accountEpoch:2});h.ctrl.render();assert.equal(h.passwordValue(),'');
+});
+
+test('auth-generation rotation clears an active draft and explains why the flow stopped',async()=>{
+ const h=setup();await choose(h,'links');h.input('role','view',true);h.input('password','generation-secret');
+ assert.doesNotMatch(h.ctrl.render(),/account connection changed/i);
+ h.setContext({...h.context(),generation:5});const html=h.ctrl.render();
+ assert.equal(h.passwordValue(),'');assert.match(html,/The account connection changed\. Review sharing again\./);
 });

@@ -217,16 +217,39 @@ test('access settings keep server-derived roles and required policy fields', () 
   const base = props({
     inventory: 'by-me', creationMethod: 'links', mode: 'settings', selectedItem: item,
     capability: capability({ password: true }), roles: [{ id: 'viewer', name: 'Can view' }], roleId: 'viewer',
-    linkName: 'Family', passwordRequired: true, password: '', expirationRequired: true, expiry: ''
+    linkName: 'Family', passwordRequired: true, passwordPresent: false, passwordLengthValid: true, passwordPolicyKnown: true, expirationRequired: true, expiry: ''
   });
   const requiredEmpty = renderSharingWorkspace(base);
   assert.match(requiredEmpty, /id="sharing-password"[^>]*required/);
   assert.match(requiredEmpty, /id="sharing-expiry"[^>]*required/);
   assert.match(requiredEmpty, /data-sharing-action="save-access" disabled/);
-  const valid = renderSharingWorkspace({ ...base, password: 'synthetic-only', expiry: '2035-01-01T10:00' });
+  assert.match(requiredEmpty, /Anyone with this link and its password can use the access shown for Trip photos\./);
+  assert.equal(requiredEmpty.match(/Anyone with this link and its password can use/g)?.length, 1);
+  assert.doesNotMatch(requiredEmpty, /sharing-disclosure|Anyone who obtains this link/);
+  const valid = renderSharingWorkspace({ ...base, passwordPresent: true, expiry: '2035-01-01T10:00' });
   assert.match(valid, /data-sharing-action="save-access"[^>]*>Create link/);
-  const disconnected = renderSharingWorkspace({ ...base, connected: false, password: 'synthetic-only', expiry: '2035-01-01T10:00' });
+  assert.match(valid, /autocomplete="new-password"[^>]*maxlength="72"[^>]*required/);
+  assert.match(valid, /Recipients need this password; Raiun does not save it locally/);
+  assert.equal(valid.match(/Anyone with this link and its password can use/g)?.length, 1);
+  assert.doesNotMatch(valid, /sharing-disclosure|Anyone who obtains this link/);
+  assert.doesNotMatch(valid, /value="[^"]*"[^>]*id="sharing-password"|synthetic-only/);
+  const disconnected = renderSharingWorkspace({ ...base, connected: false, passwordPresent: true, expiry: '2035-01-01T10:00' });
   assert.match(disconnected, /data-sharing-action="save-access" disabled/);
+  const unknown = renderSharingWorkspace({ ...base, passwordPolicyKnown: false, passwordPresent: true, expiry: '2035-01-01T10:00' });
+  assert.match(unknown, /password requirements .* unknown/i);
+  assert.match(unknown, /data-sharing-action="save-access" disabled/);
+});
+
+test('optional unprotected public link renders only its item-specific access disclosure', () => {
+  const html = renderSharingWorkspace(props({
+    inventory: 'by-me', creationMethod: 'links', mode: 'settings',
+    selectedItem: { id: 'f1', name: 'Notes', location: 'Personal', path: '/Notes.txt', isFolder: false },
+    capability: capability({ password: true }), roles: [{ id: 'view', name: 'Can view' }], roleId: 'view',
+    linkName: 'Notes link', passwordRequired: false, passwordPolicyKnown: true, passwordPresent: false
+  }));
+  assert.match(html, /Anyone who obtains this link may use it with the access shown for Notes\./);
+  assert.equal(html.match(/Anyone who obtains this link may use it with the access shown/g)?.length, 1);
+  assert.doesNotMatch(html, /class="sharing-disclosure"/);
 });
 
 test('People & groups requires a selected server result and identifies its kind', () => {

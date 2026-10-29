@@ -2,11 +2,13 @@ name: Desktop checks
 on:
   push:
     paths:
+      - '.gitattributes'
       - 'apps/desktop/**'
       - 'design/raiun/**'
       - '.github/workflows/desktop-*.yml'
   pull_request:
     paths:
+      - '.gitattributes'
       - 'apps/desktop/**'
       - 'design/raiun/**'
       - '.github/workflows/desktop-*.yml'

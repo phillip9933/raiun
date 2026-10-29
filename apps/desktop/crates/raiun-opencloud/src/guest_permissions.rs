@@ -87,13 +87,14 @@ pub struct GuestSharingCapabilities {
 }
 
 /// Strict flags used by ordinary people/group and public-link operations.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharingCapabilities {
     pub files_sharing_enabled: bool,
     pub groups_enabled: bool,
     pub public_links_enabled: bool,
     pub public_link_creation_supported: bool,
     pub public_password_enforced: Option<bool>,
+    pub public_password_required_for: Option<Vec<String>>,
     pub public_expiration_enabled: Option<bool>,
     pub public_expiration_enforced: Option<bool>,
     pub public_upload_enabled: Option<bool>,
@@ -135,6 +136,7 @@ pub struct PublicShareLink {
     pub web_url: Option<String>,
     pub expiration_date_time: Option<String>,
     pub inherited: bool,
+    pub password_protected: Option<bool>,
 }
 
 impl std::fmt::Debug for PublicShareLink {
@@ -227,11 +229,7 @@ impl OpenCloudClient {
                 "server public link capability is unavailable",
             ));
         }
-        let mut types = vec![
-            "view".to_owned(),
-            "edit".to_owned(),
-            "blocksDownload".to_owned(),
-        ];
+        let mut types = vec!["view".to_owned(), "edit".to_owned()];
         if target.is_folder && caps.public_upload_enabled == Some(true) {
             types.push("upload".to_owned());
         }
@@ -475,24 +473,48 @@ impl OpenCloudClient {
         display_name: Option<&str>,
         expiration: Option<&str>,
     ) -> Result<PublicShareLink, CloudError> {
+        self.create_public_link_with_password(target, link_type, display_name, expiration, None)
+    }
+
+    /// Use a transient caller-supplied password without persisting it or
+    /// including it in returned metadata.
+    pub fn create_public_link_with_password(
+        &self,
+        target: &GuestShareTarget,
+        link_type: &str,
+        display_name: Option<&str>,
+        expiration: Option<&str>,
+        password: Option<&str>,
+    ) -> Result<PublicShareLink, CloudError> {
         let generation = self.require_target_generation(target)?;
         validate_link_type(link_type)?;
+        if link_type == "blocksDownload" {
+            return Err(unsupported_capabilities(
+                "secure-view link creation is not advertised by OpenCloud",
+            ));
+        }
         if matches!(link_type, "upload" | "createOnly") && !target.is_folder {
             return Err(invalid("upload-only links require a folder target"));
         }
         validate_display_name(display_name)?;
         validate_requested_expiry(expiration)?;
-        let _ = self.ordinary_sharing_permissions(target)?;
+        let before = self.ordinary_sharing_permissions(target)?;
         let caps = self.fetch_sharing_capabilities(generation)?;
         if !caps.public_links_enabled {
             return Err(unsupported_capabilities(
                 "server public link capability is unavailable",
             ));
         }
-        if caps.public_password_enforced != Some(false) {
-            return Err(unsupported_capabilities(
-                "public-link password enforcement is unknown or requires an unsupported password flow",
+        let required = caps.public_password_required_for.as_ref().ok_or_else(|| {
+            unsupported_capabilities("public-link password enforcement is unknown")
+        })?;
+        if password.is_some_and(|value| value.is_empty() || value.len() > 72) {
+            return Err(invalid(
+                "public-link passwords must contain 1 to 72 UTF-8 bytes",
             ));
+        }
+        if required.iter().any(|kind| kind == link_type) && password.is_none() {
+            return Err(invalid("server requires a password for this public link"));
         }
         if !public_expiration_policy_known(
             caps.public_expiration_enabled,
@@ -527,6 +549,9 @@ impl OpenCloudClient {
         if let Some(expiry) = expiration {
             body["expirationDateTime"] = json!(expiry);
         }
+        if let Some(password) = password {
+            body["password"] = json!(password);
+        }
         let response = self.guest_request(
             target,
             &["createLink"],
@@ -536,6 +561,22 @@ impl OpenCloudClient {
             Some(generation),
         )?;
         let link = parse_public_link(single_permission(&response)?)?;
+        if password.is_some() && link.password_protected == Some(false) {
+            // Never present an explicitly unprotected result as a protected
+            // link. Revoke only a demonstrably new, non-inherited grant from
+            // this create response; preserve any pre-existing grant identity.
+            if !link.inherited
+                && !before
+                    .public_links
+                    .iter()
+                    .any(|existing| existing.permission_id == link.permission_id)
+            {
+                let _ = self.revoke_public_link(target, &link.permission_id);
+            }
+            return Err(invalid(
+                "server did not confirm the requested link password protection; refresh shares",
+            ));
+        }
         if link.link_type != link_type
             || link.inherited
             || display_name.is_some_and(|name| link.display_name.as_deref() != Some(name))
@@ -1050,18 +1091,25 @@ fn parse_sharing_capabilities(document: &Value) -> Result<SharingCapabilities, C
             .and_then(|v| v.get("enforced")),
         "files_sharing.public.expire_date.enforced",
     )?;
+    let public_password_required_for = password_requirements(
+        public_password_enforced,
+        public
+            .and_then(|value| value.get("password"))
+            .and_then(|value| value.get("enforced_for")),
+    );
     Ok(SharingCapabilities {
         files_sharing_enabled,
         groups_enabled,
         public_links_enabled,
         public_link_creation_supported: files_sharing_enabled
             && public_links_enabled
-            && public_password_enforced == Some(false)
+            && public_password_required_for.is_some()
             && public_expiration_policy_known(
                 public_expiration_enabled,
                 public_expiration_enforced,
             ),
         public_password_enforced,
+        public_password_required_for,
         public_expiration_enabled,
         public_expiration_enforced,
         public_upload_enabled: optional_flag(
@@ -1073,6 +1121,45 @@ fn parse_sharing_capabilities(document: &Value) -> Result<SharingCapabilities, C
             "files_sharing.public.supports_upload_only",
         )?,
     })
+}
+
+// OpenCloud 9 emits the global flag independently of its per-role requirements.
+// A write link is conservatively password-protected if any write category
+// requires it; this cannot weaken a folder/file-specific server policy.
+fn password_requirements(global: Option<bool>, categories: Option<&Value>) -> Option<Vec<String>> {
+    let global = global?;
+    let (read, write) = match categories {
+        None => (global, global),
+        Some(Value::Object(values)) => {
+            let keys = [
+                "read_only",
+                "read_write",
+                "read_write_delete",
+                "upload_only",
+            ];
+            if values.len() != keys.len()
+                || keys
+                    .iter()
+                    .any(|key| !values.get(*key).is_some_and(Value::is_boolean))
+            {
+                return None;
+            }
+            (
+                global || values["read_only"].as_bool()?,
+                global || keys[1..].iter().any(|key| values[*key] == true),
+            )
+        }
+        _ => return None,
+    };
+    let mut required = Vec::new();
+    if read {
+        required.push("view".into());
+        required.push("blocksDownload".into());
+    }
+    if write {
+        required.extend(["edit".into(), "upload".into(), "createOnly".into()]);
+    }
+    Some(required)
 }
 
 fn validate_link_type(link_type: &str) -> Result<(), CloudError> {
@@ -1264,6 +1351,15 @@ fn parse_public_link(row: &Value) -> Result<PublicShareLink, CloudError> {
         web_url,
         expiration_date_time: optional_expiry(row)?,
         inherited: permission_inherited(row)?,
+        password_protected: match row.get("hasPassword") {
+            None | Some(Value::Null) => None,
+            Some(Value::Bool(value)) => Some(*value),
+            _ => {
+                return Err(invalid(
+                    "server returned invalid password-protection metadata",
+                ));
+            }
+        },
     })
 }
 
@@ -2020,6 +2116,171 @@ mod tests {
     }
 
     #[test]
+    fn role_specific_password_enforcement_overrides_false_global_flag() {
+        let mut doc: Value = serde_json::from_str(SHARING_CAPABILITIES).unwrap();
+        doc["ocs"]["data"]["capabilities"]["files_sharing"]["public"]["password"]["enforced_for"] =
+            json!({"read_only":true,"read_write":true,"read_write_delete":true,"upload_only":true});
+        let caps = parse_sharing_capabilities(&doc).unwrap();
+        assert_eq!(caps.public_password_enforced, Some(false));
+        assert!(caps.public_link_creation_supported);
+        let required = caps.public_password_required_for.unwrap();
+        assert!(
+            ["view", "edit", "upload", "createOnly"]
+                .iter()
+                .all(|kind| required.iter().any(|value| value == kind))
+        );
+        doc["ocs"]["data"]["capabilities"]["files_sharing"]["public"]["password"]["enforced_for"]
+            ["read_only"] = json!("true");
+        let caps = parse_sharing_capabilities(&doc).unwrap();
+        assert!(!caps.public_link_creation_supported);
+        assert!(caps.public_password_required_for.is_none());
+        assert!(password_requirements(Some(false), Some(&json!({"read_only":true}))).is_none());
+        assert!(password_requirements(None, None).is_none());
+        assert!(password_requirements(Some(false), Some(&Value::Null)).is_none());
+    }
+
+    #[test]
+    fn protected_public_link_sends_password_only_in_create_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let worker = thread::spawn(move || {
+            let mut caps: Value = serde_json::from_str(SHARING_CAPABILITIES).unwrap();
+            caps["ocs"]["data"]["capabilities"]["files_sharing"]["public"]["password"]["enforced_for"] = json!({"read_only":true,"read_write":true,"read_write_delete":true,"upload_only":true});
+            let caps_text = caps.to_string();
+            for path in [
+                "/ocs/v1.php/cloud/capabilities?format=json",
+                "/graph/v1beta1/drives/drive/items/item/permissions",
+                "/ocs/v1.php/cloud/capabilities?format=json",
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let request = read_request(&mut stream);
+                assert!(request.starts_with(&format!("GET {path} HTTP/1.1")));
+                assert!(!request.contains("synthetic-link-secret"));
+                respond(
+                    &mut stream,
+                    "200 OK",
+                    if path.starts_with("/ocs/") {
+                        &caps_text
+                    } else {
+                        ORDINARY_ROWS
+                    },
+                );
+            }
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            assert!(
+                request
+                    .starts_with("POST /graph/v1beta1/drives/drive/items/item/createLink HTTP/1.1")
+            );
+            let body: Value =
+                serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+            assert_eq!(
+                body,
+                json!({"type":"view","displayName":"Trip","password":"synthetic-link-secret"})
+            );
+            respond(
+                &mut stream,
+                "200 OK",
+                r#"{"id":"protected-link","hasPassword":true,"link":{"type":"view","displayName":"Trip","webUrl":"https://cloud.example/s/protected"}}"#,
+            );
+        });
+        let client = OpenCloudClient::new_with_proxy(
+            &format!("http://{addr}/"),
+            "synthetic-token".into(),
+            &super::super::ProxyConfig::Direct,
+        )
+        .unwrap();
+        let target = GuestShareTarget::new(&client, "drive", "item").unwrap();
+        let link = client
+            .create_public_link_with_password(
+                &target,
+                "view",
+                Some("Trip"),
+                None,
+                Some("synthetic-link-secret"),
+            )
+            .unwrap();
+        assert_eq!(link.password_protected, Some(true));
+        assert!(!format!("{link:?}").contains("synthetic-link-secret"));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn explicitly_unprotected_create_result_revokes_only_the_new_grant() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let worker = thread::spawn(move || {
+            for path in [
+                "/ocs/v1.php/cloud/capabilities?format=json",
+                "/graph/v1beta1/drives/drive/items/item/permissions",
+                "/ocs/v1.php/cloud/capabilities?format=json",
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                assert!(read_request(&mut stream).starts_with(&format!("GET {path} HTTP/1.1")));
+                respond(
+                    &mut stream,
+                    "200 OK",
+                    if path.starts_with("/ocs/") {
+                        SHARING_CAPABILITIES
+                    } else {
+                        ORDINARY_ROWS
+                    },
+                );
+            }
+            let (mut stream, _) = listener.accept().unwrap();
+            assert!(
+                read_request(&mut stream)
+                    .starts_with("POST /graph/v1beta1/drives/drive/items/item/createLink HTTP/1.1")
+            );
+            respond(
+                &mut stream,
+                "200 OK",
+                r#"{"id":"new-unprotected-link","hasPassword":false,"link":{"type":"view","displayName":"Trip","webUrl":"https://cloud.example/s/unprotected"}}"#,
+            );
+            let (mut stream, _) = listener.accept().unwrap();
+            assert!(
+                read_request(&mut stream)
+                    .starts_with("GET /ocs/v1.php/cloud/capabilities?format=json HTTP/1.1")
+            );
+            respond(&mut stream, "200 OK", SHARING_CAPABILITIES);
+            let (mut stream, _) = listener.accept().unwrap();
+            assert!(
+                read_request(&mut stream)
+                    .starts_with("GET /graph/v1beta1/drives/drive/items/item/permissions HTTP/1.1")
+            );
+            respond(
+                &mut stream,
+                "200 OK",
+                &ORDINARY_ROWS.replace("link-1", "new-unprotected-link"),
+            );
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            assert!(request.starts_with("DELETE /graph/v1beta1/drives/drive/items/item/permissions/new-unprotected-link HTTP/1.1"));
+            assert!(!request.contains("synthetic-link-secret"));
+            respond(&mut stream, "204 No Content", "");
+        });
+        let client = OpenCloudClient::new_with_proxy(
+            &format!("http://{addr}/"),
+            "synthetic-token".into(),
+            &super::super::ProxyConfig::Direct,
+        )
+        .unwrap();
+        let target = GuestShareTarget::new(&client, "drive", "item").unwrap();
+        let error = client
+            .create_public_link_with_password(
+                &target,
+                "view",
+                Some("Trip"),
+                None,
+                Some("synthetic-link-secret"),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::InvalidResponse);
+        assert!(!error.message.contains("synthetic-link-secret"));
+        worker.join().unwrap();
+    }
+
+    #[test]
     fn graph_ordinary_and_link_routes_are_item_scoped_and_validated() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -2179,7 +2440,7 @@ mod tests {
                 .create_public_link(&target, "view", None, None)
                 .unwrap_err()
                 .kind,
-            ErrorKind::Unsupported
+            ErrorKind::InvalidResponse
         );
         worker.join().unwrap();
     }

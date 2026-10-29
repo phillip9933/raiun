@@ -28,6 +28,7 @@ type Capabilities = {
     public_links_enabled: boolean;
     public_link_creation_supported?: boolean;
     public_password_enforced?: boolean | null;
+    public_password_required_for?: string[] | null;
     public_expiration_enabled?: boolean | null;
     public_expiration_enforced?: boolean | null;
 };
@@ -74,7 +75,7 @@ export class SharingController {
     private selectedEntryId = '';
     private itemData: Data | null = null;
     private selectedShareId = '';
-    private draft = { recipient: '', role: '', expiry: '', linkName: '', query: '', recipientId: '' };
+    private draft = { recipient: '', role: '', expiry: '', linkName: '', query: '', recipientId: '', password: '' };
     private draftBaseline = '';
     private recipientResults: SharingRecipientOption[] = [];
     private recipientStatus: 'idle' | 'loading' | 'ready' | 'error' = 'idle';
@@ -88,8 +89,10 @@ export class SharingController {
     private key(c: SharingContext) { return JSON.stringify([c.profileId, c.accountEpoch, c.generation, c.server]); }
     private current(key: string, seq?: number) { const c = this.deps.context(); return !!c && this.scope === key && this.key(c) === key && (seq === undefined || seq === this.sequence); }
     private sync() { const c = this.deps.context(); const key = c ? this.key(c) : ''; if (key !== this.scope) {
+        const interruptedFlow = !!this.scope && this.mode !== 'list';
         this.leave();
         this.scope = key;
+        if (interruptedFlow) this.notice = 'The account connection changed. Review sharing again.';
     } return c; }
     leave() {
     this.sequence++; this.searchSequence++; this.inventorySequence++;
@@ -99,7 +102,20 @@ export class SharingController {
     this.itemData = null; this.selectedShareId = ''; this.selectedInventoryId = ''; this.resetDraft(); this.message = ''; this.notice = ''; this.unknown = false;
     this.listQuery = ''; this.createdId = ''; this.inventoryData = emptyInventory(); this.inventoryLoaded = false; this.inventoryLoading = false; this.inventoryError = '';
 }
-    private resetDraft() { this.ownedEdit = null; this.draft = { recipient: '', role: '', expiry: '', linkName: '', query: '', recipientId: '' }; this.recipientResults = []; this.recipientStatus = 'idle'; this.draftBaseline = JSON.stringify(this.draft); }
+    private draftFingerprint() { const { password: _password, ...shareFields } = this.draft; return JSON.stringify(shareFields); }
+    private resetDraft() { this.ownedEdit = null; this.draft = { recipient: '', role: '', expiry: '', linkName: '', query: '', recipientId: '', password: '' }; this.recipientResults = []; this.recipientStatus = 'idle'; this.draftBaseline = this.draftFingerprint(); }
+    private passwordRequiredFor(linkType: string): boolean | null {
+        if (!this.caps) return null;
+        const policy = this.caps.public_password_required_for;
+        if (Array.isArray(policy)) {
+            if (policy.some(type => typeof type !== 'string' || !Object.hasOwn(linkLabels, type))) return null;
+            return !!linkType && policy.includes(linkType);
+        }
+        if (policy === null) return null;
+        if (this.caps.public_password_enforced === true) return true;
+        if (this.caps.public_password_enforced === false) return false;
+        return null;
+    }
     async enter() {
     const c = this.sync();
     if (!c?.connected || this.capsLoading) return;
@@ -171,7 +187,7 @@ export class SharingController {
             this.selectedItem={id:binding.resourceId,name:settings.row.itemName,location:settings.row.location,path:'/',isFolder:false,shareable:true};
             this.section=settings.kind==='public_link'?'links':'people';
             this.draft.role=settings.roleId;this.draft.expiry=guestExpiryInput(settings.row.expiresAt);this.draft.linkName=settings.linkName;
-            this.draftBaseline=JSON.stringify(this.draft);this.unknown=false;this.notice='';this.mode='edit';
+            this.draftBaseline=this.draftFingerprint();this.unknown=false;this.notice='';this.mode='edit';
             if(!Object.values(settings.fields).some(Boolean))this.message='The server does not allow changing settings for this share.';
         } catch(error) {if(this.current(key,seq)){this.notice='';this.inventoryError=errorText(error);}}
         finally {if(this.current(key,seq)){this.busy=false;this.deps.render();this.deps.focus?.('heading');}}
@@ -243,8 +259,9 @@ export class SharingController {
         if (!this.caps)
             return cap;
         const enabled = this.caps.files_sharing_enabled && (section === 'guests' ? this.guestSupported : section === 'links' ? this.caps.public_links_enabled : true);
-        const passwordBlocked = section === 'links' && this.caps.public_link_creation_supported !== true;
-        return { ...cap, server: enabled ? 'supported' : 'unsupported', create: enabled && !passwordBlocked, edit: enabled && section !== 'links', remove: enabled, copyLink: enabled && section === 'links', expiration: section === 'guests' || (section === 'people' && this.mode !== 'edit') || (section === 'links' && this.caps.public_expiration_enabled !== false) };
+        const passwordPolicyKnown = section === 'links' && this.passwordRequiredFor('') !== null;
+        const passwordBlocked = section === 'links' && (this.caps.public_link_creation_supported !== true || !passwordPolicyKnown);
+        return { ...cap, server: enabled ? 'supported' : 'unsupported', create: enabled && !passwordBlocked, createUnavailableMessage: section === 'links' && this.caps.public_link_creation_supported === true && !passwordPolicyKnown ? 'The server password requirements for links are unknown. Refresh sharing information before creating a link.' : undefined, edit: enabled && section !== 'links', remove: enabled, copyLink: enabled && section === 'links', expiration: section === 'guests' || (section === 'people' && this.mode !== 'edit') || (section === 'links' && this.caps.public_expiration_enabled !== false), password: section === 'links' && this.mode !== 'edit' && passwordPolicyKnown };
     }
     render(): string {
     const c = this.sync();
@@ -269,6 +286,10 @@ export class SharingController {
         editableFields: this.ownedEdit?.fields,
         roles, roleId: this.draft.role, recipient: this.draft.recipient, expiry: this.draft.expiry, linkName: this.draft.linkName,
         recipientQuery: this.draft.query, recipientSelectedId: this.draft.recipientId, recipientResults: this.recipientResults, recipientSearchStatus: this.recipientStatus,
+        passwordRequired: this.section === 'links' && !this.ownedEdit && this.passwordRequiredFor(this.draft.role) === true,
+        passwordPolicyKnown: this.section !== 'links' || !!this.ownedEdit || this.passwordRequiredFor(this.draft.role) !== null,
+        passwordPresent: this.draft.password.length > 0,
+        passwordLengthValid: new TextEncoder().encode(this.draft.password).length <= 72,
         expirationRequired: this.section === 'links' && this.caps?.public_expiration_enforced === true,
         outcomeUnknown: this.unknown, validationMessage: this.message, notice: this.notice, createdShareId: this.createdId
     };
@@ -288,7 +309,9 @@ export class SharingController {
         root.querySelectorAll<HTMLElement>('[data-sharing-action]').forEach(el => el.addEventListener('click', () => { if (!this.current(key))
             return; const a = sharingActionFromDataset(el.dataset); if (a)
             void this.handle(a); }));
-        root.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-sharing-field]').forEach(el => el.addEventListener(el instanceof HTMLSelectElement ? 'change' : 'input', () => {
+        root.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-sharing-field]').forEach(el => {
+            if (el.dataset.sharingField === 'password') el.value = this.draft.password;
+            el.addEventListener(el instanceof HTMLSelectElement ? 'change' : 'input', () => {
             if (!this.current(key) || this.busy)
                 return;
             const field = el.dataset.sharingField, value = el.value;
@@ -300,6 +323,8 @@ export class SharingController {
                 void this.browse('/');
                 return;
             }
+            if (field === 'role' && this.section === 'links' && this.draft.role !== value)
+                this.draft.password = '';
             if (field === 'role')
                 this.draft.role = value;
             else if (field === 'expiry')
@@ -308,6 +333,8 @@ export class SharingController {
                 this.draft.recipient = value;
             else if (field === 'link-name')
                 this.draft.linkName = value;
+            else if (field === 'password')
+                this.draft.password = value;
             else if (field === 'recipient-query') {
                 this.draft.query = value;
                 this.draft.recipientId = '';
@@ -320,7 +347,8 @@ export class SharingController {
                 this.listQuery = value;
             this.message = '';
             this.deps.render();
-        }));
+            });
+        });
     }
     private async browse(path: string) {
         const c = this.sync();
@@ -401,7 +429,7 @@ export class SharingController {
                 const role = section === 'links' ? data.linkTypes.find(id => id === 'view') : data.roles.find(r => /view|read|viewer/i.test(r.name))?.id;
                 this.draft.role = role || '';
                 this.draft.linkName = item.name;
-                this.draftBaseline = JSON.stringify(this.draft);
+                this.draftBaseline = this.draftFingerprint();
                 this.mode = 'settings';
             }
             else
@@ -493,7 +521,7 @@ export class SharingController {
                 this.deps.render();
         }
     }
-    private dirty() { return (this.mode === 'settings' || this.mode === 'edit') && JSON.stringify(this.draft) !== this.draftBaseline; }
+    private dirty() { return (this.mode === 'settings' || this.mode === 'edit') && (this.draftFingerprint() !== this.draftBaseline || !!this.draft.password); }
     async handle(a: SharingAction): Promise<void> {
     const c = this.sync(); if (!c || this.busy || this.capsLoading) return;
     if (this.unknown && ['new-share','choose-item','change-item','set-section','set-inventory','choose-method'].includes(a.type)) {
@@ -502,7 +530,9 @@ export class SharingController {
     if (a.type === 'set-inventory') {
         if (a.inventory === this.inventory && this.mode === 'list') return;
         const key = this.scope;
-        if (this.dirty() && !await this.deps.confirm('Discard the unsaved sharing changes?')) return;
+        const dirty = this.dirty();
+        if (this.draft.password) { this.draft.password = ''; this.deps.render(); }
+        if (dirty && !await this.deps.confirm('Discard the unsaved sharing changes?')) return;
         if (!this.current(key)) return;
         this.sequence++; this.searchSequence++; this.inventorySequence++;
         this.inventory = a.inventory; this.mode = 'list'; this.itemData = null; this.selectedItem = null; this.selectedInventoryId = ''; this.selectedShareId = '';
@@ -518,7 +548,9 @@ export class SharingController {
         const method = a.type === 'choose-method' ? a.method : a.section;
         if (this.inventory !== 'by-me' || !this.capability(method).create) return;
         const key = this.scope;
-        if (this.dirty() && !await this.deps.confirm('Discard the unsaved sharing changes?')) return;
+        const dirty = this.dirty();
+        if (this.draft.password) { this.draft.password = ''; this.deps.render(); }
+        if (dirty && !await this.deps.confirm('Discard the unsaved sharing changes?')) return;
         if (!this.current(key)) return;
         this.sequence++; this.searchSequence++; this.section = method; this.resetDraft(); this.itemData = null; this.selectedItem = null; this.selectedEntryId = ''; this.entries = [];
         this.mode = 'choose-item'; this.status = 'idle'; this.message = ''; this.notice = ''; this.deps.render(); this.deps.focus?.('heading');
@@ -526,13 +558,15 @@ export class SharingController {
     }
     if (a.type === 'choose-item' || a.type === 'change-item') {
         const key = this.scope;
-        if (this.dirty() && !await this.deps.confirm('Discard the unsaved sharing changes and choose another item?')) return;
+        const dirty = this.dirty();
+        if (this.draft.password) { this.draft.password = ''; this.deps.render(); }
+        if (dirty && !await this.deps.confirm('Discard the unsaved sharing changes and choose another item?')) return;
         if (!this.current(key)) return;
         this.sequence++; this.searchSequence++; this.resetDraft(); this.itemData = null; this.selectedItem = null; this.selectedEntryId = ''; this.entries = [];
         this.mode = a.type === 'choose-item' ? 'lookup-item' : 'choose-item'; this.status = 'idle'; this.message = ''; this.deps.render(); this.deps.focus?.('heading');
         if (this.spaceId) await this.browse('/'); return;
     }
-    if (a.type === 'cancel') { const key=this.scope; if(this.dirty() && !await this.deps.confirm('Discard the unsaved sharing changes?')) return; if(!this.current(key)) return; this.sequence++; this.searchSequence++; this.mode = 'list'; this.selectedInventoryId = ''; this.resetDraft(); this.message = ''; this.deps.render(); this.deps.focus?.('new-share'); return; }
+    if (a.type === 'cancel') { const key=this.scope, dirty=this.dirty(); if(this.draft.password){this.draft.password='';this.deps.render();} if(dirty && !await this.deps.confirm('Discard the unsaved sharing changes?')) return; if(!this.current(key)) return; this.sequence++; this.searchSequence++; this.mode = 'list'; this.selectedInventoryId = ''; this.resetDraft(); this.message = ''; this.deps.render(); this.deps.focus?.('new-share'); return; }
     if (a.type === 'open-folder') { const e = this.entries.find(e => e.id === a.itemId); if (e?.isFolder && !e.encrypted) await this.browse(e.path); return; }
     if (a.type === 'open-parent') { if (this.spaceId) await this.browse(parent(this.path)); return; }
     if (a.type === 'refresh-items') { if (this.spaceId) await this.browse(this.path); return; }
@@ -573,6 +607,18 @@ export class SharingController {
             return;
         const role = section === 'links' ? data.linkTypes.includes(this.draft.role) : data.roles.some(r => r.id === this.draft.role);
         const expiry = this.draft.expiry ? guestExpiryValue(this.draft.expiry) : null;
+        const linkPasswordPolicy = section === 'links' && !editing ? this.passwordRequiredFor(this.draft.role) : false;
+        const passwordBytes = new TextEncoder().encode(this.draft.password).length;
+        if (!removing && section === 'links' && !editing && linkPasswordPolicy === null) {
+            this.message = 'The server password requirements for this link type are unknown. Refresh sharing information before creating the link.';
+            this.deps.render();
+            return;
+        }
+        if (!removing && section === 'links' && !editing && (passwordBytes > 72 || (linkPasswordPolicy === true && !this.draft.password))) {
+            this.message = passwordBytes > 72 ? 'Link passwords can be at most 72 UTF-8 bytes.' : 'Enter a password for this link type.';
+            this.deps.render();
+            return;
+        }
         if (!removing && (!role || (this.draft.expiry && !expiry) || (expiry && Date.parse(expiry) <= Date.now()) || (section === 'guests' && !editing && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(this.draft.recipient)))) {
             this.message = 'Review the recipient, access and expiration before continuing.';
             this.deps.render();
@@ -599,6 +645,7 @@ export class SharingController {
             args.link_type = this.draft.role;
             args.display_name = this.draft.linkName.trim() || item.name;
             args.expiration_date_time = expiry;
+            if (!editing && this.draft.password) args.password = this.draft.password;
         }
         else {
             action = editing ? 'sharing_update' : 'sharing_invite';
@@ -617,6 +664,8 @@ export class SharingController {
                 args.expiration_date_time = expiry;
             }
         }
+        const submittedPassword = action === 'sharing_link_create' && typeof args.password === 'string' ? args.password : '';
+        if (action === 'sharing_link_create') this.draft.password = '';
         this.busy = true;
         this.message = '';
         this.deps.render();
@@ -641,6 +690,7 @@ export class SharingController {
         catch (e) {
             if (this.current(key, seq)) {
                 this.message = errorText(e);
+                if (submittedPassword && this.message.includes(submittedPassword)) this.message = this.message.split(submittedPassword).join('[redacted]');
                 this.unknown = !/denied|unavailable|Reconnect|Choose|Review/.test(this.message);
             }
         }
