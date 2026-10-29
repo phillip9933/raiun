@@ -5,6 +5,8 @@
 
 mod async_body;
 mod blocking_reader;
+#[cfg(test)]
+mod dav_text_tests;
 mod recovery_stream;
 pub use recovery_stream::RecoveryStreamReadback;
 pub mod avatar;
@@ -2695,6 +2697,18 @@ struct DavItem {
     writable: Option<bool>,
 }
 
+fn append_dav_property_text(value: &mut String, fragment: &str) -> Result<(), CloudError> {
+    if value
+        .len()
+        .checked_add(fragment.len())
+        .is_none_or(|length| length > MAX_DAV_ENTRY)
+    {
+        return Err(invalid("DAV property exceeds its size limit"));
+    }
+    value.push_str(fragment);
+    Ok(())
+}
+
 fn parse_multistatus(
     bytes: &[u8],
     requested: &Url,
@@ -2702,12 +2716,13 @@ fn parse_multistatus(
     visit: &mut dyn FnMut(RemoteEntry) -> Result<(), CloudError>,
 ) -> Result<(), CloudError> {
     let mut reader = NsReader::from_reader(bytes);
-    reader.config_mut().trim_text(true);
+    reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
     let mut entries = 0usize;
     let mut item: Option<DavItem> = None;
     let mut prop_values = DavItem::default();
     let mut field = String::new();
+    let mut field_text = String::new();
     let mut depth = 0usize;
     let mut in_prop = false;
     let mut propstat_ok = false;
@@ -2746,6 +2761,7 @@ fn parse_multistatus(
                     if depth > 32 {
                         return Err(invalid("DAV entry nesting exceeds its limit"));
                     }
+                    field_text.clear();
                     field = if namespace_ok {
                         name.clone()
                     } else {
@@ -2777,14 +2793,57 @@ fn parse_multistatus(
                 }
             }
             Ok((_, Event::Text(e))) => {
-                if let Some(ref mut current) = item {
-                    let text = e
-                        .decode()
-                        .map_err(|_| invalid("DAV response contains invalid text"))?;
-                    if text.len() > MAX_DAV_ENTRY {
-                        return Err(invalid("DAV property exceeds its size limit"));
-                    }
-                    let value = text.trim();
+                let text = e
+                    .decode()
+                    .map_err(|_| invalid("DAV response contains invalid text"))?;
+                if item.is_some() && !field.is_empty() {
+                    append_dav_property_text(&mut field_text, &text)?;
+                }
+            }
+            Ok((_, Event::CData(e))) => {
+                let text = e
+                    .decode()
+                    .map_err(|_| invalid("DAV response contains invalid text"))?;
+                if item.is_some() && !field.is_empty() {
+                    append_dav_property_text(&mut field_text, &text)?;
+                }
+            }
+            Ok((_, Event::GeneralRef(reference))) => {
+                let name = reference
+                    .decode()
+                    .map_err(|_| invalid("DAV response contains an invalid reference"))?;
+                let character = match reference
+                    .resolve_char_ref()
+                    .map_err(|_| invalid("DAV response contains an invalid character reference"))?
+                {
+                    Some(character) => character,
+                    None => match name.as_ref() {
+                        "quot" => '"',
+                        "apos" => '\'',
+                        "amp" => '&',
+                        "lt" => '<',
+                        "gt" => '>',
+                        _ => return Err(invalid("DAV response contains an unknown entity")),
+                    },
+                };
+                if !matches!(character, '\u{9}' | '\u{a}' | '\u{d}' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')
+                {
+                    return Err(invalid("DAV response contains an invalid XML character"));
+                }
+                if item.is_some() && !field.is_empty() {
+                    let mut encoded = [0; 4];
+                    append_dav_property_text(&mut field_text, character.encode_utf8(&mut encoded))?;
+                }
+            }
+            Ok((namespace, Event::End(e))) => {
+                let name = local_name(e.local_name().as_ref()).to_ascii_lowercase();
+                let dav_element = namespace_is(&namespace, b"DAV:");
+                if let Some(ref mut current) = item
+                    && field == name
+                    && expected_namespace(&name)
+                        .is_some_and(|expected| namespace_is(&namespace, expected))
+                {
+                    let value = field_text.trim();
                     match field.as_str() {
                         "href" if current.href.is_empty() => current.href = value.to_owned(),
                         "getcontentlength" if in_prop => {
@@ -2818,10 +2877,6 @@ fn parse_multistatus(
                         _ => {}
                     }
                 }
-            }
-            Ok((namespace, Event::End(e))) => {
-                let name = local_name(e.local_name().as_ref()).to_ascii_lowercase();
-                let dav_element = namespace_is(&namespace, b"DAV:");
                 if dav_element && name == "prop" {
                     in_prop = false;
                 }
@@ -2861,6 +2916,7 @@ fn parse_multistatus(
                     depth = depth.saturating_sub(1);
                 }
                 field.clear();
+                field_text.clear();
             }
             Ok((_, Event::DocType(_))) => {
                 return Err(invalid("DAV response contains a document type declaration"));

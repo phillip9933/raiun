@@ -175,6 +175,17 @@ server URLs or credentials into this document.
   paired integration passed 1,311 host tests, 363 named frontend tests and strict
   Linux/Windows checks with independent review. Actual GUI retry and native ACK
   acceptance remain pending; the installed laptop remains c584b8f.
+- C15's separate deadline-expiry cohort retained the exact pending edit across
+  an independent DPAPI restart after readback exceeded its 60-second job budget.
+  It issued no native in-sync acknowledgement or automatic replay. This is
+  expiry-retention acceptance, not explicit user cancellation or GUI Retry acceptance.
+- The shared new-vault primitive now supports repeated observed parent-identity
+  checks while retaining partial folders on failure. This is not an atomic
+  remote parent transaction, and Windows creation remains unavailable. A separate
+  reviewed DAV parser correction joins bounded text/entity/CDATA fragments before
+  interpreting metadata, accepts predefined and valid numeric XML references,
+  and rejects unknown entities and DTDs. It does not establish the cause of the
+  earlier native observer failures or add file-operation authority.
 
 These records are under `desktop-release-prep-20261029/windows-ci-c584b8f/`
 and `linux/c584b8f-vm-acceptance/` outside Git. Full file operations and GUI
