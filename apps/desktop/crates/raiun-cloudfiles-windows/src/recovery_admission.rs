@@ -2,6 +2,7 @@
 //! credential, upload, healthy-record or native completion authority.
 #![cfg(windows)]
 
+use crate::recovery_state::RecoveryStateRoot;
 use crate::streamed_store::{SnapshotStore, StoreError, StorePolicy, V2_QUOTA_LOCK, V2_STORE_ROOT};
 use crate::{EditJournalScope, EditRecordProtector};
 use raiun_control_windows::{
@@ -16,7 +17,7 @@ const LEGACY_SCOPES: &str = "cloud-files-edit-scopes-v1";
 /// offline cache, session storage and other stores have separate bounds and
 /// MUST NOT be implicitly initialized or traversed by this accounting pass.
 pub struct RecoveryAdmission {
-    state: Arc<PrivateDirectory>,
+    state: Arc<RecoveryStateRoot>,
     protector: Arc<dyn EditRecordProtector>,
     policy: StorePolicy,
 }
@@ -28,7 +29,7 @@ pub struct RecoveryAdmission {
 pub struct RecoveryAdmissionLease {
     _lock: OwnedPrivateReader,
     _root: Arc<PrivateDirectory>,
-    _state: Arc<PrivateDirectory>,
+    _state: Arc<RecoveryStateRoot>,
     _store: Option<Arc<SnapshotStore>>,
 }
 
@@ -40,6 +41,14 @@ impl RecoveryAdmission {
 
     pub fn new(
         state: Arc<PrivateDirectory>,
+        protector: Arc<dyn EditRecordProtector>,
+        policy: StorePolicy,
+    ) -> Result<Self, StoreError> {
+        Self::new_admitted(RecoveryStateRoot::modern(state), protector, policy)
+    }
+
+    pub(crate) fn new_admitted(
+        state: Arc<RecoveryStateRoot>,
         protector: Arc<dyn EditRecordProtector>,
         policy: StorePolicy,
     ) -> Result<Self, StoreError> {
@@ -98,19 +107,14 @@ impl RecoveryAdmission {
         if lock.metadata().map_err(io_error)?.len() != 0 {
             return Err(StoreError::CorruptEvidence);
         }
-        lock.try_lock_exclusive().map_err(|error| {
-            if error.kind() == io::ErrorKind::WouldBlock {
-                StoreError::Busy
-            } else {
-                StoreError::Io
-            }
-        })?;
+        lock.try_lock_exclusive()
+            .map_err(crate::streamed_store::lock_error)?;
         lock.verify().map_err(io_error)?;
         root.verify_path().map_err(io_error)?;
         self.state.verify_path().map_err(io_error)?;
         let store = scope
             .map(|scope| {
-                SnapshotStore::create_or_open(
+                SnapshotStore::create_or_open_admitted(
                     Arc::clone(&self.state),
                     scope.clone(),
                     Arc::clone(&self.protector),
@@ -171,7 +175,7 @@ fn check_combined_usage(
 /// state's v2 quota.lock to serialize cooperating recovery writers. No body is
 /// read/decrypted and an unknown file is charged, never adopted as healthy.
 pub(crate) fn legacy_recovery_usage(
-    state: &Arc<PrivateDirectory>,
+    state: &Arc<RecoveryStateRoot>,
     policy: StorePolicy,
 ) -> Result<(u64, usize), StoreError> {
     policy.validate()?;
@@ -237,7 +241,7 @@ fn scan_directory(
     directory.verify_path().map_err(io_error)
 }
 
-fn pinned_parent(directory: &Arc<PrivateDirectory>) -> Result<PinnedDirectory, StoreError> {
+fn pinned_parent(directory: &Arc<RecoveryStateRoot>) -> Result<PinnedDirectory, StoreError> {
     directory.verify_path().map_err(io_error)?;
     let parent = PinnedDirectory::open(directory.path()).map_err(io_error)?;
     if parent.identity() != directory.identity() {
@@ -320,7 +324,7 @@ mod tests {
     fn child(parent: &Arc<PrivateDirectory>, name: &str) -> Arc<PrivateDirectory> {
         Arc::new(
             PrivateDirectory::create_or_open_under(
-                &pinned_parent(parent).unwrap(),
+                &PinnedDirectory::open(parent.path()).unwrap(),
                 OsStr::new(name),
             )
             .unwrap(),
@@ -357,7 +361,11 @@ mod tests {
     #[ignore = "opt-in native Windows private metadata accounting fixture; no production state, no crypto, retained fixture"]
     fn legacy_accounting_charges_retained_stages_locks_and_unknown_plain_files() {
         let state = fixture();
-        assert_eq!(legacy_recovery_usage(&state, policy()).unwrap(), (0, 0));
+        assert_eq!(
+            legacy_recovery_usage(&RecoveryStateRoot::modern(Arc::clone(&state)), policy())
+                .unwrap(),
+            (0, 0)
+        );
         let journal = child(&state, LEGACY_JOURNAL);
         let scope = child(&journal, &"a".repeat(64));
         blob(&scope, "record.body", b"1234567");
@@ -366,20 +374,27 @@ mod tests {
         blob(&journal, "unknown-retained", b"123");
         let catalogs = child(&state, LEGACY_SCOPES);
         blob(&catalogs, "unknown-file", b"12345");
-        assert_eq!(legacy_recovery_usage(&state, policy()).unwrap(), (26, 8));
+        assert_eq!(
+            legacy_recovery_usage(&RecoveryStateRoot::modern(Arc::clone(&state)), policy())
+                .unwrap(),
+            (26, 8)
+        );
         let mut few_entries = policy();
         few_entries.max_entries = 4;
         assert_eq!(
-            legacy_recovery_usage(&state, few_entries),
+            legacy_recovery_usage(&RecoveryStateRoot::modern(Arc::clone(&state)), few_entries),
             Err(StoreError::ScanLimit)
         );
         blob(&catalogs, "quota-file", &[0; 64]);
         let mut low = policy();
         low.max_state_bytes = 64;
-        assert_eq!(legacy_recovery_usage(&state, low), Err(StoreError::Quota));
+        assert_eq!(
+            legacy_recovery_usage(&RecoveryStateRoot::modern(Arc::clone(&state)), low),
+            Err(StoreError::Quota)
+        );
         let _unexpected = child(&scope, "unexpected-depth");
         assert_eq!(
-            legacy_recovery_usage(&state, policy()),
+            legacy_recovery_usage(&RecoveryStateRoot::modern(Arc::clone(&state)), policy()),
             Err(StoreError::CorruptEvidence)
         );
     }
@@ -429,14 +444,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            legacy_recovery_usage(&state, policy()),
+            legacy_recovery_usage(&RecoveryStateRoot::modern(Arc::clone(&state)), policy()),
             Err(StoreError::CorruptEvidence)
         );
         let second = fixture();
         let catalogs = child(&second, LEGACY_SCOPES);
         let _unexpected = child(&catalogs, "a-child-directory");
         assert_eq!(
-            legacy_recovery_usage(&second, policy()),
+            legacy_recovery_usage(&RecoveryStateRoot::modern(Arc::clone(&second)), policy()),
             Err(StoreError::CorruptEvidence)
         );
     }

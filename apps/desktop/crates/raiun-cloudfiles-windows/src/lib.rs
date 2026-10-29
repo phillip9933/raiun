@@ -15,6 +15,8 @@ mod opencloud;
 pub(crate) mod recovery_admission;
 mod recovery_provider;
 mod recovery_reconcile;
+#[cfg(windows)]
+pub(crate) mod recovery_state;
 #[cfg(any(windows, test))]
 pub mod streamed_reconcile;
 pub mod streamed_snapshot;

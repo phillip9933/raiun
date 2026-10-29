@@ -408,6 +408,11 @@ impl LegacyRecoveryMetadataDirectory {
     pub fn path(&self) -> &Path {
         &self.directory.path
     }
+    /// Physical directory identity only, with no record or mutation authority.
+    pub fn identity(&self) -> PinnedFileIdentity {
+        self.directory.identity()
+    }
+
     pub fn verify_path(&self) -> io::Result<()> {
         self.directory.verify_path()?;
         let file = directory_handle(&self.directory)?;

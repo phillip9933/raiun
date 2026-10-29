@@ -87,6 +87,37 @@ fn io_error(_: io::Error) -> StoreError {
     StoreError::Io
 }
 
+/// Only for a failed nonblocking OS lock operation. fs2 documents its native
+/// contention error separately; on Windows its raw code need not be WouldBlock.
+#[cfg(windows)]
+pub(crate) fn lock_error(error: io::Error) -> StoreError {
+    if error.kind() == io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+    {
+        StoreError::Busy
+    } else {
+        StoreError::Io
+    }
+}
+
+#[cfg(all(windows, test))]
+#[test]
+fn native_lock_contention_is_busy_but_other_lock_errors_are_not() {
+    assert_eq!(lock_error(fs2::lock_contended_error()), StoreError::Busy);
+    assert_eq!(
+        lock_error(io::Error::from(io::ErrorKind::WouldBlock)),
+        StoreError::Busy
+    );
+    assert_eq!(
+        lock_error(io::Error::from(io::ErrorKind::PermissionDenied)),
+        StoreError::Io
+    );
+    assert_eq!(
+        lock_error(io::Error::from(io::ErrorKind::Other)),
+        StoreError::Io
+    );
+}
+
 // Private, injected storage boundary. Only the Windows implementation is a
 // production adapter. Test filesystem handles do not assert immutable parity.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -132,6 +163,20 @@ impl SnapshotStore {
         protector: Arc<dyn EditRecordProtector>,
         policy: StorePolicy,
     ) -> Result<Arc<Self>, StoreError> {
+        Self::create_or_open_admitted(
+            crate::recovery_state::RecoveryStateRoot::modern(admitted_state),
+            scope,
+            protector,
+            policy,
+        )
+    }
+    #[cfg(windows)]
+    pub(crate) fn create_or_open_admitted(
+        admitted_state: Arc<crate::recovery_state::RecoveryStateRoot>,
+        scope: EditJournalScope,
+        protector: Arc<dyn EditRecordProtector>,
+        policy: StorePolicy,
+    ) -> Result<Arc<Self>, StoreError> {
         Self::from_directory(
             windows::root(admitted_state, V2_STORE_ROOT, true)?,
             scope,
@@ -142,6 +187,20 @@ impl SnapshotStore {
     #[cfg(windows)]
     pub fn open_existing(
         admitted_state: Arc<raiun_control_windows::PrivateDirectory>,
+        scope: EditJournalScope,
+        protector: Arc<dyn EditRecordProtector>,
+        policy: StorePolicy,
+    ) -> Result<Arc<Self>, StoreError> {
+        Self::open_existing_admitted(
+            crate::recovery_state::RecoveryStateRoot::modern(admitted_state),
+            scope,
+            protector,
+            policy,
+        )
+    }
+    #[cfg(windows)]
+    pub(crate) fn open_existing_admitted(
+        admitted_state: Arc<crate::recovery_state::RecoveryStateRoot>,
         scope: EditJournalScope,
         protector: Arc<dyn EditRecordProtector>,
         policy: StorePolicy,
@@ -162,7 +221,7 @@ impl SnapshotStore {
         policy: StorePolicy,
     ) -> Result<Vec<EditJournalScope>, StoreError> {
         Self::discover_state_scopes_bounded(
-            admitted_state,
+            crate::recovery_state::RecoveryStateRoot::modern(admitted_state),
             protector,
             policy,
             &mut DiscoveryBudget::new(policy),
@@ -171,7 +230,7 @@ impl SnapshotStore {
     /// Share this budget across global catalogs and every selected scope.
     #[cfg(windows)]
     pub(crate) fn discover_state_scopes_bounded(
-        admitted_state: Arc<raiun_control_windows::PrivateDirectory>,
+        admitted_state: Arc<crate::recovery_state::RecoveryStateRoot>,
         protector: Arc<dyn EditRecordProtector>,
         policy: StorePolicy,
         budget: &mut DiscoveryBudget,
@@ -492,7 +551,7 @@ impl SnapshotStore {
     /// legacy usage. No dummy profile/account/Space scope is constructed.
     #[cfg(windows)]
     pub(crate) fn accounted_state_usage_while_locked(
-        admitted_state: Arc<raiun_control_windows::PrivateDirectory>,
+        admitted_state: Arc<crate::recovery_state::RecoveryStateRoot>,
         protector: Arc<dyn EditRecordProtector>,
         policy: StorePolicy,
     ) -> Result<(u64, usize), StoreError> {

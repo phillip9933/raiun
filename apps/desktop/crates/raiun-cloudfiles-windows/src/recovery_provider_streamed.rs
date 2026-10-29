@@ -106,7 +106,7 @@ impl DurablePreparedEditRecovery {
             .into_iter()
             .filter(|scope| scope_matches_provider(scope, &self.scope, self.root_identity))
         {
-            let store = SnapshotStore::open_existing(
+            let store = SnapshotStore::open_existing_admitted(
                 Arc::clone(&context.state),
                 scope,
                 Arc::clone(&self.catalog.protector),

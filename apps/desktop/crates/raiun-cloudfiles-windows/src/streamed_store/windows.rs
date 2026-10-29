@@ -1,5 +1,6 @@
 //! Windows-only safe adapter. Native policy remains in control-windows.
 use super::*;
+use crate::recovery_state::RecoveryStateRoot;
 use raiun_control_windows::{
     OwnedPrivateReader, PinnedDirectory, PinnedFileIdentity, PrivateDirectory,
 };
@@ -7,13 +8,16 @@ use std::{ffi::OsStr, fs::File};
 
 struct WindowsDirectory {
     directory: Arc<PrivateDirectory>,
-    _admitted_state: Arc<PrivateDirectory>,
+    _admitted_state: Arc<RecoveryStateRoot>,
 }
 pub(super) fn root(
-    state: Arc<PrivateDirectory>,
+    state: Arc<RecoveryStateRoot>,
     name: &str,
     create: bool,
 ) -> Result<Arc<dyn Directory>, StoreError> {
+    if name != V2_STORE_ROOT {
+        return Err(StoreError::Invalid);
+    }
     state.verify_path().map_err(io_error)?;
     let parent = PinnedDirectory::open(state.path()).map_err(io_error)?;
     let directory = if create {
@@ -31,9 +35,12 @@ pub(super) fn root(
 /// Open only an existing root. Preserve absence separately from every unsafe
 /// entry/type/ACL failure; never recreate missing recovery evidence.
 pub(super) fn existing_root(
-    state: Arc<PrivateDirectory>,
+    state: Arc<RecoveryStateRoot>,
     name: &str,
 ) -> Result<Option<Arc<dyn Directory>>, StoreError> {
+    if name != V2_STORE_ROOT {
+        return Err(StoreError::Invalid);
+    }
     state.verify_path().map_err(io_error)?;
     let parent = PinnedDirectory::open(state.path()).map_err(io_error)?;
     let directory = match PrivateDirectory::open_under(&parent, OsStr::new(name)) {
@@ -155,13 +162,7 @@ impl PinnedRead for OwnedPrivateReader {
         OwnedPrivateReader::verify(self).map_err(io_error)
     }
     fn lock_exclusive(&mut self) -> Result<(), StoreError> {
-        self.try_lock_exclusive().map_err(|e| {
-            if e.kind() == io::ErrorKind::WouldBlock {
-                StoreError::Busy
-            } else {
-                StoreError::Io
-            }
-        })
+        self.try_lock_exclusive().map_err(lock_error)
     }
 }
 // The concrete OwnedPrivateReader already provides checked Read and Seek.

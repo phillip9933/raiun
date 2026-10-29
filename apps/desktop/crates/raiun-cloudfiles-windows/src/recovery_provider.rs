@@ -63,7 +63,7 @@ pub struct DurableEditRecoveryProvider {
 #[cfg(windows)]
 #[derive(Clone)]
 struct StreamedRecoveryContext {
-    state: Arc<raiun_control_windows::PrivateDirectory>,
+    state: Arc<crate::recovery_state::RecoveryStateRoot>,
     admission: Arc<crate::recovery_admission::RecoveryAdmission>,
     policy: crate::streamed_store::StorePolicy,
 }
@@ -119,6 +119,41 @@ impl DurableEditRecoveryProvider {
             .map_err(crate::edit_journal::admission_error)?,
         );
         self.streamed = Some(StreamedRecoveryContext {
+            state: crate::recovery_state::RecoveryStateRoot::modern(state),
+            admission,
+            policy,
+        });
+        Ok(self)
+    }
+
+    /// Explicit GUI compatibility admission at the unchanged DPAPI state root.
+    /// Existing root ACLs/records are only inspected; payload authority remains
+    /// confined to the strict modern v2 child and shared canonical quota lock.
+    #[cfg(windows)]
+    pub fn with_gui_streamed_recovery(
+        self,
+        policy: crate::streamed_store::StorePolicy,
+    ) -> Result<Self, crate::JournalError> {
+        let state = crate::recovery_state::RecoveryStateRoot::existing_gui(&self.state_directory)
+            .map_err(|_| crate::JournalError::ProtectionFailed)?;
+        self.attach_streamed_recovery(state, policy)
+    }
+
+    #[cfg(windows)]
+    fn attach_streamed_recovery(
+        mut self,
+        state: Arc<crate::recovery_state::RecoveryStateRoot>,
+        policy: crate::streamed_store::StorePolicy,
+    ) -> Result<Self, crate::JournalError> {
+        let admission = Arc::new(
+            crate::recovery_admission::RecoveryAdmission::new_admitted(
+                Arc::clone(&state),
+                Arc::clone(&self.protector),
+                policy,
+            )
+            .map_err(crate::edit_journal::admission_error)?,
+        );
+        self.streamed = Some(StreamedRecoveryContext {
             state,
             admission,
             policy,
@@ -127,9 +162,7 @@ impl DurableEditRecoveryProvider {
     }
 
     /// Build the production provider using current-user DPAPI and Raiun's
-    /// protected current runtime state directory. Explicit headless context
-    /// inherits its isolated state root through the session-store constructor;
-    /// the Desktop default remains under `%LOCALAPPDATA%`.
+    /// protected Desktop state directory under `%LOCALAPPDATA%`.
     #[cfg(windows)]
     pub fn current_user(
         scope: ProviderScope,
@@ -1157,7 +1190,7 @@ fn streamed_unresolved_metadata(
         .into_iter()
         .filter(|item| scope_matches_provider(item, scope, root))
     {
-        let store = crate::streamed_store::SnapshotStore::open_existing(
+        let store = crate::streamed_store::SnapshotStore::open_existing_admitted(
             Arc::clone(&context.state),
             selected,
             Arc::clone(protector),
@@ -1234,7 +1267,7 @@ impl DurablePreparedEditRecovery {
             .as_ref()
             .ok_or(crate::JournalError::InvalidState)?;
         let key = receipt.streamed.ok_or(crate::JournalError::InvalidState)?;
-        let store = crate::streamed_store::SnapshotStore::open_existing(
+        let store = crate::streamed_store::SnapshotStore::open_existing_admitted(
             Arc::clone(&context.state),
             receipt.metadata.scope.clone(),
             Arc::clone(&self.catalog.protector),
@@ -1329,7 +1362,7 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
             }),
             content_len,
         };
-        let store = crate::streamed_store::SnapshotStore::create_or_open(
+        let store = crate::streamed_store::SnapshotStore::create_or_open_admitted(
             Arc::clone(&context.state),
             snapshot.scope.clone(),
             Arc::clone(&self.catalog.protector),
@@ -2655,75 +2688,6 @@ mod tests {
         let provider =
             DurableEditRecoveryProvider::new(temp.path().to_path_buf(), scope, root, TestProtector);
         assert!(provider.identity_catalog().load(&catalog_scope).is_err());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn headless_current_user_recovery_constructor_uses_isolated_state() {
-        const CHILD: &str = "RAIUN_RECOVERY_HEADLESS_CONSTRUCTOR_CHILD";
-        if std::env::var_os(CHILD).is_none() {
-            // Child process environment is isolated from parallel tests. No
-            // session, root registration, provider activation or credentials.
-            let temp = tempfile::tempdir().unwrap();
-            let desktop_local = temp.path().join("desktop-local");
-            fs::create_dir(&desktop_local).unwrap();
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "recovery_provider::tests::headless_current_user_recovery_constructor_uses_isolated_state",
-                    "--nocapture",
-                ])
-                .env(CHILD, "1")
-                .env("RAIUN_HEADLESS_CONTEXT", "1")
-                .env("RAIUN_STATE_DIR", temp.path().join("headless"))
-                // A synthetic conventional root is still needed for overlap
-                // rejection. It must remain untouched by these constructors.
-                .env("LOCALAPPDATA", &desktop_local)
-                .status()
-                .unwrap();
-            assert!(status.success());
-            assert!(!desktop_local.join("Raiun").exists());
-            return;
-        }
-        let context = raiun_control_windows::headless_context().unwrap().unwrap();
-        let expected = context.state_root().join("sessions");
-        let protector = DpapiEditRecordProtector::current_user().unwrap();
-        assert_eq!(protector.local_state_directory(), expected);
-        let (scope, root) = fixture();
-        let provider = DurableEditRecoveryProvider::current_user(scope.clone(), root).unwrap();
-        assert_eq!(provider.state_directory, expected);
-        assert!(provider.unresolved_edits().unwrap().is_empty());
-        let journal_scope = EditJournalScope {
-            profile_id: scope.profile_id().into(),
-            server_origin: scope.server_origin().into(),
-            account_subject: scope.account_id().into(),
-            space_id: "personal".into(),
-            root_resource_id: "root-1".into(),
-            root_volume_serial: root.volume_serial,
-            root_file_index: root.file_index,
-        };
-        provider.catalog().register_scope(&journal_scope).unwrap();
-        let journal = EditJournal::open(&expected, journal_scope, protector.clone()).unwrap();
-        drop(journal);
-        // Real journal preparation must preserve the admitted sessions root's
-        // inheritable private ACL, so a later constructor can re-admit it.
-        assert_eq!(
-            DpapiEditRecordProtector::current_user()
-                .unwrap()
-                .local_state_directory(),
-            expected
-        );
-        // Synthetic DPAPI-only roundtrip verifies inherited protection without
-        // using a login or writing a session/token.
-        let aad = b"synthetic-headless-recovery-constructor-v1";
-        let body = b"synthetic local edit";
-        let sealed = protector.seal(aad, body).unwrap();
-        let restarted = DpapiEditRecordProtector::current_user().unwrap();
-        assert_eq!(restarted.local_state_directory(), expected);
-        assert_eq!(restarted.open(aad, &sealed).unwrap(), body);
-        let restarted = DurableEditRecoveryProvider::current_user(scope, root).unwrap();
-        assert_eq!(restarted.state_directory, expected);
-        assert!(restarted.unresolved_edits().unwrap().is_empty());
     }
 
     #[cfg(windows)]
