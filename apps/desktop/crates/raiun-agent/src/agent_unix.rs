@@ -8093,7 +8093,7 @@ mod tests {
             token_listener,
             vec![(
                 200,
-                r#"{"access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":3600}"#,
+                r#"{"token_type":"Bearer","access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":3600}"#,
             )],
         );
         let account_id = account_identity(&server, "personal-drive");
@@ -8354,7 +8354,7 @@ mod tests {
             listener,
             vec![(
                 200,
-                r#"{"access_token":"fixture-new-access","refresh_token":"fixture-new-refresh","expires_in":3600}"#,
+                r#"{"token_type":"Bearer","access_token":"fixture-new-access","refresh_token":"fixture-new-refresh","expires_in":3600}"#,
             )],
         );
         let initial_expiry = now_unix() + 1;
@@ -8431,7 +8431,7 @@ mod tests {
                 (500, r#"{"error":"temporarily_unavailable"}"#),
                 (
                     200,
-                    r#"{"access_token":"fixture-new-access","refresh_token":"fixture-new-refresh","expires_in":3600}"#,
+                    r#"{"token_type":"Bearer","access_token":"fixture-new-access","refresh_token":"fixture-new-refresh","expires_in":3600}"#,
                 ),
             ],
         );

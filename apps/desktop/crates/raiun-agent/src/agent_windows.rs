@@ -16652,7 +16652,7 @@ pub(super) mod tests {
                     respond(
                         &mut request_stream,
                         200,
-                        r#"{"access_token":"rotated-native-access-token","refresh_token":"rotated-native-refresh-token","expires_in":3600}"#,
+                        r#"{"token_type":"Bearer","access_token":"rotated-native-access-token","refresh_token":"rotated-native-refresh-token","expires_in":3600}"#,
                     );
                     continue;
                 }
@@ -17148,7 +17148,7 @@ pub(super) mod tests {
             respond(
                 &mut token,
                 200,
-                r#"{"access_token":"late-access-token","refresh_token":"late-refresh-token","expires_in":3600}"#,
+                r#"{"token_type":"Bearer","access_token":"late-access-token","refresh_token":"late-refresh-token","expires_in":3600}"#,
             );
         });
         (endpoint, seen_rx, release_tx, worker)
@@ -17198,7 +17198,7 @@ pub(super) mod tests {
                 respond(
                     &mut token,
                     200,
-                    r#"{"access_token":"synthetic-access-token","refresh_token":"synthetic-refresh-token","expires_in":3600}"#,
+                    r#"{"token_type":"Bearer","access_token":"synthetic-access-token","refresh_token":"synthetic-refresh-token","expires_in":3600}"#,
                 );
             }
         });
@@ -17803,7 +17803,7 @@ pub(super) mod tests {
     fn startup_restores_only_the_exact_nonexpired_active_identity() {
         let (endpoint, fixture) = synthetic_refresh_server(
             200,
-            r#"{"access_token":"rotated-access-token","refresh_token":"rotated-refresh-token","expires_in":3600}"#,
+            r#"{"token_type":"Bearer","access_token":"rotated-access-token","refresh_token":"rotated-refresh-token","expires_in":3600}"#,
         );
         let server = endpoint.trim_end_matches("/token").to_owned();
         let store = Arc::new(MemoryStore::default());
@@ -17854,7 +17854,7 @@ pub(super) mod tests {
     fn successful_refresh_with_five_minute_token_stays_connected_on_status() {
         let (endpoint, fixture) = synthetic_refresh_server(
             200,
-            r#"{"access_token":"rotated-access-token","refresh_token":"rotated-refresh-token","expires_in":300}"#,
+            r#"{"token_type":"Bearer","access_token":"rotated-access-token","refresh_token":"rotated-refresh-token","expires_in":300}"#,
         );
         let store = Arc::new(MemoryStore::default());
         seed_active_session(
