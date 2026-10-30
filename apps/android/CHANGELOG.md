@@ -4,6 +4,7 @@
 
 ### Bug fixes
 
+- Finish each encrypted offline-plan database batch before background work can switch threads, preventing intermittent database locks while keeping a folder offline.
 - Fix Authelia sign-ins that succeeded but then received HTTP 401 for files by sending canonical Bearer headers, including for previously saved accounts.
 - Preserve saved credentials after unexplained token-endpoint 401 responses, and reject malformed token responses before they replace a usable grant.
 

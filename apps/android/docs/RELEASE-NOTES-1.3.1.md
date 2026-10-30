@@ -2,6 +2,7 @@
 
 ### Bug fixes
 
+- Fix intermittent database-lock errors when preparing an encrypted folder or Space for offline use. Preparation still writes in bounded batches and checks the complete plan before accepting it.
 - Fix sign-in with Authelia where login succeeded but Personal files, Spaces or shared files then failed to load. This also fixes affected accounts already saved on the phone.
 - Stop unexplained login-server or proxy errors from unnecessarily clearing saved sign-in credentials. Raiun now distinguishes these failures from a provider explicitly rejecting the saved grant.
 

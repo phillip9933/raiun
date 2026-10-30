@@ -17,10 +17,115 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 /** Actual Android private SQLite, strict UTF8 and JCA seals; no server or plaintext file operations. */
 @RunWith(AndroidJUnit4::class)
 class VaultOfflineGroupPlanAndroidTest {
+    @Test fun nativePreparationCanAppendFlushSealAndVerifyAcrossBoundedThreadHops() =
+        fixture { f ->
+            assertWriterTransactionFree(f)
+            val context = f.context
+            val preparation = callOn("native-plan-begin") { f.store.begin(context) }
+
+            try {
+                callOn("native-plan-append-root") {
+                    preparation.appendDirectory(f.source(context.selectedEncryptedRoot, "vault", true))
+                }
+                callOn("native-plan-append-before-explicit-flush") {
+                    for (number in 1..126) {
+                        preparation.appendDirectory(
+                            f.source(
+                                "${context.selectedEncryptedRoot}/${f.raw("child-$number")}",
+                                "dir-$number",
+                                true,
+                            ),
+                        )
+                    }
+                }
+                callOn("native-plan-explicit-flush") { preparation.flush() }
+                callOn("native-plan-append-through-automatic-batch-flush") {
+                    for (number in 127..254) {
+                        preparation.appendDirectory(
+                            f.source(
+                                "${context.selectedEncryptedRoot}/${f.raw("child-$number")}",
+                                "dir-$number",
+                                true,
+                            ),
+                        )
+                    }
+                }
+                callOn("native-plan-explicit-flush-after-automatic-batch") { preparation.flush() }
+                callOn("native-plan-append-final-pending-record") {
+                    preparation.appendDirectory(
+                        f.source(
+                            "${context.selectedEncryptedRoot}/${f.raw("child-255")}",
+                            "dir-255",
+                            true,
+                        ),
+                    )
+                }
+
+                val seal = callOn("native-plan-seal-and-scan") { preparation.seal(f.material) }
+                assertEquals(256L, seal.memberCount)
+                assertEquals(0L, seal.fileCount)
+                assertEquals(0L, seal.ciphertextBytes)
+                assertTrue(callOn("native-plan-finish-prepared") { preparation.finishPrepared { true } })
+
+                callOn("native-plan-open-reader") {
+                    f.store.open(context.owner, context.groupId).use { opaque ->
+                        val verified = callOn("native-plan-verify") { opaque.verify(f.material, context) }
+                        try {
+                            val visited =
+                                callOn("native-plan-visit-verified") {
+                                    var count = 0L
+                                    verified.visitVerified { count++ }
+                                    count
+                                }
+                            assertEquals(256L, visited)
+                        } finally {
+                            callOn("native-plan-close-verified") { verified.close() }
+                        }
+                    }
+                }
+            } finally {
+                callOn("native-plan-close-preparation") { preparation.close() }
+            }
+        }
+
+    @Test fun nativeAbortClosesFlushedPlanAndRemovesItAcrossBoundedThreadHops() =
+        fixture { f ->
+            assertWriterTransactionFree(f)
+            val context = f.context
+            val preparation = callOn("native-abort-begin") { f.store.begin(context) }
+            val directory = f.directory(context)
+
+            try {
+                callOn("native-abort-append-root") {
+                    preparation.appendDirectory(f.source(context.selectedEncryptedRoot, "vault", true))
+                }
+                callOn("native-abort-append-child") {
+                    preparation.appendDirectory(
+                        f.source(
+                            "${context.selectedEncryptedRoot}/${f.raw("abort-child")}",
+                            "abort-child",
+                            true,
+                        ),
+                    )
+                }
+                callOn("native-abort-flush") { preparation.flush() }
+                callOn("native-abort-close") { preparation.close() }
+
+                assertFalse(f.store.hasActivePreparation(context.owner, context.groupId))
+                assertFalse(directory.exists())
+            } finally {
+                callOn("native-abort-cleanup") { preparation.close() }
+            }
+        }
+
     @Test fun nativePlanPagesCompleteMembershipAndBindsOriginalPrivateChildJob() =
         fixture { f ->
             val context = f.context
@@ -131,6 +236,53 @@ class VaultOfflineGroupPlanAndroidTest {
             assertTrue(f.directory(replacement).exists())
             f.store.open(replacement.owner, replacement.groupId).use { it.verify(f.material, replacement).close() }
         }
+
+    private fun assertWriterTransactionFree(f: Fixture) {
+        val records = VaultOfflineGroupPlanDatabase(File(f.root, "writer-boundary-${UUID.randomUUID()}.db"))
+        callOn("native-plan-database-owner") {
+            var database: SQLiteDatabase? = null
+            try {
+                val connection = records.create()
+                database = connection
+                assertFalse(
+                    "The plan database must not return with a transaction owned by its creator thread.",
+                    connection.inTransaction(),
+                )
+            } finally {
+                database?.let { connection ->
+                    try {
+                        if (connection.inTransaction()) connection.endTransaction()
+                    } finally {
+                        if (connection.isOpen) connection.close()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun <T> callOn(
+        name: String,
+        action: () -> T,
+    ): T {
+        val executor =
+            Executors.newSingleThreadExecutor { task ->
+                Thread(task, name).apply { isDaemon = true }
+            }
+        val future = executor.submit<T> { action() }
+        try {
+            return try {
+                future.get(8, TimeUnit.SECONDS)
+            } catch (failure: ExecutionException) {
+                throw failure.cause ?: failure
+            } catch (_: TimeoutException) {
+                future.cancel(true)
+                throw AssertionError("Operation on $name exceeded the bounded wait.")
+            }
+        } finally {
+            executor.shutdownNow()
+            executor.awaitTermination(1, TimeUnit.SECONDS)
+        }
+    }
 
     private fun fixture(block: (Fixture) -> Unit) {
         val context = InstrumentationRegistry.getInstrumentation().targetContext

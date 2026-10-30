@@ -4,7 +4,7 @@ Android and desktop have independent versions and release pages.
 
 ## Android 1.3.1 — 2026-10-30
 
-Fix Authelia sign-ins that completed but received HTTP 401 for file requests, including accounts already saved on the phone. Preserve saved credentials after unexplained token-endpoint 401 responses and improve validation of OAuth token metadata, issuers and advertised sign-in capabilities. See the [Android release notes](apps/android/docs/RELEASE-NOTES-1.3.1.md).
+Fix Authelia sign-ins that completed but received HTTP 401 for file requests, including accounts already saved on the phone. Preserve saved credentials after unexplained token-endpoint 401 responses, improve validation of login metadata and fix intermittent database locks while preparing encrypted folders for offline use. See the [Android release notes](apps/android/docs/RELEASE-NOTES-1.3.1.md).
 
 ## Android 1.3.0 — 2026-10-30
 
