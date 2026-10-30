@@ -86,10 +86,6 @@ pub(super) fn history_summary_existing(
     root.verify()?;
     let names = root.entries(budget.remaining_entries())?;
     budget.entries(names.len())?;
-    if names.is_empty() {
-        root.verify()?;
-        return Ok(NamespaceHistorySummary::default());
-    }
     if !names.iter().any(|name| name == V2_QUOTA_LOCK) {
         return Err(StoreError::IncompleteEvidence);
     }

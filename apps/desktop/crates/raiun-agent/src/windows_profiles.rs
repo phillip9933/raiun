@@ -4,6 +4,38 @@ use super::windows_profile_registry::{Registry, RootReservation, SourceKind, Sou
 use super::*;
 use std::collections::BTreeMap;
 
+#[cfg(all(test, debug_assertions))]
+#[path = "windows_headless_broker_test.rs"]
+mod windows_headless_broker_test;
+
+#[cfg(all(test, debug_assertions))]
+#[path = "windows_headless_mount_test.rs"]
+mod windows_headless_mount_test;
+
+#[cfg(all(test, debug_assertions))]
+#[path = "windows_headless_cli_test.rs"]
+mod windows_headless_cli_test;
+
+#[cfg(all(test, debug_assertions))]
+#[path = "windows_headless_write_test.rs"]
+mod windows_headless_write_test;
+
+#[cfg(all(test, debug_assertions))]
+#[path = "windows_headless_edits_native_test.rs"]
+mod windows_headless_edits_native_test;
+
+#[cfg(all(test, debug_assertions))]
+#[path = "windows_headless_busy_test.rs"]
+mod windows_headless_busy_test;
+
+#[cfg(all(test, debug_assertions))]
+#[path = "windows_headless_streamed_test.rs"]
+pub(super) mod windows_headless_streamed_test;
+
+#[cfg(test)]
+#[path = "windows_headless_directory_test.rs"]
+pub(super) mod windows_headless_directory_test;
+
 struct BrokerState {
     registry: Registry,
     runtimes: BTreeMap<String, Arc<WindowsAgent>>,
@@ -272,6 +304,13 @@ impl WindowsProfiles {
             .collect::<Vec<_>>();
         for runtime in runtimes {
             runtime.maybe_start_refresh()?;
+            if let Some(request) = runtime.headless_configured_mount_request()? {
+                if let Err(error) = self.handle(&request) {
+                    if let Ok(mut state) = runtime.state.lock() {
+                        state.error = Some(error);
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -298,6 +337,7 @@ impl WindowsProfiles {
         &self,
         request: windows_vault_requests::OwnedControlRequest,
     ) -> Result<(Value, bool), String> {
+        runtime_mode()?.validate_request(request.value())?;
         let session_action = request
             .value()
             .get("action")
@@ -451,6 +491,7 @@ impl WindowsProfiles {
     }
 
     pub(super) fn handle(&self, request: &Value) -> Result<(Value, bool), String> {
+        runtime_mode()?.validate_request(request)?;
         reject_control_secret_request(request)?;
         let action = request
             .get("action")
@@ -465,18 +506,17 @@ impl WindowsProfiles {
                 .selected()
                 .is_none();
             if no_active_account {
-                return Ok((
-                    json!({
-                        "connected":false,
-                        "offline":false,
-                        "mounted":false,
-                        "account_switch_supported":true,
-                        "accounts_empty":true,
-                        "agent_version":env!("CARGO_PKG_VERSION"),
-                        "session_cleanup_uncertain":false
-                    }),
-                    false,
-                ));
+                let mut status = json!({
+                    "connected":false,
+                    "offline":false,
+                    "mounted":false,
+                    "account_switch_supported":true,
+                    "accounts_empty":true,
+                    "agent_version":env!("CARGO_PKG_VERSION"),
+                    "session_cleanup_uncertain":false
+                });
+                windows_headless::annotate_status(&mut status, runtime_mode()?);
+                return Ok((status, false));
             }
         }
         match action {
@@ -527,7 +567,7 @@ impl WindowsProfiles {
                 }
                 Ok((
                     json!({
-                        "account_removal_supported": true,
+                        "account_removal_supported": !mount_only(),
                         "selected": selected,
                         "items": items,
                         "removed_items": removed_items
@@ -902,12 +942,15 @@ impl WindowsProfiles {
                 state.runtimes.insert(id.clone(), runtime);
                 Ok((json!({"id":id}), false))
             }
-            "configure" | "configure_root" => {
+            "configure" | "configure_root" | "mount" if action != "mount" || mount_only() => {
                 let _gate = self
                     .mutation_gate
                     .lock()
                     .map_err(|_| "Account changes are unavailable")?;
                 let (id, runtime) = self.resolve(request)?;
+                if action == "mount" && request.get("cloud_root").is_none() {
+                    return runtime.handle_request(request);
+                }
                 let path = request
                     .get("cloud_root")
                     .and_then(Value::as_str)

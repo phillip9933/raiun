@@ -1,0 +1,22 @@
+LIBRARY CldApi.dll
+EXPORTS
+    CfGetPlatformInfo
+    CfRegisterSyncRoot
+    CfUnregisterSyncRoot
+    CfGetSyncRootInfoByPath
+    CfConnectSyncRoot
+    CfDisconnectSyncRoot
+    CfGetPlaceholderInfo
+    CfHydratePlaceholder
+    CfOpenFileWithOplock
+    CfReferenceProtectedHandle
+    CfGetWin32HandleFromProtectedHandle
+    CfReleaseProtectedHandle
+    CfCloseHandle
+    CfSetInSyncState
+    CfUpdatePlaceholder
+    CfCreatePlaceholders
+    CfConvertToPlaceholder
+    CfExecute
+    CfGetPlaceholderStateFromAttributeTag
+    CfGetPlaceholderRangeInfo

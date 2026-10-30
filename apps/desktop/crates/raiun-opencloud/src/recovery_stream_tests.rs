@@ -124,6 +124,12 @@ enum Fault {
     ReadEtag,
     ReadLength,
     LateRole,
+    Create,
+    CreateCollision,
+    Create204,
+    CreateLost,
+    CreateLateRoot,
+    CreateDigest,
 }
 struct Fixture {
     url: String,
@@ -154,6 +160,21 @@ impl Fixture {
         let uploaded = Arc::new(AtomicU64::new(0));
         let received = uploaded.clone();
         let worker = thread::spawn(move || {
+            let creating = matches!(
+                fault,
+                Fault::Create
+                    | Fault::CreateCollision
+                    | Fault::Create204
+                    | Fault::CreateLost
+                    | Fault::CreateLateRoot
+                    | Fault::CreateDigest
+            );
+            let dav = if creating {
+                "/dav/spaces/drive-1/"
+            } else {
+                "/dav/personal/"
+            };
+            let root_id = if creating { "drive-1!root" } else { "root" };
             while !stop.load(Ordering::Acquire) {
                 let (mut socket, _) = match listener.accept() {
                     Ok(v) => v,
@@ -163,13 +184,24 @@ impl Fixture {
                     }
                     Err(e) => panic!("fixture accept: {e}"),
                 };
+                // Windows can inherit the listener's nonblocking mode. This
+                // fixture performs blocking I/O with bounded socket waits.
+                socket.set_nonblocking(false).unwrap();
                 socket
                     .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(5)))
                     .unwrap();
                 let mut header = Vec::new();
                 let mut byte = [0];
                 while !header.ends_with(b"\r\n\r\n") {
-                    if socket.read_exact(&mut byte).is_err() {
+                    if let Err(error) = socket.read_exact(&mut byte) {
+                        eprintln!(
+                            "recovery fixture header read failed: kind={:?} native={:?}",
+                            error.kind(),
+                            error.raw_os_error()
+                        );
                         break;
                     }
                     header.push(byte[0]);
@@ -203,7 +235,23 @@ impl Fixture {
                 }
                 if is_put {
                     put_count.fetch_add(1, Ordering::Relaxed);
-                    assert!(text.to_lowercase().contains("if-match: \"v1\""));
+                    if matches!(
+                        fault,
+                        Fault::Create
+                            | Fault::CreateCollision
+                            | Fault::Create204
+                            | Fault::CreateLost
+                            | Fault::CreateLateRoot
+                            | Fault::CreateDigest
+                    ) {
+                        let lower = text.to_lowercase();
+                        assert!(lower.contains("if-none-match: *"));
+                        assert!(!lower.contains("if-match:"));
+                        assert!(lower.contains("if: <"));
+                        assert!(lower.contains("([\"root-tag\"])"));
+                    } else {
+                        assert!(text.to_lowercase().contains("if-match: \"v1\""));
+                    }
                     assert_eq!(length, size);
                 }
                 let mut left = length;
@@ -224,7 +272,7 @@ impl Fixture {
                 }
                 if is_put {
                     received.store(length - left, Ordering::Release);
-                    if left != 0 || matches!(fault, Fault::ResponseLost) {
+                    if left != 0 || matches!(fault, Fault::ResponseLost | Fault::CreateLost) {
                         continue;
                     }
                     assert_eq!(&hash.finalize()[..], &digest(size));
@@ -233,12 +281,26 @@ impl Fixture {
                     (
                         "200 OK",
                         format!(
-                            r#"{{"value":[{{"id":"drive-1","name":"Personal","driveType":"personal","root":{{"id":"root","webDavUrl":"http://{address}/dav/personal/"}}}}]}}"#
+                            r#"{{"value":[{{"id":"drive-1","name":"Personal","driveType":"personal","root":{{"id":"{root_id}","webDavUrl":"http://{address}{dav}"}}}}]}}"#
                         ),
                         String::new(),
                     )
                 } else if is_put {
-                    ("204 No Content", String::new(), String::new())
+                    (
+                        if matches!(
+                            fault,
+                            Fault::Create
+                                | Fault::CreateLost
+                                | Fault::CreateLateRoot
+                                | Fault::CreateDigest
+                        ) {
+                            "201 Created"
+                        } else {
+                            "204 No Content"
+                        },
+                        String::new(),
+                        String::new(),
+                    )
                 } else if is_get {
                     get_count.fetch_add(1, Ordering::Relaxed);
                     assert!(text.to_lowercase().contains("if-match: \"v2\""));
@@ -268,7 +330,7 @@ impl Fixture {
                     } else {
                         size
                     };
-                    let fill = if matches!(fault, Fault::Digest) {
+                    let fill = if matches!(fault, Fault::Digest | Fault::CreateDigest) {
                         b'y'
                     } else {
                         b'x'
@@ -284,16 +346,34 @@ impl Fixture {
                     continue;
                 } else {
                     assert!(text.starts_with("PROPFIND /dav/"), "{text}");
-                    let root = text.starts_with("PROPFIND /dav/personal/ HTTP");
+                    let root = text.starts_with(&format!("PROPFIND {dav} HTTP"));
                     let changed = put_count.load(Ordering::Relaxed) > 0;
+                    if !root
+                        && !changed
+                        && matches!(
+                            fault,
+                            Fault::Create
+                                | Fault::Create204
+                                | Fault::CreateLost
+                                | Fault::CreateLateRoot
+                                | Fault::CreateDigest
+                        )
+                    {
+                        let _ = write!(
+                            socket,
+                            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        continue;
+                    }
+
                     let late = get_count.load(Ordering::Relaxed) > 0;
                     let id = if root {
                         if matches!(fault, Fault::Root)
-                            || (matches!(fault, Fault::LateRoot) && late)
+                            || (matches!(fault, Fault::LateRoot | Fault::CreateLateRoot) && late)
                         {
                             "wrong-root"
                         } else {
-                            "root"
+                            root_id
                         }
                     } else if matches!(fault, Fault::Resource) {
                         "wrong-file"
@@ -321,7 +401,7 @@ impl Fixture {
                     (
                         "207 Multi-Status",
                         format!(
-                            r#"<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response><d:href>/dav/personal/{path}</d:href><d:propstat><d:prop><d:resourcetype>{}</d:resourcetype><d:getcontentlength>{}</d:getcontentlength><d:getetag>"{etag}"</d:getetag><oc:fileid>{id}</oc:fileid><oc:permissions>{permissions}</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#,
+                            r#"<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response><d:href>{dav}{path}</d:href><d:propstat><d:prop><d:resourcetype>{}</d:resourcetype><d:getcontentlength>{}</d:getcontentlength><d:getetag>"{etag}"</d:getetag><oc:fileid>{id}</oc:fileid><oc:permissions>{permissions}</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#,
                             if root { "<d:collection/>" } else { "" },
                             if root {
                                 0
@@ -976,4 +1056,256 @@ fn original_deadline_expiring_during_join_retains_source_until_actual_shutdown()
     assert_eq!(fixture.gets.load(Ordering::Acquire), 1);
     assert!(fixture.pin_observations.load(Ordering::Acquire) > 1);
     assert_eq!(dropped.load(Ordering::Acquire), 1);
+}
+
+impl Fixture {
+    fn create(
+        &self,
+        actual: u64,
+        expected_digest: [u8; 32],
+        dropped: Arc<AtomicU64>,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<RecoveryCreateReadback, CloudError> {
+        let client =
+            OpenCloudClient::new_with_proxy(&self.url, "synthetic".into(), &ProxyConfig::Direct)
+                .unwrap();
+        client.recovery_create_blocking_reader_cancellable_with_context(
+            "drive-1",
+            "/",
+            "drive-1!root",
+            "file.bin",
+            BlockingGenerated {
+                remaining: actual,
+                dropped,
+                max_read: Arc::new(AtomicU64::new(0)),
+                panic_on_drop: false,
+            },
+            self.size,
+            expected_digest,
+            RangeReadContext {
+                deadline: Instant::now() + Duration::from_secs(10),
+                token_generation: client.token_generation(),
+            },
+            cancelled,
+        )
+    }
+}
+#[test]
+fn create_reader_requires_201_and_independent_full_readback_including_zero_and_large() {
+    for size in [0, 1, 17 * 1024 * 1024 + 7] {
+        let dropped = Arc::new(AtomicU64::new(0));
+        let fixture = Fixture::with_pin_observer(size, Fault::Create, Some(dropped.clone()));
+        let proof = fixture
+            .create(size, digest(size), dropped.clone(), Arc::new(|| false))
+            .unwrap();
+        assert_eq!(proof.observed.bytes, size);
+        assert_eq!(proof.observed.sha256, digest(size));
+        assert_eq!(proof.observed.entry.id, "file");
+        assert_eq!(fixture.puts.load(Ordering::Acquire), 1);
+        assert_eq!(fixture.gets.load(Ordering::Acquire), 1);
+        assert!(fixture.pin_observations.load(Ordering::Acquire) >= 3);
+        assert_eq!(dropped.load(Ordering::Acquire), 1);
+    }
+}
+#[test]
+fn create_reader_collision_204_loss_bad_readback_and_late_root_never_return_proof() {
+    for fault in [
+        Fault::CreateCollision,
+        Fault::Create204,
+        Fault::CreateLost,
+        Fault::CreateLateRoot,
+        Fault::CreateDigest,
+    ] {
+        let dropped = Arc::new(AtomicU64::new(0));
+        let fixture = Fixture::with_pin_observer(3, fault, Some(dropped.clone()));
+        assert!(
+            fixture
+                .create(3, digest(3), dropped.clone(), Arc::new(|| false))
+                .is_err()
+        );
+        assert_eq!(
+            fixture.puts.load(Ordering::Acquire),
+            if matches!(fault, Fault::CreateCollision) {
+                0
+            } else {
+                1
+            }
+        );
+        assert_eq!(
+            fixture.gets.load(Ordering::Acquire),
+            if matches!(fault, Fault::CreateLateRoot | Fault::CreateDigest) {
+                1
+            } else {
+                0
+            }
+        );
+        assert_eq!(dropped.load(Ordering::Acquire), 1);
+    }
+}
+#[test]
+fn create_source_short_extra_digest_and_precancel_fail_before_put_and_join() {
+    for (actual, hash, cancelled) in [
+        (0, digest(1), false),
+        (2, digest(1), false),
+        (1, [0; 32], false),
+        (1, digest(1), true),
+    ] {
+        let dropped = Arc::new(AtomicU64::new(0));
+        let fixture = Fixture::new(1, Fault::Create);
+        assert!(
+            fixture
+                .create(actual, hash, dropped.clone(), Arc::new(move || cancelled))
+                .is_err()
+        );
+        assert_eq!(fixture.puts.load(Ordering::Acquire), 0);
+        assert_eq!(fixture.gets.load(Ordering::Acquire), 0);
+        assert_eq!(dropped.load(Ordering::Acquire), 1);
+    }
+}
+
+#[test]
+fn create_active_put_and_get_cancel_keep_source_until_join() {
+    use crate::transfer_budget::TransferLimits;
+    use std::num::NonZeroU64;
+    for cancel_get in [false, true] {
+        let size = 1024 * 1024 + 1;
+        let dropped = Arc::new(AtomicU64::new(0));
+        let fixture = Fixture::with_pin_observer(size, Fault::Create, Some(dropped.clone()));
+        let client =
+            OpenCloudClient::new_with_proxy(&fixture.url, "synthetic".into(), &ProxyConfig::Direct)
+                .unwrap();
+        client.transfer_budget.set_limits(TransferLimits {
+            upload_bytes_per_second: (!cancel_get).then(|| NonZeroU64::new(1).unwrap()),
+            download_bytes_per_second: cancel_get.then(|| NonZeroU64::new(1).unwrap()),
+        });
+        let stopped = Arc::new(AtomicBool::new(false));
+        let observed = if cancel_get {
+            fixture.gets.clone()
+        } else {
+            fixture.puts.clone()
+        };
+        let stop = stopped.clone();
+        let controller = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while observed.load(Ordering::Acquire) == 0 {
+                assert!(Instant::now() < deadline);
+                thread::sleep(Duration::from_millis(2));
+            }
+            stop.store(true, Ordering::Release);
+        });
+        let check = stopped.clone();
+        let started = Instant::now();
+        let result = client.recovery_create_blocking_reader_cancellable_with_context(
+            "drive-1",
+            "/",
+            "drive-1!root",
+            "file.bin",
+            BlockingGenerated {
+                remaining: size,
+                dropped: dropped.clone(),
+                max_read: Arc::new(AtomicU64::new(0)),
+                panic_on_drop: false,
+            },
+            size,
+            digest(size),
+            RangeReadContext {
+                deadline: started + Duration::from_secs(120),
+                token_generation: client.token_generation(),
+            },
+            Arc::new(move || check.load(Ordering::Acquire)),
+        );
+        controller.join().unwrap();
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(dropped.load(Ordering::Acquire), 1);
+        assert_eq!(fixture.puts.load(Ordering::Acquire), 1);
+        assert_eq!(fixture.gets.load(Ordering::Acquire), u64::from(cancel_get));
+    }
+}
+
+#[test]
+fn create_join_rechecks_original_generation_and_cancellation_epoch() {
+    for generation in [true, false] {
+        let fixture = Fixture::new(1, Fault::Create);
+        let client =
+            OpenCloudClient::new_with_proxy(&fixture.url, "synthetic".into(), &ProxyConfig::Direct)
+                .unwrap();
+        let context = RangeReadContext {
+            deadline: Instant::now() + Duration::from_secs(10),
+            token_generation: client.token_generation(),
+        };
+        let result = client.recovery_create_blocking_reader_cancellable_with_context(
+            "drive-1",
+            "/",
+            "drive-1!root",
+            "file.bin",
+            RevokeOnDrop {
+                content: io::Cursor::new(b"x"),
+                generation: generation.then(|| client.token_generation.clone()),
+                cancellation: (!generation).then(|| client.transfer_budget.clone()),
+            },
+            1,
+            digest(1),
+            context,
+            Arc::new(|| false),
+        );
+        assert!(result.is_err());
+        assert_eq!(fixture.gets.load(Ordering::Acquire), 1);
+        assert!(!client.transfer_budget.is_paused());
+    }
+}
+
+#[test]
+fn create_stale_context_and_destructor_failure_join_without_proof() {
+    let fixture = Fixture::new(1, Fault::Create);
+    let client =
+        OpenCloudClient::new_with_proxy(&fixture.url, "synthetic".into(), &ProxyConfig::Direct)
+            .unwrap();
+    for invalid_context in [true, false] {
+        let dropped = Arc::new(AtomicU64::new(0));
+        let reads = Arc::new(AtomicU64::new(0));
+        let result = client.recovery_create_blocking_reader_cancellable_with_context(
+            "drive-1",
+            "/",
+            "drive-1!root",
+            "file.bin",
+            BlockingGenerated {
+                remaining: 1,
+                dropped: dropped.clone(),
+                max_read: reads.clone(),
+                panic_on_drop: !invalid_context,
+            },
+            1,
+            digest(1),
+            RangeReadContext {
+                deadline: Instant::now() + Duration::from_secs(10),
+                token_generation: client.token_generation() + u64::from(invalid_context),
+            },
+            Arc::new(|| false),
+        );
+        assert!(result.is_err());
+        assert_eq!(dropped.load(Ordering::Acquire), 1);
+        if invalid_context {
+            assert_eq!(reads.load(Ordering::Acquire), 0);
+            assert_eq!(fixture.puts.load(Ordering::Acquire), 0);
+        } else {
+            assert_eq!(fixture.puts.load(Ordering::Acquire), 1);
+            assert_eq!(fixture.gets.load(Ordering::Acquire), 1);
+        }
+    }
+}
+
+#[test]
+fn create_zero_source_must_prove_real_eof_and_empty_digest_before_dispatch() {
+    for (actual, expected) in [(1, digest(0)), (0, [0; 32])] {
+        let fixture = Fixture::new(0, Fault::Create);
+        let dropped = Arc::new(AtomicU64::new(0));
+        assert!(
+            fixture
+                .create(actual, expected, dropped.clone(), Arc::new(|| false))
+                .is_err()
+        );
+        assert_eq!(fixture.puts.load(Ordering::Acquire), 0);
+        assert_eq!(dropped.load(Ordering::Acquire), 1);
+    }
 }

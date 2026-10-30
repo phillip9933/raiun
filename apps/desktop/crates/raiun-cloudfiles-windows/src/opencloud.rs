@@ -19,6 +19,8 @@ pub(crate) use file_rename::VerifiedRenameSourceContent;
 #[cfg(any(windows, test))]
 pub use file_rename::{FileRenameSession, VerifiedFileRenamePublication};
 pub use initial_save::InitialEditSession;
+#[cfg(windows)]
+pub(crate) use namespace::CapturedDirectoryParent;
 #[cfg(any(windows, test))]
 pub use namespace::{DirectoryCreateSession, PlainFileCaptureParent, VerifiedDirectoryPublication};
 pub use verified_edit::VerifiedEditPublication;

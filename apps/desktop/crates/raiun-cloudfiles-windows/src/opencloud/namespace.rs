@@ -492,10 +492,7 @@ impl VerifiedDirectoryPublication<'_, '_> {
 #[cfg(any(windows, test))]
 pub struct PlainFileCaptureParent<'lease> {
     backend: &'lease OpenCloudPlaceholderBackend,
-    // Retained proof context; native plain-file capture is not composed into GUI.
-    #[cfg_attr(not(test), allow(dead_code))]
     captured: CapturedDirectoryParent,
-    #[cfg_attr(not(test), allow(dead_code))]
     components: Vec<String>,
     authorization: CapturedAuthorization,
     job: &'lease crate::StreamedRecoveryJob,
@@ -509,6 +506,22 @@ impl PlainFileCaptureParent<'_> {
             return Err(BackendError::Unavailable);
         }
         self.backend.ensure_active()
+    }
+    #[cfg(windows)]
+    pub(crate) fn backend(&self) -> &OpenCloudPlaceholderBackend {
+        self.backend
+    }
+    #[cfg(windows)]
+    pub(crate) fn captured(&self) -> &CapturedDirectoryParent {
+        &self.captured
+    }
+    #[cfg(windows)]
+    pub(crate) fn components(&self) -> &[String] {
+        &self.components
+    }
+    #[cfg(windows)]
+    pub(crate) fn authorization(&self) -> CapturedAuthorization {
+        self.authorization
     }
 }
 #[cfg(any(windows, test))]

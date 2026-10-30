@@ -4155,6 +4155,8 @@ mod tests {
         let server = "https://cloud.example.test".to_owned();
         let client = OpenCloudClient::new(&server, "synthetic-token".into()).unwrap();
         Runtime {
+            mode: super::super::RuntimeMode::Desktop,
+            headless_config: None,
             dir: dir.clone(),
             transfer_budget: Mutex::new(None),
             settings: Mutex::new(Settings {
@@ -4184,6 +4186,7 @@ mod tests {
                     server: server.clone(),
                     client_id: "test-client".into(),
                     access_token: "synthetic-token".into(),
+                    app_token_username: None,
                     refresh_token: None,
                     expires_at: u64::MAX,
                     token_endpoint: format!("{server}/token"),
@@ -5027,6 +5030,7 @@ mod tests {
                 server: server.origin.clone(),
                 client_id: "test-client".into(),
                 access_token: "synthetic-token".into(),
+                app_token_username: None,
                 refresh_token: None,
                 expires_at: u64::MAX,
                 token_endpoint: format!("{}/token", server.origin),
@@ -5115,6 +5119,7 @@ mod tests {
                 server: server.origin.clone(),
                 client_id: "test-client".into(),
                 access_token: "synthetic-token".into(),
+                app_token_username: None,
                 refresh_token: None,
                 expires_at: u64::MAX,
                 token_endpoint: format!("{}/token", server.origin),

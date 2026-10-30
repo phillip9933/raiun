@@ -118,10 +118,11 @@ fn absent_empty_and_lock_only_are_read_only_and_invalid_target_is_not_empty() {
         )
         .is_err()
     );
-    assert_eq!(
-        summary(&base, policy()).unwrap(),
-        NamespaceHistorySummary::default()
-    );
+    assert!(base.root.entries(10).unwrap().is_empty());
+    assert!(matches!(
+        summary(&base, policy()),
+        Err(StoreError::IncompleteEvidence)
+    ));
     assert!(base.root.entries(10).unwrap().is_empty());
     drop(base.acquire_lock().unwrap());
     assert_eq!(

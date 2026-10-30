@@ -3249,3 +3249,48 @@ caller is present. The copied headless fixture was held before compilation or
 execution and adapted to fresh explicit GUI-private state; it must not introduce
 headless context or current-user routing into the GUI. Actual native GUI observer
 and mounted rename acceptance remain pending.
+
+The corrected R49 fresh-parent bridge is composed as an explicit API, preserving
+source revisions and joining actual native parent/destination identity before
+reusing the existing one-send producer. It remains dormant. Pending content and
+callback-capture exclusion is a separate shared prerequisite before automatic
+GUI/CLI dispatch; no queue-empty or cached-unknown shortcut is permitted. Original
+Windows failure epochs and targeted corrected-parent controls retain their exact
+scope and do not qualify connected native entry or the next package.
+
+
+### One Desktop GUI/CLI source checkout, 31 October 2026
+
+The owner consolidated GUI and headless CLI development into the active Desktop
+checkout under `apps/desktop`. The previous headless checkout and its source,
+packages and failed/passing evidence remain frozen references. Desktop source
+stays at 0.7.5; this composition does not publish a new app version or release.
+GUI saved-session, legacy root/DPAPI compatibility, cache quota, retention,
+sharing, vault and save/Retry behavior remain the GUI baseline. Headless mode
+retains its distinct state/profile routes, transport policies and mount-only
+restrictions; folder sync, media jobs and vault operations remain disabled there.
+
+The shared SDK now includes explicit app-token authentication alongside default
+Bearer clients, the existing neutral origin/TLS policy and the GUI's sharing and
+vault metadata APIs. Streaming create helpers and their tests are composed as
+explicit APIs only: OpenCloud 9's public create-only atomicity is not qualified,
+and these helpers do not enable automatic creation. Headless packages, startup
+helpers, setup/test guides and a separately scoped license inventory now live in
+the same source tree. See [headless setup](HEADLESS.md), [Windows setup](HEADLESS-WINDOWS.md),
+[startup](HEADLESS-STARTUP.md) and [authentication](AUTHENTICATION.md).
+
+Unconfigured headless sign-in remains memory-only. An explicitly selected config
+uses `remember_login=true` and `auto_mount=true` defaults unless disabled. Linux
+remembered credentials are private plaintext files, while Windows uses isolated
+current-user DPAPI; GUI credential/default startup policy is unchanged. Explicit
+startup registration has separate platform effects described in the setup and
+privacy guides. Source composition does not install or start either mode.
+
+Historical Linux VM, Windows Cloud Files, DPAPI and SDK controls retain their
+exact original source/package scopes. They are not combined-candidate native
+acceptance, and original failed epochs remain failed. Final combined source and
+notice validation follow complete manifest/source integration. Shared pending-save
+and callback-capture exclusion remains a prerequisite before the dormant rename
+bridge can gain automatic GUI/CLI callers; no separate GUI shortcut or runtime
+writer activation is introduced here. Full Windows CRUD, replacement saves,
+large files, connected lifecycle and before-login startup remain separate gates.

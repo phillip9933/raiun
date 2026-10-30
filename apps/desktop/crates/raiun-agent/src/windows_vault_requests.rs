@@ -27,13 +27,20 @@ impl OwnedControlRequest {
 }
 impl Drop for OwnedControlRequest {
     fn drop(&mut self) {
-        if let Some(Value::String(password)) = self.value.get_mut("password") {
-            zeroize::Zeroize::zeroize(password);
+        for field in ["password", "app_token"] {
+            if let Some(Value::String(secret)) = self.value.get_mut(field) {
+                zeroize::Zeroize::zeroize(secret);
+            }
         }
         #[cfg(test)]
         if let Some(observed) = &self.wipe_observed {
             observed.store(
-                self.value.get("password").and_then(Value::as_str) == Some(""),
+                ["password", "app_token"].iter().all(|field| {
+                    self.value
+                        .get(*field)
+                        .and_then(Value::as_str)
+                        .is_none_or(str::is_empty)
+                }),
                 std::sync::atomic::Ordering::Release,
             );
         }
@@ -96,6 +103,21 @@ pub fn decode(value: &Value) -> Result<VaultInspectRequest, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn rejected_request_owner_wipes_app_token_before_release() {
+        let observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let rejected: Result<(), String> = {
+            let mut request = OwnedControlRequest::new(json!({
+                "action":"auth_app_token", "app_token":"synthetic-app-token",
+                "required_mode":"desktop",
+            }));
+            request.wipe_observed = Some(observed.clone());
+            Err("Rejected before dispatch".into())
+        };
+        assert!(rejected.is_err());
+        assert!(observed.load(std::sync::atomic::Ordering::Acquire));
+    }
+
     #[test]
     fn rejected_request_owner_wipes_password_before_release() {
         let observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

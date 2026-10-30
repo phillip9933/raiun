@@ -2772,9 +2772,34 @@ mod tests {
         assert!(!replacement.exists());
     }
 
+    struct ReparseFixture(Option<tempfile::TempDir>);
+    impl ReparseFixture {
+        fn new(prefix: &str) -> Self {
+            let temp = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            Self(Some(temp))
+        }
+        fn path(&self) -> &std::path::Path {
+            self.0.as_ref().unwrap().path()
+        }
+    }
+    impl Drop for ReparseFixture {
+        fn drop(&mut self) {
+            if std::thread::panicking()
+                && let Some(temp) = self.0.take()
+            {
+                let _ = temp.keep();
+                eprintln!("journal_reparse_fixture=RETAINED_AFTER_FAILURE");
+            }
+        }
+    }
     #[test]
     fn recovery_rejects_a_reparse_record_instead_of_reading_its_target() {
-        let temp = private_tempdir();
+        let temp = ReparseFixture::new("raiun-journal-reparse-record-");
         let journal = EditJournal::open(temp.path(), scope(), TestProtector::new()).unwrap();
         let record = journal
             .append_edit(
@@ -2808,19 +2833,38 @@ mod tests {
                     if matches!(
                         error.kind(),
                         std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
-                    ) =>
+                    ) || error.raw_os_error() == Some(1314) =>
                 {
-                    println!("journal_reparse_record_test=SKIPPED_OS_LINK_CAPABILITY_UNAVAILABLE");
+                    println!(
+                        "journal_reparse_record_test=SKIPPED_OS_LINK_CAPABILITY_UNAVAILABLE kind={:?} native={:?}",
+                        error.kind(),
+                        error.raw_os_error()
+                    );
                     return;
                 }
-                Err(error) => panic!("create synthetic reparse record: {error}"),
+                Err(error) => panic!(
+                    "stage=create_file_link kind={:?} native={:?}",
+                    error.kind(),
+                    error.raw_os_error()
+                ),
             }
         }
         #[cfg(any(unix, windows))]
         println!("journal_reparse_record_test=CREATED");
 
-        let reopened = EditJournal::open(temp.path(), scope(), TestProtector::new()).unwrap();
-        assert_eq!(reopened.recover_all(), Err(JournalError::CorruptRecord));
+        let reopened = EditJournal::open(temp.path(), scope(), TestProtector::new())
+            .expect("stage=reopen_journal_after_file_link");
+        let recovery = reopened.recover_all();
+        println!(
+            "journal_reparse_record_test=recovery_error:{:?}",
+            recovery.as_ref().err()
+        );
+        let rejected = matches!(recovery, Err(JournalError::CorruptRecord));
+        println!("journal_reparse_record_test=recovery_rejected:{rejected}");
+        assert!(
+            rejected,
+            "stage=recover_record must refuse reparse evidence"
+        );
         assert_eq!(
             fs::read(&external_target).unwrap(),
             b"must never be opened through a reparse point"
@@ -2855,7 +2899,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn opening_a_reparse_private_state_directory_fails_closed() {
-        let temp = private_tempdir();
+        let temp = ReparseFixture::new("raiun-journal-reparse-directory-");
         let target = temp.path().join("ordinary-target");
         fs::create_dir(&target).unwrap();
         let link = temp.path().join("state-link");
@@ -2865,13 +2909,32 @@ mod tests {
                 if matches!(
                     error.kind(),
                     std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
-                ) =>
+                ) || error.raw_os_error() == Some(1314) =>
             {
+                println!(
+                    "journal_reparse_directory_test=SKIPPED_OS_LINK_CAPABILITY_UNAVAILABLE kind={:?} native={:?}",
+                    error.kind(),
+                    error.raw_os_error()
+                );
                 return;
             }
-            Err(error) => panic!("create synthetic reparse directory: {error}"),
+            Err(error) => panic!(
+                "stage=create_directory_link kind={:?} native={:?}",
+                error.kind(),
+                error.raw_os_error()
+            ),
         }
-        assert!(EditJournal::open(&link, scope(), TestProtector::new()).is_err());
+        let opened = EditJournal::open(&link, scope(), TestProtector::new());
+        println!(
+            "journal_reparse_directory_test=open_error:{:?}",
+            opened.as_ref().err()
+        );
+        let rejected = opened.is_err();
+        println!("journal_reparse_directory_test=directory_rejected:{rejected}");
+        assert!(
+            rejected,
+            "stage=open_linked_directory must refuse reparse state"
+        );
         assert!(fs::read_dir(&target).unwrap().next().is_none());
     }
 }

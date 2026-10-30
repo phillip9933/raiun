@@ -2,6 +2,30 @@
 
 This inventory accompanies the Linux x86_64 beta. Third-party copyrights and licenses remain with their respective holders. See [LICENSE](LICENSE) and [NOTICE](NOTICE) for Raiun first-party terms.
 
+## Headless CLI source notices
+
+The consolidated, unpublished GUI/CLI source also retains the separate
+[headless dependency inventory](legal/headless-dependency-inventory.json) and its
+complete license texts. That frozen inventory describes 231 external crate
+versions across the Linux and Windows headless dependency closures, including
+build/proc-macro dependencies and excluding dev-only edges. It is a source/notice
+inventory, not a linked-binary SBOM or a newly verified combined-package inventory.
+Its embedded lock hash identifies the earlier CLI snapshot; the consolidated
+workspace lock and both package inventories need final consistency validation
+before packaging. The earlier GUI inventory and full notice tree below remain
+preserved with their own scope.
+
+Hidden token input uses `rpassword 7.5.4` and `rtoolbox 0.0.6`, both declared
+Apache-2.0; see their retained [rpassword license](legal/rust/rpassword-7.5.4/LICENSE-APACHE)
+and [rtoolbox license](legal/rust/rtoolbox-0.0.6/LICENSE-APACHE). All version,
+repository, target membership and notice hashes are recorded in the inventory.
+The headless notice collector at `scripts/collect-headless-notices.py` works from
+existing cached archives, verifies their locked checksums and does not download
+missing license text. No collector or package build was executed by this
+reconciliation. System FUSE and Windows APIs remain platform prerequisites.
+Consolidating these source notices does not change Desktop's version or publish
+a release.
+
 ## Scope and retained texts
 
 The offline collector traverses the two locked Linux Cargo graphs from the shipped agent, CLI and Tauri shell, excluding dev-only edges and conservatively retaining build/proc-macro dependencies. It records 464 distinct crate versions and the two production UI packages. This is a source/notice inventory, not a claim that every listed crate is linked into every binary. Development npm build tools are outside the shipped UI runtime inventory.

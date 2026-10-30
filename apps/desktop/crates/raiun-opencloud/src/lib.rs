@@ -8,7 +8,7 @@ mod blocking_reader;
 #[cfg(test)]
 mod dav_text_tests;
 mod recovery_stream;
-pub use recovery_stream::RecoveryStreamReadback;
+pub use recovery_stream::{RecoveryCreateReadback, RecoveryStreamReadback};
 pub mod avatar;
 pub mod guest_permissions;
 pub mod sharing_inventory;
@@ -40,6 +40,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use percent_encoding::percent_decode_str;
 use quick_xml::{NsReader, events::Event, name::ResolveResult};
 use raiun_core::backend::{
@@ -286,6 +287,34 @@ pub fn validate_captured_server_origin(origin: &str) -> Result<(), CloudError> {
     validate_server(&url)
 }
 
+/// Authentication method is immutable for a client and all of its clones.
+#[derive(Clone)]
+enum Authentication {
+    Bearer,
+    AppToken { username: String },
+}
+
+/// Validate an app-token origin using the same TLS policy as cloud traffic.
+pub fn validate_app_token_server(server: &str) -> Result<(), CloudError> {
+    validate_captured_server_origin(server)
+}
+
+/// Validate Basic app credentials without reflecting either value in errors.
+pub fn validate_app_token_credentials(username: &str, token: &str) -> Result<(), CloudError> {
+    if username.trim().is_empty()
+        || username.len() > 512
+        || username.trim() != username
+        || username.contains(':')
+        || username.chars().any(char::is_control)
+        || token.trim().is_empty()
+        || token.len() > 65_536
+        || token.chars().any(char::is_control)
+    {
+        return Err(invalid("app-token username or token is empty or malformed"));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct OpenCloudClient {
     server: Url,
@@ -294,6 +323,7 @@ pub struct OpenCloudClient {
     async_http: reqwest::Client,
     body_idle_timeout: Duration,
     token: Arc<Mutex<String>>,
+    authentication: Authentication,
     token_generation: Arc<AtomicU64>,
     initiator_id: String,
     transfer_budget: TransferBudget,
@@ -412,6 +442,23 @@ impl OpenCloudClient {
         proxy: &ProxyConfig,
     ) -> Result<Self, CloudError> {
         Self::new_with_proxy_and_transfer_budget(server, bearer_token, proxy, TransferBudget::new())
+    }
+
+    /// Use OpenCloud auth-app's Basic username:app-token authentication.
+    /// The credential is scoped to the configured origin; redirects stay disabled.
+    pub fn new_with_app_token(
+        server: &str,
+        username: &str,
+        app_token: String,
+        proxy: &ProxyConfig,
+    ) -> Result<Self, CloudError> {
+        validate_app_token_server(server)?;
+        validate_app_token_credentials(username, &app_token)?;
+        let mut client = Self::new_with_proxy(server, app_token, proxy)?;
+        client.authentication = Authentication::AppToken {
+            username: username.to_owned(),
+        };
+        Ok(client)
     }
 
     /// Construct an authenticated account client with a caller-owned shared
@@ -545,6 +592,7 @@ impl OpenCloudClient {
             async_http,
             body_idle_timeout: async_body::BODY_IDLE_TIMEOUT,
             token: Arc::new(Mutex::new(bearer_token)),
+            authentication: Authentication::Bearer,
             token_generation: Arc::new(AtomicU64::new(1)),
             initiator_id: format!("raiun-{}", std::process::id()),
             transfer_budget,
@@ -576,6 +624,11 @@ impl OpenCloudClient {
 
     /// Replace the in-memory bearer token after an external auth layer refreshes it.
     pub fn set_bearer_token(&self, bearer_token: String) -> Result<(), CloudError> {
+        if !matches!(self.authentication, Authentication::Bearer) {
+            return Err(invalid(
+                "an app-token client cannot accept OAuth token updates",
+            ));
+        }
         if bearer_token.trim().is_empty() || bearer_token.chars().any(char::is_control) {
             return Err(invalid("bearer token is empty or malformed"));
         }
@@ -710,6 +763,24 @@ impl OpenCloudClient {
         Ok(Some(TokenGenerationLease { _token: token }))
     }
 
+    fn authorization(&self, token: &str) -> Result<(HeaderValue, String), CloudError> {
+        let (value, redactions) = match &self.authentication {
+            Authentication::Bearer => (format!("Bearer {token}"), token.to_owned()),
+            Authentication::AppToken { username } => {
+                let pair = Zeroizing::new(format!("{username}:{token}"));
+                let encoded = Zeroizing::new(STANDARD.encode(pair.as_bytes()));
+                (
+                    format!("Basic {}", encoded.as_str()),
+                    format!("{token}\n{}", encoded.as_str()),
+                )
+            }
+        };
+        let mut header = HeaderValue::from_str(&value)
+            .map_err(|_| invalid("authentication header is malformed"))?;
+        header.set_sensitive(true);
+        Ok((header, redactions))
+    }
+
     fn request(
         &self,
         method: Method,
@@ -743,11 +814,11 @@ impl OpenCloudClient {
                 "authenticated provider generation changed",
             ));
         }
-        let token = token_guard.clone();
+        let (authorization, token) = self.authorization(&token_guard)?;
         let mut request = self
             .http
             .request(method, url.clone())
-            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(AUTHORIZATION, authorization)
             .header("Initiator-ID", &self.initiator_id)
             .header("X-Requested-With", "XMLHttpRequest");
         if let Some(context) = context {
@@ -788,11 +859,11 @@ impl OpenCloudClient {
                 "authenticated provider generation changed",
             ));
         }
-        let token = token_guard.clone();
+        let (authorization, token) = self.authorization(&token_guard)?;
         let mut request = self
             .async_http
             .request(method, url.clone())
-            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .header(AUTHORIZATION, authorization)
             .header("Initiator-ID", &self.initiator_id)
             .header("X-Requested-With", "XMLHttpRequest");
         if let Some(context) = context {
@@ -2152,6 +2223,24 @@ impl OpenCloudClient {
         Ok(root)
     }
 
+    /// Verify the authenticated identity at Graph's fixed same-origin /me route.
+    pub fn current_user_id(&self) -> Result<String, CloudError> {
+        let url = self
+            .server
+            .join("graph/v1.0/me")
+            .map_err(|_| invalid("Graph identity endpoint is invalid"))?;
+        let payload: Value = serde_json::from_slice(&self.graph_get_with_context(&url, None)?)
+            .map_err(|_| invalid("Graph identity response is invalid"))?;
+        let id = payload
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| {
+                !id.trim().is_empty() && id.len() <= 16_384 && !id.chars().any(char::is_control)
+            })
+            .ok_or_else(|| invalid("Graph identity response has no usable user ID"))?;
+        Ok(id.to_owned())
+    }
+
     /// Discover the authenticated account's Spaces under one deadline and
     /// bearer generation. Provider namespace construction uses this to bind
     /// Personal and Spaces routes to a verified account identity.
@@ -3423,7 +3512,11 @@ fn safe_diagnostic_value(value: &str, max_len: usize, secret: Option<&str>) -> O
         || !value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte))
-        || secret.is_some_and(|secret| !secret.is_empty() && value.contains(secret))
+        || secret.is_some_and(|secrets| {
+            secrets
+                .lines()
+                .any(|secret| !secret.is_empty() && value.contains(secret))
+        })
     {
         return None;
     }
@@ -3505,6 +3598,162 @@ mod tests {
         sync::mpsc,
         thread,
     };
+
+    #[test]
+    fn app_token_basic_auth_covers_graph_dav_async_range_and_refuses_redirects() {
+        let dav = r#"<d:multistatus xmlns:d="DAV:"></d:multistatus>"#;
+        let (server, worker) = fixture(vec![
+            ("200 OK", r#"{"id":"synthetic-user"}"#.into()),
+            ("207 Multi-Status", dav.into()),
+            ("206 Partial Content", "part".into()),
+            (
+                "302 Found\r\nLocation: http://127.0.0.1:1/never",
+                String::new(),
+            ),
+        ]);
+        let client = OpenCloudClient::new_with_app_token(
+            &server,
+            "synthetic-user",
+            "synthetic-app-token".into(),
+            &ProxyConfig::Direct,
+        )
+        .unwrap();
+        let graph = client.server.join("graph/v1.0/me").unwrap();
+        assert_eq!(client.current_user_id().unwrap(), "synthetic-user");
+        let dav = client.server.join("dav/spaces/synthetic/").unwrap();
+        client.propfind(&dav, "0", "/", &mut |_| Ok(())).unwrap();
+        let context = RangeReadContext {
+            deadline: Instant::now() + Duration::from_secs(2),
+            token_generation: client.token_generation(),
+        };
+        let (request, secret) = client
+            .request_async_with_context(Method::GET, &dav, Some(context))
+            .unwrap();
+        let body = async_body::run_body_operation(
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            move |_| async move {
+                let response = checked_async(
+                    request
+                        .header(RANGE, "bytes=0-3")
+                        .send()
+                        .await
+                        .map_err(network)?,
+                    &[StatusCode::PARTIAL_CONTENT],
+                    &secret,
+                )?;
+                response.bytes().await.map_err(network)
+            },
+        )
+        .unwrap();
+        assert_eq!(&*body, b"part");
+        assert_eq!(
+            client
+                .graph_get_with_context(&graph, None)
+                .unwrap_err()
+                .kind,
+            ErrorKind::InvalidResponse
+        );
+        let foreign = Url::parse("https://different.example/dav/").unwrap();
+        assert!(client.request(Method::GET, &foreign).is_err());
+        assert!(client.request_async(Method::GET, &foreign).is_err());
+        let requests = worker.join().unwrap();
+        let expected = format!(
+            "authorization: Basic {}",
+            STANDARD.encode("synthetic-user:synthetic-app-token")
+        );
+        assert!(requests.iter().all(|request| request.contains(&expected)));
+        assert!(requests[0].starts_with("GET /graph/v1.0/me "));
+        assert!(requests[1].starts_with("PROPFIND /dav/"));
+        assert!(requests[2].contains("range: bytes=0-3"));
+        assert_eq!(requests.len(), 4);
+    }
+
+    #[test]
+    fn app_token_rejection_is_unauthorized_without_secret_diagnostics_or_refresh() {
+        let encoded = STANDARD.encode("synthetic-user:synthetic-token");
+        let (server, worker) = fixture(vec![
+            (
+                "401 Unauthorized",
+                r#"{"error":{"code":"synthetic-token"}}"#.into(),
+            ),
+            (
+                "401 Unauthorized",
+                format!(r#"{{"error":{{"code":"{encoded}"}}}}"#),
+            ),
+        ]);
+        let client = OpenCloudClient::new_with_app_token(
+            &server,
+            "synthetic-user",
+            "synthetic-token".into(),
+            &ProxyConfig::Direct,
+        )
+        .unwrap();
+        for _ in 0..2 {
+            let error = client.spaces().unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Unauthorized);
+            assert!(!error.to_string().contains("synthetic-token"));
+            assert!(!error.to_string().contains(&encoded));
+        }
+        let requests = worker.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.starts_with("GET /graph/v1.0/me/drives "))
+        );
+    }
+
+    #[test]
+    fn app_token_validation_rotation_and_redaction_are_method_bound() {
+        for (username, token) in [
+            ("", "token"),
+            ("u:other", "token"),
+            ("u\n", "token"),
+            ("u", "\n"),
+            ("u", "token\r\n"),
+        ] {
+            assert!(validate_app_token_credentials(username, token).is_err());
+        }
+        assert!(validate_app_token_credentials(&"u".repeat(513), "token").is_err());
+        assert!(validate_app_token_credentials("u", &"t".repeat(65_537)).is_err());
+        for server in [
+            "http://example.com",
+            "https://cloud.example/?secret=x",
+            "https://@cloud.example",
+            "https://cloud.example\n",
+        ] {
+            assert!(validate_app_token_server(server).is_err());
+        }
+        let client = OpenCloudClient::new_with_app_token(
+            "https://cloud.example",
+            "uuid-identity",
+            "synthetic-secret".into(),
+            &ProxyConfig::Direct,
+        )
+        .unwrap();
+        assert!(
+            client
+                .clone()
+                .set_bearer_token("replacement".into())
+                .is_err()
+        );
+        assert_eq!(client.token_generation(), 1);
+        let (header, redactions) = client.authorization("synthetic-secret").unwrap();
+        assert!(header.is_sensitive());
+        let encoded = STANDARD.encode("uuid-identity:synthetic-secret");
+        assert!(safe_diagnostic_value(&encoded, 128, Some(&redactions)).is_none());
+        assert!(safe_diagnostic_value("synthetic-secret", 128, Some(&redactions)).is_none());
+        let diagnostic = format!("{client:?}");
+        assert!(!diagnostic.contains("synthetic-secret"));
+        assert!(!diagnostic.contains(&encoded));
+        let bearer = OpenCloudClient::new("https://cloud.example", "bearer-v1".into()).unwrap();
+        bearer.set_bearer_token("bearer-v2".into()).unwrap();
+        assert_eq!(
+            bearer.authorization("bearer-v2").unwrap().0,
+            "Bearer bearer-v2"
+        );
+    }
 
     #[test]
     fn vault_metadata_deadline_preserves_shorter_outer_context_and_restores_it() {

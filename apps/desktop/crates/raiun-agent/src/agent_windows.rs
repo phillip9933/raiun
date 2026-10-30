@@ -4,7 +4,7 @@
 //! publication remain separate; other feature gates are independent.
 
 #[path = "auth.rs"]
-mod auth;
+pub(super) mod auth;
 
 #[path = "root_manifest.rs"]
 mod root_manifest;
@@ -63,10 +63,20 @@ mod windows_vault_browse;
 #[path = "windows_vault_requests.rs"]
 mod windows_vault_requests;
 
+#[path = "windows_headless.rs"]
+mod windows_headless;
+#[path = "windows_headless_edits.rs"]
+mod windows_headless_edits;
+
+#[path = "windows_namespace_producer.rs"]
+mod windows_namespace_producer;
 #[path = "windows_profile_registry.rs"]
 mod windows_profile_registry;
 #[path = "windows_profiles.rs"]
 mod windows_profiles;
+#[path = "windows_recovery_policy.rs"]
+mod windows_recovery_policy;
+use windows_headless::{PreparedWindowsAuth, mount_only, runtime_mode};
 
 type ProtectedCapturePage = (
     Vec<windows_vault_custody::RecoveryCaptureMetadata>,
@@ -135,8 +145,15 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    Serve,
-    Request { message: String },
+    Serve {
+        #[arg(long)]
+        mount_only: bool,
+    },
+    Request {
+        message: String,
+    },
+    /// Read a bounded secret-bearing control request from stdin, never argv.
+    RequestStdin,
 }
 
 trait SessionStore: Send + Sync {
@@ -152,6 +169,15 @@ trait SessionStore: Send + Sync {
     fn load_active(&self, expected_scope: &str) -> Result<Option<auth::Session>, String>;
     fn revoke_active(&self) -> Result<Option<(String, String, String)>, String>;
     fn remove(&self, scope: &str, server: &str, client_id: &str) -> Result<(), String>;
+    /// Explicit logout revokes prior saved credentials even if the current
+    /// process declines to save or restore them. Ordinary cleanup may retain
+    /// the older ephemeral-policy behavior.
+    fn revoke_active_for_logout(&self) -> Result<Option<(String, String, String)>, String> {
+        self.revoke_active()
+    }
+    fn remove_for_logout(&self, scope: &str, server: &str, client_id: &str) -> Result<(), String> {
+        self.remove(scope, server, client_id)
+    }
     fn save_root_config(
         &self,
         scope: &str,
@@ -386,6 +412,7 @@ struct AccountState {
     refreshing: bool,
     refresh_retry_at: u64,
     authenticating: bool,
+    headless_mount_retry_at: u64,
     active_generation: u64,
     error: Option<String>,
     session_cleanup_uncertain: bool,
@@ -445,6 +472,15 @@ struct FolderPauseSnapshot {
 /// crosses a Rust thread boundary. All auth/session transitions synchronously
 /// request a revoke-and-disconnect before replacing credentials.
 struct ProviderManager {
+    #[cfg(all(test, debug_assertions))]
+    namespace_controls: Arc<windows_namespace_producer::Controls>,
+    #[cfg(all(test, debug_assertions))]
+    namespace_status: Arc<Mutex<windows_namespace_producer::Observation>>,
+    #[cfg(all(test, debug_assertions))]
+    namespace_test_activation: AtomicBool,
+    // Serializes explicit mount preference with every automatic reconnect.
+    mount_preference: Mutex<bool>,
+    ordinary_edits: Arc<Mutex<Option<windows_headless_edits::CachedStatus>>>,
     proxy: windows_proxy::Service,
     bandwidth: windows_bandwidth::Service,
     commands: std::sync::mpsc::SyncSender<ProviderCommand>,
@@ -573,6 +609,14 @@ struct PendingNativeVaultCleanup {
 type PendingVaultCleanupTicket = windows_vault_cleanup_holds::PendingCleanupTicket;
 
 enum ProviderCommand {
+    #[cfg(all(test, debug_assertions))]
+    NamespaceDirectoryObservation {
+        generation: u64,
+        components: Vec<String>,
+        response: std::sync::mpsc::SyncSender<
+            Result<raiun_cloudfiles_windows::NamespaceDirectoryObservation, String>,
+        >,
+    },
     InstallFolders {
         setup: Box<windows_folder_sync::Setup>,
         response: std::sync::mpsc::SyncSender<Result<(), String>>,
@@ -702,6 +746,7 @@ enum ProviderCommand {
         custody_account: Vec<u8>,
         custody_store: Arc<dyn SessionStore>,
         fresh_close_publisher: Option<windows_vault_close_worker::VaultClosePublisher>,
+        namespace_admission: Option<windows_namespace_producer::Admission>,
         response: std::sync::mpsc::SyncSender<Result<(), String>>,
     },
     DispatchRecovery {
@@ -712,6 +757,16 @@ enum ProviderCommand {
         remote: Arc<dyn raiun_cloudfiles_windows::RecoveryRemote>,
         response:
             std::sync::mpsc::SyncSender<Result<windows_gui_recovery::RecoveryCompletion, String>>,
+    },
+    DispatchRecoveryAndComplete {
+        agent_generation: u64,
+        recovery: Arc<dyn raiun_cloudfiles_windows::PreparedEditRecovery>,
+        record_id: String,
+        record_generation: u64,
+        remote: Arc<dyn raiun_cloudfiles_windows::RecoveryRemote>,
+        local_components: Vec<String>,
+        response:
+            std::sync::mpsc::SyncSender<Result<windows_headless_edits::RecoveryCompletion, String>>,
     },
     #[cfg(all(test, debug_assertions))]
     RevokeBackendForTest(std::sync::mpsc::SyncSender<Result<(), String>>),
@@ -780,6 +835,7 @@ enum NativeReadFixturePath {
 #[cfg(test)]
 #[derive(Clone, Copy)]
 enum NativeRestartProbePath {
+    PersonalOrdinarySave,
     PersonalNativeRead,
     ProjectsNativeRead,
     RecoveryDocument,
@@ -789,6 +845,9 @@ enum NativeRestartProbePath {
 
 impl ProviderManager {
     fn new() -> Self {
+        let headless = mount_only();
+        let ordinary_edits = Arc::new(Mutex::new(None));
+        let worker_ordinary_edits = Arc::clone(&ordinary_edits);
         let (commands, receiver) = std::sync::mpsc::sync_channel(4);
         let connected = Arc::new(AtomicBool::new(false));
         let worker_connected = Arc::clone(&connected);
@@ -811,6 +870,12 @@ impl ProviderManager {
         let worker_folder_error = Arc::clone(&folder_error);
         let folder_pause = Arc::new(Mutex::new(None::<FolderPauseSnapshot>));
         let worker_folder_pause = Arc::clone(&folder_pause);
+        let namespace_controls = Arc::new(windows_namespace_producer::Controls::default());
+        let namespace_status = Arc::new(Mutex::new(
+            windows_namespace_producer::Observation::default(),
+        ));
+        let worker_namespace_controls = namespace_controls.clone();
+        let worker_namespace_status = namespace_status.clone();
         let worker = thread::Builder::new()
             .name("raiun-windows-cloud-files".into())
             .spawn(move || {
@@ -824,6 +889,7 @@ impl ProviderManager {
                 let mut last_vault_cleanup_error: Option<raiun_cloudfiles_windows::Error> = None;
                 let mut folders: Option<windows_folder_sync::Runtime> = None;
                 let mut cleanup_holds = windows_vault_cleanup_holds::PendingCleanupHolds::<PendingNativeVaultCleanup>::new();
+                let mut namespace_producer:Option<windows_namespace_producer::Producer>=None;
                 let mut pending_command = None;
                 loop {
                     let command = match pending_command.take().map_or_else(
@@ -844,6 +910,7 @@ impl ProviderManager {
                         ProviderCommand::InstallFolders { setup, response } => {
                             let generation = setup.generation;
                             let result = (|| {
+                                if headless { return Err("Folder sync is unavailable in mount-only mode".into()); }
                                 if worker_generation.load(Ordering::Acquire) != generation { return Err("The account changed before folder setup".into()); }
                                 if folders.as_ref().is_some_and(|runtime| runtime.generation == generation) { return Ok(()); }
                                 let runtime = windows_folder_sync::Runtime::open(*setup, &worker_generation)?;
@@ -1299,6 +1366,22 @@ impl ProviderManager {
                             };
                             let _ = response.send(result);
                         }
+                        #[cfg(all(test, debug_assertions))]
+                        ProviderCommand::NamespaceDirectoryObservation { generation, components, response } => {
+                            let result = (|| {
+                                if worker_generation.load(Ordering::Acquire)!=generation
+                                    || active_binding.as_ref().is_none_or(|binding|binding.generation!=generation)
+                                    || backend.as_ref().is_none_or(|backend|backend.is_revoked()) {
+                                    return Err("Directory observation scope changed".to_owned());
+                                }
+                                let active=connection.as_ref().ok_or("Directory observation is disconnected")?;
+                                let refs=components.iter().map(String::as_str).collect::<Vec<_>>();
+                                let value=active.namespace_directory_fixture_observation(&refs).map_err(|_|"Directory observation refused".to_owned())?;
+                                if worker_generation.load(Ordering::Acquire)!=generation { return Err("Directory observation generation changed".to_owned()); }
+                                Ok(value)
+                            })();
+                            let _=response.send(result);
+                        }
                         ProviderCommand::Connect {
                             path,
                             generation,
@@ -1311,6 +1394,7 @@ impl ProviderManager {
                             custody_account,
                             custody_store,
                             fresh_close_publisher,
+                            namespace_admission,
                             response,
                         } => {
                             let candidate_binding = ActiveProviderBinding {
@@ -1373,22 +1457,29 @@ impl ProviderManager {
                                         ).map_err(|_| "Could not bind protected vault history".to_owned())?
                                     } else { prepared };
                                     raiun_cloudfiles_windows::connect_configured_root(prepared)
-                                        .map(|active| (active, custody))
+                                        .map(|active| (active, custody, composite_root_identity))
                                         .map_err(|_| "Could not connect the Windows Cloud Files drive".to_owned())
                                 });
                                 match lease {
-                                    Ok((active, custody))
+                                    Ok((active, custody, composite))
                                         if worker_generation.load(Ordering::Acquire) == generation =>
                                     {
                                         last_vault_cleanup_error = None;
                                         active_binding = Some(candidate_binding.clone());
+                                        if let Ok(mut status) = worker_ordinary_edits.lock() {
+                                            *status = Some(windows_headless_edits::CachedStatus {
+                                                binding: candidate_binding.clone(),
+                                                source: active.ordinary_edit_status_source(), last_outcome:None,
+                                            });
+                                        }
                                         vault_custody = custody;
+                                        namespace_producer=namespace_admission.map(|admission| windows_namespace_producer::Producer::new(admission,composite,worker_namespace_controls.clone(),worker_namespace_status.clone()));
                                         connection = Some(active);
                                         backend = Some(next_backend);
                                         worker_connected.store(true, Ordering::Release);
                                         Ok(())
                                     }
-                                    Ok((mut active, _custody)) => {
+                                    Ok((mut active, _custody, _composite)) => {
                                         next_backend.revoke();
                                         if active.disconnect_in_place().is_err() {
                                             connection = Some(active);
@@ -1422,6 +1513,11 @@ impl ProviderManager {
                                 != agent_generation
                             {
                                 Err("The account changed before recovery could start".to_owned())
+                            } else if headless {
+                                recovery.dispatch_recovered_edit(&record_id, record_generation, remote.as_ref(), raiun_cloudfiles_windows::ExplicitRecoveryApproval::user_reviewed())
+                                    .map(|outcome| windows_gui_recovery::RecoveryCompletion {
+                                        outcome, remote_verified: false, local_completion: "not_requested",
+                                    }).map_err(|_| "Protected recovery dispatch failed".to_owned())
                             } else {
                                 windows_gui_recovery::dispatch_and_complete(
                                     windows_gui_recovery::CompletionContext {
@@ -1437,6 +1533,18 @@ impl ProviderManager {
                                     remote.as_ref(),
                                 )
                             };
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::DispatchRecoveryAndComplete {
+                            agent_generation, recovery, record_id, record_generation,
+                            remote, local_components, response,
+                        } => {
+                            let result = windows_headless_edits::dispatch_and_complete(
+                                connection.as_ref(), backend.as_ref(), active_binding.as_ref(),
+                                &worker_generation, agent_generation, recovery.as_ref(),
+                                &record_id, record_generation, remote.as_ref(), &local_components,
+                            );
+                            windows_headless_edits::record_completion_outcome(&worker_ordinary_edits, active_binding.as_ref(), &result);
                             let _ = response.send(result);
                         }
                         #[cfg(all(test, debug_assertions))]
@@ -1490,6 +1598,9 @@ impl ProviderManager {
                                 .ok_or_else(|| "Windows Cloud Files connection is not active".to_owned())
                                 .map(|active| {
                                     let components = match path {
+                                        NativeRestartProbePath::PersonalOrdinarySave => {
+                                            &["Personal", "ordinary-save.bin"][..]
+                                        }
                                         NativeRestartProbePath::PersonalNativeRead => {
                                             &["Personal", "native-read.bin"][..]
                                         }
@@ -1563,6 +1674,7 @@ impl ProviderManager {
                             let _ = response.send(result);
                         }
                         ProviderCommand::Disconnect(response) => {
+                            namespace_producer=None;
                             cleanup_holds.clear();
                             if let Ok(mut handle) = worker_folder_revocation.lock() { if let Some(handle) = handle.take() { handle.revoke(); } }
                             drop(folders.take());
@@ -1583,6 +1695,7 @@ impl ProviderManager {
                             let _ = response.send(result);
                         }
                         ProviderCommand::Stop(response) => {
+                            namespace_producer=None;
                             cleanup_holds.clear();
                             if let Ok(mut handle) = worker_folder_revocation.lock() { if let Some(handle) = handle.take() { handle.revoke(); } }
                             drop(folders.take());
@@ -1609,6 +1722,9 @@ impl ProviderManager {
                             connection.as_ref(), backend.as_ref(), active_binding.as_ref(),
                             &worker_generation);
                         dispatched_initial = !matches!(&result, Ok(None));
+                        if dispatched_initial {
+                            windows_headless_edits::record_initial_outcome(&worker_ordinary_edits, active_binding.as_ref(), &result);
+                        }
                         #[cfg(all(test, debug_assertions))]
                         if dispatched_initial {
                             if let Ok(mut observation) = worker_initial_save_test_observation.lock() {
@@ -1623,6 +1739,17 @@ impl ProviderManager {
                             }
                         }
                     }
+                    // Metadata discovery is bounded and must not starve behind file saves.
+                    if namespace_producer.is_some() {
+                        match receiver.try_recv() {
+                            Ok(command)=>{pending_command=Some(command);continue;},
+                            Err(std::sync::mpsc::TryRecvError::Disconnected)=>break,
+                            Err(std::sync::mpsc::TryRecvError::Empty)=>(),
+                        }
+                        if let (Some(producer),Some(active),Some(backend),Some(binding))=(namespace_producer.as_mut(),connection.as_mut(),backend.as_ref(),active_binding.as_ref()) {
+                            producer.tick(active,backend,binding.identity);
+                        }
+                    }
                     if !handled_command && !dispatched_initial {
                         // Pick up commands arriving during initial-save inspection first.
                         match receiver.try_recv() {
@@ -1633,14 +1760,14 @@ impl ProviderManager {
                         if let Some(runtime) = folders.as_mut() {
                             // A read-only metadata request may install this worker.
                             // Disabled features must also suppress background work.
-                            let ordinary = if WINDOWS_FOLDER_SYNC_ENABLED {
+                            let ordinary = if !headless && WINDOWS_FOLDER_SYNC_ENABLED {
                                 runtime.periodic_tick(&worker_generation)
                             } else {
                                 None
                             };
                             if let Some(result) = ordinary {
                                 if let Ok(mut error) = worker_folder_error.lock() { *error = result.err(); }
-                            } else if WINDOWS_MEDIA_METADATA_ENABLED {
+                            } else if !headless && WINDOWS_MEDIA_METADATA_ENABLED {
                                 if let Some(result) = runtime.periodic_media_tick(&worker_generation) {
                                     if let Ok(mut error) = worker_folder_error.lock() { *error = result.err(); }
                                 }
@@ -1667,6 +1794,14 @@ impl ProviderManager {
             })
             .expect("start Windows Cloud Files ownership thread");
         Self {
+            #[cfg(all(test, debug_assertions))]
+            namespace_controls,
+            #[cfg(all(test, debug_assertions))]
+            namespace_status,
+            #[cfg(all(test, debug_assertions))]
+            namespace_test_activation: AtomicBool::new(false),
+            mount_preference: Mutex::new(!headless),
+            ordinary_edits,
             proxy: windows_proxy::Service::default(),
             bandwidth: windows_bandwidth::Service::default(),
             commands,
@@ -1696,6 +1831,25 @@ impl ProviderManager {
         }
     }
 
+    #[cfg(all(test, debug_assertions))]
+    fn namespace_directory_observation(
+        &self,
+        components: Vec<String>,
+    ) -> Result<raiun_cloudfiles_windows::NamespaceDirectoryObservation, String> {
+        let generation = self.authorized_generation.load(Ordering::Acquire);
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::NamespaceDirectoryObservation {
+                generation,
+                components,
+                response,
+            })
+            .map_err(|_| "Directory observation owner stopped")?;
+        result
+            .recv()
+            .map_err(|_| "Directory observation owner unavailable")?
+    }
+
     #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     fn connect(
@@ -1711,6 +1865,21 @@ impl ProviderManager {
         custody_account: Vec<u8>,
         custody_store: Arc<dyn SessionStore>,
     ) -> Result<(), String> {
+        let namespace_enabled = windows_namespace_producer::PRODUCTION_ENABLED;
+        #[cfg(all(test, debug_assertions))]
+        let namespace_enabled =
+            namespace_enabled || self.namespace_test_activation.load(Ordering::Acquire);
+        let namespace_admission = if namespace_enabled {
+            Some(windows_namespace_producer::Admission::capture(
+                &backend,
+                &self.authorized_generation,
+                generation,
+                expected_identity,
+                windows_recovery_policy::directory_storage_policy,
+            )?)
+        } else {
+            None
+        };
         let fresh_close_publisher = self
             .fresh_close_source
             .lock()
@@ -1731,6 +1900,7 @@ impl ProviderManager {
                 custody_account,
                 custody_store,
                 fresh_close_publisher,
+                namespace_admission,
                 response,
             })
             .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
@@ -2210,6 +2380,33 @@ impl ProviderManager {
             .map_err(|_| "Windows recovery manager stopped unexpectedly")?
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_recovery_and_complete(
+        &self,
+        agent_generation: u64,
+        recovery: Arc<dyn raiun_cloudfiles_windows::PreparedEditRecovery>,
+        record_id: String,
+        record_generation: u64,
+        remote: Arc<dyn raiun_cloudfiles_windows::RecoveryRemote>,
+        local_components: Vec<String>,
+    ) -> Result<windows_headless_edits::RecoveryCompletion, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::DispatchRecoveryAndComplete {
+                agent_generation,
+                recovery,
+                record_id,
+                record_generation,
+                remote,
+                local_components,
+                response,
+            })
+            .map_err(|_| "Windows recovery manager is unavailable")?;
+        result
+            .recv()
+            .map_err(|_| "Windows recovery manager stopped unexpectedly")?
+    }
+
     #[cfg(all(test, debug_assertions))]
     fn revoke_backend_for_test(&self) -> Result<(), String> {
         let (response, result) = std::sync::mpsc::sync_channel(1);
@@ -2510,7 +2707,8 @@ impl WindowsAgent {
             || state.session_cleanup_uncertain
             || binding.generation == 0
             || self.generation.load(Ordering::Acquire) != binding.generation
-            || session.expires_at <= unix_time_now().saturating_add(30)
+            || session.expires_at
+                <= unix_time_now().saturating_add(windows_headless::retry_seconds())
             || state.active_generation != binding.generation
             || self.provider.authorized_generation.load(Ordering::Acquire) != binding.generation
             || !configuration.valid
@@ -2686,6 +2884,7 @@ impl WindowsAgent {
         source_admissions: Option<SharedSourceAdmissions>,
         vault_sessions: Arc<raiun_vault::session::VaultSessionCoordinator>,
     ) -> Result<Self, String> {
+        runtime_mode()?;
         if !valid_runtime_profile(profile) {
             return Err("Invalid Windows runtime profile".into());
         }
@@ -2717,14 +2916,48 @@ impl WindowsAgent {
             #[cfg(all(test, debug_assertions))]
             synthetic_vault_completion_writer_probe: true,
         };
-        agent.restore_active_session();
+        if mount_only() {
+            if let Some(config) = crate::headless_runtime::config()? {
+                if config.profile == profile {
+                    *agent
+                        .provider
+                        .mount_preference
+                        .lock()
+                        .map_err(|_| "Mount preference is unavailable")? = config.auto_mount;
+                    if config.remember_login {
+                        agent.restore_active_session();
+                    }
+                }
+            }
+        } else {
+            agent.restore_active_session();
+        }
         Ok(agent)
     }
 
     fn restore_active_session(&self) {
         let restored = self.session_store.load_active(self.profile_scope.as_str());
         let (session, error, cleanup_uncertain) = match restored {
-            Ok(Some(session)) if session.refresh_token.is_some() => (Some(session), None, false),
+            Ok(Some(session))
+                if mount_only()
+                    && !windows_headless::session_allowed(&self.profile_scope, &session)
+                        .unwrap_or(false) =>
+            {
+                (
+                    None,
+                    Some(
+                        "Saved session does not match the headless configuration; sign in again"
+                            .into(),
+                    ),
+                    false,
+                )
+            }
+            Ok(Some(session))
+                if session.app_token_username.is_none() && session.refresh_token.is_some()
+                    || mount_only() && session.app_token_username.is_some() =>
+            {
+                (Some(session), None, false)
+            }
             Ok(Some(session)) => {
                 let revoked = self.session_store.revoke_active();
                 let mut cleanup_uncertain = revoked.is_err();
@@ -2757,6 +2990,9 @@ impl WindowsAgent {
             load_root_configuration(&self.session_store, &self.profile_scope, session)
                 .ok()
                 .flatten()
+                .filter(|root| {
+                    windows_headless::root_allowed(&self.profile_scope, root).unwrap_or(false)
+                })
         });
         if let Ok(mut state) = self.state.lock() {
             state.session = session;
@@ -2866,12 +3102,9 @@ impl WindowsAgent {
                 .filter(|session| session.expires_at > unix_time_now())
                 .ok_or("Connect this account to load its photo")?
         };
-        let client = OpenCloudClient::new_with_proxy(
-            &session.server,
-            session.access_token.clone(),
-            &session.proxy,
-        )
-        .map_err(|_| "The account photo is unavailable")?;
+        let client = session
+            .opencloud_client()
+            .map_err(|_| "The account photo is unavailable")?;
         let image = client
             .account_avatar()
             .map_err(|_| "The account photo is unavailable")?;
@@ -2898,6 +3131,7 @@ impl WindowsAgent {
         {
             return Err("The selected Windows profile does not own this request".into());
         }
+        runtime_mode()?.validate_request(request)?;
         reject_control_secret_request(request)?;
         let action = request
             .get("action")
@@ -2914,6 +3148,9 @@ impl WindowsAgent {
         }
         match action {
             "status" => Ok((self.status()?, false)),
+            "spaces" if mount_only() => Ok((self.headless_spaces()?, false)),
+            "mount" if mount_only() => Ok((self.headless_mount(request)?, false)),
+            "unmount" if mount_only() => Ok((self.headless_unmount()?, false)),
             "account_avatar" => Ok((self.account_avatar(request)?, false)),
             "guest_permissions" | "guest_invite" | "guest_update" | "guest_revoke" => {
                 Ok((self.guest_sharing(request)?, false))
@@ -3098,6 +3335,7 @@ impl WindowsAgent {
                 ))
             }
             "auth_begin" => Ok((self.begin_auth(request)?, false)),
+            "auth_app_token" if mount_only() => Ok((self.begin_auth(request)?, false)),
             "configure" | "configure_root" => Ok((self.configure_root(request)?, false)),
             "auth_cancel" => Ok((self.cancel_auth()?, false)),
             "logout" => Ok((self.logout()?, false)),
@@ -3239,6 +3477,7 @@ impl WindowsAgent {
                 || state.session.as_ref().is_none_or(|current| {
                     current.server != session.server
                         || current.client_id != session.client_id
+                        || current.app_token_username != session.app_token_username
                         || current.expected_issuer != session.expected_issuer
                         || current.access_token != session.access_token
                 })
@@ -3284,11 +3523,14 @@ impl WindowsAgent {
             .and_then(|value| value.clone());
         // Startup is a per-user app preference, independent of account secrets.
         // Query before taking account state; status never writes an entry.
-        let autostart = windows_startup_executable().ok().and_then(|executable| {
-            raiun_control_windows::autostart::autostart_status(&executable)
-                .ok()
-                .flatten()
-        });
+        let autostart = (!mount_only())
+            .then(windows_startup_executable)
+            .and_then(Result::ok)
+            .and_then(|executable| {
+                raiun_control_windows::autostart::autostart_status(&executable)
+                    .ok()
+                    .flatten()
+            });
         let state = self
             .state
             .lock()
@@ -3340,7 +3582,11 @@ impl WindowsAgent {
             "session_cleanup_uncertain": state.session_cleanup_uncertain,
             "account_removing": state.retiring,
         });
-        if WINDOWS_VAULT_SESSIONS_ENABLED {
+        windows_headless::annotate_status(&mut status, runtime_mode()?);
+        if mount_only() {
+            status["ordinary_edits"] = windows_headless_edits::status(self, &state);
+        }
+        if !mount_only() && WINDOWS_VAULT_SESSIONS_ENABLED {
             status["vault_access_mode"] = json!("native_read_only");
         }
         Ok(status)
@@ -3406,7 +3652,8 @@ impl WindowsAgent {
             || configuration.profile_scope != self.profile_scope
             || configuration.server != session.server
             || configuration.client_id != session.client_id
-            || session.expires_at <= unix_time_now().saturating_add(30)
+            || session.expires_at
+                <= unix_time_now().saturating_add(windows_headless::retry_seconds())
         {
             return Err("Saved vault edits do not match the connected account and drive".into());
         }
@@ -3464,7 +3711,8 @@ impl WindowsAgent {
             current.server == context.session.server
                 && current.client_id == context.session.client_id
                 && current.access_token == context.session.access_token
-                && current.expires_at > unix_time_now().saturating_add(30)
+                && current.expires_at
+                    > unix_time_now().saturating_add(windows_headless::retry_seconds())
         });
         if !state.online_authenticated
             || state.authenticating
@@ -3596,6 +3844,7 @@ impl WindowsAgent {
     /// Authenticated read-only discovery. No upload approval, dispatch or
     /// journal retirement is created by reading this bounded metadata page.
     fn list_recovered_edits(&self, request: &Value) -> Result<Value, String> {
+        self.check_headless_recovery_request(request)?;
         if request
             .get("profile_id")
             .is_some_and(|value| value.as_str() != Some(self.profile_scope.as_str()))
@@ -3644,11 +3893,14 @@ impl WindowsAgent {
         let records = verified
             .recovery_provider
             .unresolved_metadata_bounded()
-            .map_err(|error| match error {
-                raiun_cloudfiles_windows::JournalError::ScanLimit => {
-                    "Saved edits exceed this scan limit; nothing was changed"
+            .map_err(|error| {
+                self.invalidate_headless_edit_status();
+                match error {
+                    raiun_cloudfiles_windows::JournalError::ScanLimit => {
+                        "Saved edits exceed this scan limit; nothing was changed"
+                    }
+                    _ => "Protected recovery records could not be verified",
                 }
-                _ => "Protected recovery records could not be verified",
             })?;
         let page = recovery_metadata_page(
             records,
@@ -3675,7 +3927,8 @@ impl WindowsAgent {
                 current.server != verified.session.server
                     || current.client_id != verified.session.client_id
                     || current.access_token != verified.session.access_token
-                    || current.expires_at <= unix_time_now().saturating_add(30)
+                    || current.expires_at
+                        <= unix_time_now().saturating_add(windows_headless::retry_seconds())
             })
             || state.root_configuration.as_ref() != Some(&verified.configuration)
             || !self
@@ -3727,7 +3980,8 @@ impl WindowsAgent {
         if !configuration.valid
             || configuration.server != session.server
             || configuration.client_id != session.client_id
-            || session.expires_at <= unix_time_now().saturating_add(30)
+            || session.expires_at
+                <= unix_time_now().saturating_add(windows_headless::retry_seconds())
         {
             return Err("The saved edit does not match the current connected account".into());
         }
@@ -3751,12 +4005,9 @@ impl WindowsAgent {
                 .map_err(root_error_text)?;
 
         let client = Arc::new(
-            OpenCloudClient::new_with_proxy(
-                &session.server,
-                session.access_token.clone(),
-                &session.proxy,
-            )
-            .map_err(|_| "Could not create the connected account client")?,
+            session
+                .opencloud_client()
+                .map_err(|_| "Could not create the connected account client")?,
         );
         let server_origin = client
             .server_origin()
@@ -3788,9 +4039,23 @@ impl WindowsAgent {
             server_origin,
         )
         .map_err(|_| "Could not bind recovery to the connected account")?;
-        let recovery_provider =
+        let recovery_provider = if mount_only() {
+            windows_recovery_policy::provider(provider_scope.clone(), local_root_identity)?
+        } else {
             windows_gui_recovery::current_user(provider_scope.clone(), local_root_identity, None)
-                .map_err(|_| "Protected recovery storage is unavailable")?;
+                .map_err(|_| "Protected recovery storage is unavailable")?
+        };
+        #[cfg(all(test, debug_assertions))]
+        let recovery_provider = if mount_only() {
+            windows_profiles::windows_headless_streamed_test::maybe_enable_recovery(
+                recovery_provider,
+                &provider_scope,
+                local_root_identity,
+            )
+            .map_err(|_| "Synthetic streamed recovery admission failed")?
+        } else {
+            recovery_provider
+        };
         Ok(WindowsRecoveryContext {
             session,
             agent_generation,
@@ -3812,6 +4077,13 @@ impl WindowsAgent {
     /// refresh, reconnect, or provider callbacks.
     fn retry_recovered_edit(&self, request: &Value) -> Result<Value, String> {
         use raiun_cloudfiles_windows::EditRecoveryProvider;
+
+        let local_components = if mount_only() {
+            windows_headless_edits::local_components(request)?
+        } else {
+            None
+        };
+        self.check_headless_recovery_request(request)?;
 
         let record_id = request
             .get("record_id")
@@ -3844,15 +4116,19 @@ impl WindowsAgent {
             local_root_identity,
             agent_generation,
         )?;
-        crate::windows_recovery_request::validate(
-            request,
-            &self.profile_scope,
-            agent_generation,
-            &recovery_scope_token,
-        )?;
-        let candidates = recovery_provider
-            .unresolved_edits()
-            .map_err(|_| "Protected recovery records could not be verified")?;
+        if !mount_only() {
+            crate::windows_recovery_request::validate(
+                request,
+                &self.profile_scope,
+                agent_generation,
+                &recovery_scope_token,
+            )?;
+        }
+        self.check_headless_recovery_request(request)?;
+        let candidates = recovery_provider.unresolved_edits().map_err(|_| {
+            self.invalidate_headless_edit_status();
+            "Protected recovery records could not be verified"
+        })?;
         let mut selected = candidates
             .into_iter()
             .filter(|item| item.record_id == record_id && item.generation == record_generation);
@@ -3920,12 +4196,50 @@ impl WindowsAgent {
                 || state.session.as_ref().is_none_or(|current| {
                     current.server != session.server
                         || current.client_id != session.client_id
+                        || current.app_token_username != session.app_token_username
                         || current.access_token != session.access_token
                 })
                 || state.root_configuration.as_ref() != Some(&configuration)
             {
                 return Err("The account changed; reopen Transfers and try again".into());
             }
+        }
+        if mount_only() {
+            let (outcome, completion) = if let Some(components) = local_components {
+                let completed = self.provider.dispatch_recovery_and_complete(
+                    agent_generation,
+                    prepared,
+                    record_id.to_owned(),
+                    record_generation,
+                    remote,
+                    components,
+                )?;
+                (
+                    completed.outcome,
+                    Some((completed.remote_verified, completed.local_completion)),
+                )
+            } else {
+                let outcome = self.provider.dispatch_recovery(
+                    agent_generation,
+                    prepared,
+                    record_id.to_owned(),
+                    record_generation,
+                    remote,
+                )?;
+                (outcome.outcome, None)
+            };
+            if self.generation.load(Ordering::Acquire) != agent_generation {
+                return Err("The account changed while the recovery attempt was running".into());
+            }
+            let mut response = recovery_outcome_json(outcome);
+            if let Some((remote_verified, local_completion)) = completion {
+                response["remote_verified"] = json!(remote_verified);
+                response["local_completion"] = json!(local_completion);
+            } else if mount_only() {
+                response["remote_verified"] = json!(false);
+                response["local_completion"] = json!("not_requested");
+            }
+            return Ok(response);
         }
         let completion = self.provider.dispatch_recovery(
             agent_generation,
@@ -4013,12 +4327,9 @@ impl WindowsAgent {
             )
         };
         let client = Arc::new(
-            OpenCloudClient::new_with_proxy(
-                &session.server,
-                session.access_token.clone(),
-                &session.proxy,
-            )
-            .map_err(|_| "Could not verify the source account")?,
+            session
+                .opencloud_client()
+                .map_err(|_| "Could not verify the source account")?,
         );
         let (_, account, _, _, _) = verified_account_roots(&client, &session.server)?;
         let (kind, id, path) = match windows_folder_requests::decode(request)? {
@@ -4082,6 +4393,7 @@ impl WindowsAgent {
                 || state.session.as_ref().is_none_or(|current| {
                     current.server != session.server
                         || current.client_id != session.client_id
+                        || current.app_token_username != session.app_token_username
                         || current.expected_issuer != session.expected_issuer
                         || current.access_token != session.access_token
                         || current.expires_at != session.expires_at
@@ -4096,6 +4408,9 @@ impl WindowsAgent {
     }
 
     fn folder_request(&self, request: &Value) -> Result<Value, String> {
+        if mount_only() {
+            return Err("Folder and media workers are unavailable in mount-only mode".into());
+        }
         use raiun_control_windows::{PinnedDirectory, PrivateDirectory};
         use raiun_engine::folder_pairs::AccountScope;
         use sha2::Digest;
@@ -4134,12 +4449,9 @@ impl WindowsAgent {
         };
         if self.provider.folder_generation.load(Ordering::Acquire) != generation {
             let client = Arc::new(
-                OpenCloudClient::new_with_proxy(
-                    &session.server,
-                    session.access_token.clone(),
-                    &session.proxy,
-                )
-                .map_err(|_| "Could not prepare the connected account")?,
+                session
+                    .opencloud_client()
+                    .map_err(|_| "Could not prepare the connected account")?,
             );
             let (_, account_id, _, spaces, _) = verified_account_roots(&client, &session.server)?;
             let server = url::Url::parse(&session.server)
@@ -4193,6 +4505,7 @@ impl WindowsAgent {
                     || state.session.as_ref().is_none_or(|current| {
                         current.server != session.server
                             || current.client_id != session.client_id
+                            || current.app_token_username != session.app_token_username
                             || current.expected_issuer != session.expected_issuer
                     })
                 {
@@ -4497,6 +4810,13 @@ impl WindowsAgent {
         provider: &Arc<ProviderManager>,
         admissions: Option<&SharedSourceAdmissions>,
     ) -> Result<(), String> {
+        let preference = provider
+            .mount_preference
+            .lock()
+            .map_err(|_| "Mount preference is unavailable")?;
+        if !*preference {
+            return Ok(());
+        }
         if provider.activation_enabled() {
             let has_ready_root = state.lock().is_ok_and(|state| {
                 state.online_authenticated
@@ -4619,6 +4939,7 @@ impl WindowsAgent {
                 || state.session.as_ref().is_none_or(|current| {
                     current.server != session.server
                         || current.client_id != session.client_id
+                        || current.app_token_username != session.app_token_username
                         || current.access_token != session.access_token
                 })
             {
@@ -4635,12 +4956,9 @@ impl WindowsAgent {
         }
 
         let client = Arc::new(
-            OpenCloudClient::new_with_proxy(
-                &session.server,
-                session.access_token.clone(),
-                &session.proxy,
-            )
-            .map_err(|_| "Could not create an authenticated Windows drive client")?,
+            session
+                .opencloud_client()
+                .map_err(|_| "Could not create an authenticated Windows drive client")?,
         );
         let server_origin = client
             .server_origin()
@@ -4664,10 +4982,22 @@ impl WindowsAgent {
         if scope.token_generation() == 0 {
             return Err("The authenticated Windows provider generation is invalid".into());
         }
-        let recovery: Arc<dyn raiun_cloudfiles_windows::EditRecoveryProvider> = Arc::new(
+        let recovery = if mount_only() {
+            windows_recovery_policy::provider(scope.clone(), identity)?
+        } else {
             windows_gui_recovery::current_user(scope.clone(), identity, None)
-                .map_err(|_| "Could not prepare current-user durable edit recovery")?,
-        );
+                .map_err(|_| "Could not prepare current-user durable edit recovery")?
+        };
+        #[cfg(all(test, debug_assertions))]
+        let recovery = if mount_only() {
+            windows_profiles::windows_headless_streamed_test::maybe_enable_recovery(
+                recovery, &scope, identity,
+            )
+            .map_err(|_| "Synthetic streamed recovery admission failed")?
+        } else {
+            recovery
+        };
+        let recovery: Arc<dyn raiun_cloudfiles_windows::EditRecoveryProvider> = Arc::new(recovery);
         let identity_catalog = recovery
             .identity_catalog()
             .ok_or("Could not prepare the durable Windows identity catalog")?;
@@ -4722,6 +5052,7 @@ impl WindowsAgent {
                 || state.session.as_ref().is_none_or(|current| {
                     current.server != session.server
                         || current.client_id != session.client_id
+                        || current.app_token_username != session.app_token_username
                         || current.access_token != session.access_token
                 })
                 || state.root_configuration.as_ref() != Some(&configuration)
@@ -4761,6 +5092,7 @@ impl WindowsAgent {
                 || state.session.as_ref().is_none_or(|current| {
                     current.server != session.server
                         || current.client_id != session.client_id
+                        || current.app_token_username != session.app_token_username
                         || current.access_token != session.access_token
                 })
                 || state.root_configuration.as_ref() != Some(&configuration)
@@ -4817,6 +5149,7 @@ impl WindowsAgent {
                 || state.session.as_ref().is_none_or(|current| {
                     current.server != session.server
                         || current.client_id != session.client_id
+                        || current.app_token_username != session.app_token_username
                         || current.access_token != session.access_token
                 })
                 || state.root_configuration.as_ref() != Some(&connecting)
@@ -4899,7 +5232,9 @@ impl WindowsAgent {
         let admissions = self.source_admissions.clone();
         let worker = thread::spawn(move || {
             let mut refreshed = session.clone();
-            let result = refreshed.refresh_classified();
+            let result = refreshed
+                .refresh_classified()
+                .and_then(|()| refreshed.verify_app_token());
             match result {
                 Ok(()) => {
                     if let Err(error) = provider.disconnect() {
@@ -4910,7 +5245,8 @@ impl WindowsAgent {
                         {
                             state.refreshing = false;
                             state.online_authenticated = false;
-                            state.refresh_retry_at = unix_time_now().saturating_add(30);
+                            state.refresh_retry_at =
+                                unix_time_now().saturating_add(windows_headless::retry_seconds());
                             state.error = Some(error);
                         }
                         return;
@@ -4974,7 +5310,8 @@ impl WindowsAgent {
                     {
                         state.refreshing = false;
                         state.online_authenticated = false;
-                        state.refresh_retry_at = unix_time_now().saturating_add(30);
+                        state.refresh_retry_at =
+                            unix_time_now().saturating_add(windows_headless::retry_seconds());
                         state.error = Some(provider_error.unwrap_or(message));
                         if is_rejected {
                             state.session = None;
@@ -5038,6 +5375,23 @@ impl WindowsAgent {
             .get("client_id")
             .and_then(Value::as_str)
             .unwrap_or("");
+        let app_username =
+            if request.get("action").and_then(Value::as_str) == Some("auth_app_token") {
+                Some(
+                    request
+                        .get("username")
+                        .and_then(Value::as_str)
+                        .ok_or("Missing app-token username")?,
+                )
+            } else {
+                None
+            };
+        if app_username.is_some() && !mount_only() {
+            return Err("App-token login is available only in the headless agent".into());
+        }
+        if mount_only() {
+            crate::headless_runtime::validate_login(&self.profile_scope, &server, app_username)?;
+        }
         let generation = self.next_generation()?;
         {
             let mut state = self
@@ -5052,7 +5406,7 @@ impl WindowsAgent {
             state.error = None;
         }
         let flow = (|| {
-            if WINDOWS_VAULT_SESSIONS_ENABLED {
+            if !mount_only() && WINDOWS_VAULT_SESSIONS_ENABLED {
                 windows_vault_credentials::revoke_profile(
                     &VaultCredentialStore {
                         store: self.session_store.as_ref(),
@@ -5069,10 +5423,18 @@ impl WindowsAgent {
                     profile: &self.profile_scope,
                 },
             )?;
-            if proxy == raiun_opencloud::ProxyConfig::System {
-                auth::AuthFlow::begin(&server, client_id)
+            if let Some(username) = app_username {
+                let token = request
+                    .get("app_token")
+                    .and_then(Value::as_str)
+                    .ok_or("Missing app token")?;
+                auth::Session::for_app_token(&server, username, token.to_owned(), proxy)
+                    .map(PreparedWindowsAuth::AppToken)
+            } else if proxy == raiun_opencloud::ProxyConfig::System {
+                auth::AuthFlow::begin(&server, client_id).map(PreparedWindowsAuth::Browser)
             } else {
                 auth::AuthFlow::begin_with_proxy(&server, client_id, proxy)
+                    .map(PreparedWindowsAuth::Browser)
             }
         })();
         let flow = match flow {
@@ -5087,7 +5449,10 @@ impl WindowsAgent {
                 return Err(error);
             }
         };
-        let public_info = flow.public_info();
+        let mut public_info = flow.public_info();
+        if app_username.is_some() {
+            public_info["auth_generation"] = json!(generation);
+        }
         let (expected_server, expected_client_id) = flow.configured_identity();
         let expected_server = expected_server.to_owned();
         let expected_client_id = expected_client_id.to_owned();
@@ -5152,8 +5517,13 @@ impl WindowsAgent {
             let result = flow
                 .wait_with_cancel(|| current_generation.load(Ordering::Acquire) != generation)
                 .and_then(|session| {
-                    if session.server == expected_server && session.client_id == expected_client_id
+                    if session.server == expected_server
+                        && session.client_id == expected_client_id
+                        && windows_headless::session_allowed(&profile_scope, &session)?
                     {
+                        session
+                            .verify_app_token()
+                            .map_err(|error| error.to_string())?;
                         Ok(session)
                     } else {
                         Err("Sign-in returned an unexpected account identity".to_owned())
@@ -5179,7 +5549,11 @@ impl WindowsAgent {
                     let root_configuration =
                         load_root_configuration(&store, &profile_scope, &session)
                             .ok()
-                            .flatten();
+                            .flatten()
+                            .filter(|root| {
+                                windows_headless::root_allowed(&profile_scope, root)
+                                    .unwrap_or(false)
+                            });
                     store.before_publish();
                     let installed = if let Ok(mut state) = state.lock() {
                         if state.authenticating && state.active_generation == generation {
@@ -5260,7 +5634,8 @@ impl WindowsAgent {
                 if state.refreshing {
                     state.refreshing = false;
                     state.online_authenticated = false;
-                    state.refresh_retry_at = unix_time_now().saturating_add(30);
+                    state.refresh_retry_at =
+                        unix_time_now().saturating_add(windows_headless::retry_seconds());
                 }
                 state.error = None;
             }
@@ -5307,7 +5682,7 @@ impl WindowsAgent {
             .vault_credential_operation
             .lock()
             .map_err(|_| "Vault credential changes are unavailable")?;
-        if WINDOWS_VAULT_SESSIONS_ENABLED {
+        if !mount_only() && WINDOWS_VAULT_SESSIONS_ENABLED {
             windows_vault_credentials::revoke_profile(
                 &VaultCredentialStore {
                     store: self.session_store.as_ref(),
@@ -5346,12 +5721,12 @@ impl WindowsAgent {
             .is_some_and(|ownership| ownership.state == "registered");
         // The active pointer is the only startup restore authority. Revoke it
         // first so a later blob cleanup failure cannot resurrect the session.
-        let pointer_identity = self.session_store.revoke_active()?;
+        let pointer_identity = self.session_store.revoke_active_for_logout()?;
         let mut cleanup_uncertain = false;
         if let Some((scope, server, client_id)) = pointer_identity {
             cleanup_uncertain |= self
                 .session_store
-                .remove(&scope, &server, &client_id)
+                .remove_for_logout(&scope, &server, &client_id)
                 .is_err();
             if !preserve_registered_root {
                 cleanup_uncertain |= self
@@ -5363,7 +5738,7 @@ impl WindowsAgent {
         if let Some(session) = &session {
             cleanup_uncertain |= self
                 .session_store
-                .remove(
+                .remove_for_logout(
                     self.profile_scope.as_str(),
                     &session.server,
                     &session.client_id,
@@ -5789,12 +6164,9 @@ fn decode_root_metadata(bytes: &[u8], expected_profile: &str) -> Result<RootConf
 fn verified_personal_root_identity(
     session: &auth::Session,
 ) -> Result<(String, String, String), String> {
-    let client = OpenCloudClient::new_with_proxy(
-        &session.server,
-        session.access_token.clone(),
-        &session.proxy,
-    )
-    .map_err(|_| "Could not verify this account's Personal drive")?;
+    let client = session
+        .opencloud_client()
+        .map_err(|_| "Could not verify this account's Personal drive")?;
     let token_generation = client.token_generation();
     let context = RangeReadContext {
         deadline: std::time::Instant::now() + Duration::from_secs(30),
@@ -6358,31 +6730,39 @@ fn overlaps_private_state(
     let local_app_data = std::env::var_os("LOCALAPPDATA")
         .filter(|value| !value.is_empty())
         .ok_or("Current-user app data is unavailable")?;
-    let private_state = PathBuf::from(local_app_data).join("Raiun");
-    if !private_state.exists() {
-        // Before the first agent start there is no private state directory to
-        // alias; lexical component overlap still prevents selecting its path.
-        return Ok(windows_paths_overlap(
-            &candidate.to_string_lossy(),
-            &private_state.to_string_lossy(),
-        ));
+    let mut private_roots = vec![PathBuf::from(local_app_data).join("Raiun")];
+    if let Some(context) = raiun_control_windows::headless_context()
+        .map_err(|_| "Could not verify the headless Windows state context")?
+    {
+        private_roots.push(context.state_root().to_path_buf());
     }
-    let overlap = if let Some(identity) = registered_identity {
-        raiun_cloudfiles_windows::registered_configured_root_overlaps(
-            candidate,
-            identity,
-            &private_state,
-        )
-    } else {
-        configured_roots_overlap(candidate, &private_state)
-    };
-    let identity_overlap = overlap
-        .map_err(|_| "Could not verify the selected folder against Raiun's private app data")?;
-    Ok(identity_overlap
-        || windows_paths_overlap(
+    for private_state in private_roots {
+        let lexical_overlap = windows_paths_overlap(
             &candidate.to_string_lossy(),
             &private_state.to_string_lossy(),
-        ))
+        );
+        if lexical_overlap {
+            return Ok(true);
+        }
+        if !private_state.exists() {
+            continue;
+        }
+        let overlap = if let Some(identity) = registered_identity {
+            raiun_cloudfiles_windows::registered_configured_root_overlaps(
+                candidate,
+                identity,
+                &private_state,
+            )
+        } else {
+            configured_roots_overlap(candidate, &private_state)
+        };
+        if overlap
+            .map_err(|_| "Could not verify the selected folder against Raiun's private app data")?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn windows_paths_overlap(left: &str, right: &str) -> bool {
@@ -6442,6 +6822,31 @@ impl DpapiStore {
             return Err("Protected Windows storage belongs to another profile".into());
         }
         Ok(())
+    }
+    fn revoke_saved_identity(&self) -> Result<Option<(String, String, String)>, String> {
+        let identity = self
+            .store
+            .active_identity()
+            .map_err(|_| "Could not read the active session pointer".to_string())?;
+        if let Some((profile, _, _)) = &identity {
+            self.check_scope(profile)?;
+        }
+        self.store
+            .clear_active_identity()
+            .map_err(|_| "Could not revoke the active session pointer".to_string())?;
+        Ok(identity)
+    }
+
+    fn remove_saved_identity(
+        &self,
+        scope: &str,
+        server: &str,
+        client_id: &str,
+    ) -> Result<(), String> {
+        self.check_scope(scope)?;
+        self.store
+            .remove(Some(scope), server, client_id)
+            .map_err(|_| "Could not remove the session from Windows protected storage".into())
     }
 }
 
@@ -6504,6 +6909,9 @@ impl SessionStore for DpapiStore {
         profile: &str,
     ) -> Result<Option<zeroize::Zeroizing<Vec<u8>>>, String> {
         self.check_scope(profile)?;
+        if mount_only() {
+            return Ok(None);
+        }
         self.store
             .load_vault_credentials(profile)
             .map_err(|_| "Protected vault credentials are unavailable".into())
@@ -6515,6 +6923,9 @@ impl SessionStore for DpapiStore {
         next: &[u8],
     ) -> Result<(), String> {
         self.check_scope(profile)?;
+        if mount_only() {
+            return Err("Vault credentials are unavailable in mount-only mode".into());
+        }
         self.store
             .compare_exchange_vault_credentials(profile, old, next)
             .map_err(|_| "Vault credential publication is uncertain".into())
@@ -6569,6 +6980,15 @@ impl SessionStore for DpapiStore {
 
     fn save_pending(&self, scope: &str, session: &auth::Session) -> Result<(), String> {
         self.check_scope(scope)?;
+        if !mount_only() && session.app_token_username.is_some() {
+            return Err("Desktop session storage accepts OAuth sessions only".into());
+        }
+        if mount_only() && !windows_headless::session_allowed(scope, session)? {
+            return Err("Session does not match the headless configuration".into());
+        }
+        if mount_only() && !windows_headless::remember_login(&self.profile_scope)? {
+            return Ok(());
+        }
         let bytes = Zeroizing::new(
             serde_json::to_vec(session).map_err(|_| "Could not serialize the sign-in session")?,
         );
@@ -6582,6 +7002,15 @@ impl SessionStore for DpapiStore {
 
     fn publish_active(&self, scope: &str, session: &auth::Session) -> Result<(), String> {
         self.check_scope(scope)?;
+        if !mount_only() && session.app_token_username.is_some() {
+            return Err("Desktop session storage accepts OAuth sessions only".into());
+        }
+        if mount_only() && !windows_headless::session_allowed(scope, session)? {
+            return Err("Session does not match the headless configuration".into());
+        }
+        if mount_only() && !windows_headless::remember_login(&self.profile_scope)? {
+            return Ok(());
+        }
         self.store
             .set_active_identity(scope, &session.server, &session.client_id)
             .map_err(|_| "Could not save the active session pointer in protected storage".into())
@@ -6589,6 +7018,9 @@ impl SessionStore for DpapiStore {
 
     fn load_active(&self, expected_scope: &str) -> Result<Option<auth::Session>, String> {
         self.check_scope(expected_scope)?;
+        if mount_only() && !windows_headless::remember_login(&self.profile_scope)? {
+            return Ok(None);
+        }
         let identity = self
             .store
             .active_identity()
@@ -6611,28 +7043,36 @@ impl SessionStore for DpapiStore {
         if session.server != server || session.client_id != client_id {
             return Err("Saved Windows session does not match its active identity".into());
         }
+        if !mount_only() && session.app_token_username.is_some() {
+            return Err("Saved Desktop session is not an OAuth session; sign in again".into());
+        }
+        if mount_only() && !windows_headless::session_allowed(expected_scope, &session)? {
+            return Err("Saved session does not match the headless configuration".into());
+        }
         Ok(Some(session))
     }
 
     fn revoke_active(&self) -> Result<Option<(String, String, String)>, String> {
-        let identity = self
-            .store
-            .active_identity()
-            .map_err(|_| "Could not read the active session pointer".to_string())?;
-        if let Some((profile, _, _)) = &identity {
-            self.check_scope(profile)?;
+        if mount_only() && !windows_headless::remember_login(&self.profile_scope)? {
+            return Ok(None);
         }
-        self.store
-            .clear_active_identity()
-            .map_err(|_| "Could not revoke the active session pointer".to_string())?;
-        Ok(identity)
+        self.revoke_saved_identity()
     }
 
     fn remove(&self, scope: &str, server: &str, client_id: &str) -> Result<(), String> {
         self.check_scope(scope)?;
-        self.store
-            .remove(Some(scope), server, client_id)
-            .map_err(|_| "Could not remove the session from Windows protected storage".into())
+        if mount_only() && !windows_headless::remember_login(&self.profile_scope)? {
+            return Ok(());
+        }
+        self.remove_saved_identity(scope, server, client_id)
+    }
+
+    fn revoke_active_for_logout(&self) -> Result<Option<(String, String, String)>, String> {
+        self.revoke_saved_identity()
+    }
+
+    fn remove_for_logout(&self, scope: &str, server: &str, client_id: &str) -> Result<(), String> {
+        self.remove_saved_identity(scope, server, client_id)
     }
 
     fn save_root_config(
@@ -6679,7 +7119,16 @@ pub(super) fn run() -> Result<(), String> {
     let args = Args::parse();
     match args.command {
         Command::Request { message } => request_once(&message),
-        Command::Serve => {
+        Command::RequestStdin => {
+            let mut input = std::io::stdin().lock();
+            let request: Value = read_json_value(&mut input)?;
+            let request = crate::headless_runtime::SecretRequest(request);
+            request_value(&request.0)
+        }
+        Command::Serve {
+            mount_only: requested,
+        } => {
+            windows_headless::validate_serve(requested, runtime_mode()?)?;
             if WINDOWS_ACCOUNTS_ENABLED {
                 windows_profiles::serve_profiles()
             } else {
@@ -6692,7 +7141,18 @@ pub(super) fn run() -> Result<(), String> {
 fn request_once(message: &str) -> Result<(), String> {
     let request: Value = serde_json::from_str(message).map_err(|_| "Invalid control request")?;
     reject_secret_request(&request)?;
-    let timeout = request_timeout(&request);
+    if request.get("app_token").is_some()
+        || request.get("action").and_then(Value::as_str) == Some("auth_app_token")
+    {
+        return Err(
+            "Read the app token from stdin; it must never appear in command-line arguments".into(),
+        );
+    }
+    request_value(&request)
+}
+
+fn request_value(request: &Value) -> Result<(), String> {
+    let timeout = request_timeout(request);
     let mut stream = connect_current_user(timeout)
         .map_err(|_| "Raiun agent is not running for this Windows user".to_owned())?;
     write_json_line(&mut stream, &request)
@@ -6745,6 +7205,7 @@ fn serve_agent(agent: Arc<WindowsAgent>) -> Result<(), String> {
     agent.attach_existing_file_save_owner()?;
     let stopping = Arc::new(AtomicBool::new(false));
     while !stopping.load(Ordering::Acquire) {
+        agent.maybe_start_refresh()?;
         // Do not classify bind errors as disconnected clients: claiming the
         // first same-user pipe instance is part of the ownership boundary.
         let listener = NamedPipeListener::bind(Duration::from_millis(500))
@@ -6794,7 +7255,7 @@ fn reject_control_secret_request(request: &Value) -> Result<(), String> {
 
 fn request_timeout(request: &Value) -> Duration {
     match request.get("action").and_then(Value::as_str).unwrap_or("") {
-        "auth_begin" => Duration::from_secs(65),
+        "auth_begin" | "auth_app_token" => Duration::from_secs(65),
         "shutdown"
         | "auth_cancel"
         | "logout"
@@ -10114,6 +10575,7 @@ pub(super) mod tests {
             true,
             payload,
             upload_edit,
+            None,
         );
         let storage = DpapiSessionStore::current_user().unwrap();
         let _registry_owner = storage.lock_profile_registry().unwrap();
@@ -16346,6 +16808,54 @@ pub(super) mod tests {
         range_bytes: usize,
         last_put_if_match: Option<String>,
         last_read_if_match: Option<String>,
+        put_attempt_count: usize,
+        forbidden_put_count: usize,
+        unavailable_request_count: usize,
+        last_put_attempt_if_match: Option<String>,
+        verified_readback_count: usize,
+        paced_readback: Option<SyntheticReadbackPace>,
+    }
+
+    struct SyntheticReadbackPace {
+        bytes_per_second: u64,
+        sent: usize,
+        elapsed_millis: u128,
+        finished: bool,
+    }
+
+    fn write_paced_synthetic_readback(
+        stream: &mut TcpStream,
+        body: &[u8],
+        etag: &str,
+        pace: &mut SyntheticReadbackPace,
+    ) {
+        let started = Instant::now();
+        let result = (|| -> std::io::Result<()> {
+            stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nETag: {etag}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )?;
+            for chunk in body.chunks(64 * 1024) {
+                let target = Duration::from_secs_f64(
+                    (pace.sent + chunk.len()) as f64 / pace.bytes_per_second as f64,
+                );
+                while let Some(remaining) = target.checked_sub(started.elapsed()) {
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    thread::sleep(remaining.min(Duration::from_millis(25)));
+                }
+                stream.write_all(chunk)?;
+                pace.sent += chunk.len();
+            }
+            Ok(())
+        })();
+        pace.elapsed_millis = started.elapsed().as_millis();
+        pace.finished = result.is_ok() && pace.sent == body.len();
+        // A failed paced response is retained as incomplete telemetry. It is
+        // never silently counted as a completed readback or a fixture pass.
     }
 
     struct SyntheticVaultUploadFixture {
@@ -16362,12 +16872,15 @@ pub(super) mod tests {
         forbidden_mutation_count: usize,
     }
 
-    struct SyntheticPersonalSpacesFixture {
+    pub(super) struct SyntheticPersonalSpacesFixture {
         stop: std::sync::mpsc::Sender<()>,
         worker: thread::JoinHandle<()>,
         recovery: Arc<Mutex<SyntheticRecoveryFile>>,
         native_reads: Arc<Mutex<SyntheticNativeReadFixture>>,
         vault_upload: Option<Arc<Mutex<SyntheticVaultUploadFixture>>>,
+        directory_model: Option<
+            Arc<Mutex<super::windows_profiles::windows_headless_directory_test::DirectoryModel>>,
+        >,
     }
 
     #[derive(Default)]
@@ -16386,10 +16899,129 @@ pub(super) mod tests {
         project_hydration_mode: Option<&'static str>,
         etag_mismatch_count: usize,
         mutation_attempt_count: usize,
+        all_mutation_attempt_count: usize,
+        mutation_diagnostics: Vec<(&'static str, String)>,
+    }
+
+    #[derive(Clone, Copy)]
+    pub(super) enum SyntheticOrdinaryWriteMode {
+        PersonalSuccess,
+        PersonalForbidden,
+        Success,
+        Forbidden,
+        Unavailable,
+    }
+
+    #[derive(Clone, serde::Serialize)]
+    pub(super) struct SyntheticOrdinaryWriteSnapshot {
+        pub body: Vec<u8>,
+        pub etag: String,
+        pub put_attempt_count: usize,
+        pub put_count: usize,
+        pub get_count: usize,
+        pub range_count: usize,
+        pub last_put_if_match: Option<String>,
+        pub last_read_if_match: Option<String>,
+        pub forbidden_put_count: usize,
+        pub unavailable_request_count: usize,
+        pub last_put_attempt_if_match: Option<String>,
+        pub verified_readback_count: usize,
     }
 
     impl SyntheticPersonalSpacesFixture {
-        fn join(self) -> thread::Result<()> {
+        #[cfg(debug_assertions)]
+        pub(super) fn directory_observation(&self) -> Value {
+            self.directory_model
+                .as_ref()
+                .expect("directory fixture")
+                .lock()
+                .unwrap()
+                .observation()
+        }
+        pub(super) fn pace_streamed_readback(&self, bytes_per_second: u64) {
+            assert!((64 * 1024..=1024 * 1024).contains(&bytes_per_second));
+            let mut state = self.recovery.lock().unwrap();
+            assert_eq!(state.put_attempt_count, 0);
+            assert!(state.paced_readback.is_none());
+            state.paced_readback = Some(SyntheticReadbackPace {
+                bytes_per_second,
+                sent: 0,
+                elapsed_millis: 0,
+                finished: false,
+            });
+        }
+
+        pub(super) fn paced_readback_observation(&self) -> Value {
+            let state = self.recovery.lock().unwrap();
+            match &state.paced_readback {
+                Some(pace) => json!({"bytes_per_second":pace.bytes_per_second,"sent":pace.sent,
+                    "elapsed_millis":pace.elapsed_millis,"finished":pace.finished}),
+                None => Value::Null,
+            }
+        }
+        // Diagnostic-only seeding before any child admission. Shared wire
+        // handlers and original version/counter semantics remain unchanged.
+        pub(super) fn seed_streamed_existing_file(&self, body: Vec<u8>) {
+            let mut state = self.recovery.lock().unwrap();
+            assert!(state.present && matches!(body.len(), 17825799 | 2097159));
+            assert_eq!(state.etag, "\"synthetic-file-v1\"");
+            assert_eq!(state.put_attempt_count, 0);
+            assert_eq!(state.put_count, 0);
+            assert_eq!(state.get_count, 0);
+            assert_eq!(state.range_count, 0);
+            state.body = body;
+        }
+
+        pub(super) fn streamed_write_observation(&self) -> Value {
+            use sha2::Digest as _;
+            let state = self.recovery.lock().unwrap();
+            json!({"bytes":state.body.len(),"sha256":format!("{:x}",sha2::Sha256::digest(&state.body)),
+                "etag":state.etag,"put_attempts":state.put_attempt_count,"puts":state.put_count,
+                "readbacks":state.verified_readback_count,"ranges":state.range_count,
+                "forbidden":state.forbidden_put_count,"put_if_match":state.last_put_if_match,
+                "attempt_if_match":state.last_put_attempt_if_match,"read_if_match":state.last_read_if_match})
+        }
+
+        pub(super) fn request_count(&self) -> usize {
+            self.native_reads.lock().unwrap().request_count
+        }
+        pub(super) fn global_mutation_attempts(&self) -> usize {
+            self.native_reads.lock().unwrap().all_mutation_attempt_count
+        }
+        pub(super) fn mutation_diagnostics(&self) -> Vec<(&'static str, String)> {
+            self.native_reads
+                .lock()
+                .unwrap()
+                .mutation_diagnostics
+                .clone()
+        }
+        pub(super) fn ordinary_write_snapshot(&self) -> SyntheticOrdinaryWriteSnapshot {
+            let state = self.recovery.lock().unwrap();
+            SyntheticOrdinaryWriteSnapshot {
+                body: state.body.clone(),
+                etag: state.etag.clone(),
+                put_attempt_count: state.put_attempt_count,
+                put_count: state.put_count,
+                get_count: state.get_count,
+                range_count: state.range_count,
+                last_put_if_match: state.last_put_if_match.clone(),
+                last_read_if_match: state.last_read_if_match.clone(),
+                forbidden_put_count: state.forbidden_put_count,
+                unavailable_request_count: state.unavailable_request_count,
+                last_put_attempt_if_match: state.last_put_attempt_if_match.clone(),
+                verified_readback_count: state.verified_readback_count,
+            }
+        }
+        pub(super) fn read_counts(&self) -> (usize, usize, usize, usize) {
+            let reads = self.native_reads.lock().unwrap();
+            (
+                reads.personal_get_count,
+                reads.project_get_count,
+                reads.etag_mismatch_count,
+                reads.mutation_attempt_count,
+            )
+        }
+        pub(super) fn join(self) -> thread::Result<()> {
             let _ = self.stop.send(());
             self.worker.join()
         }
@@ -16399,6 +17031,137 @@ pub(super) mod tests {
         emit_stage: impl Fn(&str),
     ) -> (String, SyntheticPersonalSpacesFixture) {
         synthetic_personal_spaces_server_inner(emit_stage, false)
+    }
+
+    pub(super) fn synthetic_headless_personal_spaces_server(
+        emit_stage: impl Fn(&str),
+    ) -> (String, SyntheticPersonalSpacesFixture) {
+        use base64::Engine as _;
+        // Fixed synthetic credential, never a real account or credential input.
+        let header = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD
+                .encode("synthetic-user:synthetic-headless-app-token")
+        );
+        synthetic_personal_spaces_server_inner_with_vault_upload(
+            emit_stage,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            Some(header),
+        )
+    }
+
+    pub(super) fn synthetic_headless_ordinary_write_server(
+        emit_stage: impl Fn(&str),
+        armed: PathBuf,
+        mode: SyntheticOrdinaryWriteMode,
+    ) -> (String, SyntheticPersonalSpacesFixture) {
+        use base64::Engine as _;
+        let header = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD
+                .encode("synthetic-user:synthetic-headless-app-token")
+        );
+        synthetic_personal_spaces_server_with_write_control(
+            emit_stage,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            Some(header),
+            Some((armed, mode)),
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn headless_directory_server_requires_auth_before_create_only_mutation() {
+        let (server, fixture) = synthetic_headless_directory_server(false);
+        let checks = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let send = |authorization: Option<&str>| {
+                let address = server.strip_prefix("http://").unwrap();
+                let mut stream = TcpStream::connect(address).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                write!(stream,"MKCOL /remote.php/dav/personal/synthetic-personal-drive/automatic-directory HTTP/1.1\r\nHost: {address}\r\nContent-Length: 0\r\nConnection: close\r\n").unwrap();
+                if let Some(value) = authorization {
+                    write!(stream, "Authorization: {value}\r\n").unwrap();
+                }
+                stream.write_all(b"\r\n").unwrap();
+                let mut reply = String::new();
+                stream.read_to_string(&mut reply).unwrap();
+                reply
+            };
+            assert!(send(None).starts_with("HTTP/1.1 401"));
+            assert_eq!(fixture.directory_observation()["attempts"], json!([]));
+            use base64::Engine as _;
+            let authorization = format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD
+                    .encode("synthetic-user:synthetic-headless-app-token")
+            );
+            assert!(send(Some(&authorization)).starts_with("HTTP/1.1 201"));
+            assert!(send(Some(&authorization)).starts_with("HTTP/1.1 405"));
+            let observation = fixture.directory_observation();
+            assert_eq!(observation["attempts"].as_array().unwrap().len(), 2);
+            assert_eq!(observation["created"].as_array().unwrap().len(), 1);
+            assert_eq!(observation["invalid"], 0);
+            assert_eq!(fixture.global_mutation_attempts(), 3);
+        }));
+        fixture.join().unwrap();
+        checks.unwrap();
+    }
+
+    #[cfg(debug_assertions)]
+    pub(super) fn synthetic_headless_directory_server(
+        lost_response: bool,
+    ) -> (String, SyntheticPersonalSpacesFixture) {
+        use base64::Engine as _;
+        let header = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD
+                .encode("synthetic-user:synthetic-headless-app-token")
+        );
+        synthetic_personal_spaces_server_with_directory_control(
+            |_| {},
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            Some(header),
+            None,
+            Some(Arc::new(Mutex::new(
+                super::windows_profiles::windows_headless_directory_test::DirectoryModel::new(
+                    lost_response,
+                ),
+            ))),
+        )
+    }
+
+    // New opt-in Personal route; existing fixture constructors retain their routes.
+    pub(super) fn synthetic_headless_personal_write_server(
+        emit_stage: impl Fn(&str),
+        armed: PathBuf,
+        forbidden: bool,
+    ) -> (String, SyntheticPersonalSpacesFixture) {
+        synthetic_headless_ordinary_write_server(
+            emit_stage,
+            armed,
+            if forbidden {
+                SyntheticOrdinaryWriteMode::PersonalForbidden
+            } else {
+                SyntheticOrdinaryWriteMode::PersonalSuccess
+            },
+        )
     }
 
     fn synthetic_personal_spaces_server_with_native_read_files(
@@ -16485,9 +17248,11 @@ pub(super) mod tests {
             initialized_vault,
             vault_payload,
             false,
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)] // Existing test fixture flags plus one isolated auth override.
     fn synthetic_personal_spaces_server_inner_with_vault_upload(
         emit_stage: impl Fn(&str),
         native_read_files_enabled: bool,
@@ -16496,8 +17261,70 @@ pub(super) mod tests {
         initialized_vault: bool,
         vault_payload: bool,
         allow_vault_upload: bool,
+        expected_authorization: Option<String>,
+    ) -> (String, SyntheticPersonalSpacesFixture) {
+        synthetic_personal_spaces_server_with_write_control(
+            emit_stage,
+            native_read_files_enabled,
+            recovery_read_probe_enabled,
+            initially_absent,
+            initialized_vault,
+            vault_payload,
+            allow_vault_upload,
+            expected_authorization,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn synthetic_personal_spaces_server_with_write_control(
+        emit_stage: impl Fn(&str),
+        native_read_files_enabled: bool,
+        recovery_read_probe_enabled: bool,
+        initially_absent: bool,
+        initialized_vault: bool,
+        vault_payload: bool,
+        allow_vault_upload: bool,
+        expected_authorization: Option<String>,
+        write_control: Option<(PathBuf, SyntheticOrdinaryWriteMode)>,
+    ) -> (String, SyntheticPersonalSpacesFixture) {
+        synthetic_personal_spaces_server_with_directory_control(
+            emit_stage,
+            native_read_files_enabled,
+            recovery_read_probe_enabled,
+            initially_absent,
+            initialized_vault,
+            vault_payload,
+            allow_vault_upload,
+            expected_authorization,
+            write_control,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn synthetic_personal_spaces_server_with_directory_control(
+        emit_stage: impl Fn(&str),
+        native_read_files_enabled: bool,
+        recovery_read_probe_enabled: bool,
+        initially_absent: bool,
+        initialized_vault: bool,
+        vault_payload: bool,
+        allow_vault_upload: bool,
+        expected_authorization: Option<String>,
+        write_control: Option<(PathBuf, SyntheticOrdinaryWriteMode)>,
+        directory_model: Option<
+            Arc<Mutex<super::windows_profiles::windows_headless_directory_test::DirectoryModel>>,
+        >,
     ) -> (String, SyntheticPersonalSpacesFixture) {
         assert!(!allow_vault_upload || (initialized_vault && vault_payload));
+        let personal_write = write_control.as_ref().is_some_and(|(_, mode)| {
+            matches!(
+                mode,
+                SyntheticOrdinaryWriteMode::PersonalSuccess
+                    | SyntheticOrdinaryWriteMode::PersonalForbidden
+            )
+        });
         emit_stage("listener_bind_begin");
         let listener = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|error| {
             emit_stage(&format!("listener_bind_error_kind_{:?}", error.kind()));
@@ -16532,6 +17359,12 @@ pub(super) mod tests {
             range_bytes: 0,
             last_put_if_match: None,
             last_read_if_match: None,
+            put_attempt_count: 0,
+            forbidden_put_count: 0,
+            unavailable_request_count: 0,
+            last_put_attempt_if_match: None,
+            verified_readback_count: 0,
+            paced_readback: None,
         }));
         let worker_recovery = Arc::clone(&recovery);
         let native_reads = Arc::new(Mutex::new(SyntheticNativeReadFixture {
@@ -16556,6 +17389,7 @@ pub(super) mod tests {
             }))
         });
         let worker_vault_upload = vault_upload.as_ref().map(Arc::clone);
+        let worker_directory_model = directory_model.as_ref().map(Arc::clone);
         listener.set_nonblocking(true).unwrap_or_else(|error| {
             emit_stage("listener_nonblocking_error");
             panic!(
@@ -16566,7 +17400,9 @@ pub(super) mod tests {
         emit_stage("listener_nonblocking_ready");
         let (stop, stop_receiver) = std::sync::mpsc::channel();
         let worker = thread::spawn(move || {
-            let mut expected_access = "Bearer synthetic-access-token";
+            let mut expected_access = expected_authorization
+                .as_deref()
+                .unwrap_or("Bearer synthetic-access-token");
             loop {
                 if stop_receiver.try_recv().is_ok() {
                     break;
@@ -16587,6 +17423,72 @@ pub(super) mod tests {
                     .expect("bound synthetic request reads");
                 let (request, headers, body) = read_request_with_headers(&request_stream);
                 worker_native_reads.lock().unwrap().request_count += 1;
+                // Global counter precedes authorization and every handler,
+                // including the explicitly supported recovery/vault PUT paths.
+                if !matches!(
+                    request.split_whitespace().next(),
+                    Some("GET" | "HEAD" | "PROPFIND" | "OPTIONS")
+                ) {
+                    let mut reads = worker_native_reads.lock().unwrap();
+                    reads.all_mutation_attempt_count += 1;
+                    // This server admits only synthetic test traffic. Retain
+                    // bounded method/path diagnostics without headers, query
+                    // strings or bodies; never change mutation admission.
+                    if reads.mutation_diagnostics.len() < 32 {
+                        let method = match request.split_whitespace().next() {
+                            Some("PUT") => "PUT",
+                            Some("POST") => "POST",
+                            Some("PATCH") => "PATCH",
+                            Some("DELETE") => "DELETE",
+                            Some("MKCOL") => "MKCOL",
+                            Some("MOVE") => "MOVE",
+                            Some("COPY") => "COPY",
+                            Some("PROPPATCH") => "PROPPATCH",
+                            _ => "OTHER",
+                        };
+                        let path = request
+                            .split_whitespace()
+                            .nth(1)
+                            .unwrap_or("")
+                            .split('?')
+                            .next()
+                            .unwrap_or("")
+                            .chars()
+                            .filter(|ch| !ch.is_control())
+                            .take(512)
+                            .collect();
+                        reads.mutation_diagnostics.push((method, path));
+                    }
+                }
+                let ordinary_path = if personal_write {
+                    "/remote.php/dav/personal/synthetic-personal-drive/ordinary-save.bin"
+                } else {
+                    "/remote.php/dav/projects/synthetic-project-drive/RecoveryRoot/document.bin"
+                };
+                let ordinary_put = request.starts_with("PUT ")
+                    && request.split_whitespace().nth(1) == Some(ordinary_path);
+                if ordinary_put {
+                    let mut state = worker_recovery.lock().unwrap();
+                    state.put_attempt_count += 1;
+                    state.last_put_attempt_if_match = headers
+                        .iter()
+                        .find(|(name, _)| name == "if-match")
+                        .map(|(_, value)| value.clone());
+                }
+                if request.starts_with("GET /__test/request_count ") {
+                    let count = worker_native_reads
+                        .lock()
+                        .unwrap()
+                        .request_count
+                        .to_string();
+                    write!(
+                        request_stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{count}",
+                        count.len()
+                    )
+                    .unwrap();
+                    continue;
+                }
                 // Count forbidden methods without granting them a handler.
                 // The existing initialized-vault assertion still rejects them.
                 if ["DELETE ", "MOVE "]
@@ -16634,6 +17536,10 @@ pub(super) mod tests {
                     );
                 }
                 if request.starts_with("POST /token ") {
+                    assert!(
+                        expected_authorization.is_none(),
+                        "app-token fixture forbids OAuth exchange"
+                    );
                     let form: HashMap<String, String> =
                         url::form_urlencoded::parse(&body).into_owned().collect();
                     assert_eq!(
@@ -16663,6 +17569,44 @@ pub(super) mod tests {
                 if authorization != Some(expected_access) {
                     write!(request_stream, "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
                     continue;
+                }
+                // Directory model is explicit test-only and remains behind the
+                // same real app-token authorization gate as every mutation.
+                if let Some(model) = &worker_directory_model
+                    && model.lock().unwrap().handle(
+                        &worker_server,
+                        &request,
+                        &headers,
+                        &body,
+                        &mut request_stream,
+                    )
+                {
+                    continue;
+                }
+                if let Some((armed, mode)) = &write_control
+                    && std::fs::read(armed).is_ok_and(|bytes| bytes == b"armed\n")
+                {
+                    if matches!(mode, SyntheticOrdinaryWriteMode::Unavailable)
+                        && request.split_whitespace().nth(1).is_some_and(|path| {
+                            path.starts_with("/remote.php/dav/projects/synthetic-project-drive")
+                        })
+                    {
+                        worker_recovery.lock().unwrap().unavailable_request_count += 1;
+                        // Close without an HTTP response: a real transport
+                        // failure, not an HTTP status relabelled as offline.
+                        drop(request_stream);
+                        continue;
+                    }
+                    if matches!(
+                        mode,
+                        SyntheticOrdinaryWriteMode::Forbidden
+                            | SyntheticOrdinaryWriteMode::PersonalForbidden
+                    ) && ordinary_put
+                    {
+                        worker_recovery.lock().unwrap().forbidden_put_count += 1;
+                        write!(request_stream, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                        continue;
+                    }
                 }
                 // Common bearer-auth gate above must precede every opt-in mutation.
                 if request.starts_with("PUT ")
@@ -16780,6 +17724,12 @@ pub(super) mod tests {
                     request_stream.write_all(bytes).unwrap();
                     continue;
                 }
+                if expected_authorization.is_some()
+                    && request.starts_with("GET /graph/v1.0/me HTTP/")
+                {
+                    respond(&mut request_stream, 200, r#"{"id":"synthetic-user"}"#);
+                    continue;
+                }
                 if request.starts_with("GET /graph/v1.0/me/drives") {
                     let response = json!({
                         "value": [{
@@ -16802,7 +17752,10 @@ pub(super) mod tests {
                     let project_prefix =
                         "/remote.php/dav/projects/synthetic-project-drive";
                     let (root_id, name, is_directory, etag, size) =
-                        if native_read_files_enabled
+                        if personal_write && normalized == ordinary_path {
+                            let snapshot = worker_recovery.lock().unwrap();
+                            ("synthetic-personal-ordinary-save", "ordinary-save.bin", false, snapshot.etag.clone(), snapshot.body.len())
+                        } else if native_read_files_enabled
                             && normalized
                                 == "/remote.php/dav/personal/synthetic-personal-drive/native-read.bin"
                         {
@@ -16910,6 +17863,10 @@ pub(super) mod tests {
                         && normalized == "/remote.php/dav/personal/synthetic-personal-drive"
                         && native_read_files_enabled
                     {
+                        if personal_write {
+                            let snapshot = worker_recovery.lock().unwrap();
+                            entries.push((ordinary_path.into(), "synthetic-personal-ordinary-save".into(), "ordinary-save.bin".into(), false, snapshot.etag.clone(), snapshot.body.len()));
+                        }
                         entries.push((
                             "/remote.php/dav/personal/synthetic-personal-drive/native-read.bin".into(),
                             "synthetic-personal-native-read".into(),
@@ -16949,7 +17906,8 @@ pub(super) mod tests {
                         "<?xml version=\"1.0\"?><d:multistatus xmlns:d=\"DAV:\" xmlns:oc=\"http://owncloud.org/ns\">{response_xml}</d:multistatus>"
                     );
                     write!(request_stream, "HTTP/1.1 207 Multi-Status\r\nContent-Type: application/xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}", xml.len()).unwrap();
-                } else if request.starts_with("PUT /remote.php/dav/projects/synthetic-project-drive/RecoveryRoot/document.bin") {
+                } else if (personal_write && ordinary_put)
+                    || (!personal_write && request.starts_with("PUT /remote.php/dav/projects/synthetic-project-drive/RecoveryRoot/document.bin")) {
                     let if_match = headers
                         .iter()
                         .find(|(name, _)| name == "if-match")
@@ -16967,7 +17925,8 @@ pub(super) mod tests {
                     snapshot.body = body;
                     snapshot.etag = "\"synthetic-file-v2\"".into();
                     write!(request_stream, "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-                } else if request.starts_with("GET /remote.php/dav/projects/synthetic-project-drive/RecoveryRoot/document.bin")
+                } else if (personal_write && request.starts_with("GET ") && request.split_whitespace().nth(1) == Some(ordinary_path))
+                    || (!personal_write && request.starts_with("GET /remote.php/dav/projects/synthetic-project-drive/RecoveryRoot/document.bin"))
                     || (recovery_read_probe_enabled
                         && request.starts_with("GET /remote.php/dav/projects/synthetic-project-drive/RecoveryRoot/read-probe.bin"))
                 {
@@ -17003,9 +17962,25 @@ pub(super) mod tests {
                         request_stream.write_all(&body).unwrap();
                     } else {
                         snapshot.get_count += 1;
+                        if snapshot.put_count > 0 && snapshot.etag == "\"synthetic-file-v2\"" {
+                            snapshot.verified_readback_count += 1;
+                        }
                         snapshot.last_read_if_match = if_match;
-                        write!(request_stream, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nETag: {}\r\nConnection: close\r\n\r\n", snapshot.body.len(), snapshot.etag).unwrap();
-                        request_stream.write_all(&snapshot.body).unwrap();
+                        if snapshot.put_count > 0 && snapshot.etag == "\"synthetic-file-v2\""
+                            && snapshot.paced_readback.is_some()
+                        {
+                            let mut pace = snapshot.paced_readback.take().unwrap();
+                            write_paced_synthetic_readback(
+                                &mut request_stream,
+                                &snapshot.body,
+                                &snapshot.etag,
+                                &mut pace,
+                            );
+                            snapshot.paced_readback = Some(pace);
+                        } else {
+                            write!(request_stream, "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nETag: {}\r\nConnection: close\r\n\r\n", snapshot.body.len(), snapshot.etag).unwrap();
+                            request_stream.write_all(&snapshot.body).unwrap();
+                        }
                     }
                 } else if native_read_files_enabled
                     && (request.starts_with("GET /remote.php/dav/personal/synthetic-personal-drive/native-read.bin")
@@ -17086,6 +18061,7 @@ pub(super) mod tests {
                 recovery,
                 native_reads,
                 vault_upload,
+                directory_model,
             },
         )
     }
@@ -17718,6 +18694,7 @@ pub(super) mod tests {
 
     fn synthetic_session(server: &str, client_id: &str, expires_at: u64) -> auth::Session {
         auth::Session {
+            app_token_username: None,
             server: server.to_owned(),
             client_id: client_id.to_owned(),
             access_token: "synthetic-access-token".into(),
@@ -17733,6 +18710,7 @@ pub(super) mod tests {
     fn session_for_refresh(endpoint: &str, expires_at: u64) -> auth::Session {
         let server = endpoint.trim_end_matches("/token").to_owned();
         auth::Session {
+            app_token_username: None,
             server: server.clone(),
             client_id: "synthetic-client".into(),
             access_token: "synthetic-access-token".into(),

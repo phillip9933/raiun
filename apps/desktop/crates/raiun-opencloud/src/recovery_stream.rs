@@ -1,4 +1,4 @@
-//! Streaming recovery of an existing ordinary file, with independent full-body
+//! Streaming recovery/create of an ordinary file, with independent full-body
 //! readback. These checks do not establish namespace atomicity on the server.
 //! Errors after dispatch leave delivery uncertain: callers must retain their
 //! immutable snapshot and original condition, and must not automatically retry.
@@ -12,6 +12,12 @@ use std::sync::atomic::AtomicBool;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 const CHUNK: usize = 64 * 1024;
+
+/// HTTP 201 plus independent observed metadata/content. The observed ID is
+/// not an atomic server-created-ID receipt, parent CAS, or native authority.
+pub struct RecoveryCreateReadback {
+    pub observed: RecoveryStreamReadback,
+}
 
 /// A complete, revision-conditioned readback; not authority to discard local
 /// recovery data or acknowledge a native file without its separate guards.
@@ -449,6 +455,205 @@ impl OpenCloudClient {
         ensure_not_cancelled(&|| cancelled())?;
         ensure_not_cancelled(&|| cancel.is_cancelled())?;
         Ok(readback)
+    }
+
+    /// Blocking-source create sibling. Retains the source worker through full
+    /// readback and joins on every return path, including failed admission.
+    /// A synchronous read/destructor must return before shutdown can finish.
+    #[allow(clippy::too_many_arguments)]
+    pub fn recovery_create_blocking_reader_cancellable_with_context<R>(
+        &self,
+        space: &str,
+        remote_root_path: &str,
+        expected_root_id: &str,
+        relative_path: &str,
+        reader: R,
+        content_length: u64,
+        expected_sha256: [u8; 32],
+        context: RangeReadContext,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<RecoveryCreateReadback, CloudError>
+    where
+        R: std::io::Read + Send + 'static,
+    {
+        let original_cancel = self.transfer_budget.cancellation();
+        let cancelled: Arc<dyn Fn() -> bool + Send + Sync> =
+            Arc::new(move || cancelled() || original_cancel.is_cancelled());
+        let (mut worker, reader) = crate::blocking_reader::start(reader)
+            .map_err(|_| invalid("create source worker could not start"))?;
+        let result = self.recovery_create_reader_cancellable_with_context(
+            space,
+            remote_root_path,
+            expected_root_id,
+            relative_path,
+            reader,
+            content_length,
+            expected_sha256,
+            context,
+            Arc::clone(&cancelled),
+        );
+        let completion = worker.cancel_and_join();
+        match result {
+            Err(error) => Err(error),
+            Ok(proof) if completion == crate::blocking_reader::WorkerCompletion::Eof => {
+                self.stream_context_current(context)?;
+                ensure_not_cancelled(&|| cancelled())?;
+                Ok(proof)
+            }
+            Ok(_) => Err(invalid("create source worker did not complete safely")),
+        }
+    }
+
+    /// Create an ordinary file with one Absent/root-conditioned PUT and require
+    /// HTTP 201 followed by an independent exact-ETag/ID/length/hash full GET.
+    /// Not an atomic created-ID receipt. OC9 normal PUT can resolve an existing
+    /// node if a competitor appears before initiation, despite If-None-Match;
+    /// its zero-byte TouchFile route is not proven no-clobber. Pre-stat, 201
+    /// and GET do not establish atomic absence and cannot undo an overwrite. No fallback/retry is performed. After any possible
+    /// dispatch error callers retain source/intent and treat delivery as uncertain.
+    /// An async body may be dropped after sending: protected-source callers keep
+    /// a separate master pin or use the joined blocking-reader sibling.
+    #[allow(clippy::too_many_arguments)]
+    pub fn recovery_create_reader_cancellable_with_context<R>(
+        &self,
+        space: &str,
+        remote_root_path: &str,
+        expected_root_id: &str,
+        relative_path: &str,
+        reader: R,
+        content_length: u64,
+        expected_sha256: [u8; 32],
+        context: RangeReadContext,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<RecoveryCreateReadback, CloudError>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+    {
+        // Capture the original cancellation epoch before metadata/source work;
+        // composed callback also fences the independently invoked readback.
+        let original_cancel = self.transfer_budget.cancellation();
+        let cancelled: Arc<dyn Fn() -> bool + Send + Sync> =
+            Arc::new(move || cancelled() || original_cancel.is_cancelled());
+        self.stream_context_current(context)?;
+        ensure_not_cancelled(&|| cancelled())?;
+        let _guard = RangeContextGuard::enter(context);
+        let path = recovery_target_path(remote_root_path, relative_path)?;
+        stream_metadata_step(self, context, || {
+            self.validate_recovery_root(space, remote_root_path, expected_root_id)
+        })?;
+        stream_metadata_step(self, context, || {
+            match CloudBackend::stat(self, space, &path) {
+                Err(error) if error.kind == ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+                Ok(_) => Err(conflict("create target already exists")),
+            }
+        })?;
+        let (mut selected, url) =
+            stream_metadata_step(self, context, || self.transfer_url(space, &path))?;
+        let root_condition = stream_metadata_step(self, context, || {
+            selected.dav_url = self
+                .validate_identity_addressed_root(&selected, expected_root_id)?
+                .to_string();
+            self.ensure_writable_target(&selected, &url, &path)?;
+            self.root_write_condition(&selected, &path, expected_root_id)
+        })?;
+        self.stream_context_current(context)?;
+        ensure_not_cancelled(&|| cancelled())?;
+        let (request, token) = self.request_async(Method::PUT, &url)?;
+        let budget = self.transfer_budget.clone();
+        let cancel = budget.cancellation();
+        let pause_budget = budget.clone();
+        let body_cancel = cancel.clone();
+        let generation = Arc::clone(&self.token_generation);
+        let body_generation = Arc::clone(&generation);
+        let body_job_cancelled = Arc::clone(&cancelled);
+        let timeout = transfer_timeout_for_context(
+            context,
+            &budget,
+            TransferDirection::Upload,
+            content_length,
+        )?;
+        let verified = Arc::new(AtomicBool::new(false));
+        let witness = Arc::clone(&verified);
+        let result = async_body::run_body_operation_cancellable(
+            self.body_idle_timeout,
+            timeout,
+            || {
+                cancelled()
+                    || pause_budget.is_paused()
+                    || cancel.is_cancelled()
+                    || generation.load(Ordering::Acquire) != context.token_generation
+            },
+            move |progress| async move {
+                let body = strict_upload(StrictReader {
+                    reader,
+                    remaining: content_length,
+                    hash: Sha256::new(),
+                    digest: expected_sha256,
+                    budget,
+                    cancelled: move || {
+                        body_job_cancelled()
+                            || body_cancel.is_cancelled()
+                            || body_generation.load(Ordering::Acquire) != context.token_generation
+                    },
+                    progress,
+                    verified: witness,
+                })
+                .await
+                .map_err(|_| invalid("recovery source validation failed"))?;
+                let response = request
+                    .header(CONTENT_LENGTH, content_length)
+                    .header(CONTENT_TYPE, "application/octet-stream")
+                    .header(IF_NONE_MATCH, "*")
+                    .header("If", root_condition)
+                    .header("Cache-Control", "no-cache")
+                    .timeout(timeout)
+                    .body(reqwest::Body::wrap_stream(body))
+                    .send()
+                    .await
+                    .map_err(network)?;
+                checked_async(response, &[StatusCode::CREATED], &token)?;
+                Ok(())
+            },
+        );
+        self.stream_context_current(context)?;
+        ensure_not_cancelled(&|| cancelled())?;
+        ensure_not_cancelled(&|| cancel.is_cancelled())?;
+        result?;
+        if !verified.load(Ordering::Acquire) {
+            return Err(invalid("recovery source was not completely consumed"));
+        }
+        stream_metadata_step(self, context, || {
+            self.validate_recovery_root(space, remote_root_path, expected_root_id)
+        })?;
+        let after = stream_metadata_step(self, context, || CloudBackend::stat(self, space, &path))?;
+        validate_recovery_entry(&after, &path)?;
+        stream_metadata(&after.id, &after.etag)?;
+        if after.id.starts_with('/')
+            || Url::parse(&after.id).is_ok()
+            || after.size != content_length
+            || !after.writable
+            || after.directory
+            || after.encrypted
+        {
+            return Err(conflict("recovery upload could not be verified"));
+        }
+        let readback = self.recovery_read_digest_cancellable_with_context(
+            space,
+            remote_root_path,
+            expected_root_id,
+            relative_path,
+            &after.id,
+            &after.etag,
+            content_length,
+            expected_sha256,
+            context,
+            Arc::clone(&cancelled),
+        )?;
+        self.stream_context_current(context)?;
+        ensure_not_cancelled(&|| cancelled())?;
+        ensure_not_cancelled(&|| cancel.is_cancelled())?;
+        Ok(RecoveryCreateReadback { observed: readback })
     }
 
     /// Verify the entire decoded HTTP entity without returning its plaintext.

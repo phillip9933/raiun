@@ -44,6 +44,8 @@ const SOURCE_SERVER_ERROR: usize = 65536;
 const SOURCE_BODY_BAD: usize = 131072;
 const DESTINATION_BODY_BAD: usize = 262144;
 const DESTINATION_REVISION_CHANGES: usize = 524288;
+const PARENT_ETAG_V2_ALWAYS: usize = 1048576;
+const R49_DEPTH_ONE_ROOT_LISTING: usize = 2097152;
 
 struct Catalog {
     bindings: Mutex<Vec<ProviderIdentityBinding>>,
@@ -247,6 +249,12 @@ struct Fixture {
     owner_live: Arc<AtomicBool>,
     moves: Arc<AtomicUsize>,
     request_log: Arc<Mutex<Vec<String>>>,
+    #[cfg(windows)]
+    depth_log: Arc<Mutex<Vec<(String, String, String)>>>,
+    #[cfg(windows)]
+    parent_rows: Arc<Mutex<Vec<(String, String, String)>>>,
+    #[cfg(windows)]
+    parent_stats: Arc<Mutex<Vec<(String, String, String)>>>,
     conditional_gets: Arc<Mutex<Vec<(String, String)>>>,
     stop: mpsc::Sender<()>,
     worker: Option<thread::JoinHandle<()>>,
@@ -263,13 +271,19 @@ impl Fixture {
         let moves = Arc::new(AtomicUsize::new(0));
         let current_renamed = Arc::new(AtomicBool::new(false));
         let request_log = Arc::new(Mutex::new(Vec::new()));
+        let depth_log = Arc::new(Mutex::new(Vec::new()));
+        let parent_rows = Arc::new(Mutex::new(Vec::new()));
+        let parent_stats = Arc::new(Mutex::new(Vec::new()));
         let conditional_gets = Arc::new(Mutex::new(Vec::new()));
-        let (m, s, o, n, log, gets) = (
+        let (m, s, o, n, log, depths, rows, stats, gets) = (
             mode.clone(),
             status.clone(),
             owner_live.clone(),
             moves.clone(),
             request_log.clone(),
+            depth_log.clone(),
+            parent_rows.clone(),
+            parent_stats.clone(),
             conditional_gets.clone(),
         );
         let worker_client = Arc::new(Mutex::new(None::<Arc<OpenCloudClient>>));
@@ -317,6 +331,22 @@ impl Fixture {
                         let mut words = line.split_whitespace();
                         let method = words.next().unwrap_or_default();
                         let path = words.next().unwrap_or_default().trim_end_matches('/');
+                        let depth = headers
+                            .lines()
+                            .find_map(|header| {
+                                header
+                                    .split_once(':')
+                                    .filter(|(name, _)| name.eq_ignore_ascii_case("depth"))
+                                    .map(|(_, value)| value.trim().to_owned())
+                            })
+                            .unwrap_or_default();
+                        if method == "PROPFIND" {
+                            depths.lock().unwrap().push((
+                                method.to_owned(),
+                                path.to_owned(),
+                                depth.clone(),
+                            ));
+                        }
                         if method == "GET"
                             && (path == "/dav/personal/parent/source.txt"
                                 || path == "/dav/personal/parent/renamed.txt")
@@ -404,11 +434,29 @@ impl Fixture {
                             } else {
                                 "root"
                             };
-                            response(
-                                &mut stream,
-                                "207 Multi-Status",
-                                &xml(path, id, "\"root-etag\"", true, false, 0),
-                            );
+                            if flags & R49_DEPTH_ONE_ROOT_LISTING != 0 && depth == "1" {
+                                let parent_etag = if flags & PARENT_ETAG_V2_ALWAYS != 0 {
+                                    "\"parent-v2\""
+                                } else {
+                                    "\"parent-v1\""
+                                };
+                                rows.lock().unwrap().push((
+                                    depth.clone(),
+                                    "parent".to_owned(),
+                                    parent_etag.to_owned(),
+                                ));
+                                response(
+                                    &mut stream,
+                                    "207 Multi-Status",
+                                    &xml_with_parent(path, id, parent_etag),
+                                );
+                            } else {
+                                response(
+                                    &mut stream,
+                                    "207 Multi-Status",
+                                    &xml(path, id, "\"root-etag\"", true, false, 0),
+                                );
+                            }
                         } else if method == "PROPFIND" && path == "/dav/personal/parent" {
                             let flags = m.load(Ordering::Acquire);
                             if flags & PARENT_FORBIDDEN != 0 {
@@ -426,13 +474,19 @@ impl Fixture {
                             } else {
                                 "parent"
                             };
-                            let etag = if flags & PARENT_ETAG_CHANGES != 0
-                                && n.load(Ordering::Acquire) > 0
+                            let etag = if flags & PARENT_ETAG_V2_ALWAYS != 0
+                                || (flags & PARENT_ETAG_CHANGES != 0
+                                    && n.load(Ordering::Acquire) > 0)
                             {
                                 "\"parent-v2\""
                             } else {
                                 "\"parent-v1\""
                             };
+                            stats.lock().unwrap().push((
+                                depth.clone(),
+                                id.to_owned(),
+                                etag.to_owned(),
+                            ));
                             response(
                                 &mut stream,
                                 "207 Multi-Status",
@@ -565,6 +619,12 @@ impl Fixture {
             owner_live,
             moves,
             request_log,
+            #[cfg(windows)]
+            depth_log,
+            #[cfg(windows)]
+            parent_rows,
+            #[cfg(windows)]
+            parent_stats,
             conditional_gets,
             stop: stop_tx,
             worker: Some(worker),
@@ -792,6 +852,30 @@ fn xml(path: &str, id: &str, etag: &str, directory: bool, encrypted: bool, size:
     format!(
         r#"<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:lg="http://graph.opencloud.eu/ns"><d:response><d:href>{path}</d:href><d:propstat><d:prop><d:resourcetype>{resource_type}</d:resourcetype><d:getcontentlength>{size}</d:getcontentlength><d:getetag>{etag}</d:getetag><oc:fileid>{id}</oc:fileid>{encrypted}<oc:permissions>RDNVW</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#
     )
+}
+fn xml_with_parent(root_path: &str, root_id: &str, parent_etag: &str) -> String {
+    const OPEN: &str = r#"<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:lg="http://graph.opencloud.eu/ns">"#;
+    const CLOSE: &str = "</d:multistatus>";
+    let root = xml(root_path, root_id, "\"root-etag\"", true, false, 0);
+    let parent = xml(
+        &format!("{}/parent", root_path.trim_end_matches('/')),
+        "parent",
+        parent_etag,
+        true,
+        false,
+        0,
+    );
+    let root_inner = root
+        .strip_prefix(OPEN)
+        .unwrap()
+        .strip_suffix(CLOSE)
+        .unwrap();
+    let parent_inner = parent
+        .strip_prefix(OPEN)
+        .unwrap()
+        .strip_suffix(CLOSE)
+        .unwrap();
+    format!("{OPEN}{root_inner}{parent_inner}{CLOSE}")
 }
 
 #[test]
@@ -1331,6 +1415,87 @@ fn r47_assert_snapshot_unchanged(
 }
 
 #[cfg(windows)]
+fn r48_candidate<'hint>(
+    fixture: &Fixture,
+    batch: &'hint raiun_control_windows::directory_notifications::NotificationBatch,
+) -> FileRenameBindingCandidate<'hint> {
+    fixture
+        .backend
+        .file_rename_binding_candidate(
+            r47_source_identity(fixture),
+            fixture.parent,
+            r47_pair(batch),
+            r47_authorization(fixture),
+            LocalFileIdentity {
+                volume_serial: 7,
+                file_index: 13,
+            },
+            &|_| true,
+        )
+        .unwrap()
+}
+
+#[cfg(windows)]
+fn r49_assert_parent_capture_stages(
+    fixture: &Fixture,
+    before: (usize, usize, usize),
+    expected_parent_id: &str,
+    expected_parent_etag: &str,
+) {
+    let depth_log = fixture.depth_log.lock().unwrap();
+    let phase = &depth_log[before.0..];
+    let root_listing = phase
+        .iter()
+        .position(|(method, path, depth)| {
+            method == "PROPFIND" && path == "/dav/personal" && depth == "1"
+        })
+        .expect("Depth 1 Personal ancestor listing");
+    let parent_stat = phase
+        .iter()
+        .position(|(method, path, depth)| {
+            method == "PROPFIND" && path == "/dav/personal/parent" && depth == "0"
+        })
+        .expect("Depth 0 direct parent stat");
+    assert!(root_listing < parent_stat);
+    drop(depth_log);
+
+    let rows = fixture.parent_rows.lock().unwrap();
+    assert!(rows[before.1..].iter().any(|(depth, id, etag)| {
+        depth == "1" && id == "parent" && etag == expected_parent_etag
+    }));
+    let stats = fixture.parent_stats.lock().unwrap();
+    assert!(stats[before.2..].iter().any(|(depth, id, etag)| {
+        depth == "0" && id == expected_parent_id && etag == expected_parent_etag
+    }));
+}
+
+#[cfg(windows)]
+fn r49_capture_stage_counts(fixture: &Fixture) -> (usize, usize, usize) {
+    (
+        fixture.depth_log.lock().unwrap().len(),
+        fixture.parent_rows.lock().unwrap().len(),
+        fixture.parent_stats.lock().unwrap().len(),
+    )
+}
+
+#[cfg(windows)]
+fn r49_assert_no_destination_work(
+    fixture: &Fixture,
+    before: &(Vec<String>, Vec<ProviderIdentityBinding>, usize),
+) {
+    let requests = fixture.request_log.lock().unwrap();
+    assert!(
+        requests[before.0.len()..]
+            .iter()
+            .all(|line| !line.starts_with("MOVE ") && !line.contains("renamed.txt"))
+    );
+    assert_eq!(fixture.moves.load(Ordering::Acquire), before.2);
+    assert!(!fixture.catalog.bindings.lock().unwrap().iter().any(|binding| {
+        matches!(binding, ProviderIdentityBinding::File { path, .. } if path == "/parent/renamed.txt")
+    }));
+}
+
+#[cfg(windows)]
 #[test]
 fn r47_candidate_derives_exact_existing_binding_tuple_without_requests() {
     let mut fixture = Fixture::new();
@@ -1515,5 +1680,166 @@ fn r47_candidate_rejects_incomplete_pair_and_stale_owner() {
     );
     assert!(result.is_err());
     r47_assert_snapshot_unchanged(&fixture, &before);
+    fixture.finish();
+}
+
+#[cfg(windows)]
+#[test]
+fn r49_candidate_parent_capture_uses_fresh_metadata_and_releases_lease() {
+    let mut fixture = Fixture::new();
+    fixture.mode.store(
+        PARENT_ETAG_V2_ALWAYS | R49_DEPTH_ONE_ROOT_LISTING,
+        Ordering::Release,
+    );
+    let bytes = r47_notification_batch(
+        "Personal\\parent\\source.txt",
+        "Personal\\parent\\renamed.txt",
+    );
+    let parsed = parse_notification_buffer(&bytes);
+    let candidate = r48_candidate(&fixture, &parsed);
+    let before = r47_snapshot(&fixture);
+    let before_capture = r49_capture_stage_counts(&fixture);
+    let callback_saw_read_lease = AtomicBool::new(false);
+    let callback_saw_state_lock = AtomicBool::new(false);
+    let captured_etag = fixture
+        .backend
+        .with_file_rename_candidate_parent(&candidate, &|_| true, |captured| {
+            callback_saw_read_lease.store(
+                fixture.backend.lease_gate.try_write().is_err(),
+                Ordering::Release,
+            );
+            callback_saw_state_lock
+                .store(fixture.backend.state.try_lock().is_err(), Ordering::Release);
+            assert_eq!(captured.identity, fixture.parent);
+            assert_eq!(captured.path, "/parent");
+            assert_eq!(captured.remote.resource_id, "parent");
+            captured.remote.etag.clone()
+        })
+        .unwrap();
+
+    assert_eq!(captured_etag, "\"parent-v2\"");
+    assert_eq!(candidate.source_etag(), "\"source-etag\"");
+    assert!(callback_saw_read_lease.load(Ordering::Acquire));
+    assert!(!callback_saw_state_lock.load(Ordering::Acquire));
+    assert!(fixture.backend.lease_gate.try_write().is_ok());
+    r49_assert_parent_capture_stages(&fixture, before_capture, "parent", "\"parent-v2\"");
+    r49_assert_no_destination_work(&fixture, &before);
+    let after_requests = fixture.request_log.lock().unwrap().clone();
+    assert!(after_requests.len() > before.0.len());
+    assert!(
+        after_requests[before.0.len()..]
+            .iter()
+            .all(|line| !line.starts_with("MOVE ") && !line.contains("renamed.txt"))
+    );
+    assert_eq!(fixture.moves.load(Ordering::Acquire), before.2);
+    assert!(!fixture.catalog.bindings.lock().unwrap().iter().any(|binding| {
+        matches!(binding, ProviderIdentityBinding::File { path, .. } if path == "/parent/renamed.txt")
+    }));
+    fixture.finish();
+}
+
+#[cfg(windows)]
+#[test]
+fn r48_candidate_parent_capture_rejects_changed_source_tuple_without_refreshing_it() {
+    let mut fixture = Fixture::new();
+    let bytes = r47_notification_batch(
+        "Personal\\parent\\source.txt",
+        "Personal\\parent\\renamed.txt",
+    );
+    let parsed = parse_notification_buffer(&bytes);
+    let candidate = r48_candidate(&fixture, &parsed);
+    let before = r47_snapshot(&fixture);
+    {
+        let mut state = fixture.backend.state.lock().unwrap();
+        let source = state
+            .files
+            .get_mut(&candidate.source_identity())
+            .expect("exact source binding");
+        source.etag = "\"source-revision-changed\"".into();
+    }
+    assert!(
+        fixture
+            .backend
+            .with_file_rename_candidate_parent(&candidate, &|_| true, |_| ())
+            .is_err()
+    );
+    assert_eq!(
+        fixture.request_log.lock().unwrap().as_slice(),
+        before.0.as_slice()
+    );
+    assert_eq!(fixture.moves.load(Ordering::Acquire), before.2);
+    assert_eq!(candidate.source_etag(), "\"source-etag\"");
+    fixture.finish();
+}
+
+#[cfg(windows)]
+#[test]
+fn r49_candidate_parent_capture_rejects_fresh_parent_identity_mismatch() {
+    let mut fixture = Fixture::new();
+    fixture
+        .mode
+        .store(R49_DEPTH_ONE_ROOT_LISTING | PARENT_BAD, Ordering::Release);
+    let bytes = r47_notification_batch(
+        "Personal\\parent\\source.txt",
+        "Personal\\parent\\renamed.txt",
+    );
+    let parsed = parse_notification_buffer(&bytes);
+    let candidate = r48_candidate(&fixture, &parsed);
+    let before = r47_snapshot(&fixture);
+    let before_capture = r49_capture_stage_counts(&fixture);
+    assert!(
+        fixture
+            .backend
+            .with_file_rename_candidate_parent(&candidate, &|_| true, |_| ())
+            .is_err()
+    );
+    let after_requests = fixture.request_log.lock().unwrap().clone();
+    assert!(after_requests.len() > before.0.len());
+    assert!(
+        after_requests[before.0.len()..]
+            .iter()
+            .all(|line| !line.starts_with("MOVE ") && !line.contains("renamed.txt"))
+    );
+    assert_eq!(fixture.moves.load(Ordering::Acquire), before.2);
+    r49_assert_parent_capture_stages(
+        &fixture,
+        before_capture,
+        "replacement-parent",
+        "\"parent-v1\"",
+    );
+    assert!(fixture.backend.lease_gate.try_write().is_ok());
+    r49_assert_no_destination_work(&fixture, &before);
+    fixture.finish();
+}
+
+#[cfg(windows)]
+#[test]
+fn r49_candidate_parent_capture_rechecks_owner_after_local_callback() {
+    let mut fixture = Fixture::new();
+    fixture
+        .mode
+        .store(R49_DEPTH_ONE_ROOT_LISTING, Ordering::Release);
+    let bytes = r47_notification_batch(
+        "Personal\\parent\\source.txt",
+        "Personal\\parent\\renamed.txt",
+    );
+    let parsed = parse_notification_buffer(&bytes);
+    let candidate = r48_candidate(&fixture, &parsed);
+    let before = r47_snapshot(&fixture);
+    let before_capture = r49_capture_stage_counts(&fixture);
+    let owner_calls = AtomicUsize::new(0);
+    let callback_ran = AtomicBool::new(false);
+    let result = fixture.backend.with_file_rename_candidate_parent(
+        &candidate,
+        &|_| owner_calls.fetch_add(1, Ordering::AcqRel) < 3,
+        |_| callback_ran.store(true, Ordering::Release),
+    );
+    assert!(result.is_err());
+    assert!(callback_ran.load(Ordering::Acquire));
+    assert_eq!(owner_calls.load(Ordering::Acquire), 4);
+    r49_assert_parent_capture_stages(&fixture, before_capture, "parent", "\"parent-v1\"");
+    assert!(fixture.backend.lease_gate.try_write().is_ok());
+    assert_eq!(fixture.moves.load(Ordering::Acquire), 0);
+    r49_assert_no_destination_work(&fixture, &before);
     fixture.finish();
 }

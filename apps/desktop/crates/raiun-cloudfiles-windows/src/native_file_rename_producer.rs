@@ -6,7 +6,8 @@ use crate::namespace_intent::{CapturedAuthorization, NamespaceIntent};
 use crate::streamed_store::StoreError;
 use crate::streamed_store::namespace_rename_store::{FileRenamePublishResult, FileRenameStore};
 use crate::{
-    BackendError, ConfiguredRootConnection, Error, OpaqueIdentity, OpenCloudPlaceholderBackend,
+    BackendError, ConfiguredRootConnection, Error, FileRenameBindingCandidate, OpaqueIdentity,
+    OpenCloudPlaceholderBackend,
 };
 use std::sync::Arc;
 
@@ -20,6 +21,49 @@ pub enum NativeFileRenameError {
 }
 
 impl ConfiguredRootConnection {
+    /// Complete one partial observer candidate using a fresh remote parent
+    /// capture and native pins, then enter the existing explicit producer.
+    /// This is an opt-in call only; it does not activate observation or replay.
+    pub fn reconcile_fresh_file_rename_candidate(
+        &self,
+        backend: &Arc<OpenCloudPlaceholderBackend>,
+        candidate: &FileRenameBindingCandidate<'_>,
+        record_generation: u64,
+        owner_current: &dyn Fn(CapturedAuthorization) -> bool,
+    ) -> Result<FileRenameOutcome, NativeFileRenameError> {
+        self.inner
+            .preflight_file_rename_candidate(backend, candidate, record_generation, owner_current)
+            .map_err(NativeFileRenameError::Local)?;
+        let intent = backend
+            .with_file_rename_candidate_parent(candidate, owner_current, |captured| {
+                self.inner.intent_from_file_rename_candidate(
+                    backend,
+                    candidate,
+                    captured,
+                    record_generation,
+                )
+            })
+            .map_err(NativeFileRenameError::Backend)?
+            .map_err(NativeFileRenameError::Local)?;
+        let scope = match &intent.operation {
+            crate::namespace_intent::NamespaceOperation::MoveWithinScope { source, .. } => {
+                &source.local.parent.scope
+            }
+            _ => return Err(NativeFileRenameError::Local(Error::EditRecoveryUnavailable)),
+        };
+        let store = self
+            .file_rename_store(backend, scope, candidate.authorization())
+            .map_err(NativeFileRenameError::Local)?
+            .ok_or(NativeFileRenameError::Local(Error::EditRecoveryUnavailable))?;
+        self.reconcile_fresh_file_rename(
+            backend,
+            &store,
+            intent,
+            candidate.parent_identity(),
+            owner_current,
+        )
+    }
+
     /// Reconcile one already observed same-parent Personal file rename.
     ///
     /// `candidate` and `parent_identity` are hints. This call first pins the

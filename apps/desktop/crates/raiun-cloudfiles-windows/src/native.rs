@@ -46,6 +46,10 @@ pub(super) mod native_file_rename;
 pub(super) mod native_namespace_directory;
 #[path = "native_namespace_observer.rs"]
 mod native_namespace_observer;
+#[path = "native_namespace_scan.rs"]
+pub(super) mod native_namespace_scan;
+#[path = "native_plain_file_capture.rs"]
+pub(super) mod native_plain_file_capture;
 #[path = "native_streamed_io.rs"]
 mod native_streamed_io;
 
@@ -1715,13 +1719,13 @@ impl OwnedConfiguredRoot {
 
     fn register(&mut self, file_identity: &[u8]) -> Result<(), Error> {
         self.verify_identity(false)?;
-        let identity = configured_sync_root_identity(self.identity);
+        let domain = configured_registration_domain(self.identity)?;
         register_root_with_identity(
             &self.path,
-            &identity,
+            &domain.sync_root_identity,
             Some(file_identity),
-            "Raiun Internal Cloud Files Root",
-            "0.0.0-internal",
+            &domain.provider_name,
+            domain.provider_version,
         )?;
         self.registered = true;
         Ok(())
@@ -1823,6 +1827,11 @@ impl ConfiguredRootConnection {
         )
     }
 
+    pub(super) fn ordinary_edit_status_source(&self) -> Arc<dyn crate::OrdinaryEditStatusSource> {
+        Arc::new(CachedOrdinaryEditStatus {
+            state: Arc::downgrade(&self.state),
+        })
+    }
     // Admission only: this is not a proof that all filesystem names/content
     // are absent. Reconnected roots deliberately have unknown prior custody.
     pub(super) fn can_admit_vault_session(&self) -> bool {
@@ -3444,7 +3453,7 @@ impl ConfiguredRootConnection {
         let lease = configured_root._native;
         let history_owner = backend.scope().clone();
         let history_registration =
-            vault_custody_registration_binding(identity, composite_root_identity);
+            vault_custody_registration_binding(identity, composite_root_identity)?;
         let namespace_binding = native_namespace_observer::NamespaceObserverBinding::new(
             &backend,
             composite_root_identity,
@@ -5651,6 +5660,30 @@ struct CallbackState {
     directory_callbacks: AtomicUsize,
     last_directory_param_size: AtomicUsize,
     placeholder_entries_submitted: AtomicUsize,
+}
+
+struct CachedOrdinaryEditStatus {
+    // A status observer must not prolong a disconnected backend/session or
+    // retain its credentials after the native owner and callbacks release it.
+    state: std::sync::Weak<CallbackState>,
+}
+impl crate::OrdinaryEditStatusSource for CachedOrdinaryEditStatus {
+    fn cached_pending_count(&self) -> Option<usize> {
+        // The activity guard prevents a new callback from entering across this
+        // snapshot. Never wait behind a callback, body operation or network I/O.
+        let state = self.state.upgrade()?;
+        let activity = state.activity.try_lock().ok()?;
+        if activity.active_callbacks != 0
+            || state.readiness.load(Ordering::Acquire) != CALLBACK_READY
+            || state
+                .unverifiable_placeholder_closes
+                .load(Ordering::Acquire)
+                != 0
+        {
+            return None;
+        }
+        state.recovery.as_ref()?.cached_ordinary_pending_count()
+    }
 }
 
 struct CallbackActivity {
@@ -8770,12 +8803,13 @@ pub(super) fn pin_registered_configured_root(
 }
 
 fn verify_sync_root_registration(path: &Path, expected: RootIdentity) -> Result<(), Error> {
+    let domain = configured_registration_domain(expected)?;
     verify_sync_root_registration_identity(
         path,
         expected,
-        &configured_sync_root_identity(expected),
-        "Raiun Internal Cloud Files Root",
-        "0.0.0-internal",
+        &domain.sync_root_identity,
+        &domain.provider_name,
+        domain.provider_version,
     )
 }
 
@@ -9659,33 +9693,25 @@ fn completion_usn(handle: Handle, expected_file_id: u64) -> Result<i64, Error> {
     }
     // SAFETY: returned is bounded by the initialized storage above.
     let bytes = unsafe { std::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), returned) };
-    let length = u32::from_le_bytes(
-        bytes[0..4]
-            .try_into()
-            .map_err(|_| Error::EditRecoveryUnavailable)?,
-    ) as usize;
-    let major = u16::from_le_bytes(
-        bytes[4..6]
-            .try_into()
-            .map_err(|_| Error::EditRecoveryUnavailable)?,
-    );
+    decode_file_usn_record(bytes, expected_file_id).ok_or(Error::EditRecoveryUnavailable)
+}
+
+fn decode_file_usn_record(bytes: &[u8], expected_file_id: u64) -> Option<i64> {
+    let returned = bytes.len();
+    if !(60..=65536).contains(&returned) {
+        return None;
+    }
+    let length = u32::from_le_bytes(bytes[0..4].try_into().ok()?) as usize;
+    let major = u16::from_le_bytes(bytes[4..6].try_into().ok()?);
     if length < 60 || length > returned || major != 2 {
-        return Err(Error::EditRecoveryUnavailable);
+        return None;
     }
-    let file_id = u64::from_le_bytes(
-        bytes[8..16]
-            .try_into()
-            .map_err(|_| Error::EditRecoveryUnavailable)?,
-    );
-    let usn = i64::from_le_bytes(
-        bytes[24..32]
-            .try_into()
-            .map_err(|_| Error::EditRecoveryUnavailable)?,
-    );
+    let file_id = u64::from_le_bytes(bytes[8..16].try_into().ok()?);
+    let usn = i64::from_le_bytes(bytes[24..32].try_into().ok()?);
     if file_id != expected_file_id || usn <= 0 {
-        return Err(Error::EditRecoveryUnavailable);
+        return None;
     }
-    Ok(usn)
+    Some(usn)
 }
 
 type PlaceholderRecoveryRead = Result<(Zeroizing<Vec<u8>>, RootSnapshot), (usize, i32)>;
@@ -9808,12 +9834,18 @@ fn synthetic_sync_root_identity(identity: RootIdentity) -> [u8; 24] {
 }
 
 #[allow(dead_code)]
-fn configured_sync_root_identity(identity: RootIdentity) -> [u8; 24] {
-    let mut root_identity = [0_u8; 24];
-    root_identity[..8].copy_from_slice(b"RaiunCF1");
-    root_identity[8..12].copy_from_slice(&identity.volume_serial.to_le_bytes());
-    root_identity[12..20].copy_from_slice(&identity.file_index.to_le_bytes());
-    root_identity
+fn configured_registration_domain(
+    identity: RootIdentity,
+) -> Result<crate::registration_domain::ConfiguredRegistrationDomain, Error> {
+    let context = raiun_control_windows::headless_context()
+        .map_err(|error| io_error("validate headless registration context", error))?;
+    crate::registration_domain::ConfiguredRegistrationDomain::new(
+        crate::ConfiguredRootIdentity {
+            volume_serial: identity.volume_serial,
+            file_index: identity.file_index,
+        },
+        context.as_ref().map(|context| context.scope_id()),
+    )
 }
 
 /// Domain separation only. Native registration verification remains the existing
@@ -9822,19 +9854,12 @@ fn configured_sync_root_identity(identity: RootIdentity) -> [u8; 24] {
 pub(super) fn vault_custody_registration_binding(
     root: crate::ConfiguredRootIdentity,
     composite: crate::OpaqueIdentity,
-) -> String {
-    use std::fmt::Write;
-    let sync = configured_sync_root_identity(RootIdentity {
+) -> Result<String, Error> {
+    let domain = configured_registration_domain(RootIdentity {
         volume_serial: root.volume_serial,
         file_index: root.file_index,
-    });
-    let mut binding =
-        String::from("raiun-vault-registration-v1:Raiun Internal Cloud Files Root:0.0.0-internal:");
-    for byte in sync.into_iter().chain(composite.as_bytes().iter().copied()) {
-        // Formatting into a String is infallible.
-        write!(&mut binding, "{byte:02x}").expect("format registration binding");
-    }
-    binding
+    })?;
+    Ok(domain.vault_binding(composite.as_bytes()))
 }
 
 fn register_root_with_identity(
@@ -10141,6 +10166,92 @@ fn io_error(operation: &'static str, error: std::io::Error) -> Error {
 
 #[cfg(test)]
 mod backend_tests {
+    #[test]
+    fn ordinary_status_probe_is_nonblocking_and_does_not_retain_disconnected_backend() {
+        let state = std::sync::Arc::new(super::CallbackState::new(std::sync::Arc::new(
+            super::SyntheticBackend,
+        )));
+        let weak = std::sync::Arc::downgrade(&state);
+        let probe = super::CachedOrdinaryEditStatus {
+            state: weak.clone(),
+        };
+        state
+            .readiness
+            .store(super::CALLBACK_READY, super::Ordering::Release);
+        let activity = state.activity.lock().unwrap();
+        assert_eq!(
+            crate::OrdinaryEditStatusSource::cached_pending_count(&probe),
+            None
+        );
+        drop(activity);
+        assert_eq!(
+            crate::OrdinaryEditStatusSource::cached_pending_count(&probe),
+            None,
+            "unsupported legacy recovery is unknown"
+        );
+        drop(state);
+        assert!(
+            weak.upgrade().is_none(),
+            "status cannot keep a credential-bearing backend alive"
+        );
+        assert_eq!(
+            crate::OrdinaryEditStatusSource::cached_pending_count(&probe),
+            None
+        );
+    }
+    #[test]
+    fn configured_registration_uses_validated_headless_context_without_fallback() {
+        const CHILD: &str = "RAIUN_REGISTRATION_DOMAIN_CHILD";
+        let identity = super::RootIdentity {
+            volume_serial: 17,
+            file_index: 29,
+        };
+        match std::env::var(CHILD).as_deref() {
+            Ok("valid") => {
+                let context = raiun_control_windows::headless_context().unwrap().unwrap();
+                let actual = super::configured_registration_domain(identity).unwrap();
+                let expected = crate::registration_domain::ConfiguredRegistrationDomain::new(
+                    crate::ConfiguredRootIdentity {
+                        volume_serial: identity.volume_serial,
+                        file_index: identity.file_index,
+                    },
+                    Some(context.scope_id()),
+                )
+                .unwrap();
+                assert_eq!(actual.sync_root_identity, expected.sync_root_identity);
+                assert_eq!(actual.provider_name, expected.provider_name);
+                assert_ne!(&actual.sync_root_identity[..8], b"RaiunCF1");
+                return;
+            }
+            Ok("invalid") => {
+                assert!(super::configured_registration_domain(identity).is_err());
+                return;
+            }
+            _ => {}
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let desktop_local = temp.path().join("desktop-local");
+        std::fs::create_dir(&desktop_local).unwrap();
+        for mode in ["valid", "invalid"] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "native::backend_tests::configured_registration_uses_validated_headless_context_without_fallback",
+                    "--nocapture",
+                ])
+                .env(CHILD, mode)
+                .env("RAIUN_HEADLESS_CONTEXT", "1")
+                .env("LOCALAPPDATA", &desktop_local)
+                .env_remove("RAIUN_STATE_DIR");
+            if mode == "valid" {
+                command.env("RAIUN_STATE_DIR", temp.path().join("headless"));
+            }
+            assert!(command.status().unwrap().success());
+        }
+        assert!(!desktop_local.join("Raiun").exists());
+    }
+
     #[test]
     fn failed_transfer_covers_waiting_range_without_a_payload() {
         // The broker payload is deliberately not page-aligned at EOF.

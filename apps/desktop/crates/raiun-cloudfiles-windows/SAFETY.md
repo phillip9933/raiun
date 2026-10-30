@@ -1018,3 +1018,28 @@ DPAPI protector and provider constructor. It never selects default current-user
 state or derives a profile from the terminal recovery protector. Compilation
 does not qualify native execution; a separate fresh GUI fixture cohort is
 required. No saved-session, default state or registration policy is imported.
+
+## Explicit fresh-parent rename entry
+
+The partial candidate can enter an explicit connection-owned fresh-parent path.
+Before HTTP it verifies READY state, exact backend/composite/registered physical
+root, retained prepared recovery scope, captured authorization and owner. Fresh
+ancestor/parent metadata may refresh directory bindings, but original source ID,
+ETag and size are checked before and after; the source is never silently rebased.
+The local callback pins actual parent ancestry and the renamed destination,
+checks its original opaque identity, actual FileID, one link, managed clean state,
+zero modified ranges and old-source absence. No native ID comes from a hint alone.
+
+The metadata session ends before opening the connection's retained store. The
+existing producer repeats current session, native, owner and full content proof
+before fresh publication and one-send dispatch. No production observer/rename
+caller is enabled. A shared unfinished-content/capture exclusion remains a
+prerequisite for runtime wiring: scheduler booleans, an empty handoff queue,
+read-only metadata leases and an unknown cached count do not supply that fence.
+Durable evidence and native protected-reference checks must remain intact.
+
+The corrected R49 Windows controls qualify fresh parent selection and refusal
+stages only. Original R48 failures remain failed; neither that cohort nor R49
+establishes connected native entry or mounted GUI/CLI acceptance. Diagnostic
+report-writer files absent from GUI are retained as Windows evidence rather than
+imported as unrelated dependencies.

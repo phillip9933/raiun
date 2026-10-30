@@ -7,6 +7,15 @@ mod guest_sharing_wire;
 #[cfg(any(unix, windows))]
 mod sharing_wire;
 
+#[cfg(any(unix, windows))]
+mod runtime_mode;
+
+#[cfg(any(unix, windows))]
+mod headless_runtime;
+
+#[cfg(windows)]
+use agent_windows::auth;
+
 #[cfg(unix)]
 include!("agent_unix.rs");
 

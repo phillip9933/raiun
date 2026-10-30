@@ -28,6 +28,8 @@ mod recovery_reconcile;
 #[cfg(windows)]
 pub(crate) mod recovery_state;
 #[cfg(any(windows, test))]
+mod registration_domain;
+#[cfg(any(windows, test))]
 pub mod streamed_reconcile;
 pub mod streamed_snapshot;
 #[cfg(any(windows, test))]
@@ -88,6 +90,8 @@ pub use initial_edit_queue::{
     InitialEditDispatch, InitialEditLocation, MAX_PENDING_INITIAL_EDITS, PendingInitialEdit,
 };
 #[cfg(windows)]
+pub(crate) use opencloud::CapturedDirectoryParent;
+#[cfg(windows)]
 pub use opencloud::FileRenameBindingCandidate;
 #[cfg(any(windows, test))]
 pub use opencloud::{
@@ -127,6 +131,12 @@ pub struct PlatformVersion {
     pub build: u32,
     pub revision: u32,
     pub integration: u32,
+}
+
+/// Read-only connection-bound cached metadata. Implementations must return
+/// None during uncertain/native capture activity, never scan files or bodies.
+pub trait OrdinaryEditStatusSource: Send + Sync {
+    fn cached_pending_count(&self) -> Option<usize>;
 }
 
 /// Read-only support evidence; no file names, identities or content are included.
@@ -375,7 +385,7 @@ pub fn prepare_vault_custody_root<'a>(
         lease,
         backend,
         composite,
-        registration: native::vault_custody_registration_binding(lease.identity(), composite),
+        registration: native::vault_custody_registration_binding(lease.identity(), composite)?,
     };
     context.revalidate()?;
     Ok(context)
@@ -482,6 +492,44 @@ pub struct VaultCleanupFence {
 #[allow(dead_code)]
 pub struct ConfiguredRootConnection {
     inner: native::ConfiguredRootConnection,
+}
+
+/// Closed plain-file capture guard. No public constructor, serialization,
+/// upload/conversion operation or historical-record adoption exists.
+#[cfg(windows)]
+pub struct NativePlainFileCapture<'connection, 'parent, 'lease> {
+    inner: native::native_plain_file_capture::NativePlainFileCapture<'connection, 'parent, 'lease>,
+}
+#[cfg(windows)]
+impl NativePlainFileCapture<'_, '_, '_> {
+    /// Returns protected local evidence only. No network/conversion/in-sync.
+    pub fn capture_and_join(
+        self,
+        store: &std::sync::Arc<streamed_store::namespace_file_store::FileCreateStore>,
+    ) -> Result<streamed_store::namespace_file_store::PublishedFileJoin, Error> {
+        self.inner.capture_and_join(store)
+    }
+}
+
+/// Owner-thread bounded scan state. It contains no publication authority and
+/// must be discarded when its original connection context is retired.
+#[cfg(windows)]
+pub struct NamespaceScanCursor {
+    inner: native::native_namespace_scan::Scan,
+}
+#[cfg(windows)]
+pub struct NamespaceDirectoryCandidate {
+    pub parent_components: Vec<String>,
+    pub name: String,
+    pub local_file: LocalFileIdentity,
+}
+/// Hints only, including when `finished`: no scan establishes continuity or
+/// grants ordinary classification, catalog adoption or namespace authority.
+#[cfg(windows)]
+pub struct NamespaceScanPage {
+    pub candidates: Vec<NamespaceDirectoryCandidate>,
+    pub finished: bool,
+    pub limit_reached: bool,
 }
 
 /// Exact native plain-directory pins, not constructible from a path or stored
@@ -664,6 +712,45 @@ impl ConfiguredRootConnection {
         self.inner.file_rename_store(backend, scope, authorization)
     }
 
+    pub fn prepare_plain_file_capture<'connection, 'parent, 'lease>(
+        &'connection self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        parent: &'parent PlainFileCaptureParent<'lease>,
+        name: &str,
+        record_generation: u64,
+    ) -> Result<NativePlainFileCapture<'connection, 'parent, 'lease>, Error> {
+        self.inner
+            .prepare_plain_file_capture(backend, parent, name, record_generation)
+            .map(|inner| NativePlainFileCapture { inner })
+    }
+    #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
+    pub fn namespace_directory_fixture_observation(
+        &self,
+        components: &[&str],
+    ) -> Result<NamespaceDirectoryObservation, Error> {
+        self.inner
+            .namespace_directory_fixture_observation(components)
+    }
+    pub fn begin_namespace_scan(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        composite: OpaqueIdentity,
+        authorization: namespace_intent::CapturedAuthorization,
+        generation: u64,
+        max_entries: usize,
+    ) -> Result<NamespaceScanCursor, Error> {
+        self.inner
+            .begin_namespace_scan(backend, composite, authorization, generation, max_entries)
+            .map(|inner| NamespaceScanCursor { inner })
+    }
+    pub fn advance_namespace_scan(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        cursor: &mut NamespaceScanCursor,
+    ) -> Result<NamespaceScanPage, Error> {
+        self.inner
+            .advance_namespace_scan(backend, &mut cursor.inner)
+    }
     /// Components are only observation hints. Current backend routing and the
     /// exact native handles, never those strings, provide admission evidence.
     pub fn prepare_namespace_directory<'connection>(
@@ -684,7 +771,9 @@ impl ConfiguredRootConnection {
             )
             .map(|inner| PreparedNamespaceDirectory { inner })
     }
-
+    pub fn ordinary_edit_status_source(&self) -> std::sync::Arc<dyn OrdinaryEditStatusSource> {
+        self.inner.ordinary_edit_status_source()
+    }
     /// Conservative admission fence for new vault sessions. Unknown historical
     /// custody (including reconnects) refuses activation; this does not hide
     /// existing plaintext or prove complete filesystem cleanup.
@@ -896,6 +985,40 @@ pub mod synthetic_agent_integration {
     }
 
     impl Connection {
+        #[cfg(all(test, debug_assertions))]
+        pub fn namespace_directory_setup_diagnostics(&self) -> serde_json::Value {
+            let (entries, rejected, callbacks, param_size, submitted) =
+                self.0.directory_observation();
+            let (_, _, _, first_failed_hresult) = self.0.fetch_observation();
+            serde_json::json!({"directory_callback_entries":entries,"directory_guard_rejections":rejected,
+                "directory_callbacks":callbacks,"last_directory_param_size":param_size,
+                "placeholder_entries_submitted":submitted,"first_failed_hresult":first_failed_hresult})
+        }
+        pub fn prepare_namespace_directory<'a>(
+            &'a self,
+            backend: &Arc<OpenCloudPlaceholderBackend>,
+            parent_components: &[&str],
+            name: &str,
+            authorization: super::namespace_intent::CapturedAuthorization,
+            generation: u64,
+        ) -> Result<super::PreparedNamespaceDirectory<'a>, Error> {
+            self.0.prepare_namespace_directory(
+                backend,
+                parent_components,
+                name,
+                authorization,
+                generation,
+            )
+        }
+        #[cfg(all(test, debug_assertions))]
+        pub fn namespace_directory_fixture_observation(
+            &self,
+            components: &[&str],
+        ) -> Result<super::NamespaceDirectoryObservation, Error> {
+            self.0
+                .inner
+                .namespace_directory_fixture_observation(components)
+        }
         pub fn attach_namespace_observer(&mut self) -> Result<super::NamespaceObservation, Error> {
             self.0.attach_namespace_observer()
         }
@@ -1258,8 +1381,19 @@ pub struct SyntheticEntry {
     pub len: u64,
 }
 
+#[cfg(all(test, not(windows)))]
+#[path = "native_namespace_scan_parser.rs"]
+mod native_namespace_scan_parser;
+#[cfg(all(test, not(windows)))]
+#[path = "native_plain_file_capture_checks.rs"]
+mod native_plain_file_capture_checks;
+
 #[cfg(test)]
 mod tests {
+    #[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
+    mod native_namespace_directory_tests {
+        include!("native_namespace_directory_tests.rs");
+    }
     #[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
     mod connected_namespace_observer_tests {
         include!("connected_namespace_observer_tests.rs");

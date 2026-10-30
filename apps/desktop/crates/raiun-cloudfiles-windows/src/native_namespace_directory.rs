@@ -512,3 +512,42 @@ fn observed(handle: Handle) -> Result<crate::NamespaceDirectoryObservation, Erro
         opaque_identity: identity,
     })
 }
+impl ConfiguredRootConnection {
+    #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
+    pub(crate) fn namespace_directory_fixture_observation(
+        &self,
+        components: &[&str],
+    ) -> Result<crate::NamespaceDirectoryObservation, Error> {
+        if components.is_empty()
+            || components.len() > 256
+            || components.iter().any(|s| !valid_component(s))
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        let mut path = root.path.clone();
+        let mut pins = Vec::with_capacity(components.len());
+        for component in components {
+            path.push(component);
+            let handle = open_root(
+                &path,
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+            )?;
+            let snapshot = root_snapshot(handle.0)?;
+            if snapshot.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+                || (snapshot.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                    && !cleanup_cloud_reparse_tag(snapshot.reparse_tag))
+            {
+                return Err(Error::ConfiguredRootChanged);
+            }
+            pins.push(handle);
+        }
+        let value = observed(pins.last().ok_or(Error::ConfiguredRootChanged)?.0)?;
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        Ok(value)
+    }
+}

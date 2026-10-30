@@ -194,6 +194,123 @@ fn parent_path_matches_components(path: &str, components: &[String]) -> bool {
 }
 
 impl OpenCloudPlaceholderBackend {
+    #[cfg(windows)]
+    pub(crate) fn file_rename_token_is_current(&self) -> bool {
+        !self.revoked.load(Ordering::Acquire)
+            && self.client.token_generation() == self.token_generation
+    }
+
+    /// Resolve an untrusted rename pair through fresh remote parent metadata
+    /// while bracketing exact existing-binding checks with a backend lease.
+    /// The callback may do local-only work; it must not re-enter this backend
+    /// or access the rename store. The read lease is dropped before the
+    /// method returns to its caller.
+    #[cfg(windows)]
+    pub(crate) fn with_file_rename_candidate_parent<T>(
+        &self,
+        candidate: &FileRenameBindingCandidate<'_>,
+        owner_current: &dyn Fn(CapturedAuthorization) -> bool,
+        run: impl FnOnce(&super::namespace::CapturedDirectoryParent) -> T,
+    ) -> Result<T, BackendError> {
+        let authorization = candidate.authorization;
+        let hints = &candidate.hints;
+        let old = hints.old_components();
+        let new = hints.new_components();
+        if authorization.agent_generation == 0
+            || authorization.token_generation != self.token_generation
+            || old.len() < 2
+            || old.len() != new.len()
+            || old.first().map(String::as_str) != Some("Personal")
+            || old[..old.len() - 1] != new[..new.len() - 1]
+            || !self.file_rename_token_is_current()
+            || !owner_current(authorization)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let lease = self
+            .lease_gate
+            .read()
+            .map_err(|_| BackendError::Unavailable)?;
+        self.ensure_active()?;
+        let catalog_scope = self
+            .catalog_scope_snapshot()?
+            .ok_or(BackendError::Unavailable)?;
+        if catalog_scope != candidate.catalog_scope
+            || catalog_scope.local_root()
+                != self.local_root_identity.ok_or(BackendError::Unavailable)?
+            || catalog_scope.profile_id() != self.scope.profile_id()
+            || catalog_scope.account_id() != self.scope.account_id()
+            || catalog_scope.server_origin() != self.scope.server_origin()
+            || authorization.token_generation != self.scope.token_generation()
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let bindings_match = || -> Result<bool, BackendError> {
+            let state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
+            Ok(
+                state.files.get(&candidate.source_identity) == Some(&candidate.source)
+                    && state.directories.get(&candidate.parent_identity) == Some(&candidate.parent),
+            )
+        };
+        if !bindings_match()?
+            || candidate.local_file_hint.volume_serial != catalog_scope.local_root().volume_serial
+            || candidate.local_file_hint.file_index == 0
+            || !super::valid_remote_id(&candidate.source.remote_id)
+            || !strong(&candidate.source.etag)
+            || !owner_current(authorization)
+        {
+            return Err(BackendError::Unavailable);
+        }
+
+        let components = old[..old.len() - 1]
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let cancellation = crate::CancellationToken::with_timeout(Duration::from_secs(30));
+        let captured = self.capture_namespace_parent_under_lease(
+            &components,
+            catalog_scope.local_root(),
+            authorization,
+            &cancellation,
+        )?;
+        let expected_path = candidate
+            .source
+            .path
+            .rsplit_once('/')
+            .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
+            .ok_or(BackendError::Unavailable)?;
+        if captured.identity != candidate.parent_identity
+            || captured.path != expected_path
+            || captured.path != candidate.parent.path
+            || captured.remote.resource_id != candidate.parent.remote_id
+            || captured.scope.profile_id != catalog_scope.profile_id
+            || captured.scope.account_subject != catalog_scope.account_id
+            || captured.scope.server_origin != catalog_scope.server_origin
+            || captured.scope.space_id != catalog_scope.personal_space_id
+            || captured.scope.root_resource_id != catalog_scope.personal_root_resource_id
+            || captured.scope.root_volume_serial != catalog_scope.root_volume_serial
+            || captured.scope.root_file_index != catalog_scope.root_file_index
+            || captured.route.len() != components.len()
+            || !strong(&captured.remote.etag)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        if !bindings_match()? || !owner_current(authorization) {
+            return Err(BackendError::Unavailable);
+        }
+        let result = run(&captured);
+        self.ensure_active()?;
+        let token_current = self.file_rename_token_is_current();
+        if !token_current || !bindings_match()? {
+            return Err(BackendError::Unavailable);
+        }
+        drop(lease);
+        if !owner_current(authorization) {
+            return Err(BackendError::Unavailable);
+        }
+        Ok(result)
+    }
+
     /// Bind one complete notification-batch pair to the exact existing
     /// durable source and parent identities. The result remains partial
     /// evidence; a later caller must capture and validate the parent locally
@@ -223,7 +340,7 @@ impl OpenCloudPlaceholderBackend {
             || authorization.token_generation != self.token_generation
             || local_file_hint.volume_serial == 0
             || local_file_hint.file_index == 0
-            || self.client.token_generation() != self.token_generation
+            || !self.file_rename_token_is_current()
             || !owner_current(authorization)
         {
             return Err(BackendError::Unavailable);
@@ -314,7 +431,7 @@ impl OpenCloudPlaceholderBackend {
             return Err(BackendError::Unavailable);
         }
         self.ensure_active()?;
-        let token_current = self.client.token_generation() == self.token_generation;
+        let token_current = self.file_rename_token_is_current();
         drop(lease);
         if !token_current || !owner_current(authorization) {
             return Err(BackendError::Unavailable);

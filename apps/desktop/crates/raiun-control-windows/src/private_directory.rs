@@ -41,6 +41,216 @@ use windows_sys::Win32::{
     },
 };
 
+/// Admit a dedicated headless root without changing any existing ACL. Every
+/// component is pinned without following reparse points before canonicalizing.
+/// Only the final child may be created; all its parents must already exist.
+pub(crate) fn admit_headless_root(
+    requested: &Path,
+    local_app_data: &Path,
+) -> io::Result<(PrivateDirectory, String)> {
+    validate_local_drive_path(requested)?;
+    for component in requested.components() {
+        if let std::path::Component::Normal(name) = component {
+            let name = name.to_string_lossy();
+            let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+            if name.ends_with(['.', ' '])
+                || name.chars().any(|ch| ch.is_control())
+                || matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                || (stem.len() == 4
+                    && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                    && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+            {
+                return Err(headless_path_denied());
+            }
+        }
+    }
+    let parent_path = requested.parent().ok_or_else(headless_path_denied)?;
+    let name = requested.file_name().ok_or_else(headless_path_denied)?;
+    let parent = PinnedDirectory::open(parent_path)?;
+    let canonical_parent = canonical_dos_path(parent_path)?;
+    let candidate = canonical_parent.join(name);
+    // Resolve an existing final short-name alias before policy checks. Pin it
+    // first so canonicalization cannot follow a reparse point or swapped entry.
+    let existing = match PinnedDirectory::open(&candidate) {
+        Ok(directory) => Some(directory),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let candidate = if existing.is_some() {
+        canonical_dos_path(&candidate)?
+    } else {
+        candidate
+    };
+    let local = canonical_dos_path(local_app_data)?;
+    // Compare physical volume-GUID names too: a SUBST/drive alias must never
+    // admit an existing Desktop child simply because its drive letter differs.
+    let physical_candidate = match &existing {
+        Some(directory) => PathBuf::from(directory_guid_path(directory)?),
+        None => PathBuf::from(directory_guid_path(&parent)?).join(name),
+    };
+    let desktop = match canonical_guid_path(&local.join("Raiun")) {
+        Ok(path) => path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            canonical_guid_path(&local)?.join("Raiun")
+        }
+        Err(error) => return Err(error),
+    };
+    if paths_overlap(&physical_candidate, &desktop)
+        || forbidden_headless_root(&candidate, &physical_candidate)
+    {
+        return Err(headless_path_denied());
+    }
+    let drive = candidate.components().take(2).collect::<PathBuf>();
+    let wide_drive = wide_extended_path(&drive)?;
+    // DRIVE_FIXED excludes mapped network drives and removable state roots.
+    if unsafe { windows_sys::Win32::Storage::FileSystem::GetDriveTypeW(wide_drive.as_ptr()) } != 3 {
+        return Err(headless_path_denied());
+    }
+    let canonical_parent_pin = PinnedDirectory::open(&canonical_parent)?;
+    if canonical_parent_pin.identity() != parent.identity() {
+        return Err(headless_path_denied());
+    }
+    let directory = PrivateDirectory::create_or_open_under(
+        &canonical_parent_pin,
+        candidate.file_name().ok_or_else(headless_path_denied)?,
+    )?;
+    if let Some(existing) = existing {
+        if existing.identity() != directory.identity() {
+            return Err(headless_path_denied());
+        }
+    }
+    directory.verify_path()?;
+    // Use a volume GUID rather than a drive letter so drive aliases route to
+    // the same scope. FILE_NAME_NORMALIZED (zero) resolves filesystem names.
+    let canonical = directory_guid_path(&directory.directory)?;
+    directory.verify_path()?;
+    Ok((directory, canonical))
+}
+
+fn directory_guid_path(directory: &PinnedDirectory) -> io::Result<String> {
+    directory.verify_path()?;
+    let handle = directory_handle(directory)?;
+    let mut buffer = vec![0u16; 32_768];
+    let length = unsafe {
+        windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW(
+            handle.as_raw_handle() as HANDLE,
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            windows_sys::Win32::Storage::FileSystem::VOLUME_NAME_GUID,
+        )
+    };
+    if length == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if length as usize >= buffer.len() {
+        return Err(headless_path_denied());
+    }
+    let canonical =
+        String::from_utf16(&buffer[..length as usize]).map_err(|_| headless_path_denied())?;
+    directory.verify_path()?;
+    Ok(canonical)
+}
+
+fn canonical_guid_path(path: &Path) -> io::Result<PathBuf> {
+    let pinned = PinnedDirectory::open(&canonical_dos_path(path)?)?;
+    directory_guid_path(&pinned).map(PathBuf::from)
+}
+
+fn canonical_dos_path(path: &Path) -> io::Result<PathBuf> {
+    let canonical = strip_verbatim_disk(std::fs::canonicalize(path)?);
+    validate_local_drive_path(&canonical)?;
+    Ok(canonical)
+}
+
+fn strip_verbatim_disk(path: PathBuf) -> PathBuf {
+    use std::os::windows::ffi::OsStringExt;
+    if matches!(path.components().next(), Some(std::path::Component::Prefix(prefix))
+        if matches!(prefix.kind(), std::path::Prefix::VerbatimDisk(_)))
+    {
+        let units = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        PathBuf::from(OsString::from_wide(&units[4..]))
+    } else {
+        path
+    }
+}
+
+fn paths_overlap(first: &Path, second: &Path) -> bool {
+    let first = first.to_string_lossy().replace('/', "\\").to_lowercase();
+    let second = second.to_string_lossy().replace('/', "\\").to_lowercase();
+    first == second
+        || first.starts_with(&(second.clone() + "\\"))
+        || second.starts_with(&(first + "\\"))
+}
+
+fn forbidden_headless_root(path: &Path, physical: &Path) -> bool {
+    // Obtain the installed Windows location from the OS, independently of
+    // caller-supplied environment values or a nonstandard installation name.
+    let mut windows = vec![0u16; 32_768];
+    let length = unsafe {
+        windows_sys::Win32::System::SystemInformation::GetWindowsDirectoryW(
+            windows.as_mut_ptr(),
+            windows.len() as u32,
+        )
+    };
+    if length == 0 || length as usize >= windows.len() {
+        return true;
+    }
+    use std::os::windows::ffi::OsStringExt;
+    let windows = PathBuf::from(OsString::from_wide(&windows[..length as usize]));
+    let windows = match canonical_guid_path(&windows) {
+        Ok(windows) => windows,
+        Err(_) => return true,
+    };
+    if paths_overlap(physical, &windows) {
+        return true;
+    }
+    let parts = path.components().collect::<Vec<_>>();
+    if parts.len() < 3 {
+        return true;
+    }
+    let first = parts[2].as_os_str().to_string_lossy().to_lowercase();
+    if matches!(
+        first.as_str(),
+        "windows"
+            | "program files"
+            | "program files (x86)"
+            | "programdata"
+            | "$recycle.bin"
+            | "system volume information"
+            | "recovery"
+            | "boot"
+    ) || (first == "users" && parts.len() <= 4)
+    {
+        return true;
+    }
+    for variable in [
+        "SystemRoot",
+        "WINDIR",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramData",
+        "PUBLIC",
+    ] {
+        if let Some(root) = std::env::var_os(variable) {
+            let root = match canonical_guid_path(Path::new(&root)) {
+                Ok(root) => root,
+                Err(_) => return true,
+            };
+            if paths_overlap(physical, &root) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn headless_path_denied() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "Headless state requires a separate private local directory outside Desktop and system roots",
+    )
+}
+
 const SDDL_REVISION_1: u32 = 1;
 const MAX_PRIVATE_ACES: u32 = 1;
 const FILE_ALL_ACCESS_MASK: u32 = 0x001F_01FF;
@@ -1765,32 +1975,6 @@ mod tests {
         }
     }
 
-    fn private_test_directory() -> PathBuf {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock before unix epoch")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "raiun-pinned-publication-{}-{now}-{}",
-            std::process::id(),
-            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&path).expect("create isolated test directory");
-        path
-    }
-
-    fn private_directory_under(parent_path: &Path) -> (PinnedDirectory, PrivateDirectory) {
-        let parent = PinnedDirectory::open(parent_path).expect("pin private test parent");
-        let name = format!(
-            "private-{}-{}",
-            std::process::id(),
-            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-        );
-        let private = PrivateDirectory::create_or_open_under(&parent, OsStr::new(&name))
-            .expect("create current-user-only child");
-        (parent, private)
-    }
-
     #[test]
     fn legacy_metadata_directory_policy_keeps_modern_policy_strict() {
         let modern = valid_private_acl_facts(PrivateEntryKind::Directory);
@@ -1882,6 +2066,173 @@ mod tests {
         assert!(validate_legacy_metadata_component(OsStr::new(&"x".repeat(255))).is_ok());
         assert!(validate_legacy_metadata_component(OsStr::new(&"x".repeat(256))).is_err());
         assert!(validate_legacy_metadata_component(OsStr::new(&"😀".repeat(128))).is_err());
+    }
+
+    #[test]
+    #[ignore = "explicit isolated child-process real legacy producer fixture; RAIUN_RUN_LEGACY_METADATA_FIXTURE=fresh-owned-state; no real state or CF provider"]
+    fn legacy_metadata_actual_producer_isolated_child() {
+        const TEST: &str =
+            "private_directory::tests::legacy_metadata_actual_producer_isolated_child";
+        const OWNER: &[u8] = b"raiun-legacy-metadata-owned-v1\n";
+        assert_eq!(
+            std::env::var("RAIUN_RUN_LEGACY_METADATA_FIXTURE").as_deref(),
+            Ok("fresh-owned-state")
+        );
+        let args = std::env::args().collect::<Vec<_>>();
+        assert!(
+            args.iter().any(|a| a == "--ignored")
+                && args.windows(2).any(|p| p[0] == "--exact" && p[1] == TEST)
+        );
+        if std::env::var("RAIUN_LEGACY_METADATA_FIXTURE_CHILD").as_deref() != Ok("1") {
+            let root = private_test_directory(); // retained on success and failure
+            std::fs::write(root.join("OWNER.txt"), OWNER).unwrap();
+            let stdout = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(root.join("child.stdout.log"))
+                .unwrap();
+            let stderr = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(root.join("child.stderr.log"))
+                .unwrap();
+            // Fresh process avoids immutable global context and changes no parent
+            // environment. Waiting does not kill or drop a pending child owner.
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    TEST,
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("RAIUN_LEGACY_METADATA_FIXTURE_CHILD", "1")
+                .env("RAIUN_LEGACY_METADATA_FIXTURE_DIR", &root)
+                .env("RAIUN_HEADLESS_CONTEXT", "1")
+                .env("RAIUN_STATE_DIR", root.join("state"))
+                .env_remove("RAIUN_HEADLESS_CONFIG")
+                .stdout(stdout)
+                .stderr(stderr)
+                .spawn()
+                .unwrap();
+            let mut wait_failed = false;
+            let status = loop {
+                match child.wait() {
+                    Ok(status) => break status,
+                    Err(_) => {
+                        wait_failed = true;
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                }
+            };
+            assert!(
+                status.success() && !wait_failed,
+                "isolated legacy metadata producer fixture failed; all files retained"
+            );
+            return;
+        }
+        let root = PathBuf::from(std::env::var_os("RAIUN_LEGACY_METADATA_FIXTURE_DIR").unwrap());
+        assert!(root.is_absolute());
+        let marker = root.join("OWNER.txt");
+        let metadata = std::fs::symlink_metadata(&marker).unwrap();
+        use std::os::windows::fs::MetadataExt;
+        assert!(
+            metadata.is_file() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        );
+        assert_eq!(std::fs::read(&marker).unwrap(), OWNER);
+        let context = crate::headless_context()
+            .unwrap()
+            .expect("mandatory fresh child headless context");
+        assert_eq!(
+            std::fs::canonicalize(context.state_root()).unwrap(),
+            std::fs::canonicalize(root.join("state")).unwrap()
+        );
+        // Only AFTER mandatory isolated-context verification may current_user run.
+        let store = crate::DpapiSessionStore::current_user().unwrap();
+        assert!(
+            store
+                .local_edit_state_directory()
+                .starts_with(context.state_root())
+        );
+        let path = store
+            .local_edit_state_directory()
+            .join("cloud-files-edit-scopes-v1");
+        std::fs::create_dir(&path).unwrap();
+        store.protect_local_edit_directory(&path).unwrap(); // actual historical writer
+        let entry = path.join("default-created.bin");
+        let mut writer = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&entry)
+            .unwrap();
+        writer.write_all(b"retained-synthetic-bytes").unwrap();
+        writer.sync_all().unwrap();
+        drop(writer);
+        let parent = PinnedDirectory::open(store.local_edit_state_directory()).unwrap();
+        assert!(
+            PrivateDirectory::open_under(&parent, OsStr::new("cloud-files-edit-scopes-v1"))
+                .is_err()
+        );
+        let before_dir = security_descriptor_bytes(&path);
+        let before_file = security_descriptor_bytes(&entry);
+        let legacy = LegacyRecoveryMetadataDirectory::open_under(
+            &parent,
+            OsStr::new("cloud-files-edit-scopes-v1"),
+        )
+        .unwrap();
+        assert_eq!(
+            legacy
+                .file_length(OsStr::new("default-created.bin"))
+                .unwrap(),
+            24
+        );
+        let _modern_no_data =
+            open_file_handle_with_share(&entry, 0x80 | 0x0002_0000, OPEN_EXISTING, FILE_SHARE_READ)
+                .unwrap();
+        assert!(validate_private_handle(&_modern_no_data, PrivateEntryKind::File).is_err());
+        drop(_modern_no_data);
+        std::fs::hard_link(&entry, path.join("alias.bin")).unwrap();
+        assert!(
+            legacy
+                .file_length(OsStr::new("default-created.bin"))
+                .is_err()
+        );
+        assert!(legacy.file_length(OsStr::new("alias.bin")).is_err());
+        // Preserve aliases too; no implicit deletion even in a successful test.
+        assert_eq!(security_descriptor_bytes(&path), before_dir);
+        assert_eq!(security_descriptor_bytes(&entry), before_file);
+        assert_eq!(std::fs::read(&entry).unwrap(), b"retained-synthetic-bytes");
+        std::fs::write(
+            root.join("RESULT.txt"),
+            b"PASS metadata-only compatibility; ACLs and bytes retained\n",
+        )
+        .unwrap();
+    }
+
+    fn private_test_directory() -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "raiun-pinned-publication-{}-{now}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).expect("create isolated test directory");
+        path
+    }
+
+    fn private_directory_under(parent_path: &Path) -> (PinnedDirectory, PrivateDirectory) {
+        let parent = PinnedDirectory::open(parent_path).expect("pin private test parent");
+        let name = format!(
+            "private-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        );
+        let private = PrivateDirectory::create_or_open_under(&parent, OsStr::new(&name))
+            .expect("create current-user-only child");
+        (parent, private)
     }
 
     #[test]
@@ -2750,6 +3101,7 @@ mod tests {
             replace_dacl(private.path(), sddl.as_deref());
             let before = security_descriptor_bytes(private.path());
             assert!(PrivateDirectory::open_under(&parent, protected_name).is_err());
+            assert!(admit_headless_root(private.path(), &root).is_err());
             assert_eq!(
                 before,
                 security_descriptor_bytes(private.path()),
@@ -2845,6 +3197,8 @@ mod tests {
             String::from_utf8_lossy(&junction.stderr)
         );
         assert!(PrivateDirectory::open_under(&parent, OsStr::new(&link_name)).is_err());
+        assert!(admit_headless_root(&link_path, &root).is_err());
+        assert!(admit_headless_root(&link_path.join("state"), &root).is_err());
 
         assert!(
             std::fs::rename(&outer, root.join("outer-renamed")).is_err(),
@@ -2856,6 +3210,32 @@ mod tests {
         drop(parent);
         let _ = std::fs::remove_dir(&link_path);
         std::fs::remove_dir_all(root).expect("remove private test tree");
+    }
+
+    #[test]
+    fn headless_admission_is_private_pinned_canonical_and_outside_desktop() {
+        let root = private_test_directory();
+        let state = root.join("headless");
+        let (directory, canonical) = admit_headless_root(&state, &root).unwrap();
+        assert!(canonical.to_ascii_lowercase().starts_with(r"\\?\volume{"));
+        let alias = PathBuf::from(state.to_string_lossy().to_lowercase());
+        let (same, alias_canonical) = admit_headless_root(&alias, &root).unwrap();
+        assert_eq!(directory.identity(), same.identity());
+        assert_eq!(canonical.to_lowercase(), alias_canonical.to_lowercase());
+        assert!(std::fs::rename(&state, root.join("replacement")).is_err());
+        assert!(std::fs::rename(&root, root.with_extension("replacement")).is_err());
+        assert!(admit_headless_root(&root, &root).is_err());
+        assert!(admit_headless_root(&root.join("Raiun"), &root).is_err());
+        assert!(
+            !root.join("Raiun").exists(),
+            "denial precedes directory creation"
+        );
+        assert!(admit_headless_root(&root.join("missing").join("state"), &root).is_err());
+        assert!(!root.join("missing").exists());
+        assert!(admit_headless_root(&root.join("state."), &root).is_err());
+        assert!(admit_headless_root(&root.join("CON"), &root).is_err());
+        drop((directory, same));
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn immutable_regular_file_pin_denies_writes_and_replacement_until_drop() {

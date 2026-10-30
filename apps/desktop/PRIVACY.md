@@ -22,6 +22,32 @@ unavailable or locked keyring: revoking Raiun's saved-key authority and deleting
 an OS keyring entry are distinct operations. Protect your OS account and keyring.
 Do not include tokens, passwords, vault keys or private server URLs in reports.
 
+## Headless CLI candidate
+
+The headless package uses separate state and account routes. It does not launch a
+browser: PKCE sign-in prints a URL for manual opening, with loopback SSH forwarding
+for a remote browser. App-token sign-in accepts hidden terminal input or private
+stdin; credentials are not configuration fields or CLI arguments. These choices
+do not change how the GUI saves sign-in or uses its OS credential store.
+
+Without a headless config, credentials stay in the running agent's memory and
+restart needs fresh sign-in. Selecting a config opts into configured operation,
+where `remember_login` and `auto_mount` default to `true`; set them to `false` or
+create the config with `--no-remember-login` and `--no-auto-mount` to disable them.
+When remembered login is enabled, Linux stores credentials as plaintext in owned
+private 0700 directories and 0600 files, separately from nonsecret configuration.
+This is not encryption at rest. Windows uses isolated current-user DPAPI storage.
+Use OS disk protection, and treat headless state as sensitive when making backups.
+Either mode can retain cache, namespace metadata, staging files and recovery data.
+
+Startup registration is explicit. Windows boot startup can ask Task Scheduler to
+store the same user's Windows account credential after a hidden prompt; Raiun's
+configuration does not contain that password. Windows logon startup does not need
+a stored Windows password. Linux boot startup enables user lingering, which is
+retained when Raiun startup is disabled. Disabling startup, logout, unmount and
+uninstall do not erase cached files or recovery evidence. See [headless setup](docs/HEADLESS.md)
+and [startup](docs/HEADLESS-STARTUP.md) for platform policy and acceptance limits.
+
 ## Local files, cache and recovery
 
 Each account has its own configuration and storage scope. The client retains

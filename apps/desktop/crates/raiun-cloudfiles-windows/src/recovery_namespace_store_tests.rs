@@ -552,6 +552,44 @@ fn namespace_health_empty_and_legacy_baseline_are_read_only() {
             .join("cloud-files-edit-journal-v2")
             .exists()
     );
+
+    let baseline_state = PinnedDirectory::open(&baseline.state_path)
+        .expect("pin exact legacy baseline state directory");
+    let empty_v2 = PrivateDirectory::create_or_open_under(
+        &baseline_state,
+        OsStr::new(crate::streamed_store::V2_STORE_ROOT),
+    )
+    .expect("create owned empty v2 root under legacy state");
+    let empty_v2_path = empty_v2.path().to_path_buf();
+    let _empty_v2_pin = PinnedDirectory::open(&empty_v2_path).expect("pin empty v2 root");
+    assert!(
+        fs::read_dir(&empty_v2_path)
+            .expect("read synthetic empty v2 root")
+            .next()
+            .is_none()
+    );
+    assert_eq!(
+        fs::symlink_metadata(empty_v2_path.join(crate::streamed_store::V2_QUOTA_LOCK))
+            .expect_err("empty v2 root has no quota lock")
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert!(matches!(
+        baseline_prepared.has_unresolved(),
+        Err(crate::BackendError::Unavailable)
+    ));
+    assert!(
+        fs::read_dir(&empty_v2_path)
+            .expect("recheck empty v2 root")
+            .next()
+            .is_none()
+    );
+    assert_eq!(
+        fs::symlink_metadata(empty_v2_path.join(crate::streamed_store::V2_QUOTA_LOCK))
+            .expect_err("health reader did not create quota lock")
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
 }
 
 #[test]

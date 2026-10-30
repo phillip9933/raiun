@@ -133,7 +133,9 @@ mod tests {
         let shell = startup_executable(
             Path::new("/tmp/.mount_Raiun/usr/bin/raiun-agent"),
             Some(std::ffi::OsStr::new("/tmp/.mount_Raiun")),
-            Some(std::ffi::OsStr::new("/home/demo/Applications/Raiun.AppImage")),
+            Some(std::ffi::OsStr::new(
+                "/home/demo/Applications/Raiun.AppImage",
+            )),
         )
         .expect("absolute AppImage path");
         assert_eq!(shell, Path::new("/home/demo/Applications/Raiun.AppImage"));
@@ -152,12 +154,13 @@ mod tests {
 
     #[test]
     fn appimage_startup_rejects_relative_image_path() {
-        assert!(startup_executable(
-            Path::new("/tmp/.mount_Raiun/usr/bin/raiun-agent"),
-            Some(std::ffi::OsStr::new("/tmp/.mount_Raiun")),
-            Some(std::ffi::OsStr::new("Raiun.AppImage")),
-        )
-        .is_err());
+        assert!(
+            startup_executable(
+                Path::new("/tmp/.mount_Raiun/usr/bin/raiun-agent"),
+                Some(std::ffi::OsStr::new("/tmp/.mount_Raiun")),
+                Some(std::ffi::OsStr::new("Raiun.AppImage")),
+            )
+            .is_err()
+        );
     }
-
 }

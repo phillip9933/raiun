@@ -4,7 +4,9 @@
 //! settings file, and unscoped keyring entry. Additional profiles receive
 //! private state directories and independent keyring scopes.
 
-use super::{Runtime, new_runtime, start_runtime};
+#[cfg(test)]
+use super::new_runtime;
+use super::{Runtime, new_runtime_with_mode, runtime_mode::RuntimeMode, start_runtime};
 use raiun_core::{CONFIG_SCHEMA_VERSION, Config, FolderPair, MediaImportJob, validate_config};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -50,6 +52,7 @@ struct ManagerState {
 
 /// Owns the selected profile and each profile's independent engine runtime.
 pub struct ProfileManager {
+    mode: RuntimeMode,
     state_dir: PathBuf,
     vaults: Arc<raiun_vault::session::VaultSessionCoordinator>,
     state: Mutex<ManagerState>,
@@ -60,7 +63,12 @@ pub struct ProfileManager {
 
 impl ProfileManager {
     /// Load the registry and start all saved profiles.
+    #[cfg(test)]
     pub fn open(state_dir: PathBuf) -> Result<Arc<Self>, String> {
+        Self::open_with_mode(state_dir, RuntimeMode::Desktop)
+    }
+
+    pub fn open_with_mode(state_dir: PathBuf, mode: RuntimeMode) -> Result<Arc<Self>, String> {
         if !state_dir.is_absolute() {
             return Err("State directory must be absolute".into());
         }
@@ -77,7 +85,7 @@ impl ProfileManager {
                 ensure_profile_directory(&state_dir, id)?;
             }
             let scope = (id != DEFAULT_ID).then(|| id.clone());
-            let runtime = new_runtime(dir, scope, vaults.clone())?;
+            let runtime = new_runtime_with_mode(dir, scope, vaults.clone(), mode)?;
             if registry.removed.contains(id) {
                 runtime.retiring.store(true, Ordering::Release);
                 runtime.shutdown.store(true, Ordering::Release);
@@ -90,6 +98,7 @@ impl ProfileManager {
             runtimes: runtimes.clone(),
         })?)?;
         let manager = Arc::new(Self {
+            mode,
             state_dir,
             vaults,
             state: Mutex::new(ManagerState { registry, runtimes }),
@@ -114,13 +123,26 @@ impl ProfileManager {
 
     /// Route a control request to the selected profile or an explicit profile.
     pub fn handle(self: &Arc<Self>, mut request: Value) -> Result<Value, String> {
-        // Move, do not clone, password storage into a wiping owner before any
-        // profile validation can fail. The raw socket input is wiped separately.
-        let password = match request.as_object_mut().and_then(|o| o.remove("password")) {
-            Some(Value::String(value)) => Some(zeroize::Zeroizing::new(value)),
-            Some(_) => return Err("Password must be text".into()),
-            None => None,
-        };
+        // Own every decoded secret before any malformed sibling field can fail.
+        let mut owned = crate::headless_runtime::SecretRequest(request);
+        let password = crate::headless_runtime::take_secret(&mut owned.0, "password")?;
+        let app_token = crate::headless_runtime::take_secret(&mut owned.0, "app_token")?;
+        request = std::mem::take(&mut owned.0);
+        self.mode.validate_request(&request)?;
+        if self.mode == RuntimeMode::MountOnly && password.is_some() {
+            return Err("Passwords are unavailable in the mount-only client".into());
+        }
+        if request.get("action").and_then(Value::as_str) == Some("auth_app_token") {
+            if password.is_some() {
+                return Err("Password is not accepted for app-token login".into());
+            }
+            self.ensure_running()?;
+            let (_, runtime) = self.resolve_runtime(&request)?;
+            return runtime.login_app_token(&request, app_token.ok_or("Missing app token")?);
+        }
+        if app_token.is_some() {
+            return Err("App tokens are only accepted by app-token login".into());
+        }
         if request.get("action").and_then(Value::as_str) == Some("sharing_link_create") {
             let sharing = crate::sharing_wire::Request::parse(&request)?
                 .with_public_link_password(password)?;
@@ -208,7 +230,7 @@ impl ProfileManager {
             "status" => {
                 if request.get("profile_id").is_none() && self.selected_profile()?.is_none() {
                     return Ok(
-                        json!({"connected":false,"mounted":false,"account_switch_supported":true,"accounts_empty":true,"agent_version":env!("CARGO_PKG_VERSION")}),
+                        json!({"connected":false,"mounted":false,"account_switch_supported":true,"accounts_empty":true,"agent_version":env!("CARGO_PKG_VERSION"),"runtime_mode":self.mode.name()}),
                     );
                 }
                 let (id, runtime) = self.resolve_runtime(&request)?;
@@ -373,7 +395,7 @@ impl ProfileManager {
 
         let id = random_profile_id(&state.registry.profiles)?;
         let dir = ensure_profile_directory(&self.state_dir, &id)?;
-        let runtime = new_runtime(dir, Some(id.clone()), self.vaults.clone())?;
+        let runtime = new_runtime_with_mode(dir, Some(id.clone()), self.vaults.clone(), self.mode)?;
         runtime.handle(strip_profile_id(
             json!({"action":"configure","cloud_root":root}),
         ))?;
@@ -543,10 +565,11 @@ impl ProfileManager {
             return Err("Unknown removed profile_id".into());
         }
         let dir = profile_dir(&self.state_dir, id);
-        let runtime = new_runtime(
+        let runtime = new_runtime_with_mode(
             dir,
             (id != DEFAULT_ID).then(|| id.to_owned()),
             self.vaults.clone(),
+            self.mode,
         )?;
         if runtime
             .settings
@@ -830,6 +853,7 @@ impl ProfileManager {
             }
         };
         let object = status.as_object_mut().ok_or("Runtime status is invalid")?;
+        object.insert("runtime_mode".into(), json!(self.mode.name()));
         object.insert("profile_id".into(), json!(id));
         object.insert("profile_label".into(), json!(label));
         Ok(status)
@@ -1517,6 +1541,7 @@ mod tests {
         runtime.restoring.store(false, Ordering::Release);
         let registry = load_registry(&dir.join(REGISTRY_FILE)).unwrap();
         let manager = Arc::new(ProfileManager {
+            mode: RuntimeMode::Desktop,
             state_dir: dir,
             vaults,
             state: Mutex::new(ManagerState {

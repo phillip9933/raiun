@@ -65,6 +65,18 @@ pub fn state_dir() -> Result<PathBuf, String> {
     {
         return Err("State directory must not be a symbolic link".into());
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        // Create new components privately before validating the final directory;
+        // the user's umask may permit group writes on default-mode directories.
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
@@ -442,5 +454,115 @@ mod tests {
             .map(|index| format!("space-{index}"))
             .collect::<Vec<_>>();
         assert!(validate_paused_space_ids(&too_many).is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn state_directory_creation_is_private_under_umask_0002() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+        const CHILD: &str = "RAIUN_STORAGE_UMASK_TEST_CHILD";
+        const ROOT: &str = "RAIUN_STORAGE_UMASK_TEST_ROOT";
+        const TEST: &str = "storage::tests::state_directory_creation_is_private_under_umask_0002";
+        if let Some(scenario) = std::env::var_os(CHILD) {
+            let root = PathBuf::from(std::env::var_os(ROOT).expect("exact synthetic test root"));
+            match scenario.to_str().expect("synthetic scenario") {
+                "existing" => {
+                    let path = root.join("existing");
+                    let before = fs::symlink_metadata(&path).unwrap();
+                    assert_eq!(before.mode() & 0o777, 0o775);
+                    assert_eq!(
+                        state_dir().unwrap_err(),
+                        "State directory must not be group/world writable"
+                    );
+                    let after = fs::symlink_metadata(path).unwrap();
+                    assert_eq!(after.mode(), before.mode());
+                    assert_eq!(after.ino(), before.ino());
+                    assert_eq!(after.dev(), before.dev());
+                }
+                "symlink" => {
+                    let link = root.join("link");
+                    let target = root.join("target");
+                    let before = fs::symlink_metadata(&link).unwrap();
+                    let target_mode = fs::metadata(&target).unwrap().mode();
+                    assert!(before.file_type().is_symlink());
+                    assert_eq!(
+                        state_dir().unwrap_err(),
+                        "State directory must not be a symbolic link"
+                    );
+                    let after = fs::symlink_metadata(&link).unwrap();
+                    assert!(after.file_type().is_symlink());
+                    assert_eq!(after.ino(), before.ino());
+                    assert_eq!(fs::read_link(link).unwrap(), target);
+                    assert_eq!(fs::metadata(&target).unwrap().mode(), target_mode);
+                    assert_eq!(
+                        fs::read(target.join("preserved.txt")).unwrap(),
+                        b"synthetic retained bytes"
+                    );
+                }
+                "fresh" => {
+                    let path = root.join("new-parent/nested/state");
+                    assert!(!path.exists());
+                    assert_eq!(
+                        state_dir().expect("fresh state must be admitted under umask 0002"),
+                        path
+                    );
+                    for relative in ["new-parent", "new-parent/nested", "new-parent/nested/state"] {
+                        assert_eq!(
+                            fs::symlink_metadata(root.join(relative)).unwrap().mode() & 0o777,
+                            0o700,
+                            "every newly created state component must start private"
+                        );
+                    }
+                }
+                _ => panic!("unknown synthetic scenario"),
+            }
+            fs::write(
+                root.join(format!("{}.complete", scenario.to_string_lossy())),
+                b"completed exact child",
+            )
+            .unwrap();
+            return;
+        }
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        fs::create_dir(root.join("existing")).unwrap();
+        fs::set_permissions(root.join("existing"), fs::Permissions::from_mode(0o775)).unwrap();
+        fs::create_dir(root.join("target")).unwrap();
+        fs::set_permissions(root.join("target"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(
+            root.join("target/preserved.txt"),
+            b"synthetic retained bytes",
+        )
+        .unwrap();
+        symlink(root.join("target"), root.join("link")).unwrap();
+        for (scenario, relative) in [
+            ("existing", "existing"),
+            ("symlink", "link"),
+            ("fresh", "new-parent/nested/state"),
+        ] {
+            // The shell changes only its own umask and then replaces itself.
+            // No process-global Rust env/umask mutation or unsafe code is needed.
+            let output = std::process::Command::new("/bin/sh")
+                .args(["-c", r#"umask 0002; exec "$@""#, "raiun-state-umask-test"])
+                .arg(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+                .env(CHILD, scenario)
+                .env(ROOT, root)
+                .env("RAIUN_STATE_DIR", root.join(relative))
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "synthetic {scenario} child failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                fs::read(root.join(format!("{scenario}.complete"))).unwrap(),
+                b"completed exact child",
+                "zero-test child execution cannot count as a pass"
+            );
+            println!("synthetic_umask_0002_scenario={scenario},passed=true");
+        }
     }
 }

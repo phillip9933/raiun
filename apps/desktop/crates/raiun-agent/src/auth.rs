@@ -6,7 +6,9 @@
 
 #[cfg(any(unix, test))]
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use raiun_opencloud::ProxyConfig;
+use raiun_opencloud::{
+    OpenCloudClient, ProxyConfig, validate_app_token_credentials, validate_app_token_server,
+};
 use reqwest::blocking::{Client, Response};
 use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
@@ -41,6 +43,7 @@ const LEGACY_WEBFINGER_ISSUER_REL: &str = "http://opencloud.eu/ns/oidc/issuer";
 const WEBFINGER_CLIENT_ID: &str = "http://opencloud.eu/ns/oidc/client_id";
 const WEBFINGER_SCOPES: &str = "http://opencloud.eu/ns/oidc/scopes";
 const DEFAULT_CLIENT_ID: &str = "OpenCloudDesktop";
+pub const APP_TOKEN_CLIENT_ID: &str = "RaiunHeadlessAppToken";
 const DEFAULT_SCOPES: &[&str] = &["openid", "offline_access", "profile", "email"];
 
 #[cfg(all(feature = "synthetic-test-ca", not(debug_assertions)))]
@@ -72,13 +75,16 @@ pub struct AuthFlow {
     proxy: ProxyConfig,
 }
 
-/// An OAuth session. This type intentionally does not implement `Debug`.
+/// An OAuth or app-token session. This type intentionally does not implement `Debug`.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Session {
     pub server: String,
     pub client_id: String,
     pub access_token: String,
+    /// Basic app-token identity; `access_token` holds the app token when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_token_username: Option<String>,
     pub refresh_token: Option<String>,
     pub expires_at: u64,
     pub token_endpoint: String,
@@ -373,6 +379,97 @@ impl AuthFlow {
 }
 
 impl Session {
+    /// Build a non-renewable app-token session without OIDC discovery or HTTP.
+    pub fn for_app_token(
+        server: &str,
+        username: &str,
+        token: String,
+        proxy: ProxyConfig,
+    ) -> Result<Self, String> {
+        validate_app_token_server(server).map_err(|error| error.to_string())?;
+        let server_url = validate_url(server, true, "server")?;
+        if server_url.query().is_some() {
+            return Err("Server URL must not contain a query string".into());
+        }
+        validate_app_token_credentials(username, &token).map_err(|error| error.to_string())?;
+        let session = Self {
+            server: normalize_server(&server_url),
+            client_id: APP_TOKEN_CLIENT_ID.to_owned(),
+            access_token: token,
+            app_token_username: Some(username.to_owned()),
+            refresh_token: None,
+            expires_at: u64::MAX,
+            token_endpoint: String::new(),
+            expected_issuer: None,
+            last_refresh_at: None,
+            proxy,
+        };
+        validate_session(&session)?;
+        Ok(session)
+    }
+
+    /// Rebuild a cloud client while preserving this session's authentication method.
+    pub fn opencloud_client(&self) -> Result<OpenCloudClient, String> {
+        validate_session(self)?;
+        match &self.app_token_username {
+            Some(username) => OpenCloudClient::new_with_app_token(
+                &self.server,
+                username,
+                self.access_token.clone(),
+                &self.proxy,
+            ),
+            None => OpenCloudClient::new_with_proxy(
+                &self.server,
+                self.access_token.clone(),
+                &self.proxy,
+            ),
+        }
+        .map_err(|error| error.to_string())
+    }
+
+    /// Admit an app-token session only after fixed Graph identity and Personal
+    /// root discovery succeed. No write, mount, token exchange or renewal occurs.
+    pub fn verify_app_token(&self) -> Result<(), RefreshError> {
+        if self.app_token_username.is_none() {
+            return Ok(());
+        }
+        let client = self.opencloud_client().map_err(RefreshError::Other)?;
+        client
+            .with_bounded_namespace_probe(|| {
+                client.current_user_id()?;
+                let spaces = raiun_core::backend::CloudBackend::spaces(&client)?;
+                let mut personal = spaces
+                    .iter()
+                    .filter(|space| space.personal && !space.encrypted);
+                let root = personal.next().ok_or_else(|| {
+                    raiun_core::backend::CloudError::new(
+                        raiun_core::backend::ErrorKind::InvalidResponse,
+                        "The server returned no ordinary Personal drive",
+                    )
+                })?;
+                if personal.next().is_some() {
+                    return Err(raiun_core::backend::CloudError::new(
+                        raiun_core::backend::ErrorKind::InvalidResponse,
+                        "The server returned multiple Personal drives",
+                    ));
+                }
+                let context = raiun_opencloud::RangeReadContext {
+                    deadline: Instant::now() + Duration::from_secs(3),
+                    token_generation: client.token_generation(),
+                };
+                client.stat_discovered_space_root_with_context(root, context)?;
+                Ok(())
+            })
+            .map_err(|error| match error.kind {
+                raiun_core::backend::ErrorKind::Unauthorized
+                | raiun_core::backend::ErrorKind::Forbidden => RefreshError::Rejected(
+                    "The server rejected the app token; sign in again".into(),
+                ),
+                raiun_core::backend::ErrorKind::Offline => RefreshError::Transport,
+                _ => RefreshError::Other("Could not verify the app token's Personal drive".into()),
+            })
+    }
+
     /// Refresh the access token without exposing token data in diagnostics.
     #[cfg(unix)]
     pub fn refresh(&mut self) -> Result<(), String> {
@@ -384,6 +481,11 @@ impl Session {
     /// startup may use cached state only for the former.
     pub fn refresh_classified(&mut self) -> Result<(), RefreshError> {
         validate_session(self).map_err(RefreshError::Other)?;
+        // App tokens are opaque, revocable credentials with no refresh protocol.
+        // Actual Graph/DAV rejection must remain an authentication failure.
+        if self.app_token_username.is_some() {
+            return Ok(());
+        }
         let refresh_token = self.refresh_token.as_deref().ok_or_else(|| {
             RefreshError::Other("This session has no refresh token; sign in again".into())
         })?;
@@ -1023,6 +1125,7 @@ fn parse_session(
         server: server.to_string(),
         client_id: client_id.to_string(),
         access_token: parsed.access_token,
+        app_token_username: None,
         refresh_token: parsed.refresh_token,
         expires_at,
         token_endpoint: token_endpoint.to_string(),
@@ -1038,6 +1141,28 @@ pub(crate) fn validate_session(session: &Session) -> Result<(), String> {
         .validate()
         .map_err(|_| "Stored proxy configuration is invalid".to_string())?;
     let server = validate_url(&session.server, true, "stored server")?;
+    if let Some(username) = &session.app_token_username {
+        if session.server.len() > 2_048
+            || session.server.chars().any(char::is_control)
+            || server.query().is_some()
+            || normalize_server(&server) != session.server
+            || session.client_id != APP_TOKEN_CLIENT_ID
+            || session.refresh_token.is_some()
+            || !session.token_endpoint.is_empty()
+            || session.expected_issuer.is_some()
+            || session.last_refresh_at.is_some()
+            || session.expires_at == 0
+        {
+            return Err("Stored app-token session is invalid; sign in again".into());
+        }
+        validate_app_token_credentials(username, &session.access_token)
+            .map_err(|error| error.to_string())?;
+        validate_app_token_server(&session.server).map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    if session.client_id == APP_TOKEN_CLIENT_ID {
+        return Err("Stored app-token session has no username; sign in again".into());
+    }
     let allow_loopback_http =
         server.scheme() == "http" && server.host_str().is_some_and(is_loopback);
     validate_url(
@@ -1341,6 +1466,94 @@ mod tests {
     use std::io::{BufRead, BufReader};
     use std::net::TcpListener;
 
+    #[test]
+    fn oauth_session_serialization_preserves_legacy_field_shape() {
+        let legacy = json!({
+            "server":"https://cloud.example",
+            "client_id":"OpenCloudDesktop",
+            "access_token":"synthetic-oauth-access",
+            "refresh_token":"synthetic-oauth-refresh",
+            "expires_at":1234567890,
+            "token_endpoint":"https://cloud.example/token",
+            "expected_issuer":"https://cloud.example",
+            "last_refresh_at":null,
+            "proxy":{"mode":"direct"},
+        });
+        let session: Session = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(session.app_token_username.is_none());
+        validate_session(&session).unwrap();
+        let serialized = serde_json::to_value(&session).unwrap();
+        assert!(
+            !serialized
+                .as_object()
+                .unwrap()
+                .contains_key("app_token_username")
+        );
+        assert_eq!(serialized, legacy);
+    }
+
+    #[test]
+    fn app_token_session_is_non_oidc_validated_and_backward_compatible() {
+        let mut session = Session::for_app_token(
+            "https://cloud.example/base/",
+            "synthetic-uuid",
+            "synthetic-app-token".into(),
+            ProxyConfig::Direct,
+        )
+        .unwrap();
+        assert_eq!(session.server, "https://cloud.example/base");
+        assert_eq!(session.client_id, APP_TOKEN_CLIENT_ID);
+        assert_eq!(session.expires_at, u64::MAX);
+        session.refresh_classified().unwrap(); // No token endpoint exists or is contacted.
+        assert_eq!(session.access_token, "synthetic-app-token");
+        assert!(session.last_refresh_at.is_none());
+        assert!(session.opencloud_client().is_ok());
+        let saved = serde_json::to_vec(&session).unwrap();
+        let loaded: Session = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(loaded.app_token_username.as_deref(), Some("synthetic-uuid"));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&saved).unwrap()["app_token_username"],
+            "synthetic-uuid"
+        );
+        validate_session(&loaded).unwrap();
+        let mut bad = session.clone();
+        bad.refresh_token = Some("unexpected".into());
+        assert!(validate_session(&bad).is_err());
+        let mut bad = session.clone();
+        bad.client_id = "OpenCloudDesktop".into();
+        assert!(validate_session(&bad).is_err());
+        let mut bad = session.clone();
+        bad.token_endpoint = "https://cloud.example/token".into();
+        assert!(validate_session(&bad).is_err());
+        let mut bad = session.clone();
+        bad.expected_issuer = Some("https://cloud.example".into());
+        assert!(validate_session(&bad).is_err());
+        let mut bad = session.clone();
+        bad.app_token_username = None;
+        assert!(validate_session(&bad).is_err());
+        let mut oauth =
+            serde_json::to_value(refresh_session("https://cloud.example/token")).unwrap();
+        oauth.as_object_mut().unwrap().remove("app_token_username");
+        let loaded: Session = serde_json::from_value(oauth).unwrap();
+        assert!(loaded.app_token_username.is_none());
+        validate_session(&loaded).unwrap();
+    }
+
+    #[test]
+    fn app_token_session_refuses_invalid_credentials_without_echoing_them() {
+        for (server, user, token) in [
+            ("http://cloud.example", "u", "synthetic-secret"),
+            ("https://cloud.example/?secret=x", "u", "synthetic-secret"),
+            ("https://cloud.example", "u:alias", "synthetic-secret"),
+            ("https://cloud.example", "u", "synthetic-secret\n"),
+        ] {
+            let error = Session::for_app_token(server, user, token.into(), ProxyConfig::Direct)
+                .err()
+                .unwrap();
+            assert!(!error.contains("synthetic-secret"));
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn secret_service_oversized_response_is_permanent_corrupt_data() {
@@ -1422,6 +1635,7 @@ mod tests {
             server: server.clone(),
             client_id: "synthetic-client".into(),
             access_token: "old-access-token".into(),
+            app_token_username: None,
             refresh_token: Some("old-refresh-token".into()),
             expires_at: now_unix().saturating_sub(1),
             token_endpoint: endpoint.to_owned(),
@@ -2488,6 +2702,7 @@ mod tests {
             server: "https://cloud.example".into(),
             client_id: "OpenCloudDesktop".into(),
             access_token,
+            app_token_username: None,
             refresh_token: None,
             expires_at: 1,
             token_endpoint: "https://issuer.example/token".into(),

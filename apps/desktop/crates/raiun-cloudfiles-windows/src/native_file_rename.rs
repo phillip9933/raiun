@@ -1,5 +1,6 @@
 //! Narrow native admission and identity-only completion for same-parent file rename.
 use super::*;
+use crate::FileRenameBindingCandidate;
 use crate::namespace_file_rename::{
     FileRenameCompletionError, FileRenameLocal, FileRenameReadback,
 };
@@ -161,6 +162,248 @@ pub(crate) struct PinnedFileRename<'connection> {
 }
 
 impl ConfiguredRootConnection {
+    fn validate_file_rename_candidate_connection(
+        &self,
+        backend: &Arc<crate::OpenCloudPlaceholderBackend>,
+        candidate: &FileRenameBindingCandidate<'_>,
+        generation: u64,
+    ) -> Result<RootIdentity, Error> {
+        if generation == 0
+            || !self.connected
+            || self.state.readiness.load(Ordering::Acquire) != CALLBACK_READY
+        {
+            return Err(Error::ProviderUnavailable);
+        }
+        let erased: Arc<dyn PlaceholderBackend> = backend.clone();
+        if !Arc::ptr_eq(&erased, &self.state.backend) {
+            return Err(Error::ProviderUnavailable);
+        }
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        let root_identity = crate::ConfiguredRootIdentity {
+            volume_serial: root.identity.volume_serial,
+            file_index: root.identity.file_index,
+        };
+        let recovery = self
+            .state
+            .recovery
+            .as_ref()
+            .ok_or(Error::EditRecoveryUnavailable)?;
+        let provider_scope = recovery.provider_scope();
+        let scope = candidate.catalog_scope();
+        let authorization = candidate.authorization();
+        if recovery.root_identity() != root_identity
+            || scope.local_root() != root_identity
+            || scope.profile_id() != provider_scope.profile_id()
+            || scope.account_id() != provider_scope.account_id()
+            || scope.server_origin() != provider_scope.server_origin()
+            || authorization.token_generation != provider_scope.token_generation()
+            || authorization.agent_generation == 0
+            || candidate.local_file_hint().volume_serial != root_identity.volume_serial
+            || candidate.local_file_hint().file_index == 0
+        {
+            return Err(Error::ProviderUnavailable);
+        }
+        Ok(root.identity)
+    }
+
+    /// Read-only connection/root/recovery admission before a candidate-parent
+    /// session performs any HTTP metadata refresh.
+    pub(crate) fn preflight_file_rename_candidate(
+        &self,
+        backend: &Arc<crate::OpenCloudPlaceholderBackend>,
+        candidate: &FileRenameBindingCandidate<'_>,
+        generation: u64,
+        owner_current: &dyn Fn(crate::namespace_intent::CapturedAuthorization) -> bool,
+    ) -> Result<(), Error> {
+        self.validate_file_rename_candidate_connection(backend, candidate, generation)?;
+        if !backend.file_rename_token_is_current()
+            || !backend.owns_composite_root_identity(self.composite_root_identity)
+            || !owner_current(candidate.authorization())
+        {
+            return Err(Error::ProviderUnavailable);
+        }
+        Ok(())
+    }
+
+    /// Assemble the full local/remote intent only after a fresh backend parent
+    /// capture and native pin have been joined to this exact configured root.
+    /// The resulting intent remains a proposal; the existing producer repeats
+    /// all parent/file proofs under its fresh sessions before publication.
+    pub(crate) fn intent_from_file_rename_candidate(
+        &self,
+        backend: &Arc<crate::OpenCloudPlaceholderBackend>,
+        candidate: &FileRenameBindingCandidate<'_>,
+        captured: &crate::CapturedDirectoryParent,
+        generation: u64,
+    ) -> Result<NamespaceIntent, Error> {
+        self.validate_file_rename_candidate_connection(backend, candidate, generation)?;
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        let root_identity = crate::ConfiguredRootIdentity {
+            volume_serial: root.identity.volume_serial,
+            file_index: root.identity.file_index,
+        };
+        let scope = candidate.catalog_scope();
+        let authorization = candidate.authorization();
+        if captured.identity != candidate.parent_identity()
+            || captured.remote.resource_id != candidate.parent_remote_id()
+            || captured.scope.profile_id != scope.profile_id
+            || captured.scope.account_subject != scope.account_id
+            || captured.scope.server_origin != scope.server_origin
+            || captured.scope.space_id != scope.personal_space_id
+            || captured.scope.root_resource_id != scope.personal_root_resource_id
+            || captured.scope.root_volume_serial != root_identity.volume_serial
+            || captured.scope.root_file_index != root_identity.file_index
+        {
+            return Err(Error::ProviderUnavailable);
+        }
+
+        let pair = candidate.rename_hint_pair();
+        let old = pair.old_components();
+        let new = pair.new_components();
+        if old.len() < 2
+            || old.len() != new.len()
+            || old.first().map(String::as_str) != Some("Personal")
+            || old[..old.len() - 1] != new[..new.len() - 1]
+            || old
+                .iter()
+                .chain(new)
+                .any(|component| !valid_component(component))
+            || old[old.len() - 1].eq_ignore_ascii_case(&new[new.len() - 1])
+            || captured.route.len() != old.len() - 1
+        {
+            return Err(Error::InvalidConfiguredRoot);
+        }
+        let parent_components = old[..old.len() - 1]
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let remote_parent_path = candidate
+            .source_path()
+            .rsplit_once('/')
+            .map(|(parent, _)| if parent.is_empty() { "/" } else { parent })
+            .ok_or(Error::ConfiguredRootChanged)?;
+        if captured.path != remote_parent_path {
+            return Err(Error::ConfiguredRootChanged);
+        }
+
+        let (parent_handle, parent_snapshot, _ancestors) =
+            native_namespace_directory::pin_namespace_parent(
+                root,
+                &captured.route,
+                captured.identity,
+                &parent_components,
+                FILE_READ_ATTRIBUTES,
+            )?;
+        if parent_snapshot.identity.volume_serial != root.identity.volume_serial
+            || parent_snapshot.identity.file_index == 0
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+
+        let mut source_path = root.path.clone();
+        for part in old {
+            source_path.push(part);
+        }
+        let mut destination_path = root.path.clone();
+        for part in new {
+            destination_path.push(part);
+        }
+        if !absent(&source_path)? {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        let (root_final, _path_directories, entry, snapshot) = pin_callback_path_chain(
+            &destination_path,
+            root.identity,
+            candidate.local_file_hint().file_index,
+            CallbackSizePolicy::Exact(candidate.source_size()),
+        )
+        .map_err(|_| Error::ConfiguredRootChanged)?;
+        if !windows_paths_equal(&root_final, &root.path)
+            || !same_root_entry(
+                snapshot,
+                root.identity,
+                candidate.local_file_hint(),
+                candidate.source_size(),
+            )
+            || !windows_paths_equal(
+                &final_path_for_handle(entry.0).map_err(|_| Error::ConfiguredRootChanged)?,
+                &destination_path,
+            )
+            || !windows_paths_equal(
+                &final_path_for_handle(parent_handle.0)
+                    .map_err(|_| Error::ConfiguredRootChanged)?,
+                destination_path
+                    .parent()
+                    .ok_or(Error::ConfiguredRootChanged)?,
+            )
+            || !file_links(entry.0, snapshot.identity)?
+            || modified_ranges_for_handle(entry.0).map_err(|_| Error::EditRecoveryUnavailable)?
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        verify_completion_identity(entry.0, candidate.source_identity().as_bytes())?;
+        if !absent(&source_path)? {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+
+        let parent = crate::namespace_intent::NamespaceParent {
+            scope: captured.scope.clone(),
+            authorization,
+            classification: StorageClassification::Ordinary,
+            local_file: crate::LocalFileIdentity {
+                volume_serial: parent_snapshot.identity.volume_serial,
+                file_index: parent_snapshot.identity.file_index,
+            },
+            local_components: parent_components
+                .iter()
+                .map(|part| (*part).to_owned())
+                .collect(),
+            remote: captured.remote.clone(),
+        };
+        let local_file = crate::LocalFileIdentity {
+            volume_serial: snapshot.identity.volume_serial,
+            file_index: snapshot.identity.file_index,
+        };
+        let source = crate::namespace_intent::ExistingNamespaceEntry {
+            local: LocalNamespaceEntry {
+                parent: parent.clone(),
+                name: old.last().cloned().ok_or(Error::InvalidConfiguredRoot)?,
+                local_file,
+                object_kind: NamespaceObjectKind::File,
+            },
+            remote: crate::RemoteEditBaseline {
+                resource_id: candidate.source_remote_id().to_owned(),
+                etag: candidate.source_etag().to_owned(),
+                byte_len: candidate.source_size(),
+            },
+        };
+        let destination = LocalNamespaceEntry {
+            parent,
+            name: new.last().cloned().ok_or(Error::InvalidConfiguredRoot)?,
+            local_file,
+            object_kind: NamespaceObjectKind::File,
+        };
+        let intent = NamespaceIntent {
+            schema_version: 1,
+            // FileRenameStore replaces this validation placeholder with its
+            // own random record ID before durable publication.
+            record_id: "0".repeat(32),
+            record_generation: generation,
+            operation: NamespaceOperation::MoveWithinScope {
+                source,
+                destination,
+            },
+        };
+        intent
+            .validate()
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
+        Ok(intent)
+    }
+
     pub(crate) fn prepare_pinned_file_rename<'connection>(
         &'connection self,
         backend: &Arc<crate::OpenCloudPlaceholderBackend>,

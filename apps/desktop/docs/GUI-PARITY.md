@@ -260,7 +260,7 @@ tests and cross-target compilation do not establish mounted GUI acceptance.
 
 The composed partial binding-candidate API joins known opaque source/parent
 identities to a typed same-batch rename hint. It grants no mutation authority
-and makes no current parent/native classification claim. Fresh proof completion
+and makes no current parent/native classification claim. Fresh-proof native qualification
 and the connected observer/owner-thread runtime remain outstanding. The four
 original Windows candidate controls qualify the helper only; they are not
 mounted GUI or CLI acceptance.
@@ -268,5 +268,11 @@ mounted GUI or CLI acceptance.
 The explicit connected observer API is now composed with owner-thread, revocation
 and drain/retention guards. It remains unattached by GUI production code. The
 GUI test fixture uses only a fresh explicit private state root; no installed
-account/default-state access is allowed. Native GUI observer execution and fresh
-rename proof/runtime wiring remain separate pending gates.
+account/default-state access is allowed. Native GUI observer execution, fresh-proof qualification and owner-thread
+runtime wiring remain separate pending gates.
+
+The explicit fresh-parent bridge is source-composed and cross-target checked.
+Actual connected/native entry is still unexecuted. Before enabling a caller,
+shared admission must exclude unfinished content and callback capture work;
+existing save/Retry scheduling flags alone are insufficient. GUI owner-thread
+wiring, namespace attention status and mounted/package acceptance remain open.
