@@ -103,7 +103,7 @@ impl RecoveryAdmission {
         // entry. Missing/wrong-policy/reparse entries still fail closed.
         let mut lock = root
             .open_owned_immutable_file(OsStr::new(V2_QUOTA_LOCK))
-            .map_err(io_error)?;
+            .map_err(crate::streamed_store::quota_lock_open_error)?;
         if lock.metadata().map_err(io_error)?.len() != 0 {
             return Err(StoreError::CorruptEvidence);
         }

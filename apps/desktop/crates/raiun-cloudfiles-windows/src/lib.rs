@@ -10,6 +10,16 @@ use std::{error::Error as StdError, fmt};
 mod backend;
 mod edit_journal;
 mod initial_edit_queue;
+#[cfg(windows)]
+mod native_file_rename_producer;
+#[cfg(windows)]
+pub use native_file_rename_producer::NativeFileRenameError;
+#[cfg(any(windows, test))]
+pub mod namespace_file_rename;
+pub mod namespace_intent;
+#[cfg(any(windows, test))]
+pub mod namespace_reconcile;
+
 mod opencloud;
 #[cfg(windows)]
 pub(crate) mod recovery_admission;
@@ -22,6 +32,8 @@ pub mod streamed_reconcile;
 pub mod streamed_snapshot;
 #[cfg(any(windows, test))]
 pub mod streamed_store;
+#[cfg(any(windows, test))]
+pub use streamed_store::namespace_store;
 #[cfg(any(windows, test))]
 mod vault_capture_dispatch;
 #[cfg(any(windows, test))]
@@ -74,6 +86,11 @@ pub use edit_journal::{
 };
 pub use initial_edit_queue::{
     InitialEditDispatch, InitialEditLocation, MAX_PENDING_INITIAL_EDITS, PendingInitialEdit,
+};
+#[cfg(any(windows, test))]
+pub use opencloud::{
+    DirectoryCreateSession, FileRenameSession, PlainFileCaptureParent,
+    VerifiedDirectoryPublication, VerifiedFileRenamePublication,
 };
 pub use opencloud::{
     FileCacheBindingExpectation, FileCacheStatus, InitialEditSession, ListedFilePage,
@@ -460,9 +477,123 @@ pub struct ConfiguredRootConnection {
     inner: native::ConfiguredRootConnection,
 }
 
+/// Exact native plain-directory pins, not constructible from a path or stored
+/// namespace report. Metadata is exposed only after current owned CF parent
+/// routing, complete no-follow pins and FileIDs have independently joined.
+#[cfg(windows)]
+pub struct PreparedNamespaceDirectory<'connection> {
+    inner: native::native_namespace_directory::PinnedNamespaceDirectory<'connection>,
+}
+/// Physical metadata only. Constructing or serializing these values cannot
+/// construct native admission, a live session or a publication capability.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NamespaceDirectoryObservation {
+    pub local_file: LocalFileIdentity,
+    pub attributes: u32,
+    pub reparse_tag: u32,
+    pub placeholder_state: u32,
+    pub opaque_identity: Option<[u8; 16]>,
+}
+#[cfg(windows)]
+pub struct NativeDirectoryCreateLocal<'pin, 'connection, 'session, 'backend> {
+    inner: native::native_namespace_directory::NativeDirectoryLocal<
+        'pin,
+        'connection,
+        'session,
+        'backend,
+    >,
+}
+#[cfg(windows)]
+impl<'connection> PreparedNamespaceDirectory<'connection> {
+    pub fn entry(&self) -> &namespace_intent::LocalNamespaceEntry {
+        self.inner.entry()
+    }
+    pub fn parent_identity(&self) -> OpaqueIdentity {
+        self.inner.parent_identity()
+    }
+    pub fn intent(&self) -> namespace_intent::NamespaceIntent {
+        self.inner.intent()
+    }
+    /// Recheck this pinned plain directory after a dispatch-lease wait. This
+    /// local validation grants no publication authority; local.admit remains
+    /// mandatory within the live publication session before mutation.
+    pub fn validate_presend(
+        &self,
+        intent: &namespace_intent::NamespaceIntent,
+    ) -> Result<(), Error> {
+        self.inner.validate_presend(intent)
+    }
+    /// Physical metadata only, never a directory publication capability.
+    pub fn observation(&self) -> Result<NamespaceDirectoryObservation, Error> {
+        self.inner.observation()
+    }
+    pub fn local<'pin, 'session, 'backend>(
+        &'pin mut self,
+        session: &'session DirectoryCreateSession<'backend>,
+    ) -> NativeDirectoryCreateLocal<'pin, 'connection, 'session, 'backend> {
+        NativeDirectoryCreateLocal {
+            inner: self.inner.local(session),
+        }
+    }
+}
+#[cfg(windows)]
+impl namespace_reconcile::DirectoryCreateLocal for NativeDirectoryCreateLocal<'_, '_, '_, '_> {
+    fn admit(
+        &mut self,
+        intent: &namespace_intent::NamespaceIntent,
+    ) -> Result<(), raiun_core::backend::CloudError> {
+        namespace_reconcile::DirectoryCreateLocal::admit(&mut self.inner, intent)
+    }
+    fn publish(
+        &mut self,
+        intent: &namespace_intent::NamespaceIntent,
+        readback: &namespace_reconcile::DirectoryCreateReadback,
+    ) -> Result<(), raiun_core::backend::CloudError> {
+        namespace_reconcile::DirectoryCreateLocal::publish(&mut self.inner, intent, readback)
+    }
+    fn record_completion<F>(
+        &mut self,
+        intent: &namespace_intent::NamespaceIntent,
+        readback: &namespace_reconcile::DirectoryCreateReadback,
+        record: F,
+    ) -> Result<(), namespace_reconcile::DirectoryCompletionError>
+    where
+        F: FnOnce() -> Result<(), streamed_store::StoreError>,
+    {
+        namespace_reconcile::DirectoryCreateLocal::record_completion(
+            &mut self.inner,
+            intent,
+            readback,
+            record,
+        )
+    }
+}
+
 #[cfg(windows)]
 #[allow(dead_code)]
 impl ConfiguredRootConnection {
+    /// Components are only observation hints. Current backend routing and the
+    /// exact native handles, never those strings, provide admission evidence.
+    pub fn prepare_namespace_directory<'connection>(
+        &'connection self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        parent_components: &[&str],
+        name: &str,
+        authorization: namespace_intent::CapturedAuthorization,
+        generation: u64,
+    ) -> Result<PreparedNamespaceDirectory<'connection>, Error> {
+        self.inner
+            .prepare_namespace_directory(
+                backend,
+                parent_components,
+                name,
+                authorization,
+                generation,
+            )
+            .map(|inner| PreparedNamespaceDirectory { inner })
+    }
+
     /// Conservative admission fence for new vault sessions. Unknown historical
     /// custody (including reconnects) refuses activation; this does not hide
     /// existing plaintext or prove complete filesystem cleanup.

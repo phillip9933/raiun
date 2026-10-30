@@ -18,6 +18,16 @@ pub mod vault_backend;
 pub mod vault_cache;
 pub mod vault_create;
 
+mod conditional_rename;
+pub use conditional_rename::{ConditionalRenameRequest, ConditionalRenameResponse};
+mod ordinary_presence;
+pub use ordinary_presence::{OrdinaryPresenceRequest, OrdinaryTargetPresence};
+
+#[cfg(test)]
+mod conditional_rename_tests;
+#[cfg(test)]
+mod ordinary_presence_tests;
+
 use std::{
     cell::Cell,
     fs::File,
@@ -167,6 +177,15 @@ pub struct RangeReadContext {
     pub token_generation: u64,
 }
 
+/// Outcome of one MKCOL send. A successful response is kept separate from
+/// later path observations; it contains no server-created resource identity.
+#[derive(Debug)]
+pub enum DirectoryCreateResponse {
+    Created,
+    Rejected(CloudError),
+    Uncertain(CloudError),
+}
+
 /// A token-generation lease held across a short local publish operation.
 /// The credential itself is never exposed through this type.
 pub struct TokenGenerationLease<'a> {
@@ -252,10 +271,26 @@ fn transfer_timeout_for_context(
     ))
 }
 
+/// Check captured server-origin text against the existing transport policy.
+/// This performs no I/O and creates no client, session or credential authority.
+/// Callers still enforce their canonical origin-only serialization shape.
+pub fn validate_captured_server_origin(origin: &str) -> Result<(), CloudError> {
+    if origin.len() > 2_048
+        || origin.trim() != origin
+        || origin.chars().any(char::is_control)
+        || authority_contains_userinfo(origin)
+    {
+        return Err(invalid("captured server origin is malformed"));
+    }
+    let url = Url::parse(origin).map_err(|_| invalid("captured server origin is invalid"))?;
+    validate_server(&url)
+}
+
 #[derive(Clone)]
 pub struct OpenCloudClient {
     server: Url,
     http: Client,
+    conditional_http: Client,
     async_http: reqwest::Client,
     body_idle_timeout: Duration,
     token: Arc<Mutex<String>>,
@@ -475,6 +510,21 @@ impl OpenCloudClient {
         let http = builder.build().map_err(|_| {
             CloudError::new(ErrorKind::Offline, "could not initialize HTTPS client")
         })?;
+        let conditional_builder = apply_proxy(Client::builder(), proxy)?
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(connect_timeout)
+            .timeout(request_timeout)
+            .retry(reqwest::retry::never());
+        #[cfg(feature = "synthetic-test-ca")]
+        let conditional_builder = add_synthetic_test_ca(conditional_builder, &server)?;
+        #[cfg(not(feature = "synthetic-test-ca"))]
+        let _ = &server;
+        let conditional_http = conditional_builder.build().map_err(|_| {
+            CloudError::new(
+                ErrorKind::Offline,
+                "could not initialize conditional request client",
+            )
+        })?;
         let async_builder = proxy
             .apply_to_async_client_builder(reqwest::Client::builder())?
             .redirect(reqwest::redirect::Policy::none())
@@ -491,6 +541,7 @@ impl OpenCloudClient {
         Ok(Self {
             server: normalized_server(server),
             http,
+            conditional_http,
             async_http,
             body_idle_timeout: async_body::BODY_IDLE_TIMEOUT,
             token: Arc::new(Mutex::new(bearer_token)),
@@ -1683,6 +1734,68 @@ impl OpenCloudClient {
             ));
         }
         Ok(entry)
+    }
+
+    /// Send at most one ordinary MKCOL under an exact recovery root/context.
+    /// `Err` means no MKCOL was sent. Once send begins, transport/unknown-status
+    /// failures are uncertain. Bare 201 is not an atomic created-ID receipt.
+    pub fn mkdir_with_context(
+        &self,
+        space: &str,
+        remote_root_path: &str,
+        expected_root_id: &str,
+        relative_path: &str,
+        context: RangeReadContext,
+    ) -> Result<DirectoryCreateResponse, CloudError> {
+        let _guard = RangeContextGuard::enter(context);
+        self.ensure_context_current(context)?;
+        let path = recovery_target_path(remote_root_path, relative_path)?;
+        if path.trim_end_matches('/') == remote_root_path.trim_end_matches('/') {
+            return Err(invalid("cannot create a Space root"));
+        }
+        self.validate_recovery_root(space, remote_root_path, expected_root_id)?;
+        let (selected, url) = self.transfer_url(space, &path)?;
+        self.ensure_writable_target(&selected, &url, &path)?;
+        self.ensure_context_current(context)?;
+        let (request, token) =
+            self.request(Method::from_bytes(b"MKCOL").expect("static method"), &url)?;
+        let response = match request.send() {
+            Ok(response) => response,
+            Err(error) => return Ok(DirectoryCreateResponse::Uncertain(network(error))),
+        };
+        let status = response.status();
+        if status == StatusCode::CREATED {
+            return Ok(match self.ensure_context_current(context) {
+                Ok(()) => DirectoryCreateResponse::Created,
+                Err(error) => DirectoryCreateResponse::Uncertain(error),
+            });
+        }
+        if let Err(error) = self.ensure_context_current(context) {
+            return Ok(DirectoryCreateResponse::Uncertain(error));
+        }
+        let error = if status == StatusCode::METHOD_NOT_ALLOWED {
+            conflict("directory destination already exists")
+        } else {
+            checked(response, &[StatusCode::CREATED], &token)
+                .err()
+                .unwrap_or_else(|| invalid("unexpected directory create response"))
+        };
+        Ok(
+            if matches!(
+                status,
+                StatusCode::UNAUTHORIZED
+                    | StatusCode::FORBIDDEN
+                    | StatusCode::NOT_FOUND
+                    | StatusCode::CONFLICT
+                    | StatusCode::PRECONDITION_FAILED
+                    | StatusCode::METHOD_NOT_ALLOWED
+                    | StatusCode::PRECONDITION_REQUIRED
+            ) {
+                DirectoryCreateResponse::Rejected(error)
+            } else {
+                DirectoryCreateResponse::Uncertain(error)
+            },
+        )
     }
 
     /// Stat one recovered edit target beneath an exact configured remote root.
@@ -3860,7 +3973,7 @@ mod tests {
         }));
     }
 
-    fn fixture(
+    pub(super) fn fixture(
         responses: Vec<(&'static str, String)>,
     ) -> (String, thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -3956,7 +4069,36 @@ mod tests {
             .expect("stalled Graph fixture exits on client timeout");
     }
 
-    const GRAPH: &str = r#"{"value":[{"id":"drive-1","name":"Personal","driveType":"personal","root":{"id":"root","webDavUrl":"http://127.0.0.1:PORT/dav/personal/"}}]}"#;
+    pub(super) const GRAPH: &str = r#"{"value":[{"id":"drive-1","name":"Personal","driveType":"personal","root":{"id":"root","webDavUrl":"http://127.0.0.1:PORT/dav/personal/"}}]}"#;
+
+    #[test]
+    fn captured_server_origin_uses_existing_tls_policy_and_rejects_raw_url_ambiguity() {
+        for origin in ["https://fixture.invalid", "http://127.0.0.1:32123"] {
+            assert!(validate_captured_server_origin(origin).is_ok());
+        }
+        for origin in [
+            "",
+            " https://fixture.invalid",
+            "https://fixture.invalid ",
+            "https://fixture.invalid\n",
+            "https://fixture.in\tvalid",
+            "https://user@fixture.invalid",
+            "https://user:secret@fixture.invalid",
+            "https://@fixture.invalid",
+            "https://fixture.invalid?token=synthetic",
+            "https://fixture.invalid#fragment",
+            "http://fixture.invalid",
+            "http://localhost",
+            "ftp://fixture.invalid",
+            "https:///",
+        ] {
+            assert!(
+                validate_captured_server_origin(origin).is_err(),
+                "malformed or disallowed captured origin accepted"
+            );
+        }
+        assert!(validate_captured_server_origin(&"x".repeat(2_049)).is_err());
+    }
 
     #[test]
     fn client_rejects_non_loopback_http_and_redacts_debug() {

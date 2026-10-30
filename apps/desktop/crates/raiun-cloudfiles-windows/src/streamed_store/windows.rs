@@ -124,6 +124,14 @@ impl Directory for WindowsDirectory {
             .map_err(io_error)?;
         Ok(Box::new(file))
     }
+    fn open_quota_lock(&self) -> Result<Box<dyn PinnedRead>, StoreError> {
+        self.verify()?;
+        let file = self
+            .directory
+            .open_owned_immutable_file(OsStr::new(V2_QUOTA_LOCK))
+            .map_err(quota_lock_open_error)?;
+        Ok(Box::new(file))
+    }
     fn publish(&self, stage: &str, final_name: &str, identity: Identity) -> Result<(), StoreError> {
         self.verify()?;
         self.directory

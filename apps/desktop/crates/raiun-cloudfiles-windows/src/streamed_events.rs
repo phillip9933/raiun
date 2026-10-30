@@ -30,7 +30,7 @@ impl StreamedRecordKey {
     pub fn commitment_sha256(&self) -> &[u8; 32] {
         &self.commitment
     }
-    fn from_manifest(manifest: &SnapshotManifest) -> Result<Self, StoreError> {
+    pub(super) fn from_manifest(manifest: &SnapshotManifest) -> Result<Self, StoreError> {
         // Fixed-order serde struct serialization, no maps/floats. Domain/version
         // changes are required if the canonical manifest schema changes.
         let bytes = Zeroizing::new(serde_json::to_vec(manifest).map_err(|_| StoreError::Invalid)?);

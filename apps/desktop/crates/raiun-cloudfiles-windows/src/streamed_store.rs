@@ -18,6 +18,15 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+#[path = "namespace_file_store.rs"]
+pub mod namespace_file_store;
+
+#[path = "namespace_rename_store.rs"]
+pub mod namespace_rename_store;
+
+#[path = "namespace_store.rs"]
+pub mod namespace_store;
+
 #[path = "streamed_events.rs"]
 mod events;
 #[path = "streamed_retention.rs"]
@@ -103,6 +112,17 @@ pub(crate) fn lock_error(error: io::Error) -> StoreError {
     }
 }
 
+/// Map only a Windows sharing violation from opening the persistent quota
+/// file to contention. This defers admission; it grants no recovery authority.
+#[cfg(windows)]
+pub(crate) fn quota_lock_open_error(error: io::Error) -> StoreError {
+    if error.raw_os_error() == Some(32) {
+        StoreError::Busy
+    } else {
+        io_error(error)
+    }
+}
+
 #[cfg(all(windows, test))]
 #[test]
 fn native_lock_contention_is_busy_but_other_lock_errors_are_not() {
@@ -147,6 +167,11 @@ trait Directory: Send + Sync {
     fn child(&self, name: &str, create: bool) -> Result<Arc<dyn Directory>, StoreError>;
     fn create(&self, name: &str) -> Result<(Box<dyn StageWrite>, Identity), StoreError>;
     fn open(&self, name: &str) -> Result<Box<dyn PinnedRead>, StoreError>;
+    /// Open only the persistent admission lock. Injected stores retain the
+    /// previous generic-open behavior unless they provide a native adapter.
+    fn open_quota_lock(&self) -> Result<Box<dyn PinnedRead>, StoreError> {
+        self.open(V2_QUOTA_LOCK)
+    }
     fn publish(&self, stage: &str, final_name: &str, identity: Identity) -> Result<(), StoreError>;
 }
 
@@ -462,24 +487,28 @@ impl SnapshotStore {
         names: &[String],
         budget: &mut Budget,
     ) -> Result<(), StoreError> {
-        for name in names {
-            if name == V2_QUOTA_LOCK {
-                let lock = self.root.open(V2_QUOTA_LOCK)?;
-                if lock.len()? != 0 {
-                    return Err(StoreError::CorruptEvidence);
-                }
-                lock.verify()?;
-            } else if let Some(key) = name.strip_suffix(".scope") {
-                if !valid_key(key) || !names.contains(&key.to_owned()) {
-                    return Err(StoreError::IncompleteEvidence);
-                }
-                self.authenticate_scope(key, budget)?;
-                self.root.child(key, false)?.verify()?;
-            } else if !valid_key(name) || !names.contains(&format!("{name}.scope")) {
-                return Err(StoreError::IncompleteEvidence);
-            }
-        }
-        Ok(())
+        self.validate_root_catalogs_with_scope_union(names, budget)
+            .map(|_| ())
+    }
+
+    fn validate_root_catalogs_with_scope_union(
+        &self,
+        names: &[String],
+        budget: &mut Budget,
+    ) -> Result<RootCatalogScopes, StoreError> {
+        validate_root_catalog_scope_union(&*self.root, &*self.protector, names, budget)
+    }
+
+    // Publication callers hold the existing shared quota lease. Authenticate
+    // all formats before adding the prospective key, and before any catalog
+    // or directory is created. A shared key counts once across store types.
+    fn validate_requested_catalog_scope(&self) -> Result<(), StoreError> {
+        let mut budget = Budget::new(self.policy);
+        let names = self.root.entries(budget.remaining_entries())?;
+        budget.entries(names.len())?;
+        let mut catalogs = self.validate_root_catalogs_with_scope_union(&names, &mut budget)?;
+        catalogs.keys.insert(self.key.clone());
+        check_scope_union(&catalogs.keys)
     }
 
     fn acquire_lock(&self) -> Result<Box<dyn PinnedRead>, StoreError> {
@@ -492,7 +521,7 @@ impl SnapshotStore {
             }
             Err(_) => { /* existing lock is validated by immutable reopen */ }
         }
-        let mut file = self.root.open(V2_QUOTA_LOCK)?;
+        let mut file = self.root.open_quota_lock()?;
         if file.len()? != 0 {
             return Err(StoreError::CorruptEvidence);
         }
@@ -501,6 +530,7 @@ impl SnapshotStore {
         Ok(file)
     }
     fn ensure_scope(&self) -> Result<Arc<dyn Directory>, StoreError> {
+        self.validate_requested_catalog_scope()?;
         let names = self.root.entries(self.policy.max_entries)?;
         let catalog = format!("{}.scope", self.key);
         if names.contains(&catalog) {
@@ -616,6 +646,7 @@ fn v2_inventory_state(
     let mut budget = Budget::new(policy);
     let root_names = root.entries(policy.max_entries)?;
     budget.entries(root_names.len())?;
+    validate_root_catalog_scope_union(root, protector, &root_names, &mut budget)?;
     let mut result = Inventory {
         bytes: 0,
         entries: root_names.len(),
@@ -631,6 +662,44 @@ fn v2_inventory_state(
                 return Err(StoreError::CorruptEvidence);
             }
             lock.verify()?;
+            continue;
+        }
+        if name == namespace_file_store::ROOT {
+            let usage = namespace_file_store::accounted_usage(
+                &*root.child(name, false)?,
+                protector,
+                &mut budget,
+            )?;
+            result.add(usage.bytes)?;
+            result.entries = result
+                .entries
+                .checked_add(usage.entries)
+                .ok_or(StoreError::ScanLimit)?;
+            continue;
+        }
+        if name == namespace_store::ROOT {
+            let usage = namespace_store::accounted_usage(&*root.child(name, false)?, &mut budget)?;
+            result.add(usage.bytes)?;
+            result.entries = result
+                .entries
+                .checked_add(usage.entries)
+                .ok_or(StoreError::ScanLimit)?;
+            continue;
+        }
+        if name == namespace_rename_store::ROOT {
+            if !root_names.iter().any(|entry| entry == V2_QUOTA_LOCK) {
+                return Err(StoreError::IncompleteEvidence);
+            }
+            let usage = namespace_rename_store::accounted_usage(
+                &*root.child(name, false)?,
+                protector,
+                &mut budget,
+            )?;
+            result.add(usage.bytes)?;
+            result.entries = result
+                .entries
+                .checked_add(usage.entries)
+                .ok_or(StoreError::ScanLimit)?;
             continue;
         }
         if let Some(key) = name.strip_suffix(".scope") {
@@ -828,11 +897,16 @@ impl StagedSnapshot {
         if cancelled() {
             return Err(StoreError::Snapshot(SnapshotError::Cancelled));
         }
-        Ok(CommittedSnapshot { manifest })
+        Ok(CommittedSnapshot {
+            manifest,
+            store: Arc::clone(&r.store),
+        })
     }
 }
 pub struct CommittedSnapshot {
     manifest: SnapshotManifest,
+    // Ephemeral origin only; never serialized or reconstructed from discovery.
+    store: Arc<SnapshotStore>,
 }
 impl CommittedSnapshot {
     pub fn manifest(&self) -> &SnapshotManifest {
@@ -957,32 +1031,92 @@ fn discover_scope_catalogs_inner(
     policy.validate()?;
     root.verify()?;
     let names = root.entries(policy.max_entries.min(budget.remaining_entries()))?;
-    let mut unique = std::collections::HashSet::new();
     budget.entries(names.len())?;
-    let mut scopes = Vec::new();
-    for name in &names {
+    Ok(validate_root_catalog_scope_union(root, protector, &names, budget)?.snapshots)
+}
+
+struct RootCatalogScopes {
+    snapshots: Vec<EditJournalScope>,
+    rename: Vec<EditJournalScope>,
+    keys: std::collections::HashSet<String>,
+}
+
+fn check_scope_union(keys: &std::collections::HashSet<String>) -> Result<(), StoreError> {
+    if keys.len() > 256 {
+        return Err(StoreError::ScanLimit);
+    }
+    Ok(())
+}
+
+// Every catalog is authenticated under the caller's single remaining budget,
+// even when another format already contributed the same scope key. Returning
+// snapshot/rename groups separately never reinterprets another format's data.
+fn validate_root_catalog_scope_union(
+    root: &dyn Directory,
+    protector: &dyn EditRecordProtector,
+    names: &[String],
+    budget: &mut Budget,
+) -> Result<RootCatalogScopes, StoreError> {
+    root.verify()?;
+    let mut unique = std::collections::HashSet::new();
+    let mut result = RootCatalogScopes {
+        snapshots: Vec::new(),
+        rename: Vec::new(),
+        keys: std::collections::HashSet::new(),
+    };
+    for name in names {
         if !unique.insert(name) {
             return Err(StoreError::CorruptEvidence);
         }
         if name == V2_QUOTA_LOCK {
-            let lock = root.open(name)?;
+            let lock = root.open_quota_lock()?;
             if lock.len()? != 0 {
                 return Err(StoreError::CorruptEvidence);
             }
             lock.verify()?;
+        } else if name == namespace_file_store::ROOT {
+            result
+                .keys
+                .extend(namespace_file_store::validated_catalog_scope_keys(
+                    &*root.child(name, false)?,
+                    protector,
+                    budget,
+                )?);
+        } else if name == namespace_rename_store::ROOT {
+            if !names.iter().any(|entry| entry == V2_QUOTA_LOCK) {
+                return Err(StoreError::IncompleteEvidence);
+            }
+            result.rename = namespace_rename_store::validate_catalogs(
+                &*root.child(name, false)?,
+                protector,
+                budget,
+            )?;
+            for scope in &result.rename {
+                result.keys.insert(scope_key(scope)?);
+            }
+        } else if name == namespace_store::ROOT {
+            result
+                .keys
+                .extend(namespace_store::validated_catalog_scope_keys(
+                    &*root.child(name, false)?,
+                    protector,
+                    budget,
+                )?);
         } else if let Some(key) = name.strip_suffix(".scope") {
             if !valid_key(key) || !names.contains(&key.to_owned()) {
                 return Err(StoreError::IncompleteEvidence);
             }
             let scope = authenticate_scope_catalog(root, protector, key, budget)?;
             root.child(key, false)?.verify()?;
-            scopes.push(scope);
+            result.keys.insert(key.to_owned());
+            result.snapshots.push(scope);
         } else if !valid_key(name) || !names.contains(&format!("{name}.scope")) {
             return Err(StoreError::IncompleteEvidence);
         }
     }
     root.verify()?;
-    Ok(scopes)
+    check_scope_union(&result.keys)?;
+    Ok(result)
 }
 fn authenticate_scope_catalog(
     root: &dyn Directory,
@@ -1167,6 +1301,15 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(all(test, unix))]
 #[path = "streamed_store_tests.rs"]
 mod tests;
+
+#[cfg(all(
+    test,
+    windows,
+    debug_assertions,
+    feature = "synthetic-agent-integration"
+))]
+#[path = "scope_union_native_test.rs"]
+mod scope_union_native_proof;
 
 /// Synthetic disk fixture only: no Unix/Windows immutable parity claim.
 #[cfg(all(test, unix))]

@@ -6,9 +6,19 @@
 //! files to obtain opaque identities; callback identities are never treated
 //! as paths or URLs.
 
+#[cfg(any(windows, test))]
+mod file_rename;
 mod initial_save;
+#[cfg(any(windows, test))]
+mod namespace;
 mod verified_edit;
+#[cfg(any(windows, test))]
+pub(crate) use file_rename::VerifiedRenameSourceContent;
+#[cfg(any(windows, test))]
+pub use file_rename::{FileRenameSession, VerifiedFileRenamePublication};
 pub use initial_save::InitialEditSession;
+#[cfg(any(windows, test))]
+pub use namespace::{DirectoryCreateSession, PlainFileCaptureParent, VerifiedDirectoryPublication};
 pub use verified_edit::VerifiedEditPublication;
 
 use std::{
@@ -983,6 +993,95 @@ impl OpenCloudPlaceholderBackend {
                         root_resource_id: root.id,
                         path: logical_path.to_owned(),
                         remote_id: entry.id,
+                    },
+                );
+                Ok(identity)
+            })
+            .map_err(|error| self.reject_cached_cloud_error(error))?
+    }
+
+    /// Directory-create sibling of register_directory. The live namespace
+    /// session already owns the backend lease: never acquire another read here.
+    /// Neither restat may choose a different observed resource ID or validator.
+    #[cfg(any(windows, test))]
+    fn register_observed_directory_in_session(
+        &self,
+        scope: &crate::EditJournalScope,
+        path: &str,
+        expected: &crate::RemoteEditBaseline,
+        context: RangeReadContext,
+    ) -> Result<OpaqueIdentity, BackendError> {
+        self.ensure_active()?;
+        if scope.profile_id != self.scope.profile_id()
+            || scope.account_subject != self.scope.account_id()
+            || scope.server_origin != self.scope.server_origin()
+            || !valid_remote_path(&scope.space_id, &scope.root_resource_id, path, false)
+            || !valid_remote_id(&expected.resource_id)
+            || !namespace::strong(&expected.etag)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        for _ in 0..2 {
+            let root = self
+                .client
+                .stat_with_context(&scope.space_id, "/", context)
+                .map_err(|error| self.reject_cached_cloud_error(error))?;
+            let entry = self
+                .client
+                .stat_with_context(&scope.space_id, path, context)
+                .map_err(|error| self.reject_cached_cloud_error(error))?;
+            if root.id != scope.root_resource_id
+                || !root.directory
+                || root.encrypted
+                || !entry.directory
+                || entry.encrypted
+                || !entry.writable
+                || entry.id != expected.resource_id
+                || entry.etag != expected.etag
+            {
+                return Err(BackendError::Unavailable);
+            }
+        }
+        let catalog = self
+            .catalog_scope_snapshot()?
+            .ok_or(BackendError::Unavailable)?;
+        if catalog.local_root().volume_serial != scope.root_volume_serial
+            || catalog.local_root().file_index != scope.root_file_index
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let identity = binding_identity(
+            &catalog,
+            "directory",
+            &[
+                &scope.space_id,
+                &scope.root_resource_id,
+                path,
+                &expected.resource_id,
+            ],
+        );
+        let binding = ProviderIdentityBinding::Directory {
+            identity: *identity.as_bytes(),
+            space_id: scope.space_id.clone(),
+            root_resource_id: scope.root_resource_id.clone(),
+            path: path.to_owned(),
+            remote_id: expected.resource_id.clone(),
+        };
+        let mut state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
+        self.client
+            .with_token_generation(context.token_generation, || {
+                self.ensure_active()?;
+                if binding_count(&state) >= MAX_IDENTITY_CATALOG_ENTRIES {
+                    return Err(BackendError::Unavailable);
+                }
+                self.upsert_identity_binding(&catalog, &binding)?;
+                state.directories.insert(
+                    identity,
+                    DirectoryBinding {
+                        space_id: scope.space_id.clone(),
+                        root_resource_id: scope.root_resource_id.clone(),
+                        path: path.to_owned(),
+                        remote_id: expected.resource_id.clone(),
                     },
                 );
                 Ok(identity)

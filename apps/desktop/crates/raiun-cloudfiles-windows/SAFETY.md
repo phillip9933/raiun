@@ -886,3 +886,38 @@ pure original Weak identity rather than reacquiring keys or requiring a retired
 publication revision to remain current. Missing/recovered provenance fails
 closed. Synthetic markers expose only enrollment/acknowledgement stage names;
 actual Windows full-read/re-unlock/Lock qualification remains a separate gate.
+
+
+## R37 explicit ordinary-file rename completion
+
+The production adapter retains the exact registered connection, backend and
+recovery binding; no-follow ancestor, parent and destination handles; the
+expected root, parent and file IDs; the old opaque identity; and an exclusive
+ProtectedCompletionFile reference. A fresh source content capability is minted
+only after the existing SDK verifies a full If-Match source GET against the
+protected local digest. Destination publication requires a second full GET at
+the coordinator's new reported revision matching the same source bytes. Both
+network reads finish before the publication callback and its locks.
+
+The callback may use native queries and the supplied durable journal closure;
+it must not enter backend, token or HTTP APIs. It performs at most one
+synchronous identity-only CfUpdatePlaceholder with exact16-byte identity, null
+metadata/ranges/USN/OVERLAPPED, zero range count and flags0. Input identity bytes
+and the Cloud Files protected handle remain live through the call. It preserves
+pending PLACEHOLDER state rather than marking in sync. Full-body equivalence,
+zero modified ranges, root/file/parent/path continuity, unchanged creation,
+access and write times, and nondecreasing positive ChangeTime/USN qualify local
+completion. Pins survive both final journal appends. Pre-native rejection is
+unavailable; any failed call or post-native proof is uncertain. Store errors
+keep their exact typed value and durable factual prefix. There is no retry,
+cleanup, unregister, user-byte mutation or replay authority on failure.
+
+This explicit producer is not attached to the automatic observer/operation loop.
+R36 is separate native primitive evidence. R37 source/compilation or loopback
+mock completion tests do not establish execution of this native adapter,
+mounted acceptance, large-file acceptance or crash recovery.
+
+
+### GUI shared-source composition boundary
+
+The GUI crate now compiles the explicit R37 executor and its session, content, native pin and durable-store dependency closure. No GUI caller, observation loop, candidate collection or automatic rename scheduling is enabled by this composition. Directory creation helpers compile as dependencies; no automatic create path is enabled. The shared authenticated quota and scope inventory accounts for snapshots, directory creates, file creates and renames, including retained history. Existing GUI streamed retention, device-cache quota, saved-session/legacy-root compatibility, registration identity, existing-save completion and explicit Retry remain unchanged. Source and synthetic unit checks do not establish native runtime acceptance.

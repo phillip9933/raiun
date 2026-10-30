@@ -5,6 +5,18 @@ Assessment: **29 October 2026**, Desktop `work/desktop-0.7.5`, production behavi
 features and their native seams. It is not a claim that either platform has
 completed every category in [COMPLETION-CHECKLIST.md](COMPLETION-CHECKLIST.md).
 
+Source integration update, **31 October 2026**: the GUI candidate now composes
+the shared same-parent Personal file-rename executor, authenticated intent store,
+revision-conditioned content witnesses and native identity-only completion
+adapter. This is an explicit callable engine seam, not an automatic Explorer
+rename feature. The observer, fresh candidate/store factory and GUI provider
+lifecycle caller remain unwired. The existing GUI saved sign-in, streamed
+save/Retry, cache quota and completed-copy retention paths are preserved.
+Isolated native identity-update acceptance belongs to the shared engine test
+source; the integrated native rename workflow and this GUI package remain
+unverified. These additions do not close the ordinary-mutation release blocker
+or establish broader Personal/Spaces or encrypted parity.
+
 The owner's 29 October requirement supersedes treating limited Windows writes
 as enough for the next release: ordinary file/folder create, mkdir, rename,
 move, delete, in-place and replacement saves, including safe writes above

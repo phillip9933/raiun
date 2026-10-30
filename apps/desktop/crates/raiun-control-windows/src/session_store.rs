@@ -63,12 +63,26 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone)]
 pub struct DpapiSessionStore {
     root: PathBuf,
-    // Derived profile stores retain exact private directory/ancestor pins.
+    // Explicitly admitted roots and derived profiles retain directory/ancestor pins.
     // Their OI/CI policy is verified, never rewritten by legacy root repair.
     profile_directory: Option<Arc<crate::PrivateDirectory>>,
 }
 
 impl DpapiSessionStore {
+    /// Bind protection to an already admitted private directory without
+    /// consulting environment paths, creating directories or repairing ACLs.
+    /// This terminal recovery binding cannot derive profiles or use the
+    /// base session registry; it grants only the admitted directory's storage.
+    pub fn from_existing_private_directory(
+        directory: Arc<crate::PrivateDirectory>,
+    ) -> io::Result<Self> {
+        directory.verify_path()?;
+        Ok(Self {
+            root: directory.path().to_path_buf(),
+            profile_directory: Some(directory),
+        })
+    }
+
     /// Locate the current user's `%LOCALAPPDATA%` and prepare Raiun's private
     /// session directory. The path is obtained from the environment, never IPC.
     pub fn current_user() -> io::Result<Self> {
@@ -739,6 +753,13 @@ impl DpapiSessionStore {
                 io::ErrorKind::PermissionDenied,
                 "Local edit directory is outside the private state root",
             ));
+        }
+        // An admitted root already has a verified inheritable private policy.
+        // Journal protection must not replace it with the legacy root DACL.
+        if path == self.root {
+            if let Some(directory) = &self.profile_directory {
+                return directory.verify_path();
+            }
         }
         let sid = super::win32::current_user_sid_for_storage()?;
         let descriptor = security_descriptor(&wide(&format!("D:P(A;;FA;;;{sid})")))?;
@@ -1881,6 +1902,44 @@ fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_protection_preserves_explicit_private_root_policy() {
+        let root = std::env::temp_dir().join(format!(
+            "raiun-admitted-recovery-policy-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let parent = crate::PinnedDirectory::open(&root).unwrap();
+        let private = crate::PrivateDirectory::create_or_open_under(
+            &parent,
+            std::ffi::OsStr::new("sessions"),
+        )
+        .unwrap();
+        let base = DpapiSessionStore::from_existing_private_directory(Arc::new(private)).unwrap();
+        assert!(base.for_profile("default").is_err());
+        for _ in 0..2 {
+            base.protect_local_edit_directory(&base.root).unwrap();
+            base.ensure_private_root().unwrap();
+            crate::PrivateDirectory::open_under(&parent, base.root.file_name().unwrap())
+                .expect("recovery must preserve admitted inheritable private ACLs");
+        }
+        // Alter only this synthetic root; an admitted store must refuse the
+        // changed policy rather than silently applying legacy root repair.
+        let sid = super::super::win32::current_user_sid_for_storage().unwrap();
+        let descriptor = security_descriptor(&wide(&format!("D:P(A;;FA;;;{sid})"))).unwrap();
+        let handle = open_directory(&base.root).unwrap();
+        secure_handle_dacl(handle.as_raw_handle() as HANDLE, descriptor.dacl).unwrap();
+        drop(handle);
+        assert!(base.protect_local_edit_directory(&base.root).is_err());
+        assert!(base.ensure_private_root().is_err());
+        let base_path = base.root.clone();
+        drop(base);
+        drop(parent);
+        std::fs::remove_dir(base_path).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
 
     #[test]
     #[ignore = "requires isolated ordinary RaiunLabUser and native DPAPI/private-storage ACL support; synthetic temp-root only"]

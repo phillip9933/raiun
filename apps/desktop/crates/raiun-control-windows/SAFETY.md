@@ -51,3 +51,13 @@ establish complete write-ahead history; this opaque storage API provides no
 unlock, native-file ownership, or cleanup authority. Production vault access
 remains disabled. The new isolated native custody regression is pending; GNU
 all-target compilation and strict linting alone do not verify DPAPI execution.
+
+`DpapiSessionStore::from_existing_private_directory` accepts only an already
+admitted `PrivateDirectory`, verifies its pinned path and retains its ancestor
+pins. It neither selects an environment path nor creates or repairs a root.
+Recovery protection of that exact admitted root verifies its existing policy
+instead of replacing its inheritable DACL with the legacy root policy. Derived
+profiles use the same verification path; the default GUI session-root selection
+and legacy-root behavior are preserved. A synthetic Windows regression checks
+repeated protection and refusal after a deliberate test-owned ACL change;
+native execution of this GUI-specific regression remains pending.

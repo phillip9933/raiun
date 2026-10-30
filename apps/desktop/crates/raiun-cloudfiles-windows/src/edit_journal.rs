@@ -247,6 +247,19 @@ pub struct DpapiEditRecordProtector {
 
 #[cfg(windows)]
 impl DpapiEditRecordProtector {
+    /// Use current-user DPAPI with an already-opened private directory.
+    /// Unlike `current_user`, this constructor has no environment/default-path
+    /// lookup and cannot create or repair the directory.
+    #[cfg(windows)]
+    pub fn from_existing_private_directory(
+        directory: Arc<raiun_control_windows::PrivateDirectory>,
+    ) -> Result<Self, JournalError> {
+        let store =
+            raiun_control_windows::DpapiSessionStore::from_existing_private_directory(directory)
+                .map_err(|_| JournalError::ProtectionFailed)?;
+        Ok(Self { store })
+    }
+
     /// Inherit the session store's validated runtime state root, including an
     /// explicitly selected headless root. Never reconstruct a Desktop path here.
     pub fn current_user() -> Result<Self, JournalError> {
