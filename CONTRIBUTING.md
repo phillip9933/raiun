@@ -18,6 +18,20 @@ Run checks appropriate to the change. Review visual diffs deliberately, preserve
 
 Keep credentials, private signing material, local account data, build products and recovery records out of Git. Tests use synthetic files and accounts. See [Privacy](PRIVACY.md).
 
+## Commit and pull request titles
+
+Use Conventional Commits: `type(scope): summary`. Use a lowercase type such as
+`feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci` or `chore`, with
+a useful scope such as `android`, `desktop`, `windows`, `linux` or `shared`.
+Write a short imperative summary describing the actual change, without a final
+period. For example: `fix(windows): restore saved sign-in after restart`.
+Use `!` and a `BREAKING CHANGE:` explanation only for an actual breaking change.
+
+Apply the same format to PR titles so squash commits remain consistent. Use the
+correct GitHub-linked author identity; naming does not replace attribution.
+Correct unpublished local messages before pushing when safe, preserving source
+and validation provenance. Do not rewrite published history solely for naming.
+
 ## Reports and AI usage
 
 Identify the affected platform, app version, OS version, server version if known, reproduction steps, expected behavior and actual behavior. Remove credentials, tokens, private URLs, filenames and file contents from reports. Explain the concrete change, relevant validation and remaining limits in pull requests.
