@@ -97,7 +97,7 @@ class VaultRepository internal constructor(
 
             suspend fun checkRoot() {
                 access.requireCurrent()
-                val listing = dav.list(job.location.rootWebDavUrl, job.location.vaultPath, access.authorization, true)
+                val listing = streamListing(access, dav, job.location.rootWebDavUrl, job.location.vaultPath)
                 if (!listing.root.isFolder ||
                     listing.root.id != job.location.remoteVaultId ||
                     listing.integrityToken?.let(::vaultProofDigest) != job.rootProofDigest
@@ -107,13 +107,10 @@ class VaultRepository internal constructor(
                 access.requireCurrent()
             }
             checkRoot()
-            val parent = job.source.relativePath.substringBeforeLast('/', "")
             val source =
-                dav
-                    .list(job.location.rootWebDavUrl, parent, access.authorization, true)
-                    .children
-                    .firstOrNull { it.relativePath == job.source.relativePath }
-                    ?: throw OpenCloudException(OpenCloudError.PreconditionFailed)
+                withRequestCancellation(dav::cancelRequests, permit) {
+                    dav.statResource(job.location.rootWebDavUrl, job.source.relativePath, access.authorization)
+                }
             if (source != job.source) throw OpenCloudException(OpenCloudError.PreconditionFailed)
             access.requireCurrent()
             val partial = payloads.partial(job)
@@ -204,7 +201,7 @@ class VaultRepository internal constructor(
 
             suspend fun checkRoot() {
                 access.requireCurrent()
-                val root = dav.list(job.location.rootWebDavUrl, job.location.vaultPath, access.authorization, true)
+                val root = streamListing(access, dav, job.location.rootWebDavUrl, job.location.vaultPath)
                 if (root.root.id != job.location.remoteVaultId ||
                     !root.root.isFolder ||
                     root.integrityToken?.let(::vaultProofDigest) != job.rootProofDigest
@@ -217,11 +214,12 @@ class VaultRepository internal constructor(
             suspend fun destination(): VaultDavEntry? {
                 checkRoot()
                 val parent = job.destination.substringBeforeLast('/', "")
-                return dav
-                    .list(job.location.rootWebDavUrl, parent, access.authorization, true)
-                    .children
-                    .firstOrNull { it.relativePath == job.destination }
-                    .also { access.requireCurrent() }
+                var matched: VaultDavEntry? = null
+                streamListing(access, dav, job.location.rootWebDavUrl, parent, depth = 1) { entry ->
+                    if (entry.relativePath == job.destination) matched = entry
+                }
+                access.requireCurrent()
+                return matched
             }
 
             fun verify(entry: VaultDavEntry): Boolean {
@@ -349,7 +347,7 @@ class VaultRepository internal constructor(
                         )
                     val root = safeRoot(access, source.rootWebDavUrl)
                     val rootEntry =
-                        dav.list(root.toString(), authorization = access.authorization, recognizedVaultRoot = true).root
+                        streamListing(access, dav, root.toString()).root
                     access.requireCurrent()
                     if (!graphRootMatchesDav(space.rootId, rootEntry.id)) {
                         throw OpenCloudException(OpenCloudError.PreconditionFailed)
@@ -380,7 +378,7 @@ class VaultRepository internal constructor(
                     )
                 val root = safeRoot(access, source.rootWebDavUrl)
                 val rootEntry =
-                    dav.list(root.toString(), authorization = access.authorization, recognizedVaultRoot = true).root
+                    streamListing(access, dav, root.toString()).root
                 access.requireCurrent()
                 if (!graphRootMatchesDav(space.rootId, rootEntry.id)) {
                     throw OpenCloudException(OpenCloudError.PreconditionFailed)
@@ -432,6 +430,38 @@ class VaultRepository internal constructor(
                 )
             }
         }
+
+    /** Validates a complete listing while callers retain only bounded metadata they need. */
+    private suspend fun streamListing(
+        access: VaultAccess,
+        dav: VaultDavClient,
+        root: String,
+        path: String = "",
+        depth: Int = 0,
+        consume: (VaultDavEntry) -> Unit = {},
+    ): VaultDavListing {
+        val context = currentCoroutineContext()
+        val directory = spoolDirectory ?: File(requireNotNull(System.getProperty("java.io.tmpdir")))
+        access.requireCurrent()
+        return StagedRemoteFolder.create(directory).use { identities ->
+            val listing =
+                dav.streamDirectory(
+                    root,
+                    path,
+                    access.authorization,
+                    registerIdentity = { id, childPath ->
+                        context.ensureActive()
+                        requireActionPermit(access.permit)
+                        identities.registerCanonicalPath("id:$id") &&
+                            identities.registerCanonicalPath("path:$childPath")
+                    },
+                    consume = consume,
+                    depth = depth,
+                )
+            access.requireCurrent()
+            listing
+        }
+    }
 
     private suspend fun inspectVaultMarkers(
         dav: VaultDavClient,
@@ -506,7 +536,7 @@ class VaultRepository internal constructor(
                     access.requireCurrent()
                     dav.writeIntegrityToken(root.toString(), vaultPath, access.authorization, integrityToken)
                     access.requireCurrent()
-                    val proof = dav.list(root.toString(), vaultPath, access.authorization, recognizedVaultRoot = true)
+                    val proof = streamListing(access, dav, root.toString(), vaultPath)
                     access.requireCurrent()
                     val proofToken = proof.integrityToken
                     if (proof.root.id.isBlank() || !matchesProofToken(cipher, proofToken, integrityToken)) {
@@ -570,11 +600,7 @@ class VaultRepository internal constructor(
                     val root = safeRoot(access, source.rootWebDavUrl)
                     val dav = VaultDavClient(access.http, endpoints = endpointPolicy)
                     val before =
-                        dav.list(
-                            root.toString(),
-                            authorization = access.authorization,
-                            recognizedVaultRoot = true,
-                        )
+                        streamListing(access, dav, root.toString())
                     access.requireCurrent()
                     if (!graphRootMatchesDav(space.rootId, before.root.id) || !before.integrityToken.isNullOrBlank()) {
                         throw OpenCloudException(OpenCloudError.PreconditionFailed)
@@ -585,11 +611,7 @@ class VaultRepository internal constructor(
                         dav.writeIntegrityToken(root.toString(), "", access.authorization, token)
                         access.requireCurrent()
                         val after =
-                            dav.list(
-                                root.toString(),
-                                authorization = access.authorization,
-                                recognizedVaultRoot = true,
-                            )
+                            streamListing(access, dav, root.toString())
                         access.requireCurrent()
                         val proofToken = after.integrityToken
                         if (after.root.id != before.root.id || !matchesProofToken(cipher, proofToken, token)) {
@@ -637,10 +659,11 @@ class VaultRepository internal constructor(
                 FileBrowserDatabase.create(context).vaultExclusionDao(),
                 revalidate,
                 endpointPolicy,
+                File(context.noBackupFilesDir, "boundary-lookup-stage"),
             )
         }
 
-    /** Plain locations expose directories only; vault locations expose raw encrypted children. */
+    /** Legacy complete child list for explicit walkers; vault browsing uses paged session snapshots. */
     suspend fun folders(
         accountId: String,
         location: VaultLocation,
@@ -737,14 +760,12 @@ class VaultRepository internal constructor(
             throw OpenCloudException(OpenCloudError.PreconditionFailed)
         }
         access.requireCurrent()
-        val listing =
-            dav.list(
-                root.toString(),
-                path,
-                access.authorization,
-                recognizedVaultRoot =
-                    location.isVaultRoot || location.kind == VaultLocationKind.SPACE_VAULT || path.isNotEmpty(),
-            )
+        val proofFiles = ArrayList<VaultDavEntry>(MAX_PROOF_FILE_ATTEMPTS)
+        val metadata =
+            streamListing(access, dav, root.toString(), path, depth = 1) { entry ->
+                if (proofFiles.size < MAX_PROOF_FILE_ATTEMPTS && isProofCandidate(entry)) proofFiles += entry
+            }
+        val listing = metadata.copy(children = proofFiles)
         access.requireCurrent()
         requireVaultCollection(listing)
         if (location.isVaultRoot && path == location.vaultPath && listing.root.id != location.remoteVaultId) {
@@ -942,14 +963,7 @@ class VaultRepository internal constructor(
         location: VaultLocation,
     ) {
         if (location.vaultPath.isEmpty()) throw OpenCloudException(OpenCloudError.PreconditionFailed)
-        val folder =
-            dav
-                .list(
-                    root.toString(),
-                    location.vaultPath,
-                    access.authorization,
-                    recognizedVaultRoot = true,
-                ).root
+        val folder = streamListing(access, dav, root.toString(), location.vaultPath).root
         access.requireCurrent()
         if (!folder.isFolder || !isFolderVault(folder) || folder.id != location.remoteVaultId) {
             throw OpenCloudException(OpenCloudError.PreconditionFailed)
@@ -964,21 +978,6 @@ class VaultRepository internal constructor(
             throw OpenCloudException(OpenCloudError.PreconditionFailed)
         }
     }
-
-    /** Graph elides a space root's repeated opaque ID; DAV retains it as `!spaceId`. */
-    private fun graphRootMatchesDav(
-        graphRootId: String,
-        davRootId: String,
-    ): Boolean =
-        graphRootId == davRootId ||
-            run {
-                val parts = graphRootId.split('$')
-                val isShortRoot =
-                    parts.size == 2 &&
-                        parts.all(String::isNotEmpty) &&
-                        '!' !in graphRootId
-                isShortRoot && davRootId == "$graphRootId!${parts[1]}"
-            }
 
     private fun requireLocationAccount(
         access: VaultAccess,
@@ -1014,13 +1013,7 @@ class VaultRepository internal constructor(
         root: HttpUrl,
         location: VaultLocation,
     ) {
-        val listing =
-            dav.list(
-                root.toString(),
-                location.vaultPath,
-                access.authorization,
-                recognizedVaultRoot = true,
-            )
+        val listing = streamListing(access, dav, root.toString(), location.vaultPath)
         access.requireCurrent()
         if (!listing.root.isFolder || listing.root.id != location.remoteVaultId) {
             throw OpenCloudException(OpenCloudError.PreconditionFailed)
@@ -1173,6 +1166,9 @@ internal interface VaultCipherEngine : AutoCloseable {
     ): Long
 
     fun exportKeyMaterial(): ByteArray
+
+    /** Only engines with an independent content cipher may support concurrent boundary pipes. */
+    fun forkForContent(): VaultCipherEngine = throw OpenCloudException(OpenCloudError.Unsupported)
 }
 
 internal data class VaultCipherFactories(
@@ -1200,7 +1196,7 @@ private data class VaultUnlockCandidate(
     val listing: VaultDavListing,
 )
 
-private fun RcloneVaultCipher.asVaultCipher(): VaultCipherEngine =
+internal fun RcloneVaultCipher.asVaultCipher(): VaultCipherEngine =
     object : VaultCipherEngine {
         override fun createIntegrityToken() = this@asVaultCipher.createIntegrityToken()
 
@@ -1228,6 +1224,15 @@ private fun RcloneVaultCipher.asVaultCipher(): VaultCipherEngine =
 
         override fun exportKeyMaterial() = this@asVaultCipher.exportKeyMaterial()
 
+        override fun forkForContent(): VaultCipherEngine {
+            val material = this@asVaultCipher.exportKeyMaterial()
+            return try {
+                RcloneVaultCipher.fromKeyMaterial(material).asVaultCipher()
+            } finally {
+                material.fill(0)
+            }
+        }
+
         override fun close() = this@asVaultCipher.close()
     }
 
@@ -1245,7 +1250,124 @@ class VaultSession internal constructor(
     private val closed = AtomicBoolean(false)
     private val keyMaterialExported = AtomicBoolean(false)
     private val issuedEntries = ConcurrentHashMap<String, VaultFolder>()
+    private val boundaryEntries = ConcurrentHashMap<String, VaultFolder>()
     private val stateLock = Any()
+    private val directoryGeneration = AtomicLong()
+    private var directoryIndex: VaultDirectoryIndex? = null
+
+    /** Full validation precedes publication; each page replaces the previous page's entry leases. */
+    suspend fun openDirectory(
+        path: String = "",
+        showHidden: Boolean = false,
+        excludedPath: String? = null,
+    ): VaultDirectorySnapshot {
+        val epoch = invalidateDirectorySnapshot()
+        var staged: VaultDirectoryIndex? = null
+        var delivered = false
+        try {
+            val snapshot =
+                withContext(Dispatchers.IO) {
+                    requireLease()
+                    val plainPath = validatePlainPath(path)
+                    val excluded = validateVaultExcludedPath(excludedPath)
+                    val context = currentCoroutineContext()
+                    val parent = spoolDirectory ?: File(requireNotNull(System.getProperty("java.io.tmpdir")))
+                    if (!parent.mkdirs() &&
+                        !parent.isDirectory
+                    ) {
+                        throw OpenCloudException(OpenCloudError.LocalStorageWriteFailed)
+                    }
+                    val index = VaultDirectoryIndex(parent) { checkTransferActive(context) }
+                    staged = index
+                    verifyVaultRoot()
+                    streamDirectory(
+                        joinDavPaths(location.vaultPath, cipher.encryptPath(plainPath)),
+                        depth = 1,
+                    ) { entry ->
+                        checkTransferActive(context)
+                        val name = validateSingleName(cipher.decryptName(entry.rawName))
+                        val childPath = joinDavPaths(plainPath, name)
+                        if (vaultChildVisible(name, childPath, showHidden, excluded)) {
+                            index.add(entry.toFolder(childPath, false, name, null))
+                        }
+                    }
+                    requireLease()
+                    verifyVaultRoot()
+                    index.finish()
+                    requireLease()
+                    synchronized(stateLock) {
+                        requireDirectoryEpoch(epoch)
+                        directoryIndex = index
+                    }
+                    VaultDirectorySnapshot(
+                        index,
+                        checkCurrent = {
+                            requireLease()
+                            requireDirectoryEpoch(epoch)
+                        },
+                        publish = { entries ->
+                            synchronized(stateLock) {
+                                requireDirectoryEpoch(epoch)
+                                issuedEntries.clear()
+                                entries.forEach { issuedEntries[requireNotNull(it.leaseId)] = it }
+                            }
+                        },
+                        revoke = {
+                            synchronized(stateLock) {
+                                if (directoryGeneration.get() == epoch) invalidateDirectorySnapshot()
+                            }
+                        },
+                    )
+                }
+            delivered = true
+            return snapshot
+        } finally {
+            if (!delivered) {
+                staged?.close()
+                synchronized(stateLock) {
+                    if (directoryGeneration.get() == epoch) invalidateDirectorySnapshot()
+                }
+            }
+        }
+    }
+
+    private fun requireDirectoryEpoch(epoch: Long) {
+        val liveSession = !closed.get() && access.permit() && generationIsCurrent()
+        if (!liveSession || directoryGeneration.get() != epoch) {
+            throw OpenCloudException(OpenCloudError.PreconditionFailed)
+        }
+    }
+
+    private fun invalidateDirectorySnapshot(): Long =
+        synchronized(stateLock) {
+            val epoch = directoryGeneration.incrementAndGet()
+            directoryIndex?.close()
+            directoryIndex = null
+            issuedEntries.clear()
+            epoch
+        }
+
+    private suspend fun streamDirectory(
+        path: String,
+        depth: Int = 0,
+        consume: (VaultDavEntry) -> Unit = {},
+    ): VaultDavListing {
+        val context = currentCoroutineContext()
+        val directory = spoolDirectory ?: File(requireNotNull(System.getProperty("java.io.tmpdir")))
+        return StagedRemoteFolder.create(directory).use { identities ->
+            dav.streamDirectory(
+                location.rootWebDavUrl,
+                path,
+                access.authorization,
+                registerIdentity = { id, childPath ->
+                    checkTransferActive(context)
+                    identities.registerCanonicalPath("id:$id") && identities.registerCanonicalPath("path:$childPath")
+                },
+                consume = consume,
+                depth = depth,
+            )
+        }
+    }
 
     internal suspend fun ensureOfflineUnlockAnchor(offline: VaultOfflineStore) =
         withContext(Dispatchers.IO) {
@@ -1260,6 +1382,79 @@ class VaultSession internal constructor(
             }
         }
 
+    /** Preparation borrows the live transport, but never persists an unlock grant or decrypted path. */
+    internal suspend fun <T> withOfflineGroupSource(
+        context: Context,
+        path: String,
+        selectedEntry: VaultFolder? = null,
+        additionalPermit: () -> Boolean,
+        block: suspend (VaultOfflineGroupSource) -> T,
+    ): T =
+        withContext(Dispatchers.IO) {
+            requireLease()
+            val plainPath = validatePlainPath(path)
+            selectedEntry?.let {
+                requireIssuedEntry(it)
+                if (!it.isFolder || it.path != plainPath) throw OpenCloudException(OpenCloudError.PreconditionFailed)
+            }
+            val coroutine = currentCoroutineContext()
+            val checkActive = {
+                checkTransferActive(coroutine)
+                if (!additionalPermit()) throw OpenCloudException(OpenCloudError.AccessDenied)
+            }
+            checkActive()
+            val root = streamDirectory(location.vaultPath)
+            requireRootIdentity(root.root.id)
+            if (!root.root.isFolder || root.root.relativePath != location.vaultPath) {
+                throw OpenCloudException(OpenCloudError.PreconditionFailed)
+            }
+            root.integrityToken?.let(::requireAuthenticatedRootToken)
+            val proofDigest = root.integrityToken?.let(::vaultProofDigest)
+            val selected = captureOfflineGroupDirectory(plainPath, selectedEntry, root.root)
+            requireLease()
+            checkActive()
+            val material = cipher.exportKeyMaterial()
+            VaultOfflineGroupSource(
+                context,
+                identity,
+                location,
+                selected,
+                proofDigest,
+                material,
+                validateRoot = {
+                    requireLease()
+                    val current = streamDirectory(location.vaultPath)
+                    if (!current.root.isFolder ||
+                        current.root.id != identity.remoteVaultId ||
+                        current.integrityToken?.let(::vaultProofDigest) != proofDigest
+                    ) {
+                        throw OpenCloudException(OpenCloudError.PreconditionFailed)
+                    }
+                    current.integrityToken?.let(::requireAuthenticatedRootToken)
+                    requireLease()
+                },
+                checkSession = checkActive,
+                decryptName = { validateSingleName(cipher.decryptName(it)) },
+                stream = { requested, depth, consume -> streamDirectory(requested, depth, consume) },
+            ).use { source -> block(source) }
+        }
+
+    private suspend fun captureOfflineGroupDirectory(
+        plainPath: String,
+        selectedEntry: VaultFolder?,
+        root: VaultDavEntry,
+    ): VaultDavEntry {
+        val encryptedPath = joinDavPaths(location.vaultPath, cipher.encryptPath(plainPath))
+        val selected = if (encryptedPath == location.vaultPath) root else streamDirectory(encryptedPath).root
+        val sameIssued =
+            selectedEntry == null ||
+                (selected.id == selectedEntry.id && selected.rawName == selectedEntry.rawName)
+        if (!selected.isFolder || selected.relativePath != encryptedPath || !sameIssued) {
+            throw OpenCloudException(OpenCloudError.PreconditionFailed)
+        }
+        return selected
+    }
+
     internal suspend fun captureBackgroundDownload(
         payloads: VaultDownloadStore,
         entry: VaultFolder,
@@ -1269,7 +1464,7 @@ class VaultSession internal constructor(
             requireIssuedEntry(entry)
             if (entry.isFolder) throw OpenCloudException(OpenCloudError.Unsupported)
             verifyVaultRoot()
-            val root = dav.list(location.rootWebDavUrl, location.vaultPath, access.authorization, true)
+            val root = streamDirectory(location.vaultPath)
             root.integrityToken?.let(::requireAuthenticatedRootToken)
             access.requireCurrent()
             requireLease()
@@ -1335,18 +1530,63 @@ class VaultSession internal constructor(
         source: InputStream,
         size: Long,
         preparationPermit: () -> Boolean,
+    ): VaultUploadJob = prepareBackgroundCiphertext(payloads, parentPath, name, source, size, preparationPermit, null)
+
+    internal suspend fun prepareBackgroundReplacement(
+        payloads: VaultUploadStore,
+        entry: VaultFolder,
+        source: InputStream,
+        size: Long,
+        preparationPermit: () -> Boolean,
+    ): VaultUploadJob =
+        prepareBackgroundCiphertext(
+            payloads,
+            entry.path.substringBeforeLast('/', ""),
+            entry.name,
+            source,
+            size,
+            preparationPermit,
+            entry,
+        )
+
+    /** A durable admission consumes the version even when scheduling or caller delivery is interrupted. */
+    internal fun acknowledgeBackgroundReplacement(entry: VaultFolder) {
+        removeIssuedEntry(entry)
+        invalidateDirectorySnapshot()
+    }
+
+    // Create and issued replacement share ciphertext staging.
+    @Suppress("LongParameterList", "TooGenericExceptionCaught")
+    private suspend fun prepareBackgroundCiphertext(
+        payloads: VaultUploadStore,
+        parentPath: String,
+        name: String,
+        source: InputStream,
+        size: Long,
+        preparationPermit: () -> Boolean,
+        replacement: VaultFolder?,
     ): VaultUploadJob =
         withContext(Dispatchers.IO) {
             requireLease()
             val parent = validatePlainPath(parentPath)
             val safeName = validateSingleName(name)
             require(size >= -1)
+            replacement?.let {
+                requireIssuedEntry(it)
+                if (it.isFolder || it.path != joinDavPaths(parent, safeName)) {
+                    throw OpenCloudException(OpenCloudError.PreconditionFailed)
+                }
+            }
+            val expectedETag = replacement?.let(::requiredEntryETag)
             verifyWritableVaultRoot()
-            val listing = dav.list(location.rootWebDavUrl, location.vaultPath, access.authorization, true)
+            val listing = streamDirectory(location.vaultPath)
             val proof = listing.integrityToken ?: throw OpenCloudException(OpenCloudError.PreconditionFailed)
             requireAuthenticatedRootToken(proof)
             val destination =
                 joinDavPaths(location.vaultPath, joinDavPaths(cipher.encryptPath(parent), cipher.encryptName(safeName)))
+            if (replacement != null && replacement.encryptedPath != destination) {
+                throw OpenCloudException(OpenCloudError.PreconditionFailed)
+            }
             val context = currentCoroutineContext()
 
             fun checkPreparing() {
@@ -1370,7 +1610,7 @@ class VaultSession internal constructor(
                     }
                 }
             val job =
-                payloads.prepare(location, destination, null, vaultProofDigest(proof)) { output ->
+                payloads.prepare(location, destination, expectedETag, vaultProofDigest(proof)) { output ->
                     val count =
                         cipher.encryptContent(
                             guarded,
@@ -1407,6 +1647,7 @@ class VaultSession internal constructor(
             try {
                 requireLease()
                 verifyWritableVaultRoot()
+                replacement?.let(::requireIssuedEntry)
                 job
             } catch (error: Exception) {
                 payloads.delete(job.id)
@@ -1414,7 +1655,9 @@ class VaultSession internal constructor(
             }
         }
 
+    /** Legacy complete decrypted list for recursive operations; retains the bounded DAV DOM limit. */
     suspend fun list(path: String = ""): List<VaultFolder> {
+        invalidateDirectorySnapshot()
         var publishedEntries: List<VaultFolder>? = null
         var delivered = false
         try {
@@ -1469,6 +1712,192 @@ class VaultSession internal constructor(
         }
     }
 
+    /** Includes the public mutation's dispatcher handoff in single-entry publication cleanup. */
+    private suspend fun withMutationResult(block: suspend () -> VaultFolder): VaultFolder {
+        var published: VaultFolder? = null
+        var delivered = false
+        try {
+            val result = withContext(Dispatchers.IO) { block().also { published = it } }
+            delivered = true
+            return result
+        } finally {
+            if (!delivered) published?.let { removePublishedEntries(listOf(it)) }
+        }
+    }
+
+    /** Post-write lookup validates every child before authorizing only the exact destination. */
+    private suspend fun issueDestination(
+        parentPath: String,
+        encryptedName: String,
+        expectedFolder: Boolean,
+    ): VaultFolder {
+        val epoch = invalidateDirectorySnapshot()
+        var published: VaultFolder? = null
+        var delivered = false
+        try {
+            val result =
+                withContext(Dispatchers.IO) {
+                    requireLease()
+                    val parent = validatePlainPath(parentPath)
+                    val context = currentCoroutineContext()
+                    verifyVaultRoot()
+                    var matched: VaultFolder? = null
+                    streamDirectory(joinDavPaths(location.vaultPath, cipher.encryptPath(parent)), depth = 1) { raw ->
+                        checkTransferActive(context)
+                        val name = validateSingleName(cipher.decryptName(raw.rawName))
+                        if (raw.rawName == encryptedName) {
+                            // Full-stream path validation permits only one matching raw child name.
+                            matched = raw.toFolder(joinDavPaths(parent, name), false, name, newEntryToken())
+                        }
+                    }
+                    access.requireCurrent()
+                    requireLease()
+                    verifyVaultRoot()
+                    val entry = matched ?: throw OpenCloudException(OpenCloudError.InvalidResponse)
+                    if (entry.isFolder != expectedFolder) throw OpenCloudException(OpenCloudError.InvalidResponse)
+                    synchronized(stateLock) {
+                        requireDirectoryEpoch(epoch)
+                        context.ensureActive()
+                        issuedEntries.clear()
+                        issuedEntries[requireNotNull(entry.leaseId)] = entry
+                        published = entry
+                    }
+                    context.ensureActive()
+                    entry
+                }
+            delivered = true
+            return result
+        } finally {
+            if (!delivered) published?.let { removePublishedEntries(listOf(it)) }
+        }
+    }
+
+    /** Capture metadata independently of UI pages; descriptors never authorize an operation. */
+    internal suspend fun openBoundaryDirectory(
+        context: Context,
+        path: String,
+    ): BoundaryDirectorySnapshot {
+        val parent = validatePlainPath(path)
+        return captureBoundaryDirectory(context, parent, guard = { requireLease() }) { emit ->
+            requireLease()
+            verifyVaultRoot()
+            val coroutine = currentCoroutineContext()
+            streamDirectory(joinDavPaths(location.vaultPath, cipher.encryptPath(parent)), depth = 1) { raw ->
+                checkTransferActive(coroutine)
+                val name = validateSingleName(cipher.decryptName(raw.rawName))
+                emit(raw.toFolder(joinDavPaths(parent, name), false, name).asBoundaryEntry())
+            }
+            requireLease()
+            verifyVaultRoot()
+        }
+    }
+
+    /** Whole-parent names only: every child is validated, but no readable descriptor escapes. */
+    internal suspend fun openBoundaryNames(
+        context: Context,
+        path: String,
+    ): BoundaryNameIndex {
+        val parent = validatePlainPath(path)
+        return captureBoundaryNames(context, parent, guard = { requireLease() }) { emit ->
+            requireLease()
+            verifyVaultRoot()
+            val coroutine = currentCoroutineContext()
+            streamDirectory(joinDavPaths(location.vaultPath, cipher.encryptPath(parent)), depth = 1) { raw ->
+                checkTransferActive(coroutine)
+                val name = validateSingleName(cipher.decryptName(raw.rawName))
+                // Keep the legacy names-list framing proof even for unrelated children.
+                raw.toFolder(joinDavPaths(parent, name), false, name).asBoundaryEntry()
+                emit(name)
+            }
+            requireLease()
+            verifyVaultRoot()
+        }
+    }
+
+    /** Chooser metadata never participates in UI issuance or scoped content-operation leases. */
+    internal suspend fun openBoundaryDestinationFolders(
+        context: Context,
+        path: String,
+    ): BoundaryDestinationSnapshot {
+        val parent = validatePlainPath(path)
+        return captureBoundaryDestinationFolders(context, parent, guard = { requireLease() }) { emit ->
+            requireLease()
+            verifyVaultRoot()
+            val coroutine = currentCoroutineContext()
+            streamDirectory(joinDavPaths(location.vaultPath, cipher.encryptPath(parent)), depth = 1) { raw ->
+                checkTransferActive(coroutine)
+                val name = validateSingleName(cipher.decryptName(raw.rawName))
+                // Ignored files must still prove valid ciphertext framing and complete metadata.
+                val child = raw.toFolder(joinDavPaths(parent, name), false, name).asBoundaryEntry()
+                if (child.directory) emit(BoundaryDestinationFolder(child.id, child.path, child.name, false))
+            }
+            requireLease()
+            verifyVaultRoot()
+        }
+    }
+
+    /** A fresh exact operation lease is independent of UI pages and never escapes its callback. */
+    internal suspend fun <T> withBoundaryEntry(
+        expected: BoundaryEntry,
+        operation: suspend (VaultFolder) -> T,
+    ): T =
+        withContext(Dispatchers.IO) {
+            val current =
+                findBoundaryChild(expected.path.substringBeforeLast('/', "")) {
+                    sameBoundaryEntry(expected, it.asBoundaryEntry())
+                } ?: throw OpenCloudException(OpenCloudError.PreconditionFailed)
+            val entry = current.copy(leaseId = newEntryToken())
+            val context = currentCoroutineContext()
+            requireLease()
+            synchronized(stateLock) {
+                checkTransferActive(context)
+                boundaryEntries[requireNotNull(entry.leaseId)] = entry
+            }
+            try {
+                operation(entry)
+            } finally {
+                synchronized(stateLock) { boundaryEntries.remove(entry.leaseId, entry) }
+            }
+        }
+
+    /** Names and emptiness are published only after validating the entire encrypted directory. */
+    internal suspend fun hasBoundaryChild(
+        path: String,
+        name: String? = null,
+    ): Boolean {
+        name?.let { childPath(path, it) }
+        return findBoundaryChild(path) { name == null || it.name == name } != null
+    }
+
+    private suspend fun findBoundaryChild(
+        parentPath: String,
+        matches: (VaultFolder) -> Boolean,
+    ): VaultFolder? =
+        withContext(Dispatchers.IO) {
+            requireLease()
+            val parent = validatePlainPath(parentPath)
+            val context = currentCoroutineContext()
+            verifyVaultRoot()
+            var found: VaultFolder? = null
+            streamDirectory(joinDavPaths(location.vaultPath, cipher.encryptPath(parent)), depth = 1) { raw ->
+                checkTransferActive(context)
+                val name = validateSingleName(cipher.decryptName(raw.rawName))
+                val entry = raw.toFolder(joinDavPaths(parent, name), false, name)
+                // Boundary plaintext-size validation applies to every child, including non-matches.
+                entry.asBoundaryEntry()
+                if (matches(entry)) found = entry
+            }
+            requireLease()
+            verifyVaultRoot()
+            found
+        }
+
+    private fun consumeIssuedEntryForMutation(entry: VaultFolder) =
+        synchronized(stateLock) {
+            requireIssuedEntry(entry)
+            entry.leaseId?.let { boundaryEntries.remove(it, entry) }
+        }
+
     /** Encodes a directory path relative to this vault for a short-lived transfer handoff. */
     suspend fun encodeDirectoryPath(plainPath: String): String =
         withContext(Dispatchers.IO) {
@@ -1486,19 +1915,19 @@ class VaultSession internal constructor(
         parentPath: String,
         name: String,
     ): VaultFolder =
-        withContext(Dispatchers.IO) {
+        withMutationResult {
             requireLease()
             val parent = validatePlainPath(parentPath)
             val safeName = validateSingleName(name)
             verifyWritableVaultRoot()
             val encryptedName = cipher.encryptName(safeName)
             val destination = joinDavPaths(location.vaultPath, joinDavPaths(cipher.encryptPath(parent), encryptedName))
+            invalidateDirectorySnapshot()
             dav.createCollection(location.rootWebDavUrl, destination, access.authorization)
             access.requireCurrent()
             requireLease()
             verifyVaultRoot()
-            list(parent).firstOrNull { it.rawName == encryptedName && it.isFolder }
-                ?: throw OpenCloudException(OpenCloudError.InvalidResponse)
+            issueDestination(parent, encryptedName, expectedFolder = true)
         }
 
     suspend fun delete(entry: VaultFolder) {
@@ -1509,7 +1938,9 @@ class VaultSession internal constructor(
                 requireIssuedEntry(entry)
                 verifyWritableVaultRoot()
                 val etag = entry.strongETag ?: throw OpenCloudException(OpenCloudError.PreconditionFailed)
+                consumeIssuedEntryForMutation(entry)
                 mutationAttempted = true
+                invalidateDirectorySnapshot()
                 dav.deleteResource(location.rootWebDavUrl, entry.encryptedPath, access.authorization, etag)
                 access.requireCurrent()
                 requireLease()
@@ -1535,7 +1966,7 @@ class VaultSession internal constructor(
                 val parent = dav.inspectOrdinaryDirectory(location.rootWebDavUrl, parentPath, access.authorization)
                 access.requireCurrent()
                 requireRenameTargetAvailable(parent, newRootName)
-                val before = dav.list(location.rootWebDavUrl, oldPath, access.authorization, recognizedVaultRoot = true)
+                val before = streamDirectory(oldPath)
                 access.requireCurrent()
                 requireRootIdentity(before.root.id)
                 requireAuthenticatedRootToken(before.integrityToken)
@@ -1550,7 +1981,7 @@ class VaultSession internal constructor(
                 )
                 access.requireCurrent()
                 requireLease()
-                val after = dav.list(location.rootWebDavUrl, newPath, access.authorization, recognizedVaultRoot = true)
+                val after = streamDirectory(newPath)
                 access.requireCurrent()
                 requireSameRenamedRoot(before, after)
                 location.copy(title = newRootName, vaultPath = newPath)
@@ -1666,7 +2097,7 @@ class VaultSession internal constructor(
     ): VaultFolder {
         var mutationAttempted = false
         return try {
-            withContext(Dispatchers.IO) {
+            withMutationResult {
                 requireLease()
                 requireIssuedEntry(entry)
                 val parent = validatePlainPath(destinationPath)
@@ -1676,7 +2107,9 @@ class VaultSession internal constructor(
                 val destination =
                     joinDavPaths(location.vaultPath, joinDavPaths(cipher.encryptPath(parent), encryptedName))
                 val etag = requiredEntryETag(entry)
+                consumeIssuedEntryForMutation(entry)
                 mutationAttempted = true
+                invalidateDirectorySnapshot()
                 dav.moveOrCopy(
                     location.rootWebDavUrl,
                     entry.encryptedPath,
@@ -1688,7 +2121,7 @@ class VaultSession internal constructor(
                 access.requireCurrent()
                 requireLease()
                 verifyVaultRoot()
-                requireListedDestination(list(parent), encryptedName)
+                issueDestination(parent, encryptedName, expectedFolder = entry.isFolder)
             }
         } finally {
             if (mutationAttempted && !copy) removeIssuedEntry(entry)
@@ -1707,8 +2140,32 @@ class VaultSession internal constructor(
         size: Long,
         mimeType: String? = null,
         overwrite: VaultFolder? = null,
+    ): VaultFolder = uploadWithCipher(parentPath, name, source, size, mimeType, overwrite, cipher)
+
+    internal suspend fun uploadBoundary(
+        parentPath: String,
+        name: String,
+        source: InputStream,
+        size: Long,
+        mimeType: String?,
     ): VaultFolder =
-        withContext(Dispatchers.IO) {
+        withMutationResult {
+            withBoundaryContentCipher { content ->
+                uploadWithCipher(parentPath, name, source, size, mimeType, null, content)
+            }
+        }
+
+    @Suppress("LongParameterList", "CyclomaticComplexMethod")
+    private suspend fun uploadWithCipher(
+        parentPath: String,
+        name: String,
+        source: InputStream,
+        size: Long,
+        mimeType: String? = null,
+        overwrite: VaultFolder? = null,
+        contentCipher: VaultCipherEngine,
+    ): VaultFolder =
+        withMutationResult {
             requireLease()
             val parent = validatePlainPath(parentPath)
             val safeName = validateSingleName(name)
@@ -1736,7 +2193,7 @@ class VaultSession internal constructor(
                 val ciphertextSize =
                     if (spool != null) {
                         FileOutputStream(spool).use { fileOutput ->
-                            cipher.encryptContent(
+                            contentCipher.encryptContent(
                                 guardedSource,
                                 transferOutput(fileOutput, coroutineContext),
                                 Long.MAX_VALUE,
@@ -1754,7 +2211,9 @@ class VaultSession internal constructor(
                 var mutationAttempted = false
                 try {
                     verifyWritableVaultRoot()
+                    overwrite?.let(::consumeIssuedEntryForMutation)
                     mutationAttempted = true
+                    invalidateDirectorySnapshot()
                     dav.putCiphertext(
                         location.rootWebDavUrl,
                         destination,
@@ -1771,7 +2230,7 @@ class VaultSession internal constructor(
                                 }
                             if (copied != ciphertextSize) throw OpenCloudException(OpenCloudError.InvalidResponse)
                         } else {
-                            val written = cipher.encryptContent(guardedSource, guardedOutput, size)
+                            val written = contentCipher.encryptContent(guardedSource, guardedOutput, size)
                             if (written != size || guardedSource.read() != -1) {
                                 throw OpenCloudException(OpenCloudError.InvalidResponse)
                             }
@@ -1786,8 +2245,7 @@ class VaultSession internal constructor(
             access.requireCurrent()
             requireLease()
             verifyVaultRoot()
-            list(parent).firstOrNull { it.rawName == encryptedName && !it.isFolder }
-                ?: throw OpenCloudException(OpenCloudError.InvalidResponse)
+            issueDestination(parent, encryptedName, expectedFolder = false)
         }
 
     /** Streams authenticated blocks to the caller's new destination; caller removes it on failure. */
@@ -1795,6 +2253,35 @@ class VaultSession internal constructor(
         entry: VaultFolder,
         sink: OutputStream,
         maxPlaintextBytes: Long = Long.MAX_VALUE,
+    ): Long = downloadWithCipher(entry, sink, maxPlaintextBytes, cipher)
+
+    internal suspend fun readBoundary(
+        entry: BoundaryEntry,
+        sink: OutputStream,
+    ) {
+        withBoundaryEntry(entry) { issued ->
+            withBoundaryContentCipher { content -> downloadWithCipher(issued, sink, Long.MAX_VALUE, content) }
+        }
+    }
+
+    private suspend fun <T> withBoundaryContentCipher(operation: suspend (VaultCipherEngine) -> T): T =
+        withContext(Dispatchers.IO) {
+            requireLease()
+            val content = cipher.forkForContent()
+            try {
+                requireLease()
+                operation(content)
+            } finally {
+                content.close()
+            }
+        }
+
+    /** Streams authenticated blocks to the caller's new destination; caller removes it on failure. */
+    private suspend fun downloadWithCipher(
+        entry: VaultFolder,
+        sink: OutputStream,
+        maxPlaintextBytes: Long = Long.MAX_VALUE,
+        contentCipher: VaultCipherEngine,
     ): Long =
         withContext(Dispatchers.IO) {
             requireLease()
@@ -1807,7 +2294,7 @@ class VaultSession internal constructor(
             val coroutineContext = currentCoroutineContext()
             val plainSize =
                 dav.withCiphertextStream(location.rootWebDavUrl, rawEntry, access.authorization) { encryptedInput ->
-                    cipher.decryptContent(
+                    contentCipher.decryptContent(
                         transferInput(encryptedInput, coroutineContext),
                         transferOutput(sink, coroutineContext),
                         maxPlaintextBytes,
@@ -1820,7 +2307,36 @@ class VaultSession internal constructor(
             plainSize
         }
 
-    /** Authenticated snapshot metadata stays in memory while the live encrypted session is unlocked. */
+    /** Bounded current-page status; authenticates offline metadata without decrypting a child list. */
+    suspend fun offlineFiles(
+        store: VaultOfflineStore,
+        entries: List<VaultFolder>,
+    ): List<VaultFolder> =
+        withContext(Dispatchers.IO) {
+            require(entries.size <= 256)
+            val page = entries.toList()
+            requireLease()
+            page.forEach(::requireIssuedEntry)
+            val epoch = directoryGeneration.get()
+            val material = cipher.exportKeyMaterial()
+            try {
+                val snapshot = store.openWithKeyMaterial(identity.accountId, location, material)
+                val matched =
+                    try {
+                        snapshot?.matchingFiles(page).orEmpty()
+                    } finally {
+                        snapshot?.close()
+                    }
+                requireLease()
+                requireDirectoryEpoch(epoch)
+                page.forEach(::requireIssuedEntry)
+                matched
+            } finally {
+                material.fill(0)
+            }
+        }
+
+    /** Legacy complete cached child list; current-page status uses the bounded entries overload. */
     suspend fun offlineFiles(
         store: VaultOfflineStore,
         path: String,
@@ -1933,7 +2449,8 @@ class VaultSession internal constructor(
     }
 
     private fun requireIssuedEntry(entry: VaultFolder) {
-        if (entry.leaseId?.let(issuedEntries::get) != entry || entry.isVaultRoot) {
+        val issued = entry.leaseId?.let { issuedEntries[it] ?: boundaryEntries[it] }
+        if (issued != entry || entry.isVaultRoot) {
             throw OpenCloudException(OpenCloudError.PreconditionFailed)
         }
         requireEntryInsideVault(entry)
@@ -1943,6 +2460,7 @@ class VaultSession internal constructor(
         synchronized(stateLock) {
             entry.leaseId?.let { token ->
                 if (issuedEntries[token] === entry) issuedEntries.remove(token)
+                boundaryEntries.remove(token, entry)
             }
         }
     }
@@ -2019,7 +2537,7 @@ class VaultSession internal constructor(
     }
 
     /** Registry size only; keeps cancellation cleanup assertions from exposing plaintext entries. */
-    internal fun issuedEntryCountForTesting(): Int = issuedEntries.size
+    internal fun issuedEntryCountForTesting(): Int = issuedEntries.size + boundaryEntries.size
 
     suspend fun preview(entry: VaultFolder): ByteArray {
         var pendingPlaintext: ByteArray? = null
@@ -2074,6 +2592,21 @@ class VaultSession internal constructor(
         if (issued != requested || requested.isFolder) throw OpenCloudException(OpenCloudError.PreconditionFailed)
     }
 
+    internal suspend fun <T> withGroupMaterial(block: suspend (ByteArray, () -> Boolean, () -> Unit) -> T): T =
+        withContext(Dispatchers.IO) {
+            requireLease()
+            val coroutine = currentCoroutineContext()
+            val material = cipher.exportKeyMaterial()
+            try {
+                block(material, {
+                    checkTransferActive(coroutine)
+                    true
+                }, {})
+            } finally {
+                material.fill(0)
+            }
+        }
+
     /** One-shot defensive copy for biometric enrollment after this session proved the remote vault. */
     suspend fun exportVerifiedKeyMaterial(): ByteArray {
         var pendingCopy: ByteArray? = null
@@ -2109,7 +2642,8 @@ class VaultSession internal constructor(
                 if (!closed.compareAndSet(false, true)) {
                     false
                 } else {
-                    issuedEntries.clear()
+                    invalidateDirectorySnapshot()
+                    boundaryEntries.clear()
                     true
                 }
             }
@@ -2130,14 +2664,7 @@ class VaultSession internal constructor(
 
     private suspend fun verifyVaultRoot() {
         requireLease()
-        val root = location.rootWebDavUrl.toHttpUrl()
-        val listing =
-            dav.list(
-                root.toString(),
-                location.vaultPath,
-                access.authorization,
-                recognizedVaultRoot = true,
-            )
+        val listing = streamDirectory(location.vaultPath)
         access.requireCurrent()
         requireLease()
         if (!listing.root.isFolder || listing.root.id != identity.remoteVaultId) {
@@ -2148,13 +2675,7 @@ class VaultSession internal constructor(
     /** Writes require a fresh authenticated token; read-only unlock may still use file-block proof. */
     private suspend fun verifyWritableVaultRoot() {
         requireLease()
-        val listing =
-            dav.list(
-                location.rootWebDavUrl,
-                location.vaultPath,
-                access.authorization,
-                recognizedVaultRoot = true,
-            )
+        val listing = streamDirectory(location.vaultPath)
         access.requireCurrent()
         requireLease()
         if (!listing.root.isFolder || listing.root.id != identity.remoteVaultId) {
@@ -2248,6 +2769,18 @@ private fun VaultFolder.toDavEntry(rootWebDavUrl: String): VaultDavEntry =
         href = resolveEntryHref(rootWebDavUrl, encryptedPath),
     )
 
+/** Graph elides a space root's repeated opaque ID; DAV retains it as `!spaceId`. */
+internal fun graphRootMatchesDav(
+    graphRootId: String,
+    davRootId: String,
+): Boolean =
+    graphRootId == davRootId ||
+        run {
+            val parts = graphRootId.split('$')
+            val isShortRoot = parts.size == 2 && parts.all(String::isNotEmpty) && '!' !in graphRootId
+            isShortRoot && davRootId == "$graphRootId!${parts[1]}"
+        }
+
 private fun isFolderVault(entry: VaultDavEntry): Boolean =
     entry.isFolder && (entry.rawName.endsWith(".vault") || entry.isVaultMarker)
 
@@ -2255,6 +2788,23 @@ private fun joinDavPaths(
     first: String,
     second: String,
 ): String = listOf(first, second).filter(String::isNotEmpty).joinToString("/")
+
+internal fun validateVaultExcludedPath(path: String?): String? =
+    path?.let {
+        if (it.isEmpty()) throw OpenCloudException(OpenCloudError.Unsupported)
+        validatePlainPath(it)
+    }
+
+internal fun vaultChildVisible(
+    name: String,
+    path: String,
+    showHidden: Boolean,
+    excludedPath: String?,
+): Boolean {
+    val hidden = !showHidden && name.startsWith('.')
+    val excluded = excludedPath != null && (path == excludedPath || path.startsWith("$excludedPath/"))
+    return !hidden && !excluded
+}
 
 private fun validatePlainPath(path: String): String {
     if (path.isEmpty()) return path
@@ -2305,13 +2855,6 @@ private fun requireMoveDestination(
     }
 }
 
-private fun requireListedDestination(
-    entries: List<VaultFolder>,
-    encryptedName: String,
-): VaultFolder =
-    entries.firstOrNull { it.rawName == encryptedName }
-        ?: throw OpenCloudException(OpenCloudError.InvalidResponse)
-
 private fun encryptedSize(plainSize: Long): Long {
     val blocks = if (plainSize == 0L) 0L else 1L + (plainSize - 1L) / 65_536L
     return try {
@@ -2357,7 +2900,7 @@ private object VaultCiphertextSpools {
 private fun isInvalidPlainSegment(segment: String): Boolean =
     segment in setOf("", ".", "..") || segment.any(Char::isISOControl) || segment.contains('\\')
 
-private fun resolveEntryHref(
+internal fun resolveEntryHref(
     root: String,
     relativePath: String,
 ): String =

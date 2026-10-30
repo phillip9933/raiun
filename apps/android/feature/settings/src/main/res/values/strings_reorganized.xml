@@ -9,7 +9,7 @@
     <string name="settings_encrypted_preferences_summary">Biometric choices for encrypted folders and Spaces</string>
     <string name="settings_permissions">Permissions</string>
     <string name="settings_permissions_summary">Photo and video metadata access</string>
-    <string name="settings_encrypted_preferences_explanation">These choices are stored on this device. Resetting one removes its saved biometric key, if present. After you unlock that encrypted location with its password, Raiun can ask again.</string>
+    <string name="settings_encrypted_preferences_explanation">These choices are stored on this device. The list includes remembered phone access, declined phone offers, and any older biometric access. Resetting a location clears its local unlock choices; after you authenticate with its password, Raiun can ask again.</string>
     <string name="settings_encrypted_preferences_empty">No biometric choices for encrypted locations on this account.</string>
     <string name="settings_encrypted_preferences_failed">Encrypted preferences could not be read.</string>
     <string name="settings_encrypted_folder">Folder</string>

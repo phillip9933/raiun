@@ -21,6 +21,7 @@ internal data class VaultDownloadJob(
 /** Only encrypted paths and original ciphertext. Downloaded bytes remain untrusted until unlock. */
 internal class VaultDownloadStore(
     private val root: File,
+    private val registryNamespace: String? = null,
 ) {
     constructor(context: Context) : this(File(context.noBackupFilesDir, "vault-download-jobs"))
 
@@ -42,8 +43,8 @@ internal class VaultDownloadStore(
                 File(root, job.id).also {
                     vaultJobRequireWrite(it.mkdir())
                     prepared.add(job.id)
-                    preparedAccounts[job.id] =
-                        location.accountId to accountRevisions.getOrDefault(location.accountId, 0L)
+                    val accountKey = accountKey(location.accountId)
+                    preparedAccounts[job.id] = accountKey to accountRevisions.getOrDefault(accountKey, 0L)
                 }
             }
         try {
@@ -171,16 +172,19 @@ internal class VaultDownloadStore(
 
     fun forgetAccount(accountId: String) =
         synchronized(lock) {
-            accountRevisions[accountId] = accountRevisions.getOrDefault(accountId, 0L) + 1
+            val accountKey = accountKey(accountId)
+            accountRevisions[accountKey] = accountRevisions.getOrDefault(accountKey, 0L) + 1
             attempts.values
                 .flatten()
-                .filter { it.accountId == accountId }
+                .filter { it.accountKey == accountKey }
                 .forEach { it.cancel() }
             root.listFiles().orEmpty().filter { it.name !in prepared }.forEach {
                 val job = runCatching { read(it.name) }.getOrNull()
                 if (job == null || job.location.accountId == accountId) check(deleteVaultJobTree(it))
             }
         }
+
+    private fun accountKey(accountId: String) = RegistryAccountKey(registryNamespace, accountId)
 
     private fun localFile(
         id: String,
@@ -238,12 +242,17 @@ internal class VaultDownloadStore(
         accountId: String,
     ): Attempt =
         synchronized(lock) {
-            Attempt(id, accountId).also { attempts.getOrPut(id) { mutableSetOf() }.add(it) }
+            Attempt(id, accountKey(accountId)).also { attempts.getOrPut(id) { mutableSetOf() }.add(it) }
         }
+
+    internal data class RegistryAccountKey(
+        val namespace: String?,
+        val accountId: String,
+    )
 
     internal class Attempt(
         private val id: String,
-        val accountId: String,
+        internal val accountKey: RegistryAccountKey,
     ) : AutoCloseable {
         private val active = AtomicBoolean(true)
         val isActive: Boolean get() = active.get()
@@ -266,8 +275,8 @@ internal class VaultDownloadStore(
     companion object {
         private val lock = Any()
         private val prepared = ConcurrentHashMap.newKeySet<String>()
-        private val preparedAccounts = ConcurrentHashMap<String, Pair<String, Long>>()
-        private val accountRevisions = ConcurrentHashMap<String, Long>()
+        private val preparedAccounts = ConcurrentHashMap<String, Pair<RegistryAccountKey, Long>>()
+        private val accountRevisions = ConcurrentHashMap<RegistryAccountKey, Long>()
         val publishing = ConcurrentHashMap.newKeySet<String>()
         private val attempts = mutableMapOf<String, MutableSet<Attempt>>()
 

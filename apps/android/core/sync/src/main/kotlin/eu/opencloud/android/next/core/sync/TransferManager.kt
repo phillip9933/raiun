@@ -15,16 +15,17 @@ import androidx.work.workDataOf
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.ResourceEntity
+import eu.opencloud.android.next.core.database.TransferBulkScope
 import eu.opencloud.android.next.core.database.TransferDirection
 import eu.opencloud.android.next.core.database.TransferEntity
 import eu.opencloud.android.next.core.database.TransferState
+import eu.opencloud.android.next.core.database.VAULT_GROUP_LOCATION_KIND
+import eu.opencloud.android.next.core.database.vaultOfflineGroups
 import eu.opencloud.android.next.core.model.AppClock
 import eu.opencloud.android.next.core.model.SystemAppClock
 import eu.opencloud.android.next.core.network.TransferClient
 import eu.opencloud.android.next.core.security.TlsPolicy
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -42,6 +43,7 @@ class TransferManager(
     private val mutationOperations =
         TransferMutationOperations(context, store, ::refreshAfterMutation)
     private val localCopies = LocalCopyOperations(context, store, workManager)
+    private val bulkActions = BulkTransferActions(context, store, workManager, ::retryScoped)
 
     private suspend fun refreshAfterMutation(
         accountId: String,
@@ -321,7 +323,17 @@ class TransferManager(
         retried?.let { enqueueUploadWork(it) }
     }
 
-    suspend fun retry(transfer: TransferEntity): Boolean {
+    suspend fun retry(transfer: TransferEntity): Boolean = retryTransfer(transfer, null)
+
+    private suspend fun retryScoped(
+        scope: TransferBulkScope,
+        transfer: TransferEntity,
+    ): Boolean = retryTransfer(transfer, scope)
+
+    private suspend fun retryTransfer(
+        transfer: TransferEntity,
+        scope: TransferBulkScope?,
+    ): Boolean {
         require(
             transfer.state in
                 setOf(
@@ -344,21 +356,23 @@ class TransferManager(
                 updatedAtEpochMillis = clock.epochMillis(),
             )
         val retried =
-            if (transfer.locationKind == "VAULT") {
+            if (transfer.locationKind == VAULT_GROUP_LOCATION_KIND) {
+                store.retryOfflineGroup(context, transfer, reset, scope, clock.epochMillis())
+            } else if (transfer.locationKind == "VAULT") {
                 if (transfer.direction == "UPLOAD") {
                     VaultUploadStore(context).read(transfer.id)
                 } else {
                     VaultDownloadStore(context).read(transfer.id)
                 }
-                store.retryCiphertextUpload(transfer, reset)
+                store.retryCiphertextUpload(transfer, reset, scope)
             } else if (transfer.locationKind == "SHARED_FOLDER") {
                 if (transfer.direction == "UPLOAD") {
-                    IncomingFolderUploadQueue.create(context).retry(transfer, reset)
+                    IncomingFolderUploadQueue.create(context).retry(transfer, reset, scope)
                 } else {
                     sharedDownloads().retry(transfer, requireNotNull(reset.workId), clock.epochMillis())
                 }
             } else {
-                store.retryTransfer(transfer, reset)
+                store.retryTransfer(transfer, reset, scope)
             }
         retried?.let { accepted ->
             if (accepted.direction == TransferDirection.UPLOAD.name) {
@@ -371,64 +385,35 @@ class TransferManager(
     }
 
     /** Retries uploads that can be replayed without changing their destination or permissions. */
-    @Suppress("TooGenericExceptionCaught") // One failed upload must not stop the remaining retry candidates.
-    suspend fun retryFailedUploads(accountId: String): BulkUploadRetryResult {
-        val needsAttention =
-            store.observeTransfers(accountId).first().filter { transfer ->
-                transfer.direction == TransferDirection.UPLOAD.name &&
-                    transfer.state in
-                    setOf(TransferState.FAILED.name, TransferState.RETRY.name, TransferState.CONFLICT.name)
-            }
-        val candidates =
-            needsAttention.filter {
-                it.state != TransferState.CONFLICT.name &&
-                    it.errorCode.isSafeForBulkRetry()
-            }
-        var accepted = 0
-        candidates.forEach { transfer ->
-            try {
-                if (retry(transfer)) accepted++
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                // Keep this upload in needsAttention and continue with the next candidate.
-            }
-        }
-        return BulkUploadRetryResult(retried = accepted, needsAttention = needsAttention.size - accepted)
-    }
-
-    private fun String?.isSafeForBulkRetry(): Boolean =
-        this in setOf("CONNECTIVITY", "TIMEOUT", "RATE_LIMITED", "REMOTE_NOT_READY") ||
-            this?.matches(Regex("SERVER_(500|502|503|504)")) == true
+    suspend fun retryFailedUploads(accountId: String): BulkUploadRetryResult = bulkActions.retryUploads(accountId)
 
     suspend fun cancel(transfer: TransferEntity) {
         store.cancelTransfer(transfer.id)
-        if (transfer.locationKind == "VAULT" && transfer.direction == "DOWNLOAD") {
-            VaultDownloadStore(context).discardPayload(transfer.id)
+        try {
+            if (transfer.locationKind == VAULT_GROUP_LOCATION_KIND) {
+                val groups = store.vaultOfflineGroups()
+                val current = groups.find(transfer.id)
+                if (current?.group?.state == "CANCELLED") {
+                    val owner =
+                        eu.opencloud.android.next.core.database.VaultGroupOwner(
+                            current.group.accountId,
+                            current.group.accountIncarnation,
+                            current.group.accountIdentityDigest,
+                        )
+                    VaultOfflineGroupPlanStore(context).cancel(owner, transfer.id)
+                }
+            } else if (transfer.locationKind == "VAULT" && transfer.direction == "DOWNLOAD") {
+                VaultDownloadStore(context).discardPayload(transfer.id)
+            }
+        } finally {
+            // Storage cleanup errors must not leave the corresponding background work scheduled.
+            workManager.cancelUniqueWork("transfer-${transfer.id}")
         }
-        workManager.cancelUniqueWork("transfer-${transfer.id}")
     }
 
-    suspend fun clearHistory(accountId: String) {
-        VaultOfflineStore(context).mutateTransferHistory(accountId) {
-            store.clearTransferHistory(accountId)
-            reconcileVaultPayloads(context, store)
-        }
-    }
+    suspend fun clearHistory(accountId: String) = bulkActions.clearHistory(accountId)
 
-    suspend fun clearAll(
-        accountId: String,
-        transfers: List<TransferEntity>,
-    ) {
-        transfers.mapNotNull(TransferEntity::workId).forEach { workId ->
-            runCatching { workManager.cancelWorkById(UUID.fromString(workId)) }
-        }
-        transfers.forEach { store.cancelTransfer(it.id) }
-        VaultOfflineStore(context).mutateTransferHistory(accountId) {
-            store.clearTransfers(accountId)
-            reconcileVaultPayloads(context, store)
-        }
-    }
+    suspend fun clearAll(accountId: String) = bulkActions.clearAll(accountId)
 
     suspend fun cancelConflict(transfer: TransferEntity) {
         store.updateTransfer(
@@ -581,13 +566,19 @@ class TransferManager(
                 existing?.constraints?.requiredNetworkType == NetworkType.CONNECTED &&
                     existing.state != androidx.work.WorkInfo.State.RUNNING
             if (existing != null && matchesIntent && !obsoleteConstraint) {
-                store.recordScheduledWork(current, existing.id.toString(), clock.epochMillis())
+                // A group claim binds the complete parent row. Reaffirming the same active worker
+                // must not change its timestamp and invalidate that worker's exact lease.
+                if (current.locationKind != VAULT_GROUP_LOCATION_KIND || current.workId != existing.id.toString()) {
+                    store.recordScheduledWork(current, existing.id.toString(), clock.epochMillis())
+                }
                 return@withLock
             }
             val persistedId = current.workId?.let(UUID::fromString)
             val requestId = persistedId?.takeIf { workManager.getWorkInfoById(it).get() == null } ?: UUID.randomUUID()
             val builder =
-                if (current.locationKind == "VAULT" && current.direction == "DOWNLOAD") {
+                if (current.locationKind == VAULT_GROUP_LOCATION_KIND) {
+                    OneTimeWorkRequestBuilder<VaultOfflineGroupWorker>()
+                } else if (current.locationKind == "VAULT" && current.direction == "DOWNLOAD") {
                     OneTimeWorkRequestBuilder<VaultDownloadWorker>()
                 } else if (current.locationKind == "VAULT") {
                     OneTimeWorkRequestBuilder<VaultUploadWorker>()
@@ -774,4 +765,32 @@ internal fun String.requireValidSegment(): String {
         "The selected file has an invalid name."
     }
     return this
+}
+
+private suspend fun FileBrowserStore.retryOfflineGroup(
+    context: Context,
+    transfer: TransferEntity,
+    reset: TransferEntity,
+    scope: TransferBulkScope?,
+    now: Long,
+): TransferEntity? {
+    val groups = vaultOfflineGroups()
+    val expected = groups.find(transfer.id)
+    if (expected == null || expected.parent != transfer) return null
+    val owner =
+        eu.opencloud.android.next.core.database.VaultGroupOwner(
+            expected.group.accountId,
+            expected.group.accountIncarnation,
+            expected.group.accountIdentityDigest,
+        )
+    val validPlan =
+        VaultOfflineGroupPlanStore(context).open(owner, transfer.id).use { plan ->
+            plan.context.descriptor().descriptorDigest == expected.group.descriptorDigest &&
+                plan.seal.digest == expected.group.sealedPlanDigest
+        }
+    return if (validPlan) {
+        groups.retry(expected, requireNotNull(reset.workId), now, scope)?.parent
+    } else {
+        null
+    }
 }

@@ -32,39 +32,67 @@ suspend fun VaultSession.enqueueBackgroundUpload(
         val payloads = VaultUploadStore(context)
         val lease = AccountSessions.get(context).beginLease(identity.accountId)
         val job = prepareBackgroundUpload(payloads, parentPath, name, source, size, lease)
-        val now = System.currentTimeMillis()
-        val store = FileBrowserStore(FileBrowserDatabase.create(context))
-        try {
-            currentCoroutineContext().ensureActive()
-            if (!lease()) throw OpenCloudException(OpenCloudError.AccessDenied)
-            val accepted =
-                store.enqueueCiphertextUpload(
-                    TransferEntity(
-                        id = job.id,
-                        accountId = job.location.accountId,
-                        spaceId = job.location.driveId,
-                        resourceId = null,
-                        direction = "UPLOAD",
-                        sourceUri = null,
-                        destinationPath = job.destination,
-                        displayName = context.getString(R.string.encrypted_upload),
-                        mimeType = "application/octet-stream",
-                        bytesTotal = job.size,
-                        locationKind = "VAULT",
-                        createdAtEpochMillis = now,
-                        updatedAtEpochMillis = now,
-                    ),
-                )
-            TransferManager(context, store).scheduleVaultUpload(accepted)
-            job.id
-        } finally {
-            // After the Room commit, startup reconciliation owns scheduling even if this coroutine dies.
-            withContext(NonCancellable) {
-                val retained = payloads.finishPrepared(job.id) { runBlocking { store.transfer(job.id) != null } }
-                if (!retained) store.cancelTransfer(job.id)
-            }
+        enqueuePreparedVaultUpload(context, payloads, job, lease)
+    }
+
+/** Replaces only the exact issued version; the worker needs ciphertext and its captured ETag, never a key. */
+suspend fun VaultSession.enqueueBackgroundReplacement(
+    context: Context,
+    entry: VaultFolder,
+    source: InputStream,
+    size: Long,
+): String =
+    withContext(Dispatchers.IO) {
+        val payloads = VaultUploadStore(context)
+        val lease = AccountSessions.get(context).beginLease(identity.accountId)
+        val job = prepareBackgroundReplacement(payloads, entry, source, size, lease)
+        enqueuePreparedVaultUpload(context, payloads, job, lease) { acknowledgeBackgroundReplacement(entry) }
+    }
+
+@Suppress("LongParameterList") // Injectable store/scheduler keep durable admission and interruption tests isolated.
+internal suspend fun enqueuePreparedVaultUpload(
+    context: Context,
+    payloads: VaultUploadStore,
+    job: VaultUploadJob,
+    lease: () -> Boolean,
+    store: FileBrowserStore = FileBrowserStore(FileBrowserDatabase.create(context)),
+    schedule: suspend (TransferEntity) -> Unit = { TransferManager(context, store).scheduleVaultUpload(it) },
+    onCommitted: () -> Unit = {},
+): String {
+    val now = System.currentTimeMillis()
+    try {
+        currentCoroutineContext().ensureActive()
+        if (!lease()) throw OpenCloudException(OpenCloudError.AccessDenied)
+        val accepted =
+            store.enqueueCiphertextUpload(
+                TransferEntity(
+                    id = job.id,
+                    accountId = job.location.accountId,
+                    spaceId = job.location.driveId,
+                    resourceId = null,
+                    direction = "UPLOAD",
+                    sourceUri = null,
+                    destinationPath = job.destination,
+                    displayName = context.getString(R.string.encrypted_upload),
+                    mimeType = "application/octet-stream",
+                    bytesTotal = job.size,
+                    expectedETag = job.expectedETag,
+                    locationKind = "VAULT",
+                    createdAtEpochMillis = now,
+                    updatedAtEpochMillis = now,
+                ),
+            )
+        schedule(accepted)
+        return job.id
+    } finally {
+        // After the Room commit, startup reconciliation owns scheduling even if this coroutine dies.
+        withContext(NonCancellable) {
+            val retained = payloads.finishPrepared(job.id) { runBlocking { store.transfer(job.id) != null } }
+            if (retained) onCommitted()
+            if (!retained) store.cancelTransfer(job.id)
         }
     }
+}
 
 fun forgetVaultUploads(
     context: Context,

@@ -65,13 +65,23 @@ interface CredentialStore {
 class KeystoreCredentialStore(
     context: Context,
 ) : CredentialStore {
-    private val preferences = context.getSharedPreferences("secure_credentials", Context.MODE_PRIVATE)
+    private val context = context.applicationContext
+    private val preferences = this.context.getSharedPreferences("secure_credentials", Context.MODE_PRIVATE)
 
     override fun saveBasicCredentials(
         accountId: String,
         username: String,
         password: String,
-    ) = persistBasicCredentials(preferences, accountId, username, password, ::encrypt)
+    ) {
+        VaultUnlockSession.forgetProcessAccount(accountId)
+        try {
+            VaultDeviceRememberStore(context).revokeAccountAnd(accountId) {
+                persistBasicCredentials(preferences, accountId, username, password, ::encrypt)
+            }
+        } finally {
+            VaultUnlockSession.forgetProcessAccount(accountId)
+        }
+    }
 
     fun savePendingLogin(login: PendingOidcLogin) =
         synchronized(pendingLoginLock) {
@@ -98,7 +108,16 @@ class KeystoreCredentialStore(
         accountId: String,
         username: String,
     ) {
-        preferences.edit().putString("basic.username.$accountId", encrypt(username)).apply()
+        VaultUnlockSession.forgetProcessAccount(accountId)
+        try {
+            VaultDeviceRememberStore(context).revokeAccountAnd(accountId) {
+                check(preferences.edit().putString("basic.username.$accountId", encrypt(username)).commit()) {
+                    "Credentials could not be persisted."
+                }
+            }
+        } finally {
+            VaultUnlockSession.forgetProcessAccount(accountId)
+        }
     }
 
     override fun readBasicUsername(accountId: String): String? =
@@ -108,7 +127,16 @@ class KeystoreCredentialStore(
         accountId: String,
         password: String,
     ) {
-        preferences.edit().putString("basic.$accountId", encrypt(password)).apply()
+        VaultUnlockSession.forgetProcessAccount(accountId)
+        try {
+            VaultDeviceRememberStore(context).revokeAccountAnd(accountId) {
+                check(preferences.edit().putString("basic.$accountId", encrypt(password)).commit()) {
+                    "Credentials could not be persisted."
+                }
+            }
+        } finally {
+            VaultUnlockSession.forgetProcessAccount(accountId)
+        }
     }
 
     override fun readBasicPassword(accountId: String): String? =
@@ -186,25 +214,39 @@ class KeystoreCredentialStore(
         tokens: AuthTokens,
         registration: OidcClientRegistration,
     ) {
-        check(
-            preferences
-                .edit()
-                .putString("tokens.$accountId", encrypt(serializeTokens(tokens)))
-                .putString("oidc.account:$accountId", encrypt(serializeRegistration(registration)))
-                .commit(),
-        ) { "The session could not be persisted." }
+        VaultUnlockSession.forgetProcessAccount(accountId)
+        try {
+            VaultDeviceRememberStore(context).revokeAccountAnd(accountId) {
+                check(
+                    preferences
+                        .edit()
+                        .putString("tokens.$accountId", encrypt(serializeTokens(tokens)))
+                        .putString("oidc.account:$accountId", encrypt(serializeRegistration(registration)))
+                        .commit(),
+                ) { "The session could not be persisted." }
+            }
+        } finally {
+            VaultUnlockSession.forgetProcessAccount(accountId)
+        }
     }
 
     override fun remove(accountId: String) {
-        check(
-            preferences
-                .edit()
-                .remove("basic.username.$accountId")
-                .remove("basic.$accountId")
-                .remove("tokens.$accountId")
-                .remove("oidc.account:$accountId")
-                .commit(),
-        ) { "Credentials could not be removed." }
+        VaultUnlockSession.forgetProcessAccount(accountId)
+        try {
+            VaultDeviceRememberStore(context).revokeAccountAnd(accountId) {
+                check(
+                    preferences
+                        .edit()
+                        .remove("basic.username.$accountId")
+                        .remove("basic.$accountId")
+                        .remove("tokens.$accountId")
+                        .remove("oidc.account:$accountId")
+                        .commit(),
+                ) { "Credentials could not be removed." }
+            }
+        } finally {
+            VaultUnlockSession.forgetProcessAccount(accountId)
+        }
     }
 
     private fun serializeTokens(tokens: AuthTokens): String =

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="folder_crop_pan_left">Bild nach links bewegen</string>
+    <string name="folder_crop_pan_right">Bild nach rechts bewegen</string>
+    <string name="folder_crop_pan_up">Bild nach oben bewegen</string>
+    <string name="folder_crop_pan_down">Bild nach unten bewegen</string>
+</resources>

@@ -1,0 +1,10 @@
+<resources>
+    <string name="settings_encrypted_ask_every_time">Jedes Mal fragen</string>
+    <string name="settings_encrypted_unlock_session_explanation">Wenn aktiviert, ist jedes Mal eine neue Entsperrung per Passwort oder Biometrie erforderlich. Raiun entfernt gemerkte Smartphone-Schlüssel; ältere biometrische Schlüssel bleiben für eine Entsperrung pro Nutzung verfügbar. Wenn deaktiviert, können gemerkte Orte nach einem Neustart von Raiun wieder geöffnet werden, solange das Smartphone entsperrt ist. Auf nicht unterstützten Geräten oder ohne sichere Bildschirmsperre ist jedes Mal eine neue Anmeldung erforderlich.</string>
+    <string name="settings_encrypted_unlock_policy_failed">Die Entsperreinstellung konnte nicht geändert werden. Bitte versuche es erneut.</string>
+    <string name="settings_encrypted_phone_remembered">Auf diesem Smartphone gemerkt</string>
+    <string name="settings_encrypted_phone_declined">Merken auf diesem Smartphone abgelehnt</string>
+    <string name="settings_encrypted_reset_title_device">Tresor auf diesem Smartphone vergessen?</string>
+    <string name="settings_encrypted_reset_explanation_device">Raiun entfernt die gespeicherte Entsperrauswahl und den lokalen Schlüssel für %1$s. Du musst dich erneut anmelden, bevor der Tresor wieder gemerkt werden kann.</string>
+    <string name="settings_encrypted_forget_phone">Auf diesem Smartphone vergessen</string>
+</resources>

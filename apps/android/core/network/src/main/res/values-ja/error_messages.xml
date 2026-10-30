@@ -39,4 +39,5 @@
     <string name="error_directory_listing_too_large">サーバーから返されたフォルダーの一覧が、Raiunで安全に処理できる量を超えています。より小さいサブフォルダーを開いてください。</string>
     <string name="error_local_storage_write_failed">この端末にファイルを保存できませんでした。端末のストレージを確認し、もう一度お試しください。</string>
     <string name="error_source_changed">アップロードの準備中に選択したファイルが変更されました。アップロードする前に選択し直してください。</string>
+    <string name="error_encrypted_offline_index_full">この暗号化された場所のオフラインメタデータが上限に達しました。この場所のオフライン項目をいくつか削除してから、もう一度お試しください。</string>
 </resources>

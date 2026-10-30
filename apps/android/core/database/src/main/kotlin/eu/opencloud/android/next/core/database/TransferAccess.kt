@@ -5,6 +5,7 @@ import androidx.room.withTransaction
 internal suspend fun FileBrowserDatabase.retryAllowedTransfer(
     expected: TransferEntity,
     replacement: TransferEntity,
+    scope: TransferBulkScope? = null,
 ): TransferEntity? =
     withTransaction {
         require(
@@ -24,7 +25,11 @@ internal suspend fun FileBrowserDatabase.retryAllowedTransfer(
             return@withTransaction null
         }
         if (accountDao().findById(expected.accountId) == null) return@withTransaction null
-        transferDao().retry(expected, replacement)
+        if (scope == null) {
+            transferDao().retry(expected, replacement)
+        } else {
+            TransferInventory(this@retryAllowedTransfer).retryScoped(scope, expected, replacement)
+        }
     }
 
 internal suspend fun FileBrowserDatabase.claimAllowedTransfer(
@@ -34,6 +39,7 @@ internal suspend fun FileBrowserDatabase.claimAllowedTransfer(
 ): TransferEntity? =
     withTransaction {
         val current = transferDao().findById(id) ?: return@withTransaction null
+        if (current.locationKind == VAULT_GROUP_LOCATION_KIND) return@withTransaction null
         if (current.locationKind == "SPACE" &&
             vaultExclusionDao().denies(current.accountId, current.spaceId, current.destinationPath)
         ) {

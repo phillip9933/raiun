@@ -40,6 +40,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -82,6 +83,8 @@ internal fun EncryptedBrowserContent(
     }
     val layout = preferences.browserLayout
     val display = preferences.fileDisplay
+    val onShowHidden by rememberUpdatedState(callbacks.onShowHidden)
+    LaunchedEffect(display.showHidden) { onShowHidden(display.showHidden) }
     val navigatingDestination = destinationAction != null
     LaunchedEffect(state.destinationPickerPath) {
         if (state.destinationPickerPath == null) destinationAction = null
@@ -110,13 +113,14 @@ internal fun EncryptedBrowserContent(
                     VaultEntryAction.OPEN_WITH -> callbacks.onEntryAction(entry.id, selected, null)
                     VaultEntryAction.COPY, VaultEntryAction.MOVE -> {
                         destinationAction = entry to selected
-                        callbacks.onLoadDestinationFolders(state.currentPath)
+                        callbacks.onBeginDestinationPicker(entry.id, state.currentPath)
                     }
                     else -> action = entry to selected
                 }
             },
             modifier = Modifier.weight(1f),
         )
+        if (state.destinationPickerPath != null) VaultPageNavigation(state, callbacks)
         EncryptedBrowserPlacementFooter(destinationAction, state, callbacks, { destinationAction = null })
     }
     if (createFolderDialogVisible) {
@@ -259,11 +263,15 @@ private fun EncryptedEntriesList(
 ) {
     BrowserContent(
         entries =
-            state.entries
-                .filter { display.showHidden || !it.name.startsWith('.') }
-                .sortedWith(
-                    compareBy<VaultRouteEntry> { !it.isFolder }.thenBy(String.CASE_INSENSITIVE_ORDER) { it.name },
-                ),
+            if (state.directoryPage != null) {
+                state.entries
+            } else {
+                state.entries
+                    .filter { display.showHidden || !it.name.startsWith('.') }
+                    .sortedWith(
+                        compareBy<VaultRouteEntry> { !it.isFolder }.thenBy(String.CASE_INSENSITIVE_ORDER) { it.name },
+                    )
+            },
         key = { it.id },
         layout = layout,
         padding = PaddingValues(OpenCloudDimensions.Zero),
@@ -343,15 +351,15 @@ private fun EncryptedBrowserPlacementFooter(
 @Composable
 private fun EncryptedLocationHeader(state: VaultRouteState) {
     Surface(
-        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.55f),
-        contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        contentColor = MaterialTheme.colorScheme.onSurface,
     ) {
         Row(
             Modifier.fillMaxWidth().padding(OpenCloudDimensions.SpacingSm),
             horizontalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingSm),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Icons.Default.Lock, null)
+            Icon(Icons.Default.Lock, null, tint = MaterialTheme.colorScheme.tertiary)
             Text(
                 stringResource(
                     if (state.offline) {

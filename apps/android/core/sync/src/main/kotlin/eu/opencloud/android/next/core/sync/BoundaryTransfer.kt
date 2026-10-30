@@ -40,7 +40,42 @@ interface BoundaryEndpoint {
 
     suspend fun existingNames(path: String): Set<String> = list(path).map { it.name }.toSet()
 
+    /** Production endpoints validate the complete response while retaining only this name match. */
+    suspend fun containsName(
+        path: String,
+        name: String,
+    ): Boolean = name in existingNames(path)
+
     suspend fun list(path: String): List<BoundaryEntry>
+
+    /** Legacy test doubles may collect; production endpoints capture an independent encrypted snapshot. */
+    suspend fun openDirectory(
+        context: Context,
+        path: String,
+    ): BoundaryDirectorySnapshot =
+        captureBoundaryDirectory(context, path, guard = { currentCoroutineContext().ensureActive() }) { emit ->
+            list(path).forEach(emit)
+        }
+
+    /** Names-only planning; production endpoints stream once and expose no readable descriptors. */
+    suspend fun openNameIndex(
+        context: Context,
+        path: String,
+    ): BoundaryNameIndex =
+        captureBoundaryNames(context, path, guard = { currentCoroutineContext().ensureActive() }) { emit ->
+            existingNames(path).forEach(emit)
+        }
+
+    /** Metadata-only chooser; production implementations validate all siblings before filtering. */
+    suspend fun openDestinationFolders(
+        context: Context,
+        path: String,
+    ): BoundaryDestinationSnapshot =
+        captureBoundaryDestinationFolders(context, path, guard = { currentCoroutineContext().ensureActive() }) { emit ->
+            list(path).filter { it.directory }.forEach { child ->
+                emit(BoundaryDestinationFolder(child.id, child.path, child.name, false))
+            }
+        }
 
     suspend fun requireUnchanged(entry: BoundaryEntry)
 
@@ -91,10 +126,12 @@ class BoundaryTransfer(
                 currentCoroutineContext().ensureActive()
                 val folder = manifest.nextDirectory() ?: break
                 source.requireUnchanged(folder.source)
-                source.list(folder.source.path).forEach { entry ->
-                    requireDirectChild(folder.source, entry)
-                    val copied = copyEntry(source, entry, destination, folder.destination.path)
-                    manifest.add(folder.sequence, entry, copied)
+                source.openDirectory(context, folder.source.path).use { children ->
+                    children.forEach { entry ->
+                        requireDirectChild(folder.source, entry)
+                        val copied = copyEntry(source, entry, destination, folder.destination.path)
+                        manifest.add(folder.sequence, entry, copied)
+                    }
                 }
             }
             // No source deletion starts until all files verified and the complete source snapshot still matches.
@@ -103,12 +140,12 @@ class BoundaryTransfer(
                 source.requireUnchanged(record.source)
                 destination.requireUnchanged(record.destination)
                 if (record.source.directory) {
-                    manifest.requireChildren(record.sequence, source.list(record.source.path))
-                    manifest.requireChildren(
-                        record.sequence,
-                        destination.list(record.destination.path),
-                        destination = true,
-                    )
+                    source.openDirectory(context, record.source.path).use { children ->
+                        manifest.requireChildren(record.sequence, children)
+                    }
+                    destination.openDirectory(context, record.destination.path).use { children ->
+                        manifest.requireChildren(record.sequence, children, destination = true)
+                    }
                 }
             }
             if (move) deleteVerifiedSource(source, destination, manifest)

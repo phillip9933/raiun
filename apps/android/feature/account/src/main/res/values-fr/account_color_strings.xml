@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="account_color">Couleur du compte</string>
+    <string name="account_color_edit">Modifier</string>
+    <string name="account_color_automatic">Automatique</string>
+    <string name="account_color_device_only">Modifie uniquement l’apparence de ce compte sur ce téléphone.</string>
+    <string name="account_color_light_preview">Clair</string>
+    <string name="account_color_dark_preview">Sombre</string>
+    <string name="account_color_save_failed">Impossible d’enregistrer la couleur du compte. Réessayez.</string>
+    <string name="account_color_teal">Turquoise</string>
+    <string name="account_color_jade">Jade</string>
+    <string name="account_color_purple">Violet</string>
+    <string name="account_color_rose">Rose</string>
+    <string name="account_color_amber">Ambre</string>
+    <string name="account_color_blue">Bleu</string>
+    <string name="account_color_forest">Vert forêt</string>
+    <string name="account_color_plum">Prune</string>
+    <string name="account_color_save">Enregistrer</string>
+</resources>

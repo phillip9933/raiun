@@ -1,0 +1,10 @@
+<resources>
+    <string name="settings_encrypted_ask_every_time">Perguntar sempre</string>
+    <string name="settings_encrypted_unlock_session_explanation">Quando ativado, o Raiun exige uma nova palavra-passe ou desbloqueio biométrico sempre e remove as chaves memorizadas neste telemóvel; as chaves biométricas anteriores continuam disponíveis para desbloqueios de uma utilização. Quando desativado, as localizações memorizadas podem ser reabertas neste telemóvel após reiniciar o Raiun, enquanto estiver desbloqueado. Os dispositivos não suportados ou sem bloqueio de ecrã seguro exigem nova autenticação sempre.</string>
+    <string name="settings_encrypted_unlock_policy_failed">Não foi possível alterar a opção de desbloqueio. Tente novamente.</string>
+    <string name="settings_encrypted_phone_remembered">Memorizado neste telemóvel</string>
+    <string name="settings_encrypted_phone_declined">Memorização neste telemóvel recusada</string>
+    <string name="settings_encrypted_reset_title_device">Esquecer este cofre neste telemóvel?</string>
+    <string name="settings_encrypted_reset_explanation_device">O Raiun irá remover a opção de desbloqueio guardada neste telemóvel e a chave local de %1$s. Terá de se autenticar novamente antes de a poder memorizar.</string>
+    <string name="settings_encrypted_forget_phone">Esquecer neste telemóvel</string>
+</resources>

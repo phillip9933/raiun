@@ -8,15 +8,19 @@ import eu.opencloud.android.next.core.network.EndpointPolicy
 import eu.opencloud.android.next.core.network.OpenCloudApi
 import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.security.CredentialStore
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.util.concurrent.atomic.AtomicReference
 
 class ClientRegistrationResolverTest {
     private lateinit var server: MockWebServer
@@ -92,6 +96,98 @@ class ClientRegistrationResolverTest {
             ClientRegistrationResolver(api, credentials).bindingForSession("https://cloud.example", corrected).clientId,
         )
         assertEquals(0, server.requestCount)
+    }
+
+    @Test fun `platform discovery carries advertised android client and custom scopes into PKCE`() {
+        MockWebServer().use { identity ->
+            identity.start()
+            configurePlatformDiscovery(identity)
+            val cloud = server.url("/").toString().trimEnd('/')
+            val expected = "openid profile email groups opencloud offline_access"
+
+            listOf<String?>(null, "", "manual-must-not-override-server").forEach { manual ->
+                val repository = AuthRepository(api, RegistrationCredentials())
+                val configuration = requireNotNull(repository.discover(cloud, manual).oidcConfiguration)
+                val request = repository.beginPkce(configuration).authorizationUrl.toHttpUrl()
+
+                assertEquals("configured-android", request.queryParameter("client_id"))
+                assertEquals(expected, request.queryParameter("scope"))
+                assertEquals(NEXT_OIDC_REDIRECT_URI, request.queryParameter("redirect_uri"))
+                assertEquals("code", request.queryParameter("response_type"))
+                assertEquals("S256", request.queryParameter("code_challenge_method"))
+                assertEquals("/status.php", server.takeRequest().path)
+                val webFinger = requireNotNull(server.takeRequest().requestUrl)
+                assertEquals("android", webFinger.queryParameter("platform"))
+                assertEquals(cloud, webFinger.queryParameter("resource"))
+                assertEquals("http://openid.net/specs/connect/1.0/issuer", webFinger.queryParameter("rel"))
+            }
+            assertEquals(6, server.requestCount)
+            assertEquals(3, identity.requestCount) // Discovery only: no dynamic client registration or token request.
+        }
+    }
+
+    @Test fun `rediscovery refreshes advertised scopes while reusing a cached client binding`() {
+        MockWebServer().use { identity ->
+            identity.start()
+            val scopes = AtomicReference("""["openid","profile","opencloud"]""")
+            configurePlatformDiscovery(identity, scopes::get)
+            val repository = AuthRepository(api, RegistrationCredentials())
+            val cloud = server.url("/").toString().trimEnd('/')
+            val first = requireNotNull(repository.discover(cloud).oidcConfiguration)
+            assertEquals(
+                "openid profile opencloud",
+                repository
+                    .beginPkce(first)
+                    .authorizationUrl
+                    .toHttpUrl()
+                    .queryParameter("scope"),
+            )
+
+            scopes.set("""["openid","profile","groups","opencloud-new"]""")
+            val second = requireNotNull(repository.discover(cloud).oidcConfiguration)
+            val authorization = repository.beginPkce(second).authorizationUrl.toHttpUrl()
+            assertEquals("configured-android", authorization.queryParameter("client_id"))
+            assertEquals("openid profile groups opencloud-new", authorization.queryParameter("scope"))
+            assertEquals(2, identity.requestCount)
+        }
+    }
+
+    /** Mirror OpenCloud's platform-gated metadata and an IdP advertising extra, unrequested scopes. */
+    private fun configurePlatformDiscovery(
+        identity: MockWebServer,
+        scopes: () -> String = { """["openid profile email groups opencloud offline_access"]""" },
+    ) {
+        val issuer = identity.url("/").toString().trimEnd('/')
+        server.dispatcher =
+            object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse =
+                    when (request.requestUrl?.encodedPath) {
+                        "/status.php" -> MockResponse().setBody("{}")
+                        "/.well-known/webfinger" -> {
+                            val properties =
+                                if (request.requestUrl?.queryParameter("platform") == "android") {
+                                    ""","properties":{"http://opencloud.eu/ns/oidc/client_id":"configured-android","http://opencloud.eu/ns/oidc/scopes":${scopes()}}"""
+                                } else {
+                                    ""
+                                }
+                            MockResponse().setBody(
+                                """{"links":[{"rel":"http://openid.net/specs/connect/1.0/issuer","href":"$issuer"}]$properties}""",
+                            )
+                        }
+                        else -> MockResponse().setResponseCode(404)
+                    }
+            }
+        identity.dispatcher =
+            object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse =
+                    if (request.requestUrl?.encodedPath == "/.well-known/openid-configuration") {
+                        MockResponse().setBody(
+                            """{"issuer":"$issuer","authorization_endpoint":"$issuer/authorize","token_endpoint":"$issuer/token","registration_endpoint":"$issuer/register","scopes_supported":["offline_access","openid","profile","email","address","phone","groups"]}""",
+                        )
+                    } else {
+                        MockResponse().setResponseCode(404)
+                    }
+            }
     }
 
     private fun configuration() =

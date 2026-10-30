@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import eu.opencloud.android.next.core.database.AccountEntity
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
+import eu.opencloud.android.next.core.model.AccountColor
 import eu.opencloud.android.next.core.model.cacheIdentity
 import eu.opencloud.android.next.core.network.AccountProfileClient
 import eu.opencloud.android.next.core.network.OpenCloudApi
@@ -26,11 +27,61 @@ data class ProfileAppearance(
     val image: Bitmap? = null,
 )
 
+data class AccountProfileIdentity(
+    val name: String,
+    val serverUrl: String,
+)
+
 /** Only the account's own server supplies avatars. Cache v2 deliberately excludes old third-party images. */
 object AccountProfiles {
     private val mutex = Mutex()
     private val changes = MutableStateFlow(0L)
     val revision = changes.asStateFlow()
+    private val colorChanges = MutableStateFlow(0L)
+    val colorRevision = colorChanges.asStateFlow()
+
+    fun colorChoice(
+        context: Context,
+        accountId: String,
+    ): AccountColor? {
+        val saved = runCatching { preferences(context).getString("color-$accountId", null) }.getOrNull()
+        return AccountColor.entries.firstOrNull { it.name == saved }
+    }
+
+    suspend fun setColorChoice(
+        context: Context,
+        accountId: String,
+        choice: AccountColor?,
+    ) = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            account(context, accountId)
+            val editor = preferences(context).edit()
+            if (choice ==
+                null
+            ) {
+                editor.remove("color-$accountId")
+            } else {
+                editor.putString("color-$accountId", choice.name)
+            }
+            check(editor.commit()) { "Account appearance could not be saved." }
+            colorChanges.value++
+        }
+    }
+
+    /** Local, account-scoped identity for persistent navigation; never starts a server request. */
+    suspend fun identity(
+        context: Context,
+        accountId: String,
+    ): AccountProfileIdentity? =
+        withContext(Dispatchers.IO) {
+            val saved =
+                FileBrowserDatabase
+                    .create(context)
+                    .accountDao()
+                    .findById(accountId)
+                    ?.takeIf { it.isActive } ?: return@withContext null
+            AccountProfileIdentity(saved.displayName.ifBlank { saved.userId }, saved.serverUrl)
+        }
 
     suspend fun refreshAppearance(
         context: Context,
@@ -53,8 +104,10 @@ object AccountProfiles {
                 .edit()
                 .remove(accountId)
                 .remove("name-$accountId")
+                .remove("color-$accountId")
                 .apply()
             changes.value++
+            colorChanges.value++
         }
     }
 

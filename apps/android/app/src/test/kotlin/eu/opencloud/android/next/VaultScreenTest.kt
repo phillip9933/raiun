@@ -2,9 +2,13 @@ package eu.opencloud.android.next
 
 import androidx.activity.ComponentActivity
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasSetTextAction
@@ -14,11 +18,15 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.unit.Density
 import com.github.takahirom.roborazzi.captureRoboImage
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudTheme
+import eu.opencloud.android.next.ui.VaultDirectoryPageState
 import eu.opencloud.android.next.ui.VaultEntryAction
 import eu.opencloud.android.next.ui.VaultLocationKindUi
 import eu.opencloud.android.next.ui.VaultRouteCallbacks
+import eu.opencloud.android.next.ui.VaultRouteEntry
 import eu.opencloud.android.next.ui.VaultRouteError
 import eu.opencloud.android.next.ui.VaultRouteLocation
 import eu.opencloud.android.next.ui.VaultRouteMode
@@ -27,12 +35,14 @@ import eu.opencloud.android.next.ui.VaultScreen
 import eu.opencloud.android.next.ui.VaultTransferConflict
 import eu.opencloud.android.next.ui.rememberVaultUploadSnackbar
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+import eu.opencloud.android.next.feature.settings.R as SettingsR
 
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @RunWith(RobolectricTestRunner::class)
@@ -47,7 +57,7 @@ class VaultScreenTest {
         val message = compose.activity.getString(R.string.vault_background_upload_queued)
         compose.setContent {
             OpenCloudTheme {
-                val uploadSnackbar = rememberVaultUploadSnackbar(queuedCount.value)
+                val uploadSnackbar = rememberVaultUploadSnackbar(queuedCount.value, !scanning.value)
                 snackbar = uploadSnackbar
                 if (!scanning.value) {
                     VaultScreen(VaultRouteState(), callbacks(), uploadSnackbar = uploadSnackbar)
@@ -62,9 +72,15 @@ class VaultScreenTest {
 
         compose.runOnIdle { scanning.value = true }
         compose.waitForIdle()
+        compose.runOnIdle { queuedCount.value = 2 }
+        compose.runOnIdle { assertEquals(null, requireNotNull(snackbar).currentSnackbarData) }
+        compose.runOnIdle { scanning.value = false }
+        compose.onNodeWithText(message).assertExists()
+        compose.runOnIdle { requireNotNull(snackbar).currentSnackbarData?.dismiss() }
+        compose.runOnIdle { scanning.value = true }
         compose.runOnIdle { scanning.value = false }
         compose.onNodeWithText(message).assertDoesNotExist()
-        compose.runOnIdle { queuedCount.value = 2 }
+        compose.runOnIdle { queuedCount.value = 3 }
         compose.onNodeWithText(message).assertExists()
     }
 
@@ -209,6 +225,94 @@ class VaultScreenTest {
         compose.onNodeWithText("Vault password").assertExists()
     }
 
+    @Test fun firstRememberPromptUsesDirectPhoneRememberAction() {
+        var rememberCalls = 0
+        var biometricCalls = 0
+        val message = compose.activity.getString(R.string.vault_phone_remember_offer_message)
+        compose.setContent {
+            OpenCloudTheme {
+                VaultScreen(
+                    unlockState().copy(biometricOfferPending = true, phoneRememberOffer = true),
+                    callbacks(
+                        promptActions =
+                            VaultScreenPromptActions(
+                                onRemember = { rememberCalls++ },
+                                onAcceptBiometric = { biometricCalls++ },
+                            ),
+                    ),
+                )
+            }
+        }
+        compose.onNodeWithText("Remember on this phone?").assertExists()
+        compose.onNodeWithText(message).assertExists()
+        compose.onNodeWithText("Remember on this phone").assertExists().performClick()
+        compose.runOnIdle {
+            assertEquals(1, rememberCalls)
+            assertEquals(0, biometricCalls)
+        }
+    }
+
+    @Test fun existingBiometricOfferKeepsItsSeparatePerUseAction() {
+        var biometricCalls = 0
+        var rememberCalls = 0
+        compose.setContent {
+            OpenCloudTheme {
+                VaultScreen(
+                    unlockState().copy(biometricOfferPending = true),
+                    callbacks(
+                        promptActions =
+                            VaultScreenPromptActions(
+                                onRemember = { rememberCalls++ },
+                                onAcceptBiometric = { biometricCalls++ },
+                            ),
+                    ),
+                )
+            }
+        }
+        compose.onNodeWithText("Unlock with biometrics?").assertExists()
+        compose.onNodeWithText("Set up biometrics").assertExists().performClick()
+        compose.runOnIdle {
+            assertEquals(1, biometricCalls)
+            assertEquals(0, rememberCalls)
+        }
+    }
+
+    @Test fun phoneRememberDeclineIsExplicitAskEveryTimeChoice() {
+        var declineCalls = 0
+        compose.setContent {
+            OpenCloudTheme {
+                VaultScreen(
+                    unlockState().copy(biometricOfferPending = true, phoneRememberOffer = true),
+                    callbacks(
+                        promptActions = VaultScreenPromptActions(onDeclineBiometric = { declineCalls++ }),
+                    ),
+                )
+            }
+        }
+        compose.onNodeWithText("Ask every time").assertExists().performClick()
+        compose.runOnIdle { assertEquals(1, declineCalls) }
+    }
+
+    @Test fun askEveryTimeDescriptionStatesUnsupportedDeviceFallback() {
+        val explanation = compose.activity.getString(SettingsR.string.settings_encrypted_unlock_session_explanation)
+        assertTrue(explanation.contains("Unsupported devices"))
+        assertTrue(explanation.contains("fresh authentication"))
+        assertTrue(explanation.contains("Raiun restarts"))
+    }
+
+    @Test fun explicitPhoneLockShowsPendingStatusInsteadOfGenericVerification() {
+        val state = mutableStateOf(unlockState().copy(loading = true, lockingRememberedAccess = true))
+        compose.setContent {
+            OpenCloudTheme { VaultScreen(state.value, callbacks()) }
+        }
+        compose.onNodeWithText("Locking remembered access…").assertExists()
+        compose.onNodeWithText("Verifying key…").assertDoesNotExist()
+        compose.runOnIdle {
+            state.value = unlockState().copy(error = VaultRouteError.PHONE_LOCK_FAILED)
+        }
+        compose.onNodeWithText(compose.activity.getString(R.string.vault_phone_lock_failed)).assertExists()
+    }
+
     @Test fun forgettingBiometricAccessRequiresExplicitConfirmation() {
         var forgetCount = 0
         compose.setContent {
@@ -257,6 +361,82 @@ class VaultScreenTest {
         compose.onNodeWithText("Keep access").performClick()
     }
 
+    @Test fun encryptedPagingShowsGlobalCountAndRoutesPreviousAndNextWithoutResortingPage() {
+        val requests = mutableListOf<Boolean>()
+        val state =
+            mutableStateOf(
+                unlockState().copy(
+                    mode = VaultRouteMode.CONTENTS,
+                    directoryPage = VaultDirectoryPageState(37, 301, 2, true),
+                    entries =
+                        listOf(
+                            VaultRouteEntry("z", "z-first-from-snapshot", "z", false, false, 1, "text/plain"),
+                            VaultRouteEntry("a", "a-second-from-snapshot", "a", false, false, 1, "text/plain"),
+                        ),
+                ),
+            )
+        compose.setContent {
+            OpenCloudTheme {
+                VaultScreen(
+                    state.value,
+                    callbacks().copy(onDirectoryPage = {
+                        requests +=
+                            it
+                    }),
+                )
+            }
+        }
+        compose.onNodeWithText("38–39 of 301").assertExists()
+        compose.onNodeWithText("Previous").performClick()
+        compose.onNodeWithText("Next").performClick()
+        compose.runOnIdle {
+            assertEquals(listOf(true, false), requests)
+            state.value = state.value.copy(loading = true)
+        }
+        compose.onNodeWithText("Previous").assertIsNotEnabled()
+        compose.onNodeWithText("Next").assertIsNotEnabled()
+    }
+
+    @Test
+    @Config(qualifiers = "w320dp-h800dp")
+    fun largeFontEncryptedPagingKeepsBothButtonsAndFabReachable() {
+        val requests = mutableListOf<Boolean>()
+        val state =
+            unlockState().copy(
+                mode = VaultRouteMode.CONTENTS,
+                directoryPage = VaultDirectoryPageState(8_999_999_744, 9_000_000_000, 1, true),
+                entries = listOf(VaultRouteEntry("row", "large-inventory", "row", false, false, 1, "text/plain")),
+            )
+        compose.setContent {
+            CompositionLocalProvider(LocalDensity provides Density(LocalDensity.current.density, 2f)) {
+                OpenCloudTheme { VaultScreen(state, callbacks().copy(onDirectoryPage = { requests += it })) }
+            }
+        }
+        val layouts = mutableListOf<TextLayoutResult>()
+        val layoutAction =
+            compose
+                .onNodeWithText("Previous", useUnmergedTree = true)
+                .fetchSemanticsNode()
+                .config[SemanticsActions.GetTextLayoutResult]
+                .action
+        compose.runOnIdle { assertTrue(requireNotNull(layoutAction).invoke(layouts)) }
+        val density = layouts.single().layoutInput.density
+        assertEquals(2f, density.fontScale, 0f)
+        assertEquals(
+            320f,
+            compose
+                .onRoot()
+                .fetchSemanticsNode()
+                .boundsInRoot.width / density.density,
+            1f,
+        )
+        compose.onNodeWithText("Previous").assertIsDisplayed().performClick()
+        compose.onNodeWithText("Next").assertIsDisplayed().performClick()
+        compose.runOnIdle { assertEquals(listOf(true, false), requests) }
+        compose.onNodeWithContentDescription("New").assertIsDisplayed().performClick()
+        compose.onNodeWithContentDescription("Close new actions").assertIsDisplayed().performClick()
+    }
+
     private fun unlockState() =
         VaultRouteState(
             mode = VaultRouteMode.UNLOCK,
@@ -274,6 +454,7 @@ class VaultScreenTest {
         onUnlock: (CharArray) -> Unit = {},
         onForget: () -> Unit = {},
         onResolveTransferConflict: (Boolean) -> Unit = {},
+        promptActions: VaultScreenPromptActions = VaultScreenPromptActions(),
     ) = VaultRouteCallbacks(
         onNavigateBack = {},
         onSelectLocation = {},
@@ -290,6 +471,9 @@ class VaultScreenTest {
         onLock = {},
         onRetry = {},
         onResolveTransferConflict = onResolveTransferConflict,
+        onRememberOnPhone = promptActions.onRemember,
+        onAcceptBiometricOffer = promptActions.onAcceptBiometric,
+        onDeclineBiometricOffer = promptActions.onDeclineBiometric,
     )
 
     private fun transferConflict() =
@@ -301,3 +485,9 @@ class VaultScreenTest {
             proposedName = "report (1).pdf",
         )
 }
+
+private data class VaultScreenPromptActions(
+    val onRemember: () -> Unit = {},
+    val onAcceptBiometric: () -> Unit = {},
+    val onDeclineBiometric: () -> Unit = {},
+)

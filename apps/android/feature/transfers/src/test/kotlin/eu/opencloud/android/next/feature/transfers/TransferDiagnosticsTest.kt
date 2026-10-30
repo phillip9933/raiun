@@ -9,6 +9,7 @@ class TransferDiagnosticsTest {
         assertEquals("TIMEOUT", safeTransferDiagnosticCode("TIMEOUT"))
         assertEquals("SERVER_502", safeTransferDiagnosticCode("SERVER_502"))
         assertEquals("LOCAL_STORAGE_WRITE_FAILED", safeTransferDiagnosticCode("LOCAL_STORAGE_WRITE_FAILED"))
+        assertEquals("ENCRYPTED_OFFLINE_INDEX_FULL", safeTransferDiagnosticCode("ENCRYPTED_OFFLINE_INDEX_FULL"))
     }
 
     @Test fun `diagnostics reject arbitrary database text and invalid status codes`() {

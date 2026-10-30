@@ -282,7 +282,7 @@ enum class AuthenticationMode {
 internal fun Throwable.toAuthError(): String =
     toAuthError(
         "The secure connection failed. Check the server certificate and any required client certificate " +
-            "in Server connection settings.",
+            "in Wi-Fi & certificates settings.",
     )
 
 internal fun Throwable.toAuthError(

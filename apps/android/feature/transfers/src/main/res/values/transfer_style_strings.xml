@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="transfers_replace_confirmation_title">Replace existing file?</string>
+    <string name="transfers_replace_confirmation_body">Replace “%1$s” at %2$s? Existing contents may be overwritten. Raiun cannot undo this replacement.</string>
+    <string name="transfers_replace_current_destination">the current destination</string>
+</resources>

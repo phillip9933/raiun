@@ -128,6 +128,7 @@ fun BackupSettingsRoute(
             sharedRoots = state.backupPickerSharedRoots,
             sharedNames = state.backupPickerSharedNames,
             transfers = state.transfers,
+            transferStats = state.transferOverview?.backupStats,
             onManage = { backup ->
                 editingId = backup.id
                 selectedSourceUri = null
@@ -203,6 +204,7 @@ fun BackupOverview(
     onManage: (FolderBackupEntity) -> Unit,
     modifier: Modifier = Modifier,
     transfers: List<eu.opencloud.android.next.core.database.TransferEntity> = emptyList(),
+    transferStats: Map<String, eu.opencloud.android.next.core.database.BackupTransferStats>? = null,
     spaces: List<SpaceEntity> = emptyList(),
     sharedRoots: List<BackupSharedRoot> = emptyList(),
     sharedNames: Map<String, String> = emptyMap(),
@@ -232,7 +234,7 @@ fun BackupOverview(
                     Column(verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXxs)) {
                         Text(backupDestinationLabel(backup, spaces, sharedRoots, sharedNames))
                         Text(backupDetails(backup, LocalContext.current))
-                        BackupSyncInfo(backup, transfers)
+                        BackupSyncInfo(backup, transfers, transferStats?.get(backup.id))
                     }
                 },
                 trailingContent = {

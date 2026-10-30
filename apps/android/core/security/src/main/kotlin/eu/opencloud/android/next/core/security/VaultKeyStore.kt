@@ -201,12 +201,15 @@ class VaultKeyStore(
 
     /** Forget local biometric convenience only. No account, vault, or server state is touched. */
     fun forget(identity: VaultIdentity): Unit =
-        synchronized(LOCK) {
-            val identityKey = identityKey(identity)
-            pending.remove(identityKey)?.nonce?.fill(0)
-            pendingUnlocks.remove(identityKey)?.ciphertext?.fill(0)
-            atomicFile(identity).delete()
-            cleanOrphanAliases(identity)
+        withUnlockInvalidation({ VaultUnlockSession.forgetProcess(identity) }) {
+            VaultDeviceRememberStore(context).forget(identity)
+            synchronized(LOCK) {
+                val identityKey = identityKey(identity)
+                pending.remove(identityKey)?.nonce?.fill(0)
+                pendingUnlocks.remove(identityKey)?.ciphertext?.fill(0)
+                atomicFile(identity).delete()
+                cleanOrphanAliases(identity)
+            }
         }
 
     /**
@@ -215,61 +218,67 @@ class VaultKeyStore(
      * account's keys. The lock excludes in-flight enrollment and unlock completion.
      */
     fun forgetAccount(accountId: String): Unit =
-        synchronized(LOCK) {
-            require(accountId.isNotBlank())
-            val keys = VaultAccountEnvelopeInventory.keysForAccount(directory, accountId).toMutableSet()
-            pending.forEach { (key, operation) ->
-                if (operation.identity.accountId == accountId) keys += key
-            }
-            pendingUnlocks.forEach { (key, operation) ->
-                if (operation.identity.accountId == accountId) keys += key
-            }
+        withUnlockInvalidation({ VaultUnlockSession.forgetProcessAccount(accountId) }) {
+            VaultDeviceRememberStore(context).forgetAccount(accountId)
+            synchronized(LOCK) {
+                require(accountId.isNotBlank())
+                val keys = VaultAccountEnvelopeInventory.keysForAccount(directory, accountId).toMutableSet()
+                pending.forEach { (key, operation) ->
+                    if (operation.identity.accountId == accountId) keys += key
+                }
+                pendingUnlocks.forEach { (key, operation) ->
+                    if (operation.identity.accountId == accountId) keys += key
+                }
 
-            pending.entries.removeAll { entry ->
-                if (entry.value.identity.accountId == accountId) {
-                    entry.value.nonce.fill(0)
-                    true
-                } else {
-                    false
+                pending.entries.removeAll { entry ->
+                    if (entry.value.identity.accountId == accountId) {
+                        entry.value.nonce.fill(0)
+                        true
+                    } else {
+                        false
+                    }
                 }
-            }
-            pendingUnlocks.entries.removeAll { entry ->
-                if (entry.value.identity.accountId == accountId) {
-                    entry.value.ciphertext.fill(0)
-                    true
-                } else {
-                    false
+                pendingUnlocks.entries.removeAll { entry ->
+                    if (entry.value.identity.accountId == accountId) {
+                        entry.value.ciphertext.fill(0)
+                        true
+                    } else {
+                        false
+                    }
                 }
-            }
 
-            // V2 aliases encode an account hash, so even keys orphaned by a process crash are
-            // attributable. V1 orphan aliases cannot be assigned safely without an envelope.
-            val prefixes = keys.flatMap { key -> listOf(legacyAliasPrefix(key), v2IdentityAliasPrefix(accountId, key)) }
-            val accountPrefix = v2AccountAliasPrefix(accountId)
-            val keyStore = loadKeyStore()
-            val aliases = keyStore.aliases().toList()
-            aliases
-                .filter { alias -> alias.startsWith(accountPrefix) || prefixes.any(alias::startsWith) }
-                .forEach(keyStore::deleteEntry)
-            check(
-                keyStore.aliases().toList().none { alias ->
-                    alias.startsWith(accountPrefix) || prefixes.any(alias::startsWith)
-                },
-            ) { "Vault key cleanup failed." }
-            // Delete envelopes last. If Keystore deletion fails, durable records preserve the
-            // ownership mapping so a later removal attempt can retry safely.
-            keys.forEach { key ->
-                val base = envelopeFileForIdentityKey(key)
-                listOf(base, File(base.path + ".bak"), File(base.path + ".new")).forEach { file ->
-                    check(!file.exists() || file.delete()) { "Vault key cleanup failed." }
-                }
-            }
-            check(
-                keys.none { key ->
+                // V2 aliases encode an account hash, so even keys orphaned by a process crash are
+                // attributable. V1 orphan aliases cannot be assigned safely without an envelope.
+                val prefixes =
+                    keys.flatMap { key ->
+                        listOf(legacyAliasPrefix(key), v2IdentityAliasPrefix(accountId, key))
+                    }
+                val accountPrefix = v2AccountAliasPrefix(accountId)
+                val keyStore = loadKeyStore()
+                val aliases = keyStore.aliases().toList()
+                aliases
+                    .filter { alias -> alias.startsWith(accountPrefix) || prefixes.any(alias::startsWith) }
+                    .forEach(keyStore::deleteEntry)
+                check(
+                    keyStore.aliases().toList().none { alias ->
+                        alias.startsWith(accountPrefix) || prefixes.any(alias::startsWith)
+                    },
+                ) { "Vault key cleanup failed." }
+                // Delete envelopes last. If Keystore deletion fails, durable records preserve the
+                // ownership mapping so a later removal attempt can retry safely.
+                keys.forEach { key ->
                     val base = envelopeFileForIdentityKey(key)
-                    base.exists() || File(base.path + ".bak").exists() || File(base.path + ".new").exists()
-                },
-            ) { "Vault key cleanup failed." }
+                    listOf(base, File(base.path + ".bak"), File(base.path + ".new")).forEach { file ->
+                        check(!file.exists() || file.delete()) { "Vault key cleanup failed." }
+                    }
+                }
+                check(
+                    keys.none { key ->
+                        val base = envelopeFileForIdentityKey(key)
+                        base.exists() || File(base.path + ".bak").exists() || File(base.path + ".new").exists()
+                    },
+                ) { "Vault key cleanup failed." }
+            }
         }
 
     private fun requireStrongBiometrics() {
@@ -843,3 +852,15 @@ class VaultEnvelopeException(
 ) : IllegalStateException("The local biometric vault enrollment is invalid. Unlock with the vault password.", cause)
 
 private fun ByteArray.toHex(): String = joinToString(separator = "") { byte -> "%02x".format(byte) }
+
+private inline fun <T> withUnlockInvalidation(
+    invalidate: () -> Unit,
+    action: () -> T,
+): T {
+    invalidate()
+    return try {
+        action()
+    } finally {
+        invalidate()
+    }
+}

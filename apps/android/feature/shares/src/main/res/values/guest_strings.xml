@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="guest_title">Guest access · %1$s</string>
+    <string name="guest_back">Back</string>
+    <string name="guest_invite_button">Invite an external guest</string>
+    <string name="guest_server_policy_note">The server checks whether guest invitations are enabled and whether the selected role is allowed for this item.</string>
+    <string name="guest_loading">Loading guest access…</string>
+    <string name="guest_empty">No external guests have access to this item.</string>
+    <string name="guest_email_label">Email address</string>
+    <string name="guest_role_label">Access role</string>
+    <string name="guest_expiration_label">Expiration</string>
+    <string name="guest_no_expiration">No expiration</string>
+    <string name="guest_choose_date">Choose expiration date</string>
+    <string name="guest_clear_date">Clear expiration</string>
+    <string name="guest_invite_continue">Review invitation</string>
+    <string name="guest_send_confirmation_title">Send guest invitation?</string>
+    <string name="guest_send_confirmation">OpenCloud will send an invitation email to %1$s with the selected access. Continue only if this is the intended recipient.</string>
+    <string name="guest_send_email">Send invitation email</string>
+    <string name="guest_edit_title">Edit guest access</string>
+    <string name="guest_save">Save changes</string>
+    <string name="guest_cancel">Cancel</string>
+    <string name="guest_revoke">Revoke access</string>
+    <string name="guest_revoke_confirmation_title">Revoke guest access?</string>
+    <string name="guest_revoke_confirmation">%1$s will lose access to this item.</string>
+    <string name="guest_operation_error">Guest access</string>
+    <string name="guest_done">Done</string>
+    <string name="guest_retry">Retry</string>
+    <string name="guest_item_unavailable">Guest access is only available for an indexed file or folder.</string>
+    <string name="guest_server_denied">You do not have permission to manage guest access for this item.</string>
+    <string name="guest_role_unavailable">The server did not provide an available guest role.</string>
+    <string name="guest_invited">Invitation sent.</string>
+    <string name="guest_updated">Guest access updated.</string>
+    <string name="guest_removed">Guest access revoked.</string>
+    <string name="guest_expiry_summary">Expires %1$s</string>
+    <string name="guest_manage_access">Manage guest access</string>
+    <string name="guest_access_heading">Guest access</string>
+    <string name="guest_access_description">Invite and manage people outside your organization for this item.</string>
+    <string name="guest_support_unavailable">Guest invitations are unavailable or disabled on this server.</string>
+</resources>

@@ -6,6 +6,7 @@ import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -256,6 +257,46 @@ class VaultDavClientTest {
         assertEquals("Bearer secret", request.getHeader("Authorization"))
         assertNull(request.getHeader("Range"))
         assertEquals("\"v1\"", request.getHeader("If-Match"))
+    }
+
+    @Test fun `streamed conditional ciphertext rejects an explicitly conflicting response version`() {
+        val bytes = ByteArray(64) { 7 }
+        val entry =
+            VaultDavEntry(
+                "id",
+                "cipher",
+                "cipher",
+                false,
+                bytes.size.toLong(),
+                "\"v1\"",
+                server.url("dav/Vault.vault/cipher").toString(),
+            )
+        for (responseETags in listOf(
+            emptyList(),
+            listOf("\"v1\""),
+            listOf("\"v2\""),
+            listOf("W/\"v1\""),
+            listOf("\"v1\"", "\"v2\""),
+        )) {
+            val response = MockResponse().setBody(okio.Buffer().write(bytes))
+            responseETags.forEach { response.addHeader("ETag", it) }
+            server.enqueue(response)
+            var consumed = false
+            val read = {
+                client.withCiphertextStream(server.url("dav/Vault.vault/").toString(), entry, "Bearer secret") {
+                    consumed = true
+                    it.readBytes()
+                }
+            }
+            if (responseETags.isEmpty() || responseETags == listOf(entry.strongETag)) {
+                assertArrayEquals(bytes, read())
+            } else {
+                val failure = assertThrows(OpenCloudException::class.java) { read() }
+                assertEquals(OpenCloudError.InvalidResponse, failure.error)
+                assertFalse(consumed)
+            }
+            assertEquals("\"v1\"", server.takeRequest().getHeader("If-Match"))
+        }
     }
 
     @Test fun `proof prefix request is bounded even if range is ignored`() {

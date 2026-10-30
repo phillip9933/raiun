@@ -39,4 +39,5 @@
     <string name="error_directory_listing_too_large">Der Server hat eine Ordnerliste zurückgegeben, die Raiun nicht sicher verarbeiten kann. Versuche, einen kleineren Unterordner zu öffnen.</string>
     <string name="error_local_storage_write_failed">Die Datei konnte auf diesem Gerät nicht gespeichert werden. Prüfe den Gerätespeicher und versuche es erneut.</string>
     <string name="error_source_changed">Die ausgewählte Datei wurde während der Upload-Vorbereitung geändert. Wähle sie vor dem Upload erneut aus.</string>
+    <string name="error_encrypted_offline_index_full">Dieser verschlüsselte Speicherort hat sein Limit für Offline-Metadaten erreicht. Entferne einige Offline-Inhalte aus diesem Speicherort, bevor du es erneut versuchst.</string>
 </resources>

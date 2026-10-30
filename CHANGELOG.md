@@ -2,6 +2,10 @@
 
 Android and desktop have independent versions and release pages.
 
+## Android 1.3.0 — 2026-10-30
+
+Guest invitation management, clearer account colors and settings, improved large-folder and encrypted offline handling, optional remembered encrypted access on this phone, and corrected Android sign-in discovery. See the [Android release notes](apps/android/docs/RELEASE-NOTES-1.3.0.md).
+
 ## Desktop 0.7.4 Beta — 2026-10-27
 
 The Linux and Windows Desktop Beta uses numeric versioning. It brings a

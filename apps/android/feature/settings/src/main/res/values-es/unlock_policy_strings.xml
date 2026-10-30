@@ -1,0 +1,10 @@
+<resources>
+    <string name="settings_encrypted_ask_every_time">Preguntar cada vez</string>
+    <string name="settings_encrypted_unlock_session_explanation">Si está activada, Raiun requiere una nueva contraseña o desbloqueo biométrico cada vez y elimina las claves recordadas en el teléfono; las claves biométricas anteriores siguen disponibles para desbloqueos de un solo uso. Si está desactivada, las ubicaciones recordadas pueden volver a abrirse en este teléfono tras reiniciar Raiun, mientras esté desbloqueado. Los dispositivos no compatibles o sin bloqueo de pantalla seguro requieren autenticación nueva cada vez.</string>
+    <string name="settings_encrypted_unlock_policy_failed">No se pudo cambiar el ajuste de desbloqueo. Inténtalo de nuevo.</string>
+    <string name="settings_encrypted_phone_remembered">Recordado en este teléfono</string>
+    <string name="settings_encrypted_phone_declined">Se rechazó recordar en este teléfono</string>
+    <string name="settings_encrypted_reset_title_device">¿Olvidar esta bóveda en este teléfono?</string>
+    <string name="settings_encrypted_reset_explanation_device">Raiun eliminará la opción de desbloqueo guardada en este teléfono y la clave local de %1$s. Tendrás que volver a autenticarte antes de poder recordarla.</string>
+    <string name="settings_encrypted_forget_phone">Olvidar en este teléfono</string>
+</resources>

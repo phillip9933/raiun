@@ -21,10 +21,16 @@ internal fun EncryptedDestinationPicker(
     onOpenFolder: (String) -> Unit,
 ) {
     val entries =
-        state.destinationPickerEntries
-            .filter { presentation.display.showHidden || !it.name.startsWith('.') }
-            .filterNot { isInsideSourceFolder(source, it) }
-            .sortedWith(compareBy<VaultRouteEntry> { !it.isFolder }.thenBy(String.CASE_INSENSITIVE_ORDER) { it.name })
+        if (state.destinationPickerPage != null) {
+            state.destinationPickerEntries
+        } else {
+            state.destinationPickerEntries
+                .filter { presentation.display.showHidden || !it.name.startsWith('.') }
+                .filterNot { isInsideSourceFolder(source, it) }
+                .sortedWith(
+                    compareBy<VaultRouteEntry> { !it.isFolder }.thenBy(String.CASE_INSENSITIVE_ORDER) { it.name },
+                )
+        }
     Column(Modifier.fillMaxSize()) {
         if (state.destinationPickerLoading) {
             CircularProgressIndicator(Modifier.padding(OpenCloudDimensions.SpacingMd))

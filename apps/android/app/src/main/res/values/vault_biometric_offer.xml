@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="vault_phone_remember_offer_title">Remember on this phone?</string>
+    <string name="vault_phone_remember_offer_message">Raiun can securely remember this vault on this phone, so it can reopen after Raiun restarts and after you unlock your phone. Keep a secure backup of your encryption password: you will still need it on other devices or if this phone is lost.</string>
+    <string name="vault_phone_remember_offer_accept">Remember on this phone</string>
+    <string name="vault_phone_remember_offer_decline">Ask every time</string>
     <string name="vault_biometric_offer_title">Unlock with biometrics?</string>
     <string name="vault_biometric_offer_message">Use your fingerprint or supported face recognition to reopen this encrypted folder or Space. This works only on this phone. Keep a secure backup of your encryption password: you will still need it on other devices, if biometrics are reset, or if this phone is lost.</string>
     <string name="vault_biometric_offer_accept">Set up biometrics</string>

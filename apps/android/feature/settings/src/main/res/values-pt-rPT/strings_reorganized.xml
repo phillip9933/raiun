@@ -9,7 +9,7 @@
     <string name="settings_encrypted_preferences_summary">Opções biométricas para pastas e Spaces encriptados</string>
     <string name="settings_permissions">Permissões</string>
     <string name="settings_permissions_summary">Acesso aos metadados de fotografias e vídeos</string>
-    <string name="settings_encrypted_preferences_explanation">Estas opções são guardadas neste dispositivo. Repor uma opção remove a respetiva chave biométrica guardada, se existir. Depois de desbloquear essa localização encriptada com a palavra-passe, o Raiun pode perguntar novamente.</string>
+    <string name="settings_encrypted_preferences_explanation">Estas opções são guardadas neste dispositivo. A lista inclui acessos memorizados neste telemóvel, propostas recusadas e quaisquer acessos biométricos anteriores. Repor uma localização limpa as opções locais de desbloqueio; o Raiun poderá perguntar novamente depois de se autenticar com a palavra-passe.</string>
     <string name="settings_encrypted_preferences_empty">Não há opções biométricas para localizações encriptadas nesta conta.</string>
     <string name="settings_encrypted_preferences_failed">Não foi possível ler as preferências de encriptação.</string>
     <string name="settings_encrypted_folder">Pasta</string>

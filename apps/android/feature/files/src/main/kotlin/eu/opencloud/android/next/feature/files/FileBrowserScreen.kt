@@ -72,7 +72,6 @@ import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -92,7 +91,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -129,6 +127,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import eu.opencloud.android.next.core.database.FolderBackupEntity
 import eu.opencloud.android.next.core.database.ResourceEntity
 import eu.opencloud.android.next.core.database.SpaceEntity
+import eu.opencloud.android.next.core.database.TransferBrowserOverview
 import eu.opencloud.android.next.core.database.TransferDirection
 import eu.opencloud.android.next.core.database.TransferEntity
 import eu.opencloud.android.next.core.database.TransferState
@@ -137,6 +136,7 @@ import eu.opencloud.android.next.core.datastore.FileDisplayOptions
 import eu.opencloud.android.next.core.datastore.NavigationItem
 import eu.opencloud.android.next.core.datastore.SettingsBrowserLayout
 import eu.opencloud.android.next.core.datastore.normalizePinnedNavigationItems
+import eu.opencloud.android.next.core.designsystem.component.HorizontalDivider
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
 import eu.opencloud.android.next.core.model.ResourceKind
 import eu.opencloud.android.next.core.sync.BackupExclusions
@@ -147,6 +147,8 @@ import eu.opencloud.android.next.core.ui.BrowserAction
 import eu.opencloud.android.next.core.ui.BrowserActionSheet
 import eu.opencloud.android.next.core.ui.BrowserContent
 import eu.opencloud.android.next.core.ui.BrowserEntry
+import eu.opencloud.android.next.core.ui.BrowserPageNavigation
+import eu.opencloud.android.next.core.ui.BrowserPageNavigationState
 import eu.opencloud.android.next.core.ui.BrowserToolbar
 import kotlinx.coroutines.launch
 
@@ -191,6 +193,7 @@ fun FileBrowserRoute(
         if (encryptedReturnRevision > 0) viewModel.refresh()
     }
     favoritesViewModel.load(accountId)
+    LaunchedEffect(accountId, state.encryptedFolders) { favoritesViewModel.knownRoots(state.encryptedFolders) }
     var folderOpenRequest by remember(accountId) { mutableIntStateOf(0) }
     ApplyFolderShortcut(shortcutFolder, state.spaces, accountId) {
         viewModel.browseSharedResource(it)
@@ -233,6 +236,10 @@ fun FileBrowserRoute(
             onRefresh = viewModel::refresh,
             onDirectoryPage = viewModel::directoryPage,
             onDirectorySort = viewModel::setDirectorySort,
+            onFavoritesDisplay = favoritesViewModel::display,
+            onFavoritesPage = favoritesViewModel::page,
+            onOfflineDisplay = viewModel::offlineDisplay,
+            onOfflinePage = viewModel::offlinePage,
             onMoveSelection = viewModel::moveSelection,
             onCopySelection = viewModel::copySelection,
             onFavoriteSelection = viewModel::favoriteSelection,
@@ -293,6 +300,7 @@ fun FileBrowserRoute(
             onCancelUploadConflicts = viewModel::cancelUploadConflicts,
             onClearMessage = viewModel::clearMessage,
             onSearchQueryChange = viewModel::setSearchQuery,
+            onCollectionSearchOnly = viewModel::setCollectionSearchOnly,
             onOpenTransfers = destinations.onOpenTransfers,
             onRemoveFavorite = favoritesViewModel::remove,
             onDismissFavoriteError = favoritesViewModel::dismissError,
@@ -427,6 +435,11 @@ fun FileBrowserScreen(
     onScan: () -> Unit = {},
     onDirectoryPage: (Boolean) -> Unit = {},
     onDirectorySort: (String, Boolean) -> Unit = { _, _ -> },
+    onCollectionSearchOnly: (Boolean) -> Unit = {},
+    onFavoritesDisplay: (String, String, Boolean, Boolean) -> Unit = { _, _, _, _ -> },
+    onFavoritesPage: (Boolean) -> Unit = {},
+    onOfflineDisplay: (String, String, Boolean, Boolean, String) -> Unit = { _, _, _, _, _ -> },
+    onOfflinePage: (Boolean) -> Unit = {},
     pinnedNavigationItems: List<NavigationItem> = DEFAULT_PINNED_NAVIGATION_ITEMS,
 ) {
     var dialog by remember { mutableStateOf<BrowserDialog?>(null) }
@@ -439,9 +452,30 @@ fun FileBrowserScreen(
     LaunchedEffect(sortCriterion, sortAscending) { currentDirectorySort(sortCriterion.name, sortAscending) }
     var showSortMenu by remember { mutableStateOf(false) }
     var favoritesQuery by rememberSaveable(accountId) { mutableStateOf("") }
+    val currentFavoritesDisplay by rememberUpdatedState(onFavoritesDisplay)
+    val currentOfflineDisplay by rememberUpdatedState(onOfflineDisplay)
+    LaunchedEffect(favoritesQuery, sortCriterion, sortAscending, state.fileDisplay.showHidden) {
+        currentFavoritesDisplay(favoritesQuery, sortCriterion.name, sortAscending, state.fileDisplay.showHidden)
+    }
+    LaunchedEffect(state.searchQuery, sortCriterion, sortAscending, state.fileDisplay.showHidden, offlineFilter) {
+        currentOfflineDisplay(
+            state.searchQuery,
+            sortCriterion.name,
+            sortAscending,
+            state.fileDisplay.showHidden,
+            offlineFilter.name,
+        )
+    }
+    val visibleOfflinePins = state.offlinePins + favoritesState.keptOffline
     // Keep the in-session tab selection through recomposition, but start a fresh app launch
     // on Personal instead of restoring a previously selected Space.
     var selectedDestination by remember(accountId) { mutableStateOf(initialDestination) }
+    val currentCollectionSearchOnly by rememberUpdatedState(onCollectionSearchOnly)
+    LaunchedEffect(selectedDestination) {
+        currentCollectionSearchOnly(
+            selectedDestination != FileBrowserDestination.Personal,
+        )
+    }
     val currentNotifications by rememberUpdatedState(notifications)
     val notificationContent =
         remember(accountId) {
@@ -481,6 +515,15 @@ fun FileBrowserScreen(
     val selectionMode =
         selectedDestination in setOf(FileBrowserDestination.Personal, FileBrowserDestination.Offline) &&
             state.selectedIds.isNotEmpty()
+    val controlsPage =
+        when (selectedDestination) {
+            FileBrowserDestination.Personal -> state.directoryPage.takeIf { state.searchQuery.isBlank() }
+            FileBrowserDestination.Favorites -> favoritesState.page
+            FileBrowserDestination.Offline -> state.offlinePage
+            else -> null
+        }
+    val hasPageControls = controlsPage?.let { it.hasPrevious || it.hasNext } == true
+    val transferOverview = state.transferOverview ?: legacyTransferOverview(state.transfers, accountId)
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -491,11 +534,15 @@ fun FileBrowserScreen(
                 .sortedWith(sortCriterion.comparator(sortAscending))
         }
     val visibleFavorites =
-        remember(favoritesState.resources, favoritesQuery, sortCriterion, sortAscending) {
-            favoritesState.resources
-                .filter { resource ->
-                    favoritesQuery.isBlank() || resource.name.contains(favoritesQuery, ignoreCase = true)
-                }.sortedWith(sortCriterion.comparator(sortAscending))
+        remember(favoritesState.resources, favoritesState.page, favoritesQuery, sortCriterion, sortAscending) {
+            if (favoritesState.page != null) {
+                favoritesState.resources
+            } else {
+                favoritesState.resources
+                    .filter { resource ->
+                        favoritesQuery.isBlank() || resource.name.contains(favoritesQuery, ignoreCase = true)
+                    }.sortedWith(sortCriterion.comparator(sortAscending))
+            }
         }
 
     BackHandler(
@@ -577,6 +624,7 @@ fun FileBrowserScreen(
                     if (selectionMode) {
                         Column {
                             SelectionTopAppBar(
+                                accountId = accountId,
                                 selectedCount = state.selectedIds.size,
                                 onClearSelection = onClearSelection,
                                 onDownloadSelection = onDownloadSelection,
@@ -760,11 +808,21 @@ fun FileBrowserScreen(
                             notifications = notificationContent,
                         )
                     }
-                    TransferSummary(state.transfers, onOpenTransfers)
+                    TransferSummary(listOfNotNull(transferOverview.representative), onOpenTransfers)
                 }
             },
             bottomBar = {
                 Column {
+                    controlsPage?.takeIf { hasPageControls }?.let { page ->
+                        DirectoryPagingBar(
+                            page,
+                            when (selectedDestination) {
+                                FileBrowserDestination.Favorites -> onFavoritesPage
+                                FileBrowserDestination.Offline -> onOfflinePage
+                                else -> onDirectoryPage
+                            },
+                        )
+                    }
                     operationControls()
                     BrowserBottomNavigation(
                         selectedDestination =
@@ -901,11 +959,15 @@ fun FileBrowserScreen(
                         if (selectedDestination == FileBrowserDestination.Favorites) {
                             visibleFavorites
                         } else if (selectedDestination == FileBrowserDestination.Offline) {
-                            state.offlineResources
-                                .filter {
-                                    it.name.contains(state.searchQuery, true) &&
-                                        offlineFilter.matches(it, state.offlinePins)
-                                }.sortedWith(sortCriterion.comparator(sortAscending))
+                            if (state.offlinePage != null) {
+                                state.offlineResources
+                            } else {
+                                state.offlineResources
+                                    .filter {
+                                        it.name.contains(state.searchQuery, true) &&
+                                            offlineFilter.matches(it, visibleOfflinePins)
+                                    }.sortedWith(sortCriterion.comparator(sortAscending))
+                            }
                         } else if (selectedDestination == FileBrowserDestination.Recents) {
                             state.recentResources.filter { it.name.contains(state.searchQuery, true) }
                         } else {
@@ -930,8 +992,15 @@ fun FileBrowserScreen(
                         state.directoryPage.takeIf {
                             selectedDestination == FileBrowserDestination.Personal && state.searchQuery.isBlank()
                         }
+                    val collectionPage =
+                        when (selectedDestination) {
+                            FileBrowserDestination.Favorites -> favoritesState.page
+                            FileBrowserDestination.Offline -> state.offlinePage
+                            else -> null
+                        }
+                    val displayedPage = directoryPage ?: collectionPage
                     val directoryEntries =
-                        directoryPage?.entries?.mapNotNull { item ->
+                        displayedPage?.entries?.mapNotNull { item ->
                             item.resource
                                 ?.takeUnless { it.matchesEncryptedFolder(encryptedFolders) }
                                 ?.let { MixedBrowserEntry(resource = it) }
@@ -962,7 +1031,7 @@ fun FileBrowserScreen(
                             }
                         }
                         androidx.compose.runtime.key(
-                            directoryPage?.offset,
+                            displayedPage?.offset,
                             sortCriterion,
                             sortAscending,
                             state.spaceId,
@@ -990,7 +1059,7 @@ fun FileBrowserScreen(
                                     }
                                 } else if (state.layout == BrowserLayout.TILES) {
                                     BrowserGrid(
-                                        offlinePins = state.offlinePins,
+                                        offlinePins = visibleOfflinePins,
                                         resources = displayedResources,
                                         directoryEntries = directoryEntries,
                                         encryptedFolders = encryptedFolders,
@@ -1008,7 +1077,7 @@ fun FileBrowserScreen(
                                     )
                                 } else {
                                     BrowserList(
-                                        offlinePins = state.offlinePins,
+                                        offlinePins = visibleOfflinePins,
                                         resources = displayedResources,
                                         directoryEntries = directoryEntries,
                                         encryptedFolders = encryptedFolders,
@@ -1028,20 +1097,16 @@ fun FileBrowserScreen(
                                 }
                             }
                         }
-                        directoryPage?.let { page ->
-                            DirectoryPagingBar(page, onDirectoryPage)
-                        }
                     }
                 }
             }
         }
     }
 
-    val uploadConflicts = bulkUploadConflictTargets(state.transfers, accountId)
-    uploadConflicts.firstOrNull { it.locationKind != "VAULT" }?.let { conflict ->
+    transferOverview.uploadConflict?.let { conflict ->
         ConflictResolutionDialog(
             conflict = conflict,
-            count = uploadConflicts.size,
+            count = transferOverview.uploadConflictCount,
             busy = state.bulkConflictCancelling,
             onDecision = { onResolveConflict(conflict, it) },
             onCancelAll = onCancelUploadConflicts,
@@ -1053,7 +1118,7 @@ fun FileBrowserScreen(
             resource = resource,
             options =
                 ResourceDetailsOptions(
-                    keptOffline = isKeptOffline(resource, state.offlinePins),
+                    keptOffline = isKeptOffline(resource, visibleOfflinePins),
                     retentionHours = state.temporaryCopyRetentionHours,
                     display = state.fileDisplay,
                 ),
@@ -1077,7 +1142,7 @@ fun FileBrowserScreen(
             onMove = { onMove(resource) },
             onCopy = { onCopy(resource) },
             onDownloadForOffline = { onDownloadForOffline(resource) },
-            keptOffline = isKeptOffline(resource, state.offlinePins),
+            keptOffline = isKeptOffline(resource, visibleOfflinePins),
             onRemoveLocalCopy = { onRemoveLocalCopy(resource) },
             onToggleFavorite = {
                 if (selectedDestination == FileBrowserDestination.Favorites) {
@@ -1234,31 +1299,8 @@ private fun BrowserTopAppBar(
     },
     actions = {
         notifications()
-        Box(
-            modifier = Modifier.padding(end = OpenCloudDimensions.SpacingMd),
-            contentAlignment = Alignment.Center,
-        ) {
-            IconButton(
-                onClick = onOpenAccount,
-                modifier =
-                    Modifier
-                        .size(OpenCloudDimensions.TouchTarget)
-                        .browserDescription(R.string.browser_open_account_information),
-            ) {
-                Surface(
-                    modifier = Modifier.size(OpenCloudDimensions.AvatarSize),
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        eu.opencloud.android.next.core.ui
-                            .ProfileAvatar(accountId)
-                    }
-                }
-            }
-        }
+        AccountAvatar(accountId, onOpenAccount)
     },
-    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1280,7 +1322,6 @@ private fun DestinationTopAppBar(
         notifications()
         AccountAvatar(accountId, onOpenAccount)
     },
-    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
 )
 
 @Composable
@@ -1305,6 +1346,10 @@ private fun AccountAvatar(
     accountId: String,
     onOpenAccount: () -> Unit,
 ) {
+    val accountDescription =
+        stringResource(R.string.browser_open_account_information) + ", " +
+            eu.opencloud.android.next.core.ui
+                .accountIdentityDescription(accountId)
     Box(
         modifier = Modifier.padding(end = OpenCloudDimensions.SpacingMd),
         contentAlignment = Alignment.Center,
@@ -1314,7 +1359,7 @@ private fun AccountAvatar(
             modifier =
                 Modifier
                     .size(OpenCloudDimensions.TouchTarget)
-                    .browserDescription(R.string.browser_open_account_information),
+                    .semantics { contentDescription = accountDescription },
         ) {
             Surface(
                 modifier = Modifier.size(OpenCloudDimensions.AvatarSize),
@@ -1389,26 +1434,32 @@ private fun BrowserSubHeader(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SelectionTopAppBar(
+    accountId: String,
     selectedCount: Int,
     onClearSelection: () -> Unit,
     onDownloadSelection: () -> Unit,
-) = TopAppBar(
-    title = { Text(pluralStringResource(R.plurals.browser_selected_count, selectedCount, selectedCount)) },
-    navigationIcon = {
-        IconButton(onClick = onClearSelection) {
-            Icon(Icons.Default.Close, contentDescription = stringResource(R.string.browser_clear_selection))
-        }
-    },
-    actions = {
-        SelectionAction(
-            stringResource(R.string.browser_keep_offline),
-            Icons.Default.OfflinePin,
-            stringResource(R.string.browser_download_selected_offline),
-            onDownloadSelection,
-        )
-    },
-    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-)
+) {
+    val accountDescription =
+        eu.opencloud.android.next.core.ui
+            .accountIdentityDescription(accountId)
+    TopAppBar(
+        modifier = Modifier.semantics { contentDescription = accountDescription },
+        title = { Text(pluralStringResource(R.plurals.browser_selected_count, selectedCount, selectedCount)) },
+        navigationIcon = {
+            IconButton(onClick = onClearSelection) {
+                Icon(Icons.Default.Close, contentDescription = stringResource(R.string.browser_clear_selection))
+            }
+        },
+        actions = {
+            SelectionAction(
+                stringResource(R.string.browser_keep_offline),
+                Icons.Default.OfflinePin,
+                stringResource(R.string.browser_download_selected_offline),
+                onDownloadSelection,
+            )
+        },
+    )
+}
 
 @Composable
 private fun TransferSummary(
@@ -2084,6 +2135,19 @@ internal fun ConflictResolutionDialog(
     }
 }
 
+/** Small preview/test states may still supply explicit rows; production observes the scalar overview. */
+private fun legacyTransferOverview(
+    transfers: List<TransferEntity>,
+    account: String,
+): TransferBrowserOverview {
+    val representative =
+        transfers.firstOrNull { it.state == "RUNNING" }
+            ?: transfers.firstOrNull { it.state in ACTIVE_TRANSFER_STATES }
+            ?: transfers.firstOrNull { it.state in FAILED_TRANSFER_STATES }
+    val conflicts = bulkUploadConflictTargets(transfers, account)
+    return TransferBrowserOverview(representative, conflicts.firstOrNull { it.locationKind != "VAULT" }, conflicts.size)
+}
+
 internal fun bulkUploadConflictTargets(
     transfers: List<TransferEntity>,
     accountId: String,
@@ -2319,7 +2383,7 @@ fun FolderBackupSettingsContent(
             horizontalArrangement = Arrangement.End,
         ) {
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.browser_cancel)) }
-            TextButton(
+            Button(
                 enabled =
                     (initialBackup != null || sourceDisplayName != null) &&
                         (!requireDestinationBinding || destinationSpaceId != null) &&
@@ -2916,25 +2980,14 @@ private fun DirectoryPagingBar(
     page: eu.opencloud.android.next.core.database.ResourceDirectoryPage,
     onPage: (Boolean) -> Unit,
 ) {
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = OpenCloudDimensions.SpacingSm),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        TextButton(onClick = { onPage(true) }, enabled = page.hasPrevious) {
-            Text(stringResource(R.string.browser_previous_page))
-        }
-        Text(
-            stringResource(
-                R.string.browser_page_range,
-                if (page.total == 0) 0 else page.offset + 1,
-                page.offset + page.entries.size,
-                page.total,
-            ),
-            style = MaterialTheme.typography.labelMedium,
-        )
-        TextButton(onClick = { onPage(false) }, enabled = page.hasNext) {
-            Text(stringResource(R.string.browser_next_page))
-        }
-    }
+    BrowserPageNavigation(
+        BrowserPageNavigationState(
+            if (page.total == 0) 0 else page.offset.toLong() + 1,
+            page.offset.toLong() + page.entries.size,
+            page.total.toLong(),
+            page.hasPrevious,
+            page.hasNext,
+        ),
+        onPage,
+    )
 }

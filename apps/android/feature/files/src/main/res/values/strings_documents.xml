@@ -20,6 +20,7 @@
     <string name="document_edit_with">Edit with %1$s</string>
     <string name="document_close">Close</string>
     <string name="document_in_browser">In browser</string>
+    <string name="document_open_in_browser">Open in browser</string>
     <string name="document_in_app">In app</string>
     <string name="document_session_warning">Finish saving before leaving the app. Leaving closes this session.</string>
     <string name="document_no_web_apps">No compatible web apps are available on this server.</string>

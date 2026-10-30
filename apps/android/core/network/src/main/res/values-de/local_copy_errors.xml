@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="error_local_copies_retained">Einige lokale Kopien wurden beibehalten, weil sie geändert wurden oder noch verwendet werden. Schließen Sie geöffnete Dateien oder warten Sie, bis Downloads abgeschlossen sind, und versuchen Sie es erneut.</string>
+    <string name="error_local_copy_removal_failed">Raiun konnte das Entfernen lokaler Kopien nicht abschließen. Prüfen Sie den Gerätespeicher und versuchen Sie es erneut.</string>
+</resources>

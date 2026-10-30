@@ -15,6 +15,7 @@ internal suspend fun FileBrowserDatabase.enqueuePreparedCiphertextUpload(transfe
 internal suspend fun FileBrowserDatabase.retryPreparedCiphertextTransfer(
     expected: TransferEntity,
     replacement: TransferEntity,
+    scope: TransferBulkScope? = null,
 ): TransferEntity? =
     withTransaction {
         require(expected.locationKind == "VAULT" && expected.direction in setOf("UPLOAD", "DOWNLOAD"))
@@ -31,7 +32,11 @@ internal suspend fun FileBrowserDatabase.retryPreparedCiphertextTransfer(
             ) == expected,
         )
         if (accountDao().findById(expected.accountId) == null) return@withTransaction null
-        transferDao().retry(expected, replacement)
+        if (scope == null) {
+            transferDao().retry(expected, replacement)
+        } else {
+            TransferInventory(this@retryPreparedCiphertextTransfer).retryScoped(scope, expected, replacement)
+        }
     }
 
 internal suspend fun FileBrowserDatabase.enqueuePreparedCiphertextDownload(transfer: TransferEntity): TransferEntity =

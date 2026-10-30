@@ -36,6 +36,7 @@ internal class CapabilitiesParser {
         return ServerCapabilities(
             version = data.version?.string,
             sharingEnabled = sharing?.apiEnabled ?: sharing?.api.enabled(),
+            guestLinksEnabled = sharing?.guestLinks.guestLinksEnabled(),
             publicSharingEnabled = public?.enabled ?: public?.apiEnabled ?: false,
             spacesEnabled = caps.spaces?.enabled == true,
             tusSupported = caps.files?.tus?.let { it.version == "1.0.0" && it.resumable == "1.0.0" } == true,
@@ -86,6 +87,11 @@ private fun JsonElement?.enabled(allowVersion: Boolean = false): Boolean =
     }
 
 private val VERSION = Regex("[1-9][0-9]*\\.[0-9]+(?:\\.[0-9]+)?")
+
+private fun JsonElement?.guestLinksEnabled(): Boolean {
+    val enabled = (this as? JsonObject)?.get("enabled") as? JsonPrimitive ?: return false
+    return !enabled.isString && enabled.booleanOrNull == true
+}
 
 @Serializable
 private data class Envelope(
@@ -158,6 +164,7 @@ private data class SharingDto(
     @SerialName("api_enabled") val apiEnabled: Boolean? = null,
     val api: JsonElement? = null,
     val public: PublicDto? = null,
+    @SerialName("guest_links") val guestLinks: JsonElement? = null,
 )
 
 @Serializable

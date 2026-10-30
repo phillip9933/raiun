@@ -17,6 +17,34 @@ import javax.net.ssl.SSLHandshakeException
 class OpenCloudErrorTest {
     private val clock = Clock.fixed(Instant.parse("2026-09-12T00:00:00Z"), ZoneOffset.UTC)
 
+    @Test fun `encrypted offline index capacity has a scoped actionable message`() {
+        val failure = OpenCloudException(OpenCloudError.EncryptedOfflineIndexFull)
+        assertEquals(OpenCloudError.EncryptedOfflineIndexFull, failure.toOpenCloudError())
+        assertEquals(
+            "This encrypted location has reached its offline metadata limit. " +
+                "Remove some offline items from this location before trying again.",
+            failure.error.safeMessage(),
+        )
+        assertEquals(failure.error.safeMessage(), failure.message)
+    }
+
+    @Test fun `saved encryption and offline group errors stay distinct from server failures`() {
+        listOf(
+            OpenCloudError.EncryptedUnlockFailed,
+            OpenCloudError.OfflineSnapshotChanged,
+            OpenCloudError.OfflineGroupBusy,
+        ).forEach { error ->
+            val failure = OpenCloudException(error)
+            assertSame(error, failure.toOpenCloudError())
+            assertEquals(error.safeMessage(), failure.message)
+            assertNull(failure.cause)
+        }
+        assertEquals(
+            "The offline copy changed. No existing files were replaced. Save the folder offline again.",
+            OpenCloudError.OfflineSnapshotChanged.safeMessage(),
+        )
+    }
+
     @Test fun `HTTP failures remain distinct`() {
         assertEquals(OpenCloudError.AuthenticationRequired, httpError(401))
         assertEquals(OpenCloudError.AccessDenied, httpError(403))
@@ -70,6 +98,20 @@ class OpenCloudErrorTest {
                 error,
                 SSLHandshakeException("untrusted diagnostic").apply { initCause(failure) }.toOpenCloudError(),
             )
+        }
+    }
+
+    @Test fun `local removal errors describe retained copies without upload or server claims`() {
+        val retained = OpenCloudError.LocalCopiesRetained.safeMessage()
+        val failed = OpenCloudError.LocalCopyRemovalFailed.safeMessage()
+        org.junit.Assert.assertTrue(retained.contains("were kept"))
+        org.junit.Assert.assertTrue(failed.contains("removing local copies"))
+        listOf(OpenCloudError.LocalCopiesRetained, OpenCloudError.LocalCopyRemovalFailed).forEach { error ->
+            val failure = OpenCloudException(error)
+            assertEquals(error, failure.toOpenCloudError())
+            assertNull(failure.cause)
+            org.junit.Assert.assertFalse(failure.message.orEmpty().contains("upload"))
+            org.junit.Assert.assertFalse(failure.message.orEmpty().contains("server"))
         }
     }
 

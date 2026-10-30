@@ -4,16 +4,19 @@ import android.app.Application
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -192,17 +195,29 @@ fun ResourceSharesRoute(
 ) {
     val state by viewModel.controller.state.collectAsState()
     LaunchedEffect(accountId, resource.remoteId) { viewModel.controller.load(accountId, resource) }
-    ResourceSharesScreen(
-        state,
-        onNavigateBack,
-        viewModel.controller::searchRecipients,
-        viewModel.controller::createRecipientShare,
-        viewModel.controller::createPublicLink,
-        viewModel.controller::updatePermissions,
-        viewModel.controller::revoke,
-        viewModel.controller::dismissNotice,
-        modifier,
-    )
+    var guestsOpen by rememberSaveable(accountId, resource.spaceId, resource.remoteId) { mutableStateOf(false) }
+    BackHandler(enabled = guestsOpen) { guestsOpen = false }
+    if (guestsOpen) {
+        GuestInvitationsScreen(
+            accountId = accountId,
+            resource = resource,
+            onNavigateBack = { guestsOpen = false },
+            modifier = modifier,
+        )
+    } else {
+        ResourceSharesScreen(
+            state,
+            onNavigateBack,
+            viewModel.controller::searchRecipients,
+            viewModel.controller::createRecipientShare,
+            viewModel.controller::createPublicLink,
+            viewModel.controller::updatePermissions,
+            viewModel.controller::revoke,
+            viewModel.controller::dismissNotice,
+            modifier,
+            onGuests = { guestsOpen = true },
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -352,6 +367,7 @@ fun ResourceSharesScreen(
     onDismissNotice: () -> Unit,
     modifier: Modifier = Modifier,
     initialInviteOpen: Boolean = false,
+    onGuests: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     var showInvite by rememberSaveable { mutableStateOf(initialInviteOpen) }
@@ -420,6 +436,7 @@ fun ResourceSharesScreen(
                     ShareRow(share, onUpdatePermissions, onRevoke)
                 }
             }
+            guestAccessSection(onGuests, state.resource, sharingEnabled)
             externalSharing(
                 state,
                 publicSharingEnabled,
@@ -460,6 +477,11 @@ fun ResourceSharesScreen(
         onDismissNotice,
     )
 }
+
+private fun hasGuestInvitationTarget(resource: ResourceEntity?): Boolean =
+    resource?.let {
+        it.remoteId.isNotBlank() && it.spaceId.isNotBlank() && it.path.trim('/').isNotBlank()
+    } == true
 
 private fun androidx.compose.foundation.lazy.LazyListScope.externalSharing(
     state: SharesUiState,
@@ -999,3 +1021,29 @@ private fun shareRowTitle(share: ShareEntity): String =
     } else {
         share.displayName ?: share.label ?: share.shareWith ?: share.path.substringAfterLast('/')
     }
+
+private fun androidx.compose.foundation.lazy.LazyListScope.guestAccessSection(
+    onGuests: (() -> Unit)?,
+    resource: ResourceEntity?,
+    sharingEnabled: Boolean,
+) {
+    if (onGuests != null && sharingEnabled && hasGuestInvitationTarget(resource)) {
+        item {
+            Text(stringResource(R.string.guest_access_heading), style = MaterialTheme.typography.titleMedium)
+        }
+        item {
+            Text(
+                stringResource(R.string.guest_access_description),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+        }
+        item {
+            Button(onClick = onGuests, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Default.Person, null)
+                Spacer(Modifier.width(OpenCloudDimensions.SpacingXs))
+                Text(stringResource(R.string.guest_manage_access))
+            }
+        }
+    }
+}

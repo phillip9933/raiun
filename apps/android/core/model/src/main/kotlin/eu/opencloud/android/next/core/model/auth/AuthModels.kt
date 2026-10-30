@@ -35,6 +35,7 @@ data class ServerCapabilities(
     val publicLinkExpirationEnforced: Boolean = false,
     val publicLinkExpirationDays: Int? = null,
     val appProviders: List<ServerAppProvider> = emptyList(),
+    val guestLinksEnabled: Boolean = false,
 )
 
 /** Advertised endpoints only; consumers must validate them before sending credentials. */

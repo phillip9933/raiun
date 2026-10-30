@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="vault_phone_remember_offer_title">Mémoriser sur ce téléphone ?</string>
+    <string name="vault_phone_remember_offer_message">Raiun peut mémoriser ce coffre de manière sécurisée sur ce téléphone afin de le rouvrir après le redémarrage de Raiun et le déverrouillage du téléphone. Conservez une sauvegarde sécurisée de votre mot de passe de chiffrement : vous en aurez toujours besoin sur d’autres appareils ou en cas de perte de ce téléphone.</string>
+    <string name="vault_phone_remember_offer_accept">Mémoriser sur ce téléphone</string>
+    <string name="vault_phone_remember_offer_decline">Demander à chaque fois</string>
     <string name="vault_biometric_offer_title">Déverrouiller par biométrie ?</string>
     <string name="vault_biometric_offer_message">Utilisez votre empreinte digitale ou la reconnaissance faciale prise en charge pour rouvrir ce dossier ou Space chiffré. Cela fonctionne uniquement sur ce téléphone. Conservez une sauvegarde sécurisée de votre mot de passe de chiffrement : vous en aurez toujours besoin sur d’autres appareils, si la biométrie est réinitialisée ou si vous perdez ce téléphone.</string>
     <string name="vault_biometric_offer_accept">Configurer la biométrie</string>

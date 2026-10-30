@@ -53,12 +53,17 @@ internal fun EmbeddedEditorDialog(
     val owner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val dismiss by rememberUpdatedState(onDismiss)
-    var error by remember { mutableStateOf<String?>(null) }
-    var preparing by remember { mutableStateOf(true) }
+    var error by remember(resource, choice, mode) { mutableStateOf<String?>(null) }
+    var preparing by remember(resource, choice, mode) { mutableStateOf(true) }
     val surface =
-        remember { EditorWebSurface(context, choice.provider.appsUrl, onFailure = { error = it.safeMessage(context) }) }
+        remember(resource, choice, mode) {
+            EditorWebSurface(context, choice.provider.appsUrl, onFailure = {
+                error =
+                    it.safeMessage(context)
+            })
+        }
     val controller =
-        remember {
+        remember(resource, choice, mode) {
             EmbeddedHostController(
                 scope,
                 object : EmbeddedSessionSurface<EmbeddedWebAppSession> {
@@ -76,6 +81,7 @@ internal fun EmbeddedEditorDialog(
                 },
             )
         }
+    val browser = rememberServerBrowserHandoff(resource, { error = it }, onDismiss, beforeOpen = controller::close)
     DisposableEffect(controller, owner) {
         fun close() {
             controller.close()
@@ -140,7 +146,15 @@ internal fun EmbeddedEditorDialog(
                 ) {
                     CircularProgressIndicator(Modifier.padding(OpenCloudDimensions.SpacingMd))
                 }
-                error?.let { Text(it, Modifier.padding(OpenCloudDimensions.SpacingMd)) }
+                error?.let {
+                    Text(it, Modifier.padding(OpenCloudDimensions.SpacingMd))
+                    if (choice.provider.openWebUrl != null) {
+                        TextButton(enabled = !browser.opening, onClick = { browser.open(choice) }) {
+                            Text(stringResource(R.string.document_open_in_browser))
+                        }
+                    }
+                }
+                if (browser.opening) CircularProgressIndicator(Modifier.padding(OpenCloudDimensions.SpacingMd))
                 AndroidView(factory = { surface.container }, modifier = Modifier.weight(1f).fillMaxWidth())
             }
         }

@@ -9,7 +9,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -127,7 +128,7 @@ data class UpdateActions(
     val onOpenLink: (String) -> Unit = {},
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun AppUpdatesScreen(
     state: UpdateState,
@@ -155,7 +156,10 @@ fun AppUpdatesScreen(
         ) {
             Text(stringResource(R.string.updates_installed, state.installedVersion))
             Text(stringResource(R.string.updates_about), style = MaterialTheme.typography.bodyMedium)
-            Row(horizontalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs)) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs),
+                verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs),
+            ) {
                 TextButton(onClick = { actions.onOpenLink(RaiunUpdates.PROJECT_URL) }) {
                     Text(stringResource(R.string.updates_project_link))
                 }
@@ -198,7 +202,10 @@ fun AppUpdatesScreen(
                 )
             }
             Text(stringResource(R.string.updates_channel), style = MaterialTheme.typography.titleSmall)
-            Row(horizontalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs)) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs),
+                verticalArrangement = Arrangement.spacedBy(OpenCloudDimensions.SpacingXs),
+            ) {
                 FilterChip(
                     selected = state.channel == AndroidUpdateChannel.STABLE,
                     onClick = { actions.onChannel(AndroidUpdateChannel.STABLE) },

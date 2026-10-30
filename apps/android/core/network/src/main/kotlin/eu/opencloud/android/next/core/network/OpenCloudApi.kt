@@ -8,6 +8,10 @@ import eu.opencloud.android.next.core.model.auth.ServerCapabilities
 import eu.opencloud.android.next.core.model.auth.UserProfile
 import eu.opencloud.android.next.core.model.auth.WebFingerMetadata
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -57,6 +61,7 @@ class OpenCloudApi(
                     .addPathSegments(".well-known/webfinger")
                     .addQueryParameter("resource", serverUrl)
                     .addQueryParameter("rel", OIDC_ISSUER_REL)
+                    .addQueryParameter("platform", "android")
                     .build()
             val root =
                 bodyJson(
@@ -66,7 +71,12 @@ class OpenCloudApi(
                         .get()
                         .build(),
                 ).jsonObject
-            val properties = root["properties"]?.jsonObject
+            val properties =
+                when (val value = root["properties"]) {
+                    null, JsonNull -> null
+                    is JsonObject -> value
+                    else -> invalidOidcMetadata()
+                }
             val links = root["links"]?.jsonArray.orEmpty()
             val issuer =
                 (
@@ -79,14 +89,7 @@ class OpenCloudApi(
             WebFingerMetadata(
                 issuer = issuer,
                 clientId = properties?.get("http://opencloud.eu/ns/oidc/client_id")?.jsonPrimitive?.content,
-                scopes =
-                    properties
-                        ?.get("http://opencloud.eu/ns/oidc/scopes")
-                        ?.toString()
-                        ?.trim('[', ']')
-                        ?.split(',')
-                        ?.map { it.trim().trim('"') }
-                        ?.filter(String::isNotBlank),
+                scopes = parseScopeArray(properties?.get("http://opencloud.eu/ns/oidc/scopes"), allowScopeText = true),
             )
         }.getOrElse { failure ->
             if (failure is TransferHttpException && failure.statusCode == 404) null else throw failure
@@ -106,13 +109,7 @@ class OpenCloudApi(
                     .build(),
             ).jsonObject
         val scopes =
-            webFinger?.scopes ?: root["scopes_supported"]
-                ?.toString()
-                ?.trim('[', ']')
-                ?.split(',')
-                ?.map { it.trim().trim('"') }
-                ?.filter(String::isNotBlank)
-                .orEmpty()
+            webFinger?.scopes ?: parseScopeArray(root["scopes_supported"]).orEmpty()
         if (endpoints.issuer(root.requiredString("issuer")) != expectedIssuer) {
             throw OpenCloudException(OpenCloudError.Trust)
         }
@@ -315,6 +312,33 @@ class OpenCloudApi(
         const val LEGACY_ISSUER_REL = "http://opencloud.eu/ns/oidc/issuer"
     }
 }
+
+private fun parseScopeArray(
+    value: JsonElement?,
+    allowScopeText: Boolean = false,
+): List<String>? {
+    if (value == null || value == JsonNull) return null
+    val array = value as? JsonArray ?: invalidOidcMetadata()
+    return array.flatMap { element ->
+        val primitive = element as? kotlinx.serialization.json.JsonPrimitive ?: invalidOidcMetadata()
+        if (!primitive.isString) invalidOidcMetadata()
+        // OpenCloud WebFinger entries may contain complete scope text; IdP entries are individual tokens.
+        val scopes =
+            if (allowScopeText) primitive.content.split(' ').filter(String::isNotEmpty) else listOf(primitive.content)
+        if (scopes.isEmpty() || scopes.any { !it.isValidOAuthScopeToken() }) invalidOidcMetadata()
+        scopes
+    }
+}
+
+// RFC 6749 section 3.3: preserve individual scope tokens, including commas, without splitting or trimming.
+private fun String.isValidOAuthScopeToken(): Boolean =
+    isNotEmpty() &&
+        all { character ->
+            val code = character.code
+            code == 0x21 || code in 0x23..0x5b || code in 0x5d..0x7e
+        }
+
+private fun invalidOidcMetadata(): Nothing = throw OpenCloudException(OpenCloudError.InvalidResponse)
 
 data class DiscoveryResult(
     val canonicalServerUrl: String,
