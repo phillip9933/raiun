@@ -7,12 +7,14 @@ Start with [README](../README.md) for installation and current limitations, and 
 | [Product backlog](../../../docs/PRODUCT-BACKLOG.md) | Queued Android and shared product improvements |
 | [OpenCloud 9 compatibility](OPENCLOUD-9.md) | Published-server review and guest invitation creation/management boundaries |
 | [Testing](TESTING.md) | Quality commands, device requirements and validation limits |
+| [Authentication](AUTHENTICATION.md) | OAuth/OIDC discovery, token handling, issuer-response compatibility and review boundaries |
 | [Linux development](LINUX-DEVELOPMENT.md) | Installed local toolchain, commands and validation evidence |
 | [Encrypted vault guide](ENCRYPTED-VAULTS-PLAN.md) | Published encrypted-vault behavior, local follow-up, boundaries and interoperability |
 | [Scanner SDK](OFFLINE-SCANNER-SDK.md) | Pinned dependency setup and host ownership |
 | [Screenshot testing](SCREENSHOT_TESTING.md) | Golden ownership and review |
 | [Shared design mapping](SHARED-DESIGN.md) | Native Material theme, account accents and scoped accessibility checks |
 | [Release procedure](RELEASING.md) | Packaging, signing continuity and release checks |
+| [Android 1.3.1 release notes](RELEASE-NOTES-1.3.1.md) | Android 1.3.1 authentication fixes and interoperability limits |
 | [Android 1.3.0 release notes](RELEASE-NOTES-1.3.0.md) | Android 1.3.0 changes and update guidance |
 | [Android 1.2.0 release notes](RELEASE-NOTES-1.2.0.md) | Android 1.2.0 changes and update guidance |
 | [Android 1.1.0 release notes](RELEASE-NOTES-1.1.0.md) | Android 1.1.0 changes and update guidance |

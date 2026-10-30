@@ -18,6 +18,11 @@ internal data class VaultOfflineGroupPlanSummary(
     ): Boolean = members == expectedMembers && files == expectedFiles && bytes == expectedBytes
 }
 
+internal data class VaultOfflineGroupPlanRecord(
+    val member: VaultOfflineGroupMember,
+    val payload: ByteArray,
+)
+
 /** All on-disk strings are original opaque paths/IDs. Validation uses disk uniqueness, never a whole-tree set. */
 internal class VaultOfflineGroupPlanDatabase(
     private val file: File,
@@ -34,7 +39,6 @@ internal class VaultOfflineGroupPlanDatabase(
             database.execSQL("PRAGMA synchronous=FULL")
             database.execSQL("CREATE TABLE entries (seq INTEGER PRIMARY KEY, payload BLOB NOT NULL)")
             createTree(database)
-            database.beginTransaction()
             return database
         } catch (failure: Throwable) {
             database.close()
@@ -42,40 +46,65 @@ internal class VaultOfflineGroupPlanDatabase(
         }
     }
 
-    fun append(
+    /** Validation is read-only so a rejected descriptor leaves the preparation reusable. */
+    fun validateAppend(
         database: SQLiteDatabase,
         member: VaultOfflineGroupMember,
-        payload: ByteArray,
+        pending: List<VaultOfflineGroupPlanRecord>,
     ) {
-        checkTree(database, member)
-        database.insertOrThrow(
-            "entries",
-            null,
-            ContentValues().apply {
-                put("seq", member.sequence)
-                put("payload", payload)
-            },
-        )
-        if ((member.sequence + 1L) % 128L == 0L) {
+        if (member.sequence > 0) {
+            val parent = member.source.relativePath.substringBeforeLast('/', "")
+            val pendingParent = pending.any { it.member.source.relativePath == parent && it.member.source.isFolder }
+            val committedParent =
+                database.rawQuery("SELECT folder FROM tree WHERE path = ?", arrayOf(parent)).use {
+                    it.moveToFirst() && it.getInt(0) == 1
+                }
+            if (!pendingParent && !committedParent) VaultOfflineGroupPlanCodec.integrity()
+        }
+        val pendingDuplicate =
+            pending.any {
+                it.member.source.relativePath == member.source.relativePath || it.member.source.id == member.source.id
+            }
+        val committedDuplicate =
+            database
+                .rawQuery(
+                    "SELECT 1 FROM tree WHERE path = ? OR sourceId = ? LIMIT 1",
+                    arrayOf(member.source.relativePath, member.source.id),
+                ).use { it.moveToFirst() }
+        if (pendingDuplicate || committedDuplicate) VaultOfflineGroupPlanCodec.integrity()
+    }
+
+    /** No transaction or cursor escapes this synchronous batch, even when a caller later changes threads. */
+    fun appendBatch(
+        database: SQLiteDatabase,
+        pending: List<VaultOfflineGroupPlanRecord>,
+        checkActive: () -> Unit,
+    ) {
+        require(pending.size in 1..128)
+        require(pending.sumOf { it.payload.size.toLong() } <= VaultOfflineGroupPlanCodec.MAX_RECORD_BYTES)
+        database.beginTransaction()
+        try {
+            pending.forEach { record ->
+                checkActive()
+                requireLength(record.payload.size.toLong())
+                checkTree(database, record.member)
+                database.insertOrThrow(
+                    "entries",
+                    null,
+                    ContentValues().apply {
+                        put("seq", record.member.sequence)
+                        put("payload", record.payload)
+                    },
+                )
+            }
+            checkActive()
             database.setTransactionSuccessful()
+        } finally {
             database.endTransaction()
-            database.beginTransaction()
         }
     }
 
-    fun closeWriter(
-        database: SQLiteDatabase,
-        commit: Boolean,
-    ) {
-        try {
-            if (database.inTransaction()) {
-                if (commit) database.setTransactionSuccessful()
-                database.endTransaction()
-            }
-        } finally {
-            database.close()
-        }
-    }
+    fun closeWriter(database: SQLiteDatabase) = database.close()
 
     fun page(
         context: VaultOfflineGroupContext,
@@ -223,21 +252,7 @@ internal class VaultOfflineGroupPlanDatabase(
         database: SQLiteDatabase,
         member: VaultOfflineGroupMember,
     ) {
-        if (member.sequence > 0) {
-            val parent = member.source.relativePath.substringBeforeLast('/', "")
-            val directory =
-                database.rawQuery("SELECT folder FROM tree WHERE path = ?", arrayOf(parent)).use {
-                    it.moveToFirst() && it.getInt(0) == 1
-                }
-            if (!directory) VaultOfflineGroupPlanCodec.integrity()
-        }
-        val duplicate =
-            database
-                .rawQuery(
-                    "SELECT 1 FROM tree WHERE path = ? OR sourceId = ? LIMIT 1",
-                    arrayOf(member.source.relativePath, member.source.id),
-                ).use { it.moveToFirst() }
-        if (duplicate) VaultOfflineGroupPlanCodec.integrity()
+        validateAppend(database, member, emptyList())
         database.insertOrThrow(
             "tree",
             null,

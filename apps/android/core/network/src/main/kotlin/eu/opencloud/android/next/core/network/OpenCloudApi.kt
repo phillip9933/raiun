@@ -12,7 +12,6 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Credentials
@@ -70,25 +69,28 @@ class OpenCloudApi(
                         .url(endpoint)
                         .get()
                         .build(),
-                ).jsonObject
+                ) as? JsonObject ?: invalidOidcMetadata()
             val properties =
                 when (val value = root["properties"]) {
                     null, JsonNull -> null
                     is JsonObject -> value
                     else -> invalidOidcMetadata()
                 }
-            val links = root["links"]?.jsonArray.orEmpty()
-            val issuer =
+            val links =
+                when (val value = root["links"]) {
+                    null, JsonNull -> emptyList()
+                    is JsonArray -> value.map { it as? JsonObject ?: invalidOidcMetadata() }
+                    else -> invalidOidcMetadata()
+                }
+            val issuerLink =
                 (
-                    links.firstOrNull { it.jsonObject["rel"]?.jsonPrimitive?.content == OIDC_ISSUER_REL }
-                        ?: links.firstOrNull { it.jsonObject["rel"]?.jsonPrimitive?.content == LEGACY_ISSUER_REL }
-                )?.jsonObject
-                    ?.get("href")
-                    ?.jsonPrimitive
-                    ?.content
+                    links.firstOrNull { oidcMetadataString(it["rel"]) == OIDC_ISSUER_REL }
+                        ?: links.firstOrNull { oidcMetadataString(it["rel"]) == LEGACY_ISSUER_REL }
+                )
+            val issuer = issuerLink?.let { oidcMetadataString(it["href"]) }
             WebFingerMetadata(
                 issuer = issuer,
-                clientId = properties?.get("http://opencloud.eu/ns/oidc/client_id")?.jsonPrimitive?.content,
+                clientId = properties?.get("http://opencloud.eu/ns/oidc/client_id")?.let { oidcMetadataString(it) },
                 scopes = parseScopeArray(properties?.get("http://opencloud.eu/ns/oidc/scopes"), allowScopeText = true),
             )
         }.getOrElse { failure ->
@@ -107,23 +109,25 @@ class OpenCloudApi(
                     .url("${issuer.trimEnd('/')}/.well-known/openid-configuration")
                     .get()
                     .build(),
-            ).jsonObject
+            ) as? JsonObject ?: invalidOidcMetadata()
         val scopes =
             webFinger?.scopes ?: parseScopeArray(root["scopes_supported"]).orEmpty()
-        if (endpoints.issuer(root.requiredString("issuer")) != expectedIssuer) {
+        if (endpoints.issuer(oidcMetadataString(root["issuer"])) != expectedIssuer) {
             throw OpenCloudException(OpenCloudError.Trust)
         }
+        validateOidcFlowMetadata(root)
         return OidcConfiguration(
             issuer = expectedIssuer,
-            authorizationEndpoint = endpoints.endpoint(root.requiredString("authorization_endpoint")).toString(),
-            tokenEndpoint = endpoints.endpoint(root.requiredString("token_endpoint")).toString(),
+            authorizationEndpoint = endpoints.endpoint(oidcMetadataString(root["authorization_endpoint"])).toString(),
+            tokenEndpoint = endpoints.endpoint(oidcMetadataString(root["token_endpoint"])).toString(),
             registrationEndpoint =
                 root["registration_endpoint"]
-                    ?.jsonPrimitive
-                    ?.content
+                    ?.let { oidcMetadataString(it) }
                     ?.let { endpoints.endpoint(it).toString() },
             clientId = webFinger?.clientId,
             scopes = scopes.ifEmpty { listOf("openid", "profile") },
+            authorizationResponseIssParameterSupported =
+                oidcResponseIssuerSupported(root["authorization_response_iss_parameter_supported"]),
         )
     }
 
@@ -200,12 +204,12 @@ class OpenCloudApi(
                     .header("OCS-APIREQUEST", "true")
                     .get()
                     .build(),
-            ).jsonObject
-        val data = root["ocs"]?.jsonObject?.get("data")?.jsonObject ?: error("Missing OCS user data")
+            ) as? JsonObject ?: invalidOidcMetadata()
+        val data = (root["ocs"] as? JsonObject)?.get("data") as? JsonObject ?: invalidOidcMetadata()
         return UserProfile(
             id = data.requiredString("id"),
-            displayName = data["display-name"]?.jsonPrimitive?.content ?: data.requiredString("id"),
-            email = data["email"]?.jsonPrimitive?.content,
+            displayName = data.optionalProfileString("display-name") ?: data.requiredString("id"),
+            email = data.optionalProfileString("email"),
         )
     }
 
@@ -213,25 +217,23 @@ class OpenCloudApi(
         endpoint: String,
         body: FormBody,
     ): AuthTokens {
-        val data =
-            bodyJson(
+        val response =
+            execute(
                 Request
                     .Builder()
                     .url(endpoint)
                     .post(body)
                     .build(),
-            ).jsonObject
-        val expiresIn = data["expires_in"]?.jsonPrimitive?.content?.toLongOrNull() ?: 3600L
-        return AuthTokens(
-            accessToken = data.requiredString("access_token"),
-            refreshToken = data["refresh_token"]?.jsonPrimitive?.content,
-            expiresAtEpochSeconds = (clock.epochMillis() / 1000) + expiresIn.coerceIn(0, 31536000),
-            tokenType = data["token_type"]?.jsonPrimitive?.content ?: "Bearer",
-            scope = data["scope"]?.jsonPrimitive?.content,
-        )
+            )
+        return parseOAuthTokenResponse(response.body, clock.epochMillis() / 1000, json)
     }
 
-    private fun bodyJson(request: Request) = json.parseToJsonElement(execute(request).body)
+    private fun bodyJson(request: Request) =
+        try {
+            json.parseToJsonElement(execute(request).body)
+        } catch (_: kotlinx.serialization.SerializationException) {
+            invalidOidcMetadata()
+        }
 
     private fun execute(
         request: Request,
@@ -289,7 +291,9 @@ class OpenCloudApi(
             when (oauthError) {
                 "invalid_grant" -> OpenCloudError.AuthenticationRequired
                 "invalid_client" -> OpenCloudError.ClientRegistrationRequired
-                else -> httpError(code)
+                // A status-only/proxy 401 is not evidence that a refresh grant was revoked.
+                // Only the explicit invalid_grant branch may trigger destructive session cleanup.
+                else -> if (tokenRequest && code == 401) OpenCloudError.HttpFailure(code) else httpError(code)
             }
         return TransferHttpException(code, error = failure)
     }
@@ -305,7 +309,15 @@ class OpenCloudApi(
     }
 
     private fun kotlinx.serialization.json.JsonObject.requiredString(name: String): String =
-        get(name)?.jsonPrimitive?.content ?: error("Missing required field: $name")
+        oidcMetadataString(get(name))
+
+    private fun JsonObject.optionalProfileString(name: String): String? {
+        val element = get(name)
+        if (element == null || element == JsonNull) return null
+        val primitive = element as? kotlinx.serialization.json.JsonPrimitive ?: invalidOidcMetadata()
+        if (!primitive.isString) invalidOidcMetadata()
+        return primitive.content
+    }
 
     private companion object {
         const val OIDC_ISSUER_REL = "http://openid.net/specs/connect/1.0/issuer"

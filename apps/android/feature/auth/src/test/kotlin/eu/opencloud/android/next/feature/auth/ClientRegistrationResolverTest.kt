@@ -34,6 +34,43 @@ class ClientRegistrationResolverTest {
 
     @After fun tearDown() = server.shutdown()
 
+    @Test fun `PKCE rejects provider query parameters owned by the authorization request`() {
+        val repository = AuthRepository(api, credentials)
+        listOf(
+            "response_type",
+            "prompt",
+            "client_id",
+            "redirect_uri",
+            "scope",
+            "state",
+            "code_challenge",
+            "code_challenge_method",
+        ).forEach { name ->
+            val config =
+                configuration().copy(
+                    clientId = "mobile",
+                    authorizationEndpoint = "https://issuer.example/authorize?$name=old",
+                )
+            val failure = assertThrows(OpenCloudException::class.java) { repository.beginPkce(config) }
+            assertEquals(eu.opencloud.android.next.core.network.OpenCloudError.InvalidResponse, failure.error)
+        }
+    }
+
+    @Test fun `PKCE preserves unrelated provider endpoint query parameters`() {
+        val request =
+            AuthRepository(api, credentials)
+                .beginPkce(
+                    configuration().copy(
+                        clientId = "mobile",
+                        authorizationEndpoint = "https://issuer.example/authorize?tenant=one%2Btwo",
+                    ),
+                ).authorizationUrl
+                .toHttpUrl()
+        assertEquals("one+two", request.queryParameter("tenant"))
+        assertEquals(listOf("mobile"), request.queryParameterValues("client_id"))
+        assertEquals(listOf("S256"), request.queryParameterValues("code_challenge_method"))
+    }
+
     @Test fun `advertised client takes precedence over DCR and is used by PKCE`() {
         val resolver = ClientRegistrationResolver(api, credentials)
         val chosen = resolver.resolve("https://cloud.example", configuration().copy(clientId = "advertised"))

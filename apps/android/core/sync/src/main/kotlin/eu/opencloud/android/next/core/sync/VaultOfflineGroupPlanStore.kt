@@ -189,6 +189,8 @@ internal class VaultOfflineGroupPlanStore(
         private val epoch = state.epoch.get()
         private val records = VaultOfflineGroupPlanDatabase(file(directory, "plan.db"))
         private var database: SQLiteDatabase? = records.create()
+        private val pending = ArrayList<VaultOfflineGroupPlanRecord>(MAX_PENDING_RECORDS)
+        private var pendingBytes = 0
         private var count = 0L
         private var files = 0L
         private var bytes = 0L
@@ -229,14 +231,42 @@ internal class VaultOfflineGroupPlanStore(
             check(!frozen)
             val member = VaultOfflineGroupPlanCodec.createMember(context, count, source, payload, payloadDigest)
             val encoded = VaultOfflineGroupPlanCodec.member(member)
-            records.append(requireNotNull(database), member, encoded)
+            val nextCount = Math.addExact(count, 1L)
+            val nextFiles = if (source.isFolder) files else Math.addExact(files, 1L)
+            val nextBytes = if (source.isFolder) bytes else Math.addExact(bytes, source.size)
+            records.validateAppend(requireNotNull(database), member, pending)
+            if (pending.isNotEmpty() && encoded.size > MAX_RECORD - pendingBytes) flushPending()
+            pending.add(VaultOfflineGroupPlanRecord(member, encoded))
+            pendingBytes += encoded.size
             VaultOfflineGroupPlanCodec.update(hash, count, encoded)
-            count = Math.addExact(count, 1L)
-            if (!source.isFolder) {
-                files = Math.addExact(files, 1L)
-                bytes = Math.addExact(bytes, source.size)
-            }
+            count = nextCount
+            files = nextFiles
+            bytes = nextBytes
+            if (pending.size == MAX_PENDING_RECORDS || pendingBytes == MAX_RECORD) flushPending()
             return member
+        }
+
+        /** Plan records must be durable before their corresponding Room membership is admitted. */
+        fun flush() =
+            synchronized(state) {
+                active()
+                check(!frozen)
+                flushPending()
+            }
+
+        // A failed batch has uncertain write state and must never be retried or sealed.
+        @Suppress("TooGenericExceptionCaught")
+        private fun flushPending() {
+            if (pending.isEmpty()) return
+            try {
+                records.appendBatch(requireNotNull(database), pending) { active() }
+                active()
+                pending.clear()
+                pendingBytes = 0
+            } catch (failure: Throwable) {
+                frozen = true
+                throw failure
+            }
         }
 
         fun seal(
@@ -246,10 +276,11 @@ internal class VaultOfflineGroupPlanStore(
             synchronized(state) {
                 active()
                 check(!frozen && count > 0)
+                flushPending()
                 frozen = true
                 val writer = requireNotNull(database)
                 database = null
-                records.closeWriter(writer, commit = true)
+                records.closeWriter(writer)
                 FileOutputStream(file(directory, "plan.db"), true).use { it.fd.sync() }
                 durability.syncParents(directory)
                 val expected = hash.digest()
@@ -298,8 +329,10 @@ internal class VaultOfflineGroupPlanStore(
             finished = true
             val writer = database
             database = null
+            pending.clear()
+            pendingBytes = 0
             try {
-                writer?.let { records.closeWriter(it, commit = false) }
+                writer?.let { records.closeWriter(it) }
             } finally {
                 state.preparing = false
                 state.references.decrementAndGet()
@@ -773,6 +806,7 @@ internal class VaultOfflineGroupPlanStore(
 
     private companion object {
         const val MAX_RECORD = VaultOfflineGroupPlanCodec.MAX_RECORD_BYTES
+        const val MAX_PENDING_RECORDS = 128
         val uses = mutableMapOf<String, Use>()
         val revokedOwners = ConcurrentHashMap.newKeySet<String>()
     }

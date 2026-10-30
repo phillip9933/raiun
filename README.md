@@ -8,11 +8,11 @@ I build projects to solve problems I run into in my own life. I share them becau
 
 | Platform | Source and setup | Release status |
 | --- | --- | --- |
-| Android | [apps/android](apps/android/README.md) | [1.3.0](https://github.com/phillip9933/raiun/releases/tag/android-v1.3.0) |
+| Android | [apps/android](apps/android/README.md) | [1.3.1](https://github.com/phillip9933/raiun/releases/tag/android-v1.3.1) |
 | Linux Desktop | [apps/desktop](apps/desktop/README.md) | [0.7.4 Beta](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.4) |
 | Windows Desktop | [apps/desktop](apps/desktop/README.md) | [0.7.4 Beta](https://github.com/phillip9933/raiun/releases/tag/desktop-v0.7.4) |
 
-Android and desktop have independent versions and release pages. Android 1.3.0 is the current Android release. Desktop 0.7.4 is the current numeric Beta release for Linux and Windows. The older Windows beta.2 and beta.3 downloads remain withdrawn. The 0.7.4 reconnect fixes passed owner-reported checks with both the Default and a newly added Windows account. macOS is not released.
+Android and desktop have independent versions and release pages. Android 1.3.1 is the current Android release. Desktop 0.7.4 is the current numeric Beta release for Linux and Windows. The older Windows beta.2 and beta.3 downloads remain withdrawn. The 0.7.4 reconnect fixes passed owner-reported checks with both the Default and a newly added Windows account. macOS is not released.
 
 Android includes Personal files and Spaces, encrypted folders and Spaces, offline access, transfers, folder/camera backup and document scanning. See its [features and limitations](apps/android/README.md), [privacy notice](apps/android/PRIVACY.md) and [changelog](apps/android/CHANGELOG.md).
 

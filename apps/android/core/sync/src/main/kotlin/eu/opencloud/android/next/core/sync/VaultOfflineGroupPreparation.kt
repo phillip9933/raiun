@@ -78,7 +78,7 @@ internal suspend fun prepareVaultOfflineGroup(
         val claim =
             groups.beginPreparation(frozen.owner, frozen.descriptor())
                 ?: throw OpenCloudException(OpenCloudError.OfflineGroupBusy)
-        val admission = GroupPreparationAdmission(groups, claim)
+        val admission = GroupPreparationAdmission(groups, claim) { building.flush() }
         admission.append(building.appendDirectory(source.selected).admission())
         captureGroupTree(context, source, building, admission)
         admission.flush()
@@ -184,6 +184,7 @@ private suspend fun captureGroupMember(
 private class GroupPreparationAdmission(
     private val groups: VaultOfflineGroups,
     var current: VaultGroupLease,
+    private val beforeFlush: () -> Unit,
 ) {
     private val pending = ArrayList<VaultGroupMemberAdmission>(128)
 
@@ -194,6 +195,7 @@ private class GroupPreparationAdmission(
 
     suspend fun flush() {
         if (pending.isEmpty()) return
+        beforeFlush()
         val previous = current.group.stagingChainDigest
         val hash = MessageDigest.getInstance("SHA-256")
         hash.update(previous.toByteArray(Charsets.US_ASCII))

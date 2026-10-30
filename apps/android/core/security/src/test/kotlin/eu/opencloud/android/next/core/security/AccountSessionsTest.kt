@@ -56,6 +56,103 @@ class AccountSessionsTest {
         assertEquals(OpenCloudError.AuthenticationRequired, error.error)
     }
 
+    @Test fun `invalid initial tokens do not replace credentials revoke lease or advance session`() {
+        val original = tokens(3600, "original")
+        sessions.save("account", original)
+        val lease = sessions.beginLease("account")
+
+        val error =
+            assertThrows(OpenCloudException::class.java) {
+                sessions.save("account", tokens(3600, "replacement").copy(tokenType = "MAC"))
+            }
+
+        assertEquals(OpenCloudError.InvalidResponse, error.error)
+        assertEquals(original, credentials.readTokens("account"))
+        assertTrue(lease())
+    }
+
+    @Test fun `invalid refreshed tokens preserve prior credentials and lease`() {
+        val original = tokens(1, "original")
+        sessions.save("account", original)
+        val lease = sessions.beginLease("account")
+
+        val error =
+            assertThrows(OpenCloudException::class.java) {
+                sessions.tokens("account") {
+                    tokens(3600, "replacement").copy(tokenType = "MAC")
+                }
+            }
+
+        assertEquals(OpenCloudError.InvalidResponse, error.error)
+        assertEquals(original, credentials.readTokens("account"))
+        assertTrue(lease())
+    }
+
+    @Test fun `blank rotated refresh token is rejected without poisoning stored session`() {
+        val original = tokens(1, "original").copy(scope = "files profile")
+        sessions.save("account", original)
+        val lease = sessions.beginLease("account")
+
+        val error =
+            assertThrows(OpenCloudException::class.java) {
+                sessions.tokens("account") {
+                    tokens(3600, "replacement").copy(refreshToken = "")
+                }
+            }
+
+        assertEquals(OpenCloudError.InvalidResponse, error.error)
+        assertEquals(original, credentials.readTokens("account"))
+        assertTrue(lease())
+    }
+
+    @Test fun `omitted refresh token and scope retain their previous values`() {
+        val original = tokens(1, "original").copy(refreshToken = "old-refresh", scope = "files profile")
+
+        sessions.save("account", original)
+        val refreshed =
+            sessions.tokens("account") {
+                tokens(3600, "replacement").copy(refreshToken = null, scope = null)
+            }
+
+        assertEquals("old-refresh", refreshed.refreshToken)
+        assertEquals("files profile", refreshed.scope)
+        assertEquals(refreshed, credentials.readTokens("account"))
+    }
+
+    @Test fun `explicit refresh rotation is committed and lowercase bearer is accepted unchanged`() {
+        val original = tokens(1, "original")
+        sessions.save("account", original)
+
+        val refreshed =
+            sessions.tokens("account") {
+                tokens(3600, "replacement").copy(
+                    refreshToken = "rotated-refresh",
+                    tokenType = "bearer",
+                )
+            }
+
+        assertEquals("rotated-refresh", refreshed.refreshToken)
+        assertEquals("bearer", refreshed.tokenType)
+        assertEquals(refreshed, credentials.readTokens("account"))
+    }
+
+    @Test fun `unclassified unauthorized refresh failure preserves credentials`() {
+        val original = tokens(1, "original")
+        sessions.save("account", original)
+        val lease = sessions.beginLease("account")
+
+        val error =
+            assertThrows(OpenCloudException::class.java) {
+                sessions.tokens("account") {
+                    throw OpenCloudException(OpenCloudError.HttpFailure(401))
+                }
+            }
+
+        assertEquals(OpenCloudError.HttpFailure(401), error.error)
+        assertEquals(original, credentials.readTokens("account"))
+        assertTrue(lease())
+    }
+
     @Test fun `removal cannot leave tokens resurrected by an in flight refresh`() {
         sessions.save("account", tokens(1, "old"))
         val pool = Executors.newFixedThreadPool(2)
@@ -82,8 +179,9 @@ class AccountSessionsTest {
         }
     }
 
-    @Test fun `invalid grant clears unusable credentials instead of causing a refresh storm`() {
+    @Test fun `explicit invalid grant clears unusable credentials instead of causing a refresh storm`() {
         sessions.save("account", tokens(1, "old"))
+        val lease = sessions.beginLease("account")
         val refreshes = AtomicInteger()
         repeat(20) {
             assertThrows(OpenCloudException::class.java) {
@@ -94,6 +192,8 @@ class AccountSessionsTest {
             }
         }
         assertEquals(1, refreshes.get())
+        assertNull(credentials.readTokens("account"))
+        assertFalse(lease())
     }
 
     @Test fun `credential lease closes on removal and cannot revive with the same account id`() {

@@ -25,4 +25,5 @@
     <string name="auth_oidc_session_expired">Die Anmeldesitzung ist abgelaufen oder konnte nicht überprüft werden. Bitte melde dich erneut an.</string>
     <string name="auth_sign_in_cancelled">Die Anmeldung wurde abgebrochen oder abgelehnt.</string>
     <string name="auth_certificate_untrusted">Die sichere Verbindung ist fehlgeschlagen. Prüfe das Serverzertifikat und ein eventuell erforderliches Client-Zertifikat in den Serververbindungseinstellungen.</string>
+    <string name="auth_oidc_issuer_unverified">Die Browser-Anmeldung hat den erwarteten Anbieter nicht angegeben. Bitte deine Administration, die Unterstützung für issuer (iss) zu prüfen, und versuche es dann erneut.</string>
 </resources>

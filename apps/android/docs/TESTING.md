@@ -646,3 +646,53 @@ The final compatibility correction passes all **283 network and 13 authenticatio
 The owner accepted combined production-signed phone test 4 for encrypted-folder access and for a complete logout followed by server-address discovery selecting the correct client ID. This is scoped owner-reported acceptance, not a claim that every encryption, provisioning, certificate or server scenario was tested. App and signing identities remain unchanged.
 
 The release uses version 1.3.0/code 50 and an isolated checkout based on the latest published repository main, preserving the existing dirty Android checkout and newer desktop source. Run the complete quality and API26/API35 native gates on the exact release commit before publication. Release results, artifact hashes and previous-release upgrade evidence are retained outside Git under outputs/android-release-1.3.0/. Historical candidate results above retain their original source and scope; publication does not make missing physical/deployment checks pass.
+
+### Android 1.3.1 authentication review — 30 October 2026
+
+The initial authentication candidate passed all 1,987 host cases with zero failures,
+errors or skips, formatting, static/design checks, screenshot verification,
+release lint, debug and unsigned release builds, and instrumentation assembly.
+Strict locale checks passed for all 1,596 keys in German, French, Spanish,
+European Portuguese and Japanese; all eight locale-validator regressions passed.
+
+New regressions cover previously saved lowercase Bearer schemes, initial resource
+requests, malformed token metadata, refresh rotation and omitted scope preservation,
+non-destructive unclassified HTTP 401 handling, exact discovery issuer comparison,
+advertised flow capabilities, reserved authorization query parameters, callback
+issuer checks before code exchange, legacy no-issuer responses and pending-login
+restoration. Existing state, PKCE, account-removal and credential-persistence guards
+remain covered. The independent source review's empty-scope finding was corrected;
+malformed explicit scope values are rejected while omitted/null values stay compatible.
+
+These results do not establish a live Authelia deployment retest, a physical
+browser/IdP/KeyChain matrix, full OIDC relying-party conformance or complete
+multi-provider mix-up protection for legacy providers without response issuer
+proof. See [Authentication](AUTHENTICATION.md). Historical native results above
+retain their original revision; publication still requires the release revision's
+API26/API35 matrix and signed-artifact checks.
+
+#### Offline-plan transaction follow-up
+
+A fresh sync-suite repetition exposed an intermittent SQLite lock during encrypted
+folder preparation. A deterministic regression then confirmed that the writer
+returned with an active thread-bound transaction, although preparation can resume
+on a different worker thread after suspension. The writer now commits each
+synchronous batch before returning, with at most 128 records and 1 MiB buffered.
+Plan flushes precede Room member admission and sealing. Existing immediate tree
+validation, FULL synchronization, final fsync/digest verification, cancellation and
+uncertain sealed-plan retention remain. The persisted plan format is unchanged.
+
+After that fix, the complete local gate passed all **1,991 host cases**, with zero
+failures/errors/skips, formatting, static/design checks, screenshots, release lint,
+debug/unsigned release builds and instrumentation assembly. The four new host
+regressions cover transaction ownership, distinct-thread batch/seal/read behavior,
+abort cleanup and rollback followed by refusal to append or seal a failed batch.
+The native plan class passed four cases each on API26/API35, including two new
+cross-thread cases and its existing integrity checks. That targeted diagnostic APK
+preceded comment-only formatting; final release-commit CI remains a separate gate.
+
+The first independent quality attempt on the earlier authentication-only revision
+timed out without a completed sync report. Its unchanged-revision retry passed,
+as did both native matrices. That historical CI stall's exact cause was not
+established and is not claimed proven by the transaction fix. Final release
+artifacts must use the subsequent complete candidate and its own CI evidence.

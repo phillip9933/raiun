@@ -11,7 +11,6 @@ import eu.opencloud.android.next.core.datastore.SettingsRepository
 import eu.opencloud.android.next.core.designsystem.localizedString
 import eu.opencloud.android.next.core.model.auth.AuthTokens
 import eu.opencloud.android.next.core.model.auth.AuthenticationType
-import eu.opencloud.android.next.core.model.auth.NEXT_OIDC_REDIRECT_URI
 import eu.opencloud.android.next.core.model.auth.OidcConfiguration
 import eu.opencloud.android.next.core.network.OpenCloudApi
 import eu.opencloud.android.next.core.network.safeMessage
@@ -147,44 +146,39 @@ class AuthViewModel(
 
     fun completeOidcCallback(callback: String) =
         launchAuth {
-            val callbackUri = android.net.Uri.parse(callback)
-            require(
-                callbackUri.scheme == NEXT_OIDC_REDIRECT_URI.substringBefore("://") &&
-                    callbackUri.authority == "oauth",
-            )
-            require(callbackUri.path.isNullOrEmpty() && callbackUri.fragment == null)
-            val states = callbackUri.getQueryParameters("state")
-            require(states.size == 1 && states.single().isNotBlank())
-            val pending = credentialStore.consumePendingLogin(states.single(), System.currentTimeMillis())
-            if (pending == null) {
-                mutableState.value =
-                    mutableState.value.copy(
-                        isLoading = false,
-                        error =
-                            getApplication<Application>().localizedString(R.string.auth_oidc_session_expired),
-                    )
-                return@launchAuth
+            val result =
+                processOidcCallback(
+                    callback,
+                    consumePending = { state ->
+                        credentialStore.consumePendingLogin(state, System.currentTimeMillis())
+                    },
+                    exchange = { pending, code ->
+                        repository = repositoryFor(pending.serverUrl)
+                        mutableState.value =
+                            mutableState.value.copy(isLoading = true, error = null, serverUrl = pending.serverUrl)
+                        repository.completePkce(
+                            pending.serverUrl,
+                            pending.configuration,
+                            code,
+                            pending.request.codeVerifier,
+                        )
+                    },
+                )
+            when (result) {
+                OidcCallbackResult.Expired ->
+                    mutableState.value =
+                        mutableState.value.copy(
+                            isLoading = false,
+                            error = getApplication<Application>().localizedString(R.string.auth_oidc_session_expired),
+                        )
+                OidcCallbackResult.Rejected ->
+                    mutableState.value =
+                        mutableState.value.copy(
+                            isLoading = false,
+                            error = getApplication<Application>().localizedString(R.string.auth_sign_in_cancelled),
+                        )
+                is OidcCallbackResult.Completed -> setSession(result.value)
             }
-            val codes = callbackUri.getQueryParameters("code")
-            if (callbackUri.getQueryParameter("error") != null || codes.size != 1 || codes.single().isBlank()) {
-                mutableState.value =
-                    mutableState.value.copy(
-                        isLoading = false,
-                        error =
-                            getApplication<Application>().localizedString(R.string.auth_sign_in_cancelled),
-                    )
-                return@launchAuth
-            }
-            repository = repositoryFor(pending.serverUrl)
-            mutableState.value = mutableState.value.copy(isLoading = true, error = null, serverUrl = pending.serverUrl)
-            setSession(
-                repository.completePkce(
-                    pending.serverUrl,
-                    pending.configuration,
-                    codes.single(),
-                    pending.request.codeVerifier,
-                ),
-            )
         }
 
     fun approveCertificatePin(pin: String) {
@@ -290,6 +284,8 @@ internal fun Throwable.toAuthError(
     certificateErrorMessage: String,
 ): String =
     when {
+        this is OidcCallbackIssuerException ->
+            context.localizedString(R.string.auth_oidc_issuer_unverified)
         toOpenCloudError() == eu.opencloud.android.next.core.network.OpenCloudError.ClientCertificateRequired ->
             toOpenCloudError().safeMessage(context)
         this is SSLHandshakeException || cause is SSLHandshakeException || cause is CertificateException ->
@@ -300,6 +296,7 @@ internal fun Throwable.toAuthError(
 
 internal fun Throwable.toAuthError(certificateErrorMessage: String): String =
     when {
+        this is OidcCallbackIssuerException -> "The sign-in issuer could not be verified."
         toOpenCloudError() == eu.opencloud.android.next.core.network.OpenCloudError.ClientCertificateRequired ->
             toOpenCloudError().safeMessage()
         this is SSLHandshakeException || cause is SSLHandshakeException || cause is CertificateException ->

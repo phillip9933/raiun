@@ -52,6 +52,7 @@ data class OidcConfiguration(
     val registrationEndpoint: String?,
     val clientId: String?,
     val scopes: List<String>,
+    val authorizationResponseIssParameterSupported: Boolean = false,
 )
 
 data class WebFingerMetadata(
