@@ -12,6 +12,8 @@ mod initial_save;
 #[cfg(any(windows, test))]
 mod namespace;
 mod verified_edit;
+#[cfg(windows)]
+pub use file_rename::FileRenameBindingCandidate;
 #[cfg(any(windows, test))]
 pub(crate) use file_rename::VerifiedRenameSourceContent;
 #[cfg(any(windows, test))]

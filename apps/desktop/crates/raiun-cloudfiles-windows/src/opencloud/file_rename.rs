@@ -21,6 +21,94 @@ use std::{
     time::Duration,
 };
 
+#[cfg(windows)]
+use raiun_control_windows::directory_notifications::directory_rename_hints::RenameHintPair;
+
+/// O(1) binding snapshot for a typed rename notification pair.
+///
+/// This is deliberately not a namespace intent or mutation capability: it
+/// has no freshly classified parent ancestry or parent remote validator.
+#[cfg(windows)]
+pub struct FileRenameBindingCandidate<'hint> {
+    source_identity: OpaqueIdentity,
+    parent_identity: OpaqueIdentity,
+    source: FileBinding,
+    parent: DirectoryBinding,
+    destination_path: String,
+    catalog_scope: crate::ProviderIdentityCatalogScope,
+    authorization: CapturedAuthorization,
+    local_file_hint: crate::LocalFileIdentity,
+    hints: RenameHintPair<'hint>,
+}
+
+#[cfg(windows)]
+impl FileRenameBindingCandidate<'_> {
+    pub fn source_identity(&self) -> OpaqueIdentity {
+        self.source_identity
+    }
+
+    pub fn parent_identity(&self) -> OpaqueIdentity {
+        self.parent_identity
+    }
+
+    pub fn source_path(&self) -> &str {
+        &self.source.path
+    }
+
+    pub fn destination_path(&self) -> &str {
+        &self.destination_path
+    }
+
+    pub fn source_remote_id(&self) -> &str {
+        &self.source.remote_id
+    }
+
+    pub fn parent_remote_id(&self) -> &str {
+        &self.parent.remote_id
+    }
+
+    pub fn source_etag(&self) -> &str {
+        &self.source.etag
+    }
+
+    pub fn source_size(&self) -> u64 {
+        self.source.size
+    }
+
+    pub fn catalog_scope(&self) -> &crate::ProviderIdentityCatalogScope {
+        &self.catalog_scope
+    }
+
+    pub fn authorization(&self) -> CapturedAuthorization {
+        self.authorization
+    }
+
+    pub fn local_file_hint(&self) -> crate::LocalFileIdentity {
+        self.local_file_hint
+    }
+
+    pub fn rename_hint_pair(&self) -> &RenameHintPair<'_> {
+        &self.hints
+    }
+}
+
+#[cfg(windows)]
+impl std::fmt::Debug for FileRenameBindingCandidate<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FileRenameBindingCandidate")
+            .field("source_identity", &"[BOUND]")
+            .field("parent_identity", &"[BOUND]")
+            .field("source_binding", &"[BOUND]")
+            .field("parent_binding", &"[BOUND]")
+            .field("catalog_scope", &"[BOUND]")
+            .field("authorization", &"[BOUND]")
+            .field("local_file_hint", &"[HINT]")
+            .field("rename_hints", &"[UNTRUSTED SAME-BATCH PAIR]")
+            .finish()
+    }
+}
+
 #[path = "file_rename_publication.rs"]
 mod publication;
 pub use publication::VerifiedFileRenamePublication;
@@ -106,6 +194,144 @@ fn parent_path_matches_components(path: &str, components: &[String]) -> bool {
 }
 
 impl OpenCloudPlaceholderBackend {
+    /// Bind one complete notification-batch pair to the exact existing
+    /// durable source and parent identities. The result remains partial
+    /// evidence; a later caller must capture and validate the parent locally
+    /// and remotely before constructing any namespace intent.
+    #[cfg(windows)]
+    pub fn file_rename_binding_candidate<'hint>(
+        &self,
+        source_identity: OpaqueIdentity,
+        parent_identity: OpaqueIdentity,
+        hints: RenameHintPair<'hint>,
+        authorization: CapturedAuthorization,
+        local_file_hint: crate::LocalFileIdentity,
+        owner_current: &dyn Fn(CapturedAuthorization) -> bool,
+    ) -> Result<FileRenameBindingCandidate<'hint>, BackendError> {
+        let old = hints.old_components();
+        let new = hints.new_components();
+        if old.len() < 2
+            || old.len() != new.len()
+            || old.first().map(String::as_str) != Some("Personal")
+            || old[..old.len() - 1] != new[..new.len() - 1]
+            || old
+                .iter()
+                .chain(new)
+                .any(|component| !super::valid_windows_component(component))
+            || old[old.len() - 1].eq_ignore_ascii_case(&new[new.len() - 1])
+            || authorization.agent_generation == 0
+            || authorization.token_generation != self.token_generation
+            || local_file_hint.volume_serial == 0
+            || local_file_hint.file_index == 0
+            || self.client.token_generation() != self.token_generation
+            || !owner_current(authorization)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let lease = self
+            .lease_gate
+            .read()
+            .map_err(|_| BackendError::Unavailable)?;
+        self.ensure_active()?;
+
+        let catalog_scope = self
+            .catalog_scope_snapshot()?
+            .ok_or(BackendError::Unavailable)?;
+        let Some(local_root) = self.local_root_identity else {
+            return Err(BackendError::Unavailable);
+        };
+        if catalog_scope.local_root() != local_root
+            || catalog_scope.profile_id() != self.scope.profile_id()
+            || catalog_scope.account_id() != self.scope.account_id()
+            || catalog_scope.server_origin() != self.scope.server_origin()
+            || !super::valid_remote_path(
+                catalog_scope.personal_space_id(),
+                catalog_scope.personal_root_resource_id(),
+                "/",
+                true,
+            )
+            || local_file_hint.volume_serial != local_root.volume_serial
+            || self.scope.token_generation() != authorization.token_generation
+        {
+            return Err(BackendError::Unavailable);
+        }
+
+        let parent_components = &old[..old.len() - 1];
+        let (parent, source) = {
+            let state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
+            let parent = state
+                .directories
+                .get(&parent_identity)
+                .cloned()
+                .ok_or(BackendError::NotFound)?;
+            let source = state
+                .files
+                .get(&source_identity)
+                .cloned()
+                .ok_or(BackendError::NotFound)?;
+            (parent, source)
+        };
+        let expected_source_path =
+            joined(&parent.path, old.last().ok_or(BackendError::Unavailable)?);
+        let destination_path = joined(&parent.path, new.last().ok_or(BackendError::Unavailable)?);
+        if parent.space_id != catalog_scope.personal_space_id()
+            || parent.root_resource_id != catalog_scope.personal_root_resource_id()
+            || source.space_id != catalog_scope.personal_space_id()
+            || source.root_resource_id != catalog_scope.personal_root_resource_id()
+            || source.path != expected_source_path
+            || !parent_path_matches_components(&parent.path, parent_components)
+            || !super::valid_remote_path(
+                &parent.space_id,
+                &parent.root_resource_id,
+                &parent.path,
+                true,
+            )
+            || !super::valid_remote_path(
+                &source.space_id,
+                &source.root_resource_id,
+                &source.path,
+                false,
+            )
+            || !super::valid_remote_path(
+                &parent.space_id,
+                &parent.root_resource_id,
+                &destination_path,
+                false,
+            )
+            || !super::valid_remote_id(&parent.remote_id)
+            || !super::valid_remote_id(&source.remote_id)
+            || !strong(&source.etag)
+            || self
+                .ensure_ordinary_location(&parent.space_id, &parent.path)
+                .is_err()
+            || self
+                .ensure_ordinary_location(&source.space_id, &source.path)
+                .is_err()
+            || self
+                .ensure_ordinary_location(&parent.space_id, &destination_path)
+                .is_err()
+        {
+            return Err(BackendError::Unavailable);
+        }
+        self.ensure_active()?;
+        let token_current = self.client.token_generation() == self.token_generation;
+        drop(lease);
+        if !token_current || !owner_current(authorization) {
+            return Err(BackendError::Unavailable);
+        }
+        Ok(FileRenameBindingCandidate {
+            source_identity,
+            parent_identity,
+            source,
+            parent,
+            destination_path,
+            catalog_scope,
+            authorization,
+            local_file_hint,
+            hints,
+        })
+    }
+
     /// Hold one backend read lease across dispatch and all subsequent readback.
     /// No nested backend lease is acquired by the remote adapter.
     pub fn with_file_rename_session<T>(

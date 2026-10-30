@@ -257,3 +257,10 @@ does not perform disk reads. Existing content streaming, retention and Retry
 remain separate. These source changes do not activate automatic rename operations.
 New Windows metadata controls require their own fresh owned native cohort; host
 tests and cross-target compilation do not establish mounted GUI acceptance.
+
+The composed partial binding-candidate API joins known opaque source/parent
+identities to a typed same-batch rename hint. It grants no mutation authority
+and makes no current parent/native classification claim. Fresh proof completion
+and the connected observer/owner-thread runtime remain outstanding. The four
+original Windows candidate controls qualify the helper only; they are not
+mounted GUI or CLI acceptance.

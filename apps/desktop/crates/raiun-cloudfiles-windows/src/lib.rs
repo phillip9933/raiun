@@ -87,6 +87,8 @@ pub use edit_journal::{
 pub use initial_edit_queue::{
     InitialEditDispatch, InitialEditLocation, MAX_PENDING_INITIAL_EDITS, PendingInitialEdit,
 };
+#[cfg(windows)]
+pub use opencloud::FileRenameBindingCandidate;
 #[cfg(any(windows, test))]
 pub use opencloud::{
     DirectoryCreateSession, FileRenameSession, PlainFileCaptureParent,

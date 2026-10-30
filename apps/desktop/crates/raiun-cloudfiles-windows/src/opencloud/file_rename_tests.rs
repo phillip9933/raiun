@@ -18,6 +18,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(windows)]
+use raiun_control_windows::directory_notifications::{
+    directory_rename_hints::{RenameHintBatch, pair_rename_hints},
+    parse_notification_buffer,
+};
+
 const ROOT_BAD: usize = 1;
 const PARENT_BAD: usize = 2;
 const SOURCE_BAD: usize = 4;
@@ -1238,4 +1244,276 @@ impl FileRenameRemote for RepeatDispatchRemote<'_> {
     ) -> Result<FileRenameObservation, raiun_core::backend::CloudError> {
         self.inner.observe(intent)
     }
+}
+
+#[cfg(windows)]
+fn r47_notification_batch(old: &str, new: &str) -> Vec<u8> {
+    fn record(action: u32, name: &str, next: u32) -> Vec<u8> {
+        let encoded: Vec<u8> = name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut bytes = Vec::with_capacity(12 + encoded.len());
+        bytes.extend_from_slice(&next.to_le_bytes());
+        bytes.extend_from_slice(&action.to_le_bytes());
+        bytes.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&encoded);
+        bytes
+    }
+
+    let old_len = old.encode_utf16().count() * 2;
+    let first_extent = 12 + old_len;
+    let first_next = (first_extent + 3) & !3;
+    let mut bytes = record(4, old, first_next as u32);
+    bytes.resize(first_next, 0);
+    bytes.extend_from_slice(&record(5, new, 0));
+    let final_padding = (4 - (bytes.len() & 3)) & 3;
+    bytes.resize(bytes.len() + final_padding, 0);
+    bytes
+}
+
+#[cfg(windows)]
+fn r47_pair(
+    batch: &raiun_control_windows::directory_notifications::NotificationBatch,
+) -> raiun_control_windows::directory_notifications::directory_rename_hints::RenameHintPair<'_> {
+    let RenameHintBatch::Pairs(mut pairs) = pair_rename_hints(batch) else {
+        panic!("expected one complete same-batch rename pair");
+    };
+    assert_eq!(pairs.len(), 1);
+    pairs.remove(0)
+}
+
+#[cfg(windows)]
+fn r47_source_identity(fixture: &Fixture) -> OpaqueIdentity {
+    fixture
+        .catalog
+        .bindings
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|binding| match binding {
+            ProviderIdentityBinding::File { path, .. } if path == "/parent/source.txt" => {
+                Some(binding.identity())
+            }
+            _ => None,
+        })
+        .expect("registered durable source binding")
+}
+
+#[cfg(windows)]
+fn r47_authorization(fixture: &Fixture) -> CapturedAuthorization {
+    match &fixture.intent.operation {
+        NamespaceOperation::MoveWithinScope { source, .. } => source.local.parent.authorization,
+        _ => unreachable!("fixture holds a file move"),
+    }
+}
+
+#[cfg(windows)]
+fn r47_snapshot(fixture: &Fixture) -> (Vec<String>, Vec<ProviderIdentityBinding>, usize) {
+    (
+        fixture.request_log.lock().unwrap().clone(),
+        fixture.catalog.bindings.lock().unwrap().clone(),
+        fixture.moves.load(Ordering::Acquire),
+    )
+}
+
+#[cfg(windows)]
+fn r47_assert_snapshot_unchanged(
+    fixture: &Fixture,
+    before: &(Vec<String>, Vec<ProviderIdentityBinding>, usize),
+) {
+    assert_eq!(
+        fixture.request_log.lock().unwrap().as_slice(),
+        before.0.as_slice()
+    );
+    assert_eq!(
+        fixture.catalog.bindings.lock().unwrap().as_slice(),
+        before.1.as_slice()
+    );
+    assert_eq!(fixture.moves.load(Ordering::Acquire), before.2);
+}
+
+#[cfg(windows)]
+#[test]
+fn r47_candidate_derives_exact_existing_binding_tuple_without_requests() {
+    let mut fixture = Fixture::new();
+    let source_identity = r47_source_identity(&fixture);
+    let auth = r47_authorization(&fixture);
+    let before = r47_snapshot(&fixture);
+    let owner_ran_under_state_lock = Arc::new(AtomicBool::new(false));
+    let owner_lock_flag = owner_ran_under_state_lock.clone();
+    let batch = r47_notification_batch(
+        "Personal\\parent\\source.txt",
+        "Personal\\parent\\renamed.txt",
+    );
+    let parsed = parse_notification_buffer(&batch);
+    let candidate = fixture
+        .backend
+        .file_rename_binding_candidate(
+            source_identity,
+            fixture.parent,
+            r47_pair(&parsed),
+            auth,
+            LocalFileIdentity {
+                volume_serial: 7,
+                file_index: 13,
+            },
+            &|current| {
+                let state_locked = fixture.backend.state.try_lock().is_err();
+                owner_lock_flag.store(state_locked, Ordering::Release);
+                current == auth && !state_locked
+            },
+        )
+        .unwrap();
+
+    assert_eq!(candidate.source_identity(), source_identity);
+    assert_eq!(candidate.parent_identity(), fixture.parent);
+    assert_eq!(candidate.source_path(), "/parent/source.txt");
+    assert_eq!(candidate.destination_path(), "/parent/renamed.txt");
+    assert_eq!(candidate.source_remote_id(), "file-id");
+    assert_eq!(candidate.parent_remote_id(), "parent");
+    assert_eq!(candidate.source_etag(), "\"source-etag\"");
+    assert_eq!(candidate.source_size(), 4);
+    assert_eq!(candidate.authorization(), auth);
+    assert_eq!(candidate.local_file_hint().file_index, 13);
+    assert_eq!(
+        candidate
+            .rename_hint_pair()
+            .old_components()
+            .last()
+            .unwrap(),
+        "source.txt"
+    );
+    let diagnostics = format!("{candidate:?}");
+    assert!(!diagnostics.contains("source.txt"));
+    assert!(!diagnostics.contains("file-id"));
+    assert!(!diagnostics.contains("/parent"));
+    assert!(!owner_ran_under_state_lock.load(Ordering::Acquire));
+    r47_assert_snapshot_unchanged(&fixture, &before);
+    assert!(fixture.backend.lease_gate.try_write().is_ok());
+    fixture.finish();
+}
+
+#[cfg(windows)]
+#[test]
+fn r47_candidate_rejects_hint_that_does_not_match_exact_source_binding() {
+    let mut fixture = Fixture::new();
+    let auth = r47_authorization(&fixture);
+    let before = r47_snapshot(&fixture);
+    let batch = r47_notification_batch(
+        "Personal\\parent\\other.txt",
+        "Personal\\parent\\renamed.txt",
+    );
+    let parsed = parse_notification_buffer(&batch);
+    let result = fixture.backend.file_rename_binding_candidate(
+        r47_source_identity(&fixture),
+        fixture.parent,
+        r47_pair(&parsed),
+        auth,
+        LocalFileIdentity {
+            volume_serial: 7,
+            file_index: 13,
+        },
+        &|current| current == auth,
+    );
+    assert!(result.is_err());
+    r47_assert_snapshot_unchanged(&fixture, &before);
+    fixture.finish();
+}
+
+#[cfg(windows)]
+#[test]
+fn r47_candidate_rejects_wrong_parent_and_local_identity_scope() {
+    let mut fixture = Fixture::new();
+    let auth = r47_authorization(&fixture);
+    let before = r47_snapshot(&fixture);
+    let batch = r47_notification_batch(
+        "Personal\\other\\source.txt",
+        "Personal\\other\\renamed.txt",
+    );
+    let parsed = parse_notification_buffer(&batch);
+    let result = fixture.backend.file_rename_binding_candidate(
+        r47_source_identity(&fixture),
+        fixture.parent,
+        r47_pair(&parsed),
+        auth,
+        LocalFileIdentity {
+            volume_serial: 99,
+            file_index: 13,
+        },
+        &|current| current == auth,
+    );
+    assert!(result.is_err());
+
+    let batch = r47_notification_batch(
+        "Personal\\parent\\source.txt",
+        "Personal\\parent\\renamed.txt",
+    );
+    let parsed = parse_notification_buffer(&batch);
+    let result = fixture.backend.file_rename_binding_candidate(
+        r47_source_identity(&fixture),
+        fixture.parent,
+        r47_pair(&parsed),
+        auth,
+        LocalFileIdentity {
+            volume_serial: 99,
+            file_index: 13,
+        },
+        &|current| current == auth,
+    );
+    assert!(result.is_err());
+
+    let batch = r47_notification_batch(
+        "Personal\\other\\source.txt",
+        "Personal\\other\\renamed.txt",
+    );
+    let parsed = parse_notification_buffer(&batch);
+    let result = fixture.backend.file_rename_binding_candidate(
+        r47_source_identity(&fixture),
+        fixture.parent,
+        r47_pair(&parsed),
+        auth,
+        LocalFileIdentity {
+            volume_serial: 7,
+            file_index: 13,
+        },
+        &|current| current == auth,
+    );
+    assert!(result.is_err());
+    r47_assert_snapshot_unchanged(&fixture, &before);
+    fixture.finish();
+}
+
+#[cfg(windows)]
+#[test]
+fn r47_candidate_rejects_incomplete_pair_and_stale_owner() {
+    let mut fixture = Fixture::new();
+    let auth = r47_authorization(&fixture);
+    let before = r47_snapshot(&fixture);
+    let batch = r47_notification_batch(
+        "Personal\\parent\\source.txt",
+        "Personal\\other\\renamed.txt",
+    );
+    let parsed = parse_notification_buffer(&batch);
+    assert!(matches!(
+        pair_rename_hints(&parsed),
+        RenameHintBatch::RescanRequired(_)
+    ));
+
+    let batch = r47_notification_batch(
+        "Personal\\parent\\source.txt",
+        "Personal\\parent\\renamed.txt",
+    );
+    let parsed = parse_notification_buffer(&batch);
+    let result = fixture.backend.file_rename_binding_candidate(
+        r47_source_identity(&fixture),
+        fixture.parent,
+        r47_pair(&parsed),
+        auth,
+        LocalFileIdentity {
+            volume_serial: 7,
+            file_index: 13,
+        },
+        &|_| false,
+    );
+    assert!(result.is_err());
+    r47_assert_snapshot_unchanged(&fixture, &before);
+    fixture.finish();
 }

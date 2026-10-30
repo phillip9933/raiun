@@ -61,3 +61,27 @@ profiles use the same verification path; the default GUI session-root selection
 and legacy-root behavior are preserved. A synthetic Windows regression checks
 repeated protection and refusal after a deliberate test-owned ACL change;
 native execution of this GUI-specific regression remains pending.
+
+## Shared directory hints and single-owner observer
+
+The bounded directory notification parser and same-batch pairing expose untrusted
+relative names only. They grant no FileID, ancestry, storage classification,
+provider/account binding or mutation authority. Ambiguity, malformed buffers and
+loss require reconciliation. No new provider watcher is attached by exporting
+these APIs.
+
+The separately reviewed native module owns one directory handle, event, and fixed
+boxed DWORD-aligned buffer/OVERLAPPED pair. UnsafeCell permits kernel writes while
+the operation is pending; the owner is neither Send nor Sync. Only observed
+completion permits reuse or release. Cancellation, timeout and NOT_FOUND retain
+all resources. Drop deliberately drains with a potentially unbounded wait;
+consumers must retain a pending owner and keep blocking Drop off GUI/callback
+threads. No driver-completion deadline can justify freeing live kernel storage.
+
+Ordinary construction retains existing no-follow ancestor pins. The borrowed
+handle factory reopens only a bounded kernel-derived local Volume GUID locator
+and joins original/reopened physical FileID and type/tag observations. It does
+not authenticate provider/account/registration/ancestry or change ACLs, privileges,
+saved sessions, state paths or default registration behavior. Recognized Cloud
+Files tags alone confer no namespace authority. Source checks and original scoped
+observer evidence do not establish automatic GUI rename acceptance.

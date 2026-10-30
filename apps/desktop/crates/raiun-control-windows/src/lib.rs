@@ -8,6 +8,9 @@
 #[cfg(any(windows, test))]
 pub mod autostart;
 
+#[cfg(any(windows, test))]
+pub mod directory_notifications;
+
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod private_directory;

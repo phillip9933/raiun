@@ -3223,3 +3223,21 @@ work. A destination is the complete new name; renaming or replacing a Space
 root is unsupported. Ordinary paths retain conditional, non-overwriting MOVE
 behavior. This shared boundary fix does not establish mounted Windows rename
 handling, durable rename recovery or GUI file-operation parity.
+
+### GUI shared rename source integration, 31 October 2026
+
+The GUI now composes optional admitted namespace storage, a retained connected
+store accessor and authenticated metadata-only namespace health. Both provider
+and retained prepared-owner health protect cleanup/eviction/unregister decisions;
+unsupported retained history or corruption stays unknown. Completed records are
+resolved only under explicit namespace context, and cached status performs no
+disk reads. Existing saved sessions, legacy state/root compatibility, streamed
+retention/quota and save/Retry behavior remain unchanged.
+
+A partial binding candidate joins known source/parent opaque IDs to conservative
+same-batch hints without requests or mutation. It cannot construct parent or
+intent authority: fresh native/parent/owner/content proof and connected observer
+lifecycle wiring remain required. Source composition and helper controls do not
+establish automatic Explorer propagation or mounted GUI/CLI parity. The prior
+1,492-pass GUI source checkpoint and original scoped Windows native records are
+preserved separately; no new package, signing or publication is implied.

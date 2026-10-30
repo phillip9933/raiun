@@ -974,3 +974,20 @@ Absent/unsupported storage remains None. A nonzero captured agent generation is
 not current live owner authority. Existing native/session/owner fences remain
 required. Helper controls and cross-target compilation do not prove the connected
 registration wrapper executed. No automatic caller is enabled.
+
+## Partial rename binding candidate
+
+A typed same-batch rename hint pair can select an already loaded source and
+parent by their known opaque identities. Exact old path, Personal route, current
+provider/account/root scope, captured authorization, strong source revision and
+current-owner checks qualify only a partial binding snapshot. Metadata leases
+and mutexes are released before the final owner callback and return. Assembly
+sends no request, writes no catalog/journal and performs no native mutation.
+
+Directory bindings contain no current parent ETag, native parent identity or
+authenticated ancestry classification. The candidate creates neither
+NamespaceParent nor NamespaceIntent. Its local identity and notification names
+remain hints. Fresh parent/native/session/content proof is required by a later
+producer before dispatch; private fields and redacted Debug preserve this
+boundary. Synthetic setup HTTP is separate from the asserted zero assembler
+HTTP/catalog/MOVE delta. No automatic operation is enabled by this helper.
