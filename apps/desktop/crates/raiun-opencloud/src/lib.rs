@@ -2598,6 +2598,17 @@ impl CloudBackend for OpenCloudClient {
         to: &str,
         expected_etag: &str,
     ) -> Result<RemoteEntry, CloudError> {
+        // Direct backend callers must not bypass the Engine's root guard.
+        // Check before discovery and before the equal-URL no-op path.
+        if [from, to]
+            .iter()
+            .any(|path| path.is_empty() || path.bytes().all(|byte| byte == b'/'))
+        {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "cannot rename a cloud Space root or replace it",
+            ));
+        }
         let (selected, source) = self.transfer_url(space, from)?;
         let (_, destination) = self.transfer_url(space, to)?;
         if source == destination {
@@ -4192,6 +4203,62 @@ mod tests {
             listener.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
         );
+    }
+
+    #[test]
+    fn direct_rename_rejects_root_aliases_without_network_requests() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = format!("http://{}", listener.local_addr().unwrap());
+        let client = OpenCloudClient::new(&server, "synthetic-token".into()).unwrap();
+        for alias in ["", "/", "//", "///"] {
+            for (from, to) in [(alias, "/moved"), ("/item.txt", alias), (alias, alias)] {
+                let error = client.rename("drive-1", from, to, "unused").unwrap_err();
+                assert_eq!(error.kind, ErrorKind::Unsupported);
+                assert!(error.message.contains("Space root"));
+            }
+        }
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
+    fn direct_rename_keeps_conditional_nonoverwriting_move_for_ordinary_paths() {
+        let root = r#"<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response><d:href>/dav/personal/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype><d:getetag>"root"</d:getetag><oc:permissions>RDNVW</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#.to_owned();
+        let source = r#"<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response><d:href>/dav/personal/source.txt</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>4</d:getcontentlength><d:getetag>"old"</d:getetag><oc:fileid>same-file</oc:fileid><oc:permissions>RDNVW</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#.to_owned();
+        let renamed = source.replace("source.txt", "renamed.txt");
+        let (server, worker) = fixture(vec![
+            ("200 OK", GRAPH.to_owned()),
+            ("200 OK", GRAPH.to_owned()),
+            ("207 Multi-Status", root.clone()),
+            ("207 Multi-Status", source),
+            ("207 Multi-Status", root.clone()),
+            ("404 Not Found", String::new()),
+            ("207 Multi-Status", root.clone()),
+            ("201 Created", String::new()),
+            ("200 OK", GRAPH.to_owned()),
+            ("207 Multi-Status", root),
+            ("207 Multi-Status", renamed),
+        ]);
+        let client = OpenCloudClient::new(&server, "synthetic-token".into()).unwrap();
+        let result = client
+            .rename("drive-1", "/source.txt", "/renamed.txt", "\"old\"")
+            .unwrap();
+        assert_eq!(result.id, "same-file");
+        assert_eq!(result.path, "/renamed.txt");
+        let requests = worker.join().unwrap();
+        let moves: Vec<_> = requests
+            .iter()
+            .filter(|request| request.starts_with("MOVE "))
+            .collect();
+        assert_eq!(moves.len(), 1);
+        assert!(moves[0].starts_with("MOVE /dav/personal/source.txt "));
+        let headers = moves[0].to_ascii_lowercase();
+        assert!(headers.contains("if-match: \"old\""));
+        assert!(headers.contains("overwrite: f"));
+        assert!(headers.contains(&format!("destination: {server}/dav/personal/renamed.txt")));
     }
 
     #[test]

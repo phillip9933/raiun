@@ -3409,6 +3409,17 @@ impl Engine {
         to: &str,
         expected_etag: &str,
     ) -> Result<RemoteEntry, CloudError> {
+        // A rename target is the full destination name, not a container. Neither
+        // endpoint may denote the Space root, even when both aliases are equal.
+        if [from, to]
+            .iter()
+            .any(|path| path.is_empty() || path.bytes().all(|byte| byte == b'/'))
+        {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "cannot rename a cloud Space root or replace it",
+            ));
+        }
         let _guard = self.execution()?;
         let _metadata = self.metadata_publication()?;
         // FUSE may retire its spool after transferring ownership to the
@@ -6023,6 +6034,7 @@ mod tests {
         list_calls: Mutex<usize>,
         next_etag: Mutex<u64>,
         delete_calls: Mutex<usize>,
+        rename_calls: Mutex<usize>,
         downloads: Mutex<usize>,
         fail_download_after_write: Mutex<bool>,
         fail_listing: Mutex<bool>,
@@ -6393,6 +6405,7 @@ mod tests {
             to: &str,
             expected_etag: &str,
         ) -> Result<RemoteEntry, CloudError> {
+            *self.rename_calls.lock().unwrap() += 1;
             let mut entries = self
                 .entries
                 .lock()
@@ -7828,6 +7841,35 @@ mod tests {
         engine.delete("space", "/item.txt", &item.etag).unwrap();
         assert_eq!(*cloud.delete_calls.lock().unwrap(), 1);
         assert!(cloud.bytes("/item.txt").is_none());
+    }
+
+    #[test]
+    fn rename_rejects_space_root_aliases_before_backend_operations() {
+        let state = tempfile::tempdir().unwrap();
+        let cloud = Arc::new(FakeCloud::new());
+        cloud.insert_file("/item.txt", b"keep");
+        let engine = Engine::open(state.path(), cloud.clone()).unwrap();
+        let root = cloud.remote_entry("/").unwrap();
+        for alias in ["", "/", "//", "///"] {
+            for (from, to) in [(alias, "/moved"), ("/item.txt", alias), (alias, alias)] {
+                let error = engine.rename("space", from, to, "unused").unwrap_err();
+                assert_eq!(error.kind, ErrorKind::Unsupported);
+                assert!(error.message.contains("Space root"));
+            }
+        }
+        assert_eq!(*cloud.rename_calls.lock().unwrap(), 0);
+        assert_eq!(*cloud.spaces_calls.lock().unwrap(), 0);
+        assert_eq!(*cloud.list_calls.lock().unwrap(), 0);
+        assert_eq!(cloud.remote_entry("/").unwrap().etag, root.etag);
+        assert_eq!(cloud.bytes("/item.txt").unwrap(), b"keep");
+        let item = cloud.remote_entry("/item.txt").unwrap();
+        engine
+            .rename("space", "/item.txt", "/renamed.txt", &item.etag)
+            .unwrap();
+        assert_eq!(*cloud.rename_calls.lock().unwrap(), 1);
+        assert!(cloud.bytes("/item.txt").is_none());
+        assert_eq!(cloud.bytes("/renamed.txt").unwrap(), b"keep");
+        assert_eq!(cloud.remote_entry("/").unwrap().etag, root.etag);
     }
 
     #[test]

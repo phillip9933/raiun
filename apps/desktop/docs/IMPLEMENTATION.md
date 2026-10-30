@@ -3214,3 +3214,12 @@ results do not establish upgraded-GUI storage compatibility, replacement saves,
 namespace CRUD, encrypted writes or full parity. Evidence is outside Git in
 `outputs/desktop-release-prep-20261029/integration/c13-gui-compose-r1/` and
 `outputs/headless-mvp-acceptance-20261029/windows-candidate13/`.
+
+## Rename root boundary — 30 October 2026
+
+The shared Engine and direct OpenCloud rename entry points reject empty or
+slash-only source and destination paths before backend discovery or metadata
+work. A destination is the complete new name; renaming or replacing a Space
+root is unsupported. Ordinary paths retain conditional, non-overwriting MOVE
+behavior. This shared boundary fix does not establish mounted Windows rename
+handling, durable rename recovery or GUI file-operation parity.
