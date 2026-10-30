@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.3.1
+
+### Bug fixes
+
+- Fix Authelia sign-ins that succeeded but then received HTTP 401 for files by sending canonical Bearer headers, including for previously saved accounts.
+- Preserve saved credentials after unexplained token-endpoint 401 responses, and reject malformed token responses before they replace a usable grant.
+
+### Improvements
+
+- Validate exact issuer identifiers, advertised sign-in capabilities and browser-response issuers when RFC 9207 support is advertised, while retaining compatibility with providers that omit that optional capability.
+- Preserve omitted refresh-token and scope values during refresh, and reject malformed authentication metadata before sending or storing credentials.
+
 ## 1.3.0
 
 - Add and manage OpenCloud guest invitations for files and folders; recipients open emailed links in their browser.

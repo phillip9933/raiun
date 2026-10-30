@@ -19,7 +19,12 @@ class EndpointPolicy(
         return url
     }
 
-    fun issuer(value: String): String = endpoint(value, allowQuery = false).toString()
+    fun issuer(value: String): String {
+        if (value.any { it.isWhitespace() || it.isISOControl() }) reject()
+        endpoint(value, allowQuery = false)
+        // Issuers are protocol identifiers: URL normalization must not change their identity.
+        return value
+    }
 
     private fun reject(): Nothing = throw OpenCloudException(OpenCloudError.Trust)
 }

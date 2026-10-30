@@ -25,4 +25,5 @@
     <string name="auth_oidc_session_expired">La session de connexion a expiré ou n’a pas pu être vérifiée. Reconnectez-vous.</string>
     <string name="auth_sign_in_cancelled">La connexion a été annulée ou refusée.</string>
     <string name="auth_certificate_untrusted">La connexion sécurisée a échoué. Vérifiez le certificat du serveur et tout certificat client requis dans les paramètres de connexion au serveur.</string>
+    <string name="auth_oidc_issuer_unverified">La réponse de connexion du navigateur n’a pas identifié le fournisseur attendu. Demandez à votre administrateur de vérifier la prise en charge de issuer (iss), puis réessayez.</string>
 </resources>

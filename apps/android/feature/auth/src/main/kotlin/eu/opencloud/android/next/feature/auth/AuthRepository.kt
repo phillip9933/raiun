@@ -9,6 +9,7 @@ import eu.opencloud.android.next.core.model.auth.PkceRequest
 import eu.opencloud.android.next.core.model.auth.ServerCapabilities
 import eu.opencloud.android.next.core.model.auth.UserProfile
 import eu.opencloud.android.next.core.network.OpenCloudApi
+import eu.opencloud.android.next.core.network.bearerAuthorizationHeader
 import eu.opencloud.android.next.core.security.AccountSessions
 import eu.opencloud.android.next.core.security.CredentialStore
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -63,6 +64,12 @@ class AuthRepository(
     }
 
     fun beginPkce(configuration: OidcConfiguration): PkceRequest {
+        val endpoint = configuration.authorizationEndpoint.toHttpUrl()
+        if (endpoint.queryParameterNames.any { it in AUTHORIZATION_QUERY_PARAMETERS }) {
+            throw eu.opencloud.android.next.core.network.OpenCloudException(
+                eu.opencloud.android.next.core.network.OpenCloudError.InvalidResponse,
+            )
+        }
         val state = randomUrlSafeValue()
         val verifier = randomUrlSafeValue()
         val challenge =
@@ -70,8 +77,7 @@ class AuthRepository(
                 MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray()),
             )
         val authorizationUrl =
-            configuration.authorizationEndpoint
-                .toHttpUrl()
+            endpoint
                 .newBuilder()
                 .addQueryParameter("response_type", "code")
                 .addQueryParameter("prompt", "login")
@@ -102,6 +108,7 @@ class AuthRepository(
                 }
                 throw failure
             }
+        val authorization = tokens.bearerAuthorizationHeader()
         val profile = api.bearerProfile(serverUrl, tokens.accessToken)
         val account =
             Account(
@@ -111,7 +118,7 @@ class AuthRepository(
                 profile.displayName,
                 AuthenticationType.OIDC,
             )
-        val capabilities = api.capabilities(serverUrl, "Bearer ${tokens.accessToken}")
+        val capabilities = api.capabilities(serverUrl, authorization)
         sessions.save(account.id, tokens, registration)
         return AuthenticatedSession(
             account,
@@ -141,6 +148,17 @@ class AuthRepository(
 
     private companion object {
         const val REDIRECT_URI = NEXT_OIDC_REDIRECT_URI
+        val AUTHORIZATION_QUERY_PARAMETERS =
+            setOf(
+                "response_type",
+                "prompt",
+                "client_id",
+                "redirect_uri",
+                "scope",
+                "state",
+                "code_challenge",
+                "code_challenge_method",
+            )
     }
 }
 

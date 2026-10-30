@@ -5,6 +5,8 @@ import eu.opencloud.android.next.core.model.auth.OidcClientRegistration
 import eu.opencloud.android.next.core.model.auth.OidcConfiguration
 import eu.opencloud.android.next.core.network.EndpointPolicy
 import eu.opencloud.android.next.core.network.OpenCloudApi
+import eu.opencloud.android.next.core.network.OpenCloudError
+import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.network.TransferHttpException
 import eu.opencloud.android.next.core.security.CredentialStore
 import okhttp3.OkHttpClient
@@ -70,7 +72,9 @@ class AuthRepositoryPersistenceTest {
                     listOf("openid"),
                 ),
             )
-        server.enqueue(MockResponse().setBody("""{"access_token":"access","refresh_token":"refresh"}"""))
+        server.enqueue(
+            MockResponse().setBody("""{"access_token":"access","refresh_token":"refresh","token_type":"bearer"}"""),
+        )
         server.enqueue(MockResponse().setBody(PROFILE))
         server.enqueue(MockResponse().setResponseCode(503))
 
@@ -81,6 +85,36 @@ class AuthRepositoryPersistenceTest {
         assertNull(credentials.tokens)
         assertNull(credentials.sessionRegistration)
         assertEquals(3, server.requestCount)
+    }
+
+    @Test fun `unsupported token scheme stops initial login before protected requests`() {
+        val serverUrl = server.url("/").toString().trimEnd('/')
+        val config =
+            ClientRegistrationResolver(
+                OpenCloudApi(OkHttpClient(), endpoints = EndpointPolicy(allowLoopbackHttp = true)),
+                credentials,
+            ).resolve(
+                serverUrl,
+                OidcConfiguration(
+                    serverUrl,
+                    "$serverUrl/authorize",
+                    "$serverUrl/token",
+                    null,
+                    "client",
+                    listOf("openid"),
+                ),
+            )
+        server.enqueue(MockResponse().setBody("""{"access_token":"opaque","token_type":"MAC"}"""))
+
+        val failure =
+            assertThrows(OpenCloudException::class.java) {
+                repository.completePkce(serverUrl, config, "code", "verifier")
+            }
+
+        assertEquals(OpenCloudError.InvalidResponse, failure.error)
+        assertEquals(1, server.requestCount)
+        assertNull(credentials.tokens)
+        assertNull(credentials.sessionRegistration)
     }
 
     private class RecordingCredentials : CredentialStore {
