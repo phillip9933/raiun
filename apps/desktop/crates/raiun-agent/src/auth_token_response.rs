@@ -36,14 +36,15 @@ pub(super) fn parse(body: &[u8], max_secret: usize) -> Result<TokenResponse, Str
     }) {
         return Err(invalid());
     }
-    if let Some(scope) = optional_string(object, "scope")?
-        && (scope.len() > max_secret
+    if let Some(scope) = optional_string(object, "scope")? {
+        if scope.len() > max_secret
             || scope.split(' ').any(str::is_empty)
             || !scope
                 .bytes()
-                .all(|byte| (0x20..=0x7e).contains(&byte) && byte != b'"' && byte != b'\\'))
-    {
-        return Err(invalid());
+                .all(|byte| (0x20..=0x7e).contains(&byte) && byte != b'"' && byte != b'\\')
+        {
+            return Err(invalid());
+        }
     }
     let lifetime_seconds = lifetime(object)?;
 
