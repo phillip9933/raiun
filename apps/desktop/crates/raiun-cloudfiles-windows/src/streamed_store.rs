@@ -289,6 +289,118 @@ impl SnapshotStore {
         )
     }
 
+    /// Point-in-time content health for one authenticated provider/root. The
+    /// existing v2 quota lease spans global catalog validation, v2 metadata
+    /// discovery and the caller's bounded legacy scan. Namespace record bodies
+    /// are not opened or counted as content. `scan_legacy` receives the same
+    /// remaining work budget and must not mutate state. Its read policy is
+    /// selected explicitly by the caller: strict metadata-only classification
+    /// or the separately named bounded full-authentication legacy compatibility
+    /// query. There is no silent fallback between those policies. This read
+    /// does not replace the native callback admission fence required before
+    /// callers later perform remote work.
+    #[cfg(windows)]
+    pub(crate) fn content_history_pending_existing(
+        admitted_state: Arc<crate::recovery_state::RecoveryStateRoot>,
+        protector: Arc<dyn EditRecordProtector>,
+        mut policy: StorePolicy,
+        provider: &crate::ProviderScope,
+        physical_root: crate::ConfiguredRootIdentity,
+        scan_legacy: impl FnOnce(&mut DiscoveryBudget) -> Result<bool, StoreError>,
+    ) -> Result<bool, StoreError> {
+        policy.validate()?;
+        if physical_root.file_index == 0
+            || [
+                provider.profile_id(),
+                provider.account_id(),
+                provider.server_origin(),
+            ]
+            .iter()
+            .any(|value| {
+                value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control)
+            })
+            || raiun_opencloud::validate_captured_server_origin(provider.server_origin()).is_err()
+        {
+            return Err(StoreError::Invalid);
+        }
+        policy.max_entries = policy.max_entries.min(20_000);
+        policy.max_metadata_bytes_per_scan =
+            policy.max_metadata_bytes_per_scan.min(64 * 1024 * 1024);
+        let mut budget = DiscoveryBudget::new(policy);
+        let Some(root) = windows::existing_root(Arc::clone(&admitted_state), V2_STORE_ROOT)? else {
+            // There is no v2 tree/quota to lock. The legacy reader remains
+            // existing-only and can report evidence or refuse; it cannot
+            // create a missing v2 lock just to make the scan appear healthy.
+            let legacy_pending = scan_legacy(&mut budget)?;
+            admitted_state.verify_path().map_err(io_error)?;
+            if windows::existing_root(Arc::clone(&admitted_state), V2_STORE_ROOT)?.is_some() {
+                return Err(StoreError::IncompleteEvidence);
+            }
+            return Ok(legacy_pending);
+        };
+
+        root.verify()?;
+        let names = root.entries(budget.remaining_entries())?;
+        budget.entries(names.len())?;
+        if !names.iter().any(|name| name == V2_QUOTA_LOCK) {
+            return Err(StoreError::IncompleteEvidence);
+        }
+        let mut lock = root.open_quota_lock()?;
+        if lock.len()? != 0 {
+            return Err(StoreError::CorruptEvidence);
+        }
+        lock.lock_exclusive()?;
+        lock.verify()?;
+        root.verify()?;
+        admitted_state.verify_path().map_err(io_error)?;
+
+        // Re-enumerate after acquiring the existing lock. The same budget
+        // covers these names, every authenticated format, record metadata,
+        // and the legacy scanner callback.
+        let names = root.entries(budget.remaining_entries())?;
+        budget.entries(names.len())?;
+        let catalogs = validate_root_catalog_scope_union(&*root, &*protector, &names, &mut budget)?;
+        let mut pending = false;
+        let mut record_count = 0usize;
+        let mut seen = std::collections::HashSet::new();
+        for scope in catalogs.snapshots.into_iter().filter(|scope| {
+            scope.profile_id == provider.profile_id()
+                && scope.server_origin == provider.server_origin()
+                && scope.account_subject == provider.account_id()
+                && scope.root_volume_serial == physical_root.volume_serial
+                && scope.root_file_index == physical_root.file_index
+        }) {
+            // Reuse the already pinned root handle; no second root open and no
+            // account/root guessed from a record body.
+            let store = SnapshotStore::from_directory(
+                Arc::clone(&root),
+                scope,
+                Arc::clone(&protector),
+                policy,
+            )?;
+            for record in store.discover_records_bounded(&mut budget)? {
+                record_count = record_count.checked_add(1).ok_or(StoreError::ScanLimit)?;
+                if record_count > 2_000
+                    || !seen.insert((record.key.record_id().to_owned(), record.key.generation()))
+                {
+                    return Err(StoreError::ScanLimit);
+                }
+                if !matches!(
+                    record.state,
+                    StreamedAttemptState::LocallyAcknowledged { .. }
+                ) {
+                    pending = true;
+                }
+            }
+        }
+
+        let legacy_pending = scan_legacy(&mut budget)?;
+        root.verify()?;
+        lock.verify()?;
+        admitted_state.verify_path().map_err(io_error)?;
+        Ok(pending || legacy_pending)
+    }
+
     fn from_directory(
         root: Arc<dyn Directory>,
         scope: EditJournalScope,
@@ -1009,8 +1121,28 @@ impl DiscoveryBudget {
         self.bytes -= before_bytes - local.bytes;
         result
     }
-    fn remaining_entries(&self) -> usize {
+    pub(crate) fn remaining_entries(&self) -> usize {
         self.entries
+    }
+    #[cfg(windows)]
+    pub(crate) fn remaining_metadata_bytes(&self) -> u64 {
+        self.bytes
+    }
+    #[cfg(windows)]
+    pub(crate) fn charge_external_scan(
+        &mut self,
+        entries: usize,
+        metadata_bytes: u64,
+    ) -> Result<(), StoreError> {
+        self.entries = self
+            .entries
+            .checked_sub(entries)
+            .ok_or(StoreError::ScanLimit)?;
+        self.bytes = self
+            .bytes
+            .checked_sub(metadata_bytes)
+            .ok_or(StoreError::ScanLimit)?;
+        Ok(())
     }
     fn entries(&mut self, count: usize) -> Result<(), StoreError> {
         self.entries = self

@@ -7,6 +7,7 @@
 
 #[cfg(test)]
 use crate::PreparedFetchSession;
+use crate::close_capture_admission::{CloseCaptureAdmission, CloseCapturePermit};
 use crate::{
     BackendError, BoundedPermit, BoundedPermitPool, CancellationToken, Error, FetchRange,
     LocalFileIdentity, MAX_CONCURRENT_DIRECTORY_ENUMERATIONS, MAX_CONCURRENT_FETCHES,
@@ -3834,6 +3835,8 @@ unsafe extern "system" fn notify_file_close_completion_callback(
     let Some(guard) = callback_guard(info) else {
         return;
     };
+    let close_admission = Arc::clone(&guard.0.close_capture_admission);
+    let mut close_permit = close_admission.begin_close();
     if info.is_null() || parameters.is_null() {
         guard
             .0
@@ -3870,12 +3873,18 @@ unsafe extern "system" fn notify_file_close_completion_callback(
             .fetch_add(1, Ordering::AcqRel);
         return;
     }
-    let notification = guard.0.record_placeholder_close(info, flags);
+    let notification = guard
+        .0
+        .record_placeholder_close(info, flags, &mut close_permit);
     // The owned notification contains no callback/native pointers. All path,
     // file, store, route/token/epoch and close-pool guards have unwound; release
     // callback lifetime accounting too before the sole nonblocking send.
+    let vault_handoff = notification.is_some();
     drop(guard);
-    let _ = crate::backend::publish_vault_capture_notification(notification);
+    let published = crate::backend::publish_vault_capture_notification(notification).is_ok();
+    if vault_handoff && published {
+        close_permit.finish_durable();
+    }
 }
 
 fn valid_close_completion_param_size(value: usize) -> bool {
@@ -5630,6 +5639,7 @@ struct CallbackState {
     readiness_fetch_rejections: AtomicUsize,
     activity: Mutex<CallbackActivity>,
     drained: Condvar,
+    close_capture_admission: Arc<CloseCaptureAdmission>,
     backend: Arc<dyn PlaceholderBackend>,
     recovery: Option<Arc<dyn PreparedEditRecovery>>,
     initial_edits: crate::initial_edit_queue::InitialEditQueue,
@@ -5745,6 +5755,7 @@ impl CallbackState {
                 requests: HashMap::new(),
             }),
             drained: Condvar::new(),
+            close_capture_admission: Arc::new(CloseCaptureAdmission::default()),
             backend,
             recovery,
             initial_edits: crate::initial_edit_queue::InitialEditQueue::default(),
@@ -5960,6 +5971,7 @@ impl CallbackState {
         &self,
         info: &CfCallbackInfo,
         flags: u32,
+        close_permit: &mut CloseCapturePermit<'_>,
     ) -> Option<Box<dyn crate::DeferredVaultCaptureNotification>> {
         self.last_close_file_id
             .store(info.file_id as u64, Ordering::Release);
@@ -5978,9 +5990,12 @@ impl CallbackState {
                 .fetch_add(1, Ordering::AcqRel);
             return None;
         }
-        let result = self.capture_and_journal_modified_file(info);
+        let result = self.capture_and_journal_modified_file(info, close_permit);
         match result {
-            Ok(ModifiedCloseCapture::Clean) => None,
+            Ok(ModifiedCloseCapture::Clean) => {
+                close_permit.finish_clean();
+                None
+            }
             Ok(ModifiedCloseCapture::OrdinaryJournaled) => {
                 self.non_vault_modified_closes
                     .fetch_add(1, Ordering::AcqRel);
@@ -6031,6 +6046,7 @@ impl CallbackState {
     fn capture_and_journal_modified_file(
         &self,
         info: &CfCallbackInfo,
+        close_permit: &mut CloseCapturePermit<'_>,
     ) -> Result<ModifiedCloseCapture, (usize, i32, bool)> {
         let root_path = self.root_path.as_deref().ok_or((1, 0, false))?;
         let root_identity = self.root_identity.ok_or((1, 0, false))?;
@@ -6127,6 +6143,10 @@ impl CallbackState {
             eprintln!("synthetic close metadata clean without data open=true");
             return Ok(ModifiedCloseCapture::Clean);
         }
+        // The callback is now known dirty. Advance the shared close epoch
+        // before opening or staging its body, while retaining the permit until
+        // durable commit and initial-handoff handling have completed.
+        close_permit.mark_dirty_before_capture();
         // Known MODIFIED bytes invalidate this connection's exact opaque receipt
         // immediately, before any data open, revoked route lookup or retention
         // can block. Other clean files keep their own receipts. This establishes
@@ -6613,9 +6633,13 @@ impl CallbackState {
                     .ok()
                 });
             if let Some(location) = location {
-                let _ =
-                    self.initial_edits
-                        .push_with_location(Arc::clone(recovery), receipt, location);
+                if self
+                    .initial_edits
+                    .push_with_location(Arc::clone(recovery), receipt, location)
+                    .is_ok()
+                {
+                    close_permit.finish_durable();
+                }
             }
         }
         Ok(ModifiedCloseCapture::OrdinaryJournaled)

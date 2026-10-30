@@ -3294,3 +3294,60 @@ and callback-capture exclusion remains a prerequisite before the dormant rename
 bridge can gain automatic GUI/CLI callers; no separate GUI shortcut or runtime
 writer activation is introduced here. Full Windows CRUD, replacement saves,
 large files, connected lifecycle and before-login startup remain separate gates.
+
+### R51 save/capture admission foundation
+
+Close-capture accounting and a retained-owner content-health interface are being
+qualified separately from connected rename dispatch. The close-only permit starts
+before native callback validation and spans durable capture/handoff. Clean closes
+do not change its mutation epoch; dirty closes advance it before body capture.
+Unknown/error bookkeeping fails closed for future admission without suppressing
+save recovery. No bookkeeping mutex crosses I/O. A local dispatch claim supplies
+no remote atomicity guarantee.
+
+The content query avoids the legacy body-decrypting recovery decoder. It treats
+any retained legacy content conservatively as nonclean, even if historical local
+completion may exist, and reads V2 metadata under an existing quota lease without
+creating or repairing state. Unsupported/unknown results refuse admission. Exact
+source, compile, independent review and new-cohort receipts determine which
+foundation controls passed. The connected producer is unchanged and held until
+both entries use these capabilities before HTTP and publication, revalidate
+through native proofs, and preserve uncertainty after any possibly sent request.
+Full GUI/CLI operations and restart/boot acceptance remain open; sync is deferred.
+
+### R52 content-health fixture correction
+
+The first R51 filesystem cohort failed before its intended checks: two fixtures
+created unregistered journal scopes, and the synthetic protector omitted the
+directory policy required by quota inventory. The original three failures and six
+separate pure tracker passes remain consumed and preserved. R52 replaces only
+the affected fixture selectors with new ones using fresh private state, genuine
+scope registration, and an exact-root DPAPI-backed counting protector. It keeps
+the orphan, incomplete-stage, missing-quota and corrupt-evidence refusal checks.
+Production source and the connected producer are unchanged. The admitted R52
+cohort passed all three metadata DPAPI controls (PID 540). The original R51
+filesystem failures remain failed. These passes qualify only the reader controls,
+not the save/capture admission guard, connected rename workflow, GUI/CLI operation
+parity or restart/boot acceptance.
+
+### R53 legacy history compatibility
+
+Completed legacy `.edit` bodies remain retained after their local acknowledgment.
+The lightweight content query therefore continues to report them conservatively
+as nonclean. A separate explicit compatibility query uses the existing bounded
+full-authentication decoder to distinguish valid locally acknowledged history
+from pending or uncertain work. It decrypts and hashes the bounded legacy body,
+zeroizes it, then authenticates the recovery event chain. This is an owner-thread
+operation outside callbacks, backend leases and HTTP, and is not described as a
+body-free query. V2 metadata and every selected legacy scope share one work
+allowance under existing quota handling. Missing, corrupt, incomplete or exhausted
+evidence stays unavailable; history is never deleted, repaired or retargeted.
+This supports normal upgrade classification within the established bounds. Shared
+connected-entry admission, final-send ordering, caller wiring and native acceptance
+remain separate requirements; MVP is incomplete and sync is deferred.
+
+### R54 legacy compatibility fixture quota correction
+
+R53's three guarded controls failed at the first coordinated legacy append, before any compatibility-reader assertion. Its original source, logs, binary and failed 0/3 receipt remain retained. Static inspection identifies an impossible fixture quota: append_edit reserves MAX_SEALED_BYTES (16 MiB body + 256 KiB metadata + 64 KiB overhead = 17,104,896 bytes), exceeding R53's entire 16 MiB state allowance. The exact first internal failure was not instrumented.
+
+R54 uses separately named selectors and fresh retained DPAPI cases with a 64 MiB state allowance, plus an explicit reservation/headroom assertion before fixture construction. Production admission, compatibility API, strict no-body reader, decoder, native producer and quota rules are unchanged. The admitted R54 cohort passed all three bounded authenticated legacy-reader controls (PID 18068), with zero failures. The original R53 three-control failure remains failed and preserved. The typed readback/local-ack fixtures qualify history classification only; they are not actual native completion or connected guard acceptance. No rename-entry guard or caller is wired here; expanded MVP acceptance remains open and sync remains deferred.

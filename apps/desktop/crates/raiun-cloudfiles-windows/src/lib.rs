@@ -8,6 +8,8 @@
 use std::{error::Error as StdError, fmt};
 
 mod backend;
+#[cfg(any(windows, test))]
+mod close_capture_admission;
 mod edit_journal;
 mod initial_edit_queue;
 #[cfg(windows)]

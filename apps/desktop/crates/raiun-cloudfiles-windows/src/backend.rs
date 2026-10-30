@@ -405,6 +405,30 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
     /// are treated as unresolved by the native teardown path.
     fn has_unresolved(&self) -> Result<bool, BackendError>;
 
+    /// Read-only content-recovery admission check for this exact retained
+    /// account/root capability. Namespace operation history is intentionally
+    /// excluded. `false` is returned only after a bounded authenticated scan;
+    /// unsupported storage, corrupt/incomplete metadata, or exhausted limits
+    /// return `Unavailable`. Implementations must not create or repair state,
+    /// decrypt persisted content bodies, or return recovery authority here.
+    #[cfg(windows)]
+    fn has_unresolved_content(&self) -> Result<bool, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
+    /// Compatibility health that fully authenticates the retained legacy
+    /// content journal before using its terminal acknowledgement. Unlike
+    /// `has_unresolved_content`, this may decrypt legacy record bodies in
+    /// memory; it never returns those bodies or grants dispatch authority.
+    /// Unsupported storage, corrupt/incomplete evidence, or exhausted scan
+    /// budgets remain unavailable.
+    /// Call only from an owner-thread operation outside callbacks, backend
+    /// leases and HTTP; this is intentionally a bounded body-reading query.
+    #[cfg(windows)]
+    fn has_unresolved_content_authenticated_legacy(&self) -> Result<bool, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
     /// Explicitly dispatch one previously selected recovered edit. This does
     /// not connect or start a provider; implementations resolve the record
     /// internally from this prepared exact account/root scope, persist an

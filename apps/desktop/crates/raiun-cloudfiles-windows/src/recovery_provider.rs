@@ -1798,6 +1798,107 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
         Ok(legacy)
     }
 
+    #[cfg(windows)]
+    fn has_unresolved_content(&self) -> Result<bool, BackendError> {
+        if !valid_scope_binding(&self.scope, self.root_identity) {
+            return Err(BackendError::Unavailable);
+        }
+        let (state, policy) = if let Some(context) = &self.namespace_rename {
+            if context.admission.state_identity() != context.state.identity()
+                || context.state.path() != self.catalog.state_directory
+            {
+                return Err(BackendError::Unavailable);
+            }
+            (Arc::clone(&context.state), context.policy)
+        } else if let Some(context) = &self.streamed {
+            if context.admission.state_identity() != context.state.identity()
+                || context.state.path() != self.catalog.state_directory
+            {
+                return Err(BackendError::Unavailable);
+            }
+            (Arc::clone(&context.state), context.policy)
+        } else {
+            // Reopen only the exact state path captured by this provider's
+            // protector. This attests the existing root; it never creates or
+            // repairs state or derives a path from recovery metadata.
+            let state = crate::recovery_state::RecoveryStateRoot::existing_gui(
+                &self.catalog.state_directory,
+            )
+            .map_err(|_| BackendError::Unavailable)?;
+            let defaults = raiun_core::WindowsRecoveryPolicy::default();
+            let policy = crate::streamed_store::StorePolicy {
+                max_content_bytes: defaults.max_file_bytes,
+                max_state_bytes: defaults.max_state_bytes,
+                max_entries: defaults.max_state_entries,
+                max_metadata_bytes_per_scan: defaults.max_scan_metadata_bytes,
+            };
+            (state, policy)
+        };
+        let pending = crate::streamed_store::SnapshotStore::content_history_pending_existing(
+            state,
+            Arc::clone(&self.catalog.protector),
+            policy,
+            &self.scope,
+            self.root_identity,
+            |budget| {
+                self.catalog
+                    .content_presence_bounded(&self.scope, self.root_identity, budget)
+                    .map_err(|_| crate::streamed_store::StoreError::IncompleteEvidence)
+            },
+        )
+        .map_err(|_| BackendError::Unavailable)?;
+        Ok(pending)
+    }
+
+    #[cfg(windows)]
+    fn has_unresolved_content_authenticated_legacy(&self) -> Result<bool, BackendError> {
+        if !valid_scope_binding(&self.scope, self.root_identity) {
+            return Err(BackendError::Unavailable);
+        }
+        let (state, policy) = if let Some(context) = &self.namespace_rename {
+            if context.admission.state_identity() != context.state.identity()
+                || context.state.path() != self.catalog.state_directory
+            {
+                return Err(BackendError::Unavailable);
+            }
+            (Arc::clone(&context.state), context.policy)
+        } else if let Some(context) = &self.streamed {
+            if context.admission.state_identity() != context.state.identity()
+                || context.state.path() != self.catalog.state_directory
+            {
+                return Err(BackendError::Unavailable);
+            }
+            (Arc::clone(&context.state), context.policy)
+        } else {
+            let state = crate::recovery_state::RecoveryStateRoot::existing_gui(
+                &self.catalog.state_directory,
+            )
+            .map_err(|_| BackendError::Unavailable)?;
+            let defaults = raiun_core::WindowsRecoveryPolicy::default();
+            let policy = crate::streamed_store::StorePolicy {
+                max_content_bytes: defaults.max_file_bytes,
+                max_state_bytes: defaults.max_state_bytes,
+                max_entries: defaults.max_state_entries,
+                max_metadata_bytes_per_scan: defaults.max_scan_metadata_bytes,
+            };
+            (state, policy)
+        };
+        let pending = crate::streamed_store::SnapshotStore::content_history_pending_existing(
+            state,
+            Arc::clone(&self.catalog.protector),
+            policy,
+            &self.scope,
+            self.root_identity,
+            |budget| {
+                self.catalog
+                    .content_presence_authenticated_bounded(&self.scope, self.root_identity, budget)
+                    .map_err(|_| crate::streamed_store::StoreError::IncompleteEvidence)
+            },
+        )
+        .map_err(|_| BackendError::Unavailable)?;
+        Ok(pending)
+    }
+
     fn dispatch_recovered_edit(
         &self,
         record_id: &str,
@@ -1994,6 +2095,205 @@ impl ScopeCatalog {
             metadata.extend(journal.recover_metadata_bounded(&mut budget)?);
         }
         Ok(metadata)
+    }
+
+    /// Conservative no-body health for the legacy journal format. The sealed
+    /// `.edit` payload combines metadata and content, so it cannot be classified
+    /// as clean without decrypting user content. Any recognized retained entry
+    /// is therefore nonclean (including completed records retained for
+    /// recovery); malformed or unauthenticated entries are errors.
+    #[cfg(windows)]
+    fn content_presence_bounded(
+        &self,
+        provider_scope: &ProviderScope,
+        root_identity: ConfiguredRootIdentity,
+        shared: &mut crate::streamed_store::DiscoveryBudget,
+    ) -> Result<bool, crate::JournalError> {
+        if !valid_scope_binding(provider_scope, root_identity) {
+            return Err(crate::JournalError::InvalidScope);
+        }
+        let mut budget = crate::edit_journal::MetadataScanBudget {
+            entries: shared.remaining_entries(),
+            records: 2_000,
+            read_bytes: shared.remaining_metadata_bytes(),
+            metadata_bytes: shared.remaining_metadata_bytes().min(4 * 1024 * 1024) as usize,
+        };
+        let initial_entries = budget.entries;
+        let initial_read_bytes = budget.read_bytes;
+        let result = (|| {
+            let _guard = self.lock.lock().map_err(|_| crate::JournalError::Io)?;
+            let scopes = self.enumerate_scopes_bounded(Some(&mut budget))?;
+            self.verify_journal_directory_set_bounded(&scopes, &mut budget)?;
+            // A cataloged scope with a missing directory is retained evidence,
+            // not an empty journal. Verify every authenticated child before
+            // filtering to this account/root.
+            for scope in &scopes {
+                budget.entries = budget
+                    .entries
+                    .checked_sub(1)
+                    .ok_or(crate::JournalError::ScanLimit)?;
+                let path = EditJournal::storage_root(&self.state_directory)
+                    .join(EditJournal::scope_directory_key(scope)?);
+                verify_directory(&path)?;
+            }
+            let mut pending = false;
+            for scope in scopes
+                .into_iter()
+                .filter(|scope| scope_matches_provider(scope, provider_scope, root_identity))
+            {
+                let path = EditJournal::storage_root(&self.state_directory)
+                    .join(EditJournal::scope_directory_key(&scope)?);
+                verify_directory(&path)?;
+                for entry in fs::read_dir(&path).map_err(|_| crate::JournalError::Io)? {
+                    budget.entries = budget
+                        .entries
+                        .checked_sub(1)
+                        .ok_or(crate::JournalError::ScanLimit)?;
+                    let entry = entry.map_err(|_| crate::JournalError::Io)?;
+                    let name = entry
+                        .file_name()
+                        .into_string()
+                        .map_err(|_| crate::JournalError::CorruptRecord)?;
+                    let metadata =
+                        fs::symlink_metadata(entry.path()).map_err(|_| crate::JournalError::Io)?;
+                    if !metadata.is_file()
+                        || metadata.file_type().is_symlink()
+                        || has_reparse_attribute(&metadata)
+                        || !known_legacy_journal_entry(&name)
+                    {
+                        return Err(crate::JournalError::CorruptRecord);
+                    }
+                    // This only consumes a bounded directory entry and an OS
+                    // metadata query; the sealed content length is not charged
+                    // as bytes read because no entry contents are opened.
+                    pending = true;
+                }
+                verify_directory(&path)?;
+            }
+            Ok(pending)
+        })();
+        let consumed_entries = initial_entries.saturating_sub(budget.entries);
+        let consumed_bytes = initial_read_bytes.saturating_sub(budget.read_bytes);
+        shared
+            .charge_external_scan(consumed_entries, consumed_bytes)
+            .map_err(crate::edit_journal::admission_error)?;
+        result
+    }
+
+    /// Full authenticated legacy-content health for compatibility callers.
+    /// This is deliberately separate from the body-free metadata-only check:
+    /// the legacy sealed record includes content, so its acknowledgement can
+    /// be trusted only after the existing decoder verifies the body hash,
+    /// scope, and complete event chain. The decoder zeroizes content before
+    /// returning metadata. No journal entry is changed or removed.
+    #[cfg(windows)]
+    fn content_presence_authenticated_bounded(
+        &self,
+        provider_scope: &ProviderScope,
+        root_identity: ConfiguredRootIdentity,
+        shared: &mut crate::streamed_store::DiscoveryBudget,
+    ) -> Result<bool, crate::JournalError> {
+        if !valid_scope_binding(provider_scope, root_identity) {
+            return Err(crate::JournalError::InvalidScope);
+        }
+        let mut budget = crate::edit_journal::MetadataScanBudget {
+            entries: shared.remaining_entries(),
+            records: 2_000,
+            read_bytes: shared.remaining_metadata_bytes(),
+            metadata_bytes: shared.remaining_metadata_bytes().min(4 * 1024 * 1024) as usize,
+        };
+        let initial_entries = budget.entries;
+        let initial_read_bytes = budget.read_bytes;
+        let result = (|| {
+            let _guard = self.lock.lock().map_err(|_| crate::JournalError::Io)?;
+            let scopes = self.enumerate_scopes_bounded(Some(&mut budget))?;
+            self.verify_journal_directory_set_bounded(&scopes, &mut budget)?;
+            // Authenticate every cataloged child before filtering. A missing
+            // directory is incomplete evidence, never a clean empty journal.
+            for scope in &scopes {
+                budget.entries = budget
+                    .entries
+                    .checked_sub(1)
+                    .ok_or(crate::JournalError::ScanLimit)?;
+                let path = EditJournal::storage_root(&self.state_directory)
+                    .join(EditJournal::scope_directory_key(scope)?);
+                verify_directory(&path)?;
+            }
+            let mut pending = false;
+            for scope in scopes
+                .into_iter()
+                .filter(|scope| scope_matches_provider(scope, provider_scope, root_identity))
+            {
+                let journal = EditJournal::open_existing(
+                    &self.state_directory,
+                    scope,
+                    SharedProtector(Arc::clone(&self.protector)),
+                )?;
+                // This bounded reader authenticates full body hashes and all
+                // event transitions, and returns only unresolved metadata.
+                // Reuse one budget across every selected scope; never reset it.
+                pending |= !journal.recover_metadata_bounded(&mut budget)?.is_empty();
+            }
+            Ok(pending)
+        })();
+        let consumed_entries = initial_entries.saturating_sub(budget.entries);
+        let consumed_bytes = initial_read_bytes.saturating_sub(budget.read_bytes);
+        shared
+            .charge_external_scan(consumed_entries, consumed_bytes)
+            .map_err(crate::edit_journal::admission_error)?;
+        result
+    }
+
+    #[cfg(windows)]
+    fn verify_journal_directory_set_bounded(
+        &self,
+        scopes: &[EditJournalScope],
+        budget: &mut crate::edit_journal::MetadataScanBudget,
+    ) -> Result<(), crate::JournalError> {
+        let directory = EditJournal::storage_root(&self.state_directory);
+        match fs::symlink_metadata(&directory) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && scopes.is_empty() => {
+                return Ok(());
+            }
+            Err(_) => return Err(crate::JournalError::Io),
+            Ok(_) => verify_directory(&directory)?,
+        }
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if scopes.is_empty() {
+                    return Ok(());
+                }
+                return Err(crate::JournalError::Io);
+            }
+            Err(_) => return Err(crate::JournalError::Io),
+        };
+        let expected: std::collections::HashSet<String> = scopes
+            .iter()
+            .map(EditJournal::scope_directory_key)
+            .collect::<Result<_, _>>()?;
+        for entry in entries {
+            budget.entries = budget
+                .entries
+                .checked_sub(1)
+                .ok_or(crate::JournalError::ScanLimit)?;
+            let entry = entry.map_err(|_| crate::JournalError::Io)?;
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|_| crate::JournalError::CorruptRecord)?;
+            let metadata =
+                fs::symlink_metadata(entry.path()).map_err(|_| crate::JournalError::Io)?;
+            if !expected.contains(&name)
+                || !metadata.is_dir()
+                || metadata.file_type().is_symlink()
+                || has_reparse_attribute(&metadata)
+            {
+                return Err(crate::JournalError::CorruptRecord);
+            }
+        }
+        verify_directory(&directory)?;
+        Ok(())
     }
 
     fn unresolved_edits(
@@ -2516,6 +2816,40 @@ fn has_reparse_attribute(metadata: &fs::Metadata) -> bool {
     }
 }
 
+#[cfg(windows)]
+fn known_legacy_journal_entry(name: &str) -> bool {
+    fn valid_id(value: &str) -> bool {
+        value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }
+    fn valid_nonce(value: &str) -> bool {
+        value.len() == 16 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }
+
+    if let Some(id) = name.strip_suffix(".edit") {
+        return valid_id(id);
+    }
+    if let Some(rest) = name.strip_prefix(".dispatch-") {
+        return rest.strip_suffix(".lock").is_some_and(valid_id);
+    }
+    if let Some(rest) = name.strip_prefix(".recovery-") {
+        let Some(rest) = rest.strip_suffix(".evt") else {
+            return false;
+        };
+        let Some((id, sequence)) = rest.split_once('-') else {
+            return false;
+        };
+        return valid_id(id)
+            && sequence.len() == 16
+            && sequence.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && u64::from_str_radix(sequence, 16).is_ok_and(|value| value != 0);
+    }
+    if let Some(rest) = name.strip_prefix(".stage-") {
+        let nonce = rest.strip_prefix("recovery-").unwrap_or(rest);
+        return valid_nonce(nonce);
+    }
+    false
+}
+
 fn verify_directory(path: &Path) -> Result<(), crate::JournalError> {
     let metadata = fs::symlink_metadata(path).map_err(|_| crate::JournalError::Io)?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() || has_reparse_attribute(&metadata) {
@@ -2962,14 +3296,14 @@ mod tests {
         }
     }
 
-    struct ReceiptRemote {
+    pub(super) struct ReceiptRemote {
         expected: Vec<u8>,
         calls: Mutex<Vec<&'static str>>,
         authorized: bool,
     }
 
     impl ReceiptRemote {
-        fn new(expected: &[u8]) -> Self {
+        pub(super) fn new(expected: &[u8]) -> Self {
             Self {
                 expected: expected.to_vec(),
                 calls: Mutex::new(Vec::new()),
@@ -4020,3 +4354,11 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, windows))]
+#[path = "recovery_content_health_tests.rs"]
+mod content_health_tests;
+
+#[cfg(all(test, windows))]
+#[path = "recovery_legacy_auth_tests.rs"]
+mod legacy_auth_tests;
