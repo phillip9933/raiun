@@ -44,6 +44,8 @@ use zeroize::Zeroizing;
 pub(super) mod native_file_rename;
 #[path = "native_namespace_directory.rs"]
 pub(super) mod native_namespace_directory;
+#[path = "native_namespace_observer.rs"]
+mod native_namespace_observer;
 #[path = "native_streamed_io.rs"]
 mod native_streamed_io;
 
@@ -955,6 +957,9 @@ pub(super) struct ConfiguredRootConnection {
     context_key: usize,
     connection_key: CfConnectionKey,
     connected: bool,
+    namespace_observer: Option<native_namespace_observer::NamespaceObserver>,
+    namespace_binding: native_namespace_observer::NamespaceObserverBinding,
+    namespace_observation_closed: bool,
 }
 
 #[allow(dead_code)]
@@ -3440,6 +3445,10 @@ impl ConfiguredRootConnection {
         let history_owner = backend.scope().clone();
         let history_registration =
             vault_custody_registration_binding(identity, composite_root_identity);
+        let namespace_binding = native_namespace_observer::NamespaceObserverBinding::new(
+            &backend,
+            composite_root_identity,
+        );
         let backend: Arc<dyn PlaceholderBackend> = backend;
         if identity != lease.identity {
             return Err(Error::InvalidConfiguredRoot);
@@ -3531,6 +3540,9 @@ impl ConfiguredRootConnection {
                 context_key,
                 connection_key,
                 connected: true,
+                namespace_observer: None,
+                namespace_binding,
+                namespace_observation_closed: false,
             };
             if connection.finish(false).is_err() {
                 let _ = Box::leak(Box::new(connection));
@@ -3544,6 +3556,9 @@ impl ConfiguredRootConnection {
             context_key,
             connection_key,
             connected: true,
+            namespace_observer: None,
+            namespace_binding,
+            namespace_observation_closed: false,
         };
         if already_registered {
             if let Some(history) = vault_history {
@@ -3685,10 +3700,16 @@ impl ConfiguredRootConnection {
 
     fn finish(&mut self, unregister: bool) -> Result<(), Error> {
         if self.root.is_none() && !self.connected {
+            if self.namespace_observer.is_some() {
+                return Err(Error::ConnectionStateInvalid);
+            }
             return Ok(());
         }
         if self.connected {
             self.state.close_readiness();
+            // Cancellation/drain is physical ownership, and must remain
+            // available after backend/token authorization has been revoked.
+            self.stop_namespace_observer(std::time::Duration::from_millis(250))?;
             // Keep callback state registered through CfDisconnectSyncRoot;
             // Windows may deliver callbacks while the disconnect is running.
             let result = unsafe { CfDisconnectSyncRoot(self.connection_key) };
@@ -3734,14 +3755,33 @@ impl ConfiguredRootConnection {
     }
 
     fn preserve_after_cleanup_failure(&mut self) {
-        if let Some(root) = self.root.take() {
-            let _ = Box::leak(root);
-        }
+        // Explicit observer stop/poll retirement can precede global callback
+        // closure. Always close admission before retaining an aggregate that
+        // cannot safely run further cleanup, without waiting for callbacks.
+        self.state.close_readiness();
+        // Retain the complete aggregate, including any still-pending kernel
+        // I/O. Never run DirectoryObserver's blocking Drop on this failure path.
+        let _ = Box::leak(Box::new((
+            self.root.take(),
+            self.namespace_observer.take(),
+            Arc::clone(&self.state),
+            self.namespace_binding.clone(),
+            self.context_key,
+            self.connection_key,
+            self.connected,
+        )));
+        self.connected = false;
     }
 }
 
 impl Drop for ConfiguredRootConnection {
     fn drop(&mut self) {
+        if self.namespace_observation_closed && self.namespace_observer_drain_pending() {
+            // A consuming caller may already have received DrainPending.
+            // Preserve that exact owner rather than implicitly retrying finish.
+            self.preserve_after_cleanup_failure();
+            return;
+        }
         if self.finish(false).is_err() {
             self.preserve_after_cleanup_failure();
         }

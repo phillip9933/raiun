@@ -264,3 +264,9 @@ and makes no current parent/native classification claim. Fresh proof completion
 and the connected observer/owner-thread runtime remain outstanding. The four
 original Windows candidate controls qualify the helper only; they are not
 mounted GUI or CLI acceptance.
+
+The explicit connected observer API is now composed with owner-thread, revocation
+and drain/retention guards. It remains unattached by GUI production code. The
+GUI test fixture uses only a fresh explicit private state root; no installed
+account/default-state access is allowed. Native GUI observer execution and fresh
+rename proof/runtime wiring remain separate pending gates.

@@ -178,6 +178,9 @@ pub enum Error {
     ConfiguredRootChanged,
     /// Native connection ownership state did not match its lease.
     ConnectionStateInvalid,
+    /// The exact owned observer still has outstanding I/O. Keep the whole
+    /// connection alive and retry normal cancellation/drain; do not force-drop.
+    NamespaceObserverDrainPending,
     /// The exact authenticated account namespace could not be enumerated.
     ProviderUnavailable,
     /// At least one closed placeholder has modified or unverifiable data.
@@ -219,6 +222,8 @@ impl fmt::Display for Error {
             Self::ConnectionStateInvalid => {
                 formatter.write_str("Cloud Files connection state is invalid")
             }
+            Self::NamespaceObserverDrainPending => formatter
+                .write_str("directory observation I/O is still draining; connection retained"),
             Self::ProviderUnavailable => {
                 formatter.write_str("the authenticated provider namespace is unavailable")
             }
@@ -572,9 +577,78 @@ impl namespace_reconcile::DirectoryCreateLocal for NativeDirectoryCreateLocal<'_
     }
 }
 
+/// Owned, untrusted hints from one exact connected-root observation instance.
+/// This is neither a complete inventory nor account/namespace mutation,
+/// conversion, clean-state or delete authority. Every consumer must revalidate
+/// its own current agent/backend/root/ordinary-ancestry context.
+#[cfg(windows)]
+pub struct NamespaceObservation {
+    root: ConfiguredRootIdentity,
+    provider_scope: ProviderScope,
+    instance: u64,
+    poll: raiun_control_windows::directory_notifications::ObserverPoll,
+}
+
+#[cfg(windows)]
+impl NamespaceObservation {
+    pub fn root_identity(&self) -> ConfiguredRootIdentity {
+        self.root
+    }
+    pub fn provider_scope(&self) -> &ProviderScope {
+        &self.provider_scope
+    }
+    pub fn instance(&self) -> u64 {
+        self.instance
+    }
+    /// Always true: observing hints cannot establish inventory continuity.
+    pub fn inventory_unknown(&self) -> bool {
+        true
+    }
+    pub fn poll(&self) -> &raiun_control_windows::directory_notifications::ObserverPoll {
+        &self.poll
+    }
+}
+
+#[cfg(windows)]
+impl fmt::Debug for NamespaceObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NamespaceObservation")
+            .field("instance", &self.instance)
+            .field("inventory_unknown", &true)
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(windows)]
 #[allow(dead_code)]
 impl ConfiguredRootConnection {
+    /// Explicit owner-thread opt-in only. No production caller attaches it.
+    /// The first result requires an independent bounded initial inventory.
+    pub fn attach_namespace_observer(&mut self) -> Result<NamespaceObservation, Error> {
+        self.inner.attach_namespace_observer()
+    }
+    /// Production callers should pass ZERO. The test wait is capped at 250ms;
+    /// all returned paths are untrusted hints, never namespace authority.
+    /// An error does not prove I/O drained: retain the owner and call stop or
+    /// normal disconnect, including after backend or token revocation.
+    pub fn poll_namespace_observer(
+        &mut self,
+        wait: std::time::Duration,
+    ) -> Result<NamespaceObservation, Error> {
+        self.inner.poll_namespace_observer(wait)
+    }
+    /// Physical cancellation remains available after authentication revocation.
+    /// A pending error retains the same observer/root/connection aggregate.
+    pub fn stop_namespace_observer(&mut self, wait: std::time::Duration) -> Result<(), Error> {
+        self.inner.stop_namespace_observer(wait)
+    }
+    #[cfg(feature = "synthetic-agent-integration")]
+    pub fn namespace_observer_fixture_file(
+        &self,
+    ) -> Result<(LocalFileIdentity, u32, u32, u64), Error> {
+        self.inner.namespace_observer_fixture_file()
+    }
     /// Open only the namespace-rename store already associated with this live
     /// connection's prepared recovery capability. This grants storage access
     /// only; rename admission still requires the explicit live producer call.
@@ -822,6 +896,26 @@ pub mod synthetic_agent_integration {
     }
 
     impl Connection {
+        pub fn attach_namespace_observer(&mut self) -> Result<super::NamespaceObservation, Error> {
+            self.0.attach_namespace_observer()
+        }
+        pub fn poll_namespace_observer(
+            &mut self,
+            wait: std::time::Duration,
+        ) -> Result<super::NamespaceObservation, Error> {
+            self.0.poll_namespace_observer(wait)
+        }
+        pub fn stop_namespace_observer(&mut self, wait: std::time::Duration) -> Result<(), Error> {
+            self.0.stop_namespace_observer(wait)
+        }
+        pub fn namespace_observer_fixture_file(
+            &self,
+        ) -> Result<(super::LocalFileIdentity, u32, u32, u64), Error> {
+            self.0.namespace_observer_fixture_file()
+        }
+        pub fn disconnect_in_place(&mut self) -> Result<(), Error> {
+            self.0.disconnect_in_place()
+        }
         /// Drain callbacks and disconnect while retaining registration.
         pub fn disconnect(self) -> Result<(), Error> {
             self.0.disconnect()
@@ -1166,6 +1260,10 @@ pub struct SyntheticEntry {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
+    mod connected_namespace_observer_tests {
+        include!("connected_namespace_observer_tests.rs");
+    }
     use super::{
         BackendError, ConfiguredRootIdentity, EditRecoveryProvider, Error, LocalFileIdentity,
         OpenCloudPlaceholderBackend, PlaceholderEditBinding, PreparedEditRecovery, ProviderScope,

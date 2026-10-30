@@ -3241,3 +3241,11 @@ lifecycle wiring remain required. Source composition and helper controls do not
 establish automatic Explorer propagation or mounted GUI/CLI parity. The prior
 1,492-pass GUI source checkpoint and original scoped Windows native records are
 preserved separately; no new package, signing or publication is implied.
+
+The connected observer wrapper is also available as an explicit API: it checks
+current provider/root ownership around observation, drains before disconnect,
+and retains the full aggregate on pending cleanup. No production attach/poll
+caller is present. The copied headless fixture was held before compilation or
+execution and adapted to fresh explicit GUI-private state; it must not introduce
+headless context or current-user routing into the GUI. Actual native GUI observer
+and mounted rename acceptance remain pending.

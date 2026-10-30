@@ -991,3 +991,30 @@ remain hints. Fresh parent/native/session/content proof is required by a later
 producer before dispatch; private fields and redacted Debug preserve this
 boundary. Synthetic setup HTTP is separate from the asserted zero assembler
 HTTP/catalog/MOVE delta. No automatic operation is enabled by this helper.
+
+## Explicit connected-root observer lifecycle
+
+The connected observer is opt-in on the native owner thread. Its weak backend
+binding and observation envelope bind the existing composite identity, current
+provider scope, registered pinned root and unique instance. READY/token/backend/
+root/recovery checks surround attach, waits and rearm. Returned names remain
+untrusted and inventory_unknown is always true. No production caller attaches
+or polls this API in this source checkpoint.
+
+The owned observer is published into the connection before arming. Retirement
+closes observation admission and physical stop/drain remains available after
+authentication revocation. finish closes callback readiness and drains before
+CfDisconnectSyncRoot. A drain failure retains the same complete aggregate. Drop
+closes admission and preserves pending observer, root, callback state, binding
+and registry/connection keys; it never frees live kernel buffers or implicitly
+blocks on an observer already known to be draining. Ordinary unregister and
+unresolved-data guards remain unchanged. Future production callers must use
+zero wait; the API caps waits at 250 ms.
+
+The imported headless fixture is preserved in output evidence and is not valid
+for GUI execution. Its GUI replacement has a distinct selector/owner marker and
+uses a fresh pinned private synthetic state directory, an explicitly admitted
+DPAPI protector and provider constructor. It never selects default current-user
+state or derives a profile from the terminal recovery protector. Compilation
+does not qualify native execution; a separate fresh GUI fixture cohort is
+required. No saved-session, default state or registration policy is imported.
