@@ -2241,8 +2241,9 @@ impl OpenCloudClient {
                 "Space root URL cannot be used for a conditional creation",
             ));
         }
-        // RFC 4918 tagged If condition: the server checks the root revision
-        // atomically with the leaf's If-None-Match condition when applying PUT.
+        // Express the root revision as an RFC 4918 tagged If condition. This
+        // header alone does not establish atomic root/leaf preconditions; the
+        // supported server's create-only contract needs separate qualification.
         Ok(format!("<{}> ([{}])", root_url, root.etag))
     }
 
