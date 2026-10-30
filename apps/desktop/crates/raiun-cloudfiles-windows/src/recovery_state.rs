@@ -22,8 +22,9 @@ impl RecoveryStateRoot {
         Arc::new(Self(StateRoot::Modern(state)))
     }
 
-    /// Called only by the explicit GUI compatibility builder with the exact
-    /// state path captured from its DPAPI protector. Does not repair ACLs,
+    /// Compatibility metadata admission for an explicit GUI builder or a
+    /// read-only health probe at the exact state path captured by its DPAPI
+    /// protector. The probe opens existing children only. Does not repair ACLs,
     /// relocate records or adopt any legacy body as authenticated v2 content.
     pub(crate) fn existing_gui(path: &Path) -> io::Result<Arc<Self>> {
         let parent = path.parent().ok_or_else(invalid_root)?;

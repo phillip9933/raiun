@@ -273,6 +273,21 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
     fn provider_scope(&self) -> &ProviderScope;
     fn root_identity(&self) -> ConfiguredRootIdentity;
 
+    /// Optional namespace-rename storage for this exact prepared account/root.
+    /// Implementations must opt in explicitly; storage alone grants no rename
+    /// admission or publication authority.
+    #[cfg(windows)]
+    fn file_rename_store(
+        &self,
+        _scope: &crate::EditJournalScope,
+        _authorization: crate::namespace_intent::CapturedAuthorization,
+    ) -> Result<
+        Option<std::sync::Arc<crate::streamed_store::namespace_rename_store::FileRenameStore>>,
+        BackendError,
+    > {
+        Ok(None)
+    }
+
     /// A nonblocking cached count seeded by authenticated preflight. No disk,
     /// body decryption or network work is permitted here. Unsupported, poisoned
     /// or invalidated summaries return None, never a healthy zero.

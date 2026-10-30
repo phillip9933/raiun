@@ -9,8 +9,13 @@ Source integration update, **31 October 2026**: the GUI candidate now composes
 the shared same-parent Personal file-rename executor, authenticated intent store,
 revision-conditioned content witnesses and native identity-only completion
 adapter. This is an explicit callable engine seam, not an automatic Explorer
-rename feature. The observer, fresh candidate/store factory and GUI provider
-lifecycle caller remain unwired. The existing GUI saved sign-in, streamed
+rename feature. An optional admitted rename-store factory is now available;
+the observer, fresh candidate helper and GUI provider lifecycle caller remain
+unwired. Namespace storage is not enabled by the current GUI factory. Its
+prepared health query conservatively reports unknown until an authenticated
+namespace-history consumer can distinguish completed and unresolved work,
+including evidence retained across startup without an opt-in context. The
+existing GUI saved sign-in, streamed
 save/Retry, cache quota and completed-copy retention paths are preserved.
 Isolated native identity-update acceptance belongs to the shared engine test
 source; the integrated native rename workflow and this GUI package remain
@@ -241,3 +246,14 @@ credentials and all original failure/recovery artifacts.
    secure persistence, mount/startup and native acceptance requirements. Keep
    CLI folder sync unstarted and next-release readiness false until these gates
    are met. Signing, merge and publication remain separately authorized actions.
+
+## Current explicit rename storage integration
+
+The GUI source includes shared admitted rename storage and a read-only health
+consumer. Exact account/root authenticated metadata distinguishes completed and
+unresolved rename history. Corrupt/unsupported evidence stays unknown; startup
+without explicit namespace setup refuses retained matching history. Cached status
+does not perform disk reads. Existing content streaming, retention and Retry
+remain separate. These source changes do not activate automatic rename operations.
+New Windows metadata controls require their own fresh owned native cohort; host
+tests and cross-target compilation do not establish mounted GUI acceptance.

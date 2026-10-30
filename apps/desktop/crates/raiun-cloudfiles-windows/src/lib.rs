@@ -573,6 +573,21 @@ impl namespace_reconcile::DirectoryCreateLocal for NativeDirectoryCreateLocal<'_
 #[cfg(windows)]
 #[allow(dead_code)]
 impl ConfiguredRootConnection {
+    /// Open only the namespace-rename store already associated with this live
+    /// connection's prepared recovery capability. This grants storage access
+    /// only; rename admission still requires the explicit live producer call.
+    pub fn file_rename_store(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        scope: &EditJournalScope,
+        authorization: namespace_intent::CapturedAuthorization,
+    ) -> Result<
+        Option<std::sync::Arc<streamed_store::namespace_rename_store::FileRenameStore>>,
+        Error,
+    > {
+        self.inner.file_rename_store(backend, scope, authorization)
+    }
+
     /// Components are only observation hints. Current backend routing and the
     /// exact native handles, never those strings, provide admission evidence.
     pub fn prepare_namespace_directory<'connection>(

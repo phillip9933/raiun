@@ -951,6 +951,7 @@ fn placeholder_on_disk_empty(handle: Handle) -> Result<bool, Error> {
 pub(super) struct ConfiguredRootConnection {
     root: Option<Box<OwnedConfiguredRoot>>,
     state: Arc<CallbackState>,
+    composite_root_identity: crate::OpaqueIdentity,
     context_key: usize,
     connection_key: CfConnectionKey,
     connected: bool,
@@ -1750,8 +1751,73 @@ impl OwnedConfiguredRoot {
     }
 }
 
+fn file_rename_store_from_prepared(
+    recovery: Option<&Arc<dyn PreparedEditRecovery>>,
+    provider_scope: &crate::ProviderScope,
+    root_identity: crate::ConfiguredRootIdentity,
+    scope: &crate::EditJournalScope,
+    authorization: crate::namespace_intent::CapturedAuthorization,
+) -> Result<Option<Arc<crate::streamed_store::namespace_rename_store::FileRenameStore>>, Error> {
+    if scope.profile_id != provider_scope.profile_id()
+        || scope.server_origin != provider_scope.server_origin()
+        || scope.account_subject != provider_scope.account_id()
+        || scope.root_volume_serial != root_identity.volume_serial
+        || scope.root_file_index != root_identity.file_index
+        || scope.space_id.is_empty()
+        || scope.root_resource_id.is_empty()
+        || authorization.agent_generation == 0
+        || authorization.token_generation != provider_scope.token_generation()
+    {
+        return Err(Error::ProviderUnavailable);
+    }
+    let Some(recovery) = recovery else {
+        return Ok(None);
+    };
+    if recovery.provider_scope() != provider_scope || recovery.root_identity() != root_identity {
+        return Err(Error::ProviderUnavailable);
+    }
+    recovery
+        .file_rename_store(scope, authorization)
+        .map_err(|_| Error::EditRecoveryUnavailable)
+}
+
 #[allow(dead_code)]
 impl ConfiguredRootConnection {
+    pub(super) fn file_rename_store(
+        &self,
+        backend: &Arc<crate::OpenCloudPlaceholderBackend>,
+        scope: &crate::EditJournalScope,
+        authorization: crate::namespace_intent::CapturedAuthorization,
+    ) -> Result<Option<Arc<crate::streamed_store::namespace_rename_store::FileRenameStore>>, Error>
+    {
+        if !self.connected
+            || self.state.readiness.load(Ordering::Acquire) != CALLBACK_READY
+            || backend.is_revoked()
+        {
+            return Err(Error::ProviderUnavailable);
+        }
+        let backend_trait: Arc<dyn PlaceholderBackend> = backend.clone();
+        if !Arc::ptr_eq(&backend_trait, &self.state.backend)
+            || !backend.owns_composite_root_identity(self.composite_root_identity)
+        {
+            return Err(Error::ProviderUnavailable);
+        }
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        let root_identity = crate::ConfiguredRootIdentity {
+            volume_serial: root.identity.volume_serial,
+            file_index: root.identity.file_index,
+        };
+        file_rename_store_from_prepared(
+            self.state.recovery.as_ref(),
+            backend.scope(),
+            root_identity,
+            scope,
+            authorization,
+        )
+    }
+
     // Admission only: this is not a proof that all filesystem names/content
     // are absent. Reconnected roots deliberately have unknown prior custody.
     pub(super) fn can_admit_vault_session(&self) -> bool {
@@ -3461,6 +3527,7 @@ impl ConfiguredRootConnection {
             let mut connection = Self {
                 root: Some(root),
                 state,
+                composite_root_identity,
                 context_key,
                 connection_key,
                 connected: true,
@@ -3473,6 +3540,7 @@ impl ConfiguredRootConnection {
         let mut connection = Self {
             root: Some(root),
             state,
+            composite_root_identity,
             context_key,
             connection_key,
             connected: true,
@@ -5277,6 +5345,221 @@ mod hydration_inventory {
             assert!(inventory.record(id, 19, 42, path).is_ok());
             assert!(!inventory.is_complete());
         }
+    }
+}
+
+#[cfg(test)]
+mod file_rename_store_accessor_tests {
+    use super::*;
+    use crate::{
+        BackendError, ConfiguredRootIdentity, EditJournalScope, PlaceholderEditBinding,
+        PreparedEditRecovery, ProviderScope, namespace_intent::CapturedAuthorization,
+    };
+    use raiun_opencloud::OpenCloudClient;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct FakeRecovery {
+        scope: ProviderScope,
+        root: ConfiguredRootIdentity,
+        calls: AtomicUsize,
+    }
+
+    impl PreparedEditRecovery for FakeRecovery {
+        fn provider_scope(&self) -> &ProviderScope {
+            &self.scope
+        }
+
+        fn root_identity(&self) -> ConfiguredRootIdentity {
+            self.root
+        }
+
+        fn file_rename_store(
+            &self,
+            _scope: &EditJournalScope,
+            _authorization: CapturedAuthorization,
+        ) -> Result<
+            Option<Arc<crate::streamed_store::namespace_rename_store::FileRenameStore>>,
+            BackendError,
+        > {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+
+        fn append_edit(
+            &self,
+            _binding: &PlaceholderEditBinding,
+            _root_identity: ConfiguredRootIdentity,
+            _local_file: crate::LocalFileIdentity,
+            _relative_path: &str,
+            _content: &[u8],
+        ) -> Result<(), BackendError> {
+            Err(BackendError::Unavailable)
+        }
+
+        fn has_unresolved(&self) -> Result<bool, BackendError> {
+            Ok(false)
+        }
+    }
+
+    fn fixture() -> (
+        ProviderScope,
+        ConfiguredRootIdentity,
+        EditJournalScope,
+        CapturedAuthorization,
+    ) {
+        let client = OpenCloudClient::new("https://r46.invalid", "fixture-token".into()).unwrap();
+        let provider = ProviderScope::new(
+            &client,
+            "r46-profile".into(),
+            "r46-account".into(),
+            "https://r46.invalid".into(),
+        )
+        .unwrap();
+        let root = ConfiguredRootIdentity {
+            volume_serial: 41,
+            file_index: 73,
+        };
+        let scope = EditJournalScope {
+            profile_id: provider.profile_id().to_owned(),
+            server_origin: provider.server_origin().to_owned(),
+            account_subject: provider.account_id().to_owned(),
+            space_id: "r46-space".into(),
+            root_resource_id: "r46-root".into(),
+            root_volume_serial: root.volume_serial,
+            root_file_index: root.file_index,
+        };
+        let authorization = CapturedAuthorization {
+            agent_generation: 5,
+            token_generation: provider.token_generation(),
+        };
+        (provider, root, scope, authorization)
+    }
+
+    #[test]
+    fn r46_store_accessor_delegates_once_to_exact_prepared_capability() {
+        let (provider, root, scope, authorization) = fixture();
+        let recovery = Arc::new(FakeRecovery {
+            scope: provider.clone(),
+            root,
+            calls: AtomicUsize::new(0),
+        });
+        let recovery_capability: Arc<dyn PreparedEditRecovery> = recovery.clone();
+        assert!(
+            file_rename_store_from_prepared(
+                Some(&recovery_capability),
+                &provider,
+                root,
+                &scope,
+                authorization,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(recovery.calls.load(Ordering::SeqCst), 1);
+
+        assert!(
+            file_rename_store_from_prepared(None, &provider, root, &scope, authorization,)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(recovery.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn r46_store_accessor_rejects_scope_root_and_auth_before_delegation() {
+        let (provider, root, scope, authorization) = fixture();
+        let recovery = Arc::new(FakeRecovery {
+            scope: provider.clone(),
+            root,
+            calls: AtomicUsize::new(0),
+        });
+        let recovery_capability: Arc<dyn PreparedEditRecovery> = recovery.clone();
+        let rejected = |requested: &EditJournalScope, auth: CapturedAuthorization| {
+            file_rename_store_from_prepared(
+                Some(&recovery_capability),
+                &provider,
+                root,
+                requested,
+                auth,
+            )
+            .is_err()
+        };
+        let mut wrong_profile = scope.clone();
+        wrong_profile.profile_id.push_str("-other");
+        assert!(rejected(&wrong_profile, authorization));
+        let mut wrong_origin = scope.clone();
+        wrong_origin.server_origin = "https://other.invalid".into();
+        assert!(rejected(&wrong_origin, authorization));
+        let mut wrong_account = scope.clone();
+        wrong_account.account_subject.push_str("-other");
+        assert!(rejected(&wrong_account, authorization));
+        let mut wrong_physical_root = scope.clone();
+        wrong_physical_root.root_file_index += 1;
+        assert!(rejected(&wrong_physical_root, authorization));
+        assert!(rejected(
+            &scope,
+            CapturedAuthorization {
+                agent_generation: 0,
+                ..authorization
+            },
+        ));
+        assert!(rejected(
+            &scope,
+            CapturedAuthorization {
+                token_generation: authorization.token_generation + 1,
+                ..authorization
+            },
+        ));
+        assert_eq!(recovery.calls.load(Ordering::SeqCst), 0);
+
+        let mismatched_recovery = Arc::new(FakeRecovery {
+            scope: provider.clone(),
+            root: ConfiguredRootIdentity {
+                file_index: root.file_index + 1,
+                ..root
+            },
+            calls: AtomicUsize::new(0),
+        });
+        let mismatched_capability: Arc<dyn PreparedEditRecovery> = mismatched_recovery.clone();
+        assert!(
+            file_rename_store_from_prepared(
+                Some(&mismatched_capability),
+                &provider,
+                root,
+                &scope,
+                authorization,
+            )
+            .is_err()
+        );
+        assert_eq!(mismatched_recovery.calls.load(Ordering::SeqCst), 0);
+
+        let other_client =
+            OpenCloudClient::new("https://other-r46.invalid", "other-token".into()).unwrap();
+        let other_provider = ProviderScope::new(
+            &other_client,
+            "r46-profile".into(),
+            "other-account".into(),
+            "https://other-r46.invalid".into(),
+        )
+        .unwrap();
+        let mismatched_provider_recovery = Arc::new(FakeRecovery {
+            scope: other_provider,
+            root,
+            calls: AtomicUsize::new(0),
+        });
+        let mismatched_provider_capability: Arc<dyn PreparedEditRecovery> =
+            mismatched_provider_recovery.clone();
+        assert!(
+            file_rename_store_from_prepared(
+                Some(&mismatched_provider_capability),
+                &provider,
+                root,
+                &scope,
+                authorization,
+            )
+            .is_err()
+        );
+        assert_eq!(mismatched_provider_recovery.calls.load(Ordering::SeqCst), 0);
     }
 }
 

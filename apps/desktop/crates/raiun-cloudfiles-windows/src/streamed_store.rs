@@ -269,6 +269,26 @@ impl SnapshotStore {
         };
         discover_scope_catalogs_bounded(&*root, &*protector, policy, budget)
     }
+    /// Metadata-only namespace history for an exact admitted provider/root.
+    /// Missing state stays absent; this cannot create storage or grant dispatch.
+    #[cfg(windows)]
+    pub(crate) fn namespace_history_summary_existing(
+        admitted_state: Arc<crate::recovery_state::RecoveryStateRoot>,
+        protector: Arc<dyn EditRecordProtector>,
+        policy: StorePolicy,
+        provider: &crate::ProviderScope,
+        root: crate::ConfiguredRootIdentity,
+    ) -> Result<namespace_rename_store::NamespaceHistorySummary, StoreError> {
+        policy.validate()?;
+        namespace_rename_store::history_summary_existing(
+            windows::existing_root(admitted_state, V2_STORE_ROOT)?,
+            protector,
+            policy,
+            provider,
+            root,
+        )
+    }
+
     fn from_directory(
         root: Arc<dyn Directory>,
         scope: EditJournalScope,

@@ -921,3 +921,56 @@ mounted acceptance, large-file acceptance or crash recovery.
 ### GUI shared-source composition boundary
 
 The GUI crate now compiles the explicit R37 executor and its session, content, native pin and durable-store dependency closure. No GUI caller, observation loop, candidate collection or automatic rename scheduling is enabled by this composition. Directory creation helpers compile as dependencies; no automatic create path is enabled. The shared authenticated quota and scope inventory accounts for snapshots, directory creates, file creates and renames, including retained history. Existing GUI streamed retention, device-cache quota, saved-session/legacy-root compatibility, registration identity, existing-save completion and explicit Retry remain unchanged. Source and synthetic unit checks do not establish native runtime acceptance.
+
+## GUI admitted rename storage and conservative health (R44/R45)
+
+PreparedEditRecovery offers optional Windows rename storage, defaulting to None.
+The durable factory checks the exact profile, origin, account, physical root,
+token generation and nonzero agent generation before opening a requested scope.
+It retains the admitted state, protector and shared quota context; a store Arc
+confers no native, remote or replay authority. GUI compatibility uses the existing
+metadata root and strict modern v2 child. Namespace setup is explicit and last:
+repeated setup, policy mismatch and later streamed reconfiguration fail closed.
+An existing streamed context shares its exact state/admission Arcs; namespace-only
+setup never enables streamed capture. Namespace-off GUI factories, saved sessions,
+registration identity and native completion behavior remain unchanged.
+
+Provider and retained prepared-owner health queries use the same bounded,
+read-only namespace metadata reader. It authenticates actual scope catalogs and
+record/event chains for the exact profile/origin/account/physical root under one
+existing quota lease and one aggregate scan budget. Completed rename histories
+are resolved; unfinished histories remain unresolved; corrupt, incomplete or
+budget-exhausted evidence remains Unavailable. Directory/file-create namespace
+formats remain unknown. The reader creates no root, catalog, lock, writer or
+publication receipt and opens no snapshot content bodies. It grants no dispatch
+or replay authority. Cached pending getters remain unknown with namespace setup
+and perform no disk I/O.
+
+Startup preparation also checks retained evidence without namespace opt-in at the
+exact existing protector state path. Matching rename evidence, even completed,
+requires explicit namespace context; unsupported startup cannot silently report
+healthy zero. An absent/empty legacy state remains compatible. Metadata-only
+compatibility attestation does not enable writers, change ACLs or search defaults.
+Catalog/v1 admission reuses namespace admission when streamed storage is absent,
+preserving shared accounting. Conservative native cleanup/eviction/unregister
+consumers retain their unwrap_or(true) behavior.
+
+R44's six and R45's two historical guarded Windows DPAPI controls remain scoped
+to their frozen source and fresh owned storage fixtures. New qualified-reader
+controls are separate ignored Windows metadata tests, not native execution here.
+Pure host controls verify aggregate bounds, exact scope selection, malformed
+history and body-read refusal. These checks do not establish installed GUI
+legacy-state, cold-root, mounted/native package or automatic operation acceptance.
+No observer, candidate builder, runtime opt-in or caller is activated.
+
+## Retained connected rename storage accessor
+
+The explicit connected accessor uses the recovery Arc already retained by the
+connection. Connected/ready state, exact backend Arc, current composite-root
+ownership, revocation, registered pinned physical root and provider/account/root/
+token scope are checked before delegation. It never prepares another provider or
+reconstructs default state; no backend metadata lease spans storage admission.
+Absent/unsupported storage remains None. A nonzero captured agent generation is
+not current live owner authority. Existing native/session/owner fences remain
+required. Helper controls and cross-target compilation do not prove the connected
+registration wrapper executed. No automatic caller is enabled.

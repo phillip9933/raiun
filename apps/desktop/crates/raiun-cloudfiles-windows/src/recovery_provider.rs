@@ -26,6 +26,9 @@ use crate::{
 use crate::{ExplicitRecoveryApproval, ReconciliationOutcome, RecoveryRemote};
 
 #[cfg(windows)]
+#[path = "recovery_namespace_store.rs"]
+mod namespace_storage;
+#[cfg(windows)]
 #[path = "recovery_provider_streamed.rs"]
 mod streamed;
 
@@ -58,6 +61,8 @@ pub struct DurableEditRecoveryProvider {
     catalog_lock: Arc<Mutex<()>>,
     #[cfg(windows)]
     streamed: Option<StreamedRecoveryContext>,
+    #[cfg(windows)]
+    namespace_rename: Option<namespace_storage::NamespaceRenameStoreContext>,
 }
 
 #[cfg(windows)]
@@ -87,6 +92,8 @@ impl DurableEditRecoveryProvider {
             catalog_lock: Arc::new(Mutex::new(())),
             #[cfg(windows)]
             streamed: None,
+            #[cfg(windows)]
+            namespace_rename: None,
         }
     }
 
@@ -106,6 +113,9 @@ impl DurableEditRecoveryProvider {
         policy: crate::streamed_store::StorePolicy,
         transfer_policy: crate::StreamedRecoveryPolicy,
     ) -> Result<Self, crate::JournalError> {
+        if self.namespace_rename.is_some() {
+            return Err(crate::JournalError::InvalidState);
+        }
         let parent_path = self
             .state_directory
             .parent()
@@ -154,6 +164,9 @@ impl DurableEditRecoveryProvider {
         policy: crate::streamed_store::StorePolicy,
         transfer_policy: crate::StreamedRecoveryPolicy,
     ) -> Result<Self, crate::JournalError> {
+        if self.namespace_rename.is_some() {
+            return Err(crate::JournalError::InvalidState);
+        }
         let state = crate::recovery_state::RecoveryStateRoot::existing_gui(&self.state_directory)
             .map_err(|_| crate::JournalError::ProtectionFailed)?;
         self.attach_streamed_recovery(state, policy, transfer_policy)
@@ -166,6 +179,9 @@ impl DurableEditRecoveryProvider {
         policy: crate::streamed_store::StorePolicy,
         transfer_policy: crate::StreamedRecoveryPolicy,
     ) -> Result<Self, crate::JournalError> {
+        if self.namespace_rename.is_some() {
+            return Err(crate::JournalError::InvalidState);
+        }
         let admission = Arc::new(
             crate::recovery_admission::RecoveryAdmission::new_admitted(
                 Arc::clone(&state),
@@ -204,7 +220,12 @@ impl DurableEditRecoveryProvider {
             admission: self
                 .streamed
                 .as_ref()
-                .map(|context| Arc::clone(&context.admission)),
+                .map(|context| Arc::clone(&context.admission))
+                .or_else(|| {
+                    self.namespace_rename
+                        .as_ref()
+                        .map(|context| Arc::clone(&context.admission))
+                }),
         }
     }
 
@@ -261,6 +282,16 @@ impl DurableEditRecoveryProvider {
     /// Fail closed if a protected journal or incomplete staging record remains
     /// for this exact account/root, including state left by an earlier run.
     pub fn has_unresolved_edits(&self) -> Result<bool, BackendError> {
+        #[cfg(windows)]
+        if namespace_storage::has_unresolved_namespace(
+            self.namespace_rename.as_ref(),
+            self.streamed.as_ref(),
+            &self.catalog(),
+            &self.scope,
+            self.root_identity,
+        )? {
+            return Ok(true);
+        }
         if !valid_scope_binding(&self.scope, self.root_identity) {
             return Err(BackendError::Unavailable);
         }
@@ -998,6 +1029,17 @@ impl EditRecoveryProvider for DurableEditRecoveryProvider {
             return Err(BackendError::Unavailable);
         }
         let catalog = self.catalog();
+        // Guard retained/unknown namespace evidence even when this startup
+        // did not opt into namespace writers. Explicitly admitted Pending
+        // history remains connectable for recovery; it is never healthy zero.
+        #[cfg(windows)]
+        namespace_storage::has_unresolved_namespace(
+            self.namespace_rename.as_ref(),
+            self.streamed.as_ref(),
+            &catalog,
+            &self.scope,
+            self.root_identity,
+        )?;
         let pending = catalog
             .preflight_pending(&self.scope, self.root_identity)
             .map_err(|_| BackendError::Unavailable)?;
@@ -1016,6 +1058,15 @@ impl EditRecoveryProvider for DurableEditRecoveryProvider {
             }
             pending
         };
+        #[cfg(windows)]
+        let pending = if self.namespace_rename.is_some() {
+            // Cached getters do no disk I/O. Namespace status is authenticated
+            // by the bounded reader above and on explicit health queries;
+            // do not represent the content-only cache as namespace zero.
+            None
+        } else {
+            pending
+        };
         Ok(Arc::new(DurablePreparedEditRecovery {
             scope: self.scope.clone(),
             root_identity: self.root_identity,
@@ -1024,6 +1075,8 @@ impl EditRecoveryProvider for DurableEditRecoveryProvider {
             pending: Mutex::new(pending),
             #[cfg(windows)]
             streamed: self.streamed.clone(),
+            #[cfg(windows)]
+            namespace_rename: self.namespace_rename.clone(),
         }))
     }
 
@@ -1169,6 +1222,8 @@ struct DurablePreparedEditRecovery {
     pending: Mutex<Option<std::collections::HashSet<(String, u64)>>>,
     #[cfg(windows)]
     streamed: Option<StreamedRecoveryContext>,
+    #[cfg(windows)]
+    namespace_rename: Option<namespace_storage::NamespaceRenameStoreContext>,
 }
 
 // None is sticky: a collision or exhausted allowance cannot become a healthy
@@ -1505,6 +1560,18 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
         self.root_identity
     }
 
+    #[cfg(windows)]
+    fn file_rename_store(
+        &self,
+        scope: &EditJournalScope,
+        authorization: crate::namespace_intent::CapturedAuthorization,
+    ) -> Result<
+        Option<Arc<crate::streamed_store::namespace_rename_store::FileRenameStore>>,
+        BackendError,
+    > {
+        namespace_storage::prepared_store(self, scope, authorization)
+    }
+
     fn append_edit(
         &self,
         binding: &PlaceholderEditBinding,
@@ -1712,6 +1779,16 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
     }
 
     fn has_unresolved(&self) -> Result<bool, BackendError> {
+        #[cfg(windows)]
+        if namespace_storage::has_unresolved_namespace(
+            self.namespace_rename.as_ref(),
+            self.streamed.as_ref(),
+            &self.catalog,
+            &self.scope,
+            self.root_identity,
+        )? {
+            return Ok(true);
+        }
         let legacy = self
             .catalog
             .has_unresolved(&self.scope, self.root_identity)
@@ -3099,6 +3176,8 @@ mod tests {
             pending: Mutex::new(Some(Default::default())),
             #[cfg(windows)]
             streamed: None,
+            #[cfg(windows)]
+            namespace_rename: None,
         };
         let guard = direct.pending.lock().unwrap();
         assert_eq!(direct.cached_ordinary_pending_count(), None);
@@ -3207,6 +3286,8 @@ mod tests {
             pending: Mutex::new(Some(Default::default())),
             #[cfg(windows)]
             streamed: None,
+            #[cfg(windows)]
+            namespace_rename: None,
         });
         let other = direct.clone();
         assert!(

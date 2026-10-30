@@ -45,6 +45,111 @@ struct Loaded {
     commitment: [u8; 32],
 }
 
+/// Authenticated metadata classification only; never native completion proof,
+/// publication custody or replay authority. Other namespace formats stay unknown.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub(crate) struct NamespaceHistorySummary {
+    pub(crate) records: usize,
+    pub(crate) unresolved: usize,
+    pub(crate) other_namespace_evidence: bool,
+}
+
+/// One existing quota lease and one budget cover catalogs and selected prefixes.
+/// Real authenticated scope catalogs supply Space/root IDs, never caller guesses.
+pub(super) fn history_summary_existing(
+    root: Option<Arc<dyn Directory>>,
+    protector: Arc<dyn EditRecordProtector>,
+    policy: StorePolicy,
+    provider: &crate::ProviderScope,
+    physical_root: crate::ConfiguredRootIdentity,
+) -> Result<NamespaceHistorySummary, StoreError> {
+    let mut budget = scan_budget(policy)?;
+    if physical_root.file_index == 0
+        || [
+            provider.profile_id(),
+            provider.account_id(),
+            provider.server_origin(),
+        ]
+        .iter()
+        .any(|value| value.is_empty() || value.len() > 4096 || value.chars().any(char::is_control))
+        || raiun_opencloud::validate_captured_server_origin(provider.server_origin()).is_err()
+        || provider
+            .server_origin()
+            .split_once("://")
+            .is_none_or(|(_, authority)| authority.contains('/'))
+    {
+        return Err(StoreError::Invalid);
+    }
+    let Some(root) = root else {
+        return Ok(NamespaceHistorySummary::default());
+    };
+    root.verify()?;
+    let names = root.entries(budget.remaining_entries())?;
+    budget.entries(names.len())?;
+    if names.is_empty() {
+        root.verify()?;
+        return Ok(NamespaceHistorySummary::default());
+    }
+    if !names.iter().any(|name| name == V2_QUOTA_LOCK) {
+        return Err(StoreError::IncompleteEvidence);
+    }
+    let mut lock = root.open_quota_lock()?;
+    if lock.len()? != 0 {
+        return Err(StoreError::CorruptEvidence);
+    }
+    lock.lock_exclusive()?;
+    lock.verify()?;
+    // Re-enumerate only after locking; charge both bounded observations to the
+    // same allowance rather than resetting it per catalog or remote scope.
+    let names = root.entries(budget.remaining_entries())?;
+    budget.entries(names.len())?;
+    let catalogs = validate_root_catalog_scope_union(&*root, &*protector, &names, &mut budget)?;
+    let mut result = NamespaceHistorySummary {
+        other_namespace_evidence: names
+            .iter()
+            .any(|name| name == namespace_store::ROOT || name == namespace_file_store::ROOT),
+        ..NamespaceHistorySummary::default()
+    };
+    if names.iter().any(|name| name == ROOT) {
+        let rename = root.child(ROOT, false)?;
+        for scope in catalogs.rename {
+            let directory = rename.child(&scope_key(&scope)?, false)?;
+            let names = record_names(&*directory, &mut budget)?;
+            if scope.profile_id == provider.profile_id()
+                && scope.server_origin == provider.server_origin()
+                && scope.account_subject == provider.account_id()
+                && scope.root_volume_serial == physical_root.volume_serial
+                && scope.root_file_index == physical_root.file_index
+            {
+                // This ephemeral decoder uses the actual authenticated scope,
+                // opens no new directories/catalogs and acquires no second lock.
+                let base = SnapshotStore::from_directory(
+                    Arc::clone(&root),
+                    scope.clone(),
+                    Arc::clone(&protector),
+                    policy,
+                )?;
+                let decoder = FileRenameStore { base };
+                let remaining = MAX_RECORDS
+                    .checked_sub(result.records)
+                    .ok_or(StoreError::ScanLimit)?;
+                let rows =
+                    decoder.load_records(&*directory, &scope, &names, &mut budget, remaining)?;
+                result.records += rows.len();
+                result.unresolved += rows
+                    .iter()
+                    .filter(|row| !row.progress.recorded_complete)
+                    .count();
+            }
+            directory.verify()?;
+        }
+        rename.verify()?;
+    }
+    root.verify()?;
+    lock.verify()?;
+    Ok(result)
+}
+
 /// A verified record returned by read-only discovery. It is not a publication
 /// receipt and cannot be upgraded to a fresh rename lease.
 #[derive(Clone)]
@@ -1029,8 +1134,12 @@ pub(super) fn accounted_usage(
 }
 
 #[cfg(all(test, unix))]
-#[path = "namespace_rename_store_tests.rs"]
-mod tests;
+mod tests {
+    include!("namespace_rename_store_tests.rs");
+    mod namespace_history_tests {
+        include!("namespace_history_tests.rs");
+    }
+}
 
 #[cfg(all(
     test,
