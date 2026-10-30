@@ -1,0 +1,37 @@
+{
+  "@libre.graph.permissions.actions.allowedValues": [
+    "libre.graph/driveItem/permissions/create",
+    "libre.graph/driveItem/children/create",
+    "libre.graph/driveItem/standard/delete",
+    "libre.graph/driveItem/path/read",
+    "libre.graph/driveItem/quota/read",
+    "libre.graph/driveItem/content/read",
+    "libre.graph/driveItem/upload/create",
+    "libre.graph/driveItem/permissions/read",
+    "libre.graph/driveItem/children/read",
+    "libre.graph/driveItem/versions/read",
+    "libre.graph/driveItem/deleted/read",
+    "libre.graph/driveItem/path/update",
+    "libre.graph/driveItem/permissions/delete",
+    "libre.graph/driveItem/deleted/delete",
+    "libre.graph/driveItem/versions/update",
+    "libre.graph/driveItem/deleted/update",
+    "libre.graph/driveItem/basic/read",
+    "libre.graph/driveItem/permissions/update",
+    "libre.graph/driveItem/permissions/deny"
+  ],
+  "@libre.graph.permissions.roles.allowedValues": [
+    {
+      "@libre.graph.weight": 10,
+      "description": "View and download.",
+      "displayName": "Can view",
+      "id": "b1e2218d-eef8-4d4c-b82d-0f1a1b48f3b5"
+    },
+    {
+      "@libre.graph.weight": 100,
+      "description": "View, download and edit.",
+      "displayName": "Can edit",
+      "id": "2d00ce52-1fc2-4dbc-8b95-a73b73395f5a"
+    }
+  ]
+}

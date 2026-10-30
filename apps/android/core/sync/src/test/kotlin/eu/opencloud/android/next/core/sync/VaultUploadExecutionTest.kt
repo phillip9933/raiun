@@ -48,6 +48,18 @@ class VaultUploadExecutionTest {
     private var missingParentListings = 0
     private var noETagListings = 0
     private var rejectExistingOnPut = false
+    private var expectedPutETag: String? = null
+    private var extraChildren = ""
+    private var invalidTail = ""
+    private var remoteRootId = "vault-id"
+    private val davDepths = mutableListOf<String>()
+    private var honorRootDepthZero = false
+    private var parentMemberScans = 0
+    private var targetStats = 0
+    private var targetStatBytes = 0L
+    private var metadataBytes = 0L
+    private var statFileId = "file-id"
+    private var statTail = ""
 
     @Before fun prepare() {
         server.start()
@@ -87,12 +99,18 @@ class VaultUploadExecutionTest {
                     if (request.method == "PUT") {
                         puts++
                         if (revokeOnPut) revoked = true
-                        assertEquals("*", request.getHeader("If-None-Match"))
+                        if (expectedPutETag == null) {
+                            assertEquals("*", request.getHeader("If-None-Match"))
+                        } else {
+                            assertEquals(expectedPutETag, request.getHeader("If-Match"))
+                            assertEquals(null, request.getHeader("If-None-Match"))
+                        }
                         if (rejectExistingOnPut && remote != null) return MockResponse().setResponseCode(412)
                         remote = request.body.readByteArray()
                         return MockResponse().setResponseCode(201)
                     }
                     if (request.method == "GET" && path.endsWith("enc-name")) {
+                        assertEquals("\"tag-file-id\"", request.getHeader("If-Match"))
                         val body = requireNotNull(remote).copyOf()
                         if (corruptRead) body[40] = 99
                         downloadRange = request.getHeader("Range")
@@ -113,6 +131,10 @@ class VaultUploadExecutionTest {
                         return response.setBody(Buffer().write(body.copyOfRange(offset, body.size)))
                     }
                     if (request.method == "PROPFIND") {
+                        val depth = requireNotNull(request.getHeader("Depth"))
+                        davDepths += depth
+                        if (path == "/dav/files/public.vault/enc-name") return statResponse()
+                        if (path.trimEnd('/') == "/dav/files/public.vault" && depth == "1") parentMemberScans++
                         val root =
                             if (path.trimEnd('/') == "/dav/files") {
                                 entry("/dav/files/", "root", "files", true) +
@@ -126,14 +148,16 @@ class VaultUploadExecutionTest {
                                 if (hidden) hiddenDestinationListings--
                                 val noETag = remote != null && noETagListings > 0
                                 if (noETag) noETagListings--
+                                val hideSource = remote == null || hidden
+                                val depthZero = honorRootDepthZero && depth == "0"
                                 entry(
                                     "/dav/files/public.vault/",
-                                    "vault-id",
+                                    remoteRootId,
                                     "public.vault",
                                     true,
                                     "<ocrclone:integrity-id>$token</ocrclone:integrity-id>",
                                 ) +
-                                    if (remote == null || hidden) {
+                                    if (hideSource || depthZero) {
                                         ""
                                     } else {
                                         entry(
@@ -145,9 +169,14 @@ class VaultUploadExecutionTest {
                                         )
                                     }
                             }
-                        return MockResponse().setResponseCode(207).setBody(
-                            "<d:multistatus xmlns:d=\"DAV:\" xmlns:oc=\"http://owncloud.org/ns\" xmlns:ocrclone=\"ocrclone\">$root</d:multistatus>",
-                        )
+                        val includeChildren = !honorRootDepthZero || depth != "0"
+                        val extras =
+                            if (path.trimEnd('/') == "/dav/files/public.vault" && includeChildren) {
+                                extraChildren + invalidTail
+                            } else {
+                                ""
+                            }
+                        return metadataResponse(root + extras)
                     }
                     return MockResponse().setBody(
                         """{"value":[{"id":"drive","name":"Personal","driveType":"personal","root":{"id":"root","webDavUrl":"${server.url(
@@ -156,6 +185,27 @@ class VaultUploadExecutionTest {
                     )
                 }
             }
+    }
+
+    private fun metadataResponse(entries: String): MockResponse {
+        val body =
+            "<d:multistatus xmlns:d=\"DAV:\" xmlns:oc=\"http://owncloud.org/ns\" " +
+                "xmlns:ocrclone=\"ocrclone\">$entries</d:multistatus>"
+        metadataBytes += body.toByteArray().size
+        return MockResponse().setResponseCode(207).setBody(body)
+    }
+
+    private fun statResponse(): MockResponse {
+        targetStats++
+        if (remote == null) return MockResponse().setResponseCode(404)
+        val before = metadataBytes
+        // Hold the version constant so the replacement-ID test independently proves identity binding.
+        val descriptor =
+            entry("/dav/files/public.vault/enc-name", statFileId, "enc-name", false)
+                .replace("<d:getetag>\"tag-$statFileId\"</d:getetag>", "<d:getetag>\"tag-file-id\"</d:getetag>")
+        val response = metadataResponse(descriptor + statTail)
+        targetStatBytes += metadataBytes - before
+        return response
     }
 
     @After fun clean() {
@@ -302,6 +352,57 @@ class VaultUploadExecutionTest {
             assertEquals(0, puts)
         }
 
+    @Test fun preparedDownloadsStatOnlyTheirTargetAndMetadataStaysLinearWithWideParents() =
+        runBlocking {
+            remote = bytes.copyOf()
+            honorRootDepthZero = true
+            extraChildren =
+                (0 until 7000).joinToString("") { n ->
+                    entry("/dav/files/public.vault/opaque-$n", "extra-$n", "opaque-$n", false)
+                }
+            assertTrue(extraChildren.toByteArray().size > 2 * 1024 * 1024)
+            val (firstStore, first) = downloadJob()
+            repository.executePreparedDownload(first, firstStore, { true }, {})
+            val oneMetadataCost = metadataBytes
+            repeat(3) {
+                val (store, job) = downloadJob()
+                repository.executePreparedDownload(job, store, { true }, {})
+                assertArrayEquals(bytes, store.partial(job).readBytes())
+            }
+            assertEquals(0, parentMemberScans)
+            assertEquals(4, targetStats)
+            assertEquals(4 * oneMetadataCost, metadataBytes)
+            assertTrue(targetStatBytes < 4 * 2_048)
+            assertTrue(metadataBytes < 4 * 20_000)
+            assertEquals(0, puts)
+        }
+
+    @Test fun changedExactStatIdentityRefusesCiphertextBeforeGet() {
+        remote = bytes.copyOf()
+        val (store, job) = downloadJob()
+        statFileId = "replacement-file-id"
+        val failure =
+            assertThrows(OpenCloudException::class.java) {
+                runBlocking { repository.executePreparedDownload(job, store, { true }, {}) }
+            }
+        assertEquals(OpenCloudError.PreconditionFailed, failure.error)
+        assertEquals(null, downloadRange)
+        assertEquals(0, puts)
+    }
+
+    @Test fun extraResourceAfterValidTargetStatCannotTriggerCiphertextGet() {
+        remote = bytes.copyOf()
+        val (store, job) = downloadJob()
+        statTail = entry("/dav/files/public.vault/sibling", "sibling-id", "sibling", false)
+        val failure =
+            assertThrows(OpenCloudException::class.java) {
+                runBlocking { repository.executePreparedDownload(job, store, { true }, {}) }
+            }
+        assertEquals(OpenCloudError.InvalidResponse, failure.error)
+        assertEquals(null, downloadRange)
+        assertEquals(0, puts)
+    }
+
     @Test fun ciphertextDownloadResumesOnlyTheCapturedStrongVersion() =
         runBlocking {
             remote = bytes.copyOf()
@@ -339,6 +440,52 @@ class VaultUploadExecutionTest {
         assertEquals(null, downloadRange)
     }
 
+    @Test fun largeRootUploadAndDownloadKeepCapturedVersionsAndProofs() =
+        runBlocking {
+            extraChildren =
+                (0 until 7000).joinToString("") { number ->
+                    entry("/dav/files/public.vault/opaque-$number", "extra-$number", "opaque-$number", false)
+                }
+            assertTrue(extraChildren.toByteArray().size > 2 * 1024 * 1024)
+            val upload = job()
+            assertEquals("\"tag-file-id\"", repository.executePreparedUpload(upload, payloads, { true }, false, {}, {}))
+            val (downloads, download) = downloadJob()
+            assertEquals(bytes.size.toLong(), repository.executePreparedDownload(download, downloads, { true }, {}))
+            assertArrayEquals(bytes, downloads.partial(download).readBytes())
+            assertEquals(1, puts)
+            assertEquals(setOf("0", "1"), davDepths.toSet())
+        }
+
+    @Test fun lateDuplicateRejectsLargeRootBeforeUploadOrCiphertextDownload() {
+        remote = bytes.copyOf()
+        extraChildren =
+            (0 until 7000).joinToString("") { number ->
+                entry("/dav/files/public.vault/opaque-$number", "extra-$number", "opaque-$number", false)
+            }
+        invalidTail = entry("/dav/files/public.vault/duplicate", "extra-0", "duplicate", false)
+        val upload = job()
+        assertThrows(OpenCloudException::class.java) {
+            runBlocking { repository.executePreparedUpload(upload, payloads, { true }, false, {}, {}) }
+        }
+        val (downloads, download) = downloadJob()
+        assertThrows(OpenCloudException::class.java) {
+            runBlocking { repository.executePreparedDownload(download, downloads, { true }, {}) }
+        }
+        assertEquals(0, puts)
+        assertEquals(null, downloadRange)
+    }
+
+    @Test fun streamedRootIdentityReplacementFailsBeforeMutation() {
+        remoteRootId = "replacement-vault-id"
+        val upload = job()
+        val failure =
+            assertThrows(OpenCloudException::class.java) {
+                runBlocking { repository.executePreparedUpload(upload, payloads, { true }, false, {}, {}) }
+            }
+        assertEquals(OpenCloudError.PreconditionFailed, failure.error)
+        assertEquals(0, puts)
+    }
+
     private fun downloadJob(): Pair<VaultDownloadStore, VaultDownloadJob> {
         val store = VaultDownloadStore(java.io.File(directory, "downloads"))
         val source =
@@ -356,9 +503,45 @@ class VaultUploadExecutionTest {
         return store to job
     }
 
-    private fun job(): VaultUploadJob =
+    @Test fun replacementUsesCapturedETagAndVerifiesAllCommittedCiphertext() =
+        runBlocking {
+            remote = ByteArray(bytes.size) { 42 }
+            expectedPutETag = "\"tag-file-id\""
+            val job = job(expectedPutETag)
+            assertEquals(expectedPutETag, repository.executePreparedUpload(job, payloads, { true }, false, {}, {}))
+            assertEquals(1, puts)
+            assertArrayEquals(bytes, remote)
+            assertEquals(null, downloadRange)
+        }
+
+    @Test fun replacementNeverFetchesAFreshETagToOverwriteAnotherVersion() {
+        remote = ByteArray(bytes.size) { 42 }
+        val job = job("\"old-version\"")
+        val failure =
+            assertThrows(OpenCloudException::class.java) {
+                runBlocking { repository.executePreparedUpload(job, payloads, { true }, false, {}, {}) }
+            }
+        assertEquals(OpenCloudError.PreconditionFailed, failure.error)
+        assertEquals(0, puts)
+        assertArrayEquals(ByteArray(bytes.size) { 42 }, remote)
+    }
+
+    @Test fun replacementLostResponseRecoveryRequiresMatchingCiphertextAndStrongReadVersion() =
+        runBlocking {
+            remote = bytes.copyOf()
+            val job = job("\"original-version\"")
+            assertEquals("\"tag-file-id\"", repository.executePreparedUpload(job, payloads, { true }, true, {}, {}))
+            assertEquals(0, puts)
+            wrongReadETag = true
+            assertThrows(OpenCloudException::class.java) {
+                runBlocking { repository.executePreparedUpload(job, payloads, { true }, true, {}, {}) }
+            }
+            assertEquals(0, puts)
+        }
+
+    private fun job(expectedETag: String? = null): VaultUploadJob =
         payloads
-            .prepare(location, "public.vault/enc-name", null, vaultProofDigest("public-proof")) {
+            .prepare(location, "public.vault/enc-name", expectedETag, vaultProofDigest("public-proof")) {
                 it.write(bytes)
             }.also { check(payloads.finishPrepared(it.id) { true }) }
 

@@ -9,7 +9,7 @@
     <string name="settings_encrypted_preferences_summary">Biometrische Auswahl für verschlüsselte Ordner und Spaces</string>
     <string name="settings_permissions">Berechtigungen</string>
     <string name="settings_permissions_summary">Zugriff auf Foto- und Videometadaten</string>
-    <string name="settings_encrypted_preferences_explanation">Diese Auswahl wird auf diesem Gerät gespeichert. Beim Zurücksetzen wird ein gespeicherter biometrischer Schlüssel entfernt. Nach dem nächsten Entsperren mit dem Passwort kann Raiun erneut fragen.</string>
+    <string name="settings_encrypted_preferences_explanation">Diese Auswahl wird auf diesem Gerät gespeichert. Die Liste enthält gemerkten Smartphonezugriff, abgelehnte Merkanfragen und ältere biometrische Zugriffe. Beim Zurücksetzen eines Ortes werden die lokalen Entsperroptionen gelöscht. Nach der Anmeldung mit dem Passwort kann Raiun erneut fragen.</string>
     <string name="settings_encrypted_preferences_empty">Für dieses Konto gibt es keine biometrischen Einstellungen für verschlüsselte Orte.</string>
     <string name="settings_encrypted_preferences_failed">Die Verschlüsselte Bereiche konnten nicht gelesen werden.</string>
     <string name="settings_encrypted_folder">Ordner</string>

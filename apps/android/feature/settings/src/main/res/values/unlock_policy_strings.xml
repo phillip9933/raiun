@@ -1,0 +1,10 @@
+<resources>
+    <string name="settings_encrypted_ask_every_time">Ask every time</string>
+    <string name="settings_encrypted_unlock_session_explanation">When on, Raiun requires a fresh password or biometric unlock every time and removes remembered phone keys; older biometric keys remain available for per-use unlocks. When off, remembered locations can reopen on this phone after Raiun restarts, while the phone is unlocked. Unsupported devices or phones without a secure screen lock require fresh authentication each time.</string>
+    <string name="settings_encrypted_unlock_policy_failed">Could not change the unlock setting. Try again.</string>
+    <string name="settings_encrypted_phone_remembered">Remembered on this phone</string>
+    <string name="settings_encrypted_phone_declined">Phone remembering declined</string>
+    <string name="settings_encrypted_reset_title_device">Forget this vault on this phone?</string>
+    <string name="settings_encrypted_reset_explanation_device">Raiun will remove this phone’s saved unlock choice and local key for %1$s. You will need to authenticate again before it can be remembered.</string>
+    <string name="settings_encrypted_forget_phone">Forget on this phone</string>
+</resources>

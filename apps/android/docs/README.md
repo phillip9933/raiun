@@ -5,12 +5,15 @@ Start with [README](../README.md) for installation and current limitations, and 
 | Document | Purpose |
 | --- | --- |
 | [Product backlog](../../../docs/PRODUCT-BACKLOG.md) | Queued Android and shared product improvements |
+| [OpenCloud 9 compatibility](OPENCLOUD-9.md) | Published-server review and guest invitation creation/management boundaries |
 | [Testing](TESTING.md) | Quality commands, device requirements and validation limits |
 | [Linux development](LINUX-DEVELOPMENT.md) | Installed local toolchain, commands and validation evidence |
-| [Encrypted vault guide](ENCRYPTED-VAULTS-PLAN.md) | Android 1.0.0 encrypted-vault features, boundaries and interoperability |
+| [Encrypted vault guide](ENCRYPTED-VAULTS-PLAN.md) | Published encrypted-vault behavior, local follow-up, boundaries and interoperability |
 | [Scanner SDK](OFFLINE-SCANNER-SDK.md) | Pinned dependency setup and host ownership |
 | [Screenshot testing](SCREENSHOT_TESTING.md) | Golden ownership and review |
+| [Shared design mapping](SHARED-DESIGN.md) | Native Material theme, account accents and scoped accessibility checks |
 | [Release procedure](RELEASING.md) | Packaging, signing continuity and release checks |
+| [Android 1.3.0 release notes](RELEASE-NOTES-1.3.0.md) | Android 1.3.0 changes and update guidance |
 | [Android 1.2.0 release notes](RELEASE-NOTES-1.2.0.md) | Android 1.2.0 changes and update guidance |
 | [Android 1.1.0 release notes](RELEASE-NOTES-1.1.0.md) | Android 1.1.0 changes and update guidance |
 | [Translation feedback](TRANSLATION-REVIEW.md) | Reporting wording/layout issues and maintaining translations |
@@ -40,4 +43,4 @@ Paths below are relative to `apps/android`. This map reflects [settings.gradle.k
 
 Tests live with their modules under `src/test` and `src/androidTest`. The scanner is a pinned binary dependency, not a source module in this repository. Keep module boundaries within this platform project. See the [monorepo guide](../../../docs/MONOREPO.md) for repository-wide ownership and the later desktop import.
 
-[Server connections](SERVER-CONNECTIONS.md) describes the unreleased Wi-Fi route and scoped TLS client-certificate settings, including compatibility limits and acceptance requirements.
+[Server connections](SERVER-CONNECTIONS.md) describes Wi-Fi routing and scoped TLS client-certificate settings, including compatibility limits and acceptance requirements.

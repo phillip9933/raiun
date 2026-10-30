@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="error_local_copies_retained">Some local copies changed or are in use and were kept. Close open files or finish downloads, then try again.</string>
+    <string name="error_local_copy_removal_failed">Raiun could not finish removing local copies. Check device storage and try again.</string>
+</resources>

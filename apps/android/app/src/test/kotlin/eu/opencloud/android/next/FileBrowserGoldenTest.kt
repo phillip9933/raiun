@@ -569,7 +569,7 @@ class FileBrowserGoldenTest {
     fun fileBrowserAccountInformation_invokesNavigation() {
         var opened = false
         render(browserState(), onOpenAccount = { opened = true })
-        composeRule.onNodeWithContentDescription("Open account information").performClick()
+        composeRule.onNodeWithContentDescription("Open account information", substring = true).performClick()
         org.junit.Assert.assertTrue(opened)
     }
 

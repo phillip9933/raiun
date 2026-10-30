@@ -1,30 +1,37 @@
 package eu.opencloud.android.next.core.sync
 
+import android.content.Context
 import eu.opencloud.android.next.core.database.VaultExclusionDao
 import eu.opencloud.android.next.core.network.DownloadExpectation
 import eu.opencloud.android.next.core.network.EndpointPolicy
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.network.RemoteDiscoveryClient
+import eu.opencloud.android.next.core.network.RemoteFolderEntry
+import eu.opencloud.android.next.core.network.RemoteFolderSink
 import eu.opencloud.android.next.core.network.RemoteFolderSnapshot
 import eu.opencloud.android.next.core.network.RemoteResource
 import eu.opencloud.android.next.core.network.TransferClient
 import eu.opencloud.android.next.core.network.VaultDavClient
+import eu.opencloud.android.next.core.network.VaultDavListing
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import java.io.File
 import java.io.FilterInputStream
 import java.io.FilterOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 
 /** Ordinary mutations retain the same account/root/exclusion checks as encrypted discovery. */
+@Suppress("LongParameterList") // Root/exclusion guards and app-private staging stay explicit.
 internal class OrdinaryBoundaryEndpoint(
     private val access: VaultAccess,
     private val location: VaultLocation,
     private val exclusions: VaultExclusionDao,
     private val requireRoot: suspend () -> Unit,
     endpoints: EndpointPolicy = EndpointPolicy(),
+    private val stagingDirectory: File = File(requireNotNull(System.getProperty("java.io.tmpdir"))),
 ) : BoundaryEndpoint {
     override val identity = "ordinary:${location.accountId}:${location.canonicalServer}:${location.driveId}"
     override val encrypted = false
@@ -39,11 +46,109 @@ internal class OrdinaryBoundaryEndpoint(
             snapshot.excludedVaultPaths.map { it.trimEnd('/').substringAfterLast('/') }
     }
 
+    override suspend fun containsName(
+        path: String,
+        name: String,
+    ): Boolean = lookupTarget(childPath(path, name)).present
+
     override suspend fun list(path: String): List<BoundaryEntry> {
         val snapshot = readSnapshot(path)
         // A recursive ordinary copy must not silently omit an encrypted child.
         if (snapshot.excludedVaultPaths.isNotEmpty()) throw OpenCloudException(OpenCloudError.AccessDenied)
         return snapshot.resources.map(RemoteResource::asBoundaryEntry)
+    }
+
+    override suspend fun openDirectory(
+        context: Context,
+        path: String,
+    ): BoundaryDirectorySnapshot =
+        captureBoundaryDirectory(context, path, guard = { requireSnapshotAccess(path) }) { emit ->
+            var excluded = false
+            inspectChildren(path) { child ->
+                val resource = child.resource
+                if (resource == null) excluded = true else emit(resource.asBoundaryEntry())
+            }
+            // A complete ordinary recursive snapshot never silently omits encrypted descendants.
+            if (excluded) throw OpenCloudException(OpenCloudError.AccessDenied)
+            guard(path)
+        }
+
+    override suspend fun openNameIndex(
+        context: Context,
+        path: String,
+    ): BoundaryNameIndex =
+        captureBoundaryNames(context, path, guard = { requireSnapshotAccess(path) }) { emit ->
+            inspectChildren(path) { child ->
+                emit(child.resource?.name ?: child.path.trimEnd('/').substringAfterLast('/'))
+            }
+            // Excluded marker names occupy their slot without becoming readable ordinary items.
+            guard(path)
+        }
+
+    override suspend fun openDestinationFolders(
+        context: Context,
+        path: String,
+    ): BoundaryDestinationSnapshot =
+        captureBoundaryDestinationFolders(context, path, guard = { requireSnapshotAccess(path) }) { emit ->
+            inspectDestinationFolders(path, emit)
+        }
+
+    private suspend fun inspectDestinationFolders(
+        path: String,
+        emit: (BoundaryDestinationFolder) -> Unit,
+    ) {
+        guard(path)
+        // Keep RemoteDiscoveryClient's ordinary URL constraint when using the strict DAV metadata visitor.
+        if (url(path).toHttpUrl().pathSegments.any { it.endsWith(".vault", ignoreCase = true) }) {
+            throw OpenCloudException(OpenCloudError.Unsupported)
+        }
+        val coroutine = currentCoroutineContext()
+
+        fun active() {
+            coroutine.ensureActive()
+            if (!access.permit()) throw OpenCloudException(OpenCloudError.AccessDenied)
+        }
+        StagedRemoteFolder.create(stagingDirectory).use { identities ->
+            val listing =
+                withBoundaryRequestCancellation({ access.http.dispatcher.cancelAll() }) {
+                    dav.streamDirectory(
+                        location.rootWebDavUrl,
+                        path,
+                        access.authorization,
+                        registerIdentity = { id, childPath ->
+                            active()
+                            identities.registerCanonicalPath("id:$id") &&
+                                identities.registerCanonicalPath("path:$childPath")
+                        },
+                        consume = { child ->
+                            active()
+                            if (child.isFolder) {
+                                val marker = child.rawName.endsWith(".vault") || child.isVaultMarker
+                                emit(BoundaryDestinationFolder(child.id, child.relativePath, child.rawName, marker))
+                            }
+                        },
+                    )
+                }
+            requireDestinationCollection(path, listing)
+        }
+        guard(path)
+    }
+
+    private fun requireDestinationCollection(
+        path: String,
+        listing: VaultDavListing,
+    ) {
+        if (listing.requestedIsVaultMarker) throw OpenCloudException(OpenCloudError.AccessDenied)
+        if (path.trim('/').isEmpty() && !graphRootMatchesDav(location.sourceRootId, listing.root.id)) {
+            throw OpenCloudException(OpenCloudError.PreconditionFailed)
+        }
+    }
+
+    private suspend fun requireSnapshotAccess(path: String) {
+        access.requireCurrent()
+        if (exclusions.denies(location.accountId, location.driveId, "/${path.trim('/')}", false)) {
+            throw OpenCloudException(OpenCloudError.AccessDenied)
+        }
     }
 
     private suspend fun readSnapshot(path: String): RemoteFolderSnapshot {
@@ -54,17 +159,6 @@ internal class OrdinaryBoundaryEndpoint(
             }
         access.requireCurrent()
         return snapshot
-    }
-
-    private fun RemoteFolderSnapshot.requireOrdinaryTarget(path: String) {
-        if (excludedVaultPaths.any {
-                it.trim(
-                    '/',
-                ) == path.trim('/')
-            }
-        ) {
-            throw OpenCloudException(OpenCloudError.AccessDenied)
-        }
     }
 
     override suspend fun requireUnchanged(entry: BoundaryEntry) {
@@ -154,9 +248,9 @@ internal class OrdinaryBoundaryEndpoint(
         val path = childPath(parent, name)
         guard(parent)
         guard(path)
-        val snapshot = readSnapshot(parent)
-        snapshot.requireOrdinaryTarget(path)
-        if (snapshot.resources.any { it.name == name }) throw OpenCloudException(OpenCloudError.Conflict)
+        val target = lookupTarget(path)
+        target.requireOrdinary()
+        if (target.present) throw OpenCloudException(OpenCloudError.Conflict)
         withBoundaryRequestCancellation({ access.http.dispatcher.cancelAll() }) {
             dav.createCollection(location.rootWebDavUrl, path, access.authorization)
         }
@@ -167,9 +261,7 @@ internal class OrdinaryBoundaryEndpoint(
     override suspend fun delete(entry: BoundaryEntry) {
         val current = find(entry.path)
         if (!sameBoundaryEntry(entry, current)) throw OpenCloudException(OpenCloudError.PreconditionFailed)
-        if (entry.directory &&
-            list(entry.path).isNotEmpty()
-        ) {
+        if (entry.directory && !directoryIsEmpty(entry.path)) {
             throw OpenCloudException(OpenCloudError.PreconditionFailed)
         }
         // Capture the current version BEFORE proving emptiness; a subsequent addition must invalidate this ETag.
@@ -183,17 +275,89 @@ internal class OrdinaryBoundaryEndpoint(
             )
         }
         access.requireCurrent()
-        val remaining = readSnapshot(current.path.substringBeforeLast('/', ""))
-        if (remaining.resources.any { it.path.trim('/') == current.path.trim('/') }) {
+        if (lookupTarget(current.path).present) {
             throw OpenCloudException(OpenCloudError.PreconditionFailed)
         }
     }
 
     private suspend fun find(path: String): BoundaryEntry {
-        val snapshot = readSnapshot(path.substringBeforeLast('/', ""))
-        snapshot.requireOrdinaryTarget(path)
-        return snapshot.resources.singleOrNull { it.path.trim('/') == path.trim('/') }?.asBoundaryEntry()
-            ?: throw OpenCloudException(OpenCloudError.PreconditionFailed)
+        val target = lookupTarget(path)
+        target.requireOrdinary()
+        return target.entry ?: throw OpenCloudException(OpenCloudError.PreconditionFailed)
+    }
+
+    private suspend fun lookupTarget(path: String): TargetMatch {
+        var match = TargetMatch()
+        inspectChildren(path.substringBeforeLast('/', "")) { child ->
+            if (child.path.trim('/') == path.trim('/')) {
+                match = TargetMatch(child.resource?.asBoundaryEntry(), child.resource == null)
+            }
+        }
+        return match
+    }
+
+    private suspend fun directoryIsEmpty(path: String): Boolean {
+        var present = false
+        var encrypted = false
+        inspectChildren(path) { child ->
+            present = true
+            if (child.resource == null) encrypted = true
+        }
+        if (encrypted) throw OpenCloudException(OpenCloudError.AccessDenied)
+        return !present
+    }
+
+    /** Visitors retain only private lookup state; no caller observes provisional XML entries. */
+    private suspend fun inspectChildren(
+        path: String,
+        inspect: (RemoteFolderEntry) -> Unit,
+    ) {
+        guard(path)
+        val context = currentCoroutineContext()
+
+        fun active() {
+            context.ensureActive()
+            if (!access.permit()) throw OpenCloudException(OpenCloudError.AccessDenied)
+        }
+        StagedRemoteFolder.create(stagingDirectory).use { identities ->
+            withBoundaryRequestCancellation({ access.http.dispatcher.cancelAll() }) {
+                discovery.streamFolder(
+                    location.rootWebDavUrl,
+                    path,
+                    access.authorization,
+                    RemoteFolderSink(
+                        registerCanonicalPath = { value ->
+                            active()
+                            identities.registerCanonicalPath("href:$value")
+                        },
+                        registerCollectionId = { id ->
+                            active()
+                            identities.registerCanonicalPath("id:$id")
+                        },
+                        onEntry = { child ->
+                            active()
+                            val unique =
+                                identities.registerCanonicalPath("id:${child.id}") &&
+                                    identities.registerCanonicalPath("path:${child.path}")
+                            if (!unique) throw OpenCloudException(OpenCloudError.InvalidResponse)
+                            inspect(child)
+                        },
+                    ),
+                )
+            }
+            access.requireCurrent()
+        }
+    }
+
+    private data class TargetMatch(
+        val entry: BoundaryEntry? = null,
+        val encrypted: Boolean = false,
+    ) {
+        val present: Boolean get() = entry != null || encrypted
+
+        fun requireOrdinary() {
+            if (encrypted) throw OpenCloudException(OpenCloudError.AccessDenied)
+        }
     }
 
     private suspend fun guard(path: String) {

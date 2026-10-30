@@ -51,6 +51,8 @@ dependencies {
     implementation(libs.serialization.json)
     implementation(libs.okhttp)
     testImplementation(libs.junit)
+    testImplementation(libs.lazysodium.java)
+    testImplementation(libs.jna.android)
     testImplementation(libs.androidx.work.testing)
     testImplementation("androidx.concurrent:concurrent-futures:1.1.0")
     testImplementation(libs.kotlinx.coroutines.test)

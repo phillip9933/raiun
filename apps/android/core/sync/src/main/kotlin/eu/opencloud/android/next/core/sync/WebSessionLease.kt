@@ -15,6 +15,9 @@ class WebSessionLease<T : Any> internal constructor(
 ) {
     private val payload = AtomicReference<T?>(session)
 
+    /** Last UI-thread guard after current() revalidated the persistent resource snapshot on IO. */
+    fun isPermitted(): Boolean = payload.get() != null && permitted()
+
     // Drop sensitive causes; mapping rethrows cancellation.
     @Suppress("TooGenericExceptionCaught", "SwallowedException")
     suspend fun current(): T =

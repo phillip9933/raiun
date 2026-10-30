@@ -9,6 +9,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import eu.opencloud.android.next.core.database.BackupTransferStats
 import eu.opencloud.android.next.core.database.FolderBackupEntity
 import eu.opencloud.android.next.core.database.TransferEntity
 import eu.opencloud.android.next.core.network.OpenCloudError
@@ -21,11 +22,13 @@ import java.util.Date
 internal fun BackupSyncInfo(
     backup: FolderBackupEntity,
     transfers: List<TransferEntity>,
+    stats: eu.opencloud.android.next.core.database.BackupTransferStats? = null,
 ) {
     val context = LocalContext.current
     val diagnostics = remember(context) { BackupScanDiagnostics(context) }
     val failureFlow = remember(backup, diagnostics) { diagnostics.observe(backup) }
     val failure by failureFlow.collectAsState(initial = diagnostics.read(backup))
+    val progress = stats ?: legacyBackupTransferStats(backup, transfers)
     androidx.compose.foundation.layout.Column {
         failure?.let { BackupScanFailureInfo(it) }
         Text(
@@ -41,16 +44,8 @@ internal fun BackupSyncInfo(
             },
             style = MaterialTheme.typography.bodySmall,
         )
-        val matching =
-            transfers.filter {
-                it.accountId == backup.accountId &&
-                    it.spaceId == backup.spaceId &&
-                    it.direction == "UPLOAD" &&
-                    it.sourceUri?.startsWith(backup.sourceTreeUri.trimEnd('/') + "/document/") == true &&
-                    it.destinationPath.startsWith(backup.destinationPath.trimEnd('/') + "/")
-            }
-        val active = matching.count { it.state in setOf("QUEUED", "RUNNING", "RETRY") }
-        val failed = matching.count { it.state in setOf("FAILED", "CONFLICT") }
+        val active = progress.pending
+        val failed = progress.attention
         if (active > 0) {
             Text(
                 pluralStringResource(R.plurals.backup_settings_uploads_pending, active, active),
@@ -66,8 +61,7 @@ internal fun BackupSyncInfo(
                 style = MaterialTheme.typography.bodySmall,
             )
         }
-        val lastCompletedUpload =
-            matching.filter { it.state == "SUCCEEDED" }.maxOfOrNull { it.updatedAtEpochMillis }
+        val lastCompletedUpload = progress.lastCompleted
         if (lastCompletedUpload != null) {
             Text(
                 stringResource(R.string.backup_settings_last_completed_upload, backupDate(lastCompletedUpload)),
@@ -86,6 +80,26 @@ internal fun BackupSyncInfo(
             )
         }
     }
+}
+
+/** Explicit preview/test states can provide small row lists; production supplies query aggregates. */
+private fun legacyBackupTransferStats(
+    backup: FolderBackupEntity,
+    transfers: List<TransferEntity>,
+): BackupTransferStats {
+    val matching =
+        transfers.filter {
+            it.accountId == backup.accountId &&
+                it.spaceId == backup.spaceId &&
+                it.direction == "UPLOAD" &&
+                it.sourceUri?.startsWith(backup.sourceTreeUri.trimEnd('/') + "/document/") == true &&
+                it.destinationPath.startsWith(backup.destinationPath.trimEnd('/') + "/")
+        }
+    return BackupTransferStats(
+        pending = matching.count { it.state in setOf("QUEUED", "RUNNING", "RETRY") },
+        attention = matching.count { it.state in setOf("FAILED", "CONFLICT") },
+        lastCompleted = matching.filter { it.state == "SUCCEEDED" }.maxOfOrNull { it.updatedAtEpochMillis },
+    )
 }
 
 @Composable

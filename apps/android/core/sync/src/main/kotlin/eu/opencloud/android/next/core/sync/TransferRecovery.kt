@@ -41,4 +41,5 @@ internal fun reconcileVaultPayloads(
         }
     VaultUploadStore(context).reconcile(::retained)
     VaultDownloadStore(context).reconcile(::retained)
+    runBlocking { reconcileVaultOfflineGroups(context, store) }
 }

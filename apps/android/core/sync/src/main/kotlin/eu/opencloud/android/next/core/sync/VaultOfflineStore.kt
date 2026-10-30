@@ -1,11 +1,12 @@
 package eu.opencloud.android.next.core.sync
 
 import android.content.Context
-import android.util.AtomicFile
 import eu.opencloud.android.next.core.crypto.RcloneVaultCipher
 import eu.opencloud.android.next.core.database.AccountEntity
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
+import eu.opencloud.android.next.core.database.VaultOfflineGroups
+import eu.opencloud.android.next.core.database.vaultOfflineGroups
 import eu.opencloud.android.next.core.network.EndpointPolicy
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
@@ -16,10 +17,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -29,7 +28,6 @@ import java.io.OutputStream
 import java.nio.charset.StandardCharsets
 import java.security.GeneralSecurityException
 import java.security.MessageDigest
-import java.security.SecureRandom
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -50,9 +48,17 @@ class VaultOfflineStore internal constructor(
     private val beforePublication: () -> Unit = {},
     private val afterPublication: () -> Unit = {},
     private val publicationAccepted: suspend (String, VaultIdentity) -> Boolean = { _, _ -> false },
+    durability: OfflineDurability = OfflineDurability(root),
+    private val groupPublications: (() -> VaultOfflineGroups)? = null,
 ) {
     constructor(context: Context) : this(
         root = File(context.noBackupFilesDir, "vault-offline"),
+        durability = OfflineDurability(context.noBackupFilesDir),
+        groupPublications = {
+            FileBrowserStore(
+                FileBrowserDatabase.create(context.applicationContext),
+            ).vaultOfflineGroups()
+        },
         accountFor = { accountId ->
             FileBrowserStore(FileBrowserDatabase.create(context.applicationContext)).account(accountId)
         },
@@ -71,6 +77,29 @@ class VaultOfflineStore internal constructor(
         },
     )
 
+    private val ownership = VaultOfflineOwnership(root, durability)
+
+    internal val groupAccess by lazy {
+        VaultOfflineGroupAccess(
+            ownership,
+            cipherFromMaterial,
+            { identity ->
+                requireAccount(identity.accountId, identity.canonicalServer)
+                Unit
+            },
+            { account ->
+                val lock = permitFor()
+                val credentials = credentialLeaseFor(account)
+                val combined: () -> Boolean = { lock() && credentials() }
+                combined
+            },
+            ::recoverPublication,
+            ::pinDirectory,
+            beforePublication,
+            afterPublication,
+        )
+    }
+
     init {
         removeAbandonedStages(root)
     }
@@ -82,21 +111,26 @@ class VaultOfflineStore internal constructor(
             val credentialLease = credentialLeaseFor(accountId)
             if (!credentialLease()) throw OpenCloudException(OpenCloudError.AuthenticationRequired)
             val canonicalServer = endpoints.endpoint(account.serverUrl, allowQuery = false).toString()
-            val accountDir = accountDirectory(accountId)
-            if (accountRevoked(accountId) || VaultOfflineRevocations.accountBlocked(accountId)) {
+            val accountDir = ownership.accountDirectory(accountId)
+            if (ownership.accountRevoked(accountId) || VaultOfflineRevocations.accountBlocked(accountId)) {
                 return@withContext emptyList()
             }
             val result =
                 accountDir.listFiles().orEmpty().mapNotNull { directory ->
-                    if (!directory.isDirectory || !File(directory, MANIFEST).exists()) return@mapNotNull null
+                    if (!directory.isDirectory || !manifestExists(File(directory, MANIFEST))) return@mapNotNull null
                     val catalog = File(directory, CATALOG)
-                    val location = runCatching { decodeLocation(readSmall(catalog, MAX_CATALOG_BYTES)) }.getOrNull()
+                    val location =
+                        runCatching {
+                            decodeLocation(
+                                readOfflineMetadata(catalog, MAX_CATALOG_BYTES, durability = ownership.durability),
+                            )
+                        }.getOrNull()
                     location
                         ?.takeIf {
                             it.accountId == accountId &&
                                 it.canonicalServer == canonicalServer &&
-                                vaultDirectory(identityOf(it)) == directory &&
-                                !identityRevoked(identityOf(it)) &&
+                                ownership.vaultDirectory(identityOf(it)) == directory &&
+                                !ownership.identityRevoked(identityOf(it)) &&
                                 !VaultOfflineRevocations.identityBlocked(identityOf(it))
                         }?.copy(offlineOnly = true)
                 }
@@ -115,11 +149,11 @@ class VaultOfflineStore internal constructor(
             ) {
                 throw OpenCloudException(OpenCloudError.AuthenticationRequired)
             }
-            !accountRevoked(identity.accountId) &&
-                !identityRevoked(identity) &&
+            !ownership.accountRevoked(identity.accountId) &&
+                !ownership.identityRevoked(identity) &&
                 !VaultOfflineRevocations.accountBlocked(identity.accountId) &&
                 !VaultOfflineRevocations.identityBlocked(identity) &&
-                File(vaultDirectory(identity), MANIFEST).exists()
+                manifestExists(File(ownership.vaultDirectory(identity), MANIFEST))
         }
 
     /** Caller supplies a fresh, authenticated live entry and copies its original DAV ciphertext. */
@@ -146,11 +180,11 @@ class VaultOfflineStore internal constructor(
         val context = currentCoroutineContext()
         val accountGeneration = VaultOfflineRevocations.accountGeneration(identity.accountId)
         val identityGeneration = VaultOfflineRevocations.identityGeneration(identity)
-        publicationLockFor(identity.accountId).withLock {
-            lockFor(identity).withLock {
+        ownership.publicationLockFor(identity.accountId).withLock {
+            ownership.lockFor(identity).withLock {
                 recoverPublication(identity, location)
-                prepareForPin(identity)
-                val directory = vaultDirectory(identity)
+                ownership.prepareForPin(identity)
+                val directory = ownership.vaultDirectory(identity)
                 val blobs = File(directory, BLOBS)
                 check(
                     !java.nio.file.Files
@@ -159,13 +193,25 @@ class VaultOfflineStore internal constructor(
                 if (!blobs.isDirectory && !blobs.mkdirs()) throw OpenCloudException(OpenCloudError.Unsupported)
                 val manifestFile = File(directory, MANIFEST)
                 val catalogFile = File(directory, CATALOG)
-                val previousManifest = manifestFile.takeIf(File::exists)?.let { readSmall(it, MAX_MANIFEST_BYTES + 32) }
-                val previousCatalog = catalogFile.takeIf(File::exists)?.let { readSmall(it, MAX_CATALOG_BYTES) }
+                val previousManifest =
+                    manifestFile.takeIf(::manifestExists)?.let {
+                        readOfflineMetadata(
+                            it,
+                            MAX_MANIFEST_BYTES + 32,
+                            durability = ownership.durability,
+                        )
+                    }
+                val previousCatalog =
+                    catalogFile
+                        .takeIf(
+                            ::manifestExists,
+                        )?.let { readOfflineMetadata(it, MAX_CATALOG_BYTES, durability = ownership.durability) }
                 val stage = File.createTempFile(STAGE_PREFIX, ".ciphertext", blobs)
-                VaultOfflineStoreStageRegistry.active += stage.path
+                VaultOfflineStoreStageRegistry.active += stage.canonicalPath
                 var published: File? = null
                 var publishedPath: String? = null
                 var provisional = false
+                var localCommitAttempted = false
                 var journal: VaultOfflinePublicationJournal? = null
                 try {
                     var written = 0L
@@ -193,61 +239,97 @@ class VaultOfflineStore internal constructor(
                     }
                     if (written != entry.size) throw OpenCloudException(OpenCloudError.InvalidResponse)
                     checkPinActive(context, permit, identity, accountGeneration, identityGeneration)
-                    authenticateCiphertext(stage, keyMaterial) {
+                    authenticateOfflineCiphertext(stage, keyMaterial, cipherFromMaterial) {
                         checkPinActive(context, permit, identity, accountGeneration, identityGeneration)
                     }
                     val digest =
                         sha256File(stage) {
                             checkPinActive(context, permit, identity, accountGeneration, identityGeneration)
                         }
-                    val manifest = readManifestOrEmpty(identity, location, keyMaterial)
-                    val blobId = UUID.randomUUID().toString()
-                    val target = File(blobs, blobId)
-                    if (!stage.renameTo(target)) throw OpenCloudException(OpenCloudError.Unsupported)
-                    published = target
-                    publishedPath = target.path
-                    VaultOfflineStoreStageRegistry.active += target.path
-                    val cached = cachedEntry(entry, blobId, digest)
-                    val updated = manifest.withEntryAndAncestors(location, cached)
-                    requireAccount(identity.accountId, identity.canonicalServer)
-                    checkPinActive(context, permit, identity, accountGeneration, identityGeneration)
-                    beforePublication()
-                    val recovery =
-                        VaultOfflinePublicationJournal(
-                            publicationId ?: UUID.randomUUID().toString(),
-                            blobId,
-                            manifest.entries[entry.encryptedPath]?.blobId,
-                            encodeLocation(location).toByteArray(StandardCharsets.UTF_8),
-                            previousManifest,
-                            previousCatalog,
-                        )
-                    journal = recovery
-                    provisional = true
-                    VaultOfflineRevocations.clearIfUnchanged(identity, accountGeneration, identityGeneration) {
+                    val manifest = ownership.readManifestOrEmpty(identity, location, keyMaterial)
+                    try {
+                        val blobId = UUID.randomUUID().toString()
+                        val target = File(blobs, blobId)
+                        if (!stage.renameTo(target)) throw OpenCloudException(OpenCloudError.Unsupported)
+                        published = target
+                        publishedPath = target.canonicalPath
+                        VaultOfflineStoreStageRegistry.active += target.canonicalPath
+                        ownership.durability.syncParents(blobs)
+                        val cached = cachedEntry(entry, blobId, digest)
+                        val updated = manifest.withEntryAndAncestors(location, cached)
+                        requireAccount(identity.accountId, identity.canonicalServer)
                         checkPinActive(context, permit, identity, accountGeneration, identityGeneration)
-                        if (publicationId != null) recovery.write(directory)
-                        writeManifest(identity, location, keyMaterial, updated)
-                        writeCatalog(directory, location)
-                        clearRevocationMarkers(identity)
+                        beforePublication()
+                        val nextManifest =
+                            VaultOfflineIndex.prepare(
+                                directory,
+                                identity,
+                                location,
+                                keyMaterial,
+                                updated,
+                                durability = ownership.durability,
+                            ) {
+                                checkPinActive(context, permit, identity, accountGeneration, identityGeneration)
+                            }
+                        val recovery =
+                            VaultOfflinePublicationJournal(
+                                publicationId ?: UUID.randomUUID().toString(),
+                                blobId,
+                                manifest
+                                    .find(entry.encryptedPath) {
+                                        checkPinActive(context, permit, identity, accountGeneration, identityGeneration)
+                                    }?.blobId,
+                                encodeLocation(location).toByteArray(StandardCharsets.UTF_8),
+                                previousManifest,
+                                previousCatalog,
+                                nextManifestDigest = hex(sha256(nextManifest)),
+                                localCommitted = if (publicationId == null) false else null,
+                            )
+                        journal = recovery
+                        provisional = true
+                        VaultOfflineRevocations.clearIfUnchanged(identity, accountGeneration, identityGeneration) {
+                            checkPinActive(context, permit, identity, accountGeneration, identityGeneration)
+                            recovery.write(directory, ownership.durability)
+                            ownership.durability.writeAtomic(manifestFile, nextManifest)
+                            ownership.writeCatalog(directory, location)
+                            ownership.clearRevocationMarkers(identity)
+                        }
+                        // Room decides ownership while the identity mutex keeps provisional bytes from new readers.
+                        // A committed CAS must be observed even if the caller is cancelled during its suspension.
+                        withContext(NonCancellable) {
+                            afterPublication()
+                            checkPinActive(context, permit, identity, accountGeneration, identityGeneration)
+                            if (!commitPublication()) throw OpenCloudException(OpenCloudError.AccessDenied)
+                            if (publicationId == null) {
+                                localCommitAttempted = true
+                                recovery.commitLocal(directory, ownership.durability)
+                            }
+                            provisional = false
+                            published = null
+                        }
+                        recovery.finish(directory, accepted = true, durability = ownership.durability)
+                        VaultOfflineStoreStageRegistry.active -= target.canonicalPath
+                    } finally {
+                        manifest.close()
                     }
-                    // Room decides ownership while the identity mutex keeps provisional bytes from new readers.
-                    // A committed CAS must be observed even if the caller is cancelled during its suspension.
-                    withContext(NonCancellable) {
-                        afterPublication()
-                        checkPinActive(context, permit, identity, accountGeneration, identityGeneration)
-                        if (!commitPublication()) throw OpenCloudException(OpenCloudError.AccessDenied)
-                        provisional = false
-                        published = null
+                    ownership.readManifest(identity, location, keyMaterial).use {
+                        pruneVaultOfflineOrphanBlobs(
+                            directory,
+                            it,
+                            ownership.durability,
+                        ) { checkPinActive(context, permit, identity, accountGeneration, identityGeneration) }
                     }
-                    if (publicationId != null) recovery.finish(directory, accepted = true)
-                    pruneOrphanBlobs(directory, updated)
-                    VaultOfflineStoreStageRegistry.active -= target.path
+                    cleanupIndexes(directory)
                 } catch (failure: Throwable) {
-                    if (provisional) {
+                    if (localCommitAttempted) {
+                        // The commit-receipt directory sync may be ambiguous. Keep both generations/blobs
+                        // and let the persisted PREPARED/COMMITTED receipt decide on recovery.
+                        published = null
+                    } else if (provisional) {
                         try {
                             VaultOfflineRevocations.runIfUnchanged(identity, accountGeneration, identityGeneration) {
-                                journal?.restore(directory)
-                                if (publicationId != null) journal?.finish(directory, accepted = false)
+                                journal?.restore(directory, ownership.durability)
+                                journal?.finish(directory, accepted = false, durability = ownership.durability)
                             }
                         } catch (rollbackFailure: Exception) {
                             // Keep the new blob if durable metadata could still reference it after failed restoration.
@@ -261,31 +343,18 @@ class VaultOfflineStore internal constructor(
                     throw failure
                 } finally {
                     stage.delete()
-                    VaultOfflineStoreStageRegistry.active -= stage.path
+                    VaultOfflineStoreStageRegistry.active -= stage.canonicalPath
                     published?.let {
                         it.delete()
                     }
                     // The final path is no longer active even when rollback had to retain its ciphertext.
                     publishedPath?.let { VaultOfflineStoreStageRegistry.active -= it }
+                    // Cleanup must never conceal the original publication/storage error.
+                    runCatching { cleanupIndexes(directory) }
                 }
             }
         }
     }
-
-    /** Reads the encrypted manifest for a live session. */
-    internal suspend fun currentManifestForSession(
-        identity: VaultIdentity,
-        location: VaultLocation,
-        keyMaterial: ByteArray,
-    ): OfflineManifest =
-        withContext(Dispatchers.IO) {
-            requireLocation(identity, location)
-            requireAccount(identity.accountId, identity.canonicalServer)
-            lockFor(identity).withLock {
-                recoverPublication(identity, location)
-                readManifestOrEmpty(identity, location, keyMaterial)
-            }
-        }
 
     /** Marks an empty directory as available and persists its encrypted ancestor path. */
     internal suspend fun pinDirectory(
@@ -293,37 +362,48 @@ class VaultOfflineStore internal constructor(
         location: VaultLocation,
         encryptedPath: String,
         keyMaterial: ByteArray,
+        additionalPermit: () -> Boolean = { true },
     ) = withContext(Dispatchers.IO) {
         requireLocation(identity, location)
         requireAccount(identity.accountId, identity.canonicalServer)
         requireScopedPath(location, encryptedPath, allowRoot = true)
         val lockPermit = permitFor()
         val credentialLease = credentialLeaseFor(identity.accountId)
-        val permit = { lockPermit() && credentialLease() }
+        val permit = { lockPermit() && credentialLease() && additionalPermit() }
         if (!permit()) throw OpenCloudException(OpenCloudError.AccessDenied)
         val context = currentCoroutineContext()
         val accountGeneration = VaultOfflineRevocations.accountGeneration(identity.accountId)
         val identityGeneration = VaultOfflineRevocations.identityGeneration(identity)
-        lockFor(identity).withLock {
+        ownership.lockFor(identity).withLock {
             recoverPublication(identity, location)
-            prepareForPin(identity)
-            val directory = vaultDirectory(identity)
+            ownership.prepareForPin(identity)
+            val directory = ownership.vaultDirectory(identity)
             if (!directory.isDirectory && !directory.mkdirs()) throw OpenCloudException(OpenCloudError.Unsupported)
-            val manifest = readManifestOrEmpty(identity, location, keyMaterial)
-            checkPinActive(context, permit, identity, accountGeneration, identityGeneration)
-            beforePublication()
-            VaultOfflineRevocations.clearIfUnchanged(identity, accountGeneration, identityGeneration) {
+            val manifest = ownership.readManifestOrEmpty(identity, location, keyMaterial)
+            try {
                 checkPinActive(context, permit, identity, accountGeneration, identityGeneration)
-                writeManifest(
-                    identity,
-                    location,
-                    keyMaterial,
-                    manifest.withDirectoryAndAncestors(location, encryptedPath),
-                )
-                writeCatalog(directory, location)
-                clearRevocationMarkers(identity)
+                val nextManifest =
+                    VaultOfflineIndex.prepare(
+                        directory,
+                        identity,
+                        location,
+                        keyMaterial,
+                        manifest.withDirectoryAndAncestors(location, encryptedPath),
+                        durability = ownership.durability,
+                    ) {
+                        checkPinActive(context, permit, identity, accountGeneration, identityGeneration)
+                    }
+                requireAccount(identity.accountId, identity.canonicalServer)
+                beforePublication()
+                ownership.publishLocalMetadata(identity, location, nextManifest) {
+                    checkPinActive(context, permit, identity, accountGeneration, identityGeneration)
+                }
+            } finally {
+                manifest.close()
+                // Failed preparation/publication must not strand a generation or hide the original error.
+                runCatching { cleanupIndexes(directory) }
             }
-            pruneOrphanBlobs(directory, manifest)
+            cleanupIndexes(directory)
         }
     }
 
@@ -342,30 +422,58 @@ class VaultOfflineStore internal constructor(
         val credentialLease = credentialLeaseFor(identity.accountId)
         val permit = { lockPermit() && credentialLease() }
         if (!permit()) throw OpenCloudException(OpenCloudError.AccessDenied)
+        val context = currentCoroutineContext()
         val accountGeneration = VaultOfflineRevocations.accountGeneration(identity.accountId)
         val identityGeneration = VaultOfflineRevocations.identityGeneration(identity)
-        lockFor(identity).withLock {
+        val checkActive = { checkPinActive(context, permit, identity, accountGeneration, identityGeneration) }
+        ownership.lockFor(identity).withLock {
             recoverPublication(identity, location)
-            val manifest = readManifest(identity, location, keyMaterial)
-            val stale =
-                manifest.entries.values.filter { entry ->
-                    (
+            val manifest = ownership.readManifest(identity, location, keyMaterial)
+            try {
+                var stale = false
+
+                fun retain(entry: OfflineEntry): Boolean {
+                    val inside =
                         encryptedRoot.isEmpty() ||
                             entry.encryptedPath == encryptedRoot ||
                             entry.encryptedPath.startsWith("$encryptedRoot/")
-                    ) &&
-                        entry.encryptedPath !in seen
+                    return !inside || entry.encryptedPath in seen
                 }
-            if (stale.isEmpty()) return@withLock
-            requireAccount(identity.accountId, identity.canonicalServer)
-            if (!permit()) throw OpenCloudException(OpenCloudError.AccessDenied)
-            val retained = manifest.entries - stale.map(OfflineEntry::encryptedPath).toSet()
-            beforePublication()
-            VaultOfflineRevocations.clearIfUnchanged(identity, accountGeneration, identityGeneration) {
+                manifest.visit(checkActive) { if (!retain(it)) stale = true }
+                if (!stale) return@withLock
+                requireAccount(identity.accountId, identity.canonicalServer)
                 if (!permit()) throw OpenCloudException(OpenCloudError.AccessDenied)
-                writeManifest(identity, location, keyMaterial, OfflineManifest(retained))
+                val nextManifest =
+                    VaultOfflineIndex.prepare(
+                        ownership.vaultDirectory(identity),
+                        identity,
+                        location,
+                        keyMaterial,
+                        manifest.retaining(::retain),
+                        durability = ownership.durability,
+                        checkActive = checkActive,
+                    )
+                requireAccount(identity.accountId, identity.canonicalServer)
+                beforePublication()
+                ownership.publishLocalMetadata(identity, location, nextManifest, checkActive)
+            } finally {
+                manifest.close()
+                runCatching { cleanupIndexes(ownership.vaultDirectory(identity)) }
             }
-            stale.mapNotNull(OfflineEntry::blobId).forEach { File(File(vaultDirectory(identity), BLOBS), it).delete() }
+            ownership
+                .readManifest(
+                    identity,
+                    location,
+                    keyMaterial,
+                ).use {
+                    pruneVaultOfflineOrphanBlobs(
+                        ownership.vaultDirectory(identity),
+                        it,
+                        ownership.durability,
+                        checkActive,
+                    )
+                }
+            cleanupIndexes(ownership.vaultDirectory(identity))
         }
     }
 
@@ -388,72 +496,113 @@ class VaultOfflineStore internal constructor(
     }
 
     /** Caller-owned key material is copied briefly, with independent checks beside authentication. */
-    @Suppress("CyclomaticComplexMethod", "ComplexCondition")
     suspend fun openWithKeyMaterial(
         accountId: String,
         location: VaultLocation,
         keyMaterial: ByteArray,
-    ): VaultOfflineSession? =
-        withContext(Dispatchers.IO) {
-            if (location.accountId != accountId) throw OpenCloudException(OpenCloudError.PreconditionFailed)
-            val identity = identityOf(location)
-            requireLocation(identity, location)
-            val account = requireAccount(accountId, identity.canonicalServer)
-            if (accountRevoked(accountId) ||
-                identityRevoked(identity) ||
-                VaultOfflineRevocations.accountBlocked(accountId) ||
-                VaultOfflineRevocations.identityBlocked(identity)
-            ) {
-                throw OpenCloudException(OpenCloudError.AccessDenied)
-            }
-            val lockPermit = permitFor()
-            val credentialLease = credentialLeaseFor(identity.accountId)
-            val permit = { lockPermit() && credentialLease() }
-            if (!permit()) throw OpenCloudException(OpenCloudError.AccessDenied)
-            val accountGeneration = VaultOfflineRevocations.accountGeneration(accountId)
-            val identityGeneration = VaultOfflineRevocations.identityGeneration(identity)
-            lockFor(identity).withLock {
-                recoverPublication(identity, location)
-                val directory = vaultDirectory(identity)
-                if (!File(directory, MANIFEST).exists()) return@withLock null
-                val manifest = readManifest(identity, location, keyMaterial)
+    ): VaultOfflineSession? {
+        var opened: VaultOfflineSession? = null
+        var delivered = false
+        try {
+            val result =
+                withContext(Dispatchers.IO) {
+                    openOfflineSession(accountId, location, keyMaterial).also { opened = it }
+                }
+            delivered = true
+            return result
+        } finally {
+            // withContext can cancel at dispatcher delivery after the session acquired a key/reader lease.
+            if (!delivered) opened?.close()
+        }
+    }
+
+    @Suppress("CyclomaticComplexMethod", "ComplexCondition", "ThrowsCount", "TooGenericExceptionCaught")
+    // Every failed construction must close/wipe keys, including cancellation and native allocation errors.
+    private suspend fun openOfflineSession(
+        accountId: String,
+        location: VaultLocation,
+        keyMaterial: ByteArray,
+    ): VaultOfflineSession? {
+        if (location.accountId != accountId) throw OpenCloudException(OpenCloudError.PreconditionFailed)
+        val identity = identityOf(location)
+        requireLocation(identity, location)
+        val account = requireAccount(accountId, identity.canonicalServer)
+        if (ownership.accountRevoked(accountId) ||
+            ownership.identityRevoked(identity) ||
+            VaultOfflineRevocations.accountBlocked(accountId) ||
+            VaultOfflineRevocations.identityBlocked(identity)
+        ) {
+            throw OpenCloudException(OpenCloudError.AccessDenied)
+        }
+        val lockPermit = permitFor()
+        val credentialLease = credentialLeaseFor(identity.accountId)
+        val permit = { lockPermit() && credentialLease() }
+        if (!permit()) throw OpenCloudException(OpenCloudError.AccessDenied)
+        val accountGeneration = VaultOfflineRevocations.accountGeneration(accountId)
+        val identityGeneration = VaultOfflineRevocations.identityGeneration(identity)
+        val context = currentCoroutineContext()
+        val checkActive = { checkPinActive(context, permit, identity, accountGeneration, identityGeneration) }
+        return ownership.lockFor(identity).withLock {
+            recoverPublication(identity, location)
+            val directory = ownership.vaultDirectory(identity)
+            if (!manifestExists(File(directory, MANIFEST))) return@withLock null
+            val manifest = ownership.readManifest(identity, location, keyMaterial)
+            try {
+                manifest.visit(checkActive) {}
                 if (!permit() ||
                     accountGeneration != VaultOfflineRevocations.accountGeneration(accountId) ||
                     identityGeneration != VaultOfflineRevocations.identityGeneration(identity) ||
-                    accountRevoked(accountId) ||
-                    identityRevoked(identity) ||
+                    ownership.accountRevoked(accountId) ||
+                    ownership.identityRevoked(identity) ||
                     VaultOfflineRevocations.accountBlocked(accountId) ||
                     VaultOfflineRevocations.identityBlocked(identity) ||
                     accountFor(accountId) != account
                 ) {
                     throw OpenCloudException(OpenCloudError.AccessDenied)
                 }
+                // Cleanup can use metadata only after the complete authenticated membership barrier.
+                pruneVaultOfflineOrphanBlobs(directory, manifest, ownership.durability, checkActive)
+                cleanupIndexes(directory)
+                checkActive()
                 val cipher = cipherFromMaterial(keyMaterial)
-                VaultOfflineSession(
-                    identity = identity,
-                    location = location.copy(offlineOnly = true),
-                    directory = directory,
-                    manifest = manifest,
-                    cipher = cipher,
-                    keyMaterial = keyMaterial.copyOf(),
-                    permit = permit,
-                    accountAtOpen = account,
-                    accountFor = accountFor,
-                    endpoints = endpoints,
-                    accountGeneration = accountGeneration,
-                    identityGeneration = identityGeneration,
-                )
+                val copiedMaterial = keyMaterial.copyOf()
+                try {
+                    VaultOfflineSession(
+                        identity = identity,
+                        location = location.copy(offlineOnly = true),
+                        directory = directory,
+                        manifest = manifest,
+                        cipher = cipher,
+                        keyMaterial = copiedMaterial,
+                        permit = permit,
+                        accountAtOpen = account,
+                        accountFor = accountFor,
+                        endpoints = endpoints,
+                        accountGeneration = accountGeneration,
+                        identityGeneration = identityGeneration,
+                        committedAccess =
+                            VaultOfflineCommittedAccess(ownership, identity, location) {
+                                recoverPublication(identity, location)
+                            },
+                    )
+                } catch (failure: Throwable) {
+                    copiedMaterial.fill(0)
+                    cipher.close()
+                    throw failure
+                }
+            } catch (failure: Throwable) {
+                manifest.close()
+                throw failure
             }
         }
+    }
 
     suspend fun remove(identity: VaultIdentity): Unit =
         withContext(Dispatchers.IO) {
             VaultOfflineRevocations.revoke(identity)
-            writeAtomic(identityTombstone(identity), byteArrayOf(1))
-            lockFor(identity).withLock {
-                if (!vaultDirectory(identity).deleteRecursively()) {
-                    throw OpenCloudException(OpenCloudError.Unsupported)
-                }
+            ownership.durability.writeAtomic(ownership.identityTombstone(identity), byteArrayOf(1))
+            ownership.lockFor(identity).withLock {
+                ownership.deleteOwnedTree(ownership.vaultDirectory(identity))
             }
             VaultOfflineRevocations.finishRevoke(identity)
         }
@@ -461,10 +610,8 @@ class VaultOfflineStore internal constructor(
     /** Account removal may call this after the account row is gone. */
     fun forgetAccount(accountId: String) {
         VaultOfflineRevocations.revokeAccount(accountId)
-        writeAtomic(accountTombstone(accountId), byteArrayOf(1))
-        if (!accountDirectory(accountId).deleteRecursively()) {
-            throw OpenCloudException(OpenCloudError.Unsupported)
-        }
+        ownership.durability.writeAtomic(ownership.accountTombstone(accountId), byteArrayOf(1))
+        ownership.deleteOwnedTree(ownership.accountDirectory(accountId))
         VaultOfflineRevocations.finishAccountRevoke(accountId)
     }
 
@@ -473,7 +620,7 @@ class VaultOfflineStore internal constructor(
         accountId: String,
         mutation: suspend () -> Unit,
     ) {
-        publicationLockFor(accountId).withLock {
+        ownership.publicationLockFor(accountId).withLock {
             recoverPendingPublications(accountId)
             mutation()
         }
@@ -482,88 +629,36 @@ class VaultOfflineStore internal constructor(
     /** Reconcile before durable transfer rows are removed; readers also recover under the same mutex. */
     internal suspend fun recoverPendingPublications(accountId: String? = null) =
         withContext(Dispatchers.IO) {
-            check(
-                !java.nio.file.Files
-                    .isSymbolicLink(root.toPath()),
-            )
-            val accounts =
-                if (accountId ==
-                    null
-                ) {
-                    root.listFiles().orEmpty().toList()
-                } else {
-                    listOf(accountDirectory(accountId))
+            scanOfflinePublications(
+                root,
+                accountId?.let(ownership::accountDirectory),
+                ownership::directoryLock,
+            ) { directory, journal ->
+                val location = decodeLocation(journal.locationDescriptor)
+                val identity = identityOf(location)
+                if (directory.canonicalFile != ownership.vaultDirectory(identity).canonicalFile) {
+                    throw OpenCloudException(OpenCloudError.DownloadIntegrity)
                 }
-            for (accountDirectory in accounts.filter(File::isDirectory)) {
-                check(
-                    !java.nio.file.Files
-                        .isSymbolicLink(accountDirectory.toPath()),
-                )
-                for (directory in accountDirectory.listFiles().orEmpty().filter(File::isDirectory)) {
-                    check(
-                        !java.nio.file.Files
-                            .isSymbolicLink(directory.toPath()),
-                    )
-                    locks.computeIfAbsent(directory.path) { Mutex() }.withLock {
-                        val journal = VaultOfflinePublicationJournal.read(directory) ?: return@withLock
-                        val location = decodeLocation(journal.locationDescriptor)
-                        val identity = identityOf(location)
-                        if (directory !=
-                            vaultDirectory(identity)
-                        ) {
-                            throw OpenCloudException(OpenCloudError.DownloadIntegrity)
-                        }
-                        recoverPublication(identity, location)
-                    }
-                }
+                recoverPublication(identity, location)
             }
         }
 
     private suspend fun recoverPublication(
         identity: VaultIdentity,
         location: VaultLocation,
+        groupAuthority: VaultOfflineGroups? = null,
     ) {
-        val directory = vaultDirectory(identity)
-        val journal = VaultOfflinePublicationJournal.read(directory) ?: return
-        val captured = decodeLocation(journal.locationDescriptor)
-        requireLocation(identity, captured)
-        if (captured.rootWebDavUrl != location.rootWebDavUrl || captured.vaultPath != location.vaultPath) {
-            throw OpenCloudException(OpenCloudError.DownloadIntegrity)
-        }
-        val accountGeneration = VaultOfflineRevocations.accountGeneration(identity.accountId)
-        val identityGeneration = VaultOfflineRevocations.identityGeneration(identity)
-        withContext(NonCancellable) {
-            requireAccount(identity.accountId, identity.canonicalServer)
-            val accepted = publicationAccepted(journal.transferId, identity)
-            requireAccount(identity.accountId, identity.canonicalServer)
-            VaultOfflineRevocations.runIfUnchanged(identity, accountGeneration, identityGeneration) {
-                val persistentlyRevoked = accountRevoked(identity.accountId) || identityRevoked(identity)
-                val sessionRevoked =
-                    VaultOfflineRevocations.accountBlocked(identity.accountId) ||
-                        VaultOfflineRevocations.identityBlocked(identity)
-                if (persistentlyRevoked || sessionRevoked) {
-                    throw OpenCloudException(OpenCloudError.AccessDenied)
-                }
-                if (!accepted) journal.restore(directory)
-                journal.finish(directory, accepted)
-            }
-        }
-    }
-
-    private fun checkPinActive(
-        context: kotlin.coroutines.CoroutineContext,
-        permit: () -> Boolean,
-        identity: VaultIdentity,
-        accountGeneration: Long,
-        identityGeneration: Long,
-    ) {
-        context.ensureActive()
-        if (!permit() ||
-            accountGeneration != VaultOfflineRevocations.accountGeneration(identity.accountId) ||
-            identityGeneration != VaultOfflineRevocations.identityGeneration(identity)
-        ) {
-            throw OpenCloudException(OpenCloudError.AccessDenied)
-        }
+        recoverOfflinePublication(
+            ownership,
+            identity,
+            location,
+            groupAuthority ?: groupPublications?.invoke(),
+            {
+                requireAccount(identity.accountId, identity.canonicalServer)
+                Unit
+            },
+            publicationAccepted,
+        )
     }
 
     private suspend fun requireAccount(
@@ -580,121 +675,15 @@ class VaultOfflineStore internal constructor(
         return account
     }
 
-    private fun accountDirectory(accountId: String) =
-        File(root, hex(sha256(accountId.toByteArray(StandardCharsets.UTF_8))))
-
-    private fun vaultDirectory(identity: VaultIdentity) =
-        File(accountDirectory(identity.accountId), hex(sha256(identityBytes(identity))))
-
-    private fun accountTombstone(accountId: String) = File(root, "revoked-${accountDirectory(accountId).name}")
-
-    private fun identityTombstone(identity: VaultIdentity) =
-        File(accountDirectory(identity.accountId), "revoked-${vaultDirectory(identity).name}")
-
-    private fun accountRevoked(accountId: String) = accountTombstone(accountId).exists()
-
-    private fun identityRevoked(identity: VaultIdentity) = identityTombstone(identity).exists()
-
-    private fun clearRevocationMarkers(identity: VaultIdentity) {
-        listOf(accountTombstone(identity.accountId), identityTombstone(identity)).forEach { marker ->
-            if (marker.exists() && !marker.delete()) throw OpenCloudException(OpenCloudError.Unsupported)
+    private fun cleanupIndexes(directory: File) {
+        // Keep every prepared generation until a pending publication has an authoritative decision.
+        if (VaultOfflinePublicationJournal.read(directory) != null) return
+        val roots = mutableListOf<ByteArray>()
+        File(directory, MANIFEST).takeIf(::manifestExists)?.let {
+            roots +=
+                readOfflineMetadata(it, MAX_MANIFEST_BYTES + 32, durability = ownership.durability)
         }
-    }
-
-    @Suppress("ThrowsCount") // Revoked account and identity cleanup fail independently and fail closed.
-    private fun prepareForPin(identity: VaultIdentity) {
-        if (VaultOfflineRevocations.revokePending(identity)) throw OpenCloudException(OpenCloudError.AccessDenied)
-        if (accountRevoked(identity.accountId) || VaultOfflineRevocations.accountBlocked(identity.accountId)) {
-            if (!accountDirectory(
-                    identity.accountId,
-                ).deleteRecursively()
-            ) {
-                throw OpenCloudException(OpenCloudError.Unsupported)
-            }
-        } else if (identityRevoked(identity) || VaultOfflineRevocations.identityBlocked(identity)) {
-            if (!vaultDirectory(identity).deleteRecursively()) throw OpenCloudException(OpenCloudError.Unsupported)
-        }
-    }
-
-    private fun publicationLockFor(accountId: String): Mutex =
-        publicationLocks.computeIfAbsent(accountDirectory(accountId).path) { Mutex() }
-
-    private fun lockFor(identity: VaultIdentity): Mutex =
-        locks.computeIfAbsent(vaultDirectory(identity).path) { Mutex() }
-
-    private fun readManifestOrEmpty(
-        identity: VaultIdentity,
-        location: VaultLocation,
-        material: ByteArray,
-    ): OfflineManifest =
-        if (File(vaultDirectory(identity), MANIFEST).exists()) {
-            readManifest(identity, location, material)
-        } else {
-            OfflineManifest(emptyMap())
-        }
-
-    private fun readManifest(
-        identity: VaultIdentity,
-        location: VaultLocation,
-        material: ByteArray,
-    ): OfflineManifest = readOfflineManifest(File(vaultDirectory(identity), MANIFEST), identity, location, material)
-
-    private fun writeManifest(
-        identity: VaultIdentity,
-        location: VaultLocation,
-        material: ByteArray,
-        manifest: OfflineManifest,
-    ) = writeOfflineManifest(File(vaultDirectory(identity), MANIFEST), identity, location, material, manifest)
-
-    private fun writeCatalog(
-        directory: File,
-        location: VaultLocation,
-    ) {
-        val bytes = encodeLocation(location).toByteArray(StandardCharsets.UTF_8)
-        if (bytes.size > MAX_CATALOG_BYTES) throw OpenCloudException(OpenCloudError.Unsupported)
-        writeAtomic(File(directory, CATALOG), bytes)
-    }
-
-    private fun authenticateCiphertext(
-        file: File,
-        material: ByteArray,
-        checkActive: () -> Unit,
-    ) {
-        cipherFromMaterial(material).use { cipher ->
-            val sink =
-                object : OutputStream() {
-                    override fun write(value: Int) {
-                        checkActive()
-                    }
-
-                    override fun write(
-                        buffer: ByteArray,
-                        offset: Int,
-                        length: Int,
-                    ) {
-                        checkActive()
-                    }
-                }
-            FileInputStream(file).use { input ->
-                val guarded =
-                    object : java.io.FilterInputStream(input) {
-                        override fun read(): Int {
-                            checkActive()
-                            return `in`.read()
-                        }
-
-                        override fun read(
-                            buffer: ByteArray,
-                            offset: Int,
-                            length: Int,
-                        ): Int {
-                            checkActive()
-                            return `in`.read(buffer, offset, length)
-                        }
-                    }
-                cipher.decryptContent(guarded, sink, Long.MAX_VALUE)
-            }
-        }
+        VaultOfflineIndex.cleanup(directory, roots)
     }
 
     private companion object {
@@ -703,8 +692,46 @@ class VaultOfflineStore internal constructor(
         const val BLOBS = "blobs"
         const val STAGE_PREFIX = "staging-"
         const val MAX_CATALOG_BYTES = 64 * 1024
-        val locks = ConcurrentHashMap<String, Mutex>()
-        val publicationLocks = ConcurrentHashMap<String, Mutex>()
+    }
+}
+
+private fun VaultOfflineOwnership.readManifestOrEmpty(
+    identity: VaultIdentity,
+    location: VaultLocation,
+    material: ByteArray,
+): OfflineManifest =
+    if (manifestExists(File(vaultDirectory(identity), "manifest.enc"))) {
+        readManifest(identity, location, material)
+    } else {
+        LegacyOfflineManifest(emptyMap())
+    }
+
+private fun VaultOfflineOwnership.readManifest(
+    identity: VaultIdentity,
+    location: VaultLocation,
+    material: ByteArray,
+): OfflineManifest =
+    readOfflineManifest(
+        File(vaultDirectory(identity), "manifest.enc"),
+        identity,
+        location,
+        material,
+        durability = durability,
+    )
+
+private fun checkPinActive(
+    context: kotlin.coroutines.CoroutineContext,
+    permit: () -> Boolean,
+    identity: VaultIdentity,
+    accountGeneration: Long,
+    identityGeneration: Long,
+) {
+    context.ensureActive()
+    if (!permit() ||
+        accountGeneration != VaultOfflineRevocations.accountGeneration(identity.accountId) ||
+        identityGeneration != VaultOfflineRevocations.identityGeneration(identity)
+    ) {
+        throw OpenCloudException(OpenCloudError.AccessDenied)
     }
 }
 
@@ -719,47 +746,10 @@ internal data class OfflineEntry(
     val digest: String?,
 )
 
-internal data class OfflineManifest(
-    val entries: Map<String, OfflineEntry>,
-) {
-    fun withEntryAndAncestors(
-        location: VaultLocation,
-        entry: OfflineEntry,
-    ): OfflineManifest =
-        withDirectoryAndAncestors(location, entry.encryptedPath.substringBeforeLast('/', ""))
-            .let { OfflineManifest(it.entries + (entry.encryptedPath to entry)) }
-
-    fun withDirectoryAndAncestors(
-        location: VaultLocation,
-        encryptedPath: String,
-    ): OfflineManifest {
-        val result = entries.toMutableMap()
-        val root = location.vaultPath.trimEnd('/')
-        if (encryptedPath == root) return OfflineManifest(result)
-        val relative = if (root.isEmpty()) encryptedPath else encryptedPath.removePrefix("$root/")
-        var parent = root
-        relative.split('/').filter(String::isNotEmpty).forEach { segment ->
-            parent = if (parent.isEmpty()) segment else "$parent/$segment"
-            result.putIfAbsent(parent, OfflineEntry(parent, segment, "", true, 0L, null, null, null))
-        }
-        return OfflineManifest(result)
-    }
-}
-
-private object DiscardOutputStream : OutputStream() {
-    override fun write(value: Int) = Unit
-
-    override fun write(
-        buffer: ByteArray,
-        offset: Int,
-        length: Int,
-    ) = Unit
-}
-
 private fun identityOf(location: VaultLocation) =
     VaultIdentity(location.accountId, location.canonicalServer, location.driveId, location.remoteVaultId)
 
-private fun requireLocation(
+internal fun requireLocation(
     identity: VaultIdentity,
     location: VaultLocation,
 ) {
@@ -799,7 +789,7 @@ private fun cachedEntry(
     digest: String,
 ) = OfflineEntry(entry.encryptedPath, entry.rawName, entry.id, false, entry.size, entry.strongETag, blobId, digest)
 
-private fun identityBytes(identity: VaultIdentity): ByteArray =
+internal fun identityBytes(identity: VaultIdentity): ByteArray =
     ByteArrayOutputStream().use { bytes ->
         java.io.DataOutputStream(bytes).use { out ->
             listOf(
@@ -907,66 +897,113 @@ private fun updateDigestFromFile(
     }
 }
 
-@Suppress("TooGenericExceptionCaught") // AtomicFile must roll back on unchecked write failures too.
-private fun writeAtomic(
-    file: File,
-    bytes: ByteArray,
-) {
-    file.parentFile?.mkdirs()
-    val atomic = AtomicFile(file)
-    val output = atomic.startWrite()
-    try {
-        output.write(bytes)
-        atomic.finishWrite(output)
-    } catch (failure: java.io.IOException) {
-        atomic.failWrite(output)
-        throw failure
-    } catch (failure: RuntimeException) {
-        atomic.failWrite(output)
-        throw failure
-    }
-}
-
-private fun readSmall(
-    file: File,
-    maximum: Int,
-): ByteArray {
-    if (!file.isFile || file.length() > maximum) throw OpenCloudException(OpenCloudError.InvalidResponse)
-    return AtomicFile(file).openRead().use { input ->
-        val bytes = input.readBytes()
-        if (bytes.size > maximum) throw OpenCloudException(OpenCloudError.InvalidResponse)
-        bytes
-    }
-}
+private fun manifestExists(file: File): Boolean = file.isFile || File(file.path + ".bak").isFile
 
 private fun removeAbandonedStages(root: File) {
-    root
-        .listFiles()
-        .orEmpty()
-        .flatMap { it.listFiles().orEmpty().asList() }
-        .flatMap { File(it, "blobs").listFiles().orEmpty().asList() }
-        .filter { it.name.startsWith("staging-") && it.path !in VaultOfflineStoreStageRegistry.active }
-        .forEach(File::delete)
+    forEachPrivateDirectory(root) { account ->
+        forEachPrivateDirectory(account) { vault ->
+            val blobs = File(vault, "blobs")
+            if (blobs.isDirectory &&
+                !java.nio.file.Files
+                    .isSymbolicLink(blobs.toPath())
+            ) {
+                java.nio.file.Files.newDirectoryStream(blobs.toPath(), "staging-*").use { paths ->
+                    for (path in paths) {
+                        val file = path.toFile()
+                        if (file.canonicalPath !in VaultOfflineStoreStageRegistry.active) file.delete()
+                    }
+                }
+            }
+        }
+    }
 }
 
-private fun pruneOrphanBlobs(
+private fun forEachPrivateDirectory(
+    root: File,
+    consume: (File) -> Unit,
+) {
+    if (!root.isDirectory ||
+        java.nio.file.Files
+            .isSymbolicLink(root.toPath())
+    ) {
+        return
+    }
+    java.nio.file.Files.newDirectoryStream(root.toPath()).use { paths ->
+        for (path in paths) {
+            if (java.nio.file.Files
+                    .isDirectory(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            ) {
+                consume(path.toFile())
+            }
+        }
+    }
+}
+
+internal fun pruneVaultOfflineOrphanBlobs(
     directory: File,
     manifest: OfflineManifest,
+    durability: OfflineDurability,
+    checkActive: () -> Unit,
 ) {
-    val referenced =
-        manifest.entries.values
-            .mapNotNull(OfflineEntry::blobId)
-            .toSet()
-    File(directory, "blobs")
-        .listFiles()
-        .orEmpty()
-        .asSequence()
-        .filter(File::isFile)
-        .filterNot { it.name.startsWith("staging-") }
-        .filterNot { it.name in referenced }
-        .filterNot { it.path in VaultOfflineStoreStageRegistry.active }
-        .forEach(File::delete)
+    val root = readOfflineMetadata(File(directory, "manifest.enc"), MAX_MANIFEST_BYTES + 32, durability)
+    if (VaultOfflineIndex.previousGenerationInUse(directory, root)) return
+    val table = File.createTempFile("reachability-", ".db", directory)
+    try {
+        android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(table, null).use { database ->
+            database.execSQL("CREATE TABLE blobs (id TEXT PRIMARY KEY)")
+            manifest.visit(checkActive) { entry ->
+                entry.blobId?.let { blob ->
+                    database.insertWithOnConflict(
+                        "blobs",
+                        null,
+                        android.content.ContentValues().apply {
+                            put("id", blob)
+                        },
+                        android.database.sqlite.SQLiteDatabase.CONFLICT_IGNORE,
+                    )
+                }
+            }
+            // The visitor must finish before any content is removed.
+            removeUnreferencedBlobs(directory, database, checkActive)
+        }
+    } finally {
+        listOf(
+            table,
+            File(table.path + "-journal"),
+            File(table.path + "-wal"),
+            File(table.path + "-shm"),
+        ).forEach(File::delete)
+    }
 }
+
+private fun removeUnreferencedBlobs(
+    directory: File,
+    references: android.database.sqlite.SQLiteDatabase,
+    checkActive: () -> Unit,
+) {
+    val blobs = File(directory, "blobs")
+    if (!blobs.isDirectory) return
+    java.nio.file.Files.newDirectoryStream(blobs.toPath()).use { paths ->
+        for (path in paths) {
+            checkActive()
+            val file = path.toFile()
+            if (!isPrunableBlob(file)) continue
+            val referenced =
+                references
+                    .rawQuery(
+                        "SELECT 1 FROM blobs WHERE id = ?",
+                        arrayOf(file.name),
+                    ).use { it.moveToFirst() }
+            if (!referenced) file.delete()
+        }
+    }
+}
+
+private fun isPrunableBlob(file: File): Boolean =
+    file.isFile &&
+        !file.name.startsWith("staging-") &&
+        file.canonicalPath !in VaultOfflineStoreStageRegistry.active &&
+        !VaultOfflineIndex.blobInUse(file)
 
 private object VaultOfflineStoreStageRegistry {
     val active = ConcurrentHashMap.newKeySet<String>()
@@ -1063,7 +1100,7 @@ internal object VaultOfflineRevocations {
     }
 }
 
-private fun encodeLocation(location: VaultLocation): String =
+internal fun encodeLocation(location: VaultLocation): String =
     JSONObject()
         .put("account", location.accountId)
         .put("title", location.title)
@@ -1076,7 +1113,7 @@ private fun encodeLocation(location: VaultLocation): String =
         .put("path", location.vaultPath)
         .toString()
 
-private fun decodeLocation(bytes: ByteArray): VaultLocation =
+internal fun decodeLocation(bytes: ByteArray): VaultLocation =
     JSONObject(String(bytes, StandardCharsets.UTF_8)).let { json ->
         VaultLocation(
             accountId = json.getString("account"),
@@ -1099,39 +1136,15 @@ internal fun encodeVaultRootDescriptor(location: VaultLocation): JSONObject = JS
 internal fun decodeVaultRootDescriptor(value: JSONObject): VaultLocation =
     decodeLocation(value.toString().toByteArray(StandardCharsets.UTF_8))
 
-private fun encodeManifest(
-    manifest: OfflineManifest,
-    location: VaultLocation,
-): ByteArray {
-    val entries = JSONArray()
-    manifest.entries.values.forEach { entry ->
-        entries.put(
-            JSONObject()
-                .put("path", entry.encryptedPath)
-                .put("name", entry.rawName)
-                .put("id", entry.id)
-                .put("folder", entry.isFolder)
-                .put("size", entry.size)
-                .put("etag", entry.etag)
-                .put("blob", entry.blobId)
-                .put("digest", entry.digest),
-        )
-    }
-    return JSONObject()
-        .put("version", 1)
-        .put("location", encodeLocation(location))
-        .put("entries", entries)
-        .toString()
-        .toByteArray(StandardCharsets.UTF_8)
-}
-
 // Every malformed manifest field fails closed before a snapshot opens.
 @Suppress("CyclomaticComplexMethod", "ThrowsCount")
 private fun decodeManifest(
     bytes: ByteArray,
     location: VaultLocation,
+    directory: File,
+    rootDigest: String,
 ): OfflineManifest {
-    val json = JSONObject(String(bytes, StandardCharsets.UTF_8))
+    val json = JSONObject(VaultOfflineIndexCodec.text(bytes))
     if (json.getInt("version") != 1 || json.getString("location") != encodeLocation(location)) {
         throw OpenCloudException(OpenCloudError.PreconditionFailed)
     }
@@ -1150,22 +1163,31 @@ private fun decodeManifest(
                 blobId = if (item.isNull("blob")) null else item.getString("blob"),
                 digest = if (item.isNull("digest")) null else item.getString("digest"),
             )
-        requireScopedPath(location, entry.encryptedPath, allowRoot = false)
-        if (entry.rawName != entry.encryptedPath.substringAfterLast('/') ||
-            entries.put(entry.encryptedPath, entry) != null
-        ) {
-            throw OpenCloudException(OpenCloudError.InvalidResponse)
-        }
-        if (entry.isFolder) {
-            if (entry.blobId != null || entry.digest != null) throw OpenCloudException(OpenCloudError.InvalidResponse)
-        } else if (entry.size < 32L ||
-            entry.blobId?.matches(Regex("[0-9a-fA-F-]{36}")) != true ||
-            entry.digest?.matches(Regex("[0-9a-f]{64}")) != true
-        ) {
-            throw OpenCloudException(OpenCloudError.InvalidResponse)
-        }
+        validateOfflineEntry(entry, location)
+        if (entries.put(entry.encryptedPath, entry) != null) throw OpenCloudException(OpenCloudError.InvalidResponse)
     }
-    return OfflineManifest(entries)
+    return LegacyOfflineManifest(entries, directory, rootDigest)
+}
+
+@Suppress("ThrowsCount") // Reject scope/name, folder payload and invalid file payload before issuing metadata.
+internal fun validateOfflineEntry(
+    entry: OfflineEntry,
+    location: VaultLocation,
+) {
+    requireScopedPath(location, entry.encryptedPath, allowRoot = false)
+    if (entry.rawName !=
+        entry.encryptedPath.substringAfterLast('/')
+    ) {
+        throw OpenCloudException(OpenCloudError.InvalidResponse)
+    }
+    if (entry.isFolder) {
+        if (entry.blobId != null || entry.digest != null) throw OpenCloudException(OpenCloudError.InvalidResponse)
+    } else if (entry.size < 32L ||
+        entry.blobId?.matches(Regex("[0-9a-fA-F-]{36}")) != true ||
+        entry.digest?.matches(Regex("[0-9a-f]{64}")) != true
+    ) {
+        throw OpenCloudException(OpenCloudError.InvalidResponse)
+    }
 }
 
 internal fun RcloneVaultCipher.offlineEngine(): VaultCipherEngine =
@@ -1203,16 +1225,25 @@ private const val MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 private val MAGIC = byteArrayOf(0x52, 0x56, 0x4f, 0x31) // RVO1
 
 @Suppress("ThrowsCount") // Malformed headers and both authentication failure types must fail closed.
-private fun readOfflineManifest(
+internal fun readOfflineManifest(
     file: File,
     identity: VaultIdentity,
     location: VaultLocation,
     material: ByteArray,
+    durability: OfflineDurability = OfflineDurability(requireNotNull(file.parentFile)),
 ): OfflineManifest {
-    val encrypted = readSmall(file, MAX_MANIFEST_BYTES + 32)
+    val encrypted = readOfflineMetadata(file, MAX_MANIFEST_BYTES + 32, durability)
+    if (VaultOfflineIndex.recognizes(encrypted)) {
+        return try {
+            VaultOfflineIndex.open(file.parentFile!!, identity, location, material, encrypted)
+        } finally {
+            encrypted.fill(0)
+        }
+    }
     if (encrypted.size < 32 || !encrypted.copyOfRange(0, 4).contentEquals(MAGIC)) {
         throw OpenCloudException(OpenCloudError.InvalidResponse)
     }
+    val legacyRootDigest = hex(sha256(encrypted))
     val nonce = encrypted.copyOfRange(4, 16)
     val key = deriveManifestKey(material, identity)
     val plain =
@@ -1222,45 +1253,17 @@ private fun readOfflineManifest(
             cipher.updateAAD(identityBytes(identity))
             cipher.doFinal(encrypted, 16, encrypted.size - 16)
         } catch (_: GeneralSecurityException) {
-            throw OpenCloudException(OpenCloudError.AccessDenied)
+            throw OpenCloudException(OpenCloudError.EncryptedUnlockFailed)
         } catch (_: IllegalArgumentException) {
-            throw OpenCloudException(OpenCloudError.AccessDenied)
+            throw OpenCloudException(OpenCloudError.EncryptedUnlockFailed)
         } finally {
             key.fill(0)
             nonce.fill(0)
             encrypted.fill(0)
         }
     return try {
-        decodeManifest(plain, location)
+        decodeManifest(plain, location, file.parentFile!!, legacyRootDigest)
     } finally {
         plain.fill(0)
-    }
-}
-
-private fun writeOfflineManifest(
-    file: File,
-    identity: VaultIdentity,
-    location: VaultLocation,
-    material: ByteArray,
-    manifest: OfflineManifest,
-) {
-    val plain = encodeManifest(manifest, location)
-    if (plain.size > MAX_MANIFEST_BYTES) throw OpenCloudException(OpenCloudError.Unsupported)
-    val key = deriveManifestKey(material, identity)
-    val nonce = ByteArray(12).also(SecureRandom()::nextBytes)
-    try {
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce))
-        cipher.updateAAD(identityBytes(identity))
-        val sealed = cipher.doFinal(plain)
-        try {
-            writeAtomic(file, MAGIC + nonce + sealed)
-        } finally {
-            sealed.fill(0)
-        }
-    } finally {
-        plain.fill(0)
-        key.fill(0)
-        nonce.fill(0)
     }
 }

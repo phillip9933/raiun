@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="transfers_replace_confirmation_title">既存のファイルを置き換えますか？</string>
+    <string name="transfers_replace_confirmation_body">%2$s の「%1$s」を置き換えますか？既存の内容が上書きされる場合があります。Raiun ではこの置き換えを元に戻せません。</string>
+    <string name="transfers_replace_current_destination">現在の保存先</string>
+</resources>

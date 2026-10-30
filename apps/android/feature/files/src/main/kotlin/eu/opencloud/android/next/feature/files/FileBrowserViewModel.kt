@@ -15,10 +15,16 @@ import eu.opencloud.android.next.core.database.FileBrowserStore
 import eu.opencloud.android.next.core.database.FolderBackupEntity
 import eu.opencloud.android.next.core.database.IncomingShareStore
 import eu.opencloud.android.next.core.database.RESOURCE_DIRECTORY_PAGE_SIZE
+import eu.opencloud.android.next.core.database.ResourceCollection
+import eu.opencloud.android.next.core.database.ResourceCollectionOptions
+import eu.opencloud.android.next.core.database.ResourceCollectionPaging
+import eu.opencloud.android.next.core.database.ResourceCollectionRoot
 import eu.opencloud.android.next.core.database.ResourceDirectoryPage
 import eu.opencloud.android.next.core.database.ResourceDirectoryPaging
 import eu.opencloud.android.next.core.database.ResourceEntity
+import eu.opencloud.android.next.core.database.ResourceOfflineFilter
 import eu.opencloud.android.next.core.database.SpaceEntity
+import eu.opencloud.android.next.core.database.TransferBrowserOverview
 import eu.opencloud.android.next.core.database.TransferDirection
 import eu.opencloud.android.next.core.database.TransferEntity
 import eu.opencloud.android.next.core.database.TransferState
@@ -48,11 +54,15 @@ import eu.opencloud.android.next.core.sync.createSearchRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
@@ -77,6 +87,28 @@ class FileBrowserViewModel(
     private val restoredFolder: String? = savedState["browser.folder"]
     private val store = FileBrowserStore(FileBrowserDatabase.create(application))
     private val directoryPaging = ResourceDirectoryPaging(FileBrowserDatabase.create(application))
+    private val collectionPaging = ResourceCollectionPaging(FileBrowserDatabase.create(application))
+    private val offlinePager =
+        CachedCollectionPager(
+            viewModelScope,
+            collectionPaging::invalidations,
+            { collectionPaging.load(it.account, ResourceCollection.Offline, it.options) },
+            { request ->
+                collectionPaging.offlineBytes(request.account, request.options.roots) { resource ->
+                    eu.opencloud.android.next.core.model
+                        .validatedCachedFile(
+                            eu.opencloud.android.next.core.model.resourceCacheDirectory(
+                                application.filesDir,
+                                resource.accountId,
+                                resource.spaceId,
+                            ),
+                            resource.localPath,
+                            resource.sizeBytes,
+                        )?.let { it.path to it.length() }
+                }
+            },
+        )
+    private var accountJob: Job? = null
     private val directoryOptions = MutableStateFlow(DirectoryPageOptions())
     private val transfers = TransferManager(application, store)
     private val operations =
@@ -103,6 +135,7 @@ class FileBrowserViewModel(
     private val sharedBrowser = SharedFolderBrowser.create(application)
     private val sharedDestinationResolver = SharedUploadDestinationResolver.create(application)
     private val searchQuery = MutableStateFlow("")
+    private val collectionSearchOnly = MutableStateFlow(false)
     val state: StateFlow<FileBrowserUiState> = mutableState.asStateFlow()
 
     private var accountId: String? = null
@@ -111,6 +144,12 @@ class FileBrowserViewModel(
     private val encryptedFolders =
         EncryptedFolderDiscovery(application, store, viewModelScope) { entries, error ->
             reduce { withEncryptedFolders(entries, error) }
+            offlinePager.roots(
+                entries
+                    .filter {
+                        it.accountId == accountId
+                    }.map { ResourceCollectionRoot(it.driveId, it.remoteVaultId, it.vaultPath) },
+            )
             directoryOptions.update {
                 it.copy(
                     overlays =
@@ -156,6 +195,25 @@ class FileBrowserViewModel(
     init {
         transfers.scheduleCleanup()
         viewModelScope.launch(Dispatchers.IO) {
+            offlinePager.state.collectLatest { cached ->
+                if (cached.request?.account == accountId) {
+                    reduce {
+                        copy(
+                            offlineResources =
+                                cached.result
+                                    ?.page
+                                    ?.entries
+                                    ?.mapNotNull { it.resource }
+                                    .orEmpty(),
+                            offlinePage = cached.result?.page,
+                            offlineBytes = cached.bytes,
+                            error = cached.error?.toOpenCloudError()?.safeMessage(getApplication()) ?: error,
+                        )
+                    }
+                }
+            }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
             settings.settings.collectLatest { settings ->
                 directoryOptions.update { it.copy(showHidden = settings.fileDisplay.showHidden) }
                 reduce {
@@ -194,9 +252,10 @@ class FileBrowserViewModel(
         }
         viewModelScope.launch(Dispatchers.IO) {
             searchQuery
-                .flatMapLatest { query ->
+                .combine(collectionSearchOnly) { query, cachedOnly -> query to cachedOnly }
+                .flatMapLatest { (query, cachedOnly) ->
                     val account = accountId
-                    if (account == null || query.isBlank()) {
+                    if (cachedOnly || account == null || query.isBlank()) {
                         flowOf(SearchRepositoryResult(emptyList(), remoteSupported = false))
                     } else {
                         searchRepository.search(account, query)
@@ -246,15 +305,28 @@ class FileBrowserViewModel(
 
     fun load(accountId: String) {
         if (this.accountId == accountId) return
+        accountJob?.cancel()
+        this.accountId = accountId
+        offlinePager.account(accountId)
+        searchQuery.value = ""
         activeLocation.value = null
         directoryOptions.value = DirectoryPageOptions(showHidden = state.value.fileDisplay.showHidden)
         reduce {
             copy(
                 transfers = emptyList(),
+                transferOverview = TransferBrowserOverview(),
                 bulkConflictCancelling = false,
                 selectedIds = emptySet(),
                 resources = emptyList(),
                 directoryPage = null,
+                offlineResources = emptyList(),
+                offlinePage = null,
+                offlineBytes = 0,
+                offlinePins = emptyList(),
+                recentResources = emptyList(),
+                searchResults = emptyList(),
+                searchQuery = "",
+                actionResource = null,
             )
         }
         backupPickerRevision++
@@ -269,80 +341,81 @@ class FileBrowserViewModel(
                 backupPickerTrail = emptyList(),
             )
         }
-        this.accountId = accountId
-        viewModelScope.launch(Dispatchers.IO) {
-            launch {
-                sharedInventory.observe(accountId).collectLatest { shares ->
-                    if (this@FileBrowserViewModel.accountId == accountId) {
-                        reduce {
-                            copy(
-                                backupPickerSharedNames =
-                                    shares.filter { it.isFolder }.associate {
-                                        it.id to
-                                            it.name
-                                    },
-                            )
-                        }
-                    }
-                }
-            }
-            launch {
-                store.observeOffline(accountId).collectLatest { values ->
-                    val bytes = downloadedBytes(getApplication<Application>(), values)
-                    reduce { copy(offlineResources = values, offlineBytes = bytes) }
-                }
-            }
-            launch {
-                recentFiles
-                    .observe(accountId)
-                    .flatMapLatest { references ->
-                        store.observeRecent(accountId, references.map { it.resourceId }).map { resources ->
-                            references.mapNotNull { ref ->
-                                resources.firstOrNull {
-                                    it.remoteId == ref.resourceId &&
-                                        it.spaceId == ref.spaceId
-                                }
+        accountJob =
+            viewModelScope.launch(Dispatchers.IO) {
+                launch {
+                    sharedInventory.observe(accountId).collectLatest { shares ->
+                        if (this@FileBrowserViewModel.accountId == accountId) {
+                            reduce {
+                                copy(
+                                    backupPickerSharedNames =
+                                        shares.filter { it.isFolder }.associate {
+                                            it.id to
+                                                it.name
+                                        },
+                                )
                             }
                         }
-                    }.collectLatest { values -> reduce { copy(recentResources = values) } }
-            }
-            launch {
-                store.observeTransfers(accountId).collectLatest { transfers ->
-                    if (this@FileBrowserViewModel.accountId == accountId) {
-                        reduce { copy(transfers = transfers) }
+                    }
+                }
+                launch {
+                    recentFiles
+                        .observe(accountId)
+                        .flatMapLatest { references ->
+                            store.observeRecent(accountId, references.map { it.resourceId }).map { resources ->
+                                references.mapNotNull { ref ->
+                                    resources.firstOrNull {
+                                        it.remoteId == ref.resourceId &&
+                                            it.spaceId == ref.spaceId
+                                    }
+                                }
+                            }
+                        }.collectLatest { values -> reduce { copy(recentResources = values) } }
+                }
+                launch {
+                    store.transferInventory().invalidations(accountId).collectLatest {
+                        refreshTransferOverview(accountId)
+                    }
+                }
+                launch {
+                    store.observeBackups(accountId).collectLatest { backups ->
+                        reduce { copy(backups = backups) }
+                    }
+                }
+                launch {
+                    mutableState
+                        .map { it.pinCandidates() }
+                        .distinctUntilChanged()
+                        .combine(collectionPaging.invalidations(accountId)) { resources, _ -> resources }
+                        .collectLatest { resources ->
+                            val pins = collectionPaging.keptOffline(resources)
+                            if (this@FileBrowserViewModel.accountId == accountId) reduce { copy(offlinePins = pins) }
+                        }
+                }
+                launch { transfers.reconcile() }
+                launch { operations.reconcile() }
+                launch {
+                    operations.observe(accountId).collectLatest { values ->
+                        reduce { copy(operations = values) }
+                    }
+                }
+                observeDiscovery(transfers.refreshAccount(accountId))
+                store.observeSpaces(accountId).collectLatest { spaces ->
+                    val selectedSpace =
+                        mutableState.value.spaceId
+                            ?.let { selectedId -> spaces.find { it.driveId == selectedId } }
+                            ?: preferredInitialBrowserSpace(spaces)
+                    reduce {
+                        copy(
+                            spaces = spaces,
+                            spaceId = spaceId ?: selectedSpace?.driveId,
+                        )
+                    }
+                    if (activeLocation.value == null && selectedSpace != null) {
+                        restoreLocation(selectedSpace.driveId)
                     }
                 }
             }
-            launch {
-                store.observeBackups(accountId).collectLatest { backups ->
-                    reduce { copy(backups = backups) }
-                }
-            }
-            launch {
-                store.observeOfflinePins(accountId).collectLatest { values ->
-                    reduce { copy(offlinePins = values) }
-                }
-            }
-            launch { transfers.reconcile() }
-            launch { operations.reconcile() }
-            launch { operations.observe(accountId).collectLatest { values -> reduce { copy(operations = values) } } }
-            observeDiscovery(transfers.refreshAccount(accountId))
-            store.observeSpaces(accountId).collectLatest { spaces ->
-                val selectedSpace =
-                    mutableState.value.spaceId
-                        ?.let { selectedId -> spaces.find { it.driveId == selectedId } }
-                        ?: preferredInitialBrowserSpace(spaces)
-                reduce {
-                    copy(
-                        spaces = spaces,
-                        spaceId = spaceId ?: selectedSpace?.driveId,
-                    )
-                }
-                if (activeLocation.value == null && selectedSpace != null) {
-                    restoreLocation(selectedSpace.driveId)
-                }
-            }
-        }
     }
 
     fun selectSpace(spaceId: String) {
@@ -473,6 +546,19 @@ class FileBrowserViewModel(
         viewModelScope.launch(Dispatchers.IO) { settings.setBrowserLayout(layout.toSettingsLayout()) }
     }
 
+    @Suppress("TooGenericExceptionCaught") // Keep the verified overview and future invalidations after a read failure.
+    private suspend fun refreshTransferOverview(account: String) {
+        try {
+            val overview = store.transferInventory().overview(account)
+            currentCoroutineContext().ensureActive()
+            if (accountId == account) reduce { copy(transferOverview = overview) }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            if (accountId == account) reduce { copy(error = failure.toOpenCloudError().safeMessage(getApplication())) }
+        }
+    }
+
     @Suppress("TooGenericExceptionCaught") // UI boundary preserves cancellation and keeps future invalidations alive.
     private suspend fun loadDirectoryPage(
         location: BrowserLocation,
@@ -515,6 +601,28 @@ class FileBrowserViewModel(
             }
         }
     }
+
+    fun offlineDisplay(
+        query: String,
+        sort: String,
+        ascending: Boolean,
+        showHidden: Boolean,
+        filter: String,
+    ) {
+        val criterion = DirectorySort.entries.firstOrNull { it.name == sort } ?: return
+        val offlineFilter = ResourceOfflineFilter.entries.firstOrNull { it.name.equals(filter, true) } ?: return
+        offlinePager.options(
+            ResourceCollectionOptions(
+                query = query,
+                sort = criterion,
+                ascending = ascending,
+                showHidden = showHidden,
+                offlineFilter = offlineFilter,
+            ),
+        )
+    }
+
+    fun offlinePage(previous: Boolean) = offlinePager.page(previous)
 
     fun directoryPage(previous: Boolean) {
         val page = state.value.directoryPage ?: return
@@ -870,6 +978,10 @@ class FileBrowserViewModel(
                     }
                 }.onFailure { reduce { copy(error = it.toOpenCloudError().safeMessage(getApplication())) } }
         }
+    }
+
+    fun setCollectionSearchOnly(cachedOnly: Boolean) {
+        collectionSearchOnly.value = cachedOnly
     }
 
     fun setSearchQuery(query: String) {
@@ -1658,10 +1770,12 @@ data class FileBrowserUiState(
     val encryptedCreationBusy: Boolean = false,
     val encryptedSpaceCreationRevision: Int = 0,
     val offlineResources: List<ResourceEntity> = emptyList(),
+    val offlinePage: ResourceDirectoryPage? = null,
     val offlinePins: List<ResourceEntity> = emptyList(),
     val offlineBytes: Long = 0,
     val recentResources: List<ResourceEntity> = emptyList(),
     val transfers: List<TransferEntity> = emptyList(),
+    val transferOverview: TransferBrowserOverview? = null,
     val bulkConflictCancelling: Boolean = false,
     val backups: List<FolderBackupEntity> = emptyList(),
     val backupPickerTrail: List<BackupFolderCrumb> = emptyList(),
@@ -1781,3 +1895,8 @@ internal fun FileBrowserUiState.withRetainedSelection(previous: List<ResourceEnt
             .filter { it.selectionKey in selectedIds && !it.matchesEncryptedFolder(encryptedFolders) }
     return copy(selectedResources = selected)
 }
+
+/** All sources are already bounded windows or explicit selections; pin rows outside them are not retained. */
+private fun FileBrowserUiState.pinCandidates(): List<ResourceEntity> =
+    (resources + offlineResources + recentResources + searchResults + selectedResources + listOfNotNull(actionResource))
+        .distinctBy { Triple(it.accountId, it.spaceId, it.remoteId) }

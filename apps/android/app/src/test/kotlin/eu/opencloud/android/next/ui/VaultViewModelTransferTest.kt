@@ -13,6 +13,8 @@ import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import eu.opencloud.android.next.core.security.VaultIdentity
 import eu.opencloud.android.next.core.security.VaultPreferenceTargetKind
+import eu.opencloud.android.next.core.sync.BoundaryEntry
+import eu.opencloud.android.next.core.sync.BoundaryNameIndex
 import eu.opencloud.android.next.core.sync.VaultExternalCopyStore
 import eu.opencloud.android.next.core.sync.VaultFolder
 import eu.opencloud.android.next.core.sync.VaultLocation
@@ -166,6 +168,30 @@ class VaultViewModelTransferTest {
             assertFalse(viewModel.state.value.preparingUpload)
             viewModel.leaveRoute()
             source.delete()
+        }
+
+    @Test fun uploadPreflightUsesSnapshotsWithoutLegacyListing() =
+        runTest {
+            Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+            val context = ApplicationProvider.getApplicationContext<Application>()
+            val source = File(context.cacheDir, "vault-snapshot-upload.txt").apply { writeText("staged") }
+            registerUploadProvider(source)
+            val session = TestSession(identity).apply { forbidLegacyList = true }
+            val repository = TestRepository(mutableListOf(session))
+            val model = newViewModel(context, repository)
+            try {
+                enterAndUnlock(model)
+                model.prepareUpload {}
+                advanceUntilIdle()
+                model.acceptUploadUri(Uri.parse("content://$AUTHORITY/source"))
+                advanceUntilIdle()
+                assertEquals(1, repository.queuedUploadCalls)
+                assertEquals("staged", repository.queuedUploadText)
+                assertEquals(0, session.legacyListCalls)
+            } finally {
+                model.leaveRoute()
+                source.delete()
+            }
         }
 
     @Test fun pickedUploadPublishesQueuedNoticeOnlyAfterPreparationSucceeds() =
@@ -324,6 +350,94 @@ class VaultViewModelTransferTest {
             ) { exportLaunched = true }
             runCurrent()
             assertTrue(exportLaunched)
+            model.leaveRoute()
+        }
+
+    @Test fun offlineDirectoryPreparationUsesScopedFallbackAndKeepsTypedFailures() =
+        runTest {
+            Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+            val cases =
+                listOf(
+                    Triple(
+                        IllegalStateException("local preparation failed"),
+                        VaultRouteError.OFFLINE_PREPARATION,
+                        VaultRouteMode.CONTENTS,
+                    ),
+                    Triple(
+                        OpenCloudException(OpenCloudError.DownloadIntegrity),
+                        VaultRouteError.INTEGRITY,
+                        VaultRouteMode.CONTENTS,
+                    ),
+                    Triple(
+                        OpenCloudException(OpenCloudError.AccessDenied),
+                        VaultRouteError.ACCESS_DENIED,
+                        VaultRouteMode.UNLOCK,
+                    ),
+                )
+
+            for ((failure, expectedError, expectedMode) in cases) {
+                val session = TestSession(identity).apply { offlinePreparationFailure = failure }
+                val model =
+                    newViewModel(
+                        ApplicationProvider.getApplicationContext(),
+                        TestRepository(mutableListOf(session)),
+                    )
+                model.enterRoute(ACCOUNT)
+                runCurrent()
+                model.selectLocation(
+                    model.state.value.locations
+                        .single()
+                        .id,
+                )
+                model.unlock("password".toCharArray())
+                advanceUntilIdle()
+
+                model.keepDirectoryOffline()
+                advanceUntilIdle()
+
+                assertEquals(expectedError, model.state.value.error)
+                assertEquals(expectedMode, model.state.value.mode)
+                if (expectedMode == VaultRouteMode.CONTENTS) assertFalse(model.state.value.loading)
+                model.leaveRoute()
+            }
+        }
+
+    @Test fun ordinaryCreateAndRenameKeepTheMutationFailureMessage() =
+        runTest {
+            Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+            val session = TestSession(identity)
+            val model =
+                newViewModel(
+                    ApplicationProvider.getApplicationContext(),
+                    TestRepository(mutableListOf(session)),
+                )
+            model.enterRoute(ACCOUNT)
+            runCurrent()
+            model.selectLocation(
+                model.state.value.locations
+                    .single()
+                    .id,
+            )
+            model.unlock("password".toCharArray())
+            advanceUntilIdle()
+
+            model.createFolder("new-folder")
+            advanceUntilIdle()
+            assertEquals(VaultRouteError.OPERATION, model.state.value.error)
+            assertEquals(VaultRouteMode.CONTENTS, model.state.value.mode)
+
+            model.retry()
+            advanceUntilIdle()
+            model.onEntryAction(
+                model.state.value.entries
+                    .single()
+                    .id,
+                VaultEntryAction.RENAME,
+                "renamed.txt",
+            )
+            advanceUntilIdle()
+            assertEquals(VaultRouteError.OPERATION, model.state.value.error)
+            assertEquals(VaultRouteMode.CONTENTS, model.state.value.mode)
             model.leaveRoute()
         }
 
@@ -518,18 +632,26 @@ class VaultViewModelTransferTest {
         assertEquals(null, encryptedPlaintextSize(48))
     }
 
-    @Test fun encryptedConflictNamesSkipOccupiedSiblingsAndTreatFoldersAsWholeNames() {
-        assertEquals(
-            "report (3).pdf",
-            numberedEncryptedName(
-                "report.pdf",
-                false,
-                setOf("report.pdf", "report (1).pdf", "report (2).pdf"),
-            ),
-        )
-        assertEquals("folder.ext (1)", numberedEncryptedName("folder.ext", true, setOf("folder.ext")))
-        assertEquals(".hidden (1)", numberedEncryptedName(".hidden", false, setOf(".hidden")))
-    }
+    @Test fun encryptedConflictNamesSkipOccupiedSiblingsAndTreatFoldersAsWholeNames() =
+        runTest {
+            val occupied = mutableSetOf("report.pdf", "report (1).pdf", "report (2).pdf", "folder.ext", ".hidden")
+            val index =
+                object : BoundaryNameIndex {
+                    override suspend fun reserve(name: String): Boolean = occupied.add(name)
+
+                    override fun close() = Unit
+                }
+            val entries =
+                sequenceOf(
+                    BoundaryEntry("report", "report.pdf", "report.pdf", false, 1, "\"1\""),
+                    BoundaryEntry("folder", "folder.ext", "folder.ext", true, 0, "\"1\""),
+                    BoundaryEntry("hidden", ".hidden", ".hidden", false, 1, "\"1\""),
+                )
+            val plan = index.use { reserveBoundaryPlacementNames(entries, it) }
+            assertEquals("report (3).pdf", plan.names[0])
+            assertEquals("folder.ext (1)", plan.names[1])
+            assertEquals(".hidden (1)", plan.names[2])
+        }
 
     @Test fun encryptedCopyConflictWaitsForExplicitDecisionAndPreservesExtension() =
         runTest {
@@ -666,6 +788,115 @@ class VaultViewModelTransferTest {
             }
             assertTrue(rejected)
             assertEquals(0, repository.uploadCalls)
+            assertEquals(0, repository.queuedUploadCalls)
+            model.leaveRoute()
+        }
+
+    @Test fun scannerQueuesEachOutputOnlyAfterStagingAndPreservesEarlierJobsOnFailure() =
+        runTest {
+            Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+            val ready = CompletableDeferred<Unit>()
+            val opened = TestSession(identity).apply { queueUploadBlock = { ready.await() } }
+            val repository = TestRepository(mutableListOf(opened))
+            val model = newViewModel(ApplicationProvider.getApplicationContext(), repository)
+            enterAndUnlock(model)
+            val lease = requireNotNull(model.prepareScanner())
+            val first = async { lease.upload("page-1.jpg", "first".byteInputStream(), 5, "image/jpeg") }
+            runCurrent()
+            assertEquals(0, repository.queuedUploadCalls)
+            assertEquals(0L, model.state.value.queuedUploadCount)
+            ready.complete(Unit)
+            first.await()
+            assertEquals(1, repository.queuedUploadCalls)
+            assertEquals(1L, model.state.value.queuedUploadCount)
+            lease.upload("page-2.jpg", "second".byteInputStream(), 6, "image/jpeg")
+            assertEquals(2, repository.queuedUploadCalls)
+            assertEquals(2L, model.state.value.queuedUploadCount)
+
+            opened.queueUploadBlock = { throw OpenCloudException(OpenCloudError.LocalStorageWriteFailed) }
+            var failed = false
+            try {
+                lease.upload("page-3.jpg", "third".byteInputStream(), 5, "image/jpeg")
+            } catch (_: OpenCloudException) {
+                failed = true
+            }
+            assertTrue(failed)
+            assertEquals(2, repository.queuedUploadCalls)
+            assertEquals(2L, model.state.value.queuedUploadCount)
+            assertEquals(0, repository.uploadCalls)
+            model.leaveRoute()
+        }
+
+    @Test fun cancellingScannerPreparationDoesNotPublishAQueuedNoticeOrRemoveEarlierJob() =
+        runTest {
+            Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+            val opened = TestSession(identity)
+            val repository = TestRepository(mutableListOf(opened))
+            val model = newViewModel(ApplicationProvider.getApplicationContext(), repository)
+            enterAndUnlock(model)
+            val lease = requireNotNull(model.prepareScanner())
+            lease.upload("page-1.jpg", "first".byteInputStream(), 5, "image/jpeg")
+            opened.queueUploadBlock = { suspendCancellableCoroutine { } }
+            val preparing = async { lease.upload("page-2.jpg", "second".byteInputStream(), 6, "image/jpeg") }
+            runCurrent()
+            preparing.cancel()
+            preparing.join()
+            assertEquals(1, repository.queuedUploadCalls)
+            assertEquals(1L, model.state.value.queuedUploadCount)
+            assertEquals(0, repository.uploadCalls)
+            model.leaveRoute()
+        }
+
+    @Test fun scannerLeaseFromPreviousAccountCannotQueueIntoNewAccount() =
+        runTest {
+            Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+            val repository =
+                TestRepository(
+                    mutableListOf(TestSession(identity)),
+                    listOf(location, location.copy(accountId = OTHER_ACCOUNT)),
+                )
+            val model = newViewModel(ApplicationProvider.getApplicationContext(), repository)
+            enterAndUnlock(model)
+            val lease = requireNotNull(model.prepareScanner())
+            model.enterRoute(OTHER_ACCOUNT)
+            runCurrent()
+            assertFalse(lease.isValid())
+            var rejected = false
+            try {
+                lease.upload("page.jpg", "first".byteInputStream(), 5, "image/jpeg")
+            } catch (_: IllegalStateException) {
+                rejected = true
+            }
+            assertTrue(rejected)
+            assertEquals(0, repository.queuedUploadCalls)
+            assertEquals(0L, model.state.value.queuedUploadCount)
+            model.leaveRoute()
+        }
+
+    @Test fun acceptedScannerJobAfterAccountChangeHasNoStaleNoticeOrRetryableFailure() =
+        runTest {
+            Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+            val ready = CompletableDeferred<Unit>()
+            val opened = TestSession(identity).apply { queueUploadBlock = { ready.await() } }
+            val repository =
+                TestRepository(
+                    mutableListOf(opened),
+                    listOf(location, location.copy(accountId = OTHER_ACCOUNT)),
+                )
+            val model = newViewModel(ApplicationProvider.getApplicationContext(), repository)
+            enterAndUnlock(model)
+            val lease = requireNotNull(model.prepareScanner())
+            val accepting = async { lease.upload("page.jpg", "first".byteInputStream(), 5, "image/jpeg") }
+            runCurrent()
+            model.enterRoute(OTHER_ACCOUNT)
+            runCurrent()
+            // Simulate queue admission winning a race with account/route revocation.
+            ready.complete(Unit)
+            accepting.await()
+            assertEquals(1, repository.queuedUploadCalls)
+            assertEquals(0L, model.state.value.queuedUploadCount)
+            assertFalse(lease.isValid())
+            assertEquals(0, repository.uploadCalls)
             model.leaveRoute()
         }
 
@@ -762,8 +993,43 @@ class VaultViewModelTransferTest {
             assertEquals(1, opened.replaceCalls)
             assertTrue(opened.replacedEntry === entry)
             assertEquals("updated ü", opened.replacedText)
+            assertEquals(1, opened.queuedReplacementCalls)
+            assertEquals(1L, model.state.value.queuedUploadCount)
             assertTrue(bytes.all { it == 0.toByte() })
             assertEquals(null, model.state.value.preview)
+            model.leaveRoute()
+        }
+
+    @Test fun encryptedTextDraftRemainsVisibleUntilCiphertextAdmissionCompletes() =
+        runTest {
+            Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+            val ready = CompletableDeferred<Unit>()
+            val entry = fileEntry("notes.txt")
+            val opened = TestSession(identity, entries = listOf(entry))
+            opened.previewBlock = { "original".toByteArray() }
+            opened.queueReplacementBlock = { ready.await() }
+            val model = newViewModel(ApplicationProvider.getApplicationContext(), TestRepository(mutableListOf(opened)))
+            enterAndUnlock(model)
+            model.openPreview(
+                model.state.value.entries
+                    .single()
+                    .id,
+            )
+            advanceUntilIdle()
+            val preview = requireNotNull(model.state.value.preview)
+            val bytes = "edited".toByteArray()
+            model.savePreviewText(preview, bytes)
+            runCurrent()
+            assertTrue(model.state.value.previewSaving)
+            assertTrue(model.state.value.preview === preview)
+            assertEquals(0L, model.state.value.queuedUploadCount)
+            assertEquals(0, opened.queuedReplacementCalls)
+            ready.complete(Unit)
+            advanceUntilIdle()
+            assertEquals(1, opened.queuedReplacementCalls)
+            assertEquals(1L, model.state.value.queuedUploadCount)
+            assertEquals(null, model.state.value.preview)
+            assertTrue(bytes.all { it == 0.toByte() })
             model.leaveRoute()
         }
 
@@ -1019,8 +1285,7 @@ class VaultViewModelTransferTest {
         TestBiometricStore(),
         TestPreferences(),
         ioDispatcher = Dispatchers.Main,
-        // These provider fixtures expose regular files; Robolectric does not implement native poll readiness.
-        uploadPollReady = { _, _ -> true },
+        adapters = VaultViewModelAdapters(context, uploadPollReady = { _, _ -> true }),
     )
 
     private class TestRepository(
@@ -1094,13 +1359,56 @@ class VaultViewModelTransferTest {
         var lastList = ""
         var lastListBeforeCopy: String? = null
 
+        var forbidLegacyList = false
+        var legacyListCalls = 0
+
         override suspend fun list(path: String): List<VaultFolder> {
+            legacyListCalls++
+            check(!forbidLegacyList)
             lastList = path
             return if (path.isEmpty()) entries else destinationEntries
         }
 
+        override suspend fun openDirectory(
+            path: String,
+            showHidden: Boolean,
+            excludedPath: String?,
+        ): VaultRouteDirectorySnapshot {
+            if (!forbidLegacyList) return super<VaultRouteSession>.openDirectory(path, showHidden, excludedPath)
+            lastList = path
+            val visible =
+                (if (path.isEmpty()) entries else destinationEntries)
+                    .filter { showHidden || !it.name.startsWith('.') }
+                    .filter {
+                        excludedPath == null ||
+                            it.path != excludedPath &&
+                            !it.path.startsWith(
+                                excludedPath + "/",
+                            )
+                    }
+            return object : VaultRouteDirectorySnapshot {
+                override val totalCount get() = visible.size.toLong()
+
+                override suspend fun page(
+                    offset: Long,
+                    limit: Int,
+                ) = visible.drop(offset.toInt()).take(limit)
+
+                override fun close() = Unit
+            }
+        }
+
         var destinationEntries: List<VaultFolder> = emptyList()
         var copiedName: String? = null
+        var offlinePreparationFailure: Throwable? = null
+
+        override suspend fun pinOffline(entry: VaultFolder) {
+            offlinePreparationFailure?.let { throw it }
+        }
+
+        override suspend fun pinOfflineDirectory(path: String) {
+            offlinePreparationFailure?.let { throw it }
+        }
 
         override suspend fun move(
             entry: VaultFolder,
@@ -1124,10 +1432,22 @@ class VaultViewModelTransferTest {
         }
 
         var replaceCalls = 0
+        var queuedReplacementCalls = 0
+        var queueReplacementBlock: suspend () -> Unit = {}
         var replacedEntry: VaultFolder? = null
         var replacedText: String? = null
         var replaceFailure: Throwable? = null
         var replaceBlock: ((InputStream, Long) -> Unit)? = null
+
+        override suspend fun queueReplacement(
+            entry: VaultFolder,
+            source: InputStream,
+            size: Long,
+        ) {
+            queueReplacementBlock()
+            replaceText(entry, source, size)
+            queuedReplacementCalls++
+        }
 
         override suspend fun replaceText(
             entry: VaultFolder,

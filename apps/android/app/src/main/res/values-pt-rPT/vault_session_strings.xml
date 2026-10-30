@@ -1,0 +1,7 @@
+<resources>
+    <string name="vault_verifying_key">A verificar a chave…</string>
+    <string name="vault_phone_session_issue">A reutilização da sessão neste telemóvel requer atenção (código %1$s).</string>
+    <string name="vault_locking_remembered_access">A bloquear o acesso memorizado…</string>
+    <string name="vault_phone_lock_failed">Não foi possível bloquear o acesso memorizado. Remova o acesso guardado nas Preferências encriptadas e tente novamente.</string>
+    <string name="vault_phone_remember_failed">Não foi possível memorizar este cofre em segurança neste telemóvel. Tente novamente ou reponha esta opção.</string>
+</resources>

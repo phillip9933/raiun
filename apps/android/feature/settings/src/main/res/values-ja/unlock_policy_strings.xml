@@ -1,0 +1,10 @@
+<resources>
+    <string name="settings_encrypted_ask_every_time">毎回確認する</string>
+    <string name="settings_encrypted_unlock_session_explanation">オンの場合、Raiunは毎回新しいパスワードまたは生体認証による解除を求め、スマートフォンで記憶したキーを削除します。以前の生体認証キーは1回限りの解除に引き続き利用できます。オフの場合、記憶した場所はスマートフォンのロック解除中に、Raiunの再起動後も再び開けます。非対応端末や安全な画面ロックがない端末では、毎回新たな認証が必要です。</string>
+    <string name="settings_encrypted_unlock_policy_failed">ロック解除の設定を変更できませんでした。もう一度お試しください。</string>
+    <string name="settings_encrypted_phone_remembered">このスマートフォンで記憶済み</string>
+    <string name="settings_encrypted_phone_declined">このスマートフォンでの記憶を辞退</string>
+    <string name="settings_encrypted_reset_title_device">このスマートフォンから保管庫を忘れますか？</string>
+    <string name="settings_encrypted_reset_explanation_device">Raiunは%1$sの保存済み解除設定とローカルキーをこのスマートフォンから削除します。再度記憶するには、あらためて認証が必要です。</string>
+    <string name="settings_encrypted_forget_phone">このスマートフォンで忘れる</string>
+</resources>

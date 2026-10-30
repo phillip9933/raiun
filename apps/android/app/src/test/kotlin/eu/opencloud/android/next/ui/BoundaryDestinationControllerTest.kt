@@ -2,15 +2,22 @@ package eu.opencloud.android.next.ui
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import eu.opencloud.android.next.core.sync.BoundaryDestinationFolder
+import eu.opencloud.android.next.core.sync.BoundaryDestinationSnapshot
 import eu.opencloud.android.next.core.sync.BoundaryEndpoint
 import eu.opencloud.android.next.core.sync.BoundaryEntry
+import eu.opencloud.android.next.core.sync.BoundaryNameIndex
 import eu.opencloud.android.next.core.sync.VaultFolder
 import eu.opencloud.android.next.core.sync.VaultLocation
 import eu.opencloud.android.next.core.sync.VaultLocationKind
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -101,16 +108,146 @@ class BoundaryDestinationControllerTest {
             }
         }
 
+    @Test fun `conflict and cancel close reservations while keep both recaptures before preflight`() =
+        runBlocking {
+            val remoteNames = mutableSetOf("private.txt")
+            var captures = 0
+            var closes = 0
+            var writes = 0
+            var writtenName: String? = null
+            val source =
+                object : BoundaryEndpoint by FakeEndpoint(encrypted = true) {
+                    override val identity = "source"
+
+                    override suspend fun requireUnchanged(entry: BoundaryEntry) {
+                        assertEquals(captures, closes)
+                    }
+
+                    override suspend fun read(
+                        entry: BoundaryEntry,
+                        sink: OutputStream,
+                    ) {
+                        sink.write(1)
+                    }
+                }
+            val destination =
+                object : BoundaryEndpoint by FakeEndpoint() {
+                    override val identity = "destination"
+
+                    override suspend fun openNameIndex(
+                        context: Context,
+                        path: String,
+                    ): BoundaryNameIndex {
+                        captures++
+                        return TrackingNames(remoteNames) { closes++ }
+                    }
+
+                    override suspend fun write(
+                        parent: String,
+                        name: String,
+                        source: InputStream,
+                        size: Long,
+                        mimeType: String?,
+                    ): BoundaryEntry {
+                        assertEquals(captures, closes)
+                        assertEquals(listOf(1.toByte()), source.readBytes().toList())
+                        writes++
+                        writtenName = name
+                        return BoundaryEntry("copy", name, name, false, 1, "\"1\"")
+                    }
+
+                    override suspend fun read(
+                        entry: BoundaryEntry,
+                        sink: OutputStream,
+                    ) {
+                        sink.write(1)
+                    }
+                }
+            val controller = controller(FakeRepository(ordinaryBlock = { destination }), Dispatchers.Unconfined, source)
+            try {
+                controller.select(first)
+                controller.transfer()
+                assertEquals(
+                    "private (1).txt",
+                    controller.state.value.conflict
+                        ?.proposedName,
+                )
+                assertEquals(1, captures)
+                assertEquals(1, closes)
+                assertEquals(0, writes)
+                controller.cancelConflict()
+                withTimeout(5_000) { controller.state.first { !it.loading } }
+                assertNull(controller.state.value.conflict)
+                assertEquals(0, writes)
+                remoteNames += "private (1).txt"
+                controller.keepBoth()
+                withTimeout(5_000) { controller.state.first { it.complete || it.error != null } }
+                assertTrue(controller.state.value.complete)
+                assertEquals(2, captures)
+                assertEquals(2, closes)
+                assertEquals(1, writes)
+                assertEquals("private (2).txt", writtenName)
+            } finally {
+                controller.close()
+            }
+        }
+
+    @Test fun `a late name index is closed when the modal is cancelled before planning`() =
+        runBlocking {
+            var pending: Continuation<BoundaryNameIndex>? = null
+            var closes = 0
+            val destination =
+                object : BoundaryEndpoint by FakeEndpoint() {
+                    override val identity = "destination"
+
+                    override suspend fun openNameIndex(
+                        context: Context,
+                        path: String,
+                    ): BoundaryNameIndex = suspendCoroutine { pending = it }
+                }
+            val controller = controller(FakeRepository(ordinaryBlock = { destination }), Dispatchers.Unconfined)
+            controller.select(first)
+            controller.transfer()
+            val produced = requireNotNull(pending)
+            controller.close()
+            produced.resume(TrackingNames(emptySet()) { closes++ })
+            kotlinx.coroutines.yield()
+            assertEquals(1, closes)
+            assertTrue(!controller.state.value.complete)
+            assertNull(controller.state.value.conflict)
+        }
+
+    private class TrackingNames(
+        existing: Set<String>,
+        private val onClose: () -> Unit,
+    ) : BoundaryNameIndex {
+        private val names = existing.toMutableSet()
+        private var closed = false
+
+        override suspend fun reserve(name: String): Boolean {
+            check(!closed)
+            return names.add(name)
+        }
+
+        override fun close() {
+            if (!closed) {
+                closed = true
+                onClose()
+            }
+        }
+    }
+
     private fun controller(
         repository: BoundaryDestinationRepository,
         dispatcher: kotlinx.coroutines.CoroutineDispatcher,
+        source: BoundaryEndpoint = FakeEndpoint(encrypted = true),
     ) = BoundaryDestinationController(
         ApplicationProvider.getApplicationContext<Context>(),
         BoundaryTransferRequest(
             "account",
             false,
             unlocked =
-                FakeEndpoint(encrypted = true) to
+                source to
                     BoundaryEntry("source", "private.txt", "private.txt", false, 1, "\"1\""),
         ),
         repository,
@@ -146,6 +283,21 @@ class BoundaryDestinationControllerTest {
         override val encrypted: Boolean = false,
     ) : BoundaryEndpoint {
         override val identity = "synthetic-endpoint"
+
+        override suspend fun openDestinationFolders(
+            context: Context,
+            path: String,
+        ): BoundaryDestinationSnapshot =
+            object : BoundaryDestinationSnapshot {
+                override val totalCount = 0L
+
+                override suspend fun page(
+                    offset: Long,
+                    limit: Int,
+                ) = emptyList<BoundaryDestinationFolder>()
+
+                override fun close() = Unit
+            }
 
         override suspend fun list(path: String) = emptyList<BoundaryEntry>()
 

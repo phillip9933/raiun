@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.0
+
+- Add and manage OpenCloud guest invitations for files and folders; recipients open emailed links in their browser.
+- Improve Wi-Fi and certificate connection settings, account colors, account identity and light/dark styling.
+- Add an optional **Remember on this phone** choice for encrypted folders and Spaces on supported Android 15+ devices; the vault password is not saved.
+- Improve encrypted-folder offline access and large-folder browsing, copy/move, transfers and offline catalogs.
+- Fix sign-in discovery to use the server's configured Android client ID and scopes, including custom group-access scopes.
+- Encrypted offline metadata and the database format have changed. Older builds cannot read the new format; downgrade is not supported.
+
 ## 1.2.0
 
 - Match Navigation and permission buttons to the other settings controls, and align the Language selector beside its title.

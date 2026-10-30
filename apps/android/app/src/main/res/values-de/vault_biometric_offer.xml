@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="vault_phone_remember_offer_title">Auf diesem Smartphone merken?</string>
+    <string name="vault_phone_remember_offer_message">Raiun kann sich diesen Tresor sicher auf diesem Smartphone merken, damit er nach einem Neustart von Raiun und nach dem Entsperren des Smartphones wieder geöffnet werden kann. Bewahre eine sichere Kopie deines Verschlüsselungspassworts auf: Du brauchst es weiterhin auf anderen Geräten oder wenn du dieses Smartphone verlierst.</string>
+    <string name="vault_phone_remember_offer_accept">Auf diesem Smartphone merken</string>
+    <string name="vault_phone_remember_offer_decline">Jedes Mal fragen</string>
     <string name="vault_biometric_offer_title">Mit Biometrie entsperren?</string>
     <string name="vault_biometric_offer_message">Öffne diesen verschlüsselten Ordner oder Space mit deinem Fingerabdruck oder unterstützter Gesichtserkennung. Das funktioniert nur auf diesem Smartphone. Bewahre eine sichere Kopie deines Verschlüsselungspassworts auf: Du brauchst es weiterhin auf anderen Geräten, nach dem Zurücksetzen der Biometrie oder beim Verlust dieses Smartphones.</string>
     <string name="vault_biometric_offer_accept">Biometrie einrichten</string>

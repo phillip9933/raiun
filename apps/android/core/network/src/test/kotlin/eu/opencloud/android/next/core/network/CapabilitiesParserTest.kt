@@ -10,6 +10,58 @@ class CapabilitiesParserTest {
     private val parser = CapabilitiesParser()
 
     @Test
+    fun `OpenCloud guest flag is independent of legacy compatibility version`() {
+        val result =
+            parser.parse(
+                """{"ocs":{"data":{
+                "version":{"string":"0.1.0","product":"OpenCloud","productversion":"9.0.0"},
+                "capabilities":{"files_sharing":{"api_enabled":true,"guest_links":{"enabled":true}}}
+                }}}""",
+                "https://cloud.example",
+            )
+        assertEquals("0.1.0", result.version)
+        assertTrue(result.sharingEnabled)
+        assertTrue(result.guestLinksEnabled)
+    }
+
+    @Test
+    fun `missing or disabled guest flag cannot be enabled by other sharing capabilities`() {
+        for (guestField in listOf("", """, "guest_links":{}""", """, "guest_links":{"enabled":false}""")) {
+            assertFalse(
+                parse(
+                    """{"files_sharing":{"api_enabled":true,"public":{"enabled":true}$guestField}}""",
+                ).guestLinksEnabled,
+            )
+        }
+        assertFalse(parse("{}").guestLinksEnabled)
+    }
+
+    @Test
+    fun `malformed or unknown guest advertisement disables only guest support`() {
+        val advertisements =
+            listOf(
+                "null",
+                "true",
+                "1",
+                "[]",
+                """"enabled"""",
+                "{}",
+                """{"enabled":null}""",
+                """{"enabled":"true"}""",
+                """{"enabled":1}""",
+                """{"enabled":[]}""",
+                """{"enabled":{}}""",
+                """{"enabled":false,"api_enabled":true}""",
+                """{"api_enabled":true,"version":"9.0.0"}""",
+            )
+        for (advertisement in advertisements) {
+            val result = parse("""{"files_sharing":{"api_enabled":true,"guest_links":$advertisement}}""")
+            assertTrue(result.sharingEnabled)
+            assertFalse(result.guestLinksEnabled)
+        }
+    }
+
+    @Test
     fun `unrelated strings and explicit false cannot enable features`() {
         val result =
             parse(

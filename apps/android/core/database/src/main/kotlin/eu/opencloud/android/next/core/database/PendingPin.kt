@@ -97,6 +97,18 @@ interface PendingPinDao {
     )
     suspend fun deleteOperationPins(accountId: String)
 
+    /** Revoke only the selected source rights; the remote move operation itself remains untouched. */
+    @Query(
+        "DELETE FROM operation_pins WHERE EXISTS (SELECT 1 FROM file_operations o " +
+            "WHERE o.id=operation_pins.operationId AND o.accountId=:accountId AND o.sourceSpaceId=:spaceId " +
+            "AND o.sourcePath || relativePath = :path)",
+    )
+    suspend fun deleteSourceSelection(
+        accountId: String,
+        spaceId: String,
+        path: String,
+    )
+
     @Query(
         "DELETE FROM operation_pins WHERE operationId IN " +
             "(SELECT id FROM file_operations WHERE accountId = :accountId AND state = 'BLOCKED_VAULT')",

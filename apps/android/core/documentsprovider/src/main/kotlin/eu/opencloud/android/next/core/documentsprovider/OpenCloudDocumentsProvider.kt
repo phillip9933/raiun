@@ -380,8 +380,7 @@ class OpenCloudDocumentsProvider : DocumentsProvider() {
                 try {
                     withTimeout(30 * 60 * 1000L) {
                         val transferId = transfers.enqueueDownload(resource, offlinePin = false)
-                        store.observeTransfers(id.accountId).first { values ->
-                            val transfer = values.find { it.id == transferId }
+                        store.observeTransfer(id.accountId, transferId).first { transfer ->
                             transfer == null || transfer.state !in setOf("QUEUED", "RUNNING", "RETRY")
                         }
                         requireAvailable(id, readPermit)

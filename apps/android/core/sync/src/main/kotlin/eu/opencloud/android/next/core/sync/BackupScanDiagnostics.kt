@@ -121,6 +121,7 @@ private val BACKUP_SCAN_ERRORS =
         "INVALID_RESPONSE" to OpenCloudError.InvalidResponse,
         "LOCAL_STORAGE" to OpenCloudError.LocalStorage,
         "LOCAL_STORAGE_WRITE_FAILED" to OpenCloudError.LocalStorageWriteFailed,
+        "ENCRYPTED_OFFLINE_INDEX_FULL" to OpenCloudError.EncryptedOfflineIndexFull,
         "SOURCE_UNAVAILABLE" to OpenCloudError.SourceUnavailable,
         "SOURCE_CHANGED" to OpenCloudError.SourceChanged,
         "SOURCE_PERMISSION" to OpenCloudError.SourcePermissionDenied,

@@ -28,7 +28,6 @@ import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.ViewHeadline
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
@@ -40,6 +39,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.res.stringResource
 import eu.opencloud.android.next.core.datastore.SettingsBrowserLayout
+import eu.opencloud.android.next.core.designsystem.component.HorizontalDivider
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudColor
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
 

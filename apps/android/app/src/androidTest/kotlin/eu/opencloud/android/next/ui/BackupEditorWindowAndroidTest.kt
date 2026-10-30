@@ -20,6 +20,7 @@ import androidx.compose.ui.test.swipeDown
 import androidx.compose.ui.test.swipeUp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import eu.opencloud.android.next.NativeUiDiagnostics
 import eu.opencloud.android.next.core.database.FolderBackupEntity
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudTheme
 import eu.opencloud.android.next.feature.files.BackupEditorDialog
@@ -35,48 +36,51 @@ class BackupEditorWindowAndroidTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
 
     @Test
-    fun newBackupScrollsWithoutMovingOrDismissingAndClosesOnSave() {
-        showEditor(null)
-        saveScreenshot("backup-editor-new.png")
-        exerciseScrolling()
-        compose.onNodeWithText("Save").performClick()
-        compose.onNodeWithText("Editor closed").assertIsDisplayed()
-    }
+    fun newBackupScrollsWithoutMovingOrDismissingAndClosesOnSave() =
+        diagnose("backup-editor-new") { diagnostics ->
+            showEditor(null)
+            saveScreenshot("backup-editor-new.png")
+            exerciseScrolling(diagnostics)
+            compose.onNodeWithText("Save").performClick()
+            compose.onNodeWithText("Editor closed").assertIsDisplayed()
+        }
 
     @Test
-    fun existingBackupIgnoresSwipeAndBackDismissalAndClosesOnCancel() {
-        showEditor(
-            FolderBackupEntity(
-                id = "backup",
-                accountId = "account",
-                spaceId = "personal",
-                sourceTreeUri = "content://test/tree/camera",
-                sourceDisplayName = "Camera",
-                destinationPath = "/Pictures",
-                mediaType = "ALL",
-                wifiOnly = true,
-                chargingOnly = false,
-                deleteAfterUpload = false,
-            ),
-        )
-        saveScreenshot("backup-editor-manage.png")
-        exerciseScrolling()
-        compose.onNodeWithText("Cancel").performClick()
-        compose.onNodeWithText("Editor closed").assertIsDisplayed()
-    }
+    fun existingBackupIgnoresSwipeAndBackDismissalAndClosesOnCancel() =
+        diagnose("backup-editor-existing") { diagnostics ->
+            showEditor(
+                FolderBackupEntity(
+                    id = "backup",
+                    accountId = "account",
+                    spaceId = "personal",
+                    sourceTreeUri = "content://test/tree/camera",
+                    sourceDisplayName = "Camera",
+                    destinationPath = "/Pictures",
+                    mediaType = "ALL",
+                    wifiOnly = true,
+                    chargingOnly = false,
+                    deleteAfterUpload = false,
+                ),
+            )
+            saveScreenshot("backup-editor-manage.png")
+            exerciseScrolling(diagnostics)
+            compose.onNodeWithText("Cancel").performClick()
+            compose.onNodeWithText("Editor closed").assertIsDisplayed()
+        }
 
     @Test
-    fun newBackupOffersDatePresets() {
-        showEditor(null)
-        compose.onNodeWithText("Edit").performScrollTo().performClick()
-        compose.onNodeWithContentDescription("Organize files into date folders").performClick()
-        compose.onNodeWithText("[YYYY]/[MM]/[DD]").performScrollTo().performClick()
-        saveScreenshot("backup-date-pattern-editor.png")
-        compose.onNodeWithText("Done").performClick()
-        compose.onNodeWithText("[YYYY]/[MM]/[DD]").performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("Save").performClick()
-        compose.onNodeWithText("Editor closed").assertIsDisplayed()
-    }
+    fun newBackupOffersDatePresets() =
+        diagnose("backup-editor-date-presets") { _ ->
+            showEditor(null)
+            compose.onNodeWithText("Edit").performScrollTo().performClick()
+            compose.onNodeWithContentDescription("Organize files into date folders").performClick()
+            compose.onNodeWithText("[YYYY]/[MM]/[DD]").performScrollTo().performClick()
+            saveScreenshot("backup-date-pattern-editor.png")
+            compose.onNodeWithText("Done").performClick()
+            compose.onNodeWithText("[YYYY]/[MM]/[DD]").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Save").performClick()
+            compose.onNodeWithText("Editor closed").assertIsDisplayed()
+        }
 
     private fun saveScreenshot(name: String) {
         compose.waitForIdle()
@@ -89,13 +93,36 @@ class BackupEditorWindowAndroidTest {
         screenshot.recycle()
     }
 
-    private fun exerciseScrolling() {
-        val saveBounds = compose.onNodeWithText("Save").fetchSemanticsNode().boundsInRoot
-        repeat(5) {
-            compose.onNode(hasScrollAction()).performTouchInput { swipeUp() }
-            compose.onNode(hasScrollAction()).performTouchInput { swipeDown() }
+    private fun diagnose(
+        name: String,
+        block: (NativeUiDiagnostics) -> Unit,
+    ) {
+        val diagnostics = NativeUiDiagnostics(name)
+        diagnostics.stage("test-start")
+        try {
+            diagnostics.prepareDevice()
+            block(diagnostics)
+        } catch (error: Throwable) {
+            diagnostics.failure(error)
+            throw error
         }
+    }
+
+    private fun exerciseScrolling(diagnostics: NativeUiDiagnostics) {
+        diagnostics.awaitAppWindow()
+        val saveBounds = compose.onNodeWithText("Save").fetchSemanticsNode().boundsInRoot
+        repeat(5) { index ->
+            diagnostics.stage("before-swipe-up-$index")
+            compose.onNode(hasScrollAction()).performTouchInput { swipeUp() }
+            diagnostics.stage("after-swipe-up-$index")
+            diagnostics.stage("before-swipe-down-$index")
+            compose.onNode(hasScrollAction()).performTouchInput { swipeDown() }
+            diagnostics.stage("after-swipe-down-$index")
+        }
+        diagnostics.awaitAppWindow()
+        diagnostics.stage("before-raw-back")
         InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK)
+        diagnostics.stage("after-raw-back")
         compose.waitForIdle()
         compose.onNodeWithText("Save").assertIsDisplayed()
         compose.onNodeWithText("Cancel").assertIsDisplayed()

@@ -113,6 +113,7 @@ class VaultOfflinePinDispatcherTest {
                     { { true } },
                     EndpointPolicy(true),
                     { PinTestCipher() },
+                    durability = jvmOfflineDurability(offlineRoot),
                 )
             repeat(4) { server.enqueue(rootListing(ciphertext.size)) }
             server.enqueue(MockResponse().setBody(Buffer().write(ciphertext)))

@@ -135,6 +135,91 @@ class VaultDavClient(
         )
     }
 
+    /**
+     * Validates the complete stream while retaining only the requested collection.
+     * Depth0 requests still validate unexpected children if the server ignores the requested depth.
+     * Children are provisional: callers must stage them privately until this method returns.
+     * [registerIdentity] must reject duplicate IDs and canonical paths without unbounded memory.
+     */
+    @Suppress("LongParameterList") // Depth and independent identity/child visitors are explicit wire boundaries.
+    fun streamDirectory(
+        rootWebDavUrl: String,
+        path: String,
+        authorization: String,
+        registerIdentity: (String, String) -> Boolean,
+        consume: (VaultDavEntry) -> Unit,
+        depth: Int = 1,
+    ): VaultDavListing {
+        require(depth in 0..1)
+        requireAuthorization(authorization)
+        val root = validateRootUrl(rootWebDavUrl)
+        val requested = appendRelativePath(root, path)
+        val scope = responseScope(root, requested)
+        val identities = MutableVaultDavIdentities(registerIdentity)
+        var self: ParsedVaultDavResponse? = null
+        val request =
+            Request
+                .Builder()
+                .url(requested)
+                .header("Authorization", authorization)
+                .header("Depth", depth.toString())
+                .method("PROPFIND", PROPFIND_BODY)
+                .build()
+        readMarkerResponses(request) { element ->
+            val parsed = parseResponseResource(element, scope, identities)
+            if (parsed.isRequested) {
+                if (self != null) invalidVaultResponse()
+                self = parsed
+            } else {
+                consume(parsed.entry)
+            }
+        }
+        val collection = self ?: invalidVaultResponse()
+        if (!collection.entry.isFolder) invalidVaultResponse()
+        val marker = isFolderVaultEntry(collection.entry)
+        return VaultDavListing(
+            collection.entry,
+            emptyList(),
+            collection.integrityToken,
+            vaultEvidence = root.samePath(requested) && marker,
+            requestedIsVaultMarker = marker,
+        )
+    }
+
+    /**
+     * Reads exactly one requested file or collection with Depth0, without inferring vault-root authority.
+     * A second resource is refused even when a server ignores Depth0. The complete XML tail must validate
+     * before the descriptor is returned; no parent membership or mutation proof is issued here.
+     */
+    fun statResource(
+        rootWebDavUrl: String,
+        path: String,
+        authorization: String,
+    ): VaultDavEntry {
+        requireAuthorization(authorization)
+        val root = validateRootUrl(rootWebDavUrl)
+        val requested = appendRelativePath(root, path)
+        val scope = responseScope(root, requested)
+        var self: ParsedVaultDavResponse? = null
+        // Only one identity can be admitted. No whole-response ID/path collection is needed.
+        val identities = MutableVaultDavIdentities { _, _ -> self == null }
+        val request =
+            Request
+                .Builder()
+                .url(requested)
+                .header("Authorization", authorization)
+                .header("Depth", "0")
+                .method("PROPFIND", PROPFIND_BODY)
+                .build()
+        readMarkerResponses(request, maxXmlBytes) { element ->
+            if (self != null) invalidVaultResponse()
+            val parsed = parseResponseResource(element, scope, identities)
+            if (!parsed.isRequested) invalidVaultResponse()
+            self = parsed
+        }
+        return self?.entry ?: invalidVaultResponse()
+    }
+
     private fun markerStorageBytes(entry: VaultDavEntry): Long =
         128L + 2L * (
             entry.id.length + entry.relativePath.length + entry.rawName.length +
@@ -145,13 +230,14 @@ class VaultDavClient(
     @Suppress("TooGenericExceptionCaught", "SwallowedException", "ThrowsCount")
     private fun readMarkerResponses(
         request: Request,
+        maxBytes: Long = STREAMING_XML_BYTES,
         consume: (Element) -> Unit,
     ) {
         try {
             client.newCall(request).execute().use { response ->
                 if (response.code != 207) throw TransferHttpException(response.code)
                 val body = response.body ?: invalidVaultResponse()
-                readDavResponses(body.byteStream(), STREAMING_XML_BYTES, consume)
+                readDavResponses(body.byteStream(), maxBytes, consume)
             }
         } catch (cancelled: java.util.concurrent.CancellationException) {
             throw cancelled
@@ -439,6 +525,7 @@ class VaultDavClient(
                 .build()
         return client.newCall(request).execute().use { response ->
             requireReadStatus(response.code, range = null)
+            validateResponseVersion(response, entry.strongETag)
             val body = response.body ?: invalidVaultResponse()
             if (body.contentLength() >= 0 && body.contentLength() != entry.size) invalidVaultResponse()
             val input = ExactLengthInputStream(body.byteStream(), entry.size)
@@ -446,6 +533,17 @@ class VaultDavClient(
             if (input.bytesRead != entry.size) invalidVaultResponse()
             result
         }
+    }
+
+    private fun validateResponseVersion(
+        response: okhttp3.Response,
+        expectedETag: String?,
+    ) {
+        val versions = response.headers.values("ETag")
+        if (versions.size > 1) invalidVaultResponse()
+        // A successful conditional GET may omit ETag, but must not advertise a different version.
+        if (expectedETag == null || versions.isEmpty()) return
+        if (versions.single() != expectedETag) invalidVaultResponse()
     }
 
     /** Reads at most the rclone header and first encrypted block, even when Range is ignored. */

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="error_local_copies_retained">Certaines copies locales ont été conservées, car elles ont changé ou sont utilisées. Fermez les fichiers ouverts ou attendez la fin des téléchargements, puis réessayez.</string>
+    <string name="error_local_copy_removal_failed">Raiun n’a pas pu terminer la suppression des copies locales. Vérifiez le stockage de votre appareil et réessayez.</string>
+</resources>

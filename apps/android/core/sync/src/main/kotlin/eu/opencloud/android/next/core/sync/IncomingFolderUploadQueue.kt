@@ -5,7 +5,9 @@ import androidx.room.withTransaction
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FolderBackupEntity
 import eu.opencloud.android.next.core.database.SharedFolderCacheStore
+import eu.opencloud.android.next.core.database.TransferBulkScope
 import eu.opencloud.android.next.core.database.TransferEntity
+import eu.opencloud.android.next.core.database.TransferInventory
 import eu.opencloud.android.next.core.network.OpenCloudError
 import eu.opencloud.android.next.core.network.OpenCloudException
 import kotlinx.coroutines.currentCoroutineContext
@@ -78,6 +80,7 @@ class IncomingFolderUploadQueue(
     suspend fun retry(
         expected: TransferEntity,
         replacement: TransferEntity,
+        scope: TransferBulkScope? = null,
     ): TransferEntity? {
         require(replacement.id == expected.id && replacement.sourceUri == expected.sourceUri)
         require(parentPath(replacement) == parentPath(expected) && replacement.resourceId == expected.resourceId)
@@ -93,7 +96,13 @@ class IncomingFolderUploadQueue(
                     requireNotNull(expected.sourceUri),
                     expected.destinationPath,
                 )
-            if (duplicate != null) null else transfers.retry(expected, replacement)
+            if (duplicate != null) {
+                null
+            } else if (scope == null) {
+                transfers.retry(expected, replacement)
+            } else {
+                TransferInventory(database).retryScoped(scope, expected, replacement)
+            }
         }
     }
 

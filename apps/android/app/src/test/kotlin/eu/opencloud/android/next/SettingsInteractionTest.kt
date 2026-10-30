@@ -412,7 +412,7 @@ class SettingsInteractionTest {
             compose.onNodeWithText("Biometric offer declined").assertExists()
             compose.onRoot().captureRoboImage("src/test/snapshots/rendered/encrypted_preferences.png")
             compose.onNodeWithText("Ask me again").performClick()
-            compose.onNodeWithText("Reset biometric access?").assertExists()
+            compose.onNodeWithText("Forget this vault on this phone?").assertExists()
             compose.onNodeWithText("Encrypted files and folders will not change.").assertExists()
             compose.onNodeWithText("Cancel").performClick()
             assertEquals(VaultPreferenceStatus.DECLINED, preferences.status(identity))

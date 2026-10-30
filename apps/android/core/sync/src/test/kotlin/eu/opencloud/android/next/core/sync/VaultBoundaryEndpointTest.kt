@@ -15,10 +15,13 @@ import okhttp3.mockwebserver.RecordedRequest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.concurrent.atomic.AtomicInteger
 
+@RunWith(RobolectricTestRunner::class)
 class VaultBoundaryEndpointTest {
     @Test fun `encrypted folder cleanup refuses a new child version after its empty proof`() {
         MockWebServer().use { server ->

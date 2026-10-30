@@ -9,7 +9,7 @@
     <string name="settings_encrypted_preferences_summary">Opciones biométricas para carpetas y Spaces cifrados</string>
     <string name="settings_permissions">Permisos</string>
     <string name="settings_permissions_summary">Acceso a metadatos de fotos y vídeos</string>
-    <string name="settings_encrypted_preferences_explanation">Estas opciones se guardan en este dispositivo. Restablecer una elimina su clave biométrica guardada, si existe. Cuando desbloquees esa ubicación cifrada con su contraseña, Raiun podrá preguntarte de nuevo.</string>
+    <string name="settings_encrypted_preferences_explanation">Estas opciones se guardan en este dispositivo. La lista incluye el acceso recordado en el teléfono, las ofertas rechazadas y cualquier acceso biométrico anterior. Al restablecer una ubicación se borran sus opciones locales de desbloqueo; Raiun podrá preguntarte de nuevo cuando la autentiques con su contraseña.</string>
     <string name="settings_encrypted_preferences_empty">No hay opciones biométricas para ubicaciones cifradas en esta cuenta.</string>
     <string name="settings_encrypted_preferences_failed">No se pudieron leer las preferencias de cifrado.</string>
     <string name="settings_encrypted_folder">Carpeta</string>

@@ -11,11 +11,14 @@ import eu.opencloud.android.next.core.network.TransferHttpException
 import eu.opencloud.android.next.core.network.VaultDavClient
 import eu.opencloud.android.next.core.security.VaultIdentity
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
-import okio.ByteString.Companion.encodeUtf8
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -32,9 +35,7 @@ import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import java.nio.file.Files
-import java.util.Base64
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 
 @RunWith(RobolectricTestRunner::class)
 @Suppress("LargeClass") // These mutation cases intentionally share one session and MockWebServer fixture.
@@ -66,7 +67,7 @@ class VaultRepositoryMutationTest {
     @Test
     fun folderVaultCreationWritesAndReadsBackTheWebProof() =
         runBlocking {
-            val cipher = FixtureCipher()
+            val cipher = VaultBoundaryTestCipher()
             server.enqueue(graphPersonal())
             server.enqueue(davCollection("/dav/files/", "root", "files"))
             server.enqueue(davCollection("/dav/files/", "root", "files"))
@@ -96,7 +97,7 @@ class VaultRepositoryMutationTest {
     @Test
     fun graphVaultSpaceCreationUsesVaultMarkerAndVerifiesProof() =
         runBlocking {
-            val cipher = FixtureCipher()
+            val cipher = VaultBoundaryTestCipher()
             server.enqueue(MockResponse().setResponseCode(201).setBody("""{"id":"vault-drive"}"""))
             server.enqueue(graphVault())
             val graphRoot = "storage\$space"
@@ -128,7 +129,7 @@ class VaultRepositoryMutationTest {
     @Test
     fun uploadEncryptsBeforeConditionalPutAndListsFreshEntry() =
         runBlocking {
-            val cipher = FixtureCipher()
+            val cipher = VaultBoundaryTestCipher()
             val session = session(cipher)
             val rootPath = "/dav/files/Secret.vault/"
             val encryptedName = cipher.encryptName("note.txt")
@@ -165,7 +166,7 @@ class VaultRepositoryMutationTest {
     @Test
     fun overwriteUsesIssuedStrongEtagAndConsumesEntryAfterPreconditionFailure() =
         runBlocking {
-            val cipher = FixtureCipher()
+            val cipher = VaultBoundaryTestCipher()
             val session = session(cipher)
             val rootPath = "/dav/files/Secret.vault/"
             val encryptedName = cipher.encryptName("note.txt")
@@ -240,7 +241,7 @@ class VaultRepositoryMutationTest {
     @Test
     fun uploadStreamsMoreThanEightMiBWithoutPlaintextBuffer() =
         runBlocking {
-            val cipher = FixtureCipher()
+            val cipher = VaultBoundaryTestCipher()
             val session = session(cipher)
             val rootPath = "/dav/files/Secret.vault/"
             val encryptedName = cipher.encryptName("large.bin")
@@ -279,7 +280,7 @@ class VaultRepositoryMutationTest {
     @Test
     fun unknownLengthUploadDeletesCiphertextSpoolAfterSuccess() =
         runBlocking {
-            val cipher = FixtureCipher()
+            val cipher = VaultBoundaryTestCipher()
             val spoolDirectory = Files.createTempDirectory("vault-spool-test").toFile()
             val session = session(cipher, spoolDirectory)
             val rootPath = "/dav/files/Secret.vault/"
@@ -306,7 +307,7 @@ class VaultRepositoryMutationTest {
             try {
                 val added = session.upload("", "unknown.bin", PatternInputStream(plainSize), -1L)
                 assertEquals("unknown.bin", added.name)
-                assertTrue(spoolDirectory.listFiles().isNullOrEmpty())
+                assertSpoolFilesRemoved(spoolDirectory)
                 server.takeRequest()
                 server.takeRequest()
                 assertEquals(cipherSize, server.takeRequest().bodySize)
@@ -320,7 +321,7 @@ class VaultRepositoryMutationTest {
     fun cancelledUnknownLengthUploadRemovesPartialSpoolBeforePut() =
         runBlocking {
             val spoolDirectory = Files.createTempDirectory("vault-spool-cancel").toFile()
-            val session = session(FixtureCipher(), spoolDirectory)
+            val session = session(VaultBoundaryTestCipher(), spoolDirectory)
             server.enqueue(davCollection("/dav/files/Secret.vault/", "vault-id", "Secret.vault", "proof-token"))
             val source =
                 object : PatternInputStream(512L * 1024) {
@@ -340,7 +341,7 @@ class VaultRepositoryMutationTest {
                     runBlocking { session.upload("", "cancel.bin", source, -1L) }
                 }
                 assertEquals(1, server.requestCount)
-                assertTrue(spoolDirectory.listFiles().isNullOrEmpty())
+                assertSpoolFilesRemoved(spoolDirectory)
             } finally {
                 session.close()
                 spoolDirectory.deleteRecursively()
@@ -350,7 +351,7 @@ class VaultRepositoryMutationTest {
     @Test
     fun replacedRootAndForgedEntryFailBeforeMutation() =
         runBlocking {
-            val cipher = FixtureCipher()
+            val cipher = VaultBoundaryTestCipher()
             val session = session(cipher)
             server.enqueue(davCollection("/dav/files/Secret.vault/", "replacement-id", "Secret.vault"))
             try {
@@ -366,7 +367,7 @@ class VaultRepositoryMutationTest {
     @Test
     fun changedIntegrityTokenAtSameRootIdPreventsChildWrite() =
         runBlocking {
-            val session = session(FixtureCipher())
+            val session = session(VaultBoundaryTestCipher())
             server.enqueue(davCollection("/dav/files/Secret.vault/", "vault-id", "Secret.vault", "changed-token"))
             try {
                 assertThrows(OpenCloudException::class.java) {
@@ -382,7 +383,7 @@ class VaultRepositoryMutationTest {
     @Test
     fun renameUsesSameVaultMoveWithSourcePrecondition() =
         runBlocking {
-            val cipher = FixtureCipher()
+            val cipher = VaultBoundaryTestCipher()
             val session = session(cipher)
             val rootPath = "/dav/files/Secret.vault/"
             val oldName = cipher.encryptName("note.txt")
@@ -428,7 +429,7 @@ class VaultRepositoryMutationTest {
     @Test
     fun deleteRejectsEntryWithoutStrongEtagBeforeDeleteRequest() =
         runBlocking {
-            val cipher = FixtureCipher()
+            val cipher = VaultBoundaryTestCipher()
             val session = session(cipher)
             val rootPath = "/dav/files/Secret.vault/"
             val rawName = cipher.encryptName("note.txt")
@@ -452,7 +453,7 @@ class VaultRepositoryMutationTest {
     @Test
     fun ambiguousDeleteInvalidatesIssuedEntryUntilRefresh() =
         runBlocking {
-            val cipher = FixtureCipher()
+            val cipher = VaultBoundaryTestCipher()
             val session = session(cipher)
             val rootPath = "/dav/files/Secret.vault/"
             val rawName = cipher.encryptName("note.txt")
@@ -482,7 +483,7 @@ class VaultRepositoryMutationTest {
     @Test
     fun downloadAuthenticatesCiphertextBeforeWritingPlaintextToSink() =
         runBlocking {
-            val cipher = FixtureCipher()
+            val cipher = VaultBoundaryTestCipher()
             val session = session(cipher)
             val rootPath = "/dav/files/Secret.vault/"
             val rawName = cipher.encryptName("note.txt")
@@ -521,7 +522,7 @@ class VaultRepositoryMutationTest {
     @Test
     fun downloadStreamsMoreThanEightMiBIntoCallerSink() =
         runBlocking {
-            val cipher = FixtureCipher()
+            val cipher = VaultBoundaryTestCipher()
             val session = session(cipher)
             val rootPath = "/dav/files/Secret.vault/"
             val rawName = cipher.encryptName("large.bin")
@@ -559,7 +560,7 @@ class VaultRepositoryMutationTest {
     @Test
     fun damagedFinalBlockFailsWithoutWritingThatBlock() =
         runBlocking {
-            val cipher = FixtureCipher()
+            val cipher = VaultBoundaryTestCipher()
             val session = session(cipher)
             val rootPath = "/dav/files/Secret.vault/"
             val rawName = cipher.encryptName("damaged.bin")
@@ -598,8 +599,8 @@ class VaultRepositoryMutationTest {
     @Test
     fun sessionCloseRevokesIssuedEntriesBeforeNetworkMutation() =
         runBlocking {
-            val session = session(FixtureCipher())
-            val encryptedName = FixtureCipher().encryptName("note.txt")
+            val session = session(VaultBoundaryTestCipher())
+            val encryptedName = VaultBoundaryTestCipher().encryptName("note.txt")
             server.enqueue(davCollection("/dav/files/Secret.vault/", "vault-id", "Secret.vault"))
             server.enqueue(
                 davCollection(
@@ -620,7 +621,7 @@ class VaultRepositoryMutationTest {
     @Test
     fun accountSnapshotChangeRevokesSessionBeforeNetworkRead() =
         runBlocking {
-            val session = session(FixtureCipher())
+            val session = session(VaultBoundaryTestCipher())
             database.accountDao().upsert(account.copy(displayName = "Changed"))
 
             assertThrows(OpenCloudException::class.java) {
@@ -630,7 +631,340 @@ class VaultRepositoryMutationTest {
             session.close()
         }
 
-    private fun repository(cipher: FixtureCipher) =
+    @Test fun backgroundReplacementStagesExactIssuedVersionAndConsumesOnlyAfterAdmission() =
+        runBlocking<Unit> {
+            val cipher = VaultBoundaryTestCipher()
+            val session = session(cipher)
+            val root = Files.createTempDirectory("vault-replacement-staging").toFile()
+            val payloads = VaultUploadStore(root)
+            val encryptedName = cipher.encryptName("note.txt")
+            val rootPath = "/dav/files/Secret.vault/"
+            server.dispatcher =
+                object : okhttp3.mockwebserver.Dispatcher() {
+                    override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse {
+                        assertEquals("PROPFIND", request.method)
+                        return davCollection(
+                            rootPath,
+                            "vault-id",
+                            "Secret.vault",
+                            "proof-token",
+                            listOf(davFile("$rootPath$encryptedName", "file-id", encryptedName, 49)),
+                        )
+                    }
+                }
+            try {
+                val entry = session.list().single()
+                val before = server.requestCount
+                assertThrows(OpenCloudException::class.java) {
+                    runBlocking {
+                        session.prepareBackgroundReplacement(
+                            payloads,
+                            entry.copy(encryptedPath = "Secret.vault/other"),
+                            "edited".byteInputStream(),
+                            6,
+                            { true },
+                        )
+                    }
+                }
+                assertEquals(before, server.requestCount)
+                assertTrue(payloads.ids().isEmpty())
+                val plain = "edited".toByteArray()
+                val job =
+                    session.prepareBackgroundReplacement(
+                        payloads,
+                        entry,
+                        plain.inputStream(),
+                        plain.size.toLong(),
+                        { true },
+                    )
+                assertEquals(entry.encryptedPath, job.destination)
+                assertEquals(entry.strongETag, job.expectedETag)
+                payloads.open(job).use { assertArrayEquals(cipher.encryptBytes(plain), it.readBytes()) }
+                assertEquals(job, payloads.read(job.id))
+                session.acknowledgeBackgroundReplacement(entry)
+                assertThrows(OpenCloudException::class.java) {
+                    runBlocking {
+                        session.prepareBackgroundReplacement(
+                            payloads,
+                            entry,
+                            plain.inputStream(),
+                            plain.size.toLong(),
+                            { true },
+                        )
+                    }
+                }
+            } finally {
+                session.close()
+                root.deleteRecursively()
+            }
+        }
+
+    @Test fun cancelledBackgroundReplacementDeletesIncompleteCiphertextAndKeepsIssuedVersion() =
+        runBlocking {
+            val cipher = VaultBoundaryTestCipher()
+            val session = session(cipher)
+            val root = Files.createTempDirectory("vault-replacement-cancel").toFile()
+            val payloads = VaultUploadStore(root)
+            val encryptedName = cipher.encryptName("note.txt")
+            val rootPath = "/dav/files/Secret.vault/"
+            server.dispatcher =
+                object : okhttp3.mockwebserver.Dispatcher() {
+                    override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest): MockResponse =
+                        davCollection(
+                            rootPath,
+                            "vault-id",
+                            "Secret.vault",
+                            "proof-token",
+                            listOf(davFile("$rootPath$encryptedName", "file-id", encryptedName, 49)),
+                        )
+                }
+            try {
+                val entry = session.list().single()
+                val cancelled =
+                    object : InputStream() {
+                        override fun read(): Int = throw CancellationException("Synthetic cancelled preparation")
+                    }
+                assertThrows(CancellationException::class.java) {
+                    runBlocking { session.prepareBackgroundReplacement(payloads, entry, cancelled, 6, { true }) }
+                }
+                assertTrue(payloads.ids().isEmpty())
+                val retry =
+                    session.prepareBackgroundReplacement(
+                        payloads,
+                        entry,
+                        "edited".byteInputStream(),
+                        6,
+                        { true },
+                    )
+                assertEquals(entry.strongETag, retry.expectedETag)
+            } finally {
+                session.close()
+                root.deleteRecursively()
+            }
+        }
+
+    @Test
+    fun postWriteLargeDirectoryIssuesOnlyTheMatchingDestination() =
+        runBlocking {
+            val cipher = VaultBoundaryTestCipher()
+            val session = session(cipher)
+            val rootPath = "/dav/files/Secret.vault/"
+            val name = cipher.encryptName("note.txt")
+            val children =
+                listOf(davFile("$rootPath$name", "created-id", name, 49)) +
+                    (0 until 6000).map { number ->
+                        val encrypted = cipher.encryptName("sibling-$number.txt")
+                        davFile("$rootPath$encrypted", "sibling-$number", encrypted, 49)
+                    }
+            enqueueUploadResult(rootPath, children)
+            try {
+                val created = session.upload("", "note.txt", ByteArrayInputStream(byteArrayOf(1)), 1)
+                assertEquals("created-id", created.id)
+                assertEquals("note.txt", created.name)
+                assertEquals(1, session.issuedEntryCountForTesting())
+                assertEquals(7, server.requestCount)
+            } finally {
+                session.close()
+            }
+        }
+
+    @Test
+    fun lateDuplicateAfterSuccessfulPutNeverIssuesTheEarlierMatchingDestination() =
+        runBlocking {
+            val cipher = VaultBoundaryTestCipher()
+            val session = session(cipher)
+            val rootPath = "/dav/files/Secret.vault/"
+            val name = cipher.encryptName("note.txt")
+            val duplicate = cipher.encryptName("duplicate.txt")
+            val children =
+                listOf(davFile("$rootPath$name", "created-id", name, 49)) +
+                    (0 until 257).map { number ->
+                        val encrypted = cipher.encryptName("sibling-$number.txt")
+                        davFile("$rootPath$encrypted", "sibling-$number", encrypted, 49)
+                    } + davFile("$rootPath$duplicate", "created-id", duplicate, 49)
+            enqueueUploadResult(rootPath, children, finalRoot = false)
+            try {
+                assertThrows(OpenCloudException::class.java) {
+                    runBlocking { session.upload("", "note.txt", ByteArrayInputStream(byteArrayOf(1)), 1) }
+                }
+                assertEquals(0, session.issuedEntryCountForTesting())
+                assertEquals(6, server.requestCount)
+                val methods = List(6) { requireNotNull(server.takeRequest().method) }
+                assertEquals(1, methods.count { it == "PUT" })
+            } finally {
+                session.close()
+            }
+        }
+
+    @Test
+    fun lateUndecryptableSiblingAfterSuccessfulPutCannotPublishAnEarlierDestination() =
+        runBlocking {
+            val cipher = VaultBoundaryTestCipher()
+            val session = session(cipher)
+            val rootPath = "/dav/files/Secret.vault/"
+            val name = cipher.encryptName("note.txt")
+            val children =
+                listOf(davFile("$rootPath$name", "created-id", name, 49)) +
+                    (0 until 257).map { number ->
+                        val encrypted = cipher.encryptName("sibling-$number.txt")
+                        davFile("$rootPath$encrypted", "sibling-$number", encrypted, 49)
+                    } + davFile("${rootPath}invalid!", "invalid-id", "invalid!", 49)
+            enqueueUploadResult(rootPath, children, finalRoot = false)
+            try {
+                assertThrows(OpenCloudException::class.java) {
+                    runBlocking { session.upload("", "note.txt", ByteArrayInputStream(byteArrayOf(1)), 1) }
+                }
+                assertEquals(0, session.issuedEntryCountForTesting())
+                assertEquals(6, server.requestCount)
+            } finally {
+                session.close()
+            }
+        }
+
+    @Test
+    fun cancellationAfterPutDuringDestinationValidationIssuesNoEntry() {
+        val job = SupervisorJob()
+        var names = 0
+        val cipher = VaultBoundaryTestCipher(onName = { if (++names == 258) job.cancel() })
+        val session = session(cipher)
+        val rootPath = "/dav/files/Secret.vault/"
+        val name = cipher.encryptName("note.txt")
+        val children =
+            listOf(davFile("$rootPath$name", "created-id", name, 49)) +
+                (0 until 300).map { number ->
+                    val encrypted = cipher.encryptName("sibling-$number.txt")
+                    davFile("$rootPath$encrypted", "sibling-$number", encrypted, 49)
+                }
+        enqueueUploadResult(rootPath, children, finalRoot = false)
+        val scope = kotlinx.coroutines.CoroutineScope(job + Dispatchers.Unconfined)
+        try {
+            val result = scope.async { session.upload("", "note.txt", ByteArrayInputStream(byteArrayOf(1)), 1) }
+            assertThrows(CancellationException::class.java) { runBlocking { result.await() } }
+            assertEquals(0, session.issuedEntryCountForTesting())
+            assertEquals(6, server.requestCount)
+            assertEquals(1, List(6) { server.takeRequest().method }.count { it == "PUT" })
+        } finally {
+            scope.cancel()
+            session.close()
+        }
+    }
+
+    @Test
+    fun backgroundPreparationAndCaptureStreamLargeRootMetadataWithoutChangingAdmission() =
+        runBlocking {
+            val cipher = VaultBoundaryTestCipher()
+            val session = session(cipher)
+            val rootPath = "/dav/files/Secret.vault/"
+            val encryptedName = cipher.encryptName("note.txt")
+            val target = davFile("$rootPath$encryptedName", "target-id", encryptedName, 49)
+            repeat(3) {
+                server.enqueue(davCollection(rootPath, "vault-id", "Secret.vault", "proof-token", listOf(target)))
+            }
+            val staging = Files.createTempDirectory("vault-root-stream-jobs").toFile()
+            try {
+                val entry = session.list().single()
+                val children =
+                    listOf(target) +
+                        (0 until 6000).map { number ->
+                            val name = cipher.encryptName("sibling-$number.txt")
+                            davFile("$rootPath$name", "sibling-$number", name, 49)
+                        }
+                repeat(8) {
+                    server.enqueue(davCollection(rootPath, "vault-id", "Secret.vault", "proof-token", children))
+                }
+                val uploads = VaultUploadStore(File(staging, "uploads"))
+                val created =
+                    session.prepareBackgroundUpload(
+                        uploads,
+                        "",
+                        "new.txt",
+                        byteArrayOf(1).inputStream(),
+                        1,
+                        { true },
+                    )
+                assertEquals(null, created.expectedETag)
+                val replacement =
+                    session.prepareBackgroundReplacement(
+                        uploads,
+                        entry,
+                        byteArrayOf(2).inputStream(),
+                        1,
+                        { true },
+                    )
+                assertEquals(entry.strongETag, replacement.expectedETag)
+                val captured = session.captureBackgroundDownload(VaultDownloadStore(File(staging, "downloads")), entry)
+                assertEquals(entry.id, captured.source.id)
+                assertEquals(entry.strongETag, captured.source.strongETag)
+                assertEquals(created.rootProofDigest, captured.rootProofDigest)
+                assertEquals(1, session.issuedEntryCountForTesting())
+                assertEquals(11, server.requestCount)
+            } finally {
+                session.close()
+                staging.deleteRecursively()
+            }
+        }
+
+    @Test
+    fun cancelledPublicMutationDispatcherHandoffRevokesTheSinglePublishedResult() {
+        val queue = java.util.concurrent.LinkedBlockingQueue<Runnable>()
+        val dispatcher =
+            object : kotlinx.coroutines.CoroutineDispatcher() {
+                override fun dispatch(
+                    context: kotlin.coroutines.CoroutineContext,
+                    block: Runnable,
+                ) {
+                    queue.add(block)
+                }
+            }
+        val job = SupervisorJob()
+        val scope = kotlinx.coroutines.CoroutineScope(job + dispatcher)
+        val cipher = VaultBoundaryTestCipher()
+        val session = session(cipher)
+        val rootPath = "/dav/files/Secret.vault/"
+        val name = cipher.encryptName("note.txt")
+        enqueueUploadResult(rootPath, listOf(davFile("$rootPath$name", "created-id", name, 49)))
+        try {
+            val result = scope.async { session.upload("", "note.txt", ByteArrayInputStream(byteArrayOf(1)), 1) }
+            requireNotNull(queue.poll(5, TimeUnit.SECONDS)).run()
+            val handoff = requireNotNull(queue.poll(30, TimeUnit.SECONDS))
+            assertEquals(1, session.issuedEntryCountForTesting())
+            job.cancel()
+            handoff.run()
+            assertThrows(CancellationException::class.java) { runBlocking { result.await() } }
+            assertEquals(0, session.issuedEntryCountForTesting())
+        } finally {
+            scope.cancel()
+            session.close()
+        }
+    }
+
+    private fun enqueueUploadResult(
+        rootPath: String,
+        children: List<String>,
+        finalRoot: Boolean = true,
+    ) {
+        server.enqueue(davCollection(rootPath, "vault-id", "Secret.vault", "proof-token"))
+        server.enqueue(davCollection(rootPath, "vault-id", "Secret.vault", "proof-token"))
+        server.enqueue(MockResponse().setResponseCode(201))
+        server.enqueue(davCollection(rootPath, "vault-id", "Secret.vault"))
+        server.enqueue(davCollection(rootPath, "vault-id", "Secret.vault"))
+        server.enqueue(davCollection(rootPath, "vault-id", "Secret.vault", children = children))
+        if (finalRoot) server.enqueue(davCollection(rootPath, "vault-id", "Secret.vault"))
+    }
+
+    private fun assertSpoolFilesRemoved(directory: File) {
+        assertTrue(directory.isDirectory)
+        assertTrue(!Files.isSymbolicLink(directory.toPath()))
+        requireNotNull(directory.listFiles()).forEach { child ->
+            // Root validation reuses this owned container; no spool, SQLite, or nested file may remain.
+            assertEquals("discovery-stage", child.name)
+            assertTrue(!Files.isSymbolicLink(child.toPath()))
+            assertTrue(child.isDirectory)
+            assertTrue(requireNotNull(child.listFiles()).isEmpty())
+        }
+    }
+
+    private fun repository(cipher: VaultBoundaryTestCipher) =
         VaultRepository(
             store,
             { "Bearer test" },
@@ -641,7 +975,7 @@ class VaultRepositoryMutationTest {
         )
 
     private fun session(
-        cipher: FixtureCipher,
+        cipher: VaultBoundaryTestCipher,
         spoolDirectory: java.io.File? = null,
     ): VaultSession {
         val location =
@@ -720,114 +1054,6 @@ class VaultRepositoryMutationTest {
         size: Int,
     ): String =
         """<d:response><d:href>$path</d:href><d:propstat><d:prop><d:resourcetype/><d:getcontentlength>$size</d:getcontentlength><d:getetag>"tag-$id"</d:getetag><oc:fileid>$id</oc:fileid><oc:name>$name</oc:name></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"""
-
-    private class FixtureCipher : VaultCipherEngine {
-        val closed = AtomicBoolean(false)
-
-        override fun createIntegrityToken() = "proof-token"
-
-        override fun verifyIntegrityToken(base64Token: String) = base64Token == "proof-token"
-
-        override fun encryptName(plain: String) =
-            "enc_" + Base64.getUrlEncoder().withoutPadding().encodeToString(plain.encodeUtf8().toByteArray())
-
-        override fun decryptName(encrypted: String): String =
-            String(Base64.getUrlDecoder().decode(encrypted.removePrefix("enc_")))
-
-        override fun encryptPath(plain: String) =
-            if (plain.isEmpty()) {
-                ""
-            } else {
-                plain.split('/').joinToString("/") {
-                    encryptName(it)
-                }
-            }
-
-        override fun decryptPath(encrypted: String) =
-            if (encrypted.isEmpty()) {
-                ""
-            } else {
-                encrypted.split('/').joinToString("/") {
-                    decryptName(it)
-                }
-            }
-
-        override fun encryptContent(
-            input: InputStream,
-            output: OutputStream,
-            maximumPlaintextBytes: Long,
-        ): Long {
-            output.write(ByteArray(32) { 7 })
-            val block = ByteArray(65536)
-            var total = 0L
-            try {
-                while (true) {
-                    val count = readBlock(input, block)
-                    if (count == 0) return total
-                    require(count.toLong() <= maximumPlaintextBytes - total)
-                    for (index in 0 until count) block[index] = (block[index].toInt() xor 0x5a).toByte()
-                    output.write(block, 0, count)
-                    output.write(ByteArray(16) { 9 })
-                    total += count
-                    if (count < block.size) return total
-                }
-            } finally {
-                block.fill(0)
-            }
-        }
-
-        fun encryptBytes(plaintext: ByteArray): ByteArray =
-            ByteArrayOutputStream()
-                .also {
-                    encryptContent(ByteArrayInputStream(plaintext), it, plaintext.size.toLong())
-                }.toByteArray()
-
-        override fun decryptContent(
-            input: InputStream,
-            output: OutputStream,
-            maximumPlaintextBytes: Long,
-        ): Long {
-            val header = ByteArray(32)
-            require(readBlock(input, header) == header.size && header.all { it == 7.toByte() })
-            val block = ByteArray(65552)
-            var total = 0L
-            try {
-                while (true) {
-                    val count = readBlock(input, block)
-                    if (count == 0) return total
-                    require(count >= 16 && block.sliceArray(count - 16 until count).all { it == 9.toByte() })
-                    val plainSize = count - 16
-                    require(plainSize.toLong() <= maximumPlaintextBytes - total)
-                    for (index in 0 until plainSize) block[index] = (block[index].toInt() xor 0x5a).toByte()
-                    output.write(block, 0, plainSize)
-                    total += plainSize
-                    if (count < block.size) return total
-                }
-            } finally {
-                header.fill(0)
-                block.fill(0)
-            }
-        }
-
-        private fun readBlock(
-            input: InputStream,
-            block: ByteArray,
-        ): Int {
-            var count = 0
-            while (count < block.size) {
-                val read = input.read(block, count, block.size - count)
-                if (read < 0) break
-                if (read > 0) count += read
-            }
-            return count
-        }
-
-        override fun exportKeyMaterial() = ByteArray(80)
-
-        override fun close() {
-            closed.set(true)
-        }
-    }
 
     private open class PatternInputStream(
         private val length: Long,

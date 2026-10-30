@@ -1,4 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="auth_connection_settings">サーバー接続</string>
+    <string name="auth_connection_settings">Wi-Fiと証明書</string>
 </resources>

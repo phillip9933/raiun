@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="error_local_copies_retained">変更されたか使用中のローカルコピーは保持されました。開いているファイルを閉じるかダウンロードが完了してから、もう一度お試しください。</string>
+    <string name="error_local_copy_removal_failed">ローカルコピーの削除を完了できませんでした。端末のストレージを確認して、もう一度お試しください。</string>
+</resources>

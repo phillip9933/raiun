@@ -1,0 +1,5 @@
+<resources>
+    <string name="error_encrypted_unlock_failed">保存済みの暗号化データのロックを解除できませんでした。暗号化パスワードを確認するか、再接続してもう一度お試しください。</string>
+    <string name="error_offline_snapshot_changed">オフラインコピーが変更されました。既存のファイルは置き換えられていません。フォルダーをもう一度オフラインに保存してください。</string>
+    <string name="error_offline_group_busy">この暗号化された場所では、オフライン更新が既に進行中です。完了を待つかキャンセルしてから、新しい更新を開始してください。</string>
+</resources>

@@ -80,3 +80,12 @@ internal class SnapshotVersions {
         const val MAX_FOLDER_LEASES = 1024
     }
 }
+
+/** Account removal invalidates every captured account incarnation before deleting its persisted rows. */
+internal fun FileBrowserDatabase.invalidateAccountScopes(accountId: String) {
+    snapshotVersions.begin(accountId)
+    transferInventoryVersions.begin(accountId)
+    temporaryCopyVersions.begin(accountId)
+    incomingShareVersions.begin(accountId)
+    sharedFolderVersions.begin(accountId)
+}

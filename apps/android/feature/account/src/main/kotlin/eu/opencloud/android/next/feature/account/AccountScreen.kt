@@ -4,20 +4,27 @@ import android.app.Application
 import android.provider.DocumentsContract
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -30,14 +37,20 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import eu.opencloud.android.next.core.database.AccountEntity
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
+import eu.opencloud.android.next.core.database.vaultOfflineGroups
 import eu.opencloud.android.next.core.datastore.SettingsRepository
+import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
 import eu.opencloud.android.next.core.network.safeMessage
 import eu.opencloud.android.next.core.network.toOpenCloudError
 import eu.opencloud.android.next.core.security.VaultKeyStore
@@ -99,6 +112,7 @@ class AccountViewModel(
             mutableState.value = mutableState.value.copy(busy = true, error = null)
             runCatching {
                 withContext(Dispatchers.IO) {
+                    val groupOwner = store.vaultOfflineGroups().captureOwner(account.id)
                     transfers.cancelAccountWork(account.id)
                     eu.opencloud.android.next.core.security.AccountSessions
                         .get(getApplication())
@@ -106,7 +120,7 @@ class AccountViewModel(
                     eu.opencloud.android.next.core.sync
                         .forgetVaultUploads(getApplication(), account.id)
                     eu.opencloud.android.next.core.sync
-                        .forgetVaultDownloads(getApplication(), account.id)
+                        .forgetVaultDownloads(getApplication(), account.id, groupOwner)
                     VaultKeyStore(getApplication()).forgetAccount(account.id)
                     VaultPreferences(getApplication()).forgetAccount(account.id)
                     eu.opencloud.android.next.core.sync
@@ -234,36 +248,12 @@ fun AccountScreen(
                     )
                 }
                 items(state.accounts, key = AccountEntity::id) { account ->
-                    ListItem(
-                        modifier = Modifier.clickable { onDetails(account.id) },
-                        headlineContent = { Text(account.displayName) },
-                        supportingContent = { Text("${account.userId} • ${account.serverUrl}") },
-                        leadingContent = {
-                            eu.opencloud.android.next.core.ui.ProfileAvatar(
-                                account.id,
-                                name = account.displayName,
-                            )
-                        },
-                        trailingContent = {
-                            androidx.compose.foundation.layout.Row {
-                                RadioButton(
-                                    selected = state.activeAccountId == account.id,
-                                    onClick = { onSelect(account.id) },
-                                )
-                                IconButton(onClick = {
-                                    confirmRemove = account
-                                }, enabled = !state.busy) {
-                                    Icon(
-                                        Icons.Default.Delete,
-                                        contentDescription =
-                                            stringResource(
-                                                R.string.account_remove_accessibility,
-                                                account.displayName,
-                                            ),
-                                    )
-                                }
-                            }
-                        },
+                    AccountRow(
+                        account = account,
+                        state = state,
+                        onDetails = onDetails,
+                        onSelect = onSelect,
+                        onRemove = { confirmRemove = it },
                     )
                 }
             }
@@ -277,10 +267,16 @@ fun AccountScreen(
                 Text(stringResource(R.string.account_remove_confirmation, account.displayName))
             },
             confirmButton = {
-                TextButton(onClick = {
-                    confirmRemove = null
-                    onRemove(account)
-                }) { Text(stringResource(R.string.account_remove)) }
+                TextButton(
+                    colors =
+                        ButtonDefaults.textButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error,
+                        ),
+                    onClick = {
+                        confirmRemove = null
+                        onRemove(account)
+                    },
+                ) { Text(stringResource(R.string.account_remove)) }
             },
             dismissButton = {
                 TextButton(onClick = { confirmRemove = null }) { Text(stringResource(R.string.account_cancel)) }
@@ -294,4 +290,91 @@ fun AccountScreen(
             TextButton(onClick = onDismissError) { Text(stringResource(R.string.account_ok)) }
         })
     }
+}
+
+@Composable
+private fun AccountRow(
+    account: AccountEntity,
+    state: AccountUiState,
+    onDetails: (String) -> Unit,
+    onSelect: (String) -> Unit,
+    onRemove: (AccountEntity) -> Unit,
+) {
+    val isSelected = state.activeAccountId == account.id
+    val accent =
+        eu.opencloud.android.next.core.ui
+            .accountAccent(account.id)
+    val selectedContainer =
+        eu.opencloud.android.next.core.ui
+            .accountAccentContainer(account.id)
+    val content = MaterialTheme.colorScheme.onSurface
+    val supporting = MaterialTheme.colorScheme.onSurfaceVariant
+    ListItem(
+        modifier =
+            Modifier
+                .padding(
+                    horizontal = OpenCloudDimensions.SpacingMd,
+                    vertical = OpenCloudDimensions.SpacingXxs,
+                ).clip(RoundedCornerShape(OpenCloudDimensions.ContentCornerRadius))
+                .semantics { selected = isSelected }
+                .clickable { onDetails(account.id) },
+        colors =
+            ListItemDefaults.colors(
+                containerColor = if (isSelected) selectedContainer else MaterialTheme.colorScheme.surface,
+                headlineColor = content,
+                supportingColor = supporting,
+                leadingIconColor = supporting,
+                trailingIconColor = supporting,
+            ),
+        headlineContent = { Text(account.displayName) },
+        supportingContent = {
+            Column {
+                Text(account.userId, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    eu.opencloud.android.next.core.ui
+                        .accountServerLabel(account.serverUrl),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        },
+        leadingContent = {
+            eu.opencloud.android.next.core.ui.ProfileAvatar(
+                account.id,
+                name = account.displayName,
+            )
+        },
+        trailingContent = {
+            androidx.compose.foundation.layout.Row {
+                RadioButton(
+                    selected = isSelected,
+                    onClick = { onSelect(account.id) },
+                    colors =
+                        RadioButtonDefaults.colors(
+                            selectedColor = accent,
+                            unselectedColor = MaterialTheme.colorScheme.outline,
+                        ),
+                )
+                IconButton(
+                    onClick = {
+                        onRemove(account)
+                    },
+                    enabled = !state.busy,
+                    colors =
+                        IconButtonDefaults.iconButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error,
+                        ),
+                ) {
+                    Icon(
+                        Icons.Default.Delete,
+                        contentDescription =
+                            stringResource(
+                                R.string.account_remove_accessibility,
+                                account.displayName,
+                            ),
+                    )
+                }
+            }
+        },
+    )
 }
