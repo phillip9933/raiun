@@ -1097,8 +1097,10 @@ impl InitialEditReceipt {
     }
 }
 
-/// Opaque evidence minted only by the guarded native completion path after
-/// the OS accepts its nonzero-USN comparison. Not a remote-only receipt.
+/// Opaque evidence minted only after guarded native in-sync success under the
+/// retained exclusive file and provider-publication fences. Completion checks
+/// the full content digest and two stable positive USN observations; it does not
+/// ask the in-sync call to compare a USN. Not a remote-only receipt.
 pub struct CompletedLocalEdit {
     metadata: LocalEditMetadata,
     job: Option<crate::StreamedRecoveryJob>,

@@ -179,6 +179,12 @@ server URLs or credentials into this document.
   an independent DPAPI restart after readback exceeded its 60-second job budget.
   It issued no native in-sync acknowledgement or automatic replay. This is
   expiry-retention acceptance, not explicit user cancellation or GUI Retry acceptance.
+- The separate C17 CLI candidate passed ordinary directory notifications and
+  connected-root notification, revocation/drain and same-identity reconnect checks
+  on Windows. Automatic Personal folder creation then failed before any remote
+  mutation. A C18 diagnostic also stopped without remote mutation and did not
+  establish the cause. These source snapshots are separate from this GUI branch;
+  observer acceptance does not establish automatic folder creation or GUI parity.
 - The shared new-vault primitive now supports repeated observed parent-identity
   checks while retaining partial folders on failure. This is not an atomic
   remote parent transaction, and Windows creation remains unavailable. A separate
@@ -206,7 +212,9 @@ credentials and all original failure/recovery artifacts.
    incomplete editor observation; preserve completed live cleanup and failed CI evidence.
 2. Agree shared operation/snapshot APIs and server-condition proof, then
    integrate CLI-owned ordinary CRUD, editor replacement and bounded >16-MiB
-   writeback. Parent owns GUI recovery policy and reviewed completed-copy
+   writeback. Automatic new-file admission also requires a verified create-only
+   server contract; local capture or successful readback alone is insufficient.
+   Parent owns GUI recovery policy and reviewed completed-copy
    reclamation; preserve every pending, conflicting or uncertain record. The
    shared guarded-parent vault creation primitive is a prerequisite only;
    Windows creation admission and native route publication remain disabled.

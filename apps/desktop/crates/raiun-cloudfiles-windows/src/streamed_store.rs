@@ -20,12 +20,15 @@ use zeroize::Zeroizing;
 
 #[path = "streamed_events.rs"]
 mod events;
+#[path = "streamed_retention.rs"]
+mod retention;
 #[cfg(windows)]
 mod windows;
 pub use events::{
     MAX_STREAMED_HISTORY, StreamedAttemptOutcome, StreamedAttemptState, StreamedDispatchLease,
     StreamedRecordKey, StreamedRecoveryMetadata,
 };
+pub use retention::{RetainedRecordObservation, RetainedRecordsInspection};
 #[cfg(windows)]
 pub(crate) const V2_STORE_ROOT: &str = "cloud-files-edit-journal-v2";
 pub(crate) const V2_QUOTA_LOCK: &str = "quota.lock";
