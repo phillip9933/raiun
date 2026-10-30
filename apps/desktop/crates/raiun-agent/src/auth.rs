@@ -383,7 +383,11 @@ impl Session {
         if !status.is_success() {
             let code = oauth_error(&body).unwrap_or("invalid_response");
             let message = format!("Session refresh failed ({code}); sign in again if needed");
-            return Err(if status.as_u16() == 401 || code == "invalid_grant" {
+            // A proxy or temporarily unavailable issuer can return an opaque
+            // HTTP 401. Only an explicit rejected refresh grant authorizes
+            // callers to discard the saved sign-in. Client configuration or
+            // authentication errors do not prove that this user's grant expired.
+            return Err(if code == "invalid_grant" {
                 RefreshError::Rejected(message)
             } else {
                 RefreshError::Other(message)
@@ -1679,6 +1683,41 @@ mod tests {
         });
         let restored_legacy: Session = serde_json::from_value(legacy).unwrap();
         assert_eq!(restored_legacy.proxy, ProxyConfig::System);
+    }
+
+    #[test]
+    fn nonterminal_refresh_responses_preserve_saved_session() {
+        for (status, body) in [
+            (401, "<html>upstream authentication unavailable</html>"),
+            (401, r#"{}"#),
+            (401, r#"{"error":"temporarily_unavailable"}"#),
+            (401, r#"{"error":"server_error"}"#),
+            (401, r#"{"error":"unrecognized_proxy_error"}"#),
+            (401, r#"{"error":401}"#),
+            (400, r#"{"error":"invalid_client"}"#),
+            (401, r#"{"error":"invalid_client"}"#),
+        ] {
+            let (endpoint, server) = refresh_server(status, body);
+            let mut session = refresh_session(&endpoint);
+            let before = serde_json::to_value(&session).unwrap();
+            let outcome = session.refresh_classified();
+            server.join().unwrap();
+            assert!(matches!(outcome, Err(RefreshError::Other(_))));
+            assert_eq!(serde_json::to_value(&session).unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn explicit_refresh_grant_rejection_remains_terminal_without_changing_tokens() {
+        for status in [400, 401] {
+            let (endpoint, server) = refresh_server(status, r#"{"error":"invalid_grant"}"#);
+            let mut session = refresh_session(&endpoint);
+            let before = serde_json::to_value(&session).unwrap();
+            let outcome = session.refresh_classified();
+            server.join().unwrap();
+            assert!(matches!(outcome, Err(RefreshError::Rejected(_))));
+            assert_eq!(serde_json::to_value(&session).unwrap(), before);
+        }
     }
 
     #[test]
