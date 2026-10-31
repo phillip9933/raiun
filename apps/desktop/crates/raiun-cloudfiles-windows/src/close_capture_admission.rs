@@ -16,6 +16,7 @@ struct State {
     dirty_epoch: u64,
     rename_claimed: bool,
     dispatch_claimed: bool,
+    completion_claimed: bool,
 }
 
 #[derive(Default)]
@@ -51,7 +52,7 @@ impl CloseCaptureAdmission {
 
     /// Take one lightweight, retained ticket only while no close is active.
     /// The ticket serializes rename attempts, not close capture or remote I/O.
-    #[allow(dead_code)] // R52 producer integration consumes this capability.
+    #[allow(dead_code)] // R55 explicit producer consumes this capability.
     pub(crate) fn try_begin_rename(&self) -> Option<SaveRenameTicket<'_>> {
         if self.unknown.load(Ordering::Acquire) {
             return None;
@@ -63,10 +64,12 @@ impl CloseCaptureAdmission {
         }
         state.rename_claimed = true;
         state.dispatch_claimed = false;
+        state.completion_claimed = false;
         Some(SaveRenameTicket {
             tracker: self,
             epoch: state.dirty_epoch,
             dispatch_claimed: false,
+            completion_claimed: false,
         })
     }
 
@@ -183,10 +186,11 @@ pub(crate) struct SaveRenameTicket<'a> {
     tracker: &'a CloseCaptureAdmission,
     epoch: u64,
     dispatch_claimed: bool,
+    completion_claimed: bool,
 }
 
 impl SaveRenameTicket<'_> {
-    #[allow(dead_code)] // R52 producer integration rechecks this ticket.
+    #[allow(dead_code)] // R55 explicit producer rechecks this ticket.
     pub(crate) fn is_current(&self) -> bool {
         if self.tracker.unknown.load(Ordering::Acquire) {
             return false;
@@ -199,12 +203,13 @@ impl SaveRenameTicket<'_> {
             && state.active_closes == 0
             && state.dirty_epoch == self.epoch
             && (state.dispatch_claimed == self.dispatch_claimed)
+            && (state.completion_claimed == self.completion_claimed)
     }
 
     /// Short local ordering point immediately before a future remote send.
     /// This is not a remote atomicity guarantee; later close activity remains
     /// enabled and invalidates the ticket for subsequent local phases.
-    #[allow(dead_code)] // R52 producer integration consumes this claim.
+    #[allow(dead_code)] // R55 explicit producer consumes this claim.
     pub(crate) fn claim_dispatch(&mut self) -> bool {
         if self.dispatch_claimed || !self.is_current() {
             return false;
@@ -214,6 +219,7 @@ impl SaveRenameTicket<'_> {
         };
         if !state.rename_claimed
             || state.dispatch_claimed
+            || state.completion_claimed
             || state.active_closes != 0
             || state.dirty_epoch != self.epoch
             || self.tracker.unknown.load(Ordering::Acquire)
@@ -224,6 +230,36 @@ impl SaveRenameTicket<'_> {
         self.dispatch_claimed = true;
         true
     }
+
+    /// Establish the local journal-completion ordering point. This transition
+    /// shares the tracker lock with `begin_close`: an active, dirty, unknown,
+    /// or stale capture refuses the claim. The lock is released before the
+    /// caller performs durable I/O. A close admitted after this transition is
+    /// ordered after this rename's completion attempt and still runs normally;
+    /// this is not remote atomicity and cannot roll back a durable event.
+    #[allow(dead_code)] // R55 explicit producer completion fencing consumes this capability.
+    pub(crate) fn claim_completion(&mut self) -> bool {
+        if self.completion_claimed || !self.dispatch_claimed || !self.is_current() {
+            return false;
+        }
+        let Some(mut state) = self.tracker.try_state() else {
+            return false;
+        };
+        if !state.rename_claimed
+            || !state.dispatch_claimed
+            || state.completion_claimed
+            || state.active_closes != 0
+            || state.dirty_epoch != self.epoch
+            || self.tracker.unknown.load(Ordering::Acquire)
+        {
+            return false;
+        }
+        // This shared short-lock transition linearizes completion before any
+        // later close admission. No lock is held across the journal callback.
+        state.completion_claimed = true;
+        self.completion_claimed = true;
+        true
+    }
 }
 
 impl Drop for SaveRenameTicket<'_> {
@@ -231,7 +267,10 @@ impl Drop for SaveRenameTicket<'_> {
         let Some(mut state) = self.tracker.try_state() else {
             return;
         };
-        if !state.rename_claimed || state.dispatch_claimed != self.dispatch_claimed {
+        if !state.rename_claimed
+            || state.dispatch_claimed != self.dispatch_claimed
+            || state.completion_claimed != self.completion_claimed
+        {
             self.tracker.mark_unknown();
         }
         state.rename_claimed = false;
@@ -357,6 +396,40 @@ mod tests {
         assert!(tracker.try_begin_rename().is_none());
         release_close.wait();
         worker.join().unwrap();
+        assert!(tracker.try_begin_rename().is_some());
+    }
+
+    #[test]
+    fn r55_completion_claim_refuses_active_or_dirty_close() {
+        let tracker = CloseCaptureAdmission::default();
+        let mut ticket = tracker.try_begin_rename().expect("rename ticket");
+        assert!(!ticket.claim_completion());
+        assert!(ticket.claim_dispatch());
+
+        let mut close = tracker.begin_close();
+        assert!(!ticket.claim_completion());
+        close.mark_dirty_before_capture();
+        assert!(!ticket.claim_completion());
+        close.finish_durable();
+        assert!(!ticket.claim_completion());
+    }
+
+    #[test]
+    fn r55_completion_claim_is_one_use_and_orders_later_capture() {
+        let tracker = CloseCaptureAdmission::default();
+        let mut ticket = tracker.try_begin_rename().expect("rename ticket");
+        assert!(ticket.claim_dispatch());
+        assert!(ticket.claim_completion());
+        assert!(!ticket.claim_completion());
+
+        // A close after completion's ordering point still captures normally,
+        // but prevents another rename until its durable handoff finishes.
+        let mut close = tracker.begin_close();
+        assert!(tracker.try_begin_rename().is_none());
+        close.mark_dirty_before_capture();
+        assert!(!ticket.is_current());
+        close.finish_durable();
+        drop(ticket);
         assert!(tracker.try_begin_rename().is_some());
     }
 }

@@ -14,6 +14,8 @@ mod edit_journal;
 mod initial_edit_queue;
 #[cfg(windows)]
 mod native_file_rename_producer;
+#[cfg(any(windows, test))]
+mod save_rename_admission;
 #[cfg(windows)]
 pub use native_file_rename_producer::NativeFileRenameError;
 #[cfg(any(windows, test))]

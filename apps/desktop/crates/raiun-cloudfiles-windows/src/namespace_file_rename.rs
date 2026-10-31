@@ -56,6 +56,19 @@ pub trait FileRenameRemote {
     /// destination must be absent and overwrite disabled by the adapter.
     fn preflight(&self, intent: &NamespaceIntent) -> Result<(), CloudError>;
     fn rename(&self, dispatch: &FileRenameDispatch<'_>) -> Result<FileRenameSend, CloudError>;
+    /// A guarded caller requires an adapter that invokes this callback after
+    /// its last remote proof, immediately before the actual send. The default
+    /// refuses without invoking the legacy method, whose send boundary is unknown.
+    fn rename_with_send_guard(
+        &self,
+        _dispatch: &FileRenameDispatch<'_>,
+        _before_send: &mut dyn FnMut() -> Result<(), CloudError>,
+    ) -> Result<FileRenameSend, CloudError> {
+        Err(CloudError::new(
+            ErrorKind::Unsupported,
+            "guarded rename send is unavailable",
+        ))
+    }
     /// Freshly observe destination and independently establish source absence.
     fn observe(&self, intent: &NamespaceIntent) -> Result<FileRenameObservation, CloudError>;
 }

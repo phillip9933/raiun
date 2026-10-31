@@ -795,15 +795,25 @@ impl FileRenameRemote for LiveFileRename<'_> {
     }
 
     fn rename(&self, dispatch: &FileRenameDispatch<'_>) -> Result<FileRenameSend, CloudError> {
+        self.rename_with_send_guard(dispatch, &mut || Ok(()))
+    }
+
+    fn rename_with_send_guard(
+        &self,
+        dispatch: &FileRenameDispatch<'_>,
+        before_send: &mut dyn FnMut() -> Result<(), CloudError>,
+    ) -> Result<FileRenameSend, CloudError> {
         if self.attempted.replace(true) {
             return Err(refusal(ErrorKind::Conflict));
         }
         let intent = dispatch.intent();
         self.preflight(intent)?;
-        let response =
-            self.backend
-                .client
-                .conditional_rename_with_context(ConditionalRenameRequest {
+        let local_hook_refused = Cell::new(false);
+        let response = self
+            .backend
+            .client
+            .conditional_rename_with_context_before_send(
+                ConditionalRenameRequest {
                     space: &self.source().local.parent.scope.space_id,
                     remote_root_path: &self.root_path,
                     expected_root_id: &self.source().local.parent.scope.root_resource_id,
@@ -813,7 +823,17 @@ impl FileRenameRemote for LiveFileRename<'_> {
                     expected_source_size: self.source().remote.byte_len,
                     expected_source_etag: &self.source().remote.etag,
                     context: self.context,
-                });
+                },
+                || {
+                    // SDK proofs may outlive owner/cancel/location authority
+                    // without changing its token context. This check is local.
+                    let result = self.ensure_authorized(intent).and_then(|()| before_send());
+                    if result.is_err() {
+                        local_hook_refused.set(true);
+                    }
+                    result
+                },
+            );
         match response {
             Ok(ConditionalRenameResponse::Renamed) => {
                 if self.ensure_authorized(intent).is_err() {
@@ -827,6 +847,7 @@ impl FileRenameRemote for LiveFileRename<'_> {
                 self.authoritative(error);
                 Ok(FileRenameSend::Uncertain)
             }
+            Err(error) if local_hook_refused.get() => Err(error),
             Err(error) => Err(self.authoritative(error)),
         }
     }

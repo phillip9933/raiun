@@ -46,6 +46,7 @@ const DESTINATION_BODY_BAD: usize = 262144;
 const DESTINATION_REVISION_CHANGES: usize = 524288;
 const PARENT_ETAG_V2_ALWAYS: usize = 1048576;
 const R49_DEPTH_ONE_ROOT_LISTING: usize = 2097152;
+const OWNER_FALSE_ON_FINAL_DESTINATION_PROOF: usize = 4194304;
 
 struct Catalog {
     bindings: Mutex<Vec<ProviderIdentityBinding>>,
@@ -256,6 +257,7 @@ struct Fixture {
     #[cfg(windows)]
     parent_stats: Arc<Mutex<Vec<(String, String, String)>>>,
     conditional_gets: Arc<Mutex<Vec<(String, String)>>>,
+    destination_stats: Arc<AtomicUsize>,
     stop: mpsc::Sender<()>,
     worker: Option<thread::JoinHandle<()>>,
 }
@@ -275,7 +277,8 @@ impl Fixture {
         let parent_rows = Arc::new(Mutex::new(Vec::new()));
         let parent_stats = Arc::new(Mutex::new(Vec::new()));
         let conditional_gets = Arc::new(Mutex::new(Vec::new()));
-        let (m, s, o, n, log, depths, rows, stats, gets) = (
+        let destination_stats = Arc::new(AtomicUsize::new(0));
+        let (m, s, o, n, log, depths, rows, stats, gets, destination_stat_count) = (
             mode.clone(),
             status.clone(),
             owner_live.clone(),
@@ -285,6 +288,7 @@ impl Fixture {
             parent_rows.clone(),
             parent_stats.clone(),
             conditional_gets.clone(),
+            destination_stats.clone(),
         );
         let worker_client = Arc::new(Mutex::new(None::<Arc<OpenCloudClient>>));
         let worker_client_ref = worker_client.clone();
@@ -498,6 +502,17 @@ impl Fixture {
                         {
                             let flags = m.load(Ordering::Acquire);
                             let original_name = path.ends_with("/source.txt");
+                            if !original_name
+                                && flags & OWNER_FALSE_ON_FINAL_DESTINATION_PROOF != 0
+                                && destination_stat_count.fetch_add(1, Ordering::AcqRel) + 1 == 5
+                            {
+                                // The five destination checks are the two live
+                                // adapter preflights, then the SDK direct leaf,
+                                // writable-target leaf, and final direct leaf.
+                                // Revoke only after that final server proof so
+                                // the SDK's immediate local send hook observes it.
+                                o.store(false, Ordering::Release);
+                            }
                             let is_source = original_name != renamed_state.load(Ordering::Acquire)
                                 || (flags & SOURCE_REMAINS != 0 && n.load(Ordering::Acquire) > 0);
                             if original_name && is_source {
@@ -626,6 +641,7 @@ impl Fixture {
             #[cfg(windows)]
             parent_stats,
             conditional_gets,
+            destination_stats,
             stop: stop_tx,
             worker: Some(worker),
         }
@@ -1841,5 +1857,47 @@ fn r49_candidate_parent_capture_rechecks_owner_after_local_callback() {
     assert!(fixture.backend.lease_gate.try_write().is_ok());
     assert_eq!(fixture.moves.load(Ordering::Acquire), 0);
     r49_assert_no_destination_work(&fixture, &before);
+    fixture.finish();
+}
+
+#[test]
+fn r55_owner_revocation_at_sdk_final_destination_proof_is_unsent_without_cache_revocation() {
+    let mut fixture = Fixture::new();
+    fixture.enable_cache();
+    fixture
+        .mode
+        .store(OWNER_FALSE_ON_FINAL_DESTINATION_PROOF, Ordering::Release);
+    let token_generation = fixture.backend.client.token_generation();
+    let mut journal = Journal::new(fixture.intent.clone());
+    let mut local = Local::default();
+
+    let outcome = fixture.run(&mut journal, &mut local).unwrap();
+
+    assert_eq!(fixture.destination_stats.load(Ordering::Acquire), 5);
+    assert!(!fixture.owner_live.load(Ordering::Acquire));
+    assert_eq!(outcome, FileRenameOutcome::Deferred);
+    assert_eq!(fixture.moves.load(Ordering::Acquire), 0);
+    assert_eq!(local.completions, 0);
+    assert_eq!(journal.events.len(), 2);
+    assert!(matches!(
+        &journal.events[0],
+        NamespaceEventKind::RemoteSubmitted
+    ));
+    assert!(matches!(&journal.events[1], NamespaceEventKind::Deferred));
+    assert!(
+        fixture
+            .request_log
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|line| !line.starts_with("MOVE "))
+    );
+
+    // The send hook refused locally after the final SDK proof. That owner
+    // refusal must not be run through authoritative cache-denial handling.
+    assert!(fixture.backend.ensure_active().is_ok());
+    assert!(!fixture.backend.revoked.load(Ordering::Acquire));
+    assert!(fixture.backend.cache.is_some());
+    assert_eq!(fixture.backend.client.token_generation(), token_generation);
     fixture.finish();
 }

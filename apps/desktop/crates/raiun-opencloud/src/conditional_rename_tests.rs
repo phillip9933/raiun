@@ -25,7 +25,9 @@ enum FinalAction {
 #[derive(Clone, Copy, Default)]
 struct FixtureOptions {
     wrong_root_id: bool,
+    wrong_root_call: u8,
     wrong_source_id: bool,
+    wrong_source_call: u8,
     destination_exists: bool,
     destination_fault: u8,
     destination_fault_call: u8,
@@ -70,6 +72,8 @@ fn dynamic_fixture(
         let started = Instant::now();
         let mut requests = Vec::new();
         let mut destination_calls = 0u8;
+        let mut root_calls = 0u8;
+        let mut source_calls = 0u8;
         loop {
             if stop_rx.try_recv().is_ok() || started.elapsed() >= Duration::from_secs(10) {
                 break;
@@ -133,14 +137,19 @@ fn dynamic_fixture(
                             &GRAPH.replace("127.0.0.1:PORT", &authority),
                         );
                     } else if method == "PROPFIND" && path == "/dav/personal/" {
-                        let root_id = if options.wrong_root_id {
-                            "replacement-root"
-                        } else {
-                            "root"
-                        };
+                        root_calls = root_calls.saturating_add(1);
+                        let root_id =
+                            if options.wrong_root_id || options.wrong_root_call == root_calls {
+                                "replacement-root"
+                            } else {
+                                "root"
+                            };
                         write_response(&mut stream, "207 Multi-Status", &root_xml(root_id));
                     } else if method == "PROPFIND" && path == "/dav/personal/source.txt" {
-                        let source_id = if options.wrong_source_id {
+                        source_calls = source_calls.saturating_add(1);
+                        let source_id = if options.wrong_source_id
+                            || options.wrong_source_call == source_calls
+                        {
                             "replacement-file"
                         } else {
                             "file-id"
@@ -468,4 +477,122 @@ fn graph_dav_url_query_or_userinfo_fails_before_move() {
         assert!(requests.iter().all(|line| !line.starts_with("MOVE ")));
         assert!(matches!(result, Err(error) if error.kind == ErrorKind::InvalidResponse));
     }
+}
+
+#[test]
+fn r55_pre_send_claim_rejection_occurs_after_proofs_and_sends_no_move() {
+    let (client, _server, stop, worker) =
+        dynamic_fixture(FixtureOptions::default(), FinalAction::Drop);
+    let calls = std::cell::Cell::new(0usize);
+    let result = client.conditional_rename_with_context_before_send(request(&client), || {
+        calls.set(calls.get() + 1);
+        Err(CloudError::new(
+            ErrorKind::Offline,
+            "synthetic local claim refused",
+        ))
+    });
+    let seen = finish(stop, worker);
+
+    assert!(matches!(result, Err(error) if error.kind == ErrorKind::Offline));
+    assert_eq!(calls.get(), 1);
+    assert_eq!(
+        seen.iter()
+            .filter(|line| line.starts_with("PROPFIND /dav/personal/source.txt "))
+            .count(),
+        3,
+        "the callback runs only after both source proofs"
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|line| line.starts_with("PROPFIND /dav/personal/renamed.txt "))
+            .count(),
+        3,
+        "the callback runs only after both destination absence proofs"
+    );
+    assert!(seen.iter().all(|line| !line.starts_with("MOVE ")));
+}
+
+fn assert_final_proof_refused(options: FixtureOptions) -> Vec<String> {
+    let (client, _server, stop, worker) = dynamic_fixture(options, FinalAction::Drop);
+    let called = std::cell::Cell::new(false);
+    let result = client.conditional_rename_with_context_before_send(request(&client), || {
+        called.set(true);
+        Ok(())
+    });
+    let seen = finish(stop, worker);
+    assert!(matches!(result, Err(error) if error.kind == ErrorKind::Conflict));
+    assert!(
+        !called.get(),
+        "invalid final proof must precede the send claim"
+    );
+    assert!(seen.iter().all(|line| !line.starts_with("MOVE ")));
+    seen
+}
+
+#[test]
+fn r56_final_root_identity_proof_refuses_before_send_claim() {
+    // Root check 6 is only the missing-destination writable-parent fallback.
+    // Check 7 is the second explicit configured-root identity validation.
+    let seen = assert_final_proof_refused(FixtureOptions {
+        wrong_root_call: 7,
+        ..FixtureOptions::default()
+    });
+    assert_eq!(
+        seen.iter()
+            .filter(|line| line.starts_with("PROPFIND /dav/personal/ "))
+            .count(),
+        7
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|line| line.starts_with("PROPFIND /dav/personal/source.txt "))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn r56_final_source_identity_proof_refuses_before_send_claim() {
+    let seen = assert_final_proof_refused(FixtureOptions {
+        wrong_source_call: 3,
+        ..FixtureOptions::default()
+    });
+    assert_eq!(
+        seen.iter()
+            .filter(|line| line.starts_with("PROPFIND /dav/personal/source.txt "))
+            .count(),
+        3
+    );
+    assert_eq!(
+        seen.iter()
+            .filter(|line| line.starts_with("PROPFIND /dav/personal/ "))
+            .count(),
+        7
+    );
+}
+
+#[test]
+fn r55_accepted_pre_send_claim_is_consumed_once_for_one_move() {
+    let (client, _server, stop, worker) = dynamic_fixture(
+        FixtureOptions::default(),
+        FinalAction::Status("204 No Content"),
+    );
+    let calls = std::cell::Cell::new(0usize);
+    let one_use_claim = std::cell::Cell::new(Some(()));
+    let result = client.conditional_rename_with_context_before_send(request(&client), || {
+        one_use_claim.take().ok_or_else(|| {
+            CloudError::new(ErrorKind::Offline, "synthetic claim already consumed")
+        })?;
+        calls.set(calls.get() + 1);
+        Ok(())
+    });
+    let seen = finish(stop, worker);
+
+    assert!(matches!(result, Ok(ConditionalRenameResponse::Renamed)));
+    assert_eq!(calls.get(), 1);
+    assert!(one_use_claim.get().is_none());
+    assert_eq!(
+        seen.iter().filter(|line| line.starts_with("MOVE ")).count(),
+        1
+    );
 }

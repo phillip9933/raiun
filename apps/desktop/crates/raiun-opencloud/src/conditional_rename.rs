@@ -45,6 +45,21 @@ impl OpenCloudClient {
         &self,
         request: ConditionalRenameRequest<'_>,
     ) -> Result<ConditionalRenameResponse, CloudError> {
+        self.conditional_rename_with_context_before_send(request, || Ok(()))
+    }
+
+    /// Preflight and prepare the same single MOVE, then invoke `before_send`
+    /// exactly once at the final local boundary immediately before HTTP
+    /// execution. An error from the callback is definitely pre-send; after it
+    /// returns success, the existing uncertain-send rules apply. The callback
+    /// must be synchronous and must not perform network I/O or re-enter this
+    /// client. It is intended for a caller-owned one-use local claim, not for
+    /// extending remote authorization or making MOVE atomic.
+    pub fn conditional_rename_with_context_before_send(
+        &self,
+        request: ConditionalRenameRequest<'_>,
+        before_send: impl FnOnce() -> Result<(), CloudError>,
+    ) -> Result<ConditionalRenameResponse, CloudError> {
         let _guard = RangeContextGuard::enter(request.context);
         validate_request(&request)?;
         self.ensure_context_current(request.context)?;
@@ -173,6 +188,7 @@ impl OpenCloudClient {
             .header(IF_MATCH, etag)
             .build()
             .map_err(|_| invalid("conditional MOVE request is invalid"))?;
+        before_send()?;
         let response = match self.conditional_http.execute(move_request) {
             Ok(response) => response,
             Err(error) => {

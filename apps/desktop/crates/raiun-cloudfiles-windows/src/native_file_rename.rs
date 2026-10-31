@@ -162,6 +162,60 @@ pub(crate) struct PinnedFileRename<'connection> {
 }
 
 impl ConfiguredRootConnection {
+    /// Retain the callback owner's exact admission and recovery capabilities.
+    /// Owner-thread only, before HTTP and outside a backend session lease.
+    pub(crate) fn file_rename_guard_context(
+        &self,
+        backend: &Arc<crate::OpenCloudPlaceholderBackend>,
+    ) -> Result<
+        (
+            Arc<crate::close_capture_admission::CloseCaptureAdmission>,
+            Arc<dyn PreparedEditRecovery>,
+        ),
+        Error,
+    > {
+        let erased: Arc<dyn PlaceholderBackend> = backend.clone();
+        if !self.connected
+            || self.state.readiness.load(Ordering::Acquire) != CALLBACK_READY
+            || backend.is_revoked()
+            || !Arc::ptr_eq(&erased, &self.state.backend)
+            || !backend.owns_composite_root_identity(self.composite_root_identity)
+            || self
+                .state
+                .unverifiable_placeholder_closes
+                .load(Ordering::Acquire)
+                != 0
+            || self
+                .state
+                .vault_dirty
+                .try_lock()
+                .map(|dirty| dirty.has_pending())
+                .unwrap_or(true)
+        {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        let recovery = self
+            .state
+            .recovery
+            .as_ref()
+            .ok_or(Error::EditRecoveryUnavailable)?;
+        let root_identity = crate::ConfiguredRootIdentity {
+            volume_serial: root.identity.volume_serial,
+            file_index: root.identity.file_index,
+        };
+        if recovery.provider_scope() != backend.scope() || recovery.root_identity() != root_identity
+        {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        Ok((
+            Arc::clone(&self.state.close_capture_admission),
+            Arc::clone(recovery),
+        ))
+    }
+
     fn validate_file_rename_candidate_connection(
         &self,
         backend: &Arc<crate::OpenCloudPlaceholderBackend>,

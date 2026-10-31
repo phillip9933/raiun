@@ -177,6 +177,33 @@ pub struct FileRenameStore {
 }
 
 impl FileRenameStore {
+    /// Compare retained custody, scope and policy outside backend leases.
+    /// Equal path strings alone cannot bind a caller-supplied store to the
+    /// connection's admitted state. Both persistent quota handles stay pinned
+    /// through verification; this grants no publication or replay authority.
+    #[cfg(windows)]
+    pub(crate) fn same_admitted_binding(&self, expected: &Self) -> Result<bool, StoreError> {
+        if self.base.scope != expected.base.scope
+            || !Arc::ptr_eq(&self.base.protector, &expected.base.protector)
+            || self.base.policy.max_content_bytes != expected.base.policy.max_content_bytes
+            || self.base.policy.max_state_bytes != expected.base.policy.max_state_bytes
+            || self.base.policy.max_entries != expected.base.policy.max_entries
+            || self.base.policy.max_metadata_bytes_per_scan
+                != expected.base.policy.max_metadata_bytes_per_scan
+        {
+            return Ok(false);
+        }
+        self.base.root.verify()?;
+        expected.base.root.verify()?;
+        let actual = self.base.root.open_quota_lock()?;
+        let wanted = expected.base.root.open_quota_lock()?;
+        actual.verify()?;
+        wanted.verify()?;
+        let same = actual.identity() == wanted.identity();
+        self.base.root.verify()?;
+        expected.base.root.verify()?;
+        Ok(same)
+    }
     pub fn new(base: Arc<SnapshotStore>) -> Result<Arc<Self>, StoreError> {
         base.policy.validate()?;
         base.root.verify()?;
