@@ -7,6 +7,8 @@ mod async_body;
 mod blocking_reader;
 #[cfg(test)]
 mod dav_text_tests;
+#[cfg(test)]
+mod dav_upload_regressions;
 mod recovery_stream;
 pub use recovery_stream::{RecoveryCreateReadback, RecoveryStreamReadback};
 pub mod avatar;
