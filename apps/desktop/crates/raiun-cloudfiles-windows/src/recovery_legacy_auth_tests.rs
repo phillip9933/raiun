@@ -69,16 +69,12 @@ struct OwnedCase {
     provider_scope: ProviderScope,
     root: ConfiguredRootIdentity,
     edit_scope: EditJournalScope,
+    parent_file: LocalFileIdentity,
     local_file: LocalFileIdentity,
     prepared: Arc<dyn PreparedEditRecovery>,
 }
 
 fn owned_case(name: &str, store_policy: crate::streamed_store::StorePolicy) -> OwnedCase {
-    // Coordinated legacy writes reserve MAX_SEALED_BYTES before knowing the
-    // final ciphertext size: 16 MiB body + 256 KiB metadata + 64 KiB overhead.
-    // Keep independent headroom for the catalogs and other retained evidence.
-    let legacy_reservation = 16 * 1024 * 1024 + 256 * 1024 + 64 * 1024;
-    assert!(store_policy.max_state_bytes > legacy_reservation + 1024 * 1024);
     assert_eq!(
         std::env::var("RAIUN_R54_NATIVE").as_deref(),
         Ok("1"),
@@ -87,10 +83,24 @@ fn owned_case(name: &str, store_policy: crate::streamed_store::StorePolicy) -> O
     let fixture = PathBuf::from(
         std::env::var_os("RAIUN_R54_FIXTURE_DIR").expect("R54 fixture directory is required"),
     );
+    owned_case_in(name, store_policy, &fixture, OWNER)
+}
+
+fn owned_case_in(
+    name: &str,
+    store_policy: crate::streamed_store::StorePolicy,
+    fixture: &Path,
+    expected_owner: &[u8],
+) -> OwnedCase {
+    // Coordinated legacy writes reserve MAX_SEALED_BYTES before knowing the
+    // final ciphertext size: 16 MiB body + 256 KiB metadata + 64 KiB overhead.
+    // Keep independent headroom for the catalogs and other retained evidence.
+    let legacy_reservation = 16 * 1024 * 1024 + 256 * 1024 + 64 * 1024;
+    assert!(store_policy.max_state_bytes > legacy_reservation + 1024 * 1024);
     assert!(fixture.is_absolute(), "R54 fixture path must be absolute");
-    assert_eq!(fs::read(fixture.join("OWNER")).unwrap(), OWNER);
+    assert_eq!(fs::read(fixture.join("OWNER")).unwrap(), expected_owner);
     let case_path = fixture.join(name);
-    fs::create_dir(&case_path).expect("R54 case names are always fresh and retained");
+    fs::create_dir(&case_path).expect("owned case names are always fresh and retained");
 
     let case_pin = PinnedDirectory::open(&case_path).expect("pin owned fixture case");
     let logical = case_pin
@@ -102,6 +112,7 @@ fn owned_case(name: &str, store_policy: crate::streamed_store::StorePolicy) -> O
     let (_, source_identity) = personal
         .create_new_file(std::ffi::OsStr::new("notes.txt"))
         .expect("create synthetic source identity");
+    let parent_identity = personal.identity();
     let logical_identity = logical.identity();
     let root = ConfiguredRootIdentity {
         volume_serial: logical_identity.volume_serial,
@@ -154,6 +165,10 @@ fn owned_case(name: &str, store_policy: crate::streamed_store::StorePolicy) -> O
         provider_scope,
         root,
         edit_scope,
+        parent_file: LocalFileIdentity {
+            volume_serial: parent_identity.volume_serial,
+            file_index: parent_identity.file_index,
+        },
         local_file,
         prepared,
     }
@@ -197,6 +212,10 @@ fn journal_directory(case: &OwnedCase) -> PathBuf {
     EditJournal::storage_root(case.state.path())
         .join(EditJournal::scope_directory_key(&case.edit_scope).unwrap())
 }
+
+#[cfg(windows)]
+#[path = "recovery_held_dispatch_tests.rs"]
+mod held_dispatch_tests;
 
 #[test]
 #[ignore = "requires a fresh retained R54 DPAPI fixture root"]
