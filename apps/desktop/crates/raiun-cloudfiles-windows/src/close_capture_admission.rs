@@ -81,6 +81,20 @@ impl CloseCaptureAdmission {
         })
     }
 
+    /// Distinct directory exclusion only; no file or native authority.
+    #[cfg(any(windows, test))]
+    pub(crate) fn try_begin_directory(self: &Arc<Self>) -> Option<OwnedDirectoryAdmission> {
+        let ticket = self.try_begin_ticket()?;
+        let (dispatch, lifetime) = DispatchProbeLifetime::new(self.clone(), ticket.observation);
+        Some(OwnedDirectoryAdmission {
+            tracker: self.clone(),
+            ticket,
+            dispatch,
+            lifetime,
+            _owner_thread: PhantomData,
+        })
+    }
+
     fn try_begin_ticket(&self) -> Option<TicketState> {
         if self.unknown.load(Ordering::Acquire) {
             return None;
@@ -288,6 +302,53 @@ impl OwnedCreateAdmission {
 
 #[cfg(any(windows, test))]
 impl Drop for OwnedCreateAdmission {
+    fn drop(&mut self) {
+        self.lifetime.live.store(false, Ordering::Release);
+        self.ticket.retire(&self.tracker);
+    }
+}
+
+#[cfg(any(windows, test))]
+pub(crate) struct OwnedDirectoryAdmission {
+    tracker: Arc<CloseCaptureAdmission>,
+    ticket: TicketState,
+    dispatch: Arc<dyn Fn() -> bool + Send + Sync>,
+    lifetime: DispatchProbeLifetime,
+    _owner_thread: PhantomData<Rc<()>>,
+}
+
+#[cfg(any(windows, test))]
+impl OwnedDirectoryAdmission {
+    pub(crate) fn is_current(&self) -> bool {
+        self.ticket.is_current(&self.tracker, true)
+    }
+
+    pub(crate) fn observation_probe(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        self.lifetime.observation_probe()
+    }
+
+    pub(crate) fn dispatch_probe(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        self.dispatch.clone()
+    }
+
+    pub(crate) fn claim_dispatch(&mut self) -> bool {
+        if !self.ticket.claim_dispatch(&self.tracker, true) {
+            return false;
+        }
+        if !self.lifetime.arm_after_dispatch() {
+            self.tracker.mark_unknown();
+            return false;
+        }
+        true
+    }
+
+    pub(crate) fn claim_completion(&mut self) -> bool {
+        self.ticket.claim_completion(&self.tracker, true)
+    }
+}
+
+#[cfg(any(windows, test))]
+impl Drop for OwnedDirectoryAdmission {
     fn drop(&mut self) {
         self.lifetime.live.store(false, Ordering::Release);
         self.ticket.retire(&self.tracker);

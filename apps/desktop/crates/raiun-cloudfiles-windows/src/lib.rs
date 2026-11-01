@@ -10,6 +10,8 @@ use std::{error::Error as StdError, fmt};
 mod backend;
 #[cfg(any(windows, test))]
 mod close_capture_admission;
+#[cfg(any(windows, test))]
+mod directory_create_phase;
 mod edit_journal;
 #[cfg(any(windows, test))]
 mod file_create_phase;
@@ -135,6 +137,10 @@ pub use vault_custody::{
 mod native;
 #[cfg(windows)]
 pub use native::native_file_create::{FileCreateReply, FileCreateStep, FileCreateTask};
+#[cfg(windows)]
+pub use native::native_namespace_directory::{
+    DirectoryCreateReply, DirectoryCreateStep, DirectoryCreateTask,
+};
 
 /// Cloud Files API platform version. This reports API capability only; it is
 /// not evidence that Raiun has connected a provider or mounted a drive.
@@ -952,6 +958,70 @@ impl ConfiguredRootConnection {
         >,
     ) -> Result<FileCreateStep, Error> {
         self.inner.begin_fresh_personal_file_create_in_parent(
+            backend,
+            parent_components,
+            name,
+            authorization,
+            generation,
+            job,
+            current,
+        )
+    }
+    /// Start one explicit ordinary Personal directory attempt. Only returned
+    /// SDK tasks are Send; native pins/journal admission stay with this owner.
+    /// Callers MUST close admission and drain/join actual SDK workers/results
+    /// before auth/session mutation or disconnect. Backend revoke alone does
+    /// not drain these unleased tasks. No Agent routing is enabled here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_fresh_personal_directory_create(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        parent_components: &[&str],
+        name: &str,
+        authorization: namespace_intent::CapturedAuthorization,
+        generation: u64,
+        job: &StreamedRecoveryJob,
+        current: std::sync::Arc<
+            dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync,
+        >,
+    ) -> Result<DirectoryCreateStep, Error> {
+        self.inner.begin_fresh_personal_directory_create(
+            backend,
+            parent_components,
+            name,
+            authorization,
+            generation,
+            job,
+            current,
+        )
+    }
+    pub fn advance_fresh_personal_directory_create(
+        &self,
+        reply: DirectoryCreateReply,
+    ) -> Result<DirectoryCreateStep, Error> {
+        self.inner.advance_fresh_personal_directory_create(reply)
+    }
+    /// False means the original task data is still in flight. Drain/join SDK
+    /// workers before disconnect; neither this call nor history grants replay.
+    pub fn close_fresh_personal_directory_create(&self) -> bool {
+        self.inner.close_fresh_personal_directory_create()
+    }
+    /// Compatibility driver of the SAME phases. This blocks its caller; actual
+    /// Agent asynchronous scheduling is a separate, currently disabled route.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reconcile_fresh_personal_directory_create(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        parent_components: &[&str],
+        name: &str,
+        authorization: namespace_intent::CapturedAuthorization,
+        generation: u64,
+        job: &StreamedRecoveryJob,
+        current: std::sync::Arc<
+            dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync,
+        >,
+    ) -> Result<namespace_reconcile::DirectoryCreateOutcome, Error> {
+        self.inner.reconcile_fresh_personal_directory_create(
             backend,
             parent_components,
             name,

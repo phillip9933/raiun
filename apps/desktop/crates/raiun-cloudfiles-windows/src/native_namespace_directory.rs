@@ -54,6 +54,10 @@ fn fixture_diagnostic(stage: &'static str, error: Option<&Error>) {
 
 pub(crate) struct PinnedNamespaceDirectory<'connection> {
     connection: &'connection ConfiguredRootConnection,
+    pins: DirectoryPins,
+}
+pub(crate) struct DirectoryPins {
+    _owner_thread: std::marker::PhantomData<std::rc::Rc<()>>,
     backend: Arc<crate::OpenCloudPlaceholderBackend>,
     parent: RawOwnedHandle,
     parent_snapshot: RootSnapshot,
@@ -66,6 +70,17 @@ pub(crate) struct PinnedNamespaceDirectory<'connection> {
     generation: u64,
     attempted: bool,
     converted_identity: Option<[u8; 16]>,
+}
+impl std::ops::Deref for PinnedNamespaceDirectory<'_> {
+    type Target = DirectoryPins;
+    fn deref(&self) -> &DirectoryPins {
+        &self.pins
+    }
+}
+impl std::ops::DerefMut for PinnedNamespaceDirectory<'_> {
+    fn deref_mut(&mut self) -> &mut DirectoryPins {
+        &mut self.pins
+    }
 }
 pub(super) fn opaque_directory_identity(handle: Handle) -> Result<[u8; 16], Error> {
     // Same CF_PLACEHOLDER_BASIC_INFO layout as the existing population helper.
@@ -169,6 +184,27 @@ impl ConfiguredRootConnection {
         let captured = backend
             .capture_namespace_parent(parent_components, root_identity, authorization)
             .map_err(|_| Error::ProviderUnavailable)?;
+        self.pin_admitted_directory(
+            backend,
+            parent_components,
+            name,
+            authorization,
+            generation,
+            &captured,
+        )
+    }
+    fn pin_admitted_directory<'a>(
+        &'a self,
+        backend: &Arc<crate::OpenCloudPlaceholderBackend>,
+        parent_components: &[&str],
+        name: &str,
+        authorization: CapturedAuthorization,
+        generation: u64,
+        captured: &crate::opencloud::CapturedDirectoryParent,
+    ) -> Result<PinnedNamespaceDirectory<'a>, Error> {
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        root.verify_identity(true)?;
+        root.verify_registered()?;
         let (parent, parent_snapshot, ancestors) = pin_namespace_parent(
             root,
             &captured.route,
@@ -218,7 +254,7 @@ impl ConfiguredRootConnection {
         }
         let entry = LocalNamespaceEntry {
             parent: NamespaceParent {
-                scope: captured.scope,
+                scope: captured.scope.clone(),
                 authorization,
                 classification: StorageClassification::Ordinary,
                 local_file: LocalFileIdentity {
@@ -226,7 +262,7 @@ impl ConfiguredRootConnection {
                     file_index: parent_snapshot.identity.file_index,
                 },
                 local_components: parent_components.iter().map(|s| (*s).to_owned()).collect(),
-                remote: captured.remote,
+                remote: captured.remote.clone(),
             },
             name: name.into(),
             local_file: LocalFileIdentity {
@@ -237,26 +273,114 @@ impl ConfiguredRootConnection {
         };
         let prepared = PinnedNamespaceDirectory {
             connection: self,
-            backend: backend.clone(),
-            parent,
-            parent_snapshot,
-            ancestors,
-            child,
-            snapshot,
-            components: parent_components
-                .iter()
-                .copied()
-                .chain(std::iter::once(name))
-                .map(str::to_owned)
-                .collect(),
-            entry,
-            parent_identity: captured.identity,
-            generation,
-            attempted: false,
-            converted_identity: None,
+            pins: DirectoryPins {
+                _owner_thread: std::marker::PhantomData,
+                backend: backend.clone(),
+                parent,
+                parent_snapshot,
+                ancestors,
+                child,
+                snapshot,
+                components: parent_components
+                    .iter()
+                    .copied()
+                    .chain(std::iter::once(name))
+                    .map(str::to_owned)
+                    .collect(),
+                entry,
+                parent_identity: captured.identity,
+                generation,
+                attempted: false,
+                converted_identity: None,
+            },
         };
         prepared.verify(false)?;
         Ok(prepared)
+    }
+}
+impl DirectoryPins {
+    // Only called under an original typed directory publication fence.
+    fn convert_under_publication(
+        &mut self,
+        connection: &ConfiguredRootConnection,
+        identity: &[u8; 16],
+    ) -> Result<(), Error> {
+        if self.attempted {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        self.verify(connection, false).inspect_err(|_error| {
+            #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
+            fixture_diagnostic("convert_pre_verify", Some(_error));
+        })?;
+        self.attempted = true;
+        let mut usn = 0;
+        // SAFETY: SAME pinned plain directory, WRITE_DATA+attributes, no
+        // delete sharing. Identity16 remains live; synchronous flags4 only,
+        // no dehydration, FORCE or MARK_IN_SYNC. Pins and connection stay live.
+        let hr = unsafe {
+            CfConvertToPlaceholder(
+                self.child.0,
+                identity.as_ptr().cast(),
+                16,
+                ENABLE_ON_DEMAND_POPULATION,
+                &mut usn,
+                null_mut(),
+            )
+        };
+        if hr < 0 {
+            return Err(native_error("convert verified namespace directory", hr));
+        }
+        self.verify(connection, true).inspect_err(|_error| {
+            #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
+            fixture_diagnostic("convert_post_verify", Some(_error));
+        })?;
+        if opaque_directory_identity(self.child.0)? != *identity {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        self.converted_identity = Some(*identity);
+        Ok(())
+    }
+    fn verify(&self, connection: &ConfiguredRootConnection, converted: bool) -> Result<(), Error> {
+        if !connection.connected
+            || connection.state.readiness.load(Ordering::Acquire) != CALLBACK_READY
+            || self.backend.is_revoked()
+        {
+            return Err(Error::ProviderUnavailable);
+        }
+        let root = connection
+            .root
+            .as_ref()
+            .ok_or(Error::ConfiguredRootChanged)?;
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        let parent = root_snapshot(self.parent.0)?;
+        if parent.identity != self.parent_snapshot.identity
+            || !valid_callback_directory_snapshot(parent)
+            || opaque_directory_identity(self.parent.0)? != *self.parent_identity.as_bytes()
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        let refs = self
+            .components
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        verify_population_path(root, self.child.0, &self.ancestors, &refs)?;
+        let current = root_snapshot(self.child.0)?;
+        if current.identity != self.snapshot.identity
+            || current.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+            || (converted
+                && (current.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
+                    || !cleanup_cloud_reparse_tag(current.reparse_tag)
+                    || current.placeholder_state & CF_PLACEHOLDER_STATE_PLACEHOLDER == 0
+                    || current.placeholder_state & 8 != 0))
+            || (!converted
+                && (current.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+                    || current.placeholder_state != 0))
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        Ok(())
     }
 }
 impl<'connection> PinnedNamespaceDirectory<'connection> {
@@ -302,47 +426,7 @@ impl<'connection> PinnedNamespaceDirectory<'connection> {
             && matches!(&intent.operation,NamespaceOperation::CreateDirectory{destination}if destination==&self.entry)
     }
     fn verify(&self, converted: bool) -> Result<(), Error> {
-        if !self.connection.connected
-            || self.connection.state.readiness.load(Ordering::Acquire) != CALLBACK_READY
-            || self.backend.is_revoked()
-        {
-            return Err(Error::ProviderUnavailable);
-        }
-        let root = self
-            .connection
-            .root
-            .as_ref()
-            .ok_or(Error::ConfiguredRootChanged)?;
-        root.verify_identity(true)?;
-        root.verify_registered()?;
-        let parent = root_snapshot(self.parent.0)?;
-        if parent.identity != self.parent_snapshot.identity
-            || !valid_callback_directory_snapshot(parent)
-            || opaque_directory_identity(self.parent.0)? != *self.parent_identity.as_bytes()
-        {
-            return Err(Error::ConfiguredRootChanged);
-        }
-        let refs = self
-            .components
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        verify_population_path(root, self.child.0, &self.ancestors, &refs)?;
-        let current = root_snapshot(self.child.0)?;
-        if current.identity != self.snapshot.identity
-            || current.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
-            || (converted
-                && (current.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
-                    || !cleanup_cloud_reparse_tag(current.reparse_tag)
-                    || current.placeholder_state & CF_PLACEHOLDER_STATE_PLACEHOLDER == 0
-                    || current.placeholder_state & 8 != 0))
-            || (!converted
-                && (current.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
-                    || current.placeholder_state != 0))
-        {
-            return Err(Error::ConfiguredRootChanged);
-        }
-        Ok(())
+        self.pins.verify(self.connection, converted)
     }
     fn convert(&mut self, publication: &VerifiedDirectoryPublication<'_, '_>) -> Result<(), Error> {
         if self.attempted
@@ -351,39 +435,10 @@ impl<'connection> PinnedNamespaceDirectory<'connection> {
         {
             return Err(Error::EditRecoveryUnavailable);
         }
+        let connection = self.connection;
         publication.publish_and_complete(|| {
-            self.verify(false).inspect_err(|_error| {
-                #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
-                fixture_diagnostic("convert_pre_verify", Some(_error));
-            })?;
-            self.attempted = true;
-            let mut usn = 0;
-            // SAFETY: SAME pinned plain directory, WRITE_DATA+attributes, no
-            // delete sharing. Identity16 remains borrowed through this documented
-            // synchronous call (null OVERLAPPED); flags4 only, no dehydration,
-            // FORCE or MARK_IN_SYNC. All pins/connection/session stay alive.
-            let hr = unsafe {
-                CfConvertToPlaceholder(
-                    self.child.0,
-                    publication.identity().as_ptr().cast(),
-                    16,
-                    ENABLE_ON_DEMAND_POPULATION,
-                    &mut usn,
-                    null_mut(),
-                )
-            };
-            if hr < 0 {
-                return Err(native_error("convert verified namespace directory", hr));
-            }
-            self.verify(true).inspect_err(|_error| {
-                #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
-                fixture_diagnostic("convert_post_verify", Some(_error));
-            })?;
-            if opaque_directory_identity(self.child.0)? != *publication.identity() {
-                return Err(Error::ConfiguredRootChanged);
-            }
-            self.converted_identity = Some(*publication.identity());
-            Ok(())
+            self.pins
+                .convert_under_publication(connection, publication.identity())
         })
     }
     pub(crate) fn local<'a, 'session, 'backend>(
@@ -551,3 +606,597 @@ impl ConfiguredRootConnection {
         Ok(value)
     }
 }
+
+use crate::close_capture_admission::{CloseCaptureAdmission, OwnedDirectoryAdmission};
+use crate::directory_create_phase::{Phase, ReplyDisposition, ReplyKey, TaskFlight};
+use crate::namespace_intent::{NamespaceEventKind, NamespaceProgressSnapshot};
+use crate::namespace_reconcile::DirectoryCreateOutcome;
+use crate::opencloud::{OwnedDirectorySend, OwnedDirectorySession, RefreshedDirectory};
+use crate::streamed_store::namespace_store::{DirectoryIntentLease, DirectoryIntentStore};
+type DirectoryCurrent = Arc<dyn Fn(CapturedAuthorization) -> bool + Send + Sync>;
+#[derive(Default)]
+pub(super) struct DirectoryOwner {
+    closed: bool,
+    nonce: u64,
+    attempt: Option<DirectoryAttempt>,
+}
+struct DirectoryAttempt {
+    key: Arc<ReplyKey>,
+    phase: Phase,
+    done: Arc<std::sync::atomic::AtomicBool>,
+    backend: Arc<crate::OpenCloudPlaceholderBackend>,
+    recovery: Arc<dyn crate::PreparedEditRecovery>,
+    tracker: Arc<CloseCaptureAdmission>,
+    admission: OwnedDirectoryAdmission,
+    components: Vec<String>,
+    name: String,
+    job: crate::StreamedRecoveryJob,
+    current: DirectoryCurrent,
+    ready: Arc<std::sync::atomic::AtomicBool>,
+    pins: Option<DirectoryPins>,
+    lease: Option<DirectoryIntentLease>,
+    submitted: bool,
+    verified: bool,
+}
+/// Move-only SDK task; no native handle, owner ticket or record lease.
+pub struct DirectoryCreateTask {
+    key: Arc<ReplyKey>,
+    kind: Option<Box<DirectoryTaskKind>>,
+    _flight: TaskFlight,
+}
+/// Original invocation reply. No public constructor or serializable proof.
+pub struct DirectoryCreateReply {
+    key: Arc<ReplyKey>,
+    phase: Phase,
+    kind: DirectoryReplyKind,
+}
+pub enum DirectoryCreateStep {
+    Task(DirectoryCreateTask),
+    Finished(DirectoryCreateOutcome),
+}
+enum DirectoryTaskKind {
+    Prepare {
+        backend: Arc<crate::OpenCloudPlaceholderBackend>,
+        components: Vec<String>,
+        job: crate::StreamedRecoveryJob,
+        current: DirectoryCurrent,
+        recovery: Arc<dyn crate::PreparedEditRecovery>,
+    },
+    Preflight(OwnedDirectorySession, NamespaceIntent),
+    Send(
+        OwnedDirectorySession,
+        NamespaceIntent,
+        NamespaceProgressSnapshot,
+    ),
+    Refresh(
+        Box<(
+            OwnedDirectorySession,
+            NamespaceIntent,
+            crate::namespace_intent::NamespaceDestinationReport,
+        )>,
+    ),
+}
+enum DirectoryReplyKind {
+    Prepared(Result<(OwnedDirectorySession, Arc<DirectoryIntentStore>), BackendError>),
+    Preflight(
+        OwnedDirectorySession,
+        Result<(), raiun_core::backend::CloudError>,
+    ),
+    Sent(OwnedDirectorySession, OwnedDirectorySend),
+    Refreshed(
+        OwnedDirectorySession,
+        Result<RefreshedDirectory, BackendError>,
+    ),
+}
+impl DirectoryCreateTask {
+    /// Run on a joined SDK worker. The original deadline/epoch is never renewed.
+    pub fn execute(mut self) -> DirectoryCreateReply {
+        let (phase, kind) = match *self
+            .kind
+            .take()
+            .expect("private directory task consumed once")
+        {
+            DirectoryTaskKind::Prepare {
+                backend,
+                components,
+                job,
+                current,
+                recovery,
+            } => {
+                let result = (|| {
+                    job.check()?;
+                    if recovery.has_unresolved()?
+                        || recovery.has_unresolved_content_authenticated_legacy()?
+                    {
+                        return Err(BackendError::Unavailable);
+                    }
+                    let refs: Vec<_> = components.iter().map(String::as_str).collect();
+                    let session = OwnedDirectorySession::prepare(
+                        backend,
+                        &refs,
+                        self.key.root,
+                        self.key.authorization,
+                        job,
+                        current,
+                    )?;
+                    let store = recovery
+                        .directory_intent_store(&session.captured.scope, self.key.authorization)?
+                        .ok_or(BackendError::Unavailable)?;
+                    session.check()?;
+                    if recovery.has_unresolved()?
+                        || recovery.has_unresolved_content_authenticated_legacy()?
+                    {
+                        return Err(BackendError::Unavailable);
+                    }
+                    Ok((session, store))
+                })();
+                (Phase::Prepare, DirectoryReplyKind::Prepared(result))
+            }
+            DirectoryTaskKind::Preflight(session, intent) => {
+                let result = session.preflight(&intent);
+                (
+                    Phase::Preflight,
+                    DirectoryReplyKind::Preflight(session, result),
+                )
+            }
+            DirectoryTaskKind::Send(session, intent, progress) => {
+                let result = match crate::namespace_reconcile::submitted_directory_dispatch(
+                    &intent, progress,
+                ) {
+                    Ok(dispatch) => session.send(&dispatch),
+                    Err(_) => OwnedDirectorySend::Uncertain,
+                };
+                (Phase::Send, DirectoryReplyKind::Sent(session, result))
+            }
+            DirectoryTaskKind::Refresh(pair) => {
+                let (session, intent, report) = *pair;
+                let result = session.refresh(&intent, &report);
+                (
+                    Phase::Refresh,
+                    DirectoryReplyKind::Refreshed(session, result),
+                )
+            }
+        };
+        DirectoryCreateReply {
+            key: self.key.clone(),
+            phase,
+            kind,
+        }
+    }
+}
+impl DirectoryAttempt {
+    fn task(&mut self, phase: Phase, kind: DirectoryTaskKind) -> DirectoryCreateStep {
+        let (done, flight) = TaskFlight::new();
+        self.done = done;
+        self.phase = phase;
+        DirectoryCreateStep::Task(DirectoryCreateTask {
+            key: self.key.clone(),
+            kind: Some(Box::new(kind)),
+            _flight: flight,
+        })
+    }
+    fn incomplete(&self) -> DirectoryCreateOutcome {
+        if self.verified {
+            DirectoryCreateOutcome::RemoteVerifiedLocalPending
+        } else if self.submitted {
+            DirectoryCreateOutcome::Uncertain
+        } else {
+            DirectoryCreateOutcome::Deferred
+        }
+    }
+}
+impl ConfiguredRootConnection {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn begin_fresh_personal_directory_create(
+        &self,
+        backend: &Arc<crate::OpenCloudPlaceholderBackend>,
+        components: &[&str],
+        name: &str,
+        authorization: CapturedAuthorization,
+        generation: u64,
+        original_job: &crate::StreamedRecoveryJob,
+        original_current: DirectoryCurrent,
+    ) -> Result<DirectoryCreateStep, Error> {
+        if generation == 0
+            || components.first().copied() != Some("Personal")
+            || components.len() > 255
+            || components.iter().any(|part| !valid_component(part))
+            || !valid_component(name)
+            || components.iter().map(|part| part.len() + 1).sum::<usize>() + name.len() > 32768
+            || !original_current(authorization)
+            || original_job.is_stopped()
+        {
+            return Err(Error::InvalidConfiguredRoot);
+        }
+        let mut slot = self
+            .directory_owner
+            .try_borrow_mut()
+            .map_err(|_| Error::ConnectionStateInvalid)?;
+        if slot.closed {
+            return Err(Error::ProviderUnavailable);
+        }
+        if slot.attempt.is_some() {
+            return Ok(DirectoryCreateStep::Finished(
+                DirectoryCreateOutcome::Deferred,
+            ));
+        }
+        let (tracker, recovery) = self.file_rename_guard_context(backend)?;
+        let Some(admission) = tracker.try_begin_directory() else {
+            return Ok(DirectoryCreateStep::Finished(
+                DirectoryCreateOutcome::Deferred,
+            ));
+        };
+        let observation = admission.observation_probe();
+        let dispatch = admission.dispatch_probe();
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started = ready.clone();
+        let current: DirectoryCurrent = Arc::new(move |auth| {
+            original_current(auth)
+                && observation()
+                && (!started.load(Ordering::Acquire) || dispatch())
+        });
+        let check = current.clone();
+        let original = Arc::downgrade(backend);
+        let job = original_job.with_revocation_check(Arc::new(move || {
+            !check(authorization)
+                || original.upgrade().is_none_or(|b| {
+                    b.is_revoked() || b.scope().token_generation() != authorization.token_generation
+                })
+        }));
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        slot.nonce = slot
+            .nonce
+            .checked_add(1)
+            .ok_or(Error::ConnectionStateInvalid)?;
+        let key = Arc::new(ReplyKey {
+            nonce: slot.nonce,
+            context: self.context_key,
+            root: crate::ConfiguredRootIdentity {
+                volume_serial: root.identity.volume_serial,
+                file_index: root.identity.file_index,
+            },
+            generation,
+            authorization,
+        });
+        let mut attempt = DirectoryAttempt {
+            key,
+            phase: Phase::Prepare,
+            done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            backend: backend.clone(),
+            recovery: recovery.clone(),
+            tracker,
+            admission,
+            components: components.iter().map(|part| (*part).to_owned()).collect(),
+            name: name.into(),
+            job: job.clone(),
+            current: current.clone(),
+            ready,
+            pins: None,
+            lease: None,
+            submitted: false,
+            verified: false,
+        };
+        self.check_directory_attempt(&attempt)?;
+        // Store the dispatch-ready bit only in owner/SDK currentness; the ticket
+        // probe is armed by the actual successful one-use owner claim.
+        let kind = DirectoryTaskKind::Prepare {
+            backend: backend.clone(),
+            components: attempt.components.clone(),
+            job,
+            current,
+            recovery,
+        };
+        let step = attempt.task(Phase::Prepare, kind);
+        // ready stays false until dispatch; observation still invalidates every close.
+        slot.attempt = Some(attempt);
+        Ok(step)
+    }
+    fn check_directory_attempt(&self, attempt: &DirectoryAttempt) -> Result<(), Error> {
+        if attempt.job.is_stopped()
+            || !(attempt.current)(attempt.key.authorization)
+            || !attempt.admission.is_current()
+            || attempt.key.context != self.context_key
+            || !self.connected
+            || self.namespace_observation_closed
+        {
+            return Err(Error::ProviderUnavailable);
+        }
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        if root.identity.volume_serial != attempt.key.root.volume_serial
+            || root.identity.file_index != attempt.key.root.file_index
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        let (tracker, recovery) = self.file_rename_guard_context(&attempt.backend)?;
+        if !Arc::ptr_eq(&tracker, &attempt.tracker) || !Arc::ptr_eq(&recovery, &attempt.recovery) {
+            return Err(Error::ProviderUnavailable);
+        }
+        Ok(())
+    }
+    pub(crate) fn close_fresh_personal_directory_create(&self) -> bool {
+        let Ok(mut slot) = self.directory_owner.try_borrow_mut() else {
+            return false;
+        };
+        slot.closed = true;
+        if let Some(attempt) = &slot.attempt {
+            attempt.job.cancel();
+            if !attempt.done.load(Ordering::Acquire) {
+                return false;
+            }
+        }
+        slot.attempt.take();
+        true
+    }
+}
+impl ConfiguredRootConnection {
+    pub(crate) fn advance_fresh_personal_directory_create(
+        &self,
+        reply: DirectoryCreateReply,
+    ) -> Result<DirectoryCreateStep, Error> {
+        let mut slot = self
+            .directory_owner
+            .try_borrow_mut()
+            .map_err(|_| Error::ConnectionStateInvalid)?;
+        let original = slot.attempt.as_ref().ok_or(Error::ConnectionStateInvalid)?;
+        let disposition = ReplyKey::disposition(
+            &original.key,
+            &reply.key,
+            original.phase,
+            reply.phase,
+            original.done.load(Ordering::Acquire),
+            original.job.is_stopped(),
+            slot.closed,
+        );
+        if disposition == ReplyDisposition::Wrong || original.key.nonce != slot.nonce {
+            return Err(Error::ConnectionStateInvalid);
+        }
+        let mut attempt = slot.attempt.take().ok_or(Error::ConnectionStateInvalid)?;
+        if disposition == ReplyDisposition::Retire
+            || self.check_directory_attempt(&attempt).is_err()
+        {
+            return Ok(DirectoryCreateStep::Finished(attempt.incomplete()));
+        }
+        let step = match reply.kind {
+            DirectoryReplyKind::Prepared(result) => {
+                let (session, store) = result.map_err(|_| Error::EditRecoveryUnavailable)?;
+                if !session.original_backend(&attempt.backend) {
+                    return Err(Error::ProviderUnavailable);
+                }
+                let refs: Vec<_> = attempt.components.iter().map(String::as_str).collect();
+                let prepared = self.pin_admitted_directory(
+                    &attempt.backend,
+                    &refs,
+                    &attempt.name,
+                    attempt.key.authorization,
+                    attempt.key.generation,
+                    &session.captured,
+                )?;
+                let pins = prepared.pins;
+                self.check_directory_attempt(&attempt)?;
+                let published = store
+                    .publish_intent(NamespaceIntent {
+                        schema_version: 1,
+                        record_id: "0".repeat(32),
+                        record_generation: attempt.key.generation,
+                        operation: NamespaceOperation::CreateDirectory {
+                            destination: pins.entry.clone(),
+                        },
+                    })
+                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                if !published.created || published.record.progress.sequence != 0 {
+                    return Ok(DirectoryCreateStep::Finished(
+                        DirectoryCreateOutcome::Retained,
+                    ));
+                }
+                let lease = store
+                    .acquire_dispatch(&published.record.key)
+                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                let intent = lease.intent().clone();
+                attempt.pins = Some(pins);
+                attempt.lease = Some(lease);
+                attempt.task(
+                    Phase::Preflight,
+                    DirectoryTaskKind::Preflight(session, intent),
+                )
+            }
+            DirectoryReplyKind::Preflight(session, result) => {
+                if !session.original_backend(&attempt.backend) {
+                    return Err(Error::ProviderUnavailable);
+                }
+                if let Err(error) = result {
+                    let event = if error.kind == raiun_core::backend::ErrorKind::Conflict {
+                        NamespaceEventKind::Conflict
+                    } else {
+                        NamespaceEventKind::Deferred
+                    };
+                    attempt
+                        .lease
+                        .as_mut()
+                        .ok_or(Error::EditRecoveryUnavailable)?
+                        .append_event(event)
+                        .map_err(|_| Error::EditRecoveryUnavailable)?;
+                    return Ok(DirectoryCreateStep::Finished(
+                        if error.kind == raiun_core::backend::ErrorKind::Conflict {
+                            DirectoryCreateOutcome::Conflict
+                        } else {
+                            DirectoryCreateOutcome::Deferred
+                        },
+                    ));
+                }
+                session.check().map_err(|_| Error::ProviderUnavailable)?;
+                attempt
+                    .pins
+                    .as_ref()
+                    .ok_or(Error::EditRecoveryUnavailable)?
+                    .verify(self, false)?;
+                if !attempt.admission.claim_dispatch() {
+                    return Err(Error::EditRecoveryUnavailable);
+                }
+                let lease = attempt
+                    .lease
+                    .as_mut()
+                    .ok_or(Error::EditRecoveryUnavailable)?;
+                crate::namespace_reconcile::submit_directory_create(lease)
+                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                attempt.submitted = true;
+                attempt.ready.store(true, Ordering::Release);
+                let intent = lease.intent().clone();
+                let progress = lease.progress();
+                attempt.task(
+                    Phase::Send,
+                    DirectoryTaskKind::Send(session, intent, progress),
+                )
+            }
+            DirectoryReplyKind::Sent(session, result) => {
+                if !session.original_backend(&attempt.backend) {
+                    return Err(Error::ProviderUnavailable);
+                }
+                let lease = attempt
+                    .lease
+                    .as_mut()
+                    .ok_or(Error::EditRecoveryUnavailable)?;
+                match result {
+                    OwnedDirectorySend::Rejected(error) => {
+                        let event = if error.kind == raiun_core::backend::ErrorKind::Conflict {
+                            NamespaceEventKind::Conflict
+                        } else {
+                            NamespaceEventKind::Deferred
+                        };
+                        lease
+                            .append_event(event)
+                            .map_err(|_| Error::EditRecoveryUnavailable)?;
+                        return Ok(DirectoryCreateStep::Finished(
+                            if error.kind == raiun_core::backend::ErrorKind::Conflict {
+                                DirectoryCreateOutcome::Conflict
+                            } else {
+                                DirectoryCreateOutcome::Deferred
+                            },
+                        ));
+                    }
+                    OwnedDirectorySend::Uncertain => {
+                        lease
+                            .append_event(NamespaceEventKind::Uncertain)
+                            .map_err(|_| Error::EditRecoveryUnavailable)?;
+                        return Ok(DirectoryCreateStep::Finished(
+                            DirectoryCreateOutcome::Uncertain,
+                        ));
+                    }
+                    OwnedDirectorySend::Verified(report) => {
+                        let readback =
+                            crate::namespace_reconcile::record_directory_verified(lease, *report)
+                                .map_err(|_| Error::EditRecoveryUnavailable)?;
+                        attempt.verified = true;
+                        let intent = lease.intent().clone();
+                        let report = readback.report().clone();
+                        attempt.task(
+                            Phase::Refresh,
+                            DirectoryTaskKind::Refresh(Box::new((session, intent, report))),
+                        )
+                    }
+                }
+            }
+            DirectoryReplyKind::Refreshed(session, result) => {
+                if !session.original_backend(&attempt.backend) {
+                    return Err(Error::ProviderUnavailable);
+                }
+                let proof = match result {
+                    Ok(proof) => proof,
+                    Err(_) => {
+                        return Ok(DirectoryCreateStep::Finished(
+                            DirectoryCreateOutcome::RemoteVerifiedLocalPending,
+                        ));
+                    }
+                };
+                let pins = attempt
+                    .pins
+                    .as_mut()
+                    .ok_or(Error::EditRecoveryUnavailable)?;
+                // Full context checks above precede backend.state. Only native
+                // pins/currentness checks run inside the original local fence.
+                let current = attempt.current.clone();
+                let auth = attempt.key.authorization;
+                session.publish(&proof, |identity| {
+                    if !current(auth) {
+                        return Err(Error::ProviderUnavailable);
+                    }
+                    pins.convert_under_publication(self, identity)?;
+                    if !current(auth) {
+                        return Err(Error::ProviderUnavailable);
+                    }
+                    Ok(())
+                })?;
+                // publish has dropped backend.state and provider/token fences.
+                // No global quota/journal I/O may occur while those locks live.
+                self.check_directory_attempt(&attempt)?;
+                if !attempt.admission.claim_completion() {
+                    return Ok(DirectoryCreateStep::Finished(
+                        DirectoryCreateOutcome::RemoteVerifiedLocalPending,
+                    ));
+                }
+                let pins = attempt
+                    .pins
+                    .as_ref()
+                    .ok_or(Error::EditRecoveryUnavailable)?;
+                pins.verify(self, true)?;
+                if pins.converted_identity.is_none() {
+                    return Err(Error::EditRecoveryUnavailable);
+                }
+                attempt
+                    .lease
+                    .as_mut()
+                    .ok_or(Error::EditRecoveryUnavailable)?
+                    .append_event(NamespaceEventKind::LocalCompleted {
+                        destination: pins.entry.clone(),
+                    })
+                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                if !current(auth) {
+                    return Ok(DirectoryCreateStep::Finished(
+                        DirectoryCreateOutcome::RemoteVerifiedLocalPending,
+                    ));
+                }
+                return Ok(DirectoryCreateStep::Finished(
+                    DirectoryCreateOutcome::LocalCompleted,
+                ));
+            }
+        };
+        slot.attempt = Some(attempt);
+        Ok(step)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn reconcile_fresh_personal_directory_create(
+        &self,
+        backend: &Arc<crate::OpenCloudPlaceholderBackend>,
+        components: &[&str],
+        name: &str,
+        authorization: CapturedAuthorization,
+        generation: u64,
+        job: &crate::StreamedRecoveryJob,
+        current: DirectoryCurrent,
+    ) -> Result<DirectoryCreateOutcome, Error> {
+        let mut step = self.begin_fresh_personal_directory_create(
+            backend,
+            components,
+            name,
+            authorization,
+            generation,
+            job,
+            current,
+        )?;
+        loop {
+            step = match step {
+                DirectoryCreateStep::Finished(outcome) => return Ok(outcome),
+                DirectoryCreateStep::Task(task) => {
+                    self.advance_fresh_personal_directory_create(task.execute())?
+                }
+            };
+        }
+    }
+}
+
+const _: fn() = || {
+    fn send<T: Send>() {}
+    send::<DirectoryCreateTask>();
+    send::<DirectoryCreateReply>();
+};

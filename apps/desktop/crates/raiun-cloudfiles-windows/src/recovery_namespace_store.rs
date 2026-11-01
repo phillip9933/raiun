@@ -133,6 +133,61 @@ pub(super) fn prepared_store(
     Ok(Some(store))
 }
 
+pub(super) fn prepared_directory_store(
+    prepared: &DurablePreparedEditRecovery,
+    scope: &EditJournalScope,
+    authorization: CapturedAuthorization,
+) -> Result<Option<Arc<crate::streamed_store::namespace_store::DirectoryIntentStore>>, BackendError>
+{
+    let Some(context) = &prepared.namespace_rename else {
+        return Ok(None);
+    };
+    super::validate_catalog_scope(scope).map_err(|_| BackendError::Unavailable)?;
+    if !super::valid_scope_binding(&prepared.scope, prepared.root_identity)
+        || !super::scope_matches_provider(scope, &prepared.scope, prepared.root_identity)
+        || scope.root_volume_serial != prepared.root_identity.volume_serial
+        || scope.root_file_index != prepared.root_identity.file_index
+        || authorization.agent_generation == 0
+        || authorization.token_generation != prepared.scope.token_generation()
+    {
+        return Err(BackendError::Unavailable);
+    }
+    for part in [&scope.space_id, &scope.root_resource_id] {
+        if part.is_empty() || part.len() > 4096 || part.chars().any(char::is_control) {
+            return Err(BackendError::Unavailable);
+        }
+    }
+    let Some((scheme, authority)) = scope.server_origin.split_once("://") else {
+        return Err(BackendError::Unavailable);
+    };
+    if !matches!(scheme, "http" | "https")
+        || authority.is_empty()
+        || authority
+            .bytes()
+            .any(|byte| matches!(byte, b'/' | b'?' | b'#' | b'@') || byte.is_ascii_whitespace())
+    {
+        return Err(BackendError::Unavailable);
+    }
+    context
+        .state
+        .verify_path()
+        .map_err(|_| BackendError::Unavailable)?;
+    if context.admission.state_identity() != context.state.identity() {
+        return Err(BackendError::Unavailable);
+    }
+    // Constructed only from the ORIGINAL prepared namespace context; no
+    // current_user/default state/protector/caller policy is rediscovered.
+    let store =
+        crate::streamed_store::namespace_store::DirectoryIntentStore::create_or_open_admitted(
+            Arc::clone(&context.state),
+            scope.clone(),
+            Arc::clone(&prepared.catalog.protector),
+            context.policy,
+        )
+        .map_err(|_| BackendError::Unavailable)?;
+    Ok(Some(store))
+}
+
 impl DurableEditRecoveryProvider {
     /// Explicit modern private-state opt-in. Call after any streamed setup.
     #[cfg(windows)]

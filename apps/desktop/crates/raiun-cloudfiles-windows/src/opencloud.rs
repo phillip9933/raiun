@@ -25,6 +25,8 @@ pub use initial_save::InitialEditSession;
 pub(crate) use namespace::CapturedDirectoryParent;
 #[cfg(any(windows, test))]
 pub use namespace::{DirectoryCreateSession, PlainFileCaptureParent, VerifiedDirectoryPublication};
+#[cfg(windows)]
+pub(crate) use namespace::{OwnedDirectorySend, OwnedDirectorySession, RefreshedDirectory};
 pub use verified_edit::VerifiedEditPublication;
 
 use std::{

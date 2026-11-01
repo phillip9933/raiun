@@ -969,6 +969,7 @@ pub(super) struct ConfiguredRootConnection {
     namespace_binding: native_namespace_observer::NamespaceObserverBinding,
     namespace_observation_closed: bool,
     create_owner: std::cell::RefCell<native_file_create::CreateOwner>,
+    directory_owner: std::cell::RefCell<native_namespace_directory::DirectoryOwner>,
 }
 
 #[allow(dead_code)]
@@ -3558,6 +3559,7 @@ impl ConfiguredRootConnection {
                 namespace_binding,
                 namespace_observation_closed: false,
                 create_owner: Default::default(),
+                directory_owner: Default::default(),
             };
             if connection.finish(false).is_err() {
                 let _ = Box::leak(Box::new(connection));
@@ -3575,6 +3577,7 @@ impl ConfiguredRootConnection {
             namespace_binding,
             namespace_observation_closed: false,
             create_owner: Default::default(),
+            directory_owner: Default::default(),
         };
         if already_registered {
             if let Some(history) = vault_history {
@@ -3715,7 +3718,8 @@ impl ConfiguredRootConnection {
     }
 
     fn finish(&mut self, unregister: bool) -> Result<(), Error> {
-        if !self.close_fresh_personal_file_create() {
+        if !self.close_fresh_personal_directory_create() || !self.close_fresh_personal_file_create()
+        {
             // Cancelled but actual SDK/body ownership is still in flight.
             // Caller must drain/join; keep this same root/attempt connected.
             return Err(Error::EditRecoveryUnavailable);
@@ -3791,6 +3795,7 @@ impl ConfiguredRootConnection {
             self.connection_key,
             self.connected,
             std::mem::take(self.create_owner.get_mut()),
+            std::mem::take(self.directory_owner.get_mut()),
         )));
         self.connected = false;
     }

@@ -126,6 +126,85 @@ fn finish(
     Ok(outcome)
 }
 
+fn valid_directory_report(intent: &NamespaceIntent, report: &NamespaceDestinationReport) -> bool {
+    if report.remote.resource_id.starts_with("http://")
+        || report.remote.resource_id.starts_with("https://")
+        || report.remote.byte_len != 0
+    {
+        return false;
+    }
+    // Validate the adapter's report against the complete original context with
+    // the same portable checker used to validate authenticated store histories.
+    let Ok(mut check) = crate::namespace_intent::NamespaceIntentProgress::new(intent.clone())
+    else {
+        return false;
+    };
+    let Ok(context) = intent.event_context() else {
+        return false;
+    };
+    for (sequence, event) in [
+        (1, NamespaceEventKind::RemoteSubmitted),
+        (
+            2,
+            NamespaceEventKind::RemoteVerified {
+                report: report.clone(),
+            },
+        ),
+    ] {
+        if check
+            .record(&crate::namespace_intent::NamespaceEvent {
+                context: context.clone(),
+                sequence,
+                event,
+            })
+            .is_err()
+        {
+            return false;
+        }
+    }
+    true
+}
+// Shared owner-side journal ordering. No native permission is minted here.
+pub(crate) fn submit_directory_create(
+    journal: &mut impl DirectoryCreateJournal,
+) -> Result<(), StoreError> {
+    let p = journal.progress();
+    if p.sequence != 0
+        || p.remote != NamespacePhase::Pending
+        || p.attention.is_some()
+        || p.local_completed
+    {
+        return Err(StoreError::CorruptEvidence);
+    }
+    journal.append_event(NamespaceEventKind::RemoteSubmitted)
+}
+#[cfg(any(windows, test))]
+pub(crate) fn submitted_directory_dispatch<'a>(
+    intent: &'a NamespaceIntent,
+    progress: NamespaceProgressSnapshot,
+) -> Result<DirectoryCreateDispatch<'a>, StoreError> {
+    if progress.sequence != 1
+        || progress.remote != NamespacePhase::Submitted
+        || progress.attention.is_some()
+        || progress.local_completed
+    {
+        return Err(StoreError::CorruptEvidence);
+    }
+    Ok(DirectoryCreateDispatch { intent })
+}
+pub(crate) fn record_directory_verified(
+    journal: &mut impl DirectoryCreateJournal,
+    report: NamespaceDestinationReport,
+) -> Result<DirectoryCreateReadback, StoreError> {
+    let intent = journal.intent().clone();
+    if !valid_directory_report(&intent, &report) {
+        return Err(StoreError::CorruptEvidence);
+    }
+    journal.append_event(NamespaceEventKind::RemoteVerified {
+        report: report.clone(),
+    })?;
+    Ok(DirectoryCreateReadback { report })
+}
 /// At most one send. There is no retry/rebase path, including after a durable
 /// Submitted record or a failure to durably publish subsequent verification.
 pub fn reconcile_directory_create(
@@ -154,7 +233,7 @@ pub fn reconcile_directory_create(
     {
         return finish(journal, attention(&error));
     }
-    journal.append_event(NamespaceEventKind::RemoteSubmitted)?;
+    submit_directory_create(journal)?;
     let dispatch = DirectoryCreateDispatch { intent: &intent };
     match remote.create(&dispatch) {
         Err(error) | Ok(DirectoryCreateResponse::Rejected(error)) => {
@@ -180,43 +259,10 @@ pub fn reconcile_directory_create(
         Ok(report) => report,
         Err(_) => return finish(journal, NamespaceEventKind::Uncertain),
     };
-    if report.remote.resource_id.starts_with("http://")
-        || report.remote.resource_id.starts_with("https://")
-        || report.remote.byte_len != 0
-    {
+    if !valid_directory_report(&intent, &report) {
         return finish(journal, NamespaceEventKind::Uncertain);
     }
-    // Validate the adapter's report against the complete original context with
-    // the same portable checker used to validate authenticated store histories.
-    let mut check = crate::namespace_intent::NamespaceIntentProgress::new(intent.clone())
-        .map_err(|_| StoreError::CorruptEvidence)?;
-    let context = intent
-        .event_context()
-        .map_err(|_| StoreError::CorruptEvidence)?;
-    for (sequence, event) in [
-        (1, NamespaceEventKind::RemoteSubmitted),
-        (
-            2,
-            NamespaceEventKind::RemoteVerified {
-                report: report.clone(),
-            },
-        ),
-    ] {
-        if check
-            .record(&crate::namespace_intent::NamespaceEvent {
-                context: context.clone(),
-                sequence,
-                event,
-            })
-            .is_err()
-        {
-            return finish(journal, NamespaceEventKind::Uncertain);
-        }
-    }
-    journal.append_event(NamespaceEventKind::RemoteVerified {
-        report: report.clone(),
-    })?;
-    let readback = DirectoryCreateReadback { report };
+    let readback = record_directory_verified(journal, report)?;
     // Failure preserves remote verification but grants no local completion.
     if remote.ensure_authorized(&intent).is_err()
         || local.admit(&intent).is_err()
@@ -459,6 +505,34 @@ mod tests {
             }
             Ok(())
         }
+    }
+    #[test]
+    fn phased_submission_and_verified_helpers_preserve_actual_journal_order() {
+        let mut journal = Journal::new();
+        let remote = Remote::new(&journal);
+        assert!(submitted_directory_dispatch(journal.intent(), journal.progress()).is_err());
+        submit_directory_create(&mut journal).unwrap();
+        assert!(submit_directory_create(&mut journal).is_err());
+        let dispatch = submitted_directory_dispatch(journal.intent(), journal.progress()).unwrap();
+        assert!(matches!(
+            remote.create(&dispatch).unwrap(),
+            DirectoryCreateResponse::Created
+        ));
+        assert_eq!(remote.sends.get(), 1);
+        record_directory_verified(&mut journal, remote.report.clone()).unwrap();
+        assert_eq!(journal.progress().remote, NamespacePhase::Verified);
+        assert!(!journal.progress().local_completed);
+        assert!(submitted_directory_dispatch(journal.intent(), journal.progress()).is_err());
+    }
+    #[test]
+    fn phased_verified_append_failure_does_not_claim_verified_or_completion() {
+        let mut journal = Journal::new();
+        let report = Remote::new(&journal).report;
+        submit_directory_create(&mut journal).unwrap();
+        journal.fail = true;
+        assert!(record_directory_verified(&mut journal, report).is_err());
+        assert_eq!(journal.progress().remote, NamespacePhase::Submitted);
+        assert!(!journal.progress().local_completed);
     }
     #[test]
     fn one_send_after_durable_submission_and_no_replay_from_completed_or_submitted() {

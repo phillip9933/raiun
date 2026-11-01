@@ -275,12 +275,25 @@ impl DirectoryCreateRemote for LiveDirectoryCreate<'_> {
         self.preflight(intent)?;
         self.attempted.set(true);
         let scope = &self.destination().parent.scope;
-        let response = self.backend.client.mkdir_with_context(
+        let response = self.backend.client.mkdir_with_context_and_cancellation(
             &scope.space_id,
             &self.root_path,
             &scope.root_resource_id,
             self.relative_path()?,
             self.context,
+            || {
+                // Final SDK admission after its own metadata work. Only the
+                // ORIGINAL atomic owner/job/backend/token observations; no
+                // HTTP, state/catalog/route lock, journal or new epoch here.
+                self.context.deadline <= Instant::now()
+                    || !(self.owner_current)(self.destination().parent.authorization)
+                    || (self.cancelled)()
+                    || self.backend.revoked.load(Ordering::Acquire)
+                    || self.backend.token_generation != self.context.token_generation
+                    || self.destination().parent.authorization.token_generation
+                        != self.context.token_generation
+                    || self.backend.client.token_generation() != self.context.token_generation
+            },
         )?;
         if let Err(error) = self.ensure_authorized(intent) {
             return Ok(DirectoryCreateResponse::Uncertain(error));
@@ -705,5 +718,273 @@ impl OpenCloudPlaceholderBackend {
                 byte_len: 0,
             },
         })
+    }
+}
+
+/// Owned SDK-only directory context. No native pin, journal or backend lease.
+#[cfg(windows)]
+pub(crate) struct OwnedDirectorySession {
+    pub(crate) captured: CapturedDirectoryParent,
+    backend: Arc<OpenCloudPlaceholderBackend>,
+    catalog: Arc<dyn ProviderIdentityCatalog>,
+    catalog_scope: ProviderIdentityCatalogScope,
+    auth: CapturedAuthorization,
+    job: crate::StreamedRecoveryJob,
+    current: Arc<dyn Fn(CapturedAuthorization) -> bool + Send + Sync>,
+}
+#[cfg(windows)]
+pub(crate) enum OwnedDirectorySend {
+    Verified(Box<NamespaceDestinationReport>),
+    Rejected(CloudError),
+    Uncertain,
+}
+#[cfg(windows)]
+pub(crate) struct RefreshedDirectory {
+    report: Box<NamespaceDestinationReport>,
+}
+#[cfg(windows)]
+impl OwnedDirectorySession {
+    pub(crate) fn prepare(
+        backend: Arc<OpenCloudPlaceholderBackend>,
+        components: &[&str],
+        root: crate::ConfiguredRootIdentity,
+        auth: CapturedAuthorization,
+        job: crate::StreamedRecoveryJob,
+        current: Arc<dyn Fn(CapturedAuthorization) -> bool + Send + Sync>,
+    ) -> Result<Self, BackendError> {
+        job.check()?;
+        if components.first().copied() != Some("Personal") || !(current)(auth) {
+            return Err(BackendError::Unavailable);
+        }
+        let catalog = backend
+            .identity_catalog
+            .clone()
+            .ok_or(BackendError::Unavailable)?;
+        let catalog_scope = backend
+            .catalog_scope_snapshot()?
+            .ok_or(BackendError::Unavailable)?;
+        if catalog_scope.local_root() != root {
+            return Err(BackendError::Unavailable);
+        }
+        // Original deadline; no new cancellation epoch. No outer read lease spans
+        // metadata: discovery itself takes only short state locks and checks the
+        // original token/context; all observations are revalidated by the owner.
+        backend.validate_namespace_scope(
+            backend.scope.account_id(),
+            catalog_scope.personal_space_id(),
+            catalog_scope.personal_root_resource_id(),
+            job.deadline(),
+        )?;
+        let captured = backend.capture_namespace_parent_under_lease(
+            components,
+            root,
+            auth,
+            job.cancellation(),
+        )?;
+        let result = Self {
+            captured,
+            backend,
+            catalog,
+            catalog_scope,
+            auth,
+            job,
+            current,
+        };
+        result.check()?;
+        if result.captured.scope.space_id != result.catalog_scope.personal_space_id
+            || result.captured.scope.root_resource_id
+                != result.catalog_scope.personal_root_resource_id
+        {
+            return Err(BackendError::Unavailable);
+        }
+        Ok(result)
+    }
+    pub(crate) fn check(&self) -> Result<(), BackendError> {
+        self.job.check()?;
+        if !(self.current)(self.auth)
+            || self.auth.token_generation != self.backend.token_generation
+            || self
+                .backend
+                .identity_catalog
+                .as_ref()
+                .is_none_or(|c| !Arc::ptr_eq(c, &self.catalog))
+            || self.backend.client.token_generation() != self.auth.token_generation
+        {
+            return Err(BackendError::Unavailable);
+        }
+        self.backend.ensure_active()
+    }
+    pub(crate) fn original_backend(&self, backend: &Arc<OpenCloudPlaceholderBackend>) -> bool {
+        Arc::ptr_eq(&self.backend, backend)
+    }
+    fn live<'a>(&'a self, intent: &NamespaceIntent) -> Result<LiveDirectoryCreate<'a>, CloudError> {
+        self.check().map_err(|_| refusal(ErrorKind::Unauthorized))?;
+        let NamespaceOperation::CreateDirectory { destination } = &intent.operation else {
+            return Err(refusal(ErrorKind::Conflict));
+        };
+        if destination.parent.scope != self.captured.scope
+            || destination.parent.authorization != self.auth
+            || destination.parent.remote != self.captured.remote
+        {
+            return Err(refusal(ErrorKind::Conflict));
+        }
+        let path = format!(
+            "{}/{}",
+            self.captured.path.trim_end_matches('/'),
+            destination.name
+        );
+        if !valid_remote_path(
+            &self.captured.scope.space_id,
+            &self.captured.scope.root_resource_id,
+            &path,
+            false,
+        ) {
+            return Err(refusal(ErrorKind::Conflict));
+        }
+        let job = self.job.clone();
+        Ok(LiveDirectoryCreate {
+            backend: &self.backend,
+            intent: intent.clone(),
+            parent: DirectoryBinding {
+                space_id: self.captured.scope.space_id.clone(),
+                root_resource_id: self.captured.scope.root_resource_id.clone(),
+                path: self.captured.path.clone(),
+                remote_id: self.captured.remote.resource_id.clone(),
+            },
+            path,
+            root_path: "/".into(),
+            context: RangeReadContext {
+                deadline: self.job.deadline(),
+                token_generation: self.auth.token_generation,
+            },
+            owner_current: self.current.as_ref(),
+            attempted: Cell::new(false),
+            created: Cell::new(false),
+            observed: RefCell::new(None),
+            cancelled: Arc::new(move || job.is_stopped()),
+        })
+    }
+    pub(crate) fn preflight(&self, intent: &NamespaceIntent) -> Result<(), CloudError> {
+        self.live(intent)?.preflight(intent)
+    }
+    pub(crate) fn send(&self, dispatch: &DirectoryCreateDispatch<'_>) -> OwnedDirectorySend {
+        let remote = match self.live(dispatch.intent()) {
+            Ok(remote) => remote,
+            Err(error) => return OwnedDirectorySend::Rejected(error),
+        };
+        match remote.create(dispatch) {
+            Err(error) | Ok(DirectoryCreateResponse::Rejected(error)) => {
+                OwnedDirectorySend::Rejected(error)
+            }
+            Ok(DirectoryCreateResponse::Uncertain(_)) => OwnedDirectorySend::Uncertain,
+            Ok(DirectoryCreateResponse::Created) => match remote.observe(dispatch.intent()) {
+                Ok(report) => OwnedDirectorySend::Verified(Box::new(report)),
+                Err(_) => OwnedDirectorySend::Uncertain,
+            },
+        }
+    }
+    pub(crate) fn refresh(
+        &self,
+        intent: &NamespaceIntent,
+        report: &NamespaceDestinationReport,
+    ) -> Result<RefreshedDirectory, BackendError> {
+        let latest = self
+            .live(intent)
+            .map_err(|_| BackendError::Unavailable)?
+            .observe(intent)
+            .map_err(|_| BackendError::Unavailable)?;
+        self.check()?;
+        if &latest != report {
+            return Err(BackendError::Unavailable);
+        }
+        Ok(RefreshedDirectory {
+            report: Box::new(latest),
+        })
+    }
+    /// Only local catalog/native work spans the original publication fence.
+    pub(crate) fn publish<T>(
+        &self,
+        proof: &RefreshedDirectory,
+        run: impl FnOnce(&[u8; 16]) -> Result<T, crate::Error>,
+    ) -> Result<T, crate::Error> {
+        let unavailable = || crate::Error::EditRecoveryUnavailable;
+        self.check().map_err(|_| unavailable())?;
+        let report = &proof.report;
+        if report.destination.parent.scope != self.captured.scope
+            || report.destination.parent.remote != self.captured.remote
+        {
+            return Err(unavailable());
+        }
+        let scope = &self.captured.scope;
+        let path = format!(
+            "{}/{}",
+            self.captured.path.trim_end_matches('/'),
+            report.destination.name
+        );
+        let identity = binding_identity(
+            &self.catalog_scope,
+            "directory",
+            &[
+                &scope.space_id,
+                &scope.root_resource_id,
+                &path,
+                &report.remote.resource_id,
+            ],
+        );
+        let _permit = self
+            .backend
+            .begin_scoped_publish(self.job.cancellation())
+            .map_err(|_| unavailable())?;
+        self.check().map_err(|_| unavailable())?;
+        let mut state = self.backend.state.try_lock().map_err(|_| unavailable())?;
+        let composite = composite_root_identity(
+            &self.backend.scope,
+            &scope.space_id,
+            &scope.root_resource_id,
+        );
+        if !matches!(state.namespace_directories.get(&composite), Some(NamespaceDirectory::Root { account_id, personal_space_id, personal_root_id }) if account_id == self.backend.scope.account_id() && personal_space_id == &scope.space_id && personal_root_id == &scope.root_resource_id)
+            || state
+                .directories
+                .get(&self.captured.identity)
+                .is_none_or(|parent| {
+                    parent.space_id != scope.space_id
+                        || parent.root_resource_id != scope.root_resource_id
+                        || parent.path != self.captured.path
+                        || parent.remote_id != self.captured.remote.resource_id
+                })
+            || binding_count(&state) >= MAX_IDENTITY_CATALOG_ENTRIES
+            || state.files.contains_key(&identity)
+            || state.namespace_directories.contains_key(&identity)
+            || state.directories.iter().any(|(key, prior)| {
+                *key == identity || (prior.space_id == scope.space_id && prior.path == path)
+            })
+        {
+            return Err(unavailable());
+        }
+        self.backend
+            .upsert_identity_binding(
+                &self.catalog_scope,
+                &ProviderIdentityBinding::Directory {
+                    identity: *identity.as_bytes(),
+                    space_id: scope.space_id.clone(),
+                    root_resource_id: scope.root_resource_id.clone(),
+                    path: path.clone(),
+                    remote_id: report.remote.resource_id.clone(),
+                },
+            )
+            .map_err(|_| unavailable())?;
+        state.directories.insert(
+            identity,
+            DirectoryBinding {
+                space_id: scope.space_id.clone(),
+                root_resource_id: scope.root_resource_id.clone(),
+                path,
+                remote_id: report.remote.resource_id.clone(),
+            },
+        );
+        self.check().map_err(|_| unavailable())?;
+        let result = run(identity.as_bytes())?;
+        self.check().map_err(|_| unavailable())?;
+        Ok(result)
     }
 }

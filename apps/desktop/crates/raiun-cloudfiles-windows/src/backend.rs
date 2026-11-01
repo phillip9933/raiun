@@ -288,6 +288,20 @@ pub trait PreparedEditRecovery: Send + Sync + 'static {
         Ok(None)
     }
 
+    /// Optional directory journal from this SAME prepared account/root context.
+    /// Storage does not grant directory dispatch or native publication authority.
+    #[cfg(windows)]
+    fn directory_intent_store(
+        &self,
+        _scope: &crate::EditJournalScope,
+        _authorization: crate::namespace_intent::CapturedAuthorization,
+    ) -> Result<
+        Option<std::sync::Arc<crate::streamed_store::namespace_store::DirectoryIntentStore>>,
+        BackendError,
+    > {
+        Ok(None)
+    }
+
     /// A nonblocking cached count seeded by authenticated preflight. No disk,
     /// body decryption or network work is permitted here. Unsupported, poisoned
     /// or invalidated summaries return None, never a healthy zero.
