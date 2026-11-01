@@ -5,12 +5,12 @@
 //! mutex guard before doing I/O. Close capture is never suppressed when admission
 //! bookkeeping fails: failure makes future rename admission unknown instead.
 
-#[cfg(any(windows, test))]
-use std::sync::Arc;
 use std::sync::{
     Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
+#[cfg(any(windows, test))]
+use std::{marker::PhantomData, rc::Rc, sync::Arc};
 
 #[derive(Default)]
 struct State {
@@ -60,6 +60,28 @@ impl CloseCaptureAdmission {
     /// The ticket serializes rename attempts, not close capture or remote I/O.
     #[allow(dead_code)] // R55 explicit producer consumes this capability.
     pub(crate) fn try_begin_rename(&self) -> Option<SaveRenameTicket<'_>> {
+        Some(SaveRenameTicket {
+            tracker: self,
+            ticket: self.try_begin_ticket()?,
+        })
+    }
+
+    /// Preparatory owner-thread custody only; no path, history or send authority.
+    #[cfg(any(windows, test))]
+    #[cfg_attr(not(test), allow(dead_code))] // No owner-worker caller is activated yet.
+    pub(crate) fn try_begin_create(self: &Arc<Self>) -> Option<OwnedCreateAdmission> {
+        let ticket = self.try_begin_ticket()?;
+        let (dispatch, lifetime) = DispatchProbeLifetime::new(self.clone(), ticket.observation);
+        Some(OwnedCreateAdmission {
+            tracker: self.clone(),
+            ticket,
+            dispatch,
+            lifetime,
+            _owner_thread: PhantomData,
+        })
+    }
+
+    fn try_begin_ticket(&self) -> Option<TicketState> {
         if self.unknown.load(Ordering::Acquire) {
             return None;
         }
@@ -71,9 +93,9 @@ impl CloseCaptureAdmission {
         state.rename_claimed = true;
         state.dispatch_claimed = false;
         state.completion_claimed = false;
-        Some(SaveRenameTicket {
-            tracker: self,
+        Some(TicketState {
             epoch: state.dirty_epoch,
+            observation: self.create_observation.load(Ordering::Acquire),
             dispatch_claimed: false,
             completion_claimed: false,
         })
@@ -209,9 +231,67 @@ impl Drop for CloseCapturePermit<'_> {
 /// invalidate it through active-close state or a dirty epoch increment.
 pub(crate) struct SaveRenameTicket<'a> {
     tracker: &'a CloseCaptureAdmission,
+    ticket: TicketState,
+}
+
+// Both ticket shapes use the same original tracker transitions. Only the owned
+// create wrapper also requires its mint-time close observation to stay unchanged.
+struct TicketState {
     epoch: u64,
+    observation: u64,
     dispatch_claimed: bool,
     completion_claimed: bool,
+}
+
+/// Retained across owner-loop turns, never cloned or moved to an SDK worker.
+/// Atomic probes can travel; this custody and its claims stay on the owner thread.
+#[cfg(any(windows, test))]
+pub(crate) struct OwnedCreateAdmission {
+    tracker: Arc<CloseCaptureAdmission>,
+    ticket: TicketState,
+    dispatch: Arc<dyn Fn() -> bool + Send + Sync>,
+    lifetime: DispatchProbeLifetime,
+    _owner_thread: PhantomData<Rc<()>>,
+}
+
+// Deliberately preparatory private API: owner-worker integration is not enabled.
+#[cfg(any(windows, test))]
+#[cfg_attr(not(test), allow(dead_code))]
+impl OwnedCreateAdmission {
+    pub(crate) fn is_current(&self) -> bool {
+        self.ticket.is_current(&self.tracker, true)
+    }
+
+    pub(crate) fn observation_probe(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        self.lifetime.observation_probe()
+    }
+
+    pub(crate) fn dispatch_probe(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        self.dispatch.clone()
+    }
+
+    pub(crate) fn claim_dispatch(&mut self) -> bool {
+        if !self.ticket.claim_dispatch(&self.tracker, true) {
+            return false;
+        }
+        if !self.lifetime.arm_after_dispatch() {
+            self.tracker.mark_unknown();
+            return false;
+        }
+        true
+    }
+
+    pub(crate) fn claim_completion(&mut self) -> bool {
+        self.ticket.claim_completion(&self.tracker, true)
+    }
+}
+
+#[cfg(any(windows, test))]
+impl Drop for OwnedCreateAdmission {
+    fn drop(&mut self) {
+        self.lifetime.live.store(false, Ordering::Release);
+        self.ticket.retire(&self.tracker);
+    }
 }
 
 /// Ends the owned SDK observation before the borrowed ticket is retired.
@@ -230,6 +310,27 @@ impl Drop for DispatchProbeLifetime {
 }
 #[cfg(any(windows, test))]
 impl DispatchProbeLifetime {
+    fn new(
+        tracker: Arc<CloseCaptureAdmission>,
+        epoch: u64,
+    ) -> (Arc<dyn Fn() -> bool + Send + Sync>, Self) {
+        let live = Arc::new(AtomicBool::new(true));
+        let ready = Arc::new(AtomicBool::new(false));
+        let lifetime = Self {
+            live: live.clone(),
+            ready: ready.clone(),
+            tracker: tracker.clone(),
+            epoch,
+        };
+        let probe = Arc::new(move || {
+            live.load(Ordering::Acquire)
+                && ready.load(Ordering::Acquire)
+                && !tracker.unknown.load(Ordering::Acquire)
+                && tracker.create_observation.load(Ordering::Acquire) == epoch
+        });
+        (probe, lifetime)
+    }
+
     pub(crate) fn observation_probe(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
         let tracker = self.tracker.clone();
         let live = self.live.clone();
@@ -257,47 +358,49 @@ impl SaveRenameTicket<'_> {
         if !std::ptr::eq(self.tracker, Arc::as_ptr(&tracker)) || !self.is_current() {
             return None;
         }
-        let live = Arc::new(AtomicBool::new(true));
-        let ready = Arc::new(AtomicBool::new(false));
-        let lifetime = DispatchProbeLifetime {
-            live: live.clone(),
-            ready: ready.clone(),
-            tracker: tracker.clone(),
-            epoch,
-        };
-        let probe = Arc::new(move || {
-            live.load(Ordering::Acquire)
-                && ready.load(Ordering::Acquire)
-                && !tracker.unknown.load(Ordering::Acquire)
-                && tracker.create_observation.load(Ordering::Acquire) == epoch
-        });
-        Some((probe, lifetime))
+        Some(DispatchProbeLifetime::new(tracker, epoch))
     }
+
     #[allow(dead_code)] // R55 explicit producer rechecks this ticket.
     pub(crate) fn is_current(&self) -> bool {
-        if self.tracker.unknown.load(Ordering::Acquire) {
+        self.ticket.is_current(self.tracker, false)
+    }
+
+    /// Short ordering point, not remote atomicity; later captures still run.
+    #[allow(dead_code)] // R55 explicit producer consumes this claim.
+    pub(crate) fn claim_dispatch(&mut self) -> bool {
+        self.ticket.claim_dispatch(self.tracker, false)
+    }
+
+    /// Linearizes completion before later close admission, with no mutex over I/O.
+    #[allow(dead_code)] // R55 explicit producer completion fencing consumes this capability.
+    pub(crate) fn claim_completion(&mut self) -> bool {
+        self.ticket.claim_completion(self.tracker, false)
+    }
+}
+
+impl TicketState {
+    fn is_current(&self, tracker: &CloseCaptureAdmission, observe: bool) -> bool {
+        if tracker.unknown.load(Ordering::Acquire) {
             return false;
         }
-        let Some(state) = self.tracker.try_state() else {
+        let Some(state) = tracker.try_state() else {
             return false;
         };
-        !self.tracker.unknown.load(Ordering::Acquire)
+        !tracker.unknown.load(Ordering::Acquire)
             && state.rename_claimed
             && state.active_closes == 0
             && state.dirty_epoch == self.epoch
-            && (state.dispatch_claimed == self.dispatch_claimed)
-            && (state.completion_claimed == self.completion_claimed)
+            && state.dispatch_claimed == self.dispatch_claimed
+            && state.completion_claimed == self.completion_claimed
+            && (!observe || tracker.create_observation.load(Ordering::Acquire) == self.observation)
     }
 
-    /// Short local ordering point immediately before a future remote send.
-    /// This is not a remote atomicity guarantee; later close activity remains
-    /// enabled and invalidates the ticket for subsequent local phases.
-    #[allow(dead_code)] // R55 explicit producer consumes this claim.
-    pub(crate) fn claim_dispatch(&mut self) -> bool {
-        if self.dispatch_claimed || !self.is_current() {
+    fn claim_dispatch(&mut self, tracker: &CloseCaptureAdmission, observe: bool) -> bool {
+        if self.dispatch_claimed || !self.is_current(tracker, observe) {
             return false;
         }
-        let Some(mut state) = self.tracker.try_state() else {
+        let Some(mut state) = tracker.try_state() else {
             return false;
         };
         if !state.rename_claimed
@@ -305,7 +408,8 @@ impl SaveRenameTicket<'_> {
             || state.completion_claimed
             || state.active_closes != 0
             || state.dirty_epoch != self.epoch
-            || self.tracker.unknown.load(Ordering::Acquire)
+            || tracker.unknown.load(Ordering::Acquire)
+            || (observe && tracker.create_observation.load(Ordering::Acquire) != self.observation)
         {
             return false;
         }
@@ -314,18 +418,11 @@ impl SaveRenameTicket<'_> {
         true
     }
 
-    /// Establish the local journal-completion ordering point. This transition
-    /// shares the tracker lock with `begin_close`: an active, dirty, unknown,
-    /// or stale capture refuses the claim. The lock is released before the
-    /// caller performs durable I/O. A close admitted after this transition is
-    /// ordered after this rename's completion attempt and still runs normally;
-    /// this is not remote atomicity and cannot roll back a durable event.
-    #[allow(dead_code)] // R55 explicit producer completion fencing consumes this capability.
-    pub(crate) fn claim_completion(&mut self) -> bool {
-        if self.completion_claimed || !self.dispatch_claimed || !self.is_current() {
+    fn claim_completion(&mut self, tracker: &CloseCaptureAdmission, observe: bool) -> bool {
+        if self.completion_claimed || !self.dispatch_claimed || !self.is_current(tracker, observe) {
             return false;
         }
-        let Some(mut state) = self.tracker.try_state() else {
+        let Some(mut state) = tracker.try_state() else {
             return false;
         };
         if !state.rename_claimed
@@ -333,15 +430,30 @@ impl SaveRenameTicket<'_> {
             || state.completion_claimed
             || state.active_closes != 0
             || state.dirty_epoch != self.epoch
-            || self.tracker.unknown.load(Ordering::Acquire)
+            || tracker.unknown.load(Ordering::Acquire)
+            || (observe && tracker.create_observation.load(Ordering::Acquire) != self.observation)
         {
             return false;
         }
-        // This shared short-lock transition linearizes completion before any
-        // later close admission. No lock is held across the journal callback.
+        // Same short-lock completion ordering used by the borrowed ticket.
         state.completion_claimed = true;
         self.completion_claimed = true;
         true
+    }
+
+    fn retire(&self, tracker: &CloseCaptureAdmission) {
+        tracker.advance_create_observation();
+        let Some(mut state) = tracker.try_state() else {
+            return;
+        };
+        if !state.rename_claimed
+            || state.dispatch_claimed != self.dispatch_claimed
+            || state.completion_claimed != self.completion_claimed
+        {
+            tracker.mark_unknown();
+        }
+        state.rename_claimed = false;
+        state.dispatch_claimed = false;
     }
 }
 
@@ -443,20 +555,13 @@ mod connected_create_probe_tests {
 
 impl Drop for SaveRenameTicket<'_> {
     fn drop(&mut self) {
-        self.tracker.advance_create_observation();
-        let Some(mut state) = self.tracker.try_state() else {
-            return;
-        };
-        if !state.rename_claimed
-            || state.dispatch_claimed != self.dispatch_claimed
-            || state.completion_claimed != self.completion_claimed
-        {
-            self.tracker.mark_unknown();
-        }
-        state.rename_claimed = false;
-        state.dispatch_claimed = false;
+        self.ticket.retire(self.tracker);
     }
 }
+
+#[cfg(test)]
+#[path = "owned_create_admission_tests.rs"]
+mod owned_create_admission_tests;
 
 #[cfg(test)]
 mod tests {
