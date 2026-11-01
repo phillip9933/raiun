@@ -79,6 +79,10 @@ mod windows_headless_edits;
 #[path = "windows_file_rename_caller_native_test.rs"]
 mod windows_file_rename_caller_native_test;
 
+#[path = "windows_create_executor.rs"]
+mod windows_create_executor;
+#[path = "windows_file_create_producer.rs"]
+mod windows_file_create_producer;
 #[path = "windows_file_rename_producer.rs"]
 mod windows_file_rename_producer;
 #[path = "windows_namespace_dispatcher.rs"]
@@ -495,6 +499,8 @@ struct ProviderManager {
     namespace_test_activation: AtomicBool,
     #[cfg(all(test, debug_assertions))]
     mixed_namespace_test_activation: AtomicBool,
+    #[cfg(all(test, debug_assertions))]
+    create_test_activation: AtomicBool,
     // Serializes explicit mount preference with every automatic reconnect.
     mount_preference: Mutex<bool>,
     ordinary_edits: Arc<Mutex<Option<windows_headless_edits::CachedStatus>>>,
@@ -779,6 +785,7 @@ enum ProviderCommand {
         #[cfg(all(test, debug_assertions))]
         mixed_namespace_fixture: bool,
         file_rename_producer: Option<Box<windows_file_rename_producer::Producer>>,
+        create_enabled: bool,
         response: std::sync::mpsc::SyncSender<Result<(), String>>,
     },
     DispatchRecovery {
@@ -924,6 +931,9 @@ impl ProviderManager {
                 let mut folders: Option<windows_folder_sync::Runtime> = None;
                 let mut cleanup_holds = windows_vault_cleanup_holds::PendingCleanupHolds::<PendingNativeVaultCleanup>::new();
                 let mut namespace_producer:Option<windows_namespace_producer::Producer>=None;
+                // Reverse drop order on panic: dispatcher cancels original jobs
+                // and drops deferred tasks, workers join, then connection drops.
+                let mut create_workers:Option<windows_file_create_producer::Workers>=None;
                 let mut namespace_dispatcher:Option<windows_namespace_dispatcher::Dispatcher>=None;
                 let mut pending_command = None;
                 loop {
@@ -1475,6 +1485,7 @@ impl ProviderManager {
                             #[cfg(all(test, debug_assertions))]
                             mixed_namespace_fixture,
                             file_rename_producer: next_file_rename_producer,
+                            create_enabled,
                             response,
                         } => {
                             let candidate_binding = ActiveProviderBinding {
@@ -1564,6 +1575,12 @@ impl ProviderManager {
                                             namespace_producer=namespace_admission.map(|admission| windows_namespace_producer::Producer::new(admission,composite,worker_namespace_controls.clone(),worker_namespace_status.clone()));
                                             None
                                         };
+                                        if create_enabled {
+                                            match windows_file_create_producer::Workers::start(raiun_cloudfiles_windows::FileCreateTask::execute) {
+                                                Ok(workers)=>create_workers=Some(workers),
+                                                Err(_)=>if let Ok(mut notice)=worker_rename_error.lock() {notice.record(generation,worker_generation.load(Ordering::Acquire),windows_file_create_producer::HOLD);},
+                                            }
+                                        }
                                         namespace_dispatcher = if namespace_producer.is_none() && (next_file_rename_producer.is_some() || shared_directory.is_some()) {
                                             let make_dispatcher = || {
                                                 #[cfg(all(test, debug_assertions))]
@@ -1573,7 +1590,9 @@ impl ProviderManager {
                                                 windows_namespace_dispatcher::Dispatcher::new(next_file_rename_producer,shared_directory)
                                             };
                                             match make_dispatcher() {
-                                                Ok(dispatcher)=>Some(dispatcher),
+                                                Ok(dispatcher)=>Some(if create_workers.is_some() {
+                                                    dispatcher.with_create(windows_file_create_producer::Producer::new(&next_backend,&worker_generation,generation,expected_identity))
+                                                } else {dispatcher}),
                                                 Err(message)=> {
                                                     if let Ok(mut notice)=worker_rename_error.lock() {
                                                         notice.record(candidate_binding.generation,worker_generation.load(Ordering::Acquire),message);
@@ -1782,6 +1801,7 @@ impl ProviderManager {
                             let _ = response.send(result);
                         }
                         ProviderCommand::Disconnect(response) => {
+                            stop_create_workers(namespace_dispatcher.as_mut(),connection.as_ref(),&mut create_workers);
                             namespace_producer=None;
                             if let Some(dispatcher)=namespace_dispatcher.as_mut() { dispatcher.hold(); }
                             namespace_dispatcher=None;
@@ -1805,6 +1825,7 @@ impl ProviderManager {
                             let _ = response.send(result);
                         }
                         ProviderCommand::Stop(response) => {
+                            stop_create_workers(namespace_dispatcher.as_mut(),connection.as_ref(),&mut create_workers);
                             namespace_producer=None;
                             if let Some(dispatcher)=namespace_dispatcher.as_mut() { dispatcher.hold(); }
                             namespace_dispatcher=None;
@@ -1826,6 +1847,9 @@ impl ProviderManager {
                             if stopped { break; }
                         }
                     }
+                    }
+                    if let (Some(dispatcher),Some(active),Some(workers))=(namespace_dispatcher.as_mut(),connection.as_ref(),create_workers.as_mut()) {
+                        dispatcher.drain_create(active,workers);
                     }
                     let mut dispatched_initial = false;
                     if worker_initial_save_activation.load(Ordering::Acquire) {
@@ -1861,7 +1885,10 @@ impl ProviderManager {
                         }
                         if let (Some(producer), Some(active), Some(backend), Some(binding)) =
                             (namespace_dispatcher.as_mut(),connection.as_mut(),backend.as_ref(),active_binding.as_ref()) {
-                            if let Err(message) = producer.tick(active,backend,binding.identity,false) {
+                            let result=if let Some(workers)=create_workers.as_mut() {
+                                producer.tick_with_create(active,backend,binding.identity,false,Some(workers))
+                            } else {producer.tick(active,backend,binding.identity,false)};
+                            if let Err(message) = result {
                                 if let Ok(mut notice) = worker_rename_error.lock() {
                                     notice.record(binding.generation,worker_generation.load(Ordering::Acquire),message);
                                 }
@@ -1904,6 +1931,7 @@ impl ProviderManager {
                         }
                     }
                 }
+                stop_create_workers(namespace_dispatcher.as_mut(),connection.as_ref(),&mut create_workers);
                 cleanup_holds.clear();
                 worker_jobs.cancel_all();
                 if disconnect_provider_connection(
@@ -1931,6 +1959,8 @@ impl ProviderManager {
             namespace_test_activation: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions))]
             mixed_namespace_test_activation: AtomicBool::new(false),
+            #[cfg(all(test, debug_assertions))]
+            create_test_activation: AtomicBool::new(false),
             mount_preference: Mutex::new(!headless),
             ordinary_edits,
             proxy: windows_proxy::Service::default(),
@@ -2063,6 +2093,9 @@ impl ProviderManager {
     ) -> Result<(), String> {
         #[cfg(all(test, debug_assertions))]
         let mixed_namespace_fixture = self.mixed_namespace_test_activation.load(Ordering::Acquire);
+        let create_enabled = windows_file_create_producer::PRODUCTION_ENABLED;
+        #[cfg(all(test, debug_assertions))]
+        let create_enabled = create_enabled || self.create_test_activation.load(Ordering::Acquire);
         let shared_directory_ready = windows_namespace_dispatcher::DIRECTORY_ROUTING_READY;
         #[cfg(all(test, debug_assertions))]
         let shared_directory_ready = shared_directory_ready || mixed_namespace_fixture;
@@ -2125,6 +2158,7 @@ impl ProviderManager {
                 #[cfg(all(test, debug_assertions))]
                 mixed_namespace_fixture,
                 file_rename_producer,
+                create_enabled,
                 response,
             })
             .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
@@ -2799,6 +2833,26 @@ impl ProviderManager {
             },
             generation,
         )
+    }
+}
+
+fn stop_create_workers(
+    dispatcher: Option<&mut windows_namespace_dispatcher::Dispatcher>,
+    connection: Option<&raiun_cloudfiles_windows::ConfiguredRootConnection>,
+    workers: &mut Option<windows_file_create_producer::Workers>,
+) {
+    if let Some(active) = connection {
+        if let Some(dispatcher) = dispatcher {
+            dispatcher.stop_create(active);
+        }
+        let _ = active.close_fresh_personal_file_create();
+    }
+    // No Agent/model/error mutex is held while joining. Results cannot block send.
+    if let Some(mut workers) = workers.take() {
+        workers.stop_and_join();
+    }
+    if let Some(active) = connection {
+        let _ = active.close_fresh_personal_file_create();
     }
 }
 

@@ -46,3 +46,7 @@ mod windows_file_rename_producer;
 #[cfg(all(test, not(windows)))]
 #[path = "windows_namespace_dispatcher.rs"]
 mod windows_namespace_dispatcher;
+
+#[cfg(all(test, not(windows)))]
+#[path = "windows_create_executor.rs"]
+mod windows_create_executor;

@@ -32,13 +32,22 @@ fn aliases(a: &[String], b: &[String]) -> bool {
 }
 /// Called only after whole-batch CF pairing validation. No prefix truncation:
 /// one ambiguous/unsupported item refuses the plan before any side effect.
-fn route(hints: &[Hint<'_>], directories: bool) -> Result<Vec<Work>, &'static str> {
+fn route(hints: &[Hint<'_>], directories: bool, creates: bool) -> Result<Vec<Work>, &'static str> {
     let mut result = Vec::new();
     let mut endpoints: Vec<&[String]> = Vec::new();
     let mut pair = 0;
     let mut index = 0;
     while index < hints.len() {
         let hint = &hints[index];
+        if creates
+            && !personal(hint.components)
+            && matches!(
+                hint.action,
+                Action::Added | Action::Modified | Action::Removed
+            )
+        {
+            return Err("Unsupported create namespace");
+        }
         let mut names = Vec::new();
         let work = match hint.action {
             Action::Old => {
@@ -57,11 +66,15 @@ fn route(hints: &[Hint<'_>], directories: bool) -> Result<Vec<Work>, &'static st
                 Some(work)
             }
             Action::New => return Err("Unpaired namespace notification"),
-            Action::Added if directories && personal(hint.components) => {
+            Action::Added | Action::Modified
+                if (creates || (directories && hint.action == Action::Added))
+                    && personal(hint.components) =>
+            {
+                if result.iter().any(|work| matches!(work, Work::Directory(index) if hints[*index].components == hint.components)) { index += 1; continue; }
                 names.push(hint.components);
                 Some(Work::Directory(index))
             }
-            Action::Removed if directories && personal(hint.components) => {
+            Action::Removed if (directories || creates) && personal(hint.components) => {
                 return Err("Unsupported namespace removal");
             }
             // File-only mode preserves existing ignore behavior for non-rename
@@ -150,7 +163,8 @@ impl Cursor {
 #[cfg(windows)]
 mod connected {
     use super::super::{
-        windows_file_rename_producer as rename, windows_namespace_producer as mkdir,
+        windows_file_create_producer as create, windows_file_rename_producer as rename,
+        windows_namespace_producer as mkdir,
     };
     use super::*;
     use raiun_cloudfiles_windows::{
@@ -179,6 +193,7 @@ mod connected {
     pub(crate) struct Dispatcher {
         rename: Option<Box<rename::Producer>>,
         mkdir: Option<mkdir::Producer>,
+        create: Option<create::Producer>,
         attached: bool,
         instance: Option<u64>,
         batch: Option<NotificationBatch>,
@@ -232,6 +247,7 @@ mod connected {
             Ok(Self {
                 rename,
                 mkdir,
+                create: None,
                 attached: false,
                 instance: None,
                 batch: None,
@@ -243,6 +259,27 @@ mod connected {
                 #[cfg(all(test, debug_assertions))]
                 fixture_provider_directory_skipped: false,
             })
+        }
+        pub(crate) fn with_create(mut self, producer: create::Producer) -> Self {
+            self.create = Some(producer);
+            self
+        }
+        pub(crate) fn stop_create(&mut self, connection: &ConfiguredRootConnection) {
+            if let Some(create) = &mut self.create {
+                create.stop(connection);
+            }
+        }
+        pub(crate) fn drain_create(
+            &mut self,
+            connection: &ConfiguredRootConnection,
+            workers: &mut create::Workers,
+        ) {
+            if let Some(create) = &mut self.create {
+                if self.cursor.held {
+                    create.stop(connection);
+                }
+                create.drain_held(connection, workers);
+            }
         }
         #[cfg(all(test, debug_assertions))]
         pub(crate) fn observation(&self) -> Observation {
@@ -295,8 +332,20 @@ mod connected {
             root: ConfiguredRootIdentity,
             save_or_command_active: bool,
         ) -> Result<(), &'static str> {
-            let result = self.tick_inner(connection, backend, root, save_or_command_active);
+            self.tick_with_create(connection, backend, root, save_or_command_active, None)
+        }
+        pub(crate) fn tick_with_create(
+            &mut self,
+            connection: &mut ConfiguredRootConnection,
+            backend: &Arc<OpenCloudPlaceholderBackend>,
+            root: ConfiguredRootIdentity,
+            save_or_command_active: bool,
+            workers: Option<&mut create::Workers>,
+        ) -> Result<(), &'static str> {
+            let result =
+                self.tick_inner(connection, backend, root, save_or_command_active, workers);
             if result.is_err() {
+                self.stop_create(connection);
                 self.hold();
             }
             result
@@ -307,6 +356,7 @@ mod connected {
             backend: &Arc<OpenCloudPlaceholderBackend>,
             root: ConfiguredRootIdentity,
             save_or_command_active: bool,
+            workers: Option<&mut create::Workers>,
         ) -> Result<(), &'static str> {
             if !self.current(backend, root) {
                 return Err(HOLD);
@@ -360,7 +410,8 @@ mod connected {
                                 components: hint.components(),
                             })
                             .collect::<Vec<_>>();
-                        let work = route(&inputs, self.mkdir.is_some()).map_err(|_| HOLD)?;
+                        let work = route(&inputs, self.mkdir.is_some(), self.create.is_some())
+                            .map_err(|_| HOLD)?;
                         if work.is_empty() {
                             return Ok(());
                         }
@@ -394,10 +445,29 @@ mod connected {
                     let directory_ready = DIRECTORY_ROUTING_READY;
                     #[cfg(all(test, debug_assertions))]
                     let directory_ready = directory_ready || self.fixture_directory;
-                    if !directory_ready {
+                    if !directory_ready && self.create.is_none() {
                         return Err(HOLD);
                     }
-                    if !self.cursor.directory_started {
+                    if self.create.as_ref().is_some_and(create::Producer::active) {
+                        let NotificationBatch::Hints(hints) = self.batch.as_ref().ok_or(HOLD)?
+                        else {
+                            return Err(HOLD);
+                        };
+                        let components = hints.get(index).ok_or(HOLD)?.components();
+                        if components.len() != 2 {
+                            return Err(HOLD);
+                        }
+                        if self.create.as_mut().ok_or(HOLD)?.step(
+                            connection,
+                            backend,
+                            root,
+                            &components[1],
+                            generation,
+                            workers.ok_or(HOLD)?,
+                        )? {
+                            self.cursor.complete().map_err(|_| HOLD)?;
+                        }
+                    } else if !self.cursor.directory_started {
                         let NotificationBatch::Hints(hints) = self.batch.as_ref().ok_or(HOLD)?
                         else {
                             return Err(HOLD);
@@ -415,6 +485,9 @@ mod connected {
                         }
                         match observed.kind {
                             NamespaceEntryKind::PlainDirectory => {
+                                if !directory_ready {
+                                    return Err(HOLD);
+                                }
                                 // Kind/FileID are hints only. The original consumer
                                 // independently reacquires all pins and admission.
                                 self.mkdir
@@ -451,7 +524,23 @@ mod connected {
                                 }
                                 self.cursor.complete().map_err(|_| HOLD)?;
                             }
-                            NamespaceEntryKind::PlainFile => return Err(HOLD),
+                            NamespaceEntryKind::PlainFile => {
+                                if components.len() != 2 {
+                                    return Err(HOLD);
+                                }
+                                let create = self.create.as_mut().ok_or(HOLD)?;
+                                let workers = workers.ok_or(HOLD)?;
+                                if create.step(
+                                    connection,
+                                    backend,
+                                    root,
+                                    &components[1],
+                                    generation,
+                                    workers,
+                                )? {
+                                    self.cursor.complete().map_err(|_| HOLD)?;
+                                }
+                            }
                         }
                     }
                     // A deferred/started head keeps its original generation,
@@ -506,6 +595,7 @@ mod tests {
                         components: &file
                     }
                 ],
+                false,
                 false
             ),
             Ok(vec![])
@@ -516,11 +606,115 @@ mod tests {
                     action: Action::Added,
                     components: &file
                 }],
-                true
+                true,
+                false
             ),
             Ok(vec![Work::Directory(0)])
         );
         assert!(!std::hint::black_box(DIRECTORY_ROUTING_READY));
+    }
+    #[test]
+    fn create_coalesces_repeated_exact_hints_but_never_aliases_or_rename_overlap() {
+        let path = parts("Personal/new.bin");
+        let unsupported = parts("Spaces/team/new.bin");
+        for action in [Action::Added, Action::Modified, Action::Removed] {
+            assert!(
+                route(
+                    &[Hint {
+                        action,
+                        components: &unsupported
+                    }],
+                    false,
+                    true
+                )
+                .is_err()
+            );
+            assert_eq!(
+                route(
+                    &[Hint {
+                        action,
+                        components: &unsupported
+                    }],
+                    false,
+                    false
+                ),
+                Ok(vec![])
+            );
+        }
+        // Refuse the whole volatile plan before any SDK/native dispatch. This
+        // never maps local cache eviction into remote deletion authority.
+        assert!(
+            route(
+                &[Hint {
+                    action: Action::Removed,
+                    components: &path
+                }],
+                false,
+                true
+            )
+            .is_err()
+        );
+        let alias = parts("Personal/NEW.bin");
+        let hints = [
+            Hint {
+                action: Action::Added,
+                components: &path,
+            },
+            Hint {
+                action: Action::Modified,
+                components: &path,
+            },
+        ];
+        assert_eq!(route(&hints, false, true), Ok(vec![Work::Directory(0)]));
+        assert!(
+            route(
+                &[
+                    Hint {
+                        action: Action::Added,
+                        components: &path
+                    },
+                    Hint {
+                        action: Action::Modified,
+                        components: &alias
+                    }
+                ],
+                false,
+                true
+            )
+            .is_err()
+        );
+        let other = parts("Personal/other.bin");
+        assert!(
+            route(
+                &[
+                    Hint {
+                        action: Action::Added,
+                        components: &path
+                    },
+                    Hint {
+                        action: Action::Old,
+                        components: &path
+                    },
+                    Hint {
+                        action: Action::New,
+                        components: &other
+                    }
+                ],
+                false,
+                true
+            )
+            .is_err()
+        );
+        let mut cursor = Cursor::default();
+        cursor
+            .admit(vec![Work::Directory(0), Work::Directory(1)])
+            .unwrap();
+        let original = cursor.generation().unwrap();
+        assert_eq!(cursor.generation().unwrap(), original);
+        assert_eq!(cursor.front(), Some(Work::Directory(0)));
+        cursor.complete().unwrap();
+        assert_eq!(cursor.front(), Some(Work::Directory(1)));
+        assert!(cursor.generation().unwrap() > original);
     }
     #[test]
     fn mixed_order_never_routes_rename_destination_as_mkdir() {
@@ -542,10 +736,10 @@ mod tests {
             },
         ];
         assert_eq!(
-            route(&hints, true),
+            route(&hints, true, false),
             Ok(vec![Work::Directory(0), Work::Rename(0)])
         );
-        assert_eq!(route(&hints, false), Ok(vec![Work::Rename(0)]));
+        assert_eq!(route(&hints, false, false), Ok(vec![Work::Rename(0)]));
     }
     #[test]
     fn ambiguous_or_overflow_batch_has_no_partial_plan() {
@@ -567,7 +761,8 @@ mod tests {
                         components: &new
                     }
                 ],
-                true
+                true,
+                false
             )
             .is_err()
         );
@@ -587,7 +782,8 @@ mod tests {
                         components: &new
                     }
                 ],
-                true
+                true,
+                false
             )
             .is_err()
         );
@@ -603,7 +799,8 @@ mod tests {
                         components: p
                     })
                     .collect::<Vec<_>>(),
-                true
+                true,
+                false
             )
             .is_err()
         );
@@ -625,6 +822,7 @@ mod tests {
                         components: &b
                     }
                 ],
+                false,
                 false
             )
             .is_err()
@@ -635,7 +833,8 @@ mod tests {
                     action: Action::Removed,
                     components: &local
                 }],
-                true
+                true,
+                false
             )
             .is_err()
         );
@@ -645,6 +844,7 @@ mod tests {
                     action: Action::Removed,
                     components: &local
                 }],
+                false,
                 false
             ),
             Ok(vec![])
