@@ -1,5 +1,35 @@
 # Linux / Windows GUI parity gate
 
+## Current checkpoint — 2 November 2026
+
+Desktop GUI and CLI now have one coordinator and one canonical integration
+worktree, `worktrees/desktop-followup-ui`. The CLI-only chat is archived; its
+independent worktree is a preserved reference. The source checkpoint is
+`130bcb3a15ae70f34f3ea9a544c187daad870857`. The dated assessments below retain
+their original scope; this checkpoint supersedes their older ownership and
+rename-wiring descriptions, not their outstanding feature or native gates.
+
+Windows now has an automatic owner-thread caller for fresh ASCII Personal
+same-parent file renames, using the original account/root/catalog binding.
+The shared notification dispatcher and metadata-only plain/cloud entry
+classification are integrated. Shared directory routing remains disabled;
+new-file creation, replacement, deletion, Space operations and cross-parent
+moves remain separate implementation/acceptance gaps. The corrected five
+native rename controls and two owner-loop controls are packaged, but none has
+yet executed on the laptop. Download/hash verification is not native acceptance.
+The original failed fixture execution remains failed. Encrypted parity gaps
+in the matrix are not resolved by these ordinary-file changes.
+
+Linux new ordinary Desktop creates now use a durable final-close handoff with
+two upload workers. An isolated actual-FUSE fixture and the unsigned preview's
+Agent/CLI smoke, signed-out GUI rendering and normal Quit passed. The owner's
+real-server 250-MB/211-file comparison and final-package connected acceptance
+remain pending. Headless, existing-file and vault save paths are unchanged by
+this Linux create-upload work. See [the implementation checkpoint](IMPLEMENTATION.md#windows-namespace-integration--1-november-2026-source-checkpoint)
+for the source and acceptance boundaries.
+
+## Earlier assessment and feature matrix
+
 Assessment: **29 October 2026**, Desktop `work/desktop-0.7.5`, production behavior assessed at source
 `c584b8f11f506d4acbc4ad4e7697990430b2a4af`. This inventories existing GUI
 features and their native seams. It is not a claim that either platform has
@@ -216,20 +246,18 @@ parity remain unfinished. Reuse historical evidence only within its tested scope
 
 ## Integration ownership and owner-ready queue
 
-Desktop coordinator owns this worktree's Sharing/security/UI integration and
-draft PR #45. CLI coordinator owns shared provider/filesystem implementation in
-the independent dirty `worktrees/headless-cli/`, based on
-`73eb58ece99fa934296aeeef818d78191f5dcf5b`. This Desktop baseline is 77ba21c,
-not the CLI source. Exchange reviewed patches with a source manifest and
-explicit seam ownership; never overwrite either live checkout or transplant
-whole dirty directories. Preserve Android, older checkouts, user data,
-credentials and all original failure/recovery artifacts.
+The Desktop coordinator owns shared provider/filesystem, CLI, GUI, security and
+release integration in this worktree. Windows laptop work is bounded native
+testing under that ownership. Preserve the archived CLI handoff worktree,
+Android, older checkouts, user data, credentials and original failure/recovery
+artifacts. The project output `desktop-consolidation-20261031/READY-QUEUE.json`
+holds the short live queue; the following items describe remaining gate groups.
 
 1. Verify corrected-package live Sharing confirmation and investigate the
    incomplete editor observation; preserve completed live cleanup and failed CI evidence.
-2. Agree shared operation/snapshot APIs and server-condition proof, then
-   integrate CLI-owned ordinary CRUD, editor replacement and bounded >16-MiB
-   writeback. Automatic new-file admission also requires a verified create-only
+2. Finish shared ordinary CRUD, editor replacement and bounded >16-MiB
+   writeback, with account/root binding and server-condition qualifications.
+   Automatic new-file admission also requires a verified create-only
    server contract; local capture or successful readback alone is insufficient.
    Parent owns GUI recovery policy and reviewed completed-copy
    reclamation; preserve every pending, conflicting or uncertain record. The
@@ -247,7 +275,11 @@ credentials and all original failure/recovery artifacts.
    CLI folder sync unstarted and next-release readiness false until these gates
    are met. Signing, merge and publication remain separately authorized actions.
 
-## Current explicit rename storage integration
+## Earlier explicit rename storage integration
+
+This section records the pre-owner-loop stages. The current checkpoint above
+supersedes its statements that the automatic caller is unwired or unattached;
+its narrow component evidence does not become mounted/package acceptance.
 
 The GUI source includes shared admitted rename storage and a read-only health
 consumer. Exact account/root authenticated metadata distinguishes completed and
