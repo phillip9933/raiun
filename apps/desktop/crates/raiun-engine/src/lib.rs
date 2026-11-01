@@ -1288,14 +1288,27 @@ impl Engine {
     }
 
     fn cached_list(&self, space: &str, path: &str) -> Result<Vec<RemoteEntry>, CloudError> {
-        let _metadata = self.metadata_publication()?;
+        // A mutation may retain this publication guard through a long PUT
+        // and verification read. Fresh online namespace reads can proceed,
+        // but must neither publish cache metadata nor fall back to old cache
+        // evidence while that serialized publisher is in flight.
+        let metadata = match self.inner.metadata_gate.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(CloudError::new(
+                    ErrorKind::Io,
+                    "engine metadata publication lock was poisoned",
+                ));
+            }
+        };
         let context = self
             .offline_cache
             .as_ref()
             .expect("cached list requires a cache context");
         let (scope, root) = match self.online_plaintext_scope(space) {
             Ok(scope_root) => scope_root,
-            Err(error) if error.kind == ErrorKind::Offline => {
+            Err(error) if error.kind == ErrorKind::Offline && metadata.is_some() => {
                 let scope = self
                     .cached_scope(space, context)
                     .map_err(|cache_error| offline_cache_error(cache_error, error.clone()))?;
@@ -1315,59 +1328,40 @@ impl Engine {
                     ));
                 }
                 Ok(parent) => parent.id,
-                Err(error) if error.kind == ErrorKind::Offline => {
+                Err(error) if error.kind == ErrorKind::Offline && metadata.is_some() => {
                     return self.cached_listing(context, &scope, path, error);
                 }
                 Err(error) => return Err(error),
             }
         };
-        let mut entries = Vec::new();
-        let mut metadata_bytes = 0usize;
-        let result = self.backend.list(space, path, &mut |entry| {
-            if entries.len() >= MAX_LIST_ENTRIES {
-                return Err(CloudError::new(
-                    ErrorKind::InvalidResponse,
-                    "cloud listing exceeds the 100,000-entry limit",
-                ));
-            }
-            metadata_bytes = metadata_bytes
-                .saturating_add(entry.id.len())
-                .saturating_add(entry.etag.len())
-                .saturating_add(entry.path.len());
-            if metadata_bytes > MAX_REFRESH_PATH_BYTES {
-                return Err(CloudError::new(
-                    ErrorKind::InvalidResponse,
-                    "cloud listing metadata exceeds the 32 MiB limit",
-                ));
-            }
-            entries.push(entry);
-            Ok(())
-        });
+        let result = self.list_live(space, path);
         match result {
-            Ok(()) => {
-                let cache_entries = entries
-                    .iter()
-                    .filter(|entry| !entry.encrypted)
-                    .cloned()
-                    .map(|entry| CachedEntry {
-                        parent_resource_id: parent_id.clone(),
-                        entry,
-                    })
-                    .collect::<Vec<_>>();
-                // Cache failures must not turn a successful online listing into
-                // an error. A later offline read will fail closed if no full
-                // verified snapshot was committed.
-                if context
-                    .cache
-                    .publish_listing(&scope, &parent_id, &cache_entries, now_unix())
-                    .is_ok()
-                {
-                    let _ = context.cache.evict_to_quota();
+            Ok(mut entries) => {
+                if metadata.is_some() {
+                    let cache_entries = entries
+                        .iter()
+                        .filter(|entry| !entry.encrypted)
+                        .cloned()
+                        .map(|entry| CachedEntry {
+                            parent_resource_id: parent_id.clone(),
+                            entry,
+                        })
+                        .collect::<Vec<_>>();
+                    // Cache failures must not turn a successful online listing into
+                    // an error. A later offline read will fail closed if no full
+                    // verified snapshot was committed.
+                    if context
+                        .cache
+                        .publish_listing(&scope, &parent_id, &cache_entries, now_unix())
+                        .is_ok()
+                    {
+                        let _ = context.cache.evict_to_quota();
+                    }
                 }
                 self.overlay_pending_entries(&scope, &parent_id, &mut entries)?;
                 Ok(entries)
             }
-            Err(error) if error.kind == ErrorKind::Offline => {
+            Err(error) if error.kind == ErrorKind::Offline && metadata.is_some() => {
                 self.cached_listing(context, &scope, path, error)
             }
             Err(error) => Err(error),
@@ -6042,11 +6036,14 @@ mod tests {
         fail_upload_after_commit: Mutex<bool>,
         replace_root_before_scoped_upload: Mutex<bool>,
         fail_all: Mutex<Option<ErrorKind>>,
+        fail_stat_path: Mutex<Option<(String, ErrorKind)>>,
         space_encrypted: Mutex<bool>,
         spaces_override: Mutex<Option<Vec<CloudSpace>>>,
         spaces_gate: Mutex<Option<(SyncSender<()>, Receiver<()>)>>,
         list_repeat: Mutex<usize>,
         list_gate: Mutex<Option<(SyncSender<()>, Receiver<()>)>>,
+        upload_gate: Mutex<Option<(SyncSender<()>, Receiver<()>)>>,
+        download_gate: Mutex<Option<(SyncSender<()>, Receiver<()>)>>,
     }
 
     impl FakeCloud {
@@ -6266,6 +6263,11 @@ mod tests {
             {
                 return Err(CloudError::new(kind, "fixture transport unavailable"));
             }
+            if let Some((failed_path, kind)) = self.fail_stat_path.lock().unwrap().as_ref()
+                && failed_path == path
+            {
+                return Err(CloudError::new(*kind, "fixture stat unavailable"));
+            }
             self.remote_entry(path)
         }
 
@@ -6282,6 +6284,11 @@ mod tests {
                 .map_err(|_| CloudError::new(ErrorKind::Io, "poisoned"))?
             {
                 return Err(CloudError::new(kind, "fixture transport unavailable"));
+            }
+            let gate = self.download_gate.lock().unwrap().take();
+            if let Some((started, resume)) = gate {
+                started.send(()).unwrap();
+                resume.recv().unwrap();
             }
             *self
                 .downloads
@@ -6336,6 +6343,11 @@ mod tests {
                     return Err(CloudError::new(ErrorKind::Conflict, "revision changed"));
                 }
                 _ => {}
+            }
+            let gate = self.upload_gate.lock().unwrap().take();
+            if let Some((started, resume)) = gate {
+                started.send(()).unwrap();
+                resume.recv().unwrap();
             }
             let bytes = fs::read(source).map_err(io_error)?;
             self.insert_file(path, &bytes);
@@ -9303,5 +9315,263 @@ mod tests {
         let error = engine.sync_pair(&pair).unwrap_err();
         assert_eq!(error.kind, ErrorKind::Unsupported);
         assert!(cloud.bytes("/sync/hijack.txt").is_none());
+    }
+
+    fn responsiveness_fixture() -> (tempfile::TempDir, Arc<FakeCloud>, Cache, Engine) {
+        let state = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(
+            state.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        let cloud = Arc::new(FakeCloud::new());
+        cloud.insert_file("/sync/old.txt", b"old");
+        let cache = Cache::open(state.path(), 64 * 1024 * 1024).unwrap();
+        let engine = Engine::open(state.path(), cloud.clone())
+            .unwrap()
+            .with_offline_cache(
+                cache.clone(),
+                "profile-account-1".into(),
+                "https://example.invalid/".into(),
+            )
+            .unwrap();
+        (state, cloud, cache, engine)
+    }
+
+    #[test]
+    fn namespace_responsive_during_upload_and_verification_without_cache_publication() {
+        for verification in [false, true] {
+            let (state, cloud, cache, engine) = responsiveness_fixture();
+            engine.list("space", "/").unwrap();
+            engine.list("space", "/sync").unwrap();
+            let scope = engine.online_plaintext_scope("space").unwrap().0;
+            let parent_id = cloud.remote_entry("/sync").unwrap().id;
+            cloud.insert_file("/sync/fresh.txt", b"fresh");
+            let source = state.path().join("source");
+            fs::write(&source, b"uploaded").unwrap();
+            let (started_tx, started_rx) = mpsc::sync_channel(1);
+            let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+            let gate = if verification {
+                &cloud.download_gate
+            } else {
+                &cloud.upload_gate
+            };
+            *gate.lock().unwrap() = Some((started_tx, resume_rx));
+            let uploader = engine.clone();
+            let upload = std::thread::spawn(move || {
+                uploader.put("space", "/new.txt", &source, WriteCondition::Absent)
+            });
+            started_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("upload reached retained publication gate");
+            let reader = engine.clone();
+            let (listed_tx, listed_rx) = mpsc::sync_channel(1);
+            let list = std::thread::spawn(move || {
+                let _ = listed_tx.send(reader.list("space", "/sync"));
+            });
+            let listed = listed_rx.recv_timeout(std::time::Duration::from_secs(2));
+            // Check before releasing the upload; always release and join first
+            // so a failed assertion cannot leave a fixture thread blocked.
+            let cached = cache.listing(&scope, &parent_id).unwrap();
+            let invalidated = cache.listing(&scope, scope.root_resource_id()).is_err();
+            resume_tx.send(()).unwrap();
+            upload.join().unwrap().unwrap();
+            list.join().unwrap();
+            let listed = listed
+                .expect("online namespace must complete while upload remains blocked")
+                .unwrap();
+            assert!(listed.iter().any(|entry| entry.path == "/sync/fresh.txt"));
+            assert!(
+                cached
+                    .entries
+                    .iter()
+                    .all(|entry| entry.entry.path != "/sync/fresh.txt")
+            );
+            assert!(
+                invalidated,
+                "fresh bypass must not republish invalidated root metadata"
+            );
+        }
+    }
+
+    #[test]
+    fn namespace_busy_online_only_refuses_offline_and_retains_invalidation() {
+        let (_state, cloud, cache, engine) = responsiveness_fixture();
+        engine.list("space", "/").unwrap();
+        let scope = engine.online_plaintext_scope("space").unwrap().0;
+        let gate = engine.metadata_publication().unwrap();
+        engine.begin_cache_mutation("space", &["/new.txt"]).unwrap();
+        cloud.insert_file("/fresh.txt", b"fresh");
+        assert!(
+            engine
+                .list("space", "/")
+                .unwrap()
+                .iter()
+                .any(|entry| entry.path == "/fresh.txt")
+        );
+        assert!(cache.listing(&scope, scope.root_resource_id()).is_err());
+        *cloud.fail_all.lock().unwrap() = Some(ErrorKind::Offline);
+        assert_eq!(
+            engine.list("space", "/").unwrap_err().kind,
+            ErrorKind::Offline
+        );
+        assert!(cache.listing(&scope, scope.root_resource_id()).is_err());
+        drop(gate);
+        assert_eq!(
+            engine.list("space", "/").unwrap_err().kind,
+            ErrorKind::Offline
+        );
+    }
+
+    #[test]
+    fn namespace_busy_online_only_preserves_root_parent_and_listing_bounds() {
+        for fault in [
+            "missing-root",
+            "encrypted-space",
+            "encrypted-root",
+            "file-parent",
+            "encrypted-parent",
+            "entries",
+            "bytes",
+            "offline-parent",
+            "offline-list",
+        ] {
+            let (_state, cloud, _cache, engine) = responsiveness_fixture();
+            engine.list("space", "/sync").unwrap();
+            let _gate = engine.metadata_publication().unwrap();
+            let expected = match fault {
+                "missing-root" => {
+                    cloud.entries.lock().unwrap().remove("/");
+                    ErrorKind::NotFound
+                }
+                "encrypted-space" => {
+                    *cloud.space_encrypted.lock().unwrap() = true;
+                    ErrorKind::Unsupported
+                }
+                "encrypted-root" => {
+                    cloud
+                        .entries
+                        .lock()
+                        .unwrap()
+                        .get_mut("/")
+                        .unwrap()
+                        .0
+                        .encrypted = true;
+                    ErrorKind::InvalidResponse
+                }
+                "file-parent" => {
+                    cloud
+                        .entries
+                        .lock()
+                        .unwrap()
+                        .get_mut("/sync")
+                        .unwrap()
+                        .0
+                        .directory = false;
+                    ErrorKind::Unsupported
+                }
+                "encrypted-parent" => {
+                    cloud
+                        .entries
+                        .lock()
+                        .unwrap()
+                        .get_mut("/sync")
+                        .unwrap()
+                        .0
+                        .encrypted = true;
+                    ErrorKind::Unsupported
+                }
+                "entries" => {
+                    *cloud.list_repeat.lock().unwrap() = MAX_LIST_ENTRIES + 1;
+                    ErrorKind::InvalidResponse
+                }
+                "bytes" => {
+                    cloud
+                        .entries
+                        .lock()
+                        .unwrap()
+                        .get_mut("/sync/old.txt")
+                        .unwrap()
+                        .0
+                        .id = "x".repeat(MAX_REFRESH_PATH_BYTES + 1);
+                    ErrorKind::InvalidResponse
+                }
+                "offline-parent" => {
+                    *cloud.fail_stat_path.lock().unwrap() =
+                        Some(("/sync".into(), ErrorKind::Offline));
+                    ErrorKind::Offline
+                }
+                _ => {
+                    *cloud.fail_listing.lock().unwrap() = true;
+                    ErrorKind::Offline
+                }
+            };
+            assert_eq!(
+                engine.list("space", "/sync").unwrap_err().kind,
+                expected,
+                "fault={fault}"
+            );
+        }
+    }
+
+    #[test]
+    fn namespace_busy_online_only_keeps_pending_edit_overlay() {
+        let (state, cloud, cache, engine) = responsiveness_fixture();
+        engine.list("space", "/").unwrap();
+        engine.list("space", "/sync").unwrap();
+        let entry = cloud.remote_entry("/sync/old.txt").unwrap();
+        let source = state.path().join("local-edit");
+        fs::write(&source, b"retained local dirty bytes").unwrap();
+        engine
+            .queue_offline_file_write(
+                "space",
+                "/sync/old.txt",
+                &source,
+                WriteCondition::Match(entry.etag),
+            )
+            .unwrap();
+        let scope = engine.online_plaintext_scope("space").unwrap().0;
+        let parent_id = cloud.remote_entry("/sync").unwrap().id;
+        let _gate = engine.metadata_publication().unwrap();
+        cloud.insert_file("/sync/fresh.txt", b"fresh");
+        let listed = engine.list("space", "/sync").unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .find(|entry| entry.path == "/sync/old.txt")
+                .unwrap()
+                .size,
+            b"retained local dirty bytes".len() as u64
+        );
+        assert!(listed.iter().any(|entry| entry.path == "/sync/fresh.txt"));
+        assert!(
+            cache
+                .listing(&scope, &parent_id)
+                .unwrap()
+                .entries
+                .iter()
+                .all(|entry| entry.entry.path != "/sync/fresh.txt")
+        );
+        assert_eq!(cache.pending_writes(&scope).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn namespace_poisoned_publication_gate_is_not_an_online_bypass() {
+        let (_state, cloud, _cache, engine) = responsiveness_fixture();
+        let poison = engine.clone();
+        assert!(
+            std::thread::spawn(move || {
+                let _gate = poison.metadata_publication().unwrap();
+                panic!("synthetic publication poison");
+            })
+            .join()
+            .is_err()
+        );
+        assert_eq!(
+            engine.list("space", "/sync").unwrap_err().kind,
+            ErrorKind::Io
+        );
+        assert_eq!(*cloud.list_calls.lock().unwrap(), 0);
     }
 }

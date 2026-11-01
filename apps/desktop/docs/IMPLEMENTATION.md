@@ -3373,3 +3373,24 @@ R56 replaces that failed test in current source with two separately named indepe
 The admitted R57 cohort passed both fresh guarded DPAPI controls (PID 4704, 2 passed / 0 failed, 0.53 seconds) using the real retained prepared provider, its namespace-rename factory and an actual live FileRenameLease. No rerun occurred during source integration. They compare two factory bindings and keep the exclusive dispatch lease alive across whole-history and authenticated content-only health reads. The completed-legacy case requires own Pending namespace to keep whole history unresolved while full body authentication reports content clean. The pending-content case must remain nonclean. Both preserved the checked protected entry set, lengths and bytes and the pristine Pending record; timestamps were not asserted. Typed legacy ACK is authenticated synthetic history, not native completion.
 
 Production provider, guard, SDK, native code and Cargo.lock are unchanged. Original R51/R53/R55 failures and later scoped R56 passes remain separate. R57 does not register Cloud Files, contact a server, execute either ConfiguredRootConnection public entry or activate runtime callers. Actual public-entry fixtures require the retained namespace factory and real capture owner; historical arbitrary-store/streamed-only native fixtures cannot be rerun unchanged to establish acceptance. A separate output receipt records exact readiness requirements.
+
+### Upload responsiveness follow-up — 1 November 2026
+
+Ordinary online directory listings can bypass a busy Engine metadata-publication
+lock using the same root, parent, encryption and bounded-list checks. The bypass
+does not publish or evict cache metadata and refuses offline fallback; pending
+local edits retain their existing overlay. Normal acquired-lock publication and
+offline behavior remain unchanged. A proposed separate Linux listing pool was
+omitted after review: the current four synchronous mount callbacks already share
+four workers, so the proposed saturation test used a producer topology that does
+not occur in normal dispatch. Callback saturation can still delay browsing;
+background upload handoff remains necessary to address that limit.
+
+This is a source-level responsiveness improvement, not parallel uploading or
+proof that the reported Dolphin hang is fixed. Upload completion remains
+synchronous and verified. Durable background admission, pending-create reads,
+uncertain-send recovery and native/package acceptance remain separate work.
+The owner's NAS-wide outage also affected the web client; its blocked Unraid
+shared-folder workers were investigated separately, and the owner reports
+stability after upgrading from 7.3.2 to 7.3.4. This is not Desktop acceptance or
+proof of a single cause for the earlier upload errors.
