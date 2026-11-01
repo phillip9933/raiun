@@ -275,9 +275,7 @@ impl ConfiguredRootConnection {
         &self,
         components: &[&str],
     ) -> Result<crate::NamespaceEntryObservation, Error> {
-        if components.len() < 2
-            || components.len() > 256
-            || components.first().copied() != Some("Personal")
+        if !crate::namespace_entry_observation::observation_namespace(components)
             || components.iter().any(|part| !valid_component(part))
             || components.iter().map(|part| part.len() + 1).sum::<usize>() > 32_768
         {

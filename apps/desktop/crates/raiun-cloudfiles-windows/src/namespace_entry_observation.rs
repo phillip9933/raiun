@@ -8,6 +8,14 @@ pub enum NamespaceEntryKind {
     CloudDirectory,
 }
 
+/// Observation namespace/depth only, including navigation containers. Native
+/// component/path validation and all pinned-context checks remain mandatory.
+/// This permits no candidate mutation, ownership inference or health claim.
+pub(crate) fn observation_namespace(parts: &[&str]) -> bool {
+    (1..=256).contains(&parts.len())
+        && matches!(parts.first().copied(), Some("Personal" | "Spaces"))
+}
+
 pub(crate) fn classify(
     attributes: u32,
     reparse_tag: u32,
@@ -43,6 +51,41 @@ pub(crate) fn classify(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn observation_scope_includes_containers_and_bounded_namespace_leaves() {
+        for parts in [
+            vec!["Personal"],
+            vec!["Personal", "file.bin"],
+            vec!["Personal", "folder", "file.bin"],
+            vec!["Spaces"],
+            vec!["Spaces", "team"],
+            vec!["Spaces", "team", "folder", "file.bin"],
+        ] {
+            assert!(observation_namespace(&parts));
+        }
+        let mut parts = vec!["nested"; 256];
+        parts[0] = "Spaces";
+        assert!(observation_namespace(&parts));
+        parts.push("leaf");
+        assert!(!observation_namespace(&parts));
+    }
+
+    #[test]
+    fn observation_scope_rejects_rootself_arbitrary_namespaces_and_case_aliases() {
+        for parts in [
+            vec![],
+            vec![""],
+            vec!["Other"],
+            vec!["Other", "Personal", "file.bin"],
+            vec!["personal"],
+            vec!["PERSONAL", "file.bin"],
+            vec!["spaces", "team"],
+            vec!["Spaces-other", "team"],
+        ] {
+            assert!(!observation_namespace(&parts));
+        }
+    }
+
     #[test]
     fn plain_entries_require_consistent_non_reparse_metadata() {
         assert_eq!(

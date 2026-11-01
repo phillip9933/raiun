@@ -27,11 +27,63 @@ enum Work {
 fn personal(parts: &[String]) -> bool {
     parts.first().map(String::as_str) == Some("Personal") && parts.len() >= 2
 }
+// Volatile observation planning only. The CF reader independently validates
+// every component/path byte and pins the original live root/ancestry.
+fn observation_namespace(parts: &[String]) -> bool {
+    (1..=256).contains(&parts.len())
+        && matches!(
+            parts.first().map(String::as_str),
+            Some("Personal" | "Spaces")
+        )
+}
+fn direct_personal(parts: &[String]) -> bool {
+    parts.len() == 2 && parts.first().map(String::as_str) == Some("Personal")
+}
+#[derive(Clone, Copy)]
+enum ObservedShape {
+    PlainFile,
+    PlainDirectory,
+    Cloud,
+}
+#[derive(Debug, Eq, PartialEq)]
+enum Selection {
+    SkipCloud,
+    CreateFile,
+    OfferDirectory,
+}
+/// Physical shape is not ownership, health, continuity or publication proof.
+/// Failed/missing observation is None; mutation consumers admit independently.
+fn select_observed(
+    parts: &[String],
+    shape: Option<ObservedShape>,
+    directories: bool,
+    creates: bool,
+) -> Result<Selection, &'static str> {
+    if !(if creates {
+        observation_namespace(parts)
+    } else {
+        directories && personal(parts)
+    }) {
+        return Err("Unsupported observed namespace");
+    }
+    match shape {
+        Some(ObservedShape::Cloud) => Ok(Selection::SkipCloud),
+        Some(ObservedShape::PlainFile) if creates && direct_personal(parts) => {
+            Ok(Selection::CreateFile)
+        }
+        Some(ObservedShape::PlainDirectory) if directories && personal(parts) => {
+            Ok(Selection::OfferDirectory)
+        }
+        _ => Err("Observed entry needs attention"),
+    }
+}
 fn aliases(a: &[String], b: &[String]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 /// Called only after whole-batch CF pairing validation. No prefix truncation:
 /// one ambiguous/unsupported item refuses the plan before any side effect.
+/// Keep every planned endpoint, including future cloud-shaped skips, through
+/// the whole-batch alias/rename checks; classification happens only afterward.
 fn route(hints: &[Hint<'_>], directories: bool, creates: bool) -> Result<Vec<Work>, &'static str> {
     let mut result = Vec::new();
     let mut endpoints: Vec<&[String]> = Vec::new();
@@ -40,7 +92,7 @@ fn route(hints: &[Hint<'_>], directories: bool, creates: bool) -> Result<Vec<Wor
     while index < hints.len() {
         let hint = &hints[index];
         if creates
-            && !personal(hint.components)
+            && !observation_namespace(hint.components)
             && matches!(
                 hint.action,
                 Action::Added | Action::Modified | Action::Removed
@@ -67,14 +119,16 @@ fn route(hints: &[Hint<'_>], directories: bool, creates: bool) -> Result<Vec<Wor
             }
             Action::New => return Err("Unpaired namespace notification"),
             Action::Added | Action::Modified
-                if (creates || (directories && hint.action == Action::Added))
-                    && personal(hint.components) =>
+                if (creates && observation_namespace(hint.components))
+                    || (directories
+                        && hint.action == Action::Added
+                        && personal(hint.components)) =>
             {
                 if result.iter().any(|work| matches!(work, Work::Directory(index) if hints[*index].components == hint.components)) { index += 1; continue; }
                 names.push(hint.components);
                 Some(Work::Directory(index))
             }
-            Action::Removed if (directories || creates) && personal(hint.components) => {
+            Action::Removed if creates || (directories && personal(hint.components)) => {
                 return Err("Unsupported namespace removal");
             }
             // File-only mode preserves existing ignore behavior for non-rename
@@ -454,7 +508,7 @@ mod connected {
                             return Err(HOLD);
                         };
                         let components = hints.get(index).ok_or(HOLD)?.components();
-                        if components.len() != 2 {
+                        if !direct_personal(components) {
                             return Err(HOLD);
                         }
                         if self.create.as_mut().ok_or(HOLD)?.step(
@@ -477,17 +531,26 @@ mod connected {
                         if !self.current(backend, root) {
                             return Err(HOLD);
                         }
-                        let observed = connection
-                            .observe_namespace_entry(&refs)
-                            .map_err(|_| HOLD)?;
+                        let observed = connection.observe_namespace_entry(&refs);
                         if !self.current(backend, root) {
                             return Err(HOLD);
                         }
-                        match observed.kind {
-                            NamespaceEntryKind::PlainDirectory => {
-                                if !directory_ready {
-                                    return Err(HOLD);
-                                }
+                        let shape = observed.as_ref().ok().map(|entry| match entry.kind {
+                            NamespaceEntryKind::PlainFile => ObservedShape::PlainFile,
+                            NamespaceEntryKind::PlainDirectory => ObservedShape::PlainDirectory,
+                            NamespaceEntryKind::CloudFile | NamespaceEntryKind::CloudDirectory => {
+                                ObservedShape::Cloud
+                            }
+                        });
+                        match select_observed(
+                            &components,
+                            shape,
+                            directory_ready,
+                            self.create.is_some(),
+                        )
+                        .map_err(|_| HOLD)?
+                        {
+                            Selection::OfferDirectory => {
                                 // Kind/FileID are hints only. The original consumer
                                 // independently reacquires all pins and admission.
                                 self.mkdir
@@ -502,12 +565,13 @@ mod connected {
                                         self.fixture_counts[2].checked_add(1).ok_or(HOLD)?;
                                 }
                             }
-                            NamespaceEntryKind::CloudFile | NamespaceEntryKind::CloudDirectory => {
+                            Selection::SkipCloud => {
                                 // complete() advances ONLY this volatile cursor item.
                                 // No directory writer/offer/session, status completion,
                                 // ownership, clean-content or upload claim is made.
                                 #[cfg(all(test, debug_assertions))]
                                 {
+                                    let observed = observed.map_err(|_| HOLD)?;
                                     let index =
                                         if observed.kind == NamespaceEntryKind::CloudDirectory {
                                             0
@@ -524,10 +588,7 @@ mod connected {
                                 }
                                 self.cursor.complete().map_err(|_| HOLD)?;
                             }
-                            NamespaceEntryKind::PlainFile => {
-                                if components.len() != 2 {
-                                    return Err(HOLD);
-                                }
+                            Selection::CreateFile => {
                                 let create = self.create.as_mut().ok_or(HOLD)?;
                                 let workers = workers.ok_or(HOLD)?;
                                 if create.step(
@@ -581,6 +642,122 @@ mod tests {
         path.split('/').map(str::to_owned).collect()
     }
     #[test]
+    fn optin_routes_navigation_and_space_hints_only_for_live_classification() {
+        for path in [
+            "Personal",
+            "Spaces",
+            "Spaces/team",
+            "Spaces/team/file.bin",
+            "Personal/new.bin",
+        ] {
+            let components = parts(path);
+            for action in [Action::Added, Action::Modified] {
+                let hints = [Hint {
+                    action,
+                    components: &components,
+                }];
+                assert_eq!(route(&hints, false, true), Ok(vec![Work::Directory(0)]));
+                assert_eq!(route(&hints, false, false), Ok(vec![]));
+            }
+            assert!(
+                route(
+                    &[Hint {
+                        action: Action::Removed,
+                        components: &components
+                    }],
+                    false,
+                    true
+                )
+                .is_err()
+            );
+        }
+        for components in [
+            vec![],
+            parts("Other/file"),
+            parts("spaces/team"),
+            vec!["Spaces".into(); 257],
+        ] {
+            assert!(
+                route(
+                    &[Hint {
+                        action: Action::Added,
+                        components: &components
+                    }],
+                    false,
+                    true
+                )
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn live_selection_skips_only_cloud_shape_and_never_admits_unsupported_plain() {
+        for path in ["Personal", "Spaces", "Spaces/team", "Spaces/team/file.bin"] {
+            let components = parts(path);
+            assert_eq!(
+                select_observed(&components, Some(ObservedShape::Cloud), true, true),
+                Ok(Selection::SkipCloud)
+            );
+            for shape in [
+                None,
+                Some(ObservedShape::PlainFile),
+                Some(ObservedShape::PlainDirectory),
+            ] {
+                assert!(select_observed(&components, shape, true, true).is_err());
+            }
+        }
+        let direct = parts("Personal/new.bin");
+        assert_eq!(
+            select_observed(&direct, Some(ObservedShape::PlainFile), false, true),
+            Ok(Selection::CreateFile)
+        );
+        assert!(select_observed(&direct, Some(ObservedShape::PlainFile), true, false).is_err());
+        let directory = parts("Personal/new-directory");
+        assert_eq!(
+            select_observed(&directory, Some(ObservedShape::PlainDirectory), true, true),
+            Ok(Selection::OfferDirectory)
+        );
+        assert!(
+            select_observed(&directory, Some(ObservedShape::PlainDirectory), false, true).is_err()
+        );
+        assert!(
+            select_observed(
+                &parts("Personal/nested/file.bin"),
+                Some(ObservedShape::PlainFile),
+                true,
+                true
+            )
+            .is_err()
+        );
+        // A later Skip must never erase an endpoint from the raw batch plan.
+        assert_eq!(
+            select_observed(&direct, Some(ObservedShape::Cloud), false, true),
+            Ok(Selection::SkipCloud)
+        );
+        let destination = parts("Personal/renamed.bin");
+        assert!(
+            route(
+                &[
+                    Hint {
+                        action: Action::Added,
+                        components: &direct
+                    },
+                    Hint {
+                        action: Action::Old,
+                        components: &direct
+                    },
+                    Hint {
+                        action: Action::New,
+                        components: &destination
+                    }
+                ],
+                false,
+                true
+            )
+            .is_err()
+        );
+    }
+    #[test]
     fn file_only_provider_notifications_do_not_create_work_or_health() {
         let file = parts("Personal/source.bin");
         assert_eq!(
@@ -616,7 +793,7 @@ mod tests {
     #[test]
     fn create_coalesces_repeated_exact_hints_but_never_aliases_or_rename_overlap() {
         let path = parts("Personal/new.bin");
-        let unsupported = parts("Spaces/team/new.bin");
+        let unsupported = parts("Unknown/team/new.bin");
         for action in [Action::Added, Action::Modified, Action::Removed] {
             assert!(
                 route(
