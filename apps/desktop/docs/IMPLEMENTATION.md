@@ -3449,10 +3449,44 @@ retrying a potentially sent upload. Downgrading a migrated cache to an older
 binary is unsupported. Windows cleanup helpers are source-checked, not newly
 native-tested.
 
-The earlier frozen-copy prototype passed a synthetic actual-FUSE test inside an
-isolated Ubuntu VM. Validation of updated editable-save/final-RELEASE source is recorded separately
-through combined gates and exact-binary native acceptance; the earlier passes
-are not relabelled as validation of this later source. Neither proves installed-package
-or real-server throughput. The owner reports approximately 250 MB / 211 files
-uploaded through the web UI in under a minute after the NAS recovered; this
-candidate still needs measurement against that baseline.
+The final editable-save/final-RELEASE implementation passes a synthetic actual-FUSE
+check in an isolated Ubuntu VM: repeated writes, truncation, fsync, duplicated
+handles, final close, two held uploads, responsive reads/listings and independent
+byte verification. The exact unsigned Linux preview built from `30b4763` also
+passes disconnected Agent/CLI smoke checks, signed-out GUI rendering and normal
+Quit Raiun shutdown. Those are scoped component/package checks, not an installation
+on the owner's laptop or real-server throughput. The earlier prototype and failed
+GUI attempts remain separate evidence. The owner reports approximately 250 MB /
+211 files uploaded through the web UI in under a minute after the NAS recovered;
+the new uploader still needs measurement against that baseline.
+
+### Windows namespace integration — 1 November 2026 source checkpoint
+
+The unpublished candidate has an owner-thread file-rename worker using the
+original backend, identity catalog, account/token generation and physical root.
+Its current scope is a fresh, unambiguous ASCII Personal file rename within one
+parent. It invokes the guarded native/public entry and retains uncertainty;
+there is no automatic replay or recovery adoption. Headless streamed-save policy
+is unchanged. This does not implement Windows new-file creation, replacement,
+delete, Space operations or cross-parent moves.
+
+One dispatcher now owns notification attachment/polling and ordered routing,
+with a bounded cursor, checked shared record counter, command/save priority and
+sticky attention on uncertainty. The separately opted-in legacy directory route
+remains exclusive. Shared directory routing stays disabled. A new no-follow,
+metadata-only entry observation distinguishes plain entries from cloud-shaped
+entries without granting ownership, upload-completion or mutation authority.
+Future directory wiring must still independently admit and revalidate each
+ordinary directory; ignored cloud hints cannot become a healthy-upload claim.
+Completed directory history is authenticated under the original exact scope and
+shared limits; pending, corrupt or unknown history continues to block admission.
+
+Combined host validation passes 1,728 tests with 16 existing explicit ignores,
+plus strict Linux/Windows checks, formatting and Windows native compilation.
+The initial shared-target run accidentally reused an older Cloud Files artifact;
+its source-binding failure is retained. The corrected run explicitly executes
+all three new classifier cases and verifies their Windows binary symbols.
+These are source/component results. The original R58 native fixture setup failure
+remains failed; its corrected controls and actual owner-loop fixtures still need
+native execution under a normal standard-user session. Installed Windows package
+acceptance and expanded feature parity remain open. No new release is implied.
