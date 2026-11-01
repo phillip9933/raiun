@@ -3,6 +3,9 @@
 //! Remote work is dispatched to a small worker pool. Provider writes land in a
 //! durable local spool and are uploaded with an ETag precondition on flush,
 //! fsync, and release. Failed uploads leave their spool and manifest in place.
+//! An explicit optional handoff constructor permits new ordinary creates to ACK
+//! durable local custody before remote delivery; default constructors keep the
+//! synchronous behavior. Pending identities never grant remote mutation authority.
 //! Cached namespace state is intentionally bounded: at most 100,000 inodes,
 //! 10,000 visible entries per directory, 512 open directory snapshots, and
 //! 2,048 open file handles. The inode cache is released by unmounting; this
@@ -50,7 +53,12 @@ use raiun_core::{
     backend::{CloudError, CloudSpace, ErrorKind, RemoteEntry, WriteCondition},
     space_entries,
 };
-use raiun_engine::{Engine, FetchSnapshot};
+use raiun_engine::{
+    CreateUploadHandle, CreateUploadHooks, CreateUploadOwner, Engine, FetchSnapshot,
+    PendingCreateView,
+};
+
+mod create_handoff;
 use vault_routes::{
     VaultCancelledCreateReceiptState, VaultDirectoryCreateOutcome, VaultInstallHook,
     VaultPendingCreateResolution, VaultPendingDirectoryRetargetState,
@@ -266,6 +274,11 @@ enum NodeKind {
         space: String,
         entry: RemoteEntry,
     },
+    PendingCreate {
+        space: String,
+        scope: CacheScope,
+        view: Box<PendingCreateView>,
+    },
     Vault {
         route: VaultMountRoute,
         generation: u64,
@@ -326,6 +339,7 @@ struct WriteHandle {
     dirty: bool,
     ino: u64,
     cleanup_on_release: bool,
+    create: Option<create_handoff::NewCreate>,
 }
 
 struct VaultWriteHandle {
@@ -813,7 +827,20 @@ fn persist_subtree_retarget_wal(
     Ok(wal)
 }
 
+/// Explicit opt-in. Default mount constructors keep synchronous create semantics.
+pub struct CreateHandoffOptions {
+    pub hooks: CreateUploadHooks,
+    pub max_pending_bytes: u64,
+}
+
+struct CreateHandoffCapability {
+    handle: CreateUploadHandle,
+    current: Arc<dyn Fn() -> bool + Send + Sync>,
+    max_pending_bytes: u64,
+}
+
 struct RaiunFilesystem {
+    create_handoff: Option<CreateHandoffCapability>,
     engine: Engine,
     pool: RemotePool,
     project_spaces: Vec<(String, CloudSpace)>,
@@ -1114,6 +1141,7 @@ impl VaultMountRegistry {
 /// A live FUSE mount. Dropping the handle unmounts and joins the FUSE session.
 pub struct MountHandle {
     session: Option<fuser::BackgroundSession>,
+    create_upload_owner: Option<CreateUploadOwner>,
     root: PathBuf,
     source: String,
 }
@@ -1129,7 +1157,18 @@ impl MountHandle {
     /// Unmount through fusermount3 while retaining the background session until
     /// the mount has actually disappeared. This lets callers retry a busy or
     /// otherwise failed unmount instead of losing fuser's only session handle.
+    /// Irreversibly stop admission, cancel active transfers and join the owned
+    /// workers before account/root teardown, even when FUSE unmount is busy.
+    pub fn stop_create_uploads(&mut self) -> Result<(), String> {
+        if let Some(owner) = self.create_upload_owner.as_mut() {
+            owner.stop_and_join().map_err(|error| error.to_string())?;
+        }
+        self.create_upload_owner = None;
+        Ok(())
+    }
+
     pub fn unmount(&mut self) -> Result<(), String> {
+        self.stop_create_uploads()?;
         if self.session.is_none() {
             return Ok(());
         }
@@ -1340,6 +1379,26 @@ pub fn mount_with_vault_registry_for_profile(
     profile_id: &str,
     vault_registry: VaultMountRegistry,
 ) -> Result<MountHandle, String> {
+    mount_with_vault_registry_and_create_handoff(
+        engine,
+        root,
+        state_dir,
+        profile_id,
+        vault_registry,
+        None,
+    )
+}
+
+/// Opt-in durable local create acceptance. The caller owns the original account
+/// epoch and explicit server dispatch policy supplied through the hooks.
+pub fn mount_with_vault_registry_and_create_handoff(
+    engine: Engine,
+    root: &Path,
+    state_dir: &Path,
+    profile_id: &str,
+    vault_registry: VaultMountRegistry,
+    handoff: Option<CreateHandoffOptions>,
+) -> Result<MountHandle, String> {
     if !valid_profile_id(profile_id) {
         return Err("local profile identifier is invalid".into());
     }
@@ -1369,8 +1428,8 @@ pub fn mount_with_vault_registry_for_profile(
     let mount_owner = fs::metadata(&root)
         .map_err(|error| format!("could not read cloud root ownership: {error}"))?;
     let notifier = Arc::new(Mutex::new(None));
-    let filesystem = RaiunFilesystem::new(
-        engine,
+    let mut filesystem = RaiunFilesystem::new(
+        engine.clone(),
         spool_dir,
         mount_owner.uid(),
         mount_owner.gid(),
@@ -1379,6 +1438,28 @@ pub fn mount_with_vault_registry_for_profile(
         Arc::clone(&notifier),
     )
     .map_err(|error| error.to_string())?;
+    let create_upload_owner = if let Some(options) = handoff {
+        if options.max_pending_bytes == 0 {
+            return Err("create pending byte budget must be nonzero".into());
+        }
+        let original_current = options.hooks.is_current.clone();
+        let owner = engine
+            .start_create_upload_owner(options.hooks)
+            .map_err(|error| error.to_string())?;
+        let admission = owner.handle();
+        let current = Arc::new(move || admission.is_accepting() && original_current());
+        filesystem.create_handoff = Some(CreateHandoffCapability {
+            handle: owner.handle(),
+            current,
+            max_pending_bytes: options.max_pending_bytes,
+        });
+        filesystem
+            .register_create_upload_scopes(&owner.handle())
+            .map_err(|error| error.to_string())?;
+        Some(owner)
+    } else {
+        None
+    };
     let source = mount_source(&state_dir);
     let mut config = Config::default();
     config.mount_options = vec![
@@ -1396,6 +1477,7 @@ pub fn mount_with_vault_registry_for_profile(
         .map_err(|_| "FUSE notifier state is unavailable")? = Some(session.notifier());
     Ok(MountHandle {
         session: Some(session),
+        create_upload_owner,
         root,
         source,
     })
@@ -2406,6 +2488,7 @@ impl RaiunFilesystem {
         nodes.insert(PERSONAL, personal);
         nodes.insert(SPACES, spaces_node);
         let filesystem = Self {
+            create_handoff: None,
             engine,
             pool: RemotePool::new(4),
             project_spaces,
@@ -2805,6 +2888,11 @@ impl RaiunFilesystem {
             }
             NodeKind::Space { space } => format!("space:{space}"),
             NodeKind::Remote { space, entry } => format!("remote:{space}:{}", entry.id),
+            NodeKind::PendingCreate { space, scope, view } => format!(
+                "local-create:{space}:{}:{}",
+                scope.root_resource_id(),
+                view.receipt.handoff_id
+            ),
             NodeKind::Vault {
                 route,
                 generation,
@@ -3295,6 +3383,251 @@ impl RaiunFilesystem {
         })
     }
 
+    fn create_ordinary_file(
+        &self,
+        parent_ino: u64,
+        name: &OsStr,
+        flags: i32,
+    ) -> Result<(Node, u64, i32), CloudError> {
+        let name = name
+            .to_str()
+            .ok_or_else(|| invalid("file name is not UTF-8"))?;
+        let parent = self.node(parent_ino)?;
+        let (space, path) = self.child_path(&parent, name)?;
+        let reservation = self.reserve_path(&space, &path)?;
+        let engine = self.engine.clone();
+        let check_space = space.clone();
+        let check_path = path.clone();
+        match self
+            .pool
+            .call(move || engine.stat(&check_space, &check_path))?
+        {
+            Ok(entry) => {
+                if flags & libc::O_EXCL != 0 {
+                    return Err(CloudError::new(
+                        ErrorKind::Conflict,
+                        "destination already exists",
+                    ));
+                }
+                // FUSE CREATE may be used for open(O_CREAT) even when the
+                // path already exists. Without O_EXCL, POSIX semantics
+                // require opening that file; open_node refreshes its
+                // metadata and preserves the current ETag write condition.
+                let ino = self.add_node(
+                    parent_ino,
+                    name.into(),
+                    NodeKind::Remote {
+                        space: space.clone(),
+                        entry,
+                    },
+                )?;
+                drop(reservation);
+                let fh = self.open_node(ino, flags)?;
+                return Ok((self.node(ino)?, fh, flags));
+            }
+            Err(error) if error.kind == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let entry = RemoteEntry {
+            id: format!("pending:{}", stable_hash(&format!("{space}:{path}"))),
+            path: path.clone(),
+            directory: false,
+            size: 0,
+            etag: String::new(),
+            modified_unix: 0,
+            writable: true,
+            encrypted: false,
+        };
+        let ino = self.add_node(
+            parent_ino,
+            name.into(),
+            NodeKind::Remote {
+                space: space.clone(),
+                entry,
+            },
+        )?;
+        let binding = if let Some(capability) = &self.create_handoff {
+            let scope = self.engine.ordinary_write_scope(&space)?;
+            let parent_id = match &parent.kind {
+                NodeKind::Personal { .. } | NodeKind::Space { .. } => None,
+                NodeKind::Remote { entry, .. } if entry.directory && !entry.encrypted => {
+                    Some(entry.id.as_str())
+                }
+                _ => return Err(invalid("ordinary create parent is not remote")),
+            };
+            Some(self.engine.capture_new_plaintext_create_parent(
+                &scope,
+                &path,
+                parent_id,
+                capability.current.as_ref(),
+            )?)
+        } else {
+            None
+        };
+        let mut write = self.prepare_write(ino, &space, &path, None, true)?;
+        if binding
+            .as_ref()
+            .is_some_and(|parent| parent.scope() != &write.scope || parent.path() != write.path)
+        {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "ordinary create root changed before spool admission",
+            ));
+        }
+        write.create = binding.map(|parent| create_handoff::NewCreate {
+            parent,
+            intent: None,
+        });
+        let fh = self.register_handle(OpenFile::Write(Box::new(write)))?;
+        let node = self.node(ino)?;
+        reservation.disarm();
+        Ok((node, fh, flags))
+    }
+
+    fn register_create_upload_scopes(&self, handle: &CreateUploadHandle) -> Result<(), CloudError> {
+        for space in self
+            .mounted_spaces
+            .values()
+            .filter(|space| !space.encrypted)
+        {
+            let scope = self
+                .engine
+                .ordinary_create_scope(&space.id)?
+                .ok_or_else(|| invalid("create handoff requires durable cache storage"))?;
+            let page = match self.engine.ordinary_create_page(&scope, None, 1) {
+                Ok(page) => page,
+                // ordinary_creates maps missing/corrupt ledger rows to Corrupt;
+                // NotFound here specifically means scope registration absent.
+                Err(error) if error.kind == ErrorKind::NotFound => {
+                    self.engine.list(&space.id, "/")?;
+                    let initialized = self
+                        .engine
+                        .ordinary_create_scope(&space.id)?
+                        .ok_or_else(|| invalid("create scope disappeared"))?;
+                    if initialized != scope {
+                        return Err(invalid("create root changed during scope initialization"));
+                    }
+                    self.engine.ordinary_create_page(&scope, None, 1)?
+                }
+                Err(error) => return Err(error),
+            };
+            if !page.items.is_empty() {
+                handle.wake_scope(&scope)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn ordinary_open_flags(&self, ino: u64, fh: u64) -> FopenFlags {
+        let pending = self
+            .node(ino)
+            .is_ok_and(|node| matches!(node.kind, NodeKind::PendingCreate { .. }));
+        let creating = self.file_handle(fh).ok().is_some_and(|handle| {
+            handle.lock().is_ok_and(
+                |open| matches!(&*open, OpenFile::Write(write) if write.create.is_some()),
+            )
+        });
+        if pending || creating {
+            FopenFlags::FOPEN_DIRECT_IO
+        } else {
+            FopenFlags::empty()
+        }
+    }
+
+    fn finish_ordinary_handle(&self, handle: &Arc<Mutex<OpenFile>>) -> Result<(), CloudError> {
+        let result = self.commit(handle);
+        let open = handle
+            .lock()
+            .map_err(|_| io_error("open file state is unavailable"))?;
+        let mut cleanup = Ok(());
+        if let OpenFile::Write(write) = &*open {
+            cleanup = if result.is_ok() && write.cleanup_on_release {
+                if write.create.is_some() {
+                    create_handoff::cleanup(self, write)
+                } else {
+                    let _ = fs::remove_file(&write.manifest);
+                    let _ = fs::remove_file(&write.spool);
+                    Ok(())
+                }
+            } else {
+                Ok(())
+            };
+            self.release_write_key(&format!("{}\0{}", write.space, write.path));
+        }
+        result.and(cleanup)
+    }
+
+    fn publish_pending(
+        &self,
+        ino: u64,
+        space: &str,
+        scope: &CacheScope,
+        view: PendingCreateView,
+    ) -> Result<(), CloudError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| io_error("provider state is unavailable"))?;
+        let node = state
+            .nodes
+            .get_mut(&ino)
+            .ok_or_else(|| invalid("pending inode disappeared"))?;
+        node.kind = NodeKind::PendingCreate {
+            space: space.to_owned(),
+            scope: scope.clone(),
+            view: Box::new(view),
+        };
+        node.metadata_expires_at = Instant::now();
+        Ok(())
+    }
+
+    fn pending_children(
+        &self,
+        space: &str,
+        parent_id: Option<&str>,
+    ) -> Result<(Option<CacheScope>, Vec<PendingCreateView>), CloudError> {
+        let Some(scope) = self.engine.ordinary_create_scope(space)? else {
+            return Ok((None, Vec::new()));
+        };
+        let views = self
+            .engine
+            .pending_create_children(&scope, parent_id.unwrap_or(scope.root_resource_id()))?;
+        if views.len() > MAX_DIRECTORY_ENTRIES {
+            return Err(invalid("pending directory exceeds listing limit"));
+        }
+        Ok((Some(scope), views))
+    }
+
+    fn append_pending_children(
+        &self,
+        parent: u64,
+        space: &str,
+        scope: &Option<CacheScope>,
+        views: Vec<PendingCreateView>,
+        result: &mut Vec<Node>,
+    ) -> Result<(), CloudError> {
+        for view in views {
+            let scope = scope
+                .as_ref()
+                .ok_or_else(|| invalid("pending scope is missing"))?;
+            let name = view.entry.path.rsplit('/').next().unwrap_or_default();
+            if !safe_component(name) {
+                return Err(invalid("pending create name is unsafe"));
+            }
+            let ino = self.add_node(
+                parent,
+                name.to_owned(),
+                NodeKind::PendingCreate {
+                    space: space.to_owned(),
+                    scope: scope.clone(),
+                    view: Box::new(view),
+                },
+            )?;
+            result.push(self.node(ino)?);
+        }
+        Ok(())
+    }
+
     fn children_with_lease(
         &self,
         parent_ino: u64,
@@ -3340,6 +3673,15 @@ impl RaiunFilesystem {
                         return Err(error);
                     }
                 };
+                let (pending_scope, pending) = self.pending_children(&space, None)?;
+                entries.retain(|entry| !pending.iter().any(|v| v.entry.path == entry.path));
+                self.append_pending_children(
+                    parent_ino,
+                    &space,
+                    &pending_scope,
+                    pending,
+                    &mut result,
+                )?;
                 if let Err(error) = self.append_active_vault_routes(&space, "/", &mut entries) {
                     trace_fuse_namespace_error("personal_route_overlay", &error);
                     return Err(error);
@@ -3361,6 +3703,12 @@ impl RaiunFilesystem {
                     ));
                 }
                 for mut entry in entries {
+                    if entry.id.starts_with("raiun-pending-create:") {
+                        return Err(CloudError::new(
+                            ErrorKind::Conflict,
+                            "pending namespace changed; refresh the directory",
+                        ));
+                    }
                     let name = entry.path.rsplit('/').next().unwrap_or_default().to_owned();
                     if !safe_component(&name) {
                         continue;
@@ -3388,6 +3736,7 @@ impl RaiunFilesystem {
                 }
             }
             NodeKind::Remote { space, entry } if entry.directory && !entry.encrypted => {
+                let parent_id = entry.id.clone();
                 let path = entry.path.clone();
                 let engine = self.engine.clone();
                 let request_space = space.clone();
@@ -3400,8 +3749,18 @@ impl RaiunFilesystem {
                     Err(error) if error.kind == ErrorKind::Offline => (Vec::new(), Some(error)),
                     Err(error) => return Err(error),
                 };
+                let (pending_scope, pending) = self.pending_children(&space, Some(&parent_id))?;
+                entries.retain(|entry| !pending.iter().any(|v| v.entry.path == entry.path));
+                self.append_pending_children(
+                    parent_ino,
+                    &space,
+                    &pending_scope,
+                    pending,
+                    &mut result,
+                )?;
                 self.append_active_vault_routes(&space, &path, &mut entries)?;
                 if entries.is_empty()
+                    && result.is_empty()
                     && let Some(error) = unavailable
                 {
                     return Err(error);
@@ -3413,6 +3772,12 @@ impl RaiunFilesystem {
                     ));
                 }
                 for mut entry in entries {
+                    if entry.id.starts_with("raiun-pending-create:") {
+                        return Err(CloudError::new(
+                            ErrorKind::Conflict,
+                            "pending namespace changed; refresh the directory",
+                        ));
+                    }
                     let name = entry.path.rsplit('/').next().unwrap_or_default().to_owned();
                     if !safe_component(&name) {
                         continue;
@@ -3556,7 +3921,7 @@ impl RaiunFilesystem {
                 // Vault roots must be revalidated against the provider before
                 // lookup; their route authorization alone does not prove that
                 // the configured remote root still has the same identity.
-                NodeKind::Vault { .. } => false,
+                NodeKind::Vault { .. } | NodeKind::PendingCreate { .. } => false,
                 // Locked placeholders are synthetic and must be rebuilt from
                 // the current Space/parent listing so unlock transitions can
                 // replace them with route-bound nodes.
@@ -3824,6 +4189,18 @@ impl RaiunFilesystem {
         let mut condition = existing
             .map(|entry| WriteCondition::Match(entry.etag.clone()))
             .unwrap_or(WriteCondition::Absent);
+        if manifest.exists() {
+            let bytes = recovery::read_manifest_bytes(&manifest)
+                .map_err(|_| invalid("provider spool marker is unsafe"))?;
+            if let Ok(marker) = serde_json::from_slice::<OrdinaryWriteManifest>(&bytes) {
+                if marker.version == 3 || marker.handoff.is_some() {
+                    return Err(CloudError::new(
+                        ErrorKind::Conflict,
+                        "create handoff is recovery-only; refusing writable reopen",
+                    ));
+                }
+            }
+        }
         let pending = manifest.exists() && spool.exists();
         if pending && truncate {
             return Err(CloudError::new(
@@ -3881,6 +4258,7 @@ impl RaiunFilesystem {
             dirty: pending || truncate || existing.is_none(),
             ino,
             cleanup_on_release: false,
+            create: None,
         })
     }
 
@@ -3897,6 +4275,56 @@ impl RaiunFilesystem {
         let node = self.node(ino)?;
         if let NodeKind::Recovery(view) = &node.kind {
             self.validate_recovery_node(view)?;
+        }
+        if let NodeKind::PendingCreate { space, scope, view } = &node.kind {
+            // Active metadata refresh is metadata-only. Full immutable body
+            // validation belongs to read/ACK/cleanup, not every Dolphin stat.
+            if let Some(current) = self.engine.pending_create(scope, &view.entry.path)? {
+                if current.receipt.handoff_id != view.receipt.handoff_id
+                    || current.receipt.write.id != view.receipt.write.id
+                {
+                    return Err(invalid("pending inode identity changed"));
+                }
+                self.publish_pending(ino, space, scope, current)?;
+                return self.node(ino);
+            }
+            let receipt = self
+                .engine
+                .create_receipt_for_handoff(scope, &view.entry.path, &view.receipt.handoff_id)?
+                .ok_or_else(|| invalid("pending create receipt disappeared"))?;
+            if let Some(remote) = &receipt.storage_receipt().remote {
+                if self.engine.ordinary_write_scope(space)? != *scope {
+                    return Err(CloudError::new(
+                        ErrorKind::Conflict,
+                        "verified create root changed",
+                    ));
+                }
+                let entry = self.engine.stat(space, &view.entry.path)?;
+                if entry.id != remote.resource_id
+                    || entry.etag != remote.etag
+                    || entry.encrypted
+                    || entry.directory
+                {
+                    return Err(CloudError::new(
+                        ErrorKind::Conflict,
+                        "verified create identity changed",
+                    ));
+                }
+                let mut state = self
+                    .state
+                    .lock()
+                    .map_err(|_| io_error("provider state is unavailable"))?;
+                let node = state
+                    .nodes
+                    .get_mut(&ino)
+                    .ok_or_else(|| invalid("pending inode disappeared"))?;
+                node.kind = NodeKind::Remote {
+                    space: space.clone(),
+                    entry,
+                };
+                node.metadata_expires_at = Instant::now() + TTL;
+            }
+            return self.node(ino);
         }
         let NodeKind::Remote { space, entry } = &node.kind else {
             return Ok(node);
@@ -4116,6 +4544,9 @@ impl RaiunFilesystem {
         };
         write.file.flush().map_err(io_cloud)?;
         write.file.sync_all().map_err(io_cloud)?;
+        if write.create.is_some() {
+            return create_handoff::commit(self, write);
+        }
         if !write.dirty {
             return Ok(());
         }
@@ -4814,7 +5245,7 @@ impl Filesystem for RaiunFilesystem {
             }
         } else {
             match initial.and_then(|_| self.open_node(ino.0, flags.0)) {
-                Ok(fh) => reply.opened(FileHandle(fh), FopenFlags::empty()),
+                Ok(fh) => reply.opened(FileHandle(fh), self.ordinary_open_flags(ino.0, fh)),
                 Err(error) => reply.error(errno(&error)),
             }
         }
@@ -5031,6 +5462,7 @@ impl Filesystem for RaiunFilesystem {
                     "file was not opened for writing",
                 ));
             };
+            create_handoff::ensure_mutable(write)?;
             let offset = if flags.0 & libc::O_APPEND != 0 {
                 write.file.metadata().map_err(io_cloud)?.len()
             } else {
@@ -5235,31 +5667,9 @@ impl Filesystem for RaiunFilesystem {
                     Err(error) => reply.error(errno(&error)),
                 }
             }
-            Some(handle) => match self.commit(&handle) {
-                Ok(()) => {
-                    let mut key = None;
-                    if let Ok(open) = handle.lock() {
-                        if let OpenFile::Write(write) = &*open {
-                            if write.cleanup_on_release {
-                                let _ = fs::remove_file(&write.manifest);
-                                let _ = fs::remove_file(&write.spool);
-                            }
-                            key = Some(format!("{}\0{}", write.space, write.path));
-                        }
-                    }
-                    if let Some(key) = key {
-                        self.release_write_key(&key);
-                    }
-                    reply.ok()
-                }
-                Err(error) => {
-                    if let Ok(open) = handle.lock() {
-                        if let OpenFile::Write(write) = &*open {
-                            self.release_write_key(&format!("{}\0{}", write.space, write.path));
-                        }
-                    }
-                    reply.error(errno(&error))
-                }
+            Some(handle) => match self.finish_ordinary_handle(&handle) {
+                Ok(()) => reply.ok(),
+                Err(error) => reply.error(errno(&error)),
             },
             None => reply.error(Errno::EBADF),
         }
@@ -5981,77 +6391,14 @@ impl Filesystem for RaiunFilesystem {
             }
             return;
         }
-        let result = (|| {
-            let name = name
-                .to_str()
-                .ok_or_else(|| invalid("file name is not UTF-8"))?;
-            let parent = self.node(parent_ino.0)?;
-            let (space, path) = self.child_path(&parent, name)?;
-            let reservation = self.reserve_path(&space, &path)?;
-            let engine = self.engine.clone();
-            let check_space = space.clone();
-            let check_path = path.clone();
-            match self
-                .pool
-                .call(move || engine.stat(&check_space, &check_path))?
-            {
-                Ok(entry) => {
-                    if flags & libc::O_EXCL != 0 {
-                        return Err(CloudError::new(
-                            ErrorKind::Conflict,
-                            "destination already exists",
-                        ));
-                    }
-                    // FUSE CREATE may be used for open(O_CREAT) even when the
-                    // path already exists. Without O_EXCL, POSIX semantics
-                    // require opening that file; open_node refreshes its
-                    // metadata and preserves the current ETag write condition.
-                    let ino = self.add_node(
-                        parent_ino.0,
-                        name.into(),
-                        NodeKind::Remote {
-                            space: space.clone(),
-                            entry,
-                        },
-                    )?;
-                    drop(reservation);
-                    let fh = self.open_node(ino, flags)?;
-                    return Ok((self.node(ino)?, fh, flags));
-                }
-                Err(error) if error.kind == ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-            let entry = RemoteEntry {
-                id: format!("pending:{}", stable_hash(&format!("{space}:{path}"))),
-                path: path.clone(),
-                directory: false,
-                size: 0,
-                etag: String::new(),
-                modified_unix: 0,
-                writable: true,
-                encrypted: false,
-            };
-            let ino = self.add_node(
-                parent_ino.0,
-                name.into(),
-                NodeKind::Remote {
-                    space: space.clone(),
-                    entry,
-                },
-            )?;
-            let write = self.prepare_write(ino, &space, &path, None, true)?;
-            let fh = self.register_handle(OpenFile::Write(Box::new(write)))?;
-            let node = self.node(ino)?;
-            reservation.disarm();
-            Ok((node, fh, flags))
-        })();
+        let result = self.create_ordinary_file(parent_ino.0, name, flags);
         match result {
             Ok((node, fh, _)) => reply.created(
                 &TTL,
                 &self.attr(&node),
                 Generation(0),
                 FileHandle(fh),
-                FopenFlags::empty(),
+                self.ordinary_open_flags(node.ino, fh),
             ),
             Err(error) => reply.error(errno(&error)),
         }
@@ -6108,6 +6455,7 @@ impl Filesystem for RaiunFilesystem {
                     let vault_lease = lease;
                     let updated_size = match &mut *open {
                         OpenFile::Write(write) => {
+                            create_handoff::ensure_mutable(write)?;
                             write.file.set_len(size).map_err(io_cloud)?;
                             write.dirty = true;
                             size
@@ -6226,12 +6574,123 @@ impl RaiunFilesystem {
         contents
     }
 
+    fn open_pending_create_read(
+        &self,
+        scope: &CacheScope,
+        view: &PendingCreateView,
+    ) -> Result<FetchSnapshot, CloudError> {
+        match self
+            .engine
+            .fetch_create_snapshot(scope, &view.entry.path, &view.receipt.handoff_id)
+        {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(error) if error.kind == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        // A missing immutable body alone is never permission for a remote read.
+        // Only the exact completed, acknowledged clean-eviction tombstone may
+        // transition this original local identity to its verified remote copy.
+        let receipt = self.engine.validate_create_receipt(
+            scope,
+            &view.entry.path,
+            &view.receipt.handoff_id,
+            &view.receipt,
+        )?;
+        let stored = receipt.storage_receipt();
+        if stored.state != raiun_cache::OrdinaryCreateState::Verified
+            || stored.write.state != raiun_cache::WriteState::Verified
+            || !stored.local_handoff_acknowledged
+            || !stored.body_evicted
+        {
+            return Err(invalid(
+                "missing pending body has no qualified clean eviction",
+            ));
+        }
+        let remote = stored
+            .remote
+            .as_ref()
+            .ok_or_else(|| invalid("evicted create has no verified remote identity"))?;
+        let prove = || -> Result<(), CloudError> {
+            if self.engine.ordinary_write_scope(scope.space_id())? != *scope {
+                return Err(invalid("evicted create root changed"));
+            }
+            let entry = self.engine.stat(scope.space_id(), &view.entry.path)?;
+            if entry.id != remote.resource_id
+                || entry.etag != remote.etag
+                || entry.path != stored.write.logical_path
+                || entry.size != stored.byte_len
+                || entry.directory
+                || entry.encrypted
+            {
+                return Err(invalid("evicted create remote identity changed"));
+            }
+            Ok(())
+        };
+        prove()?;
+        let mut snapshot = self
+            .engine
+            .fetch_snapshot(scope.space_id(), &view.entry.path)?;
+        // FetchSnapshot's ordinary path API carries no public receipt metadata.
+        // Check the original full digest/length before exposing any bytes, then
+        // repeat the original root/revision proof around the completed snapshot.
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        let mut len = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let count = snapshot.read(&mut buffer).map_err(io_cloud)?;
+            if count == 0 {
+                break;
+            }
+            len = len
+                .checked_add(count as u64)
+                .ok_or_else(|| invalid("evicted create snapshot is too large"))?;
+            if len > stored.byte_len {
+                return Err(invalid("evicted create snapshot length changed"));
+            }
+            digest.update(&buffer[..count]);
+        }
+        if len != stored.byte_len || format!("{:x}", digest.finalize()) != stored.sha256 {
+            return Err(invalid("evicted create snapshot content changed"));
+        }
+        prove()?;
+        snapshot.seek(SeekFrom::Start(0)).map_err(io_cloud)?;
+        Ok(snapshot)
+    }
+
     fn open_node(&self, ino: u64, flags: i32) -> Result<u64, CloudError> {
-        let initial_node = self.node(ino)?;
+        let mut initial_node = self.node(ino)?;
         if flags & libc::O_ACCMODE != libc::O_RDONLY
             || flags & (libc::O_TRUNC | libc::O_APPEND | libc::O_CREAT | libc::O_EXCL) != 0
         {
             self.reject_recovery_alias(initial_node.parent, &initial_node.name)?;
+        }
+        if let NodeKind::PendingCreate { scope, view, .. } = &initial_node.kind {
+            let scope = scope.clone();
+            let view = view.clone();
+            // OPEN may arrive without GETATTR. Refresh lifecycle metadata
+            // first, retaining the original identity across verification/GC.
+            if let Some(current) = self.engine.pending_create(&scope, &view.entry.path)? {
+                if !current.receipt.has_same_immutable_binding(&view.receipt) {
+                    return Err(invalid("pending inode identity changed"));
+                }
+            }
+            if flags & libc::O_ACCMODE == libc::O_RDONLY
+                && flags & (libc::O_TRUNC | libc::O_APPEND | libc::O_CREAT | libc::O_EXCL) == 0
+            {
+                let reader = self.open_pending_create_read(&scope, &view)?;
+                // Do not promote the inode before the exact snapshot succeeds:
+                // a failed remote digest must not bypass this check next open.
+                self.refresh_remote_node(ino)?;
+                return self.register_handle(OpenFile::Read(ReadHandle::Snapshot(reader)));
+            }
+            initial_node = self.refresh_remote_node(ino)?;
+            if matches!(initial_node.kind, NodeKind::PendingCreate { .. }) {
+                return Err(CloudError::new(
+                    ErrorKind::Conflict,
+                    "pending create is immutable",
+                ));
+            }
         }
         if let NodeKind::Recovery(ref view) = initial_node.kind {
             return self.open_recovery_node(view, flags);
@@ -6254,6 +6713,19 @@ impl RaiunFilesystem {
                 ErrorKind::Unsupported,
                 "locked encrypted location is a directory",
             ));
+        }
+        if let NodeKind::Remote { space, entry } = &initial_node.kind {
+            if let Some(scope) = self.engine.ordinary_create_scope(space)? {
+                if let Some(view) = self.engine.pending_create(&scope, &entry.path)? {
+                    self.publish_pending(ino, space, &scope, view)?;
+                    return self.open_node(ino, flags);
+                }
+            }
+            if entry.id.starts_with("raiun-pending-create:") {
+                return Err(invalid(
+                    "stale pending identity cannot authorize a remote open",
+                ));
+            }
         }
         let writing = flags & libc::O_ACCMODE != libc::O_RDONLY;
         let reservation = if writing {
@@ -6299,7 +6771,33 @@ impl RaiunFilesystem {
         } else {
             let (spool, manifest) = self.spool_paths(&space, &entry.path);
             let read_handle = if spool.exists() && manifest.exists() {
-                ReadHandle::Local(File::open(spool).map_err(io_cloud)?)
+                let bytes = recovery::read_manifest_bytes(&manifest)
+                    .map_err(|_| invalid("provider spool manifest is unsafe"))?;
+                let marker: OrdinaryWriteManifest = serde_json::from_slice(&bytes)
+                    .map_err(|_| invalid("provider spool manifest is malformed"))?;
+                if marker.version == 3 {
+                    let scope = self.engine.ordinary_write_scope(&space)?;
+                    if !marker.matches_scope(&scope, &entry.path) {
+                        return Err(invalid("create spool scope changed"));
+                    }
+                    let intent = marker
+                        .handoff
+                        .filter(|intent| intent.valid())
+                        .ok_or_else(|| invalid("create handoff is malformed"))?;
+                    ReadHandle::Snapshot(self.engine.fetch_create_snapshot(
+                        &scope,
+                        &entry.path,
+                        &intent.id,
+                    )?)
+                } else {
+                    read_manifest(
+                        &manifest,
+                        &self.engine.ordinary_write_scope(&space)?,
+                        (!entry.etag.is_empty()).then_some(entry.id.as_str()),
+                        &entry.path,
+                    )?;
+                    ReadHandle::Local(File::open(spool).map_err(io_cloud)?)
+                }
             } else {
                 let engine = self.engine.clone();
                 let fetch_space = space.clone();
@@ -6372,6 +6870,12 @@ impl RaiunFilesystem {
                 ErrorKind::Conflict,
                 "directory is not empty",
             ));
+        }
+        if directory && self.create_handoff.is_some() {
+            // A failed handoff may have a frozen V3 spool before Cache has any
+            // ledger row. Preserve the same bounded recovery exclusion used
+            // by rename before removing its intended ordinary ancestor.
+            self.ensure_ordinary_rename_has_no_recovery(&[(space.as_str(), entry.path.as_str())])?;
         }
         let engine = self.engine.clone();
         let path = entry.path;
@@ -7294,6 +7798,7 @@ impl RaiunFilesystem {
         let directory = self.file_type(node) == FileType::Directory;
         let (size, mtime, writable) = match &node.kind {
             NodeKind::Recovery(view) => (view.size(), UNIX_EPOCH, false),
+            NodeKind::PendingCreate { view, .. } => (view.receipt.byte_len, UNIX_EPOCH, false),
             NodeKind::Remote { space, entry } => {
                 let (spool, manifest) = self.spool_paths(space, &entry.path);
                 let size = if spool.exists() && manifest.exists() {
@@ -7447,6 +7952,19 @@ fn same_identity(a: &NodeKind, b: &NodeKind) -> bool {
     match (a, b) {
         (NodeKind::Recovery(a), NodeKind::Recovery(b)) => a.key() == b.key(),
         (NodeKind::Space { space: a }, NodeKind::Space { space: b }) => a == b,
+        (
+            NodeKind::PendingCreate {
+                scope: a, view: va, ..
+            },
+            NodeKind::PendingCreate {
+                scope: b, view: vb, ..
+            },
+        ) => {
+            a == b
+                && va.receipt.handoff_id == vb.receipt.handoff_id
+                && va.receipt.write.id == vb.receipt.write.id
+                && va.receipt.write.content == vb.receipt.write.content
+        }
         (
             NodeKind::LockedVault {
                 profile_id: profile_a,
@@ -7651,6 +8169,21 @@ struct OrdinaryWriteManifest {
     path: String,
     condition: String,
     etag: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    handoff: Option<create_handoff::Intent>,
+}
+
+impl OrdinaryWriteManifest {
+    fn matches_scope(&self, scope: &CacheScope, path: &str) -> bool {
+        self.origin == scope.origin()
+            && self.account_id == scope.account_id()
+            && self.space_id == scope.space_id()
+            && self.root_resource_id == scope.root_resource_id()
+            && self.path == path
+            && self.resource_id.is_none()
+            && self.condition == "absent"
+            && self.etag.is_empty()
+    }
 }
 
 fn write_manifest(
@@ -7664,6 +8197,23 @@ fn write_manifest(
         WriteCondition::Absent => ("absent", ""),
         WriteCondition::Match(etag) => ("match", etag.as_str()),
     };
+    let encoded = serde_json::to_vec(&OrdinaryWriteManifest {
+        version: 2,
+        handoff: None,
+        origin: scope.origin().to_owned(),
+        account_id: scope.account_id().to_owned(),
+        space_id: scope.space_id().to_owned(),
+        root_resource_id: scope.root_resource_id().to_owned(),
+        resource_id: resource_id.map(str::to_owned),
+        path: remote.to_owned(),
+        condition: kind.to_owned(),
+        etag: etag.to_owned(),
+    })
+    .map_err(|_| invalid("could not encode provider spool manifest"))?;
+    persist_manifest(path, &encoded)
+}
+
+fn persist_manifest(path: &Path, encoded: &[u8]) -> Result<(), CloudError> {
     let parent = path
         .parent()
         .ok_or_else(|| invalid("provider spool path has no parent"))?;
@@ -7683,20 +8233,8 @@ fn write_manifest(
             Err(error) => return Err(io_cloud(error)),
         }
     };
-    let encoded = serde_json::to_vec(&OrdinaryWriteManifest {
-        version: 2,
-        origin: scope.origin().to_owned(),
-        account_id: scope.account_id().to_owned(),
-        space_id: scope.space_id().to_owned(),
-        root_resource_id: scope.root_resource_id().to_owned(),
-        resource_id: resource_id.map(str::to_owned),
-        path: remote.to_owned(),
-        condition: kind.to_owned(),
-        etag: etag.to_owned(),
-    })
-    .map_err(|_| invalid("could not encode provider spool manifest"))?;
     let result = (|| {
-        file.write_all(&encoded).map_err(io_cloud)?;
+        file.write_all(encoded).map_err(io_cloud)?;
         file.sync_all().map_err(io_cloud)?;
         drop(file);
         fs::rename(&temp, path).map_err(io_cloud)?;
@@ -7750,6 +8288,7 @@ fn read_manifest(
     let manifest: OrdinaryWriteManifest =
         serde_json::from_str(body).map_err(|_| invalid("provider spool manifest is malformed"))?;
     if manifest.version != 2
+        || manifest.handoff.is_some()
         || manifest.origin != expected_scope.origin()
         || manifest.account_id != expected_scope.account_id()
         || manifest.space_id != expected_scope.space_id()
@@ -8028,6 +8567,8 @@ mod tests {
         root_ids: Mutex<HashMap<String, String>>,
         list_calls: AtomicUsize,
         stat_calls: AtomicUsize,
+        create_barrier: Option<Arc<CreateBarrier>>,
+        root_on_next_list: Mutex<Option<String>>,
     }
 
     struct FakeVaultReadBackend;
@@ -9224,6 +9765,8 @@ mod tests {
                 root_ids: Mutex::new(HashMap::new()),
                 list_calls: AtomicUsize::new(0),
                 stat_calls: AtomicUsize::new(0),
+                create_barrier: None,
+                root_on_next_list: Mutex::new(None),
             }
         }
 
@@ -9321,6 +9864,9 @@ mod tests {
             self.list_calls.fetch_add(1, Ordering::Relaxed);
             if let Some(error) = self.network_error() {
                 return Err(error);
+            }
+            if let Some(root) = self.root_on_next_list.lock().unwrap().take() {
+                self.replace_root_id(space, &root);
             }
             let files = self.files.lock().expect("fake lock");
             for ((candidate_space, candidate_path), (item, _)) in files.iter() {
@@ -9449,6 +9995,47 @@ mod tests {
                 return Err(CloudError::new(ErrorKind::Conflict, "fixture root changed"));
             }
             self.download(space, path, etag, destination)
+        }
+        fn upload_in_root_with_cancellation(
+            &self,
+            space: &str,
+            path: &str,
+            source: &Path,
+            condition: WriteCondition,
+            root: &str,
+            cancellation: &raiun_core::backend::OperationCancellation,
+        ) -> Result<RemoteEntry, CloudError> {
+            let _active = self
+                .create_barrier
+                .as_ref()
+                .map(|barrier| barrier.enter(cancellation));
+            if cancellation.is_cancelled() {
+                return Err(CloudError::new(ErrorKind::Offline, "fixture cancelled"));
+            }
+            let mut entry = self.upload_in_root(space, path, source, condition, root)?;
+            entry.etag = "\"create-v2\"".into();
+            self.files
+                .lock()
+                .unwrap()
+                .get_mut(&(space.to_owned(), path.to_owned()))
+                .unwrap()
+                .0 = entry.clone();
+            Ok(entry)
+        }
+
+        fn download_in_root_with_cancellation(
+            &self,
+            space: &str,
+            path: &str,
+            etag: Option<&str>,
+            destination: &Path,
+            root: &str,
+            cancellation: &raiun_core::backend::OperationCancellation,
+        ) -> Result<RemoteEntry, CloudError> {
+            if cancellation.is_cancelled() {
+                return Err(CloudError::new(ErrorKind::Offline, "fixture cancelled"));
+            }
+            self.download_in_root(space, path, etag, destination, root)
         }
         fn mkdir(&self, _space: &str, _path: &str) -> Result<RemoteEntry, CloudError> {
             Err(CloudError::new(ErrorKind::Unsupported, "not needed"))
@@ -14461,4 +15048,5 @@ mod tests {
             b"local conflict edit"
         );
     }
+    include!("create_handoff_tests.rs");
 }

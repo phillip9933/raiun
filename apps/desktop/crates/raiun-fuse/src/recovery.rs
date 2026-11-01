@@ -362,6 +362,8 @@ struct ScopedManifest {
     path: String,
     condition: String,
     etag: String,
+    #[serde(default)]
+    handoff: Option<Box<super::create_handoff::Intent>>,
 }
 
 enum ProviderManifest {
@@ -410,7 +412,17 @@ fn read_manifest_bytes_after_open(
 fn read_bounded_manifest(path: &Path) -> Result<ProviderManifest, ManifestReadError> {
     let body = read_manifest_bytes(path)?;
     if let Ok(manifest) = serde_json::from_slice::<ScopedManifest>(&body) {
-        if manifest.version != 2
+        let valid_version = match (manifest.version, manifest.handoff.as_ref()) {
+            (2, None) => true,
+            (3, Some(intent)) => {
+                intent.valid()
+                    && manifest.resource_id.is_none()
+                    && manifest.condition == "absent"
+                    && manifest.etag.is_empty()
+            }
+            _ => false,
+        };
+        if !valid_version
             || manifest.origin.len() > 4_096
             || manifest.account_id.is_empty()
             || manifest.account_id.len() > 1_024
