@@ -3538,6 +3538,11 @@ checks reject stale completions; root configuration reserves admission through
 its persistence handoff. Nine focused Windows lifecycle tests are compiled, not
 executed. Connected directory-worker and exact-package acceptance remain open;
 revocation alone is not a completed drain.
+The ignored directory-worker case and panic-safe lifecycle test fixtures now
+pass Windows compilation and strict source checks. They have not run on a
+Windows device. Directory conversion deliberately retains its existing
+on-demand population policy; completion does not certify the whole directory
+as in sync. The earlier pinned device-test cohort remains unchanged.
 
 The normal headless streamed-recovery factory also has a compiled qualification
 case with fresh memory-only login and explicit mounting. It is not native
