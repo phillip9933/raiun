@@ -3510,8 +3510,10 @@ plain entries, missing or changed metadata and removals retain attention; this
 does not add deletion, nested-file or Space-file creation support.
 
 Source checks pass 1,767 host cases with 17 explicit ignores, strict Linux and
-Windows checks, and Windows test compilation. Connected create fixtures are
-compiled, not executed; the full manager/worker fixture is being prepared.
+Windows checks, and Windows test compilation. The two public-entry create
+fixtures and full manager/worker upload-and-stop fixture are compiled, not
+executed. The latter's Windows-only test changes reuse the unchanged host
+baseline with explicit source proof.
 Production creation remains disabled. Native and exact-package acceptance,
 plus a verified create-only server contract, are still required: HTTP 201 and
 full readback alone do not establish atomic no-clobber semantics. No installed
