@@ -1491,3 +1491,263 @@ fn ordinary_verified_writer_revokes_cleanup_before_failed_write_or_truncate() {
     assert!(write.dirty && !write.cleanup_on_release);
     assert_eq!(fs::read(&write.spool).unwrap(), b"verified");
 }
+
+#[test]
+#[ignore = "requires explicitly authorized isolated Linux VM and RAIUN_FUSE_CREATE_HANDOFF_VM_TEST=1; never run on host"]
+fn live_fuse_create_handoff_211_files_250mb_two_workers_in_vm() {
+    assert_eq!(
+        std::env::var("RAIUN_FUSE_CREATE_HANDOFF_VM_TEST").as_deref(),
+        Ok("1"),
+        "explicit isolated VM test opt-in is required before mounting"
+    );
+    assert!(
+        Path::new("/dev/fuse").exists(),
+        "VM FUSE device is required"
+    );
+    const FILES: usize = 211;
+    const TOTAL: usize = 250_000_000;
+    const CHUNK: usize = 64 * 1024;
+    fn length(index: usize) -> usize {
+        TOTAL / FILES + usize::from(index < TOTAL % FILES)
+    }
+    fn relative(index: usize) -> String {
+        format!("batch-{}/file-{index:03}.bin", index % 3)
+    }
+    fn pattern(index: usize, offset: usize, bytes: &mut [u8]) {
+        for (position, byte) in bytes.iter_mut().enumerate() {
+            *byte = (index as u8)
+                .wrapping_mul(31)
+                .wrapping_add((offset + position) as u8);
+        }
+    }
+    fn verify_pending(personal: &Path, count: usize) {
+        let mut listed = 0;
+        for directory in 0..3 {
+            for entry in fs::read_dir(personal.join(format!("batch-{directory}"))).unwrap() {
+                entry.unwrap();
+                listed += 1;
+            }
+        }
+        assert_eq!(listed, count);
+        let mut actual = [0_u8; CHUNK];
+        let mut expected = [0_u8; CHUNK];
+        for index in 0..count {
+            let mut file = fs::File::open(personal.join(relative(index))).unwrap();
+            let mut offset = 0;
+            while offset < length(index) {
+                let take = CHUNK.min(length(index) - offset);
+                file.read_exact(&mut actual[..take]).unwrap();
+                pattern(index, offset, &mut expected[..take]);
+                assert_eq!(&actual[..take], &expected[..take], "pending file {index}");
+                offset += take;
+            }
+            assert_eq!(file.read(&mut actual[..1]).unwrap(), 0);
+        }
+    }
+    let started = Instant::now();
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("task-only-batch-mount");
+    let state = temp.path().join("provider-state");
+    let cache_dir = temp.path().join("private-cache");
+    fs::create_dir(&root).unwrap();
+    fs::create_dir(&cache_dir).unwrap();
+    fs::set_permissions(&cache_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let barrier = Arc::new(CreateBarrier::default());
+    let backend = Arc::new(FakeBackend {
+        create_barrier: Some(barrier.clone()),
+        ..FakeBackend::default()
+    });
+    // Existing backend supports directory metadata, not mkdir. These three
+    // synthetic ordinary parents are pre-existing: no folder-create claim.
+    for directory in 0..3 {
+        backend.add_space_entry(
+            "personal",
+            &format!("/batch-{directory}"),
+            b"",
+            true,
+            "dir-v1",
+        );
+    }
+    let engine = Engine::open(&temp.path().join("engine"), backend.clone())
+        .unwrap()
+        .with_offline_cache(
+            raiun_cache::Cache::open(&cache_dir, 512 * 1024 * 1024).unwrap(),
+            "fuse-vm-batch-synthetic-account".into(),
+            "https://example.invalid".into(),
+        )
+        .unwrap();
+    let mut mount = mount_with_vault_registry_and_create_handoff(
+        engine.clone(),
+        &root,
+        &state,
+        "fuse-vm-batch-task",
+        VaultMountRegistry::new(),
+        Some(CreateHandoffOptions {
+            hooks: CreateUploadHooks {
+                is_current: Arc::new(|| true),
+                dispatch_allowed: Arc::new(|_| true),
+            },
+            max_pending_bytes: 384 * 1024 * 1024,
+        }),
+    )
+    .unwrap();
+    let personal = root.join("Personal");
+    for directory in 0..3 {
+        assert!(personal.join(format!("batch-{directory}")).is_dir());
+    }
+    let (progress_tx, progress_rx) = std::sync::mpsc::sync_channel(1);
+    let (continue_tx, continue_rx) = std::sync::mpsc::sync_channel(0);
+    let copy_root = personal.clone();
+    let copy = thread::spawn(move || {
+        let mut bytes = [0_u8; CHUNK];
+        for index in 0..FILES {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(copy_root.join(relative(index)))
+                .unwrap();
+            let mut offset = 0;
+            while offset < length(index) {
+                let take = CHUNK.min(length(index) - offset);
+                pattern(index, offset, &mut bytes[..take]);
+                file.write_all(&bytes[..take]).unwrap();
+                offset += take;
+            }
+            file.sync_all().unwrap();
+            drop(file); // actual kernel FLUSH/RELEASE, not a direct helper call
+            progress_tx.send(index).unwrap();
+            if index == 1 {
+                continue_rx.recv_timeout(Duration::from_secs(20)).unwrap();
+            }
+        }
+    });
+    for index in 0..2 {
+        assert_eq!(
+            progress_rx.recv_timeout(Duration::from_secs(20)).unwrap(),
+            index
+        );
+        barrier.wait_entered(index + 1);
+    }
+    assert_eq!(barrier.active.load(Ordering::SeqCst), 2);
+    let probe_root = personal.clone();
+    let (probe_tx, probe_rx) = std::sync::mpsc::sync_channel(0);
+    let probe = thread::spawn(move || {
+        verify_pending(&probe_root, 2);
+        probe_tx.send(()).unwrap();
+    });
+    probe_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("held uploads blocked kernel reads/listings");
+    probe.join().unwrap();
+    continue_tx.send(()).unwrap();
+    let copy_deadline = Instant::now() + Duration::from_secs(120);
+    for index in 2..FILES {
+        let remaining = copy_deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "batch local handoff deadline");
+        assert_eq!(
+            progress_rx
+                .recv_timeout(remaining.min(Duration::from_secs(20)))
+                .unwrap(),
+            index
+        );
+    }
+    copy.join().unwrap();
+    let scope = engine.ordinary_write_scope("personal").unwrap();
+    let local_deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let page = engine.ordinary_create_page(&scope, None, 256).unwrap();
+        if page.items.len() == FILES && page.items.iter().all(|r| r.local_handoff_acknowledged) {
+            assert!(page.next_after.is_none());
+            assert_eq!(page.counts.claimed, 2);
+            assert_eq!(page.counts.ready, (FILES - 2) as u64);
+            assert_eq!(
+                page.counts.staged
+                    + page.counts.uncertain
+                    + page.counts.conflict
+                    + page.counts.verified,
+                0
+            );
+            assert_eq!(
+                page.items.iter().map(|r| r.byte_len).sum::<u64>(),
+                TOTAL as u64
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < local_deadline,
+            "not all kernel releases reached durable ACK"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(barrier.active.load(Ordering::SeqCst), 2);
+    assert_eq!(barrier.state.lock().unwrap().0, 2);
+    assert_eq!(barrier.peak.load(Ordering::SeqCst), 2);
+    let probe_root = personal.clone();
+    let (probe_tx, probe_rx) = std::sync::mpsc::sync_channel(0);
+    let probe = thread::spawn(move || {
+        verify_pending(&probe_root, FILES);
+        probe_tx.send(()).unwrap();
+    });
+    probe_rx
+        .recv_timeout(Duration::from_secs(45))
+        .expect("queued batch blocked pending reads/listings");
+    probe.join().unwrap();
+    eprintln!(
+        "batch checkpoint: 211 durable ACKs, 250000000 pending bytes independently read, 2 held workers, elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
+    barrier.release();
+    let verified_deadline = Instant::now() + Duration::from_secs(120);
+    let page = loop {
+        let page = engine.ordinary_create_page(&scope, None, 256).unwrap();
+        if page.items.len() == FILES
+            && page
+                .items
+                .iter()
+                .all(|r| r.state == raiun_cache::OrdinaryCreateState::Verified)
+        {
+            break page;
+        }
+        assert!(
+            Instant::now() < verified_deadline,
+            "batch remote verification deadline"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(page.next_after.is_none());
+    let files = backend.files.lock().unwrap();
+    assert_eq!(files.len(), FILES + 3);
+    let mut expected = [0_u8; CHUNK];
+    for index in 0..FILES {
+        let logical = format!("/{}", relative(index));
+        let (remote, body) = files.get(&("personal".into(), logical.clone())).unwrap();
+        let receipt = page
+            .items
+            .iter()
+            .find(|r| r.write.logical_path == logical)
+            .unwrap();
+        assert_eq!(body.len(), length(index));
+        assert_eq!(remote.size, length(index) as u64);
+        let mut digest = Sha256::new();
+        for (chunk, actual) in body.chunks(CHUNK).enumerate() {
+            pattern(index, chunk * CHUNK, &mut expected[..actual.len()]);
+            assert_eq!(actual, &expected[..actual.len()], "remote file {index}");
+            digest.update(&expected[..actual.len()]);
+        }
+        assert_eq!(receipt.sha256, format!("{:x}", digest.finalize()));
+        assert_eq!(receipt.byte_len, length(index) as u64);
+        assert!(receipt.local_handoff_acknowledged);
+        assert_eq!(receipt.remote.as_ref().unwrap().etag, remote.etag);
+    }
+    drop(files);
+    assert_eq!(barrier.state.lock().unwrap().0, FILES);
+    assert_eq!(barrier.peak.load(Ordering::SeqCst), 2);
+    mount.unmount().unwrap();
+    assert!(!mount.is_mounted());
+    assert!(mount.create_upload_owner.is_none());
+    assert_eq!(barrier.active.load(Ordering::SeqCst), 0);
+    eprintln!(
+        "batch complete: 211 byte-verified remote bodies and Verified receipts, peak=2, normal unmount and owner joined; functional synthetic KVM workload, not NAS benchmark; elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
+}
