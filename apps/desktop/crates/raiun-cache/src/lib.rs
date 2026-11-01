@@ -99,7 +99,7 @@ pub use windows_download_stage::{
     VerifiedPlaintextDownload,
 };
 
-const CACHE_VERSION: u32 = 9;
+const CACHE_VERSION: u32 = 10;
 const MAX_SCOPE_FIELD: usize = 1024;
 const MAX_PATH_BYTES: usize = 32 * 1024;
 const MAX_ENTRY_NAME_BYTES: usize = 4096;
@@ -5922,6 +5922,10 @@ impl Cache {
         for row in rows {
             let (id, parent, name, path, resource, base_kind, base_etag, key, state, created) =
                 row.map_err(db_error)?;
+            if let Some(receipt) = ordinary_create::load(&db, scope, id)? {
+                out.push(receipt.write);
+                continue;
+            }
             let (resource_id, etag, protection): (String, String, i64) = db
                 .query_row(
                     "SELECT resource_id,etag,protection FROM contents WHERE content_key=?1",

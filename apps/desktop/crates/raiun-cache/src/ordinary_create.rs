@@ -1,5 +1,7 @@
 //! Storage-only ordinary-create custody. Admission is not server authorization.
 use super::*;
+#[path = "ordinary_create_clean.rs"]
+mod clean;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i64)]
@@ -29,6 +31,9 @@ pub struct OrdinaryCreateReceipt {
     pub sha256: String,
     pub state: OrdinaryCreateState,
     pub remote: Option<ContentVersion>,
+    pub local_handoff_acknowledged: bool,
+    /// Committed retirement/eviction; a normal cache miss only after Verified+ACK.
+    pub body_evicted: bool,
 }
 /// Opaque durable attempt authority. Dropping never resets a claim.
 pub struct OrdinaryCreateClaim {
@@ -141,14 +146,14 @@ fn version(scope: &CacheScope, request: &OrdinaryCreateRequest) -> ContentVersio
     }
 }
 // Load through the authenticated storage scope, and validate every redundant binding.
-fn load(
+pub(super) fn load(
     db: &Connection,
     scope: &CacheScope,
     id: i64,
 ) -> Result<Option<OrdinaryCreateReceipt>, CacheError> {
-    let result = db.query_row("SELECT w.parent_id,w.name,w.path,w.resource_id,w.base_kind,w.base_etag,w.content_key,w.state,w.created_at,h.handoff_id,h.state,h.path,h.content_key,h.claim_id,h.remote_id,h.remote_etag,c.resource_id,c.etag,c.protection,c.byte_len,c.sha256,c.scope_key FROM ordinary_create_handoffs h JOIN writes w ON w.id=h.write_id JOIN contents c ON c.content_key=w.content_key WHERE h.scope_key=?1 AND w.scope_key=?1 AND h.write_id=?2",
+    let result = db.query_row("SELECT w.parent_id,w.name,w.path,w.resource_id,w.base_kind,w.base_etag,w.content_key,w.state,w.created_at,h.handoff_id,h.state,h.path,h.content_key,h.claim_id,h.remote_id,h.remote_etag,h.body_len,h.body_sha256,h.local_handoff_ack,h.body_state,c.resource_id,c.etag,c.protection,c.byte_len,c.sha256,c.scope_key,c.relative_path FROM ordinary_create_handoffs h JOIN writes w ON w.id=h.write_id LEFT JOIN contents c ON c.content_key=w.content_key WHERE h.scope_key=?1 AND w.scope_key=?1 AND h.write_id=?2",
         params![scope.key,id], |r| Ok((
-            r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,i64>(4)?,r.get::<_,String>(5)?,r.get::<_,String>(6)?,r.get::<_,i64>(7)?,r.get::<_,i64>(8)?,r.get::<_,String>(9)?,r.get::<_,i64>(10)?,r.get::<_,String>(11)?,r.get::<_,String>(12)?,r.get::<_,String>(13)?,r.get::<_,Option<String>>(14)?,r.get::<_,Option<String>>(15)?,r.get::<_,String>(16)?,r.get::<_,String>(17)?,r.get::<_,i64>(18)?,r.get::<_,i64>(19)?,r.get::<_,String>(20)?,r.get::<_,String>(21)?
+            r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Option<String>>(3)?,r.get::<_,i64>(4)?,r.get::<_,String>(5)?,r.get::<_,String>(6)?,r.get::<_,i64>(7)?,r.get::<_,i64>(8)?,r.get::<_,String>(9)?,r.get::<_,i64>(10)?,r.get::<_,String>(11)?,r.get::<_,String>(12)?,r.get::<_,String>(13)?,r.get::<_,Option<String>>(14)?,r.get::<_,Option<String>>(15)?,r.get::<_,i64>(16)?,r.get::<_,String>(17)?,r.get::<_,i64>(18)?,r.get::<_,i64>(19)?,r.get::<_,Option<String>>(20)?,r.get::<_,Option<String>>(21)?,r.get::<_,Option<i64>>(22)?,r.get::<_,Option<i64>>(23)?,r.get::<_,Option<String>>(24)?,r.get::<_,Option<String>>(25)?,r.get::<_,Option<String>>(26)?
         ))).optional().map_err(db_error)?;
     let Some((
         parent,
@@ -167,12 +172,17 @@ fn load(
         nonce,
         remote_id,
         remote_etag,
+        len,
+        digest,
+        ack,
+        body_state,
         content_id,
         etag,
         protection,
-        len,
-        digest,
+        content_len,
+        content_digest,
         content_scope,
+        relative_path,
     )) = result
     else {
         let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM ordinary_create_handoffs WHERE scope_key=?1 AND write_id=?2)", params![scope.key,id], |r| r.get(0)).map_err(db_error)?;
@@ -189,9 +199,9 @@ fn load(
         _ => WriteState::Pending,
     };
     let content = ContentVersion {
-        resource_id: content_id,
-        etag,
-        protection: decode_content_protection(protection)?,
+        resource_id: hash_fields(&[&scope.key, &parent, &name, &path]),
+        etag: format!("journal-create-{handoff}"),
+        protection: ContentProtection::Plaintext,
     };
     if id <= 0
         || base_kind != 0
@@ -199,11 +209,7 @@ fn load(
         || resource.is_some()
         || path != hpath
         || key != hkey
-        || content_scope != scope.key
         || content_key(scope, &content) != key
-        || content.protection != ContentProtection::Plaintext
-        || content.etag != format!("journal-create-{handoff}")
-        || content.resource_id != hash_fields(&[&scope.key, &parent, &name, &path])
         || !hex(&handoff, 32)
         || !hex(&digest, 64)
         || len < 0
@@ -211,8 +217,39 @@ fn load(
         || decode_write_state(write_state)? != expected_write
         || (status == OrdinaryCreateState::Claimed) != !nonce.is_empty()
         || (!nonce.is_empty() && !hex(&nonce, 32))
+        || !matches!(ack, 0 | 1)
+        || !matches!(body_state, 0..=2)
+        || (body_state != 0 && (ack != 1 || status != OrdinaryCreateState::Verified))
     {
         return Err(CacheError::Corrupt);
+    }
+    match (
+        content_id,
+        etag,
+        protection,
+        content_len,
+        content_digest,
+        content_scope,
+        relative_path,
+    ) {
+        (
+            Some(cid),
+            Some(etag),
+            Some(protection),
+            Some(clen),
+            Some(digest_found),
+            Some(cscope),
+            Some(relative),
+        ) if body_state != 2
+            && cid == content.resource_id
+            && etag == content.etag
+            && protection == ContentProtection::Plaintext as i64
+            && clen == len
+            && digest_found == digest
+            && cscope == scope.key
+            && relative == format!("{key}.blob") => {}
+        (None, None, None, None, None, None, None) if body_state == 2 => {}
+        _ => return Err(CacheError::Corrupt),
     }
     validate_id(&parent)?;
     validate_name(&name)?;
@@ -253,7 +290,15 @@ fn load(
         sha256: digest,
         state: status,
         remote,
+        local_handoff_acknowledged: ack == 1,
+        body_evicted: body_state != 0,
     }))
+}
+impl OrdinaryCreateReceipt {
+    /// Compare only immutable custody identity; this grants no dispatch authority.
+    pub fn has_same_immutable_binding(&self, other: &Self) -> bool {
+        same_binding(self, other)
+    }
 }
 fn same_binding(a: &OrdinaryCreateReceipt, b: &OrdinaryCreateReceipt) -> bool {
     let mut a = a.clone();
@@ -264,6 +309,10 @@ fn same_binding(a: &OrdinaryCreateReceipt, b: &OrdinaryCreateReceipt) -> bool {
     b.write.state = a.write.state;
     a.remote = None;
     b.remote = None;
+    a.local_handoff_acknowledged = false;
+    b.local_handoff_acknowledged = false;
+    a.body_evicted = false;
+    b.body_evicted = false;
     a == b
 }
 fn current(
@@ -390,6 +439,22 @@ impl Cache {
         {
             return Err(CacheError::InsufficientSpace);
         }
+        if let Some(existing) = &existing
+            && existing.body_evicted
+        {
+            let mut bounded = source.take(request.expected_len + 1);
+            let mut checked = CheckedSource {
+                source: &mut bounded,
+                expected: &request.expected_sha256,
+                digest: Sha256::new(),
+            };
+            let len = io::copy(&mut checked, &mut io::sink()).map_err(io_error)?;
+            if len != request.expected_len {
+                return Err(CacheError::Conflict);
+            }
+            let db = self.lock_db()?;
+            return load(&db, scope, existing.write.id)?.ok_or(CacheError::Corrupt);
+        }
         let mut checked_source = CheckedSource {
             source,
             expected: &request.expected_sha256,
@@ -431,7 +496,7 @@ impl Cache {
         tx.execute("INSERT INTO contents(content_key,scope_key,resource_id,etag,protection,byte_len,sha256,relative_path,last_accessed,retention) VALUES(?1,?2,?3,?4,0,?5,?6,?7,?8,1)",params![key,scope.key,content.resource_id,content.etag,i64_from_u64(len)?,digest,relative,now_unix()]).map_err(db_error)?;
         tx.execute("INSERT INTO writes(scope_key,parent_id,name,path,resource_id,base_kind,base_etag,content_key,state,created_at) VALUES(?1,?2,?3,?4,NULL,0,'',?5,0,?6)",params![scope.key,request.parent_resource_id,request.name,request.logical_path,key,now_unix()]).map_err(db_error)?;
         let id = tx.last_insert_rowid();
-        tx.execute("INSERT INTO ordinary_create_handoffs(write_id,scope_key,handoff_id,path,content_key,state,updated_at) VALUES(?1,?2,?3,?4,?5,0,?6)",params![id,scope.key,request.handoff_id,request.logical_path,key,now_unix()]).map_err(db_error)?;
+        tx.execute("INSERT INTO ordinary_create_handoffs(write_id,scope_key,handoff_id,path,content_key,state,updated_at,body_len,body_sha256) VALUES(?1,?2,?3,?4,?5,0,?6,?7,?8)",params![id,scope.key,request.handoff_id,request.logical_path,key,now_unix(),i64_from_u64(len)?,digest]).map_err(db_error)?;
         let receipt = load(&tx, scope, id)?.ok_or(CacheError::Corrupt)?;
         tx.commit().map_err(db_error)?;
         Ok(receipt)
@@ -517,7 +582,7 @@ impl Cache {
         let db = self.lock_db()?;
         let tx = db.unchecked_transaction().map_err(db_error)?;
         let found = current(&tx, scope, receipt)?;
-        if found != *receipt
+        if found.state != receipt.state
             || !matches!(
                 found.state,
                 OrdinaryCreateState::Staged | OrdinaryCreateState::Ready
@@ -576,7 +641,9 @@ impl Cache {
         let db = self.lock_db()?;
         let tx = db.unchecked_transaction().map_err(db_error)?;
         let found = current(&tx, scope, &claim.receipt)?;
-        if found != claim.receipt || found.state != OrdinaryCreateState::Claimed {
+        if found.state != OrdinaryCreateState::Claimed
+            || claim.receipt.state != OrdinaryCreateState::Claimed
+        {
             return Err(CacheError::Conflict);
         }
         let target = if remote.is_some() { 5 } else { 3 };
@@ -780,3 +847,43 @@ fn write_state(
 #[cfg(all(test, unix))]
 #[path = "ordinary_create_tests.rs"]
 mod tests;
+
+// Migration validates all retained bindings, not just successful backfill row counts.
+pub(super) fn validate_migration(db: &Connection) -> Result<(), CacheError> {
+    let mut statement=db.prepare("SELECT h.write_id,s.origin,s.account_id,s.space_id,s.root_resource_id,s.protection,h.scope_key FROM ordinary_create_handoffs h LEFT JOIN scopes s ON s.scope_key=h.scope_key ORDER BY h.write_id").map_err(db_error)?;
+    let rows = statement
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(4)?,
+                r.get::<_, i64>(5)?,
+                r.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(db_error)?;
+    let mut count = 0;
+    for row in rows {
+        count += 1;
+        if count > MAX_JOURNAL_RECORDS {
+            return Err(CacheError::LimitExceeded);
+        }
+        let (id, origin, account, space, root, protection, key) = row.map_err(db_error)?;
+        if protection != ScopeProtection::PlaintextAllowed as i64 {
+            return Err(CacheError::Corrupt);
+        }
+        let scope = CacheScope::new(
+            &origin,
+            &account,
+            &space,
+            &root,
+            ScopeProtection::PlaintextAllowed,
+        )?;
+        if scope.key != key || load(db, &scope, id)?.is_none() {
+            return Err(CacheError::Corrupt);
+        }
+    }
+    Ok(())
+}

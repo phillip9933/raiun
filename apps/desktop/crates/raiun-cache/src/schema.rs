@@ -25,6 +25,7 @@ pub(super) fn initialize(db: &Connection, journal: JournalMode) -> Result<(), Ca
         && version != 4
         && version != 5
         && version != 6
+        && version != 9
         && version != 8
         && version != 7
         && version != CACHE_VERSION as i64
@@ -350,6 +351,35 @@ pub(super) fn initialize(db: &Connection, journal: JournalMode) -> Result<(), Ca
       ON ordinary_create_handoffs(scope_key,state,write_id);",
     )
     .map_err(db_error)?;
+    ensure_column(
+        db,
+        "ordinary_create_handoffs",
+        "body_len",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        db,
+        "ordinary_create_handoffs",
+        "body_sha256",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        db,
+        "ordinary_create_handoffs",
+        "local_handoff_ack",
+        "INTEGER NOT NULL DEFAULT 0 CHECK(local_handoff_ack IN (0,1))",
+    )?;
+    ensure_column(
+        db,
+        "ordinary_create_handoffs",
+        "body_state",
+        "INTEGER NOT NULL DEFAULT 0 CHECK(body_state IN (0,1,2))",
+    )?;
+    db.execute("CREATE INDEX IF NOT EXISTS ordinary_create_body_cleanup ON ordinary_create_handoffs(scope_key,body_state,write_id)",[]).map_err(db_error)?;
+    if version < 10 {
+        db.execute("UPDATE ordinary_create_handoffs SET local_handoff_ack=0,body_state=0,body_len=(SELECT c.byte_len FROM contents c WHERE c.content_key=ordinary_create_handoffs.content_key AND c.scope_key=ordinary_create_handoffs.scope_key),body_sha256=(SELECT c.sha256 FROM contents c WHERE c.content_key=ordinary_create_handoffs.content_key AND c.scope_key=ordinary_create_handoffs.scope_key)",[]).map_err(db_error)?;
+        super::ordinary_create::validate_migration(db)?;
+    }
     db.pragma_update(None, "user_version", CACHE_VERSION)
         .map_err(db_error)?;
     validate_cache_schema(db)?;

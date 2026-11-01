@@ -407,7 +407,7 @@ fn v8_migration_preserves_legacy_ineligibility() {
     assert_eq!(
         db.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        9
+        CACHE_VERSION as i64
     );
 }
 #[test]
