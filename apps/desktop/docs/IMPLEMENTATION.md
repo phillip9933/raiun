@@ -3490,3 +3490,29 @@ These are source/component results. The original R58 native fixture setup failur
 remains failed; its corrected controls and actual owner-loop fixtures still need
 native execution under a normal standard-user session. Installed Windows package
 acceptance and expanded feature parity remain open. No new release is implied.
+
+### Windows new-file source integration — 2 November 2026
+
+The unpublished candidate now includes guarded creation of an ordinary file
+directly inside Personal. It retains the original connected root, prepared
+recovery provider, immutable snapshot, account/token generation and deadline
+through SDK upload/readback, native conversion and linked custody completion.
+Native ownership stays on the connection thread. Owned SDK tasks run on a joined
+two-thread executor with at most two outstanding tasks, including undrained
+replies; only one file-create operation is admitted per root. This improves the
+owner-thread structure, not Windows bulk-upload parallelism. Local capture,
+hashing and durable journal work are still synchronous bounded phases.
+
+Notification routing now validates the complete raw batch before live metadata
+classification. Personal/Spaces containers and cloud-shaped entries can be
+skipped without granting ownership or claiming completed uploads. Unsupported
+plain entries, missing or changed metadata and removals retain attention; this
+does not add deletion, nested-file or Space-file creation support.
+
+Source checks pass 1,767 host cases with 17 explicit ignores, strict Linux and
+Windows checks, and Windows test compilation. Connected create fixtures are
+compiled, not executed; the full manager/worker fixture is being prepared.
+Production creation remains disabled. Native and exact-package acceptance,
+plus a verified create-only server contract, are still required: HTTP 201 and
+full readback alone do not establish atomic no-clobber semantics. No installed
+application or published release has changed.
