@@ -45,7 +45,7 @@ impl<'a> SaveRenameAdmission<'a> {
         self.check().is_ok() && matches!(probe(), Ok(false)) && self.check().is_ok()
     }
 
-    fn claim_send(&self) -> Result<(), CloudError> {
+    pub(crate) fn claim_send(&self) -> Result<(), CloudError> {
         if self
             .ticket
             .try_borrow_mut()

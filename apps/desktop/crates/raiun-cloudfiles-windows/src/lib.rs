@@ -508,6 +508,15 @@ pub struct ConfiguredRootConnection {
 pub struct NativePlainFileCapture<'connection, 'parent, 'lease> {
     inner: native::native_plain_file_capture::NativePlainFileCapture<'connection, 'parent, 'lease>,
 }
+/// Explicit foundation outcomes. None grants clean/native completion or replay.
+#[cfg(windows)]
+#[derive(Debug, Eq, PartialEq)]
+pub enum FreshFileCreateOutcome {
+    BusyBeforeCapture,
+    CapturedLocalIncomplete,
+    SubmittedUncertain,
+    RemoteVerifiedLocalIncomplete,
+}
 #[cfg(windows)]
 impl NativePlainFileCapture<'_, '_, '_> {
     /// Returns protected local evidence only. No network/conversion/in-sync.
@@ -816,6 +825,29 @@ impl ConfiguredRootConnection {
         self.inner
             .prepare_plain_file_capture(backend, parent, name, record_generation)
             .map(|inner| NativePlainFileCapture { inner })
+    }
+    /// Explicit direct-Personal create foundation, never native clean completion.
+    /// The currentness callback must use nonblocking original owner/epoch checks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reconcile_fresh_personal_file_create(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        name: &str,
+        authorization: namespace_intent::CapturedAuthorization,
+        generation: u64,
+        job: &StreamedRecoveryJob,
+        current: std::sync::Arc<
+            dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync,
+        >,
+    ) -> Result<FreshFileCreateOutcome, Error> {
+        self.inner.reconcile_fresh_personal_file_create(
+            backend,
+            name,
+            authorization,
+            generation,
+            job,
+            current,
+        )
     }
     #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
     pub fn namespace_directory_fixture_observation(

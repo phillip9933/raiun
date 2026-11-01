@@ -264,6 +264,10 @@ pub struct FileRenameStore {
 }
 
 impl FileRenameStore {
+    #[cfg(windows)]
+    pub(crate) fn snapshot_store(&self) -> &Arc<SnapshotStore> {
+        &self.base
+    }
     /// Compare retained custody, scope and policy outside backend leases.
     /// Equal path strings alone cannot bind a caller-supplied store to the
     /// connection's admitted state. Both persistent quota handles stay pinned

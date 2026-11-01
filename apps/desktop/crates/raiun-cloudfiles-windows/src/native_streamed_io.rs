@@ -110,7 +110,7 @@ mod windows {
                 || cancelled(cancellation),
                 |offset, buffer, eof_probe| {
                     let mut read = PendingRead {
-                        file: self,
+                        file: &self.raw,
                         io: CompletionIo::new()?,
                         buffer,
                         pending: false,
@@ -121,11 +121,27 @@ mod windows {
         }
     }
 
+    pub(in super::super) fn read_create_at(
+        source: &super::super::native_file_create::SourceReference<'_>,
+        offset: u64,
+        buffer: &mut [u8],
+        eof: bool,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<usize, Error> {
+        PendingRead {
+            file: &source.raw,
+            io: CompletionIo::new()?,
+            buffer,
+            pending: false,
+        }
+        .read_at(offset, eof, cancellation)
+    }
+
     /// Borrows the Cf owner and caller buffer through actual I/O completion.
     /// This guard is never moved after submission; methods only borrow it.
     /// Its Drop also drains on unwind before either borrow can be released.
     struct PendingRead<'a> {
-        file: &'a ProtectedCompletionFile,
+        file: &'a Handle,
         io: CompletionIo,
         buffer: &'a mut [u8],
         pending: bool,
@@ -153,7 +169,7 @@ mod windows {
             // ownership of the borrowed Win32 handle is taken or transferred.
             let submitted = unsafe {
                 ReadFile(
-                    self.file.raw,
+                    *self.file,
                     self.buffer.as_mut_ptr().cast(),
                     length,
                     null_mut(),
@@ -180,7 +196,7 @@ mod windows {
                 // SAFETY: exact live submitted pair; no buffer access occurs
                 // until completion. wait=false permits cancellation polling.
                 let complete = unsafe {
-                    GetOverlappedResult(self.file.raw, &mut self.io.overlapped, &mut count, 0)
+                    GetOverlappedResult(*self.file, &mut self.io.overlapped, &mut count, 0)
                 };
                 if complete != 0 {
                     self.pending = false;
@@ -207,13 +223,13 @@ mod windows {
             }
             // SAFETY: cancel only this read. Success or NOT_FOUND is not drain
             // proof, so all references/event/buffer remain live for the wait.
-            unsafe { CancelIoEx(self.file.raw, &self.io.overlapped) };
+            unsafe { CancelIoEx(*self.file, &self.io.overlapped) };
             loop {
                 let mut count = 0;
                 // SAFETY: exact pair and storage stay live through definitive
                 // terminal completion; an unresponsive driver can block here.
                 let complete = unsafe {
-                    GetOverlappedResult(self.file.raw, &mut self.io.overlapped, &mut count, 1)
+                    GetOverlappedResult(*self.file, &mut self.io.overlapped, &mut count, 1)
                 };
                 if complete != 0
                     || !matches!(
@@ -234,6 +250,9 @@ mod windows {
         }
     }
 }
+
+#[cfg(windows)]
+pub(super) use windows::read_create_at;
 
 #[cfg(test)]
 mod tests {

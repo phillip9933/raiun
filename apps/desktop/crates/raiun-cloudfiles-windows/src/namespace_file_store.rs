@@ -689,6 +689,19 @@ pub struct FileCreateLease {
     poisoned: bool,
 }
 impl FileCreateLease {
+    #[cfg(windows)]
+    pub(crate) fn record_remote_verified(
+        &mut self,
+        proof: &crate::opencloud::file_create::VerifiedCreateReadback,
+    ) -> Result<(), StoreError> {
+        if !self.submitted_here {
+            return Err(StoreError::Invalid);
+        }
+        let report = proof
+            .report_for(self.loaded.record.intent())
+            .map_err(|_| StoreError::Invalid)?;
+        self.append(NamespaceEventKind::RemoteVerified { report })
+    }
     pub fn record(&self) -> &StoredFileJoin {
         &self.loaded.record
     }
@@ -772,6 +785,9 @@ fn check_transition(
         return Err(StoreError::Invalid);
     }
     match kind {
+        NamespaceEventKind::RemoteVerified { .. } if prior.remote == NamespacePhase::Submitted => {
+            Ok(())
+        }
         NamespaceEventKind::RemoteSubmitted
             if prior.sequence == 0 && prior.remote == NamespacePhase::Pending =>
         {

@@ -7,6 +7,105 @@ use crate::namespace_intent::{
 use crate::{LocalFileIdentity, RemoteEditBaseline};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+#[test]
+fn own_pending_snapshot_keeps_initial_clean_fence_but_late_close_invalidates() {
+    use crate::{
+        close_capture_admission::CloseCaptureAdmission, save_rename_admission::SaveRenameAdmission,
+    };
+    let (_temp, base, files, _) = fixture();
+    let tracker = Arc::new(CloseCaptureAdmission::default());
+    let ticket = tracker.try_begin_rename().unwrap();
+    let (_, lifetime) = ticket.dispatch_probe(tracker.clone()).unwrap();
+    let guard = SaveRenameAdmission::new(ticket);
+    let _lifetime = lifetime;
+    let observation = _lifetime.observation_probe();
+    assert!(guard.probe_clean(|| base.discover_records().map(|records| !records.is_empty())));
+    let _fresh = files
+        .publish_fresh(draft(&base, 1), commit(&base, 1), mapping(), &mut || false)
+        .unwrap();
+    let records = base.discover_records().unwrap();
+    assert_eq!(records.len(), 1);
+    assert!(!matches!(
+        records[0].state,
+        StreamedAttemptState::LocallyAcknowledged { .. }
+    ));
+    assert!(
+        !guard.probe_clean(|| base.discover_records().map(|records| !records.is_empty())),
+        "generic content scan sees own Pending body"
+    );
+    assert!(
+        guard.check().is_ok() && observation(),
+        "retained clean fence permits only own newly published body"
+    );
+    let mut close = tracker.begin_close();
+    close.finish_clean();
+    assert!(
+        guard.check().is_ok(),
+        "old rename clean-close behavior is unchanged"
+    );
+    assert!(
+        !observation(),
+        "new create conservatively refuses even an intervening clean close"
+    );
+}
+
+#[test]
+fn connected_create_remote_verified_prefix_reopens_unresolved_without_replay_or_completion() {
+    let (_temp, base, files, _) = fixture();
+    let publication = files
+        .publish_fresh(draft(&base, 1), commit(&base, 1), mapping(), &mut || false)
+        .unwrap();
+    let key = publication.record().key().clone();
+    let intent = publication.record().intent().clone();
+    let NamespaceOperation::CreateFile {
+        destination,
+        content,
+    } = intent.operation
+    else {
+        unreachable!()
+    };
+    let mut lease = files.acquire_dispatch(&key).unwrap();
+    lease.mark_submitted().unwrap();
+    let report = crate::namespace_intent::NamespaceDestinationReport {
+        destination: destination.clone(),
+        remote: RemoteEditBaseline {
+            resource_id: "created-file".into(),
+            etag: "\"created-v1\"".into(),
+            byte_len: 1,
+        },
+        content: Some(content),
+    };
+    let mut wrong = report.clone();
+    wrong.destination.name = "different.bin".into();
+    assert!(
+        lease
+            .append(NamespaceEventKind::RemoteVerified { report: wrong })
+            .is_err()
+    );
+    lease
+        .append(NamespaceEventKind::RemoteVerified { report })
+        .unwrap();
+    assert_eq!(lease.progress().remote, NamespacePhase::Verified);
+    assert!(!lease.progress().recorded_complete);
+    assert!(
+        lease
+            .append(NamespaceEventKind::LocalCompleted { destination })
+            .is_err()
+    );
+    drop(lease);
+    let reopened = FileCreateStore::new(base).unwrap();
+    let retained = reopened.discover().unwrap().pop().unwrap();
+    assert_eq!(retained.progress().remote, NamespacePhase::Verified);
+    assert!(!retained.progress().recorded_complete);
+    assert!(
+        reopened
+            .acquire_dispatch(&key)
+            .unwrap()
+            .mark_submitted()
+            .is_err()
+    );
+}
+
 fn policy() -> StorePolicy {
     StorePolicy {
         max_content_bytes: 32 * 1024 * 1024,

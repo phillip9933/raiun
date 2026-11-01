@@ -5,9 +5,11 @@
 //! mutex guard before doing I/O. Close capture is never suppressed when admission
 //! bookkeeping fails: failure makes future rename admission unknown instead.
 
+#[cfg(any(windows, test))]
+use std::sync::Arc;
 use std::sync::{
     Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 #[derive(Default)]
@@ -23,6 +25,7 @@ struct State {
 pub(crate) struct CloseCaptureAdmission {
     state: Mutex<State>,
     unknown: AtomicBool,
+    create_observation: AtomicU64,
 }
 
 impl CloseCaptureAdmission {
@@ -30,16 +33,19 @@ impl CloseCaptureAdmission {
     /// Failure is fail-closed for rename admission but does not stop capture.
     pub(crate) fn begin_close(&self) -> CloseCapturePermit<'_> {
         let active = match self.try_state() {
-            Some(mut state) => match state.active_closes.checked_add(1) {
-                Some(next) => {
-                    state.active_closes = next;
-                    true
+            Some(mut state) => {
+                self.advance_create_observation();
+                match state.active_closes.checked_add(1) {
+                    Some(next) => {
+                        state.active_closes = next;
+                        true
+                    }
+                    None => {
+                        self.unknown.store(true, Ordering::Release);
+                        false
+                    }
                 }
-                None => {
-                    self.unknown.store(true, Ordering::Release);
-                    false
-                }
-            },
+            }
             None => false,
         };
         CloseCapturePermit {
@@ -71,6 +77,25 @@ impl CloseCaptureAdmission {
             dispatch_claimed: false,
             completion_claimed: false,
         })
+    }
+
+    fn advance_create_observation(&self) {
+        let mut epoch = self.create_observation.load(Ordering::Acquire);
+        loop {
+            let Some(next) = epoch.checked_add(1) else {
+                self.unknown.store(true, Ordering::Release);
+                return;
+            };
+            match self.create_observation.compare_exchange_weak(
+                epoch,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(current) => epoch = current,
+            }
+        }
     }
 
     fn try_state(&self) -> Option<std::sync::MutexGuard<'_, State>> {
@@ -189,7 +214,65 @@ pub(crate) struct SaveRenameTicket<'a> {
     completion_claimed: bool,
 }
 
+/// Ends the owned SDK observation before the borrowed ticket is retired.
+#[cfg(any(windows, test))]
+pub(crate) struct DispatchProbeLifetime {
+    live: Arc<AtomicBool>,
+    ready: Arc<AtomicBool>,
+    tracker: Arc<CloseCaptureAdmission>,
+    epoch: u64,
+}
+#[cfg(any(windows, test))]
+impl Drop for DispatchProbeLifetime {
+    fn drop(&mut self) {
+        self.live.store(false, Ordering::Release);
+    }
+}
+#[cfg(any(windows, test))]
+impl DispatchProbeLifetime {
+    pub(crate) fn observation_probe(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        let tracker = self.tracker.clone();
+        let live = self.live.clone();
+        let epoch = self.epoch;
+        Arc::new(move || {
+            live.load(Ordering::Acquire)
+                && !tracker.unknown.load(Ordering::Acquire)
+                && tracker.create_observation.load(Ordering::Acquire) == epoch
+        })
+    }
+    pub(crate) fn arm_after_dispatch(&self) -> bool {
+        self.ready
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+}
+
 impl SaveRenameTicket<'_> {
+    #[cfg(any(windows, test))]
+    pub(crate) fn dispatch_probe(
+        &self,
+        tracker: Arc<CloseCaptureAdmission>,
+    ) -> Option<(Arc<dyn Fn() -> bool + Send + Sync>, DispatchProbeLifetime)> {
+        let epoch = tracker.create_observation.load(Ordering::Acquire);
+        if !std::ptr::eq(self.tracker, Arc::as_ptr(&tracker)) || !self.is_current() {
+            return None;
+        }
+        let live = Arc::new(AtomicBool::new(true));
+        let ready = Arc::new(AtomicBool::new(false));
+        let lifetime = DispatchProbeLifetime {
+            live: live.clone(),
+            ready: ready.clone(),
+            tracker: tracker.clone(),
+            epoch,
+        };
+        let probe = Arc::new(move || {
+            live.load(Ordering::Acquire)
+                && ready.load(Ordering::Acquire)
+                && !tracker.unknown.load(Ordering::Acquire)
+                && tracker.create_observation.load(Ordering::Acquire) == epoch
+        });
+        Some((probe, lifetime))
+    }
     #[allow(dead_code)] // R55 explicit producer rechecks this ticket.
     pub(crate) fn is_current(&self) -> bool {
         if self.tracker.unknown.load(Ordering::Acquire) {
@@ -262,8 +345,105 @@ impl SaveRenameTicket<'_> {
     }
 }
 
+#[cfg(test)]
+mod connected_create_probe_tests {
+    use super::*;
+    #[test]
+    fn retired_ticket_invalidates_probe_even_if_lifetime_outlives_it() {
+        let tracker = Arc::new(CloseCaptureAdmission::default());
+        let mut ticket = tracker.try_begin_rename().unwrap();
+        let (probe, lifetime) = ticket.dispatch_probe(tracker.clone()).unwrap();
+        assert!(ticket.claim_dispatch());
+        assert!(lifetime.arm_after_dispatch());
+        assert!(probe());
+        drop(ticket);
+        let mut next = tracker.try_begin_rename().unwrap();
+        assert!(next.claim_dispatch());
+        assert!(!probe());
+        drop(lifetime);
+    }
+
+    #[test]
+    fn concurrent_atomic_polling_does_not_poison_and_claim_is_one_use() {
+        let tracker = Arc::new(CloseCaptureAdmission::default());
+        let mut ticket = tracker.try_begin_rename().unwrap();
+        assert!(
+            ticket
+                .dispatch_probe(Arc::new(CloseCaptureAdmission::default()))
+                .is_none()
+        );
+        let (probe, lifetime) = ticket.dispatch_probe(tracker.clone()).unwrap();
+        assert!(!probe());
+        assert!(ticket.claim_dispatch());
+        assert!(!ticket.claim_dispatch());
+        assert!(lifetime.arm_after_dispatch());
+        assert!(!lifetime.arm_after_dispatch());
+        let workers = (0..8)
+            .map(|_| {
+                let probe = probe.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..1000 {
+                        assert!(probe());
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert!(!tracker.unknown.load(Ordering::Acquire));
+    }
+    #[test]
+    fn dropped_lifetime_never_resurrects_under_new_clean_ticket() {
+        let tracker = Arc::new(CloseCaptureAdmission::default());
+        let mut ticket = tracker.try_begin_rename().unwrap();
+        let (probe, lifetime) = ticket.dispatch_probe(tracker.clone()).unwrap();
+        assert!(ticket.claim_dispatch());
+        assert!(lifetime.arm_after_dispatch());
+        assert!(probe());
+        drop(lifetime);
+        drop(ticket);
+        let mut next = tracker.try_begin_rename().unwrap();
+        assert!(next.claim_dispatch());
+        assert!(!probe());
+    }
+    #[test]
+    fn even_clean_close_invalidates_only_new_create_probe() {
+        let tracker = Arc::new(CloseCaptureAdmission::default());
+        let mut ticket = tracker.try_begin_rename().unwrap();
+        let (probe, lifetime) = ticket.dispatch_probe(tracker.clone()).unwrap();
+        assert!(ticket.claim_dispatch());
+        assert!(lifetime.arm_after_dispatch());
+        let mut close = tracker.begin_close();
+        assert!(!probe());
+        close.finish_clean();
+        assert!(ticket.is_current(), "original rename semantics preserved");
+        assert!(!probe());
+    }
+    #[test]
+    fn dirty_unknown_and_observation_overflow_fail_closed() {
+        let tracker = Arc::new(CloseCaptureAdmission::default());
+        let mut ticket = tracker.try_begin_rename().unwrap();
+        let (probe, lifetime) = ticket.dispatch_probe(tracker.clone()).unwrap();
+        assert!(ticket.claim_dispatch());
+        assert!(lifetime.arm_after_dispatch());
+        let mut close = tracker.begin_close();
+        close.mark_dirty_before_capture();
+        close.finish_durable();
+        assert!(!probe());
+        tracker
+            .create_observation
+            .store(u64::MAX, Ordering::Release);
+        let mut close = tracker.begin_close();
+        close.finish_clean();
+        assert!(tracker.unknown.load(Ordering::Acquire));
+        assert!(!probe());
+    }
+}
+
 impl Drop for SaveRenameTicket<'_> {
     fn drop(&mut self) {
+        self.tracker.advance_create_observation();
         let Some(mut state) = self.tracker.try_state() else {
             return;
         };

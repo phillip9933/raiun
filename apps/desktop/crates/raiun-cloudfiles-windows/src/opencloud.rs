@@ -6,6 +6,8 @@
 //! files to obtain opaque identities; callback identities are never treated
 //! as paths or URLs.
 
+#[cfg(windows)]
+pub(crate) mod file_create;
 #[cfg(any(windows, test))]
 mod file_rename;
 mod initial_save;
