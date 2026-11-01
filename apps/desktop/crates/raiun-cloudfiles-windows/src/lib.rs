@@ -736,6 +736,79 @@ impl fmt::Debug for NamespaceObservation {
     }
 }
 
+// Shared path correspondence only; native component and managed-parent admission
+// remain mandatory. The first component is the local namespace, never a Space.
+#[cfg(any(windows, test))]
+fn personal_create_relative(parent: &[&str], leaf: &str) -> Option<String> {
+    if parent.first() != Some(&"Personal") || parent.len() >= 256 {
+        return None;
+    }
+    let valid = |part: &str| {
+        !part.is_empty()
+            && !matches!(part, "." | "..")
+            && !part.contains(['/', '\\'])
+            && !part.chars().any(char::is_control)
+    };
+    if !valid(leaf) || parent.iter().any(|part| !valid(part)) {
+        return None;
+    }
+    // Bound before collecting/joining caller input, including separators.
+    let total = parent
+        .iter()
+        .copied()
+        .chain(std::iter::once(leaf))
+        .try_fold(0usize, |total, part| {
+            total.checked_add(part.len())?.checked_add(1)
+        })?;
+    if total > 32768 {
+        return None;
+    }
+    let relative = parent[1..]
+        .iter()
+        .copied()
+        .chain(std::iter::once(leaf))
+        .collect::<Vec<_>>()
+        .join("/");
+    (relative.len() <= 32768 && relative.len() + "Personal/".len() <= 32768).then_some(relative)
+}
+
+#[cfg(test)]
+mod personal_create_path_tests {
+    use super::personal_create_relative;
+    #[test]
+    fn parent_and_leaf_keep_exact_full_relative_path() {
+        assert_eq!(
+            personal_create_relative(&["Personal"], "file.bin").as_deref(),
+            Some("file.bin")
+        );
+        assert_eq!(
+            personal_create_relative(&["Personal", "Courses & CEUs #1", "nested"], "file.bin")
+                .as_deref(),
+            Some("Courses & CEUs #1/nested/file.bin")
+        );
+        assert_ne!(
+            personal_create_relative(&["Personal", "a"], "file.bin"),
+            personal_create_relative(&["Personal", "b"], "file.bin")
+        );
+    }
+    #[test]
+    fn invalid_scope_components_and_limits_refuse() {
+        for parent in [
+            vec![],
+            vec!["Spaces"],
+            vec!["personal"],
+            vec!["Personal", ".."],
+            vec!["Personal", "a/b"],
+        ] {
+            assert!(personal_create_relative(&parent, "file.bin").is_none());
+        }
+        assert!(personal_create_relative(&["Personal"], "a/b").is_none());
+        assert!(personal_create_relative(&["Personal"], "").is_none());
+        assert!(personal_create_relative(&vec!["Personal"; 256], "file.bin").is_none());
+        assert!(personal_create_relative(&["Personal"], &"a".repeat(32768)).is_none());
+    }
+}
+
 #[cfg(windows)]
 #[allow(dead_code)]
 impl ConfiguredRootConnection {
@@ -847,6 +920,32 @@ impl ConfiguredRootConnection {
     ) -> Result<FileCreateStep, Error> {
         self.inner.begin_fresh_personal_file_create(
             backend,
+            name,
+            authorization,
+            generation,
+            job,
+            current,
+        )
+    }
+    /// Start one create under an existing managed ordinary Personal parent.
+    /// Components are immutable hints; the original owner independently admits
+    /// the exact managed/native parent. No parent creation or fallback occurs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_fresh_personal_file_create_in_parent(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        parent_components: &[&str],
+        name: &str,
+        authorization: namespace_intent::CapturedAuthorization,
+        generation: u64,
+        job: &StreamedRecoveryJob,
+        current: std::sync::Arc<
+            dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync,
+        >,
+    ) -> Result<FileCreateStep, Error> {
+        self.inner.begin_fresh_personal_file_create_in_parent(
+            backend,
+            parent_components,
             name,
             authorization,
             generation,

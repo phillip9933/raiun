@@ -185,6 +185,7 @@ struct OwnerAttempt {
     tracker: Arc<CloseCaptureAdmission>,
     ticket: OwnedCreateAdmission,
     name: String,
+    parent_components: Vec<String>,
     job: crate::StreamedRecoveryJob,
     current: crate::opencloud::file_create::Current,
     dispatched: Arc<std::sync::atomic::AtomicBool>,
@@ -219,6 +220,7 @@ pub struct FileCreateTask {
     _flight: TaskFlight, // LAST: all owned network/body data drops before done.
 }
 struct Preparation {
+    parent_components: Vec<String>,
     recovery: Arc<dyn PreparedEditRecovery>,
     job: crate::StreamedRecoveryJob,
     current: crate::opencloud::file_create::Current,
@@ -271,7 +273,10 @@ impl FileCreateTask {
                     {
                         return Err(BackendError::Unavailable);
                     }
+                    let parent_components: Vec<_> =
+                        prep.parent_components.iter().map(String::as_str).collect();
                     let admission = self.backend.admit_file_create(
+                        &parent_components,
                         self.key.root,
                         self.key.authorization,
                         &prep.job,
@@ -353,7 +358,30 @@ impl ConfiguredRootConnection {
         job: &crate::StreamedRecoveryJob,
         original_current: crate::opencloud::file_create::Current,
     ) -> Result<FileCreateStep, Error> {
-        if !valid_component(name)
+        self.begin_fresh_personal_file_create_in_parent(
+            backend,
+            &["Personal"],
+            name,
+            authorization,
+            generation,
+            job,
+            original_current,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn begin_fresh_personal_file_create_in_parent(
+        &self,
+        backend: &Arc<crate::OpenCloudPlaceholderBackend>,
+        parent_components: &[&str],
+        name: &str,
+        authorization: CapturedAuthorization,
+        generation: u64,
+        job: &crate::StreamedRecoveryJob,
+        original_current: crate::opencloud::file_create::Current,
+    ) -> Result<FileCreateStep, Error> {
+        if crate::personal_create_relative(parent_components, name).is_none()
+            || parent_components.iter().any(|part| !valid_component(part))
+            || !valid_component(name)
             || generation == 0
             || !original_current(authorization)
             || job.is_stopped()
@@ -421,6 +449,10 @@ impl ConfiguredRootConnection {
             tracker,
             ticket,
             name: name.into(),
+            parent_components: parent_components
+                .iter()
+                .map(|part| (*part).to_owned())
+                .collect(),
             job: job.clone(),
             current: current.clone(),
             dispatched,
@@ -430,6 +462,7 @@ impl ConfiguredRootConnection {
         let task = attempt.task(
             Phase::Prepare,
             TaskKind::Prepare(Box::new(Preparation {
+                parent_components: attempt.parent_components.clone(),
                 recovery,
                 job,
                 current,
@@ -661,6 +694,13 @@ impl ConfiguredRootConnection {
         let authorization = attempt.key.authorization;
         let generation = attempt.key.generation;
         let name = attempt.name.as_str();
+        let components: Vec<_> = attempt
+            .parent_components
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let relative_path = crate::personal_create_relative(&components, name)
+            .ok_or(Error::InvalidConfiguredRoot)?;
         let current = &attempt.current;
         let capture_job = admission.capture_job();
         let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
@@ -671,10 +711,14 @@ impl ConfiguredRootConnection {
                 root,
                 &captured.route,
                 captured.identity,
-                &["Personal"],
+                &components,
                 FILE_READ_ATTRIBUTES,
             )?;
-        let path = root.path.join("Personal").join(name);
+        let path = attempt
+            .parent_components
+            .iter()
+            .fold(root.path.clone(), |path, part| path.join(part))
+            .join(name);
         let wide = wide_path(&path)?;
         // SAFETY: bounded no-follow metadata probe, no data or DELETE access.
         let raw = unsafe {
@@ -738,7 +782,7 @@ impl ConfiguredRootConnection {
                 root,
                 &captured.route,
                 captured.identity,
-                &["Personal"],
+                &components,
                 FILE_READ_ATTRIBUTES,
             )?;
             if !same_edit_snapshot(snapshot, now.0)
@@ -770,7 +814,7 @@ impl ConfiguredRootConnection {
                     volume_serial: parent_snapshot.identity.volume_serial,
                     file_index: parent_snapshot.identity.file_index,
                 },
-                local_components: vec!["Personal".into()],
+                local_components: attempt.parent_components.clone(),
                 remote: captured.remote.clone(),
             },
             name: name.into(),
@@ -785,7 +829,7 @@ impl ConfiguredRootConnection {
                 scope: captured.scope.clone(),
                 generation,
                 local_file,
-                relative_path: name.into(),
+                relative_path: relative_path.clone(),
                 remote: None,
                 content_len: snapshot.file_size,
             })
@@ -835,8 +879,16 @@ impl ConfiguredRootConnection {
                     },
                 },
                 committed,
-                CapturedCreatePath::new(vec!["Personal".into(), name.into()], name.into())
-                    .map_err(|_| Error::EditRecoveryUnavailable)?,
+                CapturedCreatePath::new(
+                    attempt
+                        .parent_components
+                        .iter()
+                        .cloned()
+                        .chain(std::iter::once(name.into()))
+                        .collect(),
+                    relative_path,
+                )
+                .map_err(|_| Error::EditRecoveryUnavailable)?,
                 &mut || stopped(),
             )
             .map_err(|_| Error::EditRecoveryUnavailable)?;
@@ -882,6 +934,11 @@ impl ConfiguredRootConnection {
     ) -> Result<crate::FreshFileCreateOutcome, Error> {
         use crate::FreshFileCreateOutcome::*;
         self.check_create_attempt(attempt)?;
+        let components: Vec<_> = attempt
+            .parent_components
+            .iter()
+            .map(String::as_str)
+            .collect();
         let ticket = &mut attempt.ticket;
         let backend = &attempt.backend;
         let authorization = attempt.key.authorization;
@@ -948,7 +1005,7 @@ impl ConfiguredRootConnection {
                 root,
                 &admission.parent.route,
                 admission.parent.identity,
-                &["Personal"],
+                &components,
                 FILE_READ_ATTRIBUTES,
             )?;
             if actual_parent.identity != parent_snapshot.identity

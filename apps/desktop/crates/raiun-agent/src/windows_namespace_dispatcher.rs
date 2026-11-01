@@ -36,8 +36,8 @@ fn observation_namespace(parts: &[String]) -> bool {
             Some("Personal" | "Spaces")
         )
 }
-fn direct_personal(parts: &[String]) -> bool {
-    parts.len() == 2 && parts.first().map(String::as_str) == Some("Personal")
+fn create_personal(parts: &[String]) -> bool {
+    (2..=256).contains(&parts.len()) && parts.first().map(String::as_str) == Some("Personal")
 }
 #[derive(Clone, Copy)]
 enum ObservedShape {
@@ -68,7 +68,7 @@ fn select_observed(
     }
     match shape {
         Some(ObservedShape::Cloud) => Ok(Selection::SkipCloud),
-        Some(ObservedShape::PlainFile) if creates && direct_personal(parts) => {
+        Some(ObservedShape::PlainFile) if creates && create_personal(parts) => {
             Ok(Selection::CreateFile)
         }
         Some(ObservedShape::PlainDirectory) if directories && personal(parts) => {
@@ -508,14 +508,14 @@ mod connected {
                             return Err(HOLD);
                         };
                         let components = hints.get(index).ok_or(HOLD)?.components();
-                        if !direct_personal(components) {
+                        if !create_personal(components) {
                             return Err(HOLD);
                         }
                         if self.create.as_mut().ok_or(HOLD)?.step(
                             connection,
                             backend,
                             root,
-                            &components[1],
+                            components,
                             generation,
                             workers.ok_or(HOLD)?,
                         )? {
@@ -595,7 +595,7 @@ mod connected {
                                     connection,
                                     backend,
                                     root,
-                                    &components[1],
+                                    &components,
                                     generation,
                                     workers,
                                 )? {
@@ -720,15 +720,18 @@ mod tests {
         assert!(
             select_observed(&directory, Some(ObservedShape::PlainDirectory), false, true).is_err()
         );
-        assert!(
+        assert_eq!(
             select_observed(
-                &parts("Personal/nested/file.bin"),
+                &parts("Personal/Courses & CEUs #1/nested/file.bin"),
                 Some(ObservedShape::PlainFile),
                 true,
                 true
-            )
-            .is_err()
+            ),
+            Ok(Selection::CreateFile)
         );
+        assert!(!create_personal(&parts("Spaces/team/file.bin")));
+        assert!(!create_personal(&parts("Personal")));
+        assert!(!create_personal(&vec!["Personal".into(); 257]));
         // A later Skip must never erase an endpoint from the raw batch plan.
         assert_eq!(
             select_observed(&direct, Some(ObservedShape::Cloud), false, true),

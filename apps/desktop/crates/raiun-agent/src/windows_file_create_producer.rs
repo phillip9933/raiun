@@ -15,7 +15,7 @@ pub(crate) const PRODUCTION_ENABLED: bool = false;
 pub(crate) const HOLD: &str =
     "File creation sync needs attention. Existing recovery files have been kept.";
 struct Candidate {
-    name: String,
+    components: Vec<String>,
     generation: u64,
     job: StreamedRecoveryJob,
     current: Arc<dyn Fn(CapturedAuthorization) -> bool + Send + Sync>,
@@ -93,11 +93,16 @@ impl Producer {
         connection: &ConfiguredRootConnection,
         backend: &Arc<OpenCloudPlaceholderBackend>,
         root: ConfiguredRootIdentity,
-        name: &str,
+        components: &[String],
         record_generation: u64,
         workers: &mut Workers,
     ) -> Result<bool, &'static str> {
-        if self.held || !self.current(backend, root) {
+        if components.len() < 2
+            || components.len() > 256
+            || components.first().map(String::as_str) != Some("Personal")
+            || self.held
+            || !self.current(backend, root)
+        {
             self.stop(connection);
             self.drain_held(connection, workers);
             return Err(HOLD);
@@ -105,7 +110,7 @@ impl Producer {
         if self
             .candidate
             .as_ref()
-            .is_some_and(|old| old.name != name || old.generation != record_generation)
+            .is_some_and(|old| old.components != components || old.generation != record_generation)
         {
             self.stop(connection);
             return Err(HOLD);
@@ -135,7 +140,7 @@ impl Producer {
             let original_job = job.clone();
             self.cancel_on_drop = Some(CancelOnDrop::new(Arc::new(move || original_job.cancel())));
             self.candidate = Some(Candidate {
-                name: name.into(),
+                components: components.to_vec(),
                 generation: record_generation,
                 job,
                 current,
@@ -174,9 +179,13 @@ impl Producer {
             };
             Some(
                 connection
-                    .begin_fresh_personal_file_create(
+                    .begin_fresh_personal_file_create_in_parent(
                         backend,
-                        name,
+                        &candidate.components[..candidate.components.len() - 1]
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>(),
+                        candidate.components.last().ok_or(HOLD)?,
                         auth,
                         record_generation,
                         &candidate.job,

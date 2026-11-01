@@ -8,6 +8,7 @@ use crate::streamed_store::namespace_file_store::VerifiedFileJoin;
 pub(crate) type Current = Arc<dyn Fn(CapturedAuthorization) -> bool + Send + Sync>;
 pub(crate) struct Admission {
     pub(crate) parent: namespace::CapturedDirectoryParent,
+    parent_components: Vec<String>,
     catalog: Arc<dyn ProviderIdentityCatalog>,
     catalog_scope: ProviderIdentityCatalogScope,
     auth: CapturedAuthorization,
@@ -17,6 +18,12 @@ pub(crate) struct Admission {
     backend: std::sync::Weak<OpenCloudPlaceholderBackend>,
 }
 impl Admission {
+    fn child_path(&self, leaf: &str) -> Result<String, BackendError> {
+        let components: Vec<_> = self.parent_components.iter().map(String::as_str).collect();
+        let relative =
+            crate::personal_create_relative(&components, leaf).ok_or(BackendError::Unavailable)?;
+        Ok(format!("/{relative}"))
+    }
     pub(crate) fn capture_job(&self) -> crate::StreamedRecoveryJob {
         self.job.clone()
     }
@@ -49,7 +56,7 @@ impl Admission {
             return Err(unavailable());
         }
         let scope = &self.parent.scope;
-        let path = format!("/{}", report.destination.name);
+        let path = self.child_path(&report.destination.name)?;
         // Refresh the exact historical readback tuple before entering the local
         // publication fence. This is bounded metadata observation, not remote CAS.
         let context = RangeReadContext {
@@ -64,6 +71,22 @@ impl Admission {
         if !root.directory || root.encrypted || !root.writable || root.id != scope.root_resource_id
         {
             return Err(unavailable());
+        }
+        if self.parent_components.len() > 1 {
+            let parent = backend
+                .client
+                .stat_with_context(&scope.space_id, &self.parent.path, context)
+                .map_err(|_| BackendError::Unavailable)?;
+            self.check(backend)?;
+            if parent.path != self.parent.path
+                || parent.id != self.parent.remote.resource_id
+                || !parent.directory
+                || parent.encrypted
+                || !parent.writable
+                || !namespace::strong(&parent.etag)
+            {
+                return Err(unavailable());
+            }
         }
         let observed = backend
             .client
@@ -101,7 +124,9 @@ impl Admission {
             return Err(unavailable());
         }
         let scope = &self.parent.scope;
-        let path = format!("/{}", report.destination.name);
+        let path = self
+            .child_path(&report.destination.name)
+            .map_err(|_| unavailable())?;
         let identity = binding_identity(
             &self.catalog_scope,
             "file",
@@ -221,12 +246,14 @@ impl Admission {
         };
         if destination.parent.scope != self.parent.scope
             || destination.parent.authorization != self.auth
-            || destination.parent.local_components != ["Personal"]
+            || destination.parent.local_components != self.parent_components
             || destination.parent.remote != self.parent.remote
             || joined.manifest().binding().remote.is_some()
             || joined.manifest().binding().generation != intent.record_generation
             || joined.manifest().binding().local_file != destination.local_file
             || joined.manifest().binding().content_len != content.byte_len
+            || joined.manifest().binding().relative_path
+                != self.child_path(&destination.name)?.trim_start_matches('/')
             || joined.manifest().binding().scope != self.parent.scope
             || joined
                 .manifest()
@@ -256,26 +283,52 @@ impl Admission {
             .map_err(|_| BackendError::Unavailable)?;
         // No backend lease, account guard or parent callback spans SDK recursion.
         before_sdk()?;
-        let proof = backend
-            .client
-            .recovery_create_blocking_reader_cancellable_with_context(
-                &self.parent.scope.space_id,
-                "/",
-                &self.parent.scope.root_resource_id,
-                &destination.name,
-                reader,
-                content.byte_len,
-                digest,
-                RangeReadContext {
-                    deadline: self.job.deadline(),
-                    token_generation: self.auth.token_generation,
-                },
-                cancelled,
-            )
-            .map_err(|_| BackendError::Unavailable)?;
+        let path = self.child_path(&destination.name)?;
+        let relative = path.trim_start_matches('/');
+        let context = RangeReadContext {
+            deadline: self.job.deadline(),
+            token_generation: self.auth.token_generation,
+        };
+        let proof = if self.parent_components.len() == 1 {
+            // Preserve the established explicit root wrapper's SDK behavior.
+            backend
+                .client
+                .recovery_create_blocking_reader_cancellable_with_context(
+                    &self.parent.scope.space_id,
+                    "/",
+                    &self.parent.scope.root_resource_id,
+                    relative,
+                    reader,
+                    content.byte_len,
+                    digest,
+                    context,
+                    cancelled,
+                )
+        } else {
+            let parent = raiun_opencloud::RecoveryCreateParent {
+                path: &self.parent.path,
+                resource_id: &self.parent.remote.resource_id,
+                etag: &self.parent.remote.etag,
+            };
+            backend
+                .client
+                .recovery_create_blocking_reader_with_parent_cancellable_with_context(
+                    &self.parent.scope.space_id,
+                    "/",
+                    &self.parent.scope.root_resource_id,
+                    relative,
+                    &parent,
+                    reader,
+                    content.byte_len,
+                    digest,
+                    context,
+                    cancelled,
+                )
+        }
+        .map_err(|_| BackendError::Unavailable)?;
         self.check(backend)?;
         let observed = proof.observed;
-        if observed.entry.path != format!("/{}", destination.name)
+        if observed.entry.path != path
             || observed.entry.directory
             || observed.entry.encrypted
             || !observed.entry.writable
@@ -330,13 +383,14 @@ impl VerifiedCreateReadback {
 impl OpenCloudPlaceholderBackend {
     pub(crate) fn admit_file_create(
         self: &Arc<Self>,
+        components: &[&str],
         root: crate::ConfiguredRootIdentity,
         auth: CapturedAuthorization,
         job: &crate::StreamedRecoveryJob,
         current: Current,
     ) -> Result<Admission, BackendError> {
         job.check()?;
-        if !current(auth) {
+        if !current(auth) || crate::personal_create_relative(components, "probe").is_none() {
             return Err(BackendError::Unavailable);
         }
         let catalog = self
@@ -361,15 +415,15 @@ impl OpenCloudPlaceholderBackend {
                 .lease_gate
                 .read()
                 .map_err(|_| BackendError::Unavailable)?;
-            self.capture_namespace_parent_under_lease(
-                &["Personal"],
-                root,
-                auth,
-                job.cancellation(),
-            )?
+            self.capture_namespace_parent_under_lease(components, root, auth, job.cancellation())?
         };
         if catalog_scope.local_root() != root
-            || parent.path != "/"
+            || parent.path
+                != if components.len() == 1 {
+                    "/".into()
+                } else {
+                    format!("/{}", components[1..].join("/"))
+                }
             || parent.scope.space_id != catalog_scope.personal_space_id
             || parent.scope.root_resource_id != catalog_scope.personal_root_resource_id
         {
@@ -377,6 +431,7 @@ impl OpenCloudPlaceholderBackend {
         }
         let result = Admission {
             parent,
+            parent_components: components.iter().map(|part| (*part).to_owned()).collect(),
             catalog,
             catalog_scope,
             auth,
