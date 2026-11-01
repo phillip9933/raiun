@@ -10,6 +10,8 @@ mod dav_text_tests;
 #[cfg(test)]
 mod dav_upload_regressions;
 #[cfg(test)]
+mod mkdir_cancellation_tests;
+#[cfg(test)]
 mod operation_cancellation_tests;
 mod recovery_stream;
 pub use recovery_stream::{RecoveryCreateParent, RecoveryCreateReadback, RecoveryStreamReadback};
@@ -1844,22 +1846,51 @@ impl OpenCloudClient {
         relative_path: &str,
         context: RangeReadContext,
     ) -> Result<DirectoryCreateResponse, CloudError> {
+        self.mkdir_with_context_and_cancellation(
+            space,
+            remote_root_path,
+            expected_root_id,
+            relative_path,
+            context,
+            || false,
+        )
+    }
+
+    /// As `mkdir_with_context`, with the original owner's cancellation probe
+    /// checked after metadata admission and immediately before the single send.
+    /// Cancellation observed after send starts is uncertain, never a safe retry.
+    /// The probe must be local and must not perform network or journal work.
+    pub fn mkdir_with_context_and_cancellation(
+        &self,
+        space: &str,
+        remote_root_path: &str,
+        expected_root_id: &str,
+        relative_path: &str,
+        context: RangeReadContext,
+        is_cancelled: impl Fn() -> bool,
+    ) -> Result<DirectoryCreateResponse, CloudError> {
         let _guard = RangeContextGuard::enter(context);
+        ensure_not_cancelled(&is_cancelled)?;
         self.ensure_context_current(context)?;
         let path = recovery_target_path(remote_root_path, relative_path)?;
         if path.trim_end_matches('/') == remote_root_path.trim_end_matches('/') {
             return Err(invalid("cannot create a Space root"));
         }
         self.validate_recovery_root(space, remote_root_path, expected_root_id)?;
+        ensure_not_cancelled(&is_cancelled)?;
         let (selected, url) = self.transfer_url(space, &path)?;
         self.ensure_writable_target(&selected, &url, &path)?;
         self.ensure_context_current(context)?;
         let (request, token) =
             self.request(Method::from_bytes(b"MKCOL").expect("static method"), &url)?;
+        ensure_not_cancelled(&is_cancelled)?;
         let response = match request.send() {
             Ok(response) => response,
             Err(error) => return Ok(DirectoryCreateResponse::Uncertain(network(error))),
         };
+        if let Err(error) = ensure_not_cancelled(&is_cancelled) {
+            return Ok(DirectoryCreateResponse::Uncertain(error));
+        }
         let status = response.status();
         if status == StatusCode::CREATED {
             return Ok(match self.ensure_context_current(context) {
