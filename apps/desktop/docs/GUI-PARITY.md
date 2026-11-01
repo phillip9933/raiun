@@ -248,8 +248,9 @@ parity remain unfinished. Reuse historical evidence only within its tested scope
 
 The 2 November source checkpoint adds guarded new-file creation in Personal and
 existing managed Personal subfolders, owned SDK worker phases and metadata-only
-population classification. A directory owner/SDK phase foundation is integrated;
-its Agent scheduling and auth/drain ordering repair remain separate work.
+population classification. Directory scheduling on the same SDK workers and
+account-change drain ordering are integrated and source-checked; connected
+device and exact-package acceptance remain open.
 Normal CLI streamed-factory qualification is compiled only and stays disabled.
 Production
 creation remains disabled; compiled fixtures do not establish native or package
