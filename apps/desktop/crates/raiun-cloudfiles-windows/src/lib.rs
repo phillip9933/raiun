@@ -12,6 +12,10 @@ mod backend;
 mod close_capture_admission;
 mod edit_journal;
 mod initial_edit_queue;
+#[cfg(any(windows, test))]
+mod namespace_entry_observation;
+#[cfg(windows)]
+pub use namespace_entry_observation::NamespaceEntryKind;
 #[cfg(windows)]
 mod native_file_rename_producer;
 #[cfg(any(windows, test))]
@@ -575,6 +579,19 @@ pub struct NamespaceDirectoryObservation {
     pub placeholder_state: u32,
     pub opaque_identity: Option<[u8; 16]>,
 }
+/// Value-only metadata from a pinned, no-follow Personal entry. The kind only
+/// distinguishes physical entry shapes; it does not establish provider ownership,
+/// clean content, continuity, a completed upload or permission to mutate it.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NamespaceEntryObservation {
+    pub local_file: LocalFileIdentity,
+    pub kind: NamespaceEntryKind,
+    pub attributes: u32,
+    pub reparse_tag: u32,
+    pub placeholder_state: u32,
+    pub byte_len: u64,
+}
 /// Copied physical metadata from a live connected root. These values are
 /// untrusted hints; they carry no retained pin, classification, publication
 /// permission or native completion authority.
@@ -729,6 +746,15 @@ impl ConfiguredRootConnection {
     /// A pending error retains the same observer/root/connection aggregate.
     pub fn stop_namespace_observer(&mut self, wait: std::time::Duration) -> Result<(), Error> {
         self.inner.stop_namespace_observer(wait)
+    }
+    /// Inspect physical kind without admission, adoption, hydration or cloud I/O.
+    /// A cloud-shaped entry can be excluded from ordinary-directory candidates;
+    /// it must never be treated as proof of a healthy or completed upload.
+    pub fn observe_namespace_entry(
+        &self,
+        components: &[&str],
+    ) -> Result<NamespaceEntryObservation, Error> {
+        self.inner.observe_namespace_entry(components)
     }
     /// Read metadata only for an existing Personal file placeholder beneath
     /// this connected root. Returned values never replace the public rename

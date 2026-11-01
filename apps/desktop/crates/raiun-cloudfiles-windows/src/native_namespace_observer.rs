@@ -271,6 +271,114 @@ impl ConfiguredRootConnection {
 }
 
 impl ConfiguredRootConnection {
+    pub(crate) fn observe_namespace_entry(
+        &self,
+        components: &[&str],
+    ) -> Result<crate::NamespaceEntryObservation, Error> {
+        if components.len() < 2
+            || components.len() > 256
+            || components.first().copied() != Some("Personal")
+            || components.iter().any(|part| !valid_component(part))
+            || components.iter().map(|part| part.len() + 1).sum::<usize>() > 32_768
+        {
+            return Err(Error::InvalidConfiguredRoot);
+        }
+        let context = self.namespace_observation_context()?;
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        let mut path = root.path.clone();
+        let mut ancestors = Vec::with_capacity(components.len() - 1);
+        for component in &components[..components.len() - 1] {
+            path.push(component);
+            let handle = open_root(
+                &path,
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+            )?;
+            let snapshot = root_snapshot(handle.0)?;
+            if snapshot.identity.volume_serial != root.identity.volume_serial
+                || snapshot.identity.file_index == 0
+                || snapshot.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+                || !valid_callback_directory_snapshot(snapshot)
+                || !windows_paths_equal(
+                    &final_path_for_handle(handle.0).map_err(|_| Error::ConfiguredRootChanged)?,
+                    &path,
+                )
+            {
+                return Err(Error::ConfiguredRootChanged);
+            }
+            ancestors.push((handle, snapshot));
+        }
+        path.push(components.last().ok_or(Error::InvalidConfiguredRoot)?);
+        let wide = wide_path(&path)?;
+        // SAFETY: validated bounded path under this live registered root. Each
+        // no-follow ancestor remains pinned without DELETE sharing. Metadata-only
+        // BACKUP_SEMANTICS permits directories; OPEN_REPARSE_POINT never follows
+        // the leaf. No data/WRITE/DELETE access or external handle is provided.
+        let raw = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        };
+        if raw.is_null() || raw == INVALID_HANDLE_VALUE {
+            return Err(win32_io_error("observe connected namespace entry metadata"));
+        }
+        let leaf = RawOwnedHandle(raw);
+        let snapshot = root_snapshot(leaf.0)?;
+        if snapshot.identity.volume_serial != root.identity.volume_serial
+            || snapshot.identity.file_index == 0
+            || !windows_paths_equal(
+                &final_path_for_handle(leaf.0).map_err(|_| Error::ConfiguredRootChanged)?,
+                &path,
+            )
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        let kind = crate::namespace_entry_observation::classify(
+            snapshot.file_attributes,
+            snapshot.reparse_tag,
+            snapshot.placeholder_state,
+            cleanup_cloud_reparse_tag(snapshot.reparse_tag),
+        )
+        .ok_or(Error::ConfiguredRootChanged)?;
+        // Concurrent metadata changes remain unknown. No prior observation or
+        // path can substitute for this exact live handle/root check.
+        let mut metadata = ancestors
+            .iter()
+            .map(|(handle, before)| (handle, *before))
+            .collect::<Vec<_>>();
+        metadata.push((&leaf, snapshot));
+        for (handle, before) in metadata {
+            let after = root_snapshot(handle.0)?;
+            if after.identity != before.identity
+                || after.file_attributes != before.file_attributes
+                || after.reparse_tag != before.reparse_tag
+                || after.placeholder_state != before.placeholder_state
+            {
+                return Err(Error::ConfiguredRootChanged);
+            }
+        }
+        if self.namespace_observation_context()? != context {
+            return Err(Error::ProviderUnavailable);
+        }
+        Ok(crate::NamespaceEntryObservation {
+            local_file: LocalFileIdentity {
+                volume_serial: snapshot.identity.volume_serial,
+                file_index: snapshot.identity.file_index,
+            },
+            kind,
+            attributes: snapshot.file_attributes,
+            reparse_tag: snapshot.reparse_tag,
+            placeholder_state: snapshot.placeholder_state,
+            byte_len: snapshot.file_size,
+        })
+    }
+
     pub(crate) fn observe_namespace_file(
         &self,
         components: &[&str],
