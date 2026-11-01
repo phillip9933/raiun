@@ -76,6 +76,34 @@ impl Engine {
         }
         Ok(&self.offline_cache.as_ref().ok_or_else(refused)?.cache)
     }
+    /// Record local custody failure visibility only; this does not attempt an upload.
+    pub fn record_create_handoff_failure(
+        &self,
+        scope: &CacheScope,
+        path: &str,
+    ) -> Result<(), CloudError> {
+        self.create_cache(scope)?;
+        validate_remote_path(path).map_err(|_| refused())?;
+        if !path.starts_with('/') || path == "/" || path.ends_with('/') {
+            return Err(refused());
+        }
+        let context = self.offline_cache.as_ref().ok_or_else(refused)?;
+        // Match retained original scope metadata, never obtain fresh network authority.
+        if self
+            .cached_scope(scope.space_id(), context)
+            .map_err(cache_cloud_error)?
+            != *scope
+        {
+            return Err(refused());
+        }
+        let transfer = self.begin_transfer(None, scope.space_id(), path, "upload")?;
+        self.finish_transfer(
+            transfer,
+            "failed",
+            0,
+            Some("File saved locally but upload could not be queued. Open Saved upload copies in Transfers to recover it."),
+        )
+    }
     pub fn ordinary_create_scope(&self, space: &str) -> Result<Option<CacheScope>, CloudError> {
         if self.offline_cache.is_none() {
             return Ok(None);

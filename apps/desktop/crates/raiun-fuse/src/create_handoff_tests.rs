@@ -120,12 +120,12 @@ fn create_handoff_sequential_release_allows_two_bodies_and_pending_reads() {
     let mut fs = filesystem(&temp, backend.clone());
     let mut owner = enable_create_handoff(&mut fs, 1024 * 1024, true);
     let (a, a_handle) = new_create_bytes(&fs, "create-a.txt", b"first immutable body");
-    fs.commit(&a_handle).unwrap();
+    fs.finalize_create_handle(&a_handle).unwrap();
     fs.finish_ordinary_handle(&a_handle).unwrap();
     assert!(!fs.spool_paths("personal", "/create-a.txt").0.exists());
     barrier.wait_entered(1);
     let (_, b_handle) = new_create_bytes(&fs, "create-b.txt", b"second immutable body");
-    fs.commit(&b_handle).unwrap();
+    fs.finalize_create_handle(&b_handle).unwrap();
     fs.finish_ordinary_handle(&b_handle).unwrap();
     barrier.wait_entered(2);
     assert_eq!(barrier.peak.load(Ordering::SeqCst), 2);
@@ -196,7 +196,7 @@ fn create_handoff_failed_admission_freezes_same_handle_and_preserves_v3_recovery
     let mut fs = filesystem(&temp, Arc::new(FakeBackend::default()));
     let mut owner = enable_create_handoff(&mut fs, 1, false);
     let (_, handle) = new_create_bytes(&fs, "too-large.txt", b"preserved body exceeds budget");
-    assert!(fs.commit(&handle).is_err());
+    assert!(fs.finalize_create_handle(&handle).is_err());
     let (id, marker) = {
         let open = handle.lock().unwrap();
         let OpenFile::Write(write) = &*open else {
@@ -214,7 +214,7 @@ fn create_handoff_failed_admission_freezes_same_handle_and_preserves_v3_recovery
         assert_eq!(marker.version, 3);
         (marker.handoff.unwrap().id, write.manifest.clone())
     };
-    assert!(fs.commit(&handle).is_err());
+    assert!(fs.finalize_create_handle(&handle).is_err());
     let marker: OrdinaryWriteManifest = serde_json::from_slice(&fs::read(marker).unwrap()).unwrap();
     assert_eq!(marker.handoff.unwrap().id, id);
     assert!(
@@ -264,7 +264,7 @@ fn create_handoff_lost_receipt_marker_relooks_same_id_without_second_write() {
             receipt.storage_receipt().write.id,
         )
     };
-    fs.commit(&handle).unwrap();
+    fs.finalize_create_handle(&handle).unwrap();
     let receipt = fs
         .engine
         .create_receipt_for_handoff(&scope, "/receipt.txt", &id)
@@ -294,7 +294,7 @@ fn create_handoff_mount_owner_stop_cancels_joins_without_unmount_and_closes_admi
     let mut fs = filesystem(&temp, backend);
     let owner = enable_create_handoff(&mut fs, 1024 * 1024, true);
     let (_, handle) = new_create_bytes(&fs, "cancel.txt", b"retained on cancellation");
-    fs.commit(&handle).unwrap();
+    fs.finalize_create_handle(&handle).unwrap();
     barrier.wait_entered(1);
     let mut mount = MountHandle {
         session: None,
@@ -316,7 +316,7 @@ fn create_handoff_mount_owner_stop_cancels_joins_without_unmount_and_closes_admi
         pending.receipt.state,
         raiun_cache::OrdinaryCreateState::Uncertain
     );
-    assert!(fs.commit(&handle).is_err());
+    assert!(fs.finalize_create_handle(&handle).is_err());
 }
 
 #[test]
@@ -325,7 +325,7 @@ fn create_handoff_foreign_receipt_marker_never_authorizes_spool_cleanup() {
     let mut fs = filesystem(&temp, Arc::new(FakeBackend::default()));
     let mut owner = enable_create_handoff(&mut fs, 1024 * 1024, false);
     let (_, handle) = new_create_bytes(&fs, "foreign-marker.txt", b"must remain recoverable");
-    fs.commit(&handle).unwrap();
+    fs.finalize_create_handle(&handle).unwrap();
     let (spool, marker) = fs.spool_paths("personal", "/foreign-marker.txt");
     let mut json: serde_json::Value = serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
     json["handoff"]["receipt"]["write_id"] = serde_json::json!(999999);
@@ -403,7 +403,7 @@ fn create_handoff_source_path_replacement_preserves_original_fd_and_never_readie
         fs::write(&write.spool, b"replacement pathname").unwrap();
         preserved
     };
-    assert!(fs.commit(&handle).is_err());
+    assert!(fs.finalize_create_handle(&handle).is_err());
     assert!(
         fs.engine
             .ordinary_create_page(&scope, None, 32)
@@ -457,7 +457,7 @@ fn create_handoff_same_inode_body_change_cannot_replace_durable_expected_hash() 
         fs::write(&write.spool, b"tampered bytes").unwrap();
         intent
     };
-    assert!(fs.commit(&handle).is_err());
+    assert!(fs.finalize_create_handle(&handle).is_err());
     assert!(
         fs.engine
             .ordinary_create_page(&scope, None, 32)
@@ -539,9 +539,22 @@ fn live_fuse_create_handoff_sequential_fsync_close_two_held_uploads_in_vm() {
             .create_new(true)
             .open(&path)
             .unwrap();
-        file.write_all(bytes).unwrap();
-        file.sync_all().unwrap(); // local custody must ACK while PUT remains held
-        assert!(file.write_all(b"refused edit after handoff").is_err());
+        file.write_all(b"first editable version").unwrap();
+        file.sync_all().unwrap(); // editable local custody, not Cache handoff
+        drop(file.try_clone().unwrap()); // kernel dup-close FLUSH is not final RELEASE
+        file.set_len(0).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(bytes).unwrap(); // same FD remains writable after fsync
+        file.sync_all().unwrap();
+        let scope = engine.ordinary_write_scope("personal").unwrap();
+        assert_eq!(
+            engine
+                .ordinary_create_page(&scope, None, 32)
+                .unwrap()
+                .items
+                .len(),
+            expected_entered - 1
+        );
         drop(file); // actual kernel FLUSH/RELEASE must retire only receipt-owned spool
         barrier.wait_entered(expected_entered);
         let stem = format!("{:016x}", stable_hash(&format!("personal\0/{name}")));
@@ -620,7 +633,7 @@ fn create_handoff_durable_marker_precedes_cache_ack_and_ack_failure_retains_writ
                 .and_then(|bytes| serde_json::from_slice::<OrdinaryWriteManifest>(&bytes).ok())
                 .is_some_and(|marker| marker.handoff.is_none_or(|intent| intent.receipt.is_none()))
     });
-    assert!(fs.commit(&handle).is_err());
+    assert!(fs.finalize_create_handle(&handle).is_err());
     let open = handle.lock().unwrap();
     let OpenFile::Write(write) = &*open else {
         panic!("writer")
@@ -652,7 +665,7 @@ fn create_handoff_persisted_receipt_cannot_be_downgraded_to_intent_only() {
         "no-downgrade.txt",
         b"persisted receipt retains ownership",
     );
-    fs.commit(&handle).unwrap();
+    fs.finalize_create_handle(&handle).unwrap();
     let mut open = handle.lock().unwrap();
     let OpenFile::Write(write) = &mut *open else {
         panic!("writer")
@@ -689,7 +702,7 @@ fn create_handoff_cleanup_preserves_same_inode_bytes_changed_after_ack() {
     let mut fs = filesystem(&temp, Arc::new(FakeBackend::default()));
     let mut owner = enable_create_handoff(&mut fs, 1024 * 1024, false);
     let (_, handle) = new_create_bytes(&fs, "changed-after-ack.txt", b"original bytes");
-    fs.commit(&handle).unwrap();
+    fs.finalize_create_handle(&handle).unwrap();
     let (spool, marker) = fs.spool_paths("personal", "/changed-after-ack.txt");
     fs::write(&spool, b"tampered bytes").unwrap();
     assert!(fs.finish_ordinary_handle(&handle).is_err());
@@ -717,7 +730,7 @@ fn create_handoff_preledger_frozen_child_blocks_ordinary_ancestor_rmdir() {
         "failed-child.txt",
         b"preserve before Cache admission",
     );
-    assert!(fs.commit(&handle).is_err());
+    assert!(fs.finalize_create_handle(&handle).is_err());
     assert!(fs.finish_ordinary_handle(&handle).is_err()); // release writer reservation, retain recovery
     let scope = fs.engine.ordinary_write_scope("personal").unwrap();
     assert!(
@@ -770,7 +783,7 @@ impl EvictedCreateReadFixture {
         let owner = enable_create_handoff(&mut fs, 1024 * 1024, dispatch);
         let (node, handle) =
             new_create_bytes(&fs, "evicted-read.txt", b"original verified create bytes");
-        fs.commit(&handle).unwrap();
+        fs.finalize_create_handle(&handle).unwrap();
         fs.finish_ordinary_handle(&handle).unwrap();
         if dispatch {
             barrier.wait_entered(1);
@@ -1107,4 +1120,374 @@ fn create_handoff_scope_registration_refuses_offline_unknown_or_changed_root() {
         assert!(fs.register_create_upload_scopes(&owner.handle()).is_err());
         owner.stop_and_join().unwrap();
     }
+}
+
+fn edit_working_bytes(
+    fs: &RaiunFilesystem,
+    handle: &Arc<Mutex<OpenFile>>,
+    offset: u64,
+    bytes: &[u8],
+) -> Result<(), CloudError> {
+    let mut open = handle.lock().unwrap();
+    let OpenFile::Write(write) = &mut *open else {
+        panic!("working writer")
+    };
+    create_handoff::write_bytes(fs, write, offset, bytes, false).map(|_| ())
+}
+fn truncate_working(
+    fs: &RaiunFilesystem,
+    handle: &Arc<Mutex<OpenFile>>,
+    len: u64,
+) -> Result<(), CloudError> {
+    let mut open = handle.lock().unwrap();
+    let OpenFile::Write(write) = &mut *open else {
+        panic!("working writer")
+    };
+    create_handoff::truncate(fs, write, len).map(|_| ())
+}
+
+#[test]
+fn create_release_handoff_fsync_remains_editable_and_only_close_queues_final_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let barrier = Arc::new(CreateBarrier::default());
+    let backend = Arc::new(FakeBackend {
+        create_barrier: Some(barrier.clone()),
+        ..FakeBackend::default()
+    });
+    let mut fs = filesystem(&temp, backend.clone());
+    let mut owner = enable_create_handoff(&mut fs, 1024 * 1024, true);
+    let (node, handle) = new_create_bytes(&fs, "editable.txt", b"first version");
+    let scope = fs.engine.ordinary_write_scope("personal").unwrap();
+    fs.commit(&handle).unwrap(); // actual fsync/flush local-only helper
+    assert!(
+        fs.engine
+            .ordinary_create_page(&scope, None, 1)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert_eq!(barrier.state.lock().unwrap().0, 0);
+    edit_working_bytes(&fs, &handle, 0, b"second version").unwrap();
+    fs.commit(&handle).unwrap();
+    truncate_working(&fs, &handle, 0).unwrap();
+    edit_working_bytes(&fs, &handle, 0, b"final bytes").unwrap();
+    fs.commit(&handle).unwrap();
+    let (spool, marker) = fs.spool_paths("personal", "/editable.txt");
+    let saved: OrdinaryWriteManifest = serde_json::from_slice(&fs::read(marker).unwrap()).unwrap();
+    assert_eq!(saved.version, 4);
+    assert!(saved.handoff.is_none());
+    assert!(!saved.working.unwrap().closing);
+    let fh = fs.open_node(node.ino, libc::O_RDONLY).unwrap();
+    let reader = fs.file_handle(fh).unwrap();
+    let mut open = reader.lock().unwrap();
+    let OpenFile::Read(ReadHandle::Local(file)) = &mut *open else {
+        panic!("local working read")
+    };
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"final bytes");
+    drop(open);
+    assert!(
+        !backend
+            .files
+            .lock()
+            .unwrap()
+            .contains_key(&("personal".into(), "/editable.txt".into()))
+    );
+    fs.finish_ordinary_handle(&handle).unwrap();
+    barrier.wait_entered(1);
+    let view = fs
+        .engine
+        .pending_create(&scope, "/editable.txt")
+        .unwrap()
+        .unwrap();
+    let mut snapshot = fs
+        .engine
+        .fetch_create_snapshot(&scope, "/editable.txt", &view.receipt.handoff_id)
+        .unwrap();
+    let mut bytes = Vec::new();
+    snapshot.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"final bytes");
+    assert!(!spool.exists());
+    assert!(edit_working_bytes(&fs, &handle, 0, b"late").is_err());
+    assert!(truncate_working(&fs, &handle, 0).is_err());
+    owner.stop_and_join().unwrap();
+}
+
+#[test]
+fn create_release_handoff_dup_flush_and_read_reference_do_not_freeze_or_publish() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut fs = filesystem(&temp, Arc::new(FakeBackend::default()));
+    let mut owner = enable_create_handoff(&mut fs, 1024 * 1024, false);
+    let (_, handle) = new_create_bytes(&fs, "dup-flush.txt", b"first");
+    let duplicated = handle.clone();
+    fs.commit(&handle).unwrap(); // dup close FLUSH, not final RELEASE
+    fs.commit(&duplicated).unwrap();
+    edit_working_bytes(&fs, &duplicated, 0, b"later").unwrap();
+    let scope = fs.engine.ordinary_write_scope("personal").unwrap();
+    assert!(
+        fs.engine
+            .ordinary_create_page(&scope, None, 1)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    fs.finish_ordinary_handle(&handle).unwrap();
+    assert!(
+        fs.engine
+            .pending_create(&scope, "/dup-flush.txt")
+            .unwrap()
+            .is_some()
+    );
+    assert!(edit_working_bytes(&fs, &duplicated, 0, b"late callback").is_err());
+    owner.stop_and_join().unwrap();
+}
+
+#[test]
+fn create_release_handoff_failed_admission_retains_readonly_export_and_failed_transfer() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut fs = filesystem(&temp, Arc::new(FakeBackend::default()));
+    let mut owner = enable_create_handoff(&mut fs, 1, false);
+    let (_, handle) = new_create_bytes(&fs, "quota-attention.txt", b"retained final local body");
+    fs.commit(&handle).unwrap(); // local ACK must not require closed-queue quota
+    assert!(fs.finish_ordinary_handle(&handle).is_err());
+    let scope = fs.engine.ordinary_write_scope("personal").unwrap();
+    assert!(
+        fs.engine
+            .ordinary_create_page(&scope, None, 1)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    let page = recovery::list_recoveries(&fs.spool_dir, None, 100).unwrap();
+    let item = page
+        .items
+        .iter()
+        .find(|item| item.remote_path.as_deref() == Some("/quota-attention.txt"))
+        .unwrap();
+    assert!(
+        item.warnings
+            .contains(&RecoveryWarning::RetainedCreateHandoff)
+    );
+    assert!(item.local_data_path.is_some());
+    let mut saved = recovery::open_saved_create_copy(
+        &fs.spool_dir,
+        &item.spool_key,
+        &scope,
+        "/quota-attention.txt",
+    )
+    .unwrap();
+    assert!(
+        saved
+            .write_all(b"must not write through recovery reader")
+            .is_err()
+    );
+    let mut bytes = Vec::new();
+    saved.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"retained final local body");
+    assert!(
+        fs.engine
+            .transfers(10)
+            .unwrap()
+            .iter()
+            .any(|t| t.path == "/quota-attention.txt" && t.state == "failed")
+    );
+    owner.stop_and_join().unwrap();
+}
+
+#[test]
+fn create_release_handoff_stopped_owner_retains_closed_v4_without_replay() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut fs = filesystem(&temp, Arc::new(FakeBackend::default()));
+    let mut owner = enable_create_handoff(&mut fs, 1024 * 1024, false);
+    let (_, handle) = new_create_bytes(&fs, "stopped.txt", b"retained on owner stop");
+    fs.commit(&handle).unwrap();
+    owner.stop_and_join().unwrap();
+    assert!(fs.commit(&handle).is_err());
+    assert!(edit_working_bytes(&fs, &handle, 0, b"refused").is_err());
+    assert!(fs.finish_ordinary_handle(&handle).is_err());
+    let scope = fs.engine.ordinary_write_scope("personal").unwrap();
+    let (_, path) = fs.spool_paths("personal", "/stopped.txt");
+    let marker: OrdinaryWriteManifest = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(marker.version, 4);
+    assert!(marker.working.unwrap().closing);
+    assert!(marker.handoff.is_none());
+    assert!(
+        fs.engine
+            .ordinary_create_page(&scope, None, 1)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(edit_working_bytes(&fs, &handle, 0, b"late retained callback").is_err());
+    assert!(
+        fs.engine
+            .transfers(10)
+            .unwrap()
+            .iter()
+            .any(|t| t.path == "/stopped.txt" && t.state == "failed")
+    );
+}
+
+#[test]
+fn create_release_handoff_restart_working_copy_is_scope_bound_readonly_and_never_adopted() {
+    let temp = tempfile::tempdir().unwrap();
+    let backend = Arc::new(FakeBackend::default());
+    let mut fs = filesystem(&temp, backend.clone());
+    let mut owner = enable_create_handoff(&mut fs, 1024 * 1024, false);
+    let (_, handle) = new_create_bytes(&fs, "unclosed.txt", b"first synced bytes");
+    fs.commit(&handle).unwrap();
+    // Continued writes can change length after the marker's last synced size;
+    // recovery must preserve that legitimate local state, not reject a checksum.
+    edit_working_bytes(&fs, &handle, 0, b"continued bytes after the last fsync").unwrap();
+    {
+        let open = handle.lock().unwrap();
+        let OpenFile::Write(write) = &*open else {
+            panic!("writer")
+        };
+        write.file.sync_all().unwrap();
+    }
+    let scope = fs.engine.ordinary_write_scope("personal").unwrap();
+    let spool_dir = fs.spool_dir.clone();
+    owner.stop_and_join().unwrap();
+    drop(owner);
+    drop(handle);
+    drop(fs); // no final RELEASE, simulates retained daemon restart state
+    let restarted = filesystem(&temp, backend.clone());
+    let page = recovery::list_recoveries(&spool_dir, None, 100).unwrap();
+    let item = page
+        .items
+        .iter()
+        .find(|item| item.remote_path.as_deref() == Some("/unclosed.txt"))
+        .unwrap();
+    assert!(
+        item.warnings
+            .contains(&RecoveryWarning::EditableCreateWorkingCopy)
+    );
+    let mut saved =
+        recovery::open_saved_create_copy(&spool_dir, &item.spool_key, &scope, "/unclosed.txt")
+            .unwrap();
+    let mut bytes = Vec::new();
+    saved.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"continued bytes after the last fsync");
+    assert!(saved.set_len(0).is_err());
+    let wrong_scope = raiun_cache::CacheScope::new(
+        scope.origin(),
+        "other-account",
+        scope.space_id(),
+        scope.root_resource_id(),
+        raiun_cache::ScopeProtection::PlaintextAllowed,
+    )
+    .unwrap();
+    assert!(
+        recovery::open_saved_create_copy(
+            &spool_dir,
+            &item.spool_key,
+            &wrong_scope,
+            "/unclosed.txt"
+        )
+        .is_err()
+    );
+    assert!(
+        recovery::open_saved_create_copy(&spool_dir, &item.spool_key, &scope, "/different-path")
+            .is_err()
+    );
+    assert!(
+        restarted
+            .prepare_write(999, "personal", "/unclosed.txt", None, false)
+            .is_err()
+    );
+    assert!(
+        !backend
+            .files
+            .lock()
+            .unwrap()
+            .contains_key(&("personal".into(), "/unclosed.txt".into()))
+    );
+    assert!(
+        restarted
+            .engine
+            .transfers(10)
+            .unwrap()
+            .iter()
+            .all(|t| t.direction != "download")
+    );
+}
+
+#[test]
+fn create_release_handoff_missing_previously_recorded_receipt_never_readmits() {
+    let temp = tempfile::tempdir().unwrap();
+    let backend = Arc::new(FakeBackend::default());
+    let mut fs = filesystem(&temp, backend.clone());
+    let mut owner = enable_create_handoff(&mut fs, 1024 * 1024, false);
+    let (_, handle) = new_create_bytes(
+        &fs,
+        "lost-receipt.txt",
+        b"preserve missing receipt evidence",
+    );
+    let scope = fs.engine.ordinary_write_scope("personal").unwrap();
+    {
+        let mut open = handle.lock().unwrap();
+        let OpenFile::Write(write) = &mut *open else {
+            panic!("writer")
+        };
+        write.file.sync_all().unwrap();
+        create_handoff::prepare(write).unwrap();
+        let mut value =
+            serde_json::to_value(write.create.as_ref().unwrap().intent.as_ref().unwrap()).unwrap();
+        value["receipt"] = serde_json::json!({"write_id": 9999, "content_resource_id": "old-record", "content_etag": "old-content-revision"});
+        write.create.as_mut().unwrap().intent = Some(serde_json::from_value(value).unwrap());
+        create_handoff::persist(write).unwrap();
+    }
+    let calls = backend.stat_calls.load(Ordering::SeqCst);
+    assert!(fs.finish_ordinary_handle(&handle).is_err());
+    assert_eq!(backend.stat_calls.load(Ordering::SeqCst), calls);
+    assert!(
+        fs.engine
+            .ordinary_create_page(&scope, None, 1)
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    let (spool, marker) = fs.spool_paths("personal", "/lost-receipt.txt");
+    assert_eq!(
+        fs::read(spool).unwrap(),
+        b"preserve missing receipt evidence"
+    );
+    assert!(marker.exists());
+    owner.stop_and_join().unwrap();
+}
+
+#[test]
+fn ordinary_verified_writer_revokes_cleanup_before_failed_write_or_truncate() {
+    let temp = tempfile::tempdir().unwrap();
+    let fs = filesystem(
+        &temp,
+        Arc::new(FakeBackend::with_file("/match.txt", b"original")),
+    );
+    let node = fs
+        .children(PERSONAL)
+        .unwrap()
+        .into_iter()
+        .find(|node| node.name == "match.txt")
+        .unwrap();
+    let fh = fs.open_node(node.ino, libc::O_RDWR).unwrap();
+    let handle = fs.file_handle(fh).unwrap();
+    edit_working_bytes(&fs, &handle, 0, b"verified").unwrap();
+    fs.commit(&handle).unwrap();
+    let mut open = handle.lock().unwrap();
+    let OpenFile::Write(write) = &mut *open else {
+        panic!("writer")
+    };
+    assert!(!write.dirty && write.cleanup_on_release);
+    // The read-only descriptor points to the same owned file and makes each
+    // mutation fail at the syscall. This checks ordering without global limits.
+    write.file = File::open(&write.spool).unwrap();
+    assert!(create_handoff::write_bytes(&fs, write, 0, b"new", false).is_err());
+    assert!(write.dirty && !write.cleanup_on_release);
+    write.dirty = false;
+    write.cleanup_on_release = true;
+    assert!(create_handoff::truncate(&fs, write, 0).is_err());
+    assert!(write.dirty && !write.cleanup_on_release);
+    assert_eq!(fs::read(&write.spool).unwrap(), b"verified");
 }

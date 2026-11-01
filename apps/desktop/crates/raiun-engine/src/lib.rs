@@ -9729,6 +9729,71 @@ mod tests {
             .unwrap()
     }
     #[cfg(unix)]
+    #[test]
+    fn create_handoff_failure_records_only_failed_local_custody_metadata() {
+        let (state, cloud, cache, engine) = responsiveness_fixture();
+        let source = state.path().join("retained-release-source");
+        fs::write(&source, b"retained release body").unwrap();
+        let receipt = queue_create_fixture(&engine, &cloud, &source, 991);
+        let scope = receipt.scope();
+        let path = &receipt.storage_receipt().write.logical_path;
+        let spaces = *cloud.spaces_calls.lock().unwrap();
+        let listings = *cloud.list_calls.lock().unwrap();
+        *cloud.fail_all.lock().unwrap() = Some(ErrorKind::Offline);
+        engine.record_create_handoff_failure(scope, path).unwrap();
+        let transfers = engine.transfers(10).unwrap();
+        assert_eq!(transfers.len(), 1);
+        let transfer = &transfers[0];
+        assert_eq!(transfer.origin, "provider");
+        assert_eq!(transfer.space_id, scope.space_id());
+        assert_eq!(&transfer.path, path);
+        assert_eq!(transfer.direction, "upload");
+        assert_eq!(transfer.state, "failed");
+        assert_eq!((transfer.bytes_done, transfer.bytes_total), (0, 0));
+        assert_eq!(
+            transfer.error.as_deref(),
+            Some(
+                "File saved locally but upload could not be queued. Open Saved upload copies in Transfers to recover it."
+            )
+        );
+        assert_eq!(fs::read(&source).unwrap(), b"retained release body");
+        assert_eq!(
+            cache
+                .ordinary_create_for_handoff(scope, &receipt.storage_receipt().handoff_id)
+                .unwrap()
+                .as_ref(),
+            Some(receipt.storage_receipt())
+        );
+        let mut snapshot = engine
+            .fetch_create_snapshot(scope, path, &receipt.storage_receipt().handoff_id)
+            .unwrap();
+        let mut bytes = Vec::new();
+        snapshot.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"retained release body");
+        for bad in ["/", "relative", "/sync/../bad", "/sync/bad/"] {
+            assert!(engine.record_create_handoff_failure(scope, bad).is_err());
+        }
+        for (account, root) in [
+            ("other-account", scope.root_resource_id()),
+            (scope.account_id(), "other-root"),
+        ] {
+            let wrong = CacheScope::new(
+                scope.origin(),
+                account,
+                scope.space_id(),
+                root,
+                ScopeProtection::PlaintextAllowed,
+            )
+            .unwrap();
+            assert!(engine.record_create_handoff_failure(&wrong, path).is_err());
+        }
+        assert_eq!(engine.transfers(10).unwrap().len(), 1);
+        assert_eq!(*cloud.spaces_calls.lock().unwrap(), spaces);
+        assert_eq!(*cloud.list_calls.lock().unwrap(), listings);
+        assert_eq!(*cloud.downloads.lock().unwrap(), 0);
+        assert_eq!(cloud.create_sends.load(Ordering::Acquire), 0);
+    }
+    #[cfg(unix)]
     fn create_hooks(allowed: bool) -> CreateUploadHooks {
         CreateUploadHooks {
             is_current: Arc::new(|| true),

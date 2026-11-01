@@ -4,8 +4,8 @@
 //! durable local spool and are uploaded with an ETag precondition on flush,
 //! fsync, and release. Failed uploads leave their spool and manifest in place.
 //! An explicit optional handoff constructor permits new ordinary creates to ACK
-//! durable local custody before remote delivery; default constructors keep the
-//! synchronous behavior. Pending identities never grant remote mutation authority.
+//! durable editable local custody on fsync/flush and publish only on final RELEASE;
+//! default constructors keep the synchronous behavior. Pending identities never grant remote mutation authority.
 //! Cached namespace state is intentionally bounded: at most 100,000 inodes,
 //! 10,000 visible entries per directory, 512 open directory snapshots, and
 //! 2,048 open file handles. The inode cache is released by unmounting; this
@@ -3464,6 +3464,21 @@ impl RaiunFilesystem {
         } else {
             None
         };
+        if binding.is_some() {
+            let (spool, marker) = self.spool_paths(&space, &path);
+            for path in [spool, marker] {
+                match fs::symlink_metadata(path) {
+                    Ok(_) => {
+                        return Err(CloudError::new(
+                            ErrorKind::Conflict,
+                            "existing recovery bytes cannot become an editable create",
+                        ));
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(io_cloud(error)),
+                }
+            }
+        }
         let mut write = self.prepare_write(ino, &space, &path, None, true)?;
         if binding
             .as_ref()
@@ -3474,10 +3489,9 @@ impl RaiunFilesystem {
                 "ordinary create root changed before spool admission",
             ));
         }
-        write.create = binding.map(|parent| create_handoff::NewCreate {
-            parent,
-            intent: None,
-        });
+        if let Some(parent) = binding {
+            create_handoff::initialize(self, &mut write, parent)?;
+        }
         let fh = self.register_handle(OpenFile::Write(Box::new(write)))?;
         let node = self.node(ino)?;
         reservation.disarm();
@@ -3534,8 +3548,21 @@ impl RaiunFilesystem {
         }
     }
 
+    fn finalize_create_handle(&self, handle: &Arc<Mutex<OpenFile>>) -> Result<(), CloudError> {
+        let mut open = handle
+            .lock()
+            .map_err(|_| io_error("open file state is unavailable"))?;
+        if let OpenFile::Write(write) = &mut *open {
+            if write.create.is_some() {
+                return create_handoff::close_and_commit(self, write);
+            }
+        }
+        drop(open);
+        self.commit(handle)
+    }
+
     fn finish_ordinary_handle(&self, handle: &Arc<Mutex<OpenFile>>) -> Result<(), CloudError> {
-        let result = self.commit(handle);
+        let result = self.finalize_create_handle(handle);
         let open = handle
             .lock()
             .map_err(|_| io_error("open file state is unavailable"))?;
@@ -4193,7 +4220,11 @@ impl RaiunFilesystem {
             let bytes = recovery::read_manifest_bytes(&manifest)
                 .map_err(|_| invalid("provider spool marker is unsafe"))?;
             if let Ok(marker) = serde_json::from_slice::<OrdinaryWriteManifest>(&bytes) {
-                if marker.version == 3 || marker.handoff.is_some() {
+                if marker.version == 3
+                    || marker.version == 4
+                    || marker.handoff.is_some()
+                    || marker.working.is_some()
+                {
                     return Err(CloudError::new(
                         ErrorKind::Conflict,
                         "create handoff is recovery-only; refusing writable reopen",
@@ -4542,11 +4573,11 @@ impl RaiunFilesystem {
         let OpenFile::Write(write) = &mut *open else {
             return Ok(());
         };
+        if write.create.is_some() {
+            return create_handoff::sync_editable(self, write);
+        }
         write.file.flush().map_err(io_cloud)?;
         write.file.sync_all().map_err(io_cloud)?;
-        if write.create.is_some() {
-            return create_handoff::commit(self, write);
-        }
         if !write.dirty {
             return Ok(());
         }
@@ -5462,19 +5493,7 @@ impl Filesystem for RaiunFilesystem {
                     "file was not opened for writing",
                 ));
             };
-            create_handoff::ensure_mutable(write)?;
-            let offset = if flags.0 & libc::O_APPEND != 0 {
-                write.file.metadata().map_err(io_cloud)?.len()
-            } else {
-                offset
-            };
-            write.file.seek(SeekFrom::Start(offset)).map_err(io_cloud)?;
-            write.file.write_all(data).map_err(io_cloud)?;
-            write.dirty = true;
-            let count = u32::try_from(data.len()).map_err(|_| {
-                CloudError::new(ErrorKind::Unsupported, "write request is too large")
-            })?;
-            Ok((count, offset.saturating_add(u64::from(count))))
+            create_handoff::write_bytes(self, write, offset, data, flags.0 & libc::O_APPEND != 0)
         });
         match result {
             Ok((count, size)) => {
@@ -6454,12 +6473,7 @@ impl Filesystem for RaiunFilesystem {
                         .map_err(|_| io_error("open file state is unavailable"))?;
                     let vault_lease = lease;
                     let updated_size = match &mut *open {
-                        OpenFile::Write(write) => {
-                            create_handoff::ensure_mutable(write)?;
-                            write.file.set_len(size).map_err(io_cloud)?;
-                            write.dirty = true;
-                            size
-                        }
+                        OpenFile::Write(write) => create_handoff::truncate(self, write, size)?,
                         OpenFile::VaultWrite(write) => {
                             let lease = vault_lease.ok_or_else(|| {
                                 CloudError::new(
@@ -6775,7 +6789,17 @@ impl RaiunFilesystem {
                     .map_err(|_| invalid("provider spool manifest is unsafe"))?;
                 let marker: OrdinaryWriteManifest = serde_json::from_slice(&bytes)
                     .map_err(|_| invalid("provider spool manifest is malformed"))?;
-                if marker.version == 3 {
+                if marker.version == 4 {
+                    let scope = self.engine.ordinary_write_scope(&space)?;
+                    let key = manifest
+                        .file_stem()
+                        .and_then(|key| key.to_str())
+                        .ok_or_else(|| invalid("working copy key is invalid"))?;
+                    ReadHandle::Local(
+                        recovery::open_saved_create_copy(&self.spool_dir, key, &scope, &entry.path)
+                            .map_err(|_| invalid("saved working copy is unsafe"))?,
+                    )
+                } else if marker.version == 3 {
                     let scope = self.engine.ordinary_write_scope(&space)?;
                     if !marker.matches_scope(&scope, &entry.path) {
                         return Err(invalid("create spool scope changed"));
@@ -8171,6 +8195,8 @@ struct OrdinaryWriteManifest {
     etag: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     handoff: Option<create_handoff::Intent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    working: Option<create_handoff::WorkingCopy>,
 }
 
 impl OrdinaryWriteManifest {
@@ -8200,6 +8226,7 @@ fn write_manifest(
     let encoded = serde_json::to_vec(&OrdinaryWriteManifest {
         version: 2,
         handoff: None,
+        working: None,
         origin: scope.origin().to_owned(),
         account_id: scope.account_id().to_owned(),
         space_id: scope.space_id().to_owned(),
@@ -8289,6 +8316,7 @@ fn read_manifest(
         serde_json::from_str(body).map_err(|_| invalid("provider spool manifest is malformed"))?;
     if manifest.version != 2
         || manifest.handoff.is_some()
+        || manifest.working.is_some()
         || manifest.origin != expected_scope.origin()
         || manifest.account_id != expected_scope.account_id()
         || manifest.space_id != expected_scope.space_id()
