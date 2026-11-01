@@ -29,6 +29,13 @@ use std::sync::{
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::{Builder as TempBuilder, NamedTempFile};
 
+mod ordinary_create;
+pub use ordinary_create::{
+    CreateHandoffRequest, CreateUploadHooks, DurableCreateReceipt, PendingCreateView,
+    VerifiedCreateParent,
+};
+#[cfg(unix)]
+pub use ordinary_create::{CreateUploadHandle, CreateUploadOwner};
 mod db_owner;
 mod folder_pair_document;
 pub mod folder_pairs;
@@ -1257,6 +1264,12 @@ impl Engine {
                 match self.backend.stat(space, path) {
                     Ok(entry) if entry.encrypted => Err(unsupported_encrypted_cache()),
                     Ok(entry) => self.overlay_pending_stat(&scope, path, entry),
+                    Err(error) if error.kind == ErrorKind::NotFound => {
+                        match self.pending_create(&scope, path)? {
+                            Some(pending) => Ok(pending.entry),
+                            None => Err(error),
+                        }
+                    }
                     Err(error) if error.kind == ErrorKind::Offline => {
                         if let Some(write) = context
                             .cache
@@ -1337,7 +1350,7 @@ impl Engine {
         let result = self.list_live(space, path);
         match result {
             Ok(mut entries) => {
-                if metadata.is_some() {
+                if metadata.is_some() && !self.create_overlap_live(&scope, path)? {
                     let cache_entries = entries
                         .iter()
                         .filter(|entry| !entry.encrypted)
@@ -1467,6 +1480,12 @@ impl Engine {
                         "cloud Space root changed during a provider mutation",
                     ));
                 }
+                if self.create_overlap_live(&mutation.scope, &parent_path)? {
+                    return Err(CloudError::new(
+                        ErrorKind::Conflict,
+                        "parent has unresolved local create custody",
+                    ));
+                }
                 let parent = if parent_path == "/" {
                     root
                 } else {
@@ -1553,6 +1572,16 @@ impl Engine {
         else {
             return Ok(remote);
         };
+        if let Some(receipt) = context
+            .cache
+            .ordinary_create_for_write(scope, write.id)
+            .map_err(cache_cloud_error)?
+        {
+            if receipt.state == raiun_cache::OrdinaryCreateState::Staged {
+                return Ok(remote);
+            }
+            return Ok(self.create_view(scope, receipt)?.entry);
+        }
         if remote.encrypted {
             context
                 .cache
@@ -1587,6 +1616,23 @@ impl Engine {
             .map_err(cache_cloud_error)?;
         for write in writes {
             if write.state == WriteState::Verified {
+                continue;
+            }
+            if let Some(receipt) = context
+                .cache
+                .ordinary_create_for_write(scope, write.id)
+                .map_err(cache_cloud_error)?
+            {
+                if receipt.state != raiun_cache::OrdinaryCreateState::Staged
+                    && receipt.state != raiun_cache::OrdinaryCreateState::Verified
+                {
+                    let local = self.create_view(scope, receipt)?.entry;
+                    if let Some(index) = entries.iter().position(|entry| entry.path == local.path) {
+                        entries[index] = local;
+                    } else {
+                        entries.push(local);
+                    }
+                }
                 continue;
             }
             let existing = entries
@@ -1896,6 +1942,12 @@ impl Engine {
                 .map_err(cache_cloud_error)?,
             Err(error) => return Err(error),
         };
+        if self.create_overlap_live(&scope, path)? {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "handed-off create cannot be replaced",
+            ));
+        }
         let metadata = fs::metadata(source).map_err(io_error)?;
         if !metadata.is_file() {
             return Err(CloudError::new(
@@ -2262,6 +2314,17 @@ impl Engine {
             .into_iter()
             .find(|write| write.id == write_id)
             .ok_or_else(|| CloudError::new(ErrorKind::NotFound, "pending write was not found"))?;
+        if context
+            .cache
+            .ordinary_create_for_write(&scope, write.id)
+            .map_err(cache_cloud_error)?
+            .is_some()
+        {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "durable creates require their one-use uploader",
+            ));
+        }
         if write.state == WriteState::Verified {
             return Err(CloudError::new(
                 ErrorKind::NotFound,
@@ -3326,6 +3389,7 @@ impl Engine {
 
     pub fn mkdir(&self, space: &str, path: &str) -> Result<RemoteEntry, CloudError> {
         let _guard = self.execution()?;
+        self.guard_create_mutation(space, &[path])?;
         let _metadata = self.metadata_publication()?;
         let cache_mutation = self.begin_cache_mutation(space, &[path])?;
         let id = self.begin_transfer(None, space, path, "mkdir")?;
@@ -3366,6 +3430,7 @@ impl Engine {
             ));
         }
         let _guard = self.execution()?;
+        self.guard_create_mutation(space, &[path])?;
         let _metadata = self.metadata_publication()?;
         let cache_mutation = self.begin_cache_mutation(space, &[path])?;
         let id = self.begin_transfer(None, space, path, "delete")?;
@@ -3415,6 +3480,7 @@ impl Engine {
             ));
         }
         let _guard = self.execution()?;
+        self.guard_create_mutation(space, &[from, to])?;
         let _metadata = self.metadata_publication()?;
         // FUSE may retire its spool after transferring ownership to the
         // durable write journal. A move must protect those edits as well.
@@ -4713,6 +4779,7 @@ impl Engine {
         };
         let before_hash = hash_file(source)?;
         let bytes = fs::metadata(source).map_err(io_error)?.len();
+        self.guard_create_mutation(space, &[path])?;
         let _metadata = self.metadata_publication()?;
         let cache_mutation = self.begin_cache_mutation(space, &[path])?;
         let id = self.begin_transfer(pair_id, space, path, "upload")?;
@@ -6043,6 +6110,9 @@ mod tests {
         list_repeat: Mutex<usize>,
         list_gate: Mutex<Option<(SyncSender<()>, Receiver<()>)>>,
         upload_gate: Mutex<Option<(SyncSender<()>, Receiver<()>)>>,
+        create_gate: Mutex<Option<(SyncSender<String>, Arc<AtomicBool>)>>,
+        create_sends: std::sync::atomic::AtomicUsize,
+        create_corrupt_readback: AtomicBool,
         download_gate: Mutex<Option<(SyncSender<()>, Receiver<()>)>>,
     }
 
@@ -6388,6 +6458,62 @@ mod tests {
                 return Err(CloudError::new(ErrorKind::Conflict, "fixture root changed"));
             }
             self.download(space, path, etag, destination)
+        }
+        fn upload_in_root_with_cancellation(
+            &self,
+            space: &str,
+            path: &str,
+            source: &Path,
+            condition: WriteCondition,
+            root: &str,
+            cancellation: &raiun_core::backend::OperationCancellation,
+        ) -> Result<RemoteEntry, CloudError> {
+            if cancellation.is_cancelled() {
+                return Err(CloudError::new(ErrorKind::Offline, "create cancelled"));
+            }
+            if self.remote_entry("/")?.id != root {
+                return Err(CloudError::new(ErrorKind::Conflict, "root changed"));
+            }
+            self.create_sends.fetch_add(1, Ordering::AcqRel);
+            let gate = self.create_gate.lock().unwrap().clone();
+            if let Some((started, release)) = gate {
+                started.send(path.into()).unwrap();
+                while !release.load(Ordering::Acquire) && !cancellation.is_cancelled() {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            }
+            if cancellation.is_cancelled() {
+                return Err(CloudError::new(ErrorKind::Offline, "create cancelled"));
+            }
+            let mut entry = self.upload_in_root(space, path, source, condition, root)?;
+            entry.etag = format!("\"{}\"", entry.etag);
+            self.entries.lock().unwrap().get_mut(path).unwrap().0.etag = entry.etag.clone();
+            Ok(entry)
+        }
+        fn download_in_root_with_cancellation(
+            &self,
+            space: &str,
+            path: &str,
+            etag: Option<&str>,
+            destination: &Path,
+            root: &str,
+            cancellation: &raiun_core::backend::OperationCancellation,
+        ) -> Result<RemoteEntry, CloudError> {
+            if cancellation.is_cancelled() {
+                return Err(CloudError::new(ErrorKind::Offline, "create cancelled"));
+            }
+            let result = self.download_in_root(space, path, etag, destination, root)?;
+            if self.create_corrupt_readback.load(Ordering::Acquire) {
+                let mut bytes = fs::read(destination).map_err(io_error)?;
+                if let Some(first) = bytes.first_mut() {
+                    *first ^= 1;
+                }
+                fs::write(destination, bytes).map_err(io_error)?;
+            }
+            if cancellation.is_cancelled() {
+                return Err(CloudError::new(ErrorKind::Offline, "create cancelled"));
+            }
+            Ok(result)
         }
         fn mkdir(&self, _space: &str, path: &str) -> Result<RemoteEntry, CloudError> {
             self.insert_dir(path);
@@ -9573,5 +9699,913 @@ mod tests {
             ErrorKind::Io
         );
         assert_eq!(*cloud.list_calls.lock().unwrap(), 0);
+    }
+
+    #[cfg(unix)]
+    fn queue_create_fixture(
+        engine: &Engine,
+        cloud: &FakeCloud,
+        source: &Path,
+        index: usize,
+    ) -> DurableCreateReceipt {
+        let scope = engine.ordinary_write_scope("space").unwrap();
+        let parent = cloud.remote_entry("/sync").unwrap();
+        let path = format!("/sync/create-{index}.txt");
+        let proof = engine
+            .capture_new_plaintext_create_parent(&scope, &path, Some(&parent.id), &|| true)
+            .unwrap();
+        engine
+            .queue_new_plaintext_create_scoped(
+                CreateHandoffRequest {
+                    parent: &proof,
+                    source: &File::open(source).unwrap(),
+                    expected_len: fs::metadata(source).unwrap().len(),
+                    expected_sha256: &hash_file(source).unwrap(),
+                    handoff_id: &format!("{index:032x}"),
+                    max_pending_bytes: 16 * 1024 * 1024,
+                },
+                &|| true,
+            )
+            .unwrap()
+    }
+    #[cfg(unix)]
+    fn create_hooks(allowed: bool) -> CreateUploadHooks {
+        CreateUploadHooks {
+            is_current: Arc::new(|| true),
+            dispatch_allowed: Arc::new(move |_| allowed),
+        }
+    }
+    #[cfg(unix)]
+    fn wait_create_state(
+        engine: &Engine,
+        scope: &CacheScope,
+        handoff: &str,
+        state: raiun_cache::OrdinaryCreateState,
+    ) {
+        let start = std::time::Instant::now();
+        loop {
+            if engine
+                .offline_cache
+                .as_ref()
+                .unwrap()
+                .cache
+                .ordinary_create_for_handoff(scope, handoff)
+                .unwrap()
+                .unwrap()
+                .state
+                == state
+            {
+                return;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(5),
+                "create did not reach {state:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+    #[cfg(unix)]
+    #[test]
+    fn durable_create_handoff_pending_reads_and_existing_mutator_exclusion() {
+        let (state, cloud, cache, engine) = responsiveness_fixture();
+        engine.list("space", "/").unwrap();
+        engine.list("space", "/sync").unwrap();
+        let source = state.path().join("source-create");
+        fs::write(&source, b"new immutable create").unwrap();
+        let receipt = queue_create_fixture(&engine, &cloud, &source, 1);
+        assert_eq!(cloud.create_sends.load(Ordering::Acquire), 0);
+        let storage = receipt.storage_receipt();
+        let scope = receipt.scope();
+        assert_eq!(storage.state, raiun_cache::OrdinaryCreateState::Ready);
+        assert!(engine.has_pending_create_overlap(scope, "/sync").unwrap());
+        assert!(
+            !engine
+                .stat("space", &storage.write.logical_path)
+                .unwrap()
+                .writable
+        );
+        assert!(
+            engine
+                .pending_create_children(scope, &storage.write.parent_resource_id)
+                .unwrap()
+                .iter()
+                .any(|view| view.receipt.handoff_id == storage.handoff_id)
+        );
+        let mut snapshot = engine
+            .fetch_create_snapshot(scope, &storage.write.logical_path, &storage.handoff_id)
+            .unwrap();
+        let mut bytes = Vec::new();
+        snapshot.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"new immutable create");
+        for result in [
+            engine
+                .put(
+                    "space",
+                    &storage.write.logical_path,
+                    &source,
+                    WriteCondition::Absent,
+                )
+                .map(|_| ()),
+            engine
+                .mkdir("space", &storage.write.logical_path)
+                .map(|_| ()),
+            engine.delete("space", "/sync", "etag"),
+            engine
+                .rename("space", "/sync", "/moved", "etag")
+                .map(|_| ()),
+        ] {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::Conflict);
+        }
+        assert!(
+            engine
+                .list("space", "/sync")
+                .unwrap()
+                .iter()
+                .any(|entry| entry.path == storage.write.logical_path)
+        );
+        let actual = engine
+            .create_receipt_for_handoff(scope, &storage.write.logical_path, &storage.handoff_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            actual.storage_receipt().write.content,
+            storage.write.content
+        );
+        let mut forged = storage.clone();
+        forged.sha256 = "0".repeat(64);
+        assert!(
+            engine
+                .validate_create_receipt(
+                    scope,
+                    &storage.write.logical_path,
+                    &storage.handoff_id,
+                    &forged
+                )
+                .is_err()
+        );
+        assert_eq!(
+            cache
+                .ordinary_create_for_handoff(scope, &storage.handoff_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            raiun_cache::OrdinaryCreateState::Ready
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn durable_create_two_workers_overlap_siblings_and_bound_third_without_global_gates() {
+        let (state, cloud, cache, engine) = responsiveness_fixture();
+        engine.list("space", "/").unwrap();
+        engine.list("space", "/sync").unwrap();
+        let source = state.path().join("source-create");
+        fs::write(&source, b"parallel create body").unwrap();
+        let (started, receiver) = mpsc::sync_channel(4);
+        let release = Arc::new(AtomicBool::new(false));
+        *cloud.create_gate.lock().unwrap() = Some((started, release.clone()));
+        let mut owner = engine
+            .start_create_upload_owner(create_hooks(true))
+            .unwrap();
+        let handle = owner.handle();
+        let first = queue_create_fixture(&engine, &cloud, &source, 1);
+        handle.wake_scope(first.scope()).unwrap();
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("A reached PUT");
+        // The first publisher has invalidated the parent, but it does not
+        // prevent B's independently proved durable handoff.
+        assert!(
+            cache
+                .listing(
+                    first.scope(),
+                    &first.storage_receipt().write.parent_resource_id
+                )
+                .is_err()
+        );
+        let second = queue_create_fixture(&engine, &cloud, &source, 2);
+        handle.wake_scope(second.scope()).unwrap();
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("B reached PUT before A completes");
+        let third = queue_create_fixture(&engine, &cloud, &source, 3);
+        handle.wake_scope(third.scope()).unwrap();
+        assert_eq!(cloud.create_sends.load(Ordering::Acquire), 2);
+        assert_eq!(
+            cache
+                .ordinary_create_for_handoff(third.scope(), &third.storage_receipt().handoff_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            raiun_cache::OrdinaryCreateState::Ready
+        );
+        assert!(engine.inner.execution.try_lock().is_ok());
+        assert!(engine.inner.metadata_gate.try_lock().is_ok());
+        assert!(
+            engine
+                .list("space", "/sync")
+                .unwrap()
+                .iter()
+                .any(|entry| entry.path == third.storage_receipt().write.logical_path)
+        );
+        assert!(
+            cache
+                .listing(
+                    first.scope(),
+                    &first.storage_receipt().write.parent_resource_id
+                )
+                .is_err()
+        );
+        release.store(true, Ordering::Release);
+        for receipt in [&first, &second, &third] {
+            wait_create_state(
+                &engine,
+                receipt.scope(),
+                &receipt.storage_receipt().handoff_id,
+                raiun_cache::OrdinaryCreateState::Verified,
+            );
+        }
+        owner.stop_and_join().unwrap();
+        assert!(!handle.is_accepting());
+        assert_eq!(cloud.create_sends.load(Ordering::Acquire), 3);
+        assert_eq!(*cloud.downloads.lock().unwrap(), 3);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn durable_create_claimed_error_is_uncertain_and_never_resent() {
+        let (state, cloud, _cache, engine) = responsiveness_fixture();
+        engine.list("space", "/").unwrap();
+        engine.list("space", "/sync").unwrap();
+        let source = state.path().join("source-create");
+        fs::write(&source, b"uncertain create").unwrap();
+        *cloud.fail_upload_after_commit.lock().unwrap() = true;
+        let receipt = queue_create_fixture(&engine, &cloud, &source, 1);
+        let mut owner = engine
+            .start_create_upload_owner(create_hooks(true))
+            .unwrap();
+        owner.handle().wake_scope(receipt.scope()).unwrap();
+        wait_create_state(
+            &engine,
+            receipt.scope(),
+            &receipt.storage_receipt().handoff_id,
+            raiun_cache::OrdinaryCreateState::Uncertain,
+        );
+        owner.stop_and_join().unwrap();
+        drop(owner);
+        let mut restarted = engine
+            .start_create_upload_owner(create_hooks(true))
+            .unwrap();
+        restarted.handle().wake_scope(receipt.scope()).unwrap();
+        // A fresh wake and a second Ready item prove the owner ran again,
+        // without using a sleep as evidence of no replay.
+        *cloud.fail_upload_after_commit.lock().unwrap() = false;
+        let next = queue_create_fixture(&engine, &cloud, &source, 2);
+        restarted.handle().wake_scope(next.scope()).unwrap();
+        wait_create_state(
+            &engine,
+            next.scope(),
+            &next.storage_receipt().handoff_id,
+            raiun_cache::OrdinaryCreateState::Verified,
+        );
+        restarted.stop_and_join().unwrap();
+        assert_eq!(cloud.create_sends.load(Ordering::Acquire), 2);
+        assert!(
+            engine
+                .fetch_create_snapshot(
+                    receipt.scope(),
+                    &receipt.storage_receipt().write.logical_path,
+                    &receipt.storage_receipt().handoff_id
+                )
+                .is_ok()
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn durable_create_owner_cancels_and_joins_both_active_bodies() {
+        let (state, cloud, _cache, engine) = responsiveness_fixture();
+        let source = state.path().join("source-create");
+        fs::write(&source, b"cancel create").unwrap();
+        let first = queue_create_fixture(&engine, &cloud, &source, 1);
+        let second = queue_create_fixture(&engine, &cloud, &source, 2);
+        let (started, receiver) = mpsc::sync_channel(2);
+        *cloud.create_gate.lock().unwrap() = Some((started, Arc::new(AtomicBool::new(false))));
+        let mut owner = engine
+            .start_create_upload_owner(create_hooks(true))
+            .unwrap();
+        let handle = owner.handle();
+        handle.wake_scope(first.scope()).unwrap();
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        owner.stop_and_join().unwrap();
+        assert!(!handle.is_accepting());
+        assert!(handle.wake_scope(first.scope()).is_err());
+        for receipt in [&first, &second] {
+            wait_create_state(
+                &engine,
+                receipt.scope(),
+                &receipt.storage_receipt().handoff_id,
+                raiun_cache::OrdinaryCreateState::Uncertain,
+            );
+        }
+        assert!(
+            cloud
+                .remote_entry(&first.storage_receipt().write.logical_path)
+                .is_err()
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn durable_create_owner_is_exclusive_and_default_policy_sends_nothing() {
+        let (state, cloud, _cache, engine) = responsiveness_fixture();
+        let source = state.path().join("source-create");
+        fs::write(&source, b"disabled create").unwrap();
+        let receipt = queue_create_fixture(&engine, &cloud, &source, 1);
+        let mut owner = engine
+            .start_create_upload_owner(create_hooks(false))
+            .unwrap();
+        owner.handle().wake_scope(receipt.scope()).unwrap();
+        assert!(
+            engine
+                .start_create_upload_owner(create_hooks(true))
+                .is_err()
+        );
+        owner.stop_and_join().unwrap();
+        assert_eq!(cloud.create_sends.load(Ordering::Acquire), 0);
+        assert_eq!(
+            receipt.storage_receipt().state,
+            raiun_cache::OrdinaryCreateState::Ready
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn durable_create_readback_digest_failure_and_terminal_claim_recovery_never_replay() {
+        let (state, cloud, cache, engine) = responsiveness_fixture();
+        let source = state.path().join("source-create");
+        fs::write(&source, b"verify exact complete body").unwrap();
+        let first = queue_create_fixture(&engine, &cloud, &source, 1);
+        cloud.create_corrupt_readback.store(true, Ordering::Release);
+        let mut owner = engine
+            .start_create_upload_owner(create_hooks(true))
+            .unwrap();
+        owner.handle().wake_scope(first.scope()).unwrap();
+        wait_create_state(
+            &engine,
+            first.scope(),
+            &first.storage_receipt().handoff_id,
+            raiun_cache::OrdinaryCreateState::Uncertain,
+        );
+        owner.stop_and_join().unwrap();
+        drop(owner);
+        assert_eq!(cloud.create_sends.load(Ordering::Acquire), 1);
+        assert_eq!(*cloud.downloads.lock().unwrap(), 1);
+        let mut body = engine
+            .fetch_create_snapshot(
+                first.scope(),
+                &first.storage_receipt().write.logical_path,
+                &first.storage_receipt().handoff_id,
+            )
+            .unwrap();
+        let mut bytes = Vec::new();
+        body.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"verify exact complete body");
+        let second = queue_create_fixture(&engine, &cloud, &source, 2);
+        let claim = cache
+            .claim_ordinary_create(second.scope(), second.storage_receipt())
+            .unwrap()
+            .unwrap();
+        drop(claim);
+        let mut restarted = engine
+            .start_create_upload_owner(create_hooks(false))
+            .unwrap();
+        restarted.handle().wake_scope(second.scope()).unwrap();
+        assert_eq!(
+            cache
+                .ordinary_create_for_handoff(second.scope(), &second.storage_receipt().handoff_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            raiun_cache::OrdinaryCreateState::Uncertain
+        );
+        restarted.stop_and_join().unwrap();
+        assert_eq!(cloud.create_sends.load(Ordering::Acquire), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_create_final_admission_rechecks_original_parent_and_epoch() {
+        let (state, cloud, cache, engine) = responsiveness_fixture();
+        let source = state.path().join("source-create");
+        fs::write(&source, b"staged retain").unwrap();
+        let scope = engine.ordinary_write_scope("space").unwrap();
+        let id = cloud.remote_entry("/sync").unwrap().id;
+        let proof = engine
+            .capture_new_plaintext_create_parent(&scope, "/sync/new.txt", Some(&id), &|| true)
+            .unwrap();
+        cloud.entries.lock().unwrap().get_mut("/sync").unwrap().0.id = "replaced-parent".into();
+        assert!(
+            engine
+                .queue_new_plaintext_create_scoped(
+                    CreateHandoffRequest {
+                        parent: &proof,
+                        source: &File::open(&source).unwrap(),
+                        expected_len: fs::metadata(&source).unwrap().len(),
+                        expected_sha256: &hash_file(&source).unwrap(),
+                        handoff_id: "00000000000000000000000000000001",
+                        max_pending_bytes: 1024 * 1024
+                    },
+                    &|| true
+                )
+                .is_err()
+        );
+        assert_eq!(
+            cache
+                .ordinary_create_for_handoff(&scope, "00000000000000000000000000000001")
+                .unwrap()
+                .unwrap()
+                .state,
+            raiun_cache::OrdinaryCreateState::Staged
+        );
+        assert!(
+            engine
+                .create_receipt_for_handoff(
+                    &scope,
+                    "/sync/new.txt",
+                    "00000000000000000000000000000001"
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(engine.has_pending_create_overlap(&scope, "/sync").unwrap());
+        assert_eq!(cloud.create_sends.load(Ordering::Acquire), 0);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn durable_create_ready_invalidates_a_listing_that_was_already_publishing() {
+        let (state, cloud, cache, engine) = responsiveness_fixture();
+        engine.list("space", "/").unwrap();
+        engine.list("space", "/sync").unwrap();
+        let scope = engine.ordinary_write_scope("space").unwrap();
+        let parent = cloud.remote_entry("/sync").unwrap();
+        let proof = engine
+            .capture_new_plaintext_create_parent(
+                &scope,
+                "/sync/publication-race.txt",
+                Some(&parent.id),
+                &|| true,
+            )
+            .unwrap();
+        let source = state.path().join("publication-source");
+        fs::write(&source, b"durable ready").unwrap();
+        let (list_started, list_entered) = mpsc::sync_channel(1);
+        let (resume, list_resume) = mpsc::sync_channel(1);
+        *cloud.list_gate.lock().unwrap() = Some((list_started, list_resume));
+        let listing_engine = engine.clone();
+        let listing = std::thread::spawn(move || listing_engine.list("space", "/sync"));
+        list_entered
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let queue_engine = engine.clone();
+        let (ready, ready_result) = mpsc::sync_channel(1);
+        let queue = std::thread::spawn(move || {
+            let result = queue_engine.queue_new_plaintext_create_scoped(
+                CreateHandoffRequest {
+                    parent: &proof,
+                    source: &File::open(&source).unwrap(),
+                    expected_len: fs::metadata(&source).unwrap().len(),
+                    expected_sha256: &hash_file(&source).unwrap(),
+                    handoff_id: "00000000000000000000000000000031",
+                    max_pending_bytes: 1024 * 1024,
+                },
+                &|| true,
+            );
+            let _ = ready.send(result);
+        });
+        // Staging happens without the publication guard, but Ready cannot ACK
+        // until the already-running check/publish section has completed.
+        let start = std::time::Instant::now();
+        let staged = loop {
+            let found = cache
+                .ordinary_create_for_handoff(&scope, "00000000000000000000000000000031")
+                .unwrap();
+            if found.is_some() || start.elapsed() > std::time::Duration::from_secs(5) {
+                break found;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        let premature = ready_result.try_recv();
+        resume.send(()).unwrap();
+        listing.join().unwrap().unwrap();
+        queue.join().unwrap();
+        assert_eq!(
+            staged.unwrap().state,
+            raiun_cache::OrdinaryCreateState::Staged
+        );
+        assert!(
+            premature.is_err(),
+            "Ready must not bypass publishing listing"
+        );
+        let receipt = ready_result
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            receipt.storage_receipt().state,
+            raiun_cache::OrdinaryCreateState::Ready
+        );
+        assert!(
+            cache.listing(&scope, &parent.id).is_err(),
+            "Ready invalidates any just-published old listing before ACK"
+        );
+        assert_eq!(cloud.create_sends.load(Ordering::Acquire), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_create_pause_keeps_ready_and_offline_scope_is_read_only() {
+        let (state, cloud, cache, engine) = responsiveness_fixture();
+        engine.list("space", "/").unwrap();
+        engine.list("space", "/sync").unwrap();
+        let source = state.path().join("pause-source");
+        fs::write(&source, b"pause-ready-body").unwrap();
+        let receipt = queue_create_fixture(&engine, &cloud, &source, 1);
+        engine.set_sync_paused(true);
+        let mut owner = engine
+            .start_create_upload_owner(create_hooks(true))
+            .unwrap();
+        owner.handle().wake_scope(receipt.scope()).unwrap();
+        // The owner is running; shutdown completes without a send or claim.
+        owner.stop_and_join().unwrap();
+        drop(owner);
+        assert_eq!(cloud.create_sends.load(Ordering::Acquire), 0);
+        assert_eq!(
+            cache
+                .ordinary_create_for_handoff(receipt.scope(), &receipt.storage_receipt().handoff_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            raiun_cache::OrdinaryCreateState::Ready
+        );
+        *cloud.fail_all.lock().unwrap() = Some(ErrorKind::Offline);
+        assert_eq!(
+            engine.ordinary_create_scope("space").unwrap().as_ref(),
+            Some(receipt.scope())
+        );
+        assert!(
+            engine
+                .pending_create(
+                    receipt.scope(),
+                    &receipt.storage_receipt().write.logical_path
+                )
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            engine
+                .capture_new_plaintext_create_parent(
+                    receipt.scope(),
+                    "/sync/no-offline-create.txt",
+                    Some(&receipt.storage_receipt().write.parent_resource_id),
+                    &|| true
+                )
+                .is_err()
+        );
+        let mut body = engine
+            .fetch_create_snapshot(
+                receipt.scope(),
+                &receipt.storage_receipt().write.logical_path,
+                &receipt.storage_receipt().handoff_id,
+            )
+            .unwrap();
+        let mut bytes = Vec::new();
+        body.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"pause-ready-body");
+        *cloud.fail_all.lock().unwrap() = None;
+        engine.set_sync_paused(false);
+        let mut resumed = engine
+            .start_create_upload_owner(create_hooks(true))
+            .unwrap();
+        resumed.handle().wake_scope(receipt.scope()).unwrap();
+        wait_create_state(
+            &engine,
+            receipt.scope(),
+            &receipt.storage_receipt().handoff_id,
+            raiun_cache::OrdinaryCreateState::Verified,
+        );
+        resumed.stop_and_join().unwrap();
+        assert_eq!(cloud.create_sends.load(Ordering::Acquire), 1);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn durable_create_source_matches_durable_expected_bytes_not_a_reopened_path() {
+        let (state, cloud, cache, engine) = responsiveness_fixture();
+        engine.list("space", "/").unwrap();
+        engine.list("space", "/sync").unwrap();
+        let scope = engine.ordinary_write_scope("space").unwrap();
+        let parent = cloud.remote_entry("/sync").unwrap();
+        let source = state.path().join("source-pinned");
+        fs::write(&source, b"original-intent").unwrap();
+        let expected = hash_file(&source).unwrap();
+        let pinned = File::open(&source).unwrap();
+        fs::rename(&source, state.path().join("original-still-pinned")).unwrap();
+        fs::write(&source, b"different-path").unwrap();
+        let proof = engine
+            .capture_new_plaintext_create_parent(
+                &scope,
+                "/sync/pinned.txt",
+                Some(&parent.id),
+                &|| true,
+            )
+            .unwrap();
+        let receipt = engine
+            .queue_new_plaintext_create_scoped(
+                CreateHandoffRequest {
+                    parent: &proof,
+                    source: &pinned,
+                    expected_len: 15,
+                    expected_sha256: &expected,
+                    handoff_id: "00000000000000000000000000000041",
+                    max_pending_bytes: 1024 * 1024,
+                },
+                &|| true,
+            )
+            .unwrap();
+        let mut body = engine
+            .fetch_create_snapshot(
+                &scope,
+                "/sync/pinned.txt",
+                &receipt.storage_receipt().handoff_id,
+            )
+            .unwrap();
+        let mut bytes = Vec::new();
+        body.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"original-intent");
+        for (id, changed) in [(42, false), (43, true)] {
+            let local = state.path().join(format!("source-{id}"));
+            fs::write(&local, b"durable intent").unwrap();
+            let expected = hash_file(&local).unwrap();
+            let file = File::open(&local).unwrap();
+            if changed {
+                fs::write(&local, b"changed intent").unwrap();
+            }
+            let hash = if changed { expected } else { "0".repeat(64) };
+            let path = format!("/sync/refuse-{id}.txt");
+            let proof = engine
+                .capture_new_plaintext_create_parent(&scope, &path, Some(&parent.id), &|| true)
+                .unwrap();
+            let handoff = format!("{id:032x}");
+            assert!(
+                engine
+                    .queue_new_plaintext_create_scoped(
+                        CreateHandoffRequest {
+                            parent: &proof,
+                            source: &file,
+                            expected_len: 14,
+                            expected_sha256: &hash,
+                            handoff_id: &handoff,
+                            max_pending_bytes: 1024 * 1024
+                        },
+                        &|| true
+                    )
+                    .is_err()
+            );
+            assert!(
+                cache
+                    .ordinary_create_for_handoff(&scope, &handoff)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(local.exists());
+        }
+        assert_eq!(cloud.create_sends.load(Ordering::Acquire), 0);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn durable_create_ack_headroom_gc_accepts_only_qualified_tombstone() {
+        let state = tempfile::tempdir().unwrap();
+        fs::set_permissions(
+            state.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        let cloud = Arc::new(FakeCloud::new());
+        let cache = Cache::open(state.path(), 128).unwrap();
+        let engine = Engine::open(state.path(), cloud.clone())
+            .unwrap()
+            .with_offline_cache(
+                cache.clone(),
+                "profile-account-1".into(),
+                "https://example.invalid/".into(),
+            )
+            .unwrap();
+        engine.list("space", "/").unwrap();
+        engine.list("space", "/sync").unwrap();
+        let scope = engine.ordinary_write_scope("space").unwrap();
+        let parent = cloud.remote_entry("/sync").unwrap();
+        let source = state.path().join("ack-body");
+        fs::write(&source, [b'a'; 32]).unwrap();
+        let file = File::open(&source).unwrap();
+        let proof = engine
+            .capture_new_plaintext_create_parent(
+                &scope,
+                "/sync/ack-a.txt",
+                Some(&parent.id),
+                &|| true,
+            )
+            .unwrap();
+        let first = engine
+            .queue_new_plaintext_create_scoped(
+                CreateHandoffRequest {
+                    parent: &proof,
+                    source: &file,
+                    expected_len: 32,
+                    expected_sha256: &hash_file(&source).unwrap(),
+                    handoff_id: "00000000000000000000000000000051",
+                    max_pending_bytes: 128,
+                },
+                &|| true,
+            )
+            .unwrap();
+        assert!(
+            engine
+                .acknowledge_create_handoff(
+                    &scope,
+                    proof.path(),
+                    &first.storage_receipt().handoff_id,
+                    first.storage_receipt(),
+                    &|| false
+                )
+                .is_err()
+        );
+        assert!(
+            !cache
+                .ordinary_create_for_handoff(&scope, &first.storage_receipt().handoff_id)
+                .unwrap()
+                .unwrap()
+                .local_handoff_acknowledged
+        );
+        let mut owner = engine
+            .start_create_upload_owner(create_hooks(true))
+            .unwrap();
+        owner.handle().wake_scope(&scope).unwrap();
+        wait_create_state(
+            &engine,
+            &scope,
+            &first.storage_receipt().handoff_id,
+            raiun_cache::OrdinaryCreateState::Verified,
+        );
+        owner.stop_and_join().unwrap();
+        drop(owner);
+        let acknowledged = engine
+            .acknowledge_create_handoff(
+                &scope,
+                proof.path(),
+                &first.storage_receipt().handoff_id,
+                first.storage_receipt(),
+                &|| true,
+            )
+            .unwrap();
+        assert!(acknowledged.storage_receipt().local_handoff_acknowledged);
+        let next_source = state.path().join("next-body");
+        fs::write(&next_source, [b'b'; 64]).unwrap();
+        let next_file = File::open(&next_source).unwrap();
+        let next_proof = engine
+            .capture_new_plaintext_create_parent(
+                &scope,
+                "/sync/ack-b.txt",
+                Some(&parent.id),
+                &|| true,
+            )
+            .unwrap();
+        let second = engine
+            .queue_new_plaintext_create_scoped(
+                CreateHandoffRequest {
+                    parent: &next_proof,
+                    source: &next_file,
+                    expected_len: 64,
+                    expected_sha256: &hash_file(&next_source).unwrap(),
+                    handoff_id: "00000000000000000000000000000052",
+                    max_pending_bytes: 128,
+                },
+                &|| true,
+            )
+            .unwrap();
+        // Engine's bounded headroom pass retires only A's verified+ACK body;
+        // immutable history remains valid cleanup evidence, never empty data.
+        let tombstone = engine
+            .validate_create_receipt(
+                &scope,
+                proof.path(),
+                &first.storage_receipt().handoff_id,
+                first.storage_receipt(),
+            )
+            .unwrap();
+        assert!(tombstone.storage_receipt().body_evicted);
+        assert!(tombstone.storage_receipt().local_handoff_acknowledged);
+        assert!(
+            engine
+                .fetch_create_snapshot(&scope, proof.path(), &first.storage_receipt().handoff_id)
+                .is_err()
+        );
+        assert_eq!(
+            tombstone.storage_receipt().state,
+            raiun_cache::OrdinaryCreateState::Verified
+        );
+        assert!(
+            engine
+                .acknowledge_create_handoff(
+                    &scope,
+                    proof.path(),
+                    &first.storage_receipt().handoff_id,
+                    first.storage_receipt(),
+                    &|| true
+                )
+                .is_ok()
+        );
+        let blobs = fs::read_dir(state.path().join("cache-v1/content"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "blob"))
+            .collect::<Vec<_>>();
+        assert_eq!(blobs.len(), 1);
+        fs::remove_file(&blobs[0]).unwrap();
+        let mut forged = second.storage_receipt().clone();
+        forged.body_evicted = true;
+        forged.local_handoff_acknowledged = true;
+        forged.state = raiun_cache::OrdinaryCreateState::Verified;
+        assert!(
+            engine
+                .validate_create_receipt(&scope, next_proof.path(), &forged.handoff_id, &forged)
+                .is_err()
+        );
+        assert!(
+            engine
+                .acknowledge_create_handoff(
+                    &scope,
+                    next_proof.path(),
+                    &forged.handoff_id,
+                    &forged,
+                    &|| true
+                )
+                .is_err()
+        );
+        assert!(
+            !cache
+                .ordinary_create_for_handoff(&scope, &forged.handoff_id)
+                .unwrap()
+                .unwrap()
+                .local_handoff_acknowledged
+        );
+        assert_eq!(cloud.create_sends.load(Ordering::Acquire), 1);
+        assert_eq!(fs::read(&source).unwrap(), [b'a'; 32]);
+        assert_eq!(fs::read(&next_source).unwrap(), [b'b'; 64]);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn durable_create_pause_after_claim_refuses_next_readback_phase() {
+        let (state, cloud, cache, engine) = responsiveness_fixture();
+        let source = state.path().join("phase-source");
+        fs::write(&source, b"claimed pause body").unwrap();
+        let receipt = queue_create_fixture(&engine, &cloud, &source, 1);
+        let (started, entered) = mpsc::sync_channel(1);
+        let release = Arc::new(AtomicBool::new(false));
+        *cloud.create_gate.lock().unwrap() = Some((started, release.clone()));
+        let mut owner = engine
+            .start_create_upload_owner(create_hooks(true))
+            .unwrap();
+        owner.handle().wake_scope(receipt.scope()).unwrap();
+        entered
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        engine.set_sync_paused(true);
+        release.store(true, Ordering::Release);
+        wait_create_state(
+            &engine,
+            receipt.scope(),
+            &receipt.storage_receipt().handoff_id,
+            raiun_cache::OrdinaryCreateState::Uncertain,
+        );
+        owner.stop_and_join().unwrap();
+        assert_eq!(*cloud.downloads.lock().unwrap(), 0);
+        assert_eq!(cloud.create_sends.load(Ordering::Acquire), 1);
+        assert_eq!(
+            cache
+                .ordinary_create_for_handoff(receipt.scope(), &receipt.storage_receipt().handoff_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            raiun_cache::OrdinaryCreateState::Uncertain
+        );
+        assert!(
+            engine
+                .fetch_create_snapshot(
+                    receipt.scope(),
+                    &receipt.storage_receipt().write.logical_path,
+                    &receipt.storage_receipt().handoff_id
+                )
+                .is_ok()
+        );
     }
 }
