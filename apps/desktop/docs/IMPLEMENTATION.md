@@ -3515,8 +3515,9 @@ Windows checks, and Windows test compilation. The two public-entry create
 fixtures and full manager/worker upload-and-stop fixture are compiled, not
 executed. The latter's Windows-only test changes reuse the unchanged host
 baseline with explicit source proof.
-Existing-subfolder runtime wiring is source-checked; its connected native
-acceptance case is being prepared and is not covered by the earlier root cases.
+Existing-subfolder runtime wiring and its connected native acceptance case are
+compiled and source-checked. The new case requires its own native execution;
+the earlier root cases do not establish subfolder acceptance.
 Production creation remains disabled. Native and exact-package acceptance,
 plus a verified create-only server contract, are still required: HTTP 201 and
 full readback alone do not establish atomic no-clobber semantics. No installed
