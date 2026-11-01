@@ -7,6 +7,9 @@
 #[path = "windows_file_create_public_entry_test.rs"]
 mod windows_file_create_public_entry_test;
 #[cfg(all(test, windows, debug_assertions))]
+#[path = "windows_file_create_worker_native_test.rs"]
+mod windows_file_create_worker_native_test;
+#[cfg(all(test, windows, debug_assertions))]
 #[path = "windows_rename_public_entry_test.rs"]
 mod windows_rename_public_entry_test;
 
@@ -765,6 +768,11 @@ enum ProviderCommand {
         root_path: String,
         response: std::sync::mpsc::SyncSender<Result<bool, String>>,
     },
+    #[cfg(all(test, windows, debug_assertions))]
+    CreateWorkerObservation {
+        binding: ActiveProviderBinding,
+        response: std::sync::mpsc::SyncSender<Result<Value, String>>,
+    },
     InspectConnection {
         binding: ActiveProviderBinding,
         response: std::sync::mpsc::SyncSender<Result<bool, String>>,
@@ -1433,6 +1441,21 @@ impl ProviderManager {
                                 if worker_generation.load(Ordering::Acquire)!=generation {
                                     return Err("Rename fixture generation changed during observation".into());
                                 }
+                                Ok(value)
+                            })();
+                            let _=response.send(result);
+                        }
+                        #[cfg(all(test, windows, debug_assertions))]
+                        ProviderCommand::CreateWorkerObservation {binding,response} => {
+                            let result=(|| {
+                                if worker_generation.load(Ordering::Acquire)!=binding.generation || active_binding.as_ref()!=Some(&binding) {
+                                    return Err("Create worker fixture generation retired".to_owned());
+                                }
+                                let value=windows_file_create_worker_native_test::observe_owner(
+                                    connection.as_ref().ok_or("Create worker fixture disconnected")?,
+                                    backend.as_ref().ok_or("Create worker fixture backend unavailable")?,
+                                    &binding)?;
+                                if worker_generation.load(Ordering::Acquire)!=binding.generation {return Err("Create worker fixture retired during observation".to_owned());}
                                 Ok(value)
                             })();
                             let _=response.send(result);

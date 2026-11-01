@@ -86,7 +86,7 @@ fn guarded(held: bool) -> PathBuf {
     );
     root
 }
-fn generated(out: &mut impl Write) -> [u8; 32] {
+pub(super) fn generated(out: &mut impl Write) -> [u8; 32] {
     generated_variant(out, false)
 }
 fn generated_variant(out: &mut impl Write, modified: bool) -> [u8; 32] {
@@ -108,7 +108,7 @@ fn generated_variant(out: &mut impl Write, modified: bool) -> [u8; 32] {
     }
     hash.finalize().into()
 }
-fn digest(mut input: impl Read) -> (u64, [u8; 32]) {
+pub(super) fn digest(mut input: impl Read) -> (u64, [u8; 32]) {
     let mut buffer = [0u8; 65536];
     let mut total = 0;
     let mut hash = Sha256::new();
@@ -207,10 +207,10 @@ fn join_child(child: &mut std::process::Child) {
     }
 }
 
-struct RetainedFactory {
-    scope: cf::ProviderScope,
-    root: cf::ConfiguredRootIdentity,
-    prepared: Arc<dyn PreparedEditRecovery>,
+pub(super) struct RetainedFactory {
+    pub(super) scope: cf::ProviderScope,
+    pub(super) root: cf::ConfiguredRootIdentity,
+    pub(super) prepared: Arc<dyn PreparedEditRecovery>,
 }
 impl EditRecoveryProvider for RetainedFactory {
     fn prepare(
@@ -224,7 +224,7 @@ impl EditRecoveryProvider for RetainedFactory {
         Ok(Arc::clone(&self.prepared))
     }
 }
-fn policy() -> cf::streamed_store::StorePolicy {
+pub(super) fn policy() -> cf::streamed_store::StorePolicy {
     cf::streamed_store::StorePolicy {
         max_content_bytes: 32 * 1024 * 1024,
         max_state_bytes: 512 * 1024 * 1024,
