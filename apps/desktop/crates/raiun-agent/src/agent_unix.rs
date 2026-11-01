@@ -1001,6 +1001,26 @@ impl Runtime {
         }
     }
 
+    fn create_handoff_options(
+        &self,
+        engine: &Engine,
+        hooks: raiun_engine::CreateUploadHooks,
+        disabled: bool,
+    ) -> Option<raiun_fuse::CreateHandoffOptions> {
+        if self.mode != RuntimeMode::Desktop || disabled {
+            return None;
+        }
+        // The cache is optional for the established online mount. If it is
+        // unavailable, preserve that synchronous path rather than breaking
+        // sign-in/mounting to enable this optimization. Existing Engine write
+        // checks remain responsible for any unusable cache/journal state.
+        let quota = engine.offline_cache_usage().ok()?.quota_bytes;
+        (quota > 0).then_some(raiun_fuse::CreateHandoffOptions {
+            hooks,
+            max_pending_bytes: quota,
+        })
+    }
+
     fn mount_engine(
         &self,
         engine: Engine,
@@ -1027,23 +1047,12 @@ impl Runtime {
             *mounted = None;
         }
         if mounted.is_none() {
-            // The first handoff freezes its creating descriptor, so this is
-            // presently a copy-workflow experiment, not general POSIX fsync
-            // semantics. Normal Desktop and headless mounts stay unchanged.
-            let handoff = if self.mode == RuntimeMode::Desktop
-                && std::env::var_os("RAIUN_EXPERIMENTAL_CREATE_HANDOFF").as_deref()
-                    == Some(std::ffi::OsStr::new("1"))
-            {
-                Some(raiun_fuse::CreateHandoffOptions {
-                    hooks,
-                    max_pending_bytes: engine
-                        .offline_cache_usage()
-                        .map_err(|error| error.to_string())?
-                        .quota_bytes,
-                })
-            } else {
-                None
-            };
+            let handoff = self.create_handoff_options(
+                &engine,
+                hooks,
+                std::env::var_os("RAIUN_DISABLE_CREATE_HANDOFF").as_deref()
+                    == Some(std::ffi::OsStr::new("1")),
+            );
             *mounted = Some(Box::new(
                 raiun_fuse::mount_with_vault_registry_and_create_handoff(
                     engine,
@@ -7084,6 +7093,43 @@ mod tests {
             local_handoff_acknowledged: true,
         });
         assert!(pending_write_response(completed).is_err());
+    }
+
+    #[test]
+    fn create_handoff_options_preserve_headless_and_cache_unavailable_mounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = runtime_for_mount_test(dir.path().to_path_buf(), false, None);
+        let engine_dir = dir.path().join("engine");
+        let base = Engine::open(&engine_dir, Arc::new(OfflineCacheFixture)).unwrap();
+        let hooks = || runtime.create_upload_hooks(0, "account-a");
+        assert!(
+            runtime
+                .create_handoff_options(&base, hooks(), false)
+                .is_none()
+        );
+        let cache_dir = offline_cache_state_dir(&engine_dir).unwrap();
+        let cache = raiun_cache::Cache::open(&cache_dir, 1024 * 1024).unwrap();
+        let engine = base
+            .with_offline_cache(
+                cache,
+                "account-a".into(),
+                "https://fixture.example.test".into(),
+            )
+            .unwrap();
+        let options = runtime
+            .create_handoff_options(&engine, hooks(), false)
+            .unwrap();
+        assert_eq!(options.max_pending_bytes, 1024 * 1024);
+        assert!((options.hooks.is_current)());
+        assert!(
+            runtime
+                .create_handoff_options(&engine, hooks(), true)
+                .is_none()
+        );
+        runtime.mode = RuntimeMode::MountOnly;
+        assert!(runtime.create_handoff_options(
+            &engine, runtime.create_upload_hooks(0, "account-a"), false,
+        ).is_none());
     }
 
     #[test]
