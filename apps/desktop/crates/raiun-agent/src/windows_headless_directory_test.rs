@@ -61,6 +61,20 @@ impl DirectoryModel {
             propfinds: 0,
         }
     }
+    #[cfg(debug_assertions)]
+    pub(in super::super) fn for_fixture(lost_response: bool, mixed: bool) -> Self {
+        let mut model = Self::new(lost_response);
+        if mixed {
+            model.nodes.insert(
+                format!("{PERSONAL}/provider-directory"),
+                (
+                    "synthetic-provider-directory".into(),
+                    "provider-directory".into(),
+                ),
+            );
+        }
+        model
+    }
     pub(in super::super) fn observation(&self) -> Value {
         json!({"attempts":self.attempts,"created":self.created,"invalid":self.invalid,"propfinds":self.propfinds,"lost_response":self.lost_response})
     }
@@ -99,7 +113,8 @@ impl DirectoryModel {
             || !matches!(
                 relative,
                 "" | "/automatic-directory" | "/automatic-directory/nested"
-            )
+            ) && !(path == format!("{PERSONAL}/provider-directory")
+                && self.nodes.contains_key(path))
             || headers
                 .iter()
                 .any(|(name, _)| matches!(name.as_str(), "destination" | "overwrite"))
@@ -195,6 +210,9 @@ mod native {
     const ROLE: &str = "RAIUN_HEADLESS_DIRECTORY_FIXTURE_CHILD";
     const CASE: &str = "RAIUN_HEADLESS_DIRECTORY_FIXTURE_CASE";
     const OWNER: &str = "raiun-headless-automatic-directory-v1\n";
+    const MIXED_TEST: &str = "agent_windows::windows_profiles::windows_headless_directory_test::native::synthetic_shared_mixed_cloud_directory_and_ordinary_mkdir";
+    const MIXED_OWNER: &str = "raiun-shared-mixed-directory-v1\n";
+    const MIXED_FLAG: &str = "RAIUN_MIXED_DIRECTORY_NATIVE";
     const CONTENT: &[u8] = b"retained automatic directory child\0\x01\xff";
     static REPORT_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     fn report(path: &Path, value: Value) {
@@ -208,7 +226,13 @@ mod native {
         use std::os::windows::fs::MetadataExt;
         std::fs::symlink_metadata(path.join("OWNER.txt"))
             .is_ok_and(|m| m.is_file() && m.file_attributes() & 0x400 == 0)
-            && std::fs::read_to_string(path.join("OWNER.txt")).is_ok_and(|s| s == OWNER)
+            && std::fs::read_to_string(path.join("OWNER.txt")).is_ok_and(|s| {
+                s == if case(path) == "personal-mixed" {
+                    MIXED_OWNER
+                } else {
+                    OWNER
+                }
+            })
     }
     fn same(a: &Path, b: &Path) -> bool {
         matches!((std::fs::canonicalize(a),std::fs::canonicalize(b)),(Ok(a),Ok(b)) if a==b)
@@ -242,6 +266,9 @@ mod native {
             cursor.push("nested");
             std::fs::create_dir(&cursor).map_err(|_| "OS nested mkdir failed")?;
         }
+        if case(path) == "personal-mixed" {
+            return Ok(());
+        }
         std::fs::write(cursor.join("retained-child.bin"), CONTENT)
             .map_err(|_| "retained child write failed")?;
         Ok(())
@@ -253,6 +280,13 @@ mod native {
         }
         if case(path) == "personal-nested" {
             local.push("nested");
+        }
+        if case(path) == "personal-mixed" {
+            return if local.is_dir() {
+                Ok(())
+            } else {
+                Err("retained mixed directory unavailable".into())
+            };
         }
         if std::fs::read(local.join("retained-child.bin"))
             .map_err(|_| "post-stop child unavailable")?
@@ -267,14 +301,18 @@ mod native {
         cmd.args([
             "--ignored",
             "--exact",
-            TEST,
+            if case(path) == "personal-mixed" {
+                MIXED_TEST
+            } else {
+                TEST
+            },
             "--nocapture",
             "--test-threads=1",
         ])
         .env(DIRECTORY, path)
         .env(ROLE, role)
         .stdin(std::process::Stdio::null());
-        if matches!(role, "io" | "verify-save" | "verify-restart") {
+        if matches!(role, "io" | "populate" | "verify-save" | "verify-restart") {
             cmd.env_remove("RAIUN_HEADLESS_CONTEXT")
                 .env_remove("RAIUN_STATE_DIR")
                 .env_remove("RAIUN_HEADLESS_CONFIG");
@@ -374,10 +412,22 @@ mod native {
             .provider
             .lifecycle_test_activation
             .store(true, Ordering::Release);
-        agent
-            .provider
-            .namespace_test_activation
-            .store(true, Ordering::Release);
+        let mixed = case(path) == "personal-mixed";
+        if mixed {
+            assert_eq!(
+                std::env::var(MIXED_FLAG).as_deref(),
+                Ok("fresh-owned-state")
+            );
+            agent
+                .provider
+                .mixed_namespace_test_activation
+                .store(true, Ordering::Release);
+        } else {
+            agent
+                .provider
+                .namespace_test_activation
+                .store(true, Ordering::Release);
+        }
         let paused = matches!(case(path), "personal-nested" | "personal-bootstrap");
         agent
             .provider
@@ -435,9 +485,62 @@ mod native {
                 root_volume_serial: root.volume_serial,
                 root_file_index: root.file_index,
             };
+            let original_generation = agent.generation.load(Ordering::Acquire);
+            let mut mixed_instance = Value::Null;
             let mut discarded_before_io = 0;
+            if mixed {
+                wait_for(|| {
+                    let o = agent.provider.mixed_namespace_observation()?;
+                    if o["held"] == true {
+                        return Err("shared dispatcher held before materialization".into());
+                    }
+                    if o["attached"] == true && o["instance"].as_u64().is_some() {
+                        mixed_instance = o["instance"].clone();
+                        return Ok(true);
+                    }
+                    Ok(false)
+                })?;
+                let before = agent.provider.mixed_namespace_observation()?;
+                wait_child(spawn(path, "populate")?, path, "populate")?;
+                wait_for(|| {
+                    let o = agent.provider.mixed_namespace_observation()?;
+                    if o["held"] == true
+                        || o["instance"] != mixed_instance
+                        || o["directory_offers"] != 0
+                    {
+                        return Err("cloud materialization mutated or retired shared owner".into());
+                    }
+                    Ok(o["provider_directory_skipped"] == true
+                        && o["cloud_directories_skipped"]
+                            .as_u64()
+                            .ok_or("missing actual skip count")?
+                            > before["cloud_directories_skipped"]
+                                .as_u64()
+                                .ok_or("missing actual skip count")?)
+                })?;
+                let cloud = agent.provider.namespace_directory_observation(vec![
+                    "Personal".into(),
+                    "provider-directory".into(),
+                ])?;
+                if cloud.opaque_identity.is_none() || cloud.placeholder_state == 0 {
+                    return Err("actual provider directory was not cloud-shaped".into());
+                }
+                let initial = DirectoryIntentStore::current_user(
+                    scope.clone(),
+                    super::super::super::windows_recovery_policy::directory_storage_policy()?,
+                )
+                .map_err(|_| "mixed namespace store unavailable")?;
+                if !initial
+                    .discover_account_root()
+                    .map_err(|_| "mixed initial history unavailable")?
+                    .is_empty()
+                    || agent.provider.namespace_status.lock().unwrap().completed != 0
+                {
+                    return Err("cloud materialization published directory history".into());
+                }
+            }
             if role == "save" {
-                if !paused {
+                if !paused && !mixed {
                     wait_for(|| Ok(agent.provider.namespace_status.lock().unwrap().ticks > 0))?;
                 }
                 discarded_before_io = agent
@@ -550,6 +653,18 @@ mod native {
                     {
                         return Err("directory binding mismatch".into());
                     }
+                    if mixed
+                        && (destination.parent.authorization.agent_generation
+                            != original_generation
+                            || destination.parent.authorization.token_generation
+                                != verified.provider_scope.token_generation()
+                            || record.intent.record_generation == 0)
+                    {
+                        return Err("mixed history original authorization changed".into());
+                    }
+                    if mixed && !record.progress.recorded_complete {
+                        return Ok(false);
+                    }
                     let terminal = if lost {
                         record.progress.remote == NamespacePhase::Submitted
                             && record.progress.attention == Some(NamespaceAttention::Uncertain)
@@ -656,18 +771,31 @@ mod native {
             if case(path) == "personal-nested" {
                 local.push("nested");
             }
-            if std::fs::read(local.join("retained-child.bin"))
-                .map_err(|_| "retained child unavailable")?
-                != CONTENT
+            if !mixed
+                && std::fs::read(local.join("retained-child.bin"))
+                    .map_err(|_| "retained child unavailable")?
+                    != CONTENT
             {
                 return Err("retained child changed".into());
             }
             if agent.provider.folder_generation.load(Ordering::Acquire) != 0 {
                 return Err("folder worker unexpectedly active".into());
             }
+            let mixed_observation = if mixed {
+                let o = agent.provider.mixed_namespace_observation()?;
+                if o["held"] != false
+                    || o["instance"] != mixed_instance
+                    || o["directory_offers"] != 1
+                {
+                    return Err("shared dispatcher did not preserve one observer/one offer".into());
+                }
+                o
+            } else {
+                Value::Null
+            };
             let observation = agent.provider.namespace_status.lock().unwrap().clone();
             Ok(
-                json!({"records":summary,"ticks":observation.ticks,"pages":observation.pages,"hints":observation.hints,"discarded_hints":observation.discarded_hints,"discarded_hints_after_io":observation.discarded_hints.saturating_sub(discarded_before_io),"continuity_lost":observation.continuity_lost,"retained":observation.retained,"retained_submitted_or_uncertain":observation.retained_submitted_or_uncertain,"producer_core_only":false,"inventory_unknown":true}),
+                json!({"shared_dispatcher":mixed_observation,"records":summary,"ticks":observation.ticks,"pages":observation.pages,"hints":observation.hints,"discarded_hints":observation.discarded_hints,"discarded_hints_after_io":observation.discarded_hints.saturating_sub(discarded_before_io),"continuity_lost":observation.continuity_lost,"retained":observation.retained,"retained_submitted_or_uncertain":observation.retained_submitted_or_uncertain,"producer_core_only":false,"inventory_unknown":true}),
             )
         };
         let exercise = std::panic::catch_unwind(std::panic::AssertUnwindSafe(exercise))
@@ -744,6 +872,101 @@ mod native {
         assert!(
             passed && !REPORT_FAILED.load(Ordering::Acquire),
             "automatic native directory case incomplete; evidence retained"
+        );
+    }
+    fn populate_mixed(path: &Path) -> Result<(), String> {
+        let root = path.join("cloud-root");
+        let _ = std::fs::read_dir(&root)
+            .map_err(|_| "mixed root enumeration failed")?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "mixed root entry failed")?;
+        let entries = std::fs::read_dir(root.join("Personal"))
+            .map_err(|_| "mixed Personal enumeration failed")?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "mixed Personal entry failed")?;
+        if !entries
+            .iter()
+            .any(|e| e.file_name() == "provider-directory")
+        {
+            return Err("provider directory was not materialized".into());
+        }
+        Ok(())
+    }
+    #[test]
+    #[ignore = "real single-observer shared directory owner; explicit fresh native wrapper only"]
+    fn synthetic_shared_mixed_cloud_directory_and_ordinary_mkdir() {
+        assert_eq!(
+            std::env::var(MIXED_FLAG).as_deref(),
+            Ok("fresh-owned-state")
+        );
+        let directory = PathBuf::from(std::env::var_os(DIRECTORY).expect("explicit mixed wrapper"));
+        assert!(directory.is_absolute());
+        let args = std::env::args().collect::<Vec<_>>();
+        assert!(
+            args.iter().any(|a| a == "--ignored")
+                && args
+                    .windows(2)
+                    .any(|p| p[0] == "--exact" && p[1] == MIXED_TEST)
+        );
+        if let Ok(role) = std::env::var(ROLE) {
+            assert_eq!(case(&directory), "personal-mixed");
+            assert!(owned(&directory));
+            match role.as_str() {
+                "save" => runtime(&directory, &role),
+                "populate" => populate_mixed(&directory).unwrap(),
+                "io" => create_io(&directory).unwrap(),
+                "verify-save" => verify_io(&directory).unwrap(),
+                _ => panic!("unsupported mixed child"),
+            }
+            return;
+        }
+        use std::os::windows::fs::MetadataExt;
+        assert!(
+            std::fs::symlink_metadata(&directory)
+                .is_ok_and(|m| m.is_dir() && m.file_attributes() & 0x400 == 0)
+        );
+        assert!(
+            std::fs::symlink_metadata(directory.join("OWNER.txt"))
+                .is_ok_and(|m| m.is_file() && m.file_attributes() & 0x400 == 0)
+        );
+        assert_eq!(
+            std::fs::read(directory.join("OWNER.txt")).unwrap(),
+            MIXED_OWNER.as_bytes()
+        );
+        let entries = std::fs::read_dir(&directory)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(entries.iter().all(|e| matches!(
+            e.file_name().to_str(),
+            Some("OWNER.txt" | "runner.json" | "supervisor.stdout.log" | "supervisor.stderr.log")
+        )));
+        let path = directory.join("personal-mixed");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::create_dir(path.join("cloud-root")).unwrap();
+        std::fs::write(path.join("OWNER.txt"), MIXED_OWNER).unwrap();
+        let (server, fixture) = super::super::super::tests::synthetic_mixed_directory_server();
+        report(
+            &path.join("config.json"),
+            json!({"schema_version":1,"server":server,"auth":"app_token","username":"synthetic-user","mount_path":path.join("cloud-root"),"auto_mount":true,"remember_login":true,"reconnect_interval_seconds":1,"profile":"default"}),
+        );
+        let save = spawn(&path, "save").and_then(|child| wait_child(child, &path, "save"));
+        let remote = fixture.directory_observation();
+        let expected = json!([format!("{PERSONAL}/{NAME}")]);
+        let passed = save.is_ok()
+            && !REPORT_FAILED.load(Ordering::Acquire)
+            && remote["attempts"] == expected
+            && remote["created"] == expected
+            && remote["invalid"] == 0
+            && fixture.global_mutation_attempts() == 1;
+        report(
+            &directory.join("RESULTS.json"),
+            json!({"fixture":"shared-mixed-directory-v1","passed":passed,"save":save,"remote":remote,"global_mutations":fixture.global_mutation_attempts(),"native_execution":true,"production_enabled":false,"directory_routing_ready":false,"state_deletion_requested":false,"replay":false}),
+        );
+        fixture.join().unwrap();
+        assert!(
+            passed && !REPORT_FAILED.load(Ordering::Acquire),
+            "mixed native directory failed; preserve cohort, no replay"
         );
     }
     #[test]

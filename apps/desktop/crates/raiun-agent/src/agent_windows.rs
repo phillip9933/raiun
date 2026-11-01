@@ -490,6 +490,8 @@ struct ProviderManager {
     namespace_status: Arc<Mutex<windows_namespace_producer::Observation>>,
     #[cfg(all(test, debug_assertions))]
     namespace_test_activation: AtomicBool,
+    #[cfg(all(test, debug_assertions))]
+    mixed_namespace_test_activation: AtomicBool,
     // Serializes explicit mount preference with every automatic reconnect.
     mount_preference: Mutex<bool>,
     ordinary_edits: Arc<Mutex<Option<windows_headless_edits::CachedStatus>>>,
@@ -622,6 +624,11 @@ struct PendingNativeVaultCleanup {
 type PendingVaultCleanupTicket = windows_vault_cleanup_holds::PendingCleanupTicket;
 
 enum ProviderCommand {
+    #[cfg(all(test, debug_assertions))]
+    MixedNamespaceObservation {
+        generation: u64,
+        response: std::sync::mpsc::SyncSender<Result<Value, String>>,
+    },
     #[cfg(all(test, windows, debug_assertions))]
     RenameCallerObservation {
         generation: u64,
@@ -766,6 +773,8 @@ enum ProviderCommand {
         custody_store: Arc<dyn SessionStore>,
         fresh_close_publisher: Option<windows_vault_close_worker::VaultClosePublisher>,
         namespace_admission: Option<windows_namespace_producer::Admission>,
+        #[cfg(all(test, debug_assertions))]
+        mixed_namespace_fixture: bool,
         file_rename_producer: Option<Box<windows_file_rename_producer::Producer>>,
         response: std::sync::mpsc::SyncSender<Result<(), String>>,
     },
@@ -1373,6 +1382,20 @@ impl ProviderManager {
                                 else { Err("The Windows drive changed during cleanup inspection".to_owned()) };
                             let _ = response.send(result);
                         }
+                        #[cfg(all(test, debug_assertions))]
+                        ProviderCommand::MixedNamespaceObservation { generation, response } => {
+                            let result = (|| {
+                                let binding = active_binding.as_ref().filter(|b| b.generation == generation).ok_or("Mixed namespace fixture retired")?;
+                                if worker_generation.load(Ordering::Acquire) != generation { return Err("Mixed namespace generation retired".into()); }
+                                let dispatcher = namespace_dispatcher.as_ref().ok_or("Mixed dispatcher unavailable")?;
+                                let backend = backend.as_ref().ok_or("Mixed backend unavailable")?;
+                                if connection.is_none() || backend.is_revoked() || binding.identity.volume_serial == 0 { return Err("Mixed connection unavailable".into()); }
+                                let o = dispatcher.observation();
+                                if worker_generation.load(Ordering::Acquire) != generation { return Err("Mixed namespace generation changed".into()); }
+                                Ok(json!({"attached":o.attached,"instance":o.instance,"held":o.held,"cloud_directories_skipped":o.cloud_directories_skipped,"cloud_files_skipped":o.cloud_files_skipped,"directory_offers":o.directory_offers,"provider_directory_skipped":o.provider_directory_skipped}))
+                            })();
+                            let _ = response.send(result);
+                        }
                         #[cfg(all(test, windows, debug_assertions))]
                         ProviderCommand::RenameCallerObservation { generation, path, response } => {
                             let result=(|| {
@@ -1446,6 +1469,8 @@ impl ProviderManager {
                             custody_store,
                             fresh_close_publisher,
                             namespace_admission,
+                            #[cfg(all(test, debug_assertions))]
+                            mixed_namespace_fixture,
                             file_rename_producer: next_file_rename_producer,
                             response,
                         } => {
@@ -1527,14 +1552,24 @@ impl ProviderManager {
                                         vault_custody = custody;
                                         // The separately opted-in legacy directory fixture remains exclusive.
                                         // Shared directory routing is held until typed classification is admitted.
-                                        let shared_directory = if windows_namespace_dispatcher::DIRECTORY_ROUTING_READY {
+                                        let shared_directory_ready = windows_namespace_dispatcher::DIRECTORY_ROUTING_READY;
+                                        #[cfg(all(test, debug_assertions))]
+                                        let shared_directory_ready = shared_directory_ready || mixed_namespace_fixture;
+                                        let shared_directory = if shared_directory_ready {
                                             namespace_admission.map(|admission| windows_namespace_producer::Producer::new_shared(admission,composite,worker_namespace_controls.clone(),worker_namespace_status.clone()))
                                         } else {
                                             namespace_producer=namespace_admission.map(|admission| windows_namespace_producer::Producer::new(admission,composite,worker_namespace_controls.clone(),worker_namespace_status.clone()));
                                             None
                                         };
                                         namespace_dispatcher = if namespace_producer.is_none() && (next_file_rename_producer.is_some() || shared_directory.is_some()) {
-                                            match windows_namespace_dispatcher::Dispatcher::new(next_file_rename_producer,shared_directory) {
+                                            let make_dispatcher = || {
+                                                #[cfg(all(test, debug_assertions))]
+                                                if mixed_namespace_fixture {
+                                                    return windows_namespace_dispatcher::Dispatcher::new_mixed_fixture(next_file_rename_producer, shared_directory.ok_or("Mixed directory consumer missing")?);
+                                                }
+                                                windows_namespace_dispatcher::Dispatcher::new(next_file_rename_producer,shared_directory)
+                                            };
+                                            match make_dispatcher() {
                                                 Ok(dispatcher)=>Some(dispatcher),
                                                 Err(message)=> {
                                                     if let Ok(mut notice)=worker_rename_error.lock() {
@@ -1891,6 +1926,8 @@ impl ProviderManager {
             namespace_status,
             #[cfg(all(test, debug_assertions))]
             namespace_test_activation: AtomicBool::new(false),
+            #[cfg(all(test, debug_assertions))]
+            mixed_namespace_test_activation: AtomicBool::new(false),
             mount_preference: Mutex::new(!headless),
             ordinary_edits,
             proxy: windows_proxy::Service::default(),
@@ -1940,6 +1977,21 @@ impl ProviderManager {
         result
             .recv_timeout(Duration::from_secs(5))
             .map_err(|_| "Rename fixture owner observation timed out".to_owned())?
+    }
+
+    #[cfg(all(test, debug_assertions))]
+    fn mixed_namespace_observation(&self) -> Result<Value, String> {
+        let generation = self.authorized_generation.load(Ordering::Acquire);
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::MixedNamespaceObservation {
+                generation,
+                response,
+            })
+            .map_err(|_| "Mixed owner stopped")?;
+        result
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "Mixed owner observation timed out")?
     }
 
     #[cfg(all(test, debug_assertions))]
@@ -2006,10 +2058,16 @@ impl ProviderManager {
         custody_account: Vec<u8>,
         custody_store: Arc<dyn SessionStore>,
     ) -> Result<(), String> {
+        #[cfg(all(test, debug_assertions))]
+        let mixed_namespace_fixture = self.mixed_namespace_test_activation.load(Ordering::Acquire);
+        let shared_directory_ready = windows_namespace_dispatcher::DIRECTORY_ROUTING_READY;
+        #[cfg(all(test, debug_assertions))]
+        let shared_directory_ready = shared_directory_ready || mixed_namespace_fixture;
         let namespace_enabled = windows_namespace_producer::PRODUCTION_ENABLED;
         #[cfg(all(test, debug_assertions))]
-        let namespace_enabled =
-            namespace_enabled || self.namespace_test_activation.load(Ordering::Acquire);
+        let namespace_enabled = namespace_enabled
+            || self.namespace_test_activation.load(Ordering::Acquire)
+            || mixed_namespace_fixture;
         let namespace_admission = if namespace_enabled {
             Some(windows_namespace_producer::Admission::capture(
                 &backend,
@@ -2021,26 +2079,25 @@ impl ProviderManager {
         } else {
             None
         };
-        let file_rename_producer =
-            if !namespace_enabled || windows_namespace_dispatcher::DIRECTORY_ROUTING_READY {
-                file_rename_catalog
-                    .map(|catalog| {
-                        windows_file_rename_producer::Producer::capture(
-                            &backend,
-                            catalog,
-                            &self.authorized_generation,
-                            generation,
-                            expected_identity,
-                            &personal_space_id,
-                            &personal_root_resource_id,
-                        )
-                        .map(Box::new)
-                        .map_err(str::to_owned)
-                    })
-                    .transpose()?
-            } else {
-                None
-            };
+        let file_rename_producer = if !namespace_enabled || shared_directory_ready {
+            file_rename_catalog
+                .map(|catalog| {
+                    windows_file_rename_producer::Producer::capture(
+                        &backend,
+                        catalog,
+                        &self.authorized_generation,
+                        generation,
+                        expected_identity,
+                        &personal_space_id,
+                        &personal_root_resource_id,
+                    )
+                    .map(Box::new)
+                    .map_err(str::to_owned)
+                })
+                .transpose()?
+        } else {
+            None
+        };
         let fresh_close_publisher = self
             .fresh_close_source
             .lock()
@@ -2062,6 +2119,8 @@ impl ProviderManager {
                 custody_store,
                 fresh_close_publisher,
                 namespace_admission,
+                #[cfg(all(test, debug_assertions))]
+                mixed_namespace_fixture,
                 file_rename_producer,
                 response,
             })
@@ -17301,6 +17360,17 @@ pub(super) mod tests {
     pub(super) fn synthetic_headless_directory_server(
         lost_response: bool,
     ) -> (String, SyntheticPersonalSpacesFixture) {
+        synthetic_directory_server(lost_response, false)
+    }
+    #[cfg(debug_assertions)]
+    pub(super) fn synthetic_mixed_directory_server() -> (String, SyntheticPersonalSpacesFixture) {
+        synthetic_directory_server(false, true)
+    }
+    #[cfg(debug_assertions)]
+    fn synthetic_directory_server(
+        lost_response: bool,
+        mixed: bool,
+    ) -> (String, SyntheticPersonalSpacesFixture) {
         use base64::Engine as _;
         let header = format!(
             "Basic {}",
@@ -17318,9 +17388,7 @@ pub(super) mod tests {
             Some(header),
             None,
             Some(Arc::new(Mutex::new(
-                super::windows_profiles::windows_headless_directory_test::DirectoryModel::new(
-                    lost_response,
-                ),
+                super::windows_profiles::windows_headless_directory_test::DirectoryModel::for_fixture(lost_response, mixed),
             ))),
         )
     }

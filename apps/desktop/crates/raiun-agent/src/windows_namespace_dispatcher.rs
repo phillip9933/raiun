@@ -171,6 +171,10 @@ mod connected {
         pub(crate) attached: bool,
         pub(crate) instance: Option<u64>,
         pub(crate) held: bool,
+        pub(crate) cloud_directories_skipped: u64,
+        pub(crate) cloud_files_skipped: u64,
+        pub(crate) directory_offers: u64,
+        pub(crate) provider_directory_skipped: bool,
     }
     pub(crate) struct Dispatcher {
         rename: Option<Box<rename::Producer>>,
@@ -179,9 +183,35 @@ mod connected {
         instance: Option<u64>,
         batch: Option<NotificationBatch>,
         cursor: Cursor,
+        #[cfg(all(test, debug_assertions))]
+        fixture_directory: bool,
+        #[cfg(all(test, debug_assertions))]
+        fixture_counts: [u64; 3],
+        #[cfg(all(test, debug_assertions))]
+        fixture_provider_directory_skipped: bool,
     }
     impl Dispatcher {
         pub(crate) fn new(
+            rename: Option<Box<rename::Producer>>,
+            mkdir: Option<mkdir::Producer>,
+        ) -> Result<Self, &'static str> {
+            if mkdir.is_some() && !DIRECTORY_ROUTING_READY {
+                return Err("Shared directory routing is not admitted");
+            }
+            Self::build(rename, mkdir)
+        }
+        // Test admission changes routing only; original shared/authorization
+        // checks and every actual consumer/native guard remain mandatory.
+        #[cfg(all(test, debug_assertions))]
+        pub(crate) fn new_mixed_fixture(
+            rename: Option<Box<rename::Producer>>,
+            mkdir: mkdir::Producer,
+        ) -> Result<Self, &'static str> {
+            let mut value = Self::build(rename, Some(mkdir))?;
+            value.fixture_directory = true;
+            Ok(value)
+        }
+        fn build(
             rename: Option<Box<rename::Producer>>,
             mkdir: Option<mkdir::Producer>,
         ) -> Result<Self, &'static str> {
@@ -189,7 +219,7 @@ mod connected {
                 return Err(rename::UNAVAILABLE);
             }
             if let Some(directory) = &mkdir {
-                if !DIRECTORY_ROUTING_READY || !directory.is_shared() {
+                if !directory.is_shared() {
                     return Err("Shared directory routing is not admitted");
                 }
                 if rename
@@ -206,6 +236,12 @@ mod connected {
                 instance: None,
                 batch: None,
                 cursor: Cursor::default(),
+                #[cfg(all(test, debug_assertions))]
+                fixture_directory: false,
+                #[cfg(all(test, debug_assertions))]
+                fixture_counts: [0; 3],
+                #[cfg(all(test, debug_assertions))]
+                fixture_provider_directory_skipped: false,
             })
         }
         #[cfg(all(test, debug_assertions))]
@@ -214,6 +250,10 @@ mod connected {
                 attached: self.attached,
                 instance: self.instance,
                 held: self.cursor.held,
+                cloud_directories_skipped: self.fixture_counts[0],
+                cloud_files_skipped: self.fixture_counts[1],
+                directory_offers: self.fixture_counts[2],
+                provider_directory_skipped: self.fixture_provider_directory_skipped,
             }
         }
         /// Immutable borrow for the existing fixed-path read-only fixture only;
@@ -351,7 +391,10 @@ mod connected {
                     self.cursor.complete().map_err(|_| HOLD)?;
                 }
                 Work::Directory(index) => {
-                    if !DIRECTORY_ROUTING_READY {
+                    let directory_ready = DIRECTORY_ROUTING_READY;
+                    #[cfg(all(test, debug_assertions))]
+                    let directory_ready = directory_ready || self.fixture_directory;
+                    if !directory_ready {
                         return Err(HOLD);
                     }
                     if !self.cursor.directory_started {
@@ -380,11 +423,32 @@ mod connected {
                                     .offer_added(components, generation)
                                     .map_err(|_| HOLD)?;
                                 self.cursor.directory_started = true;
+                                #[cfg(all(test, debug_assertions))]
+                                {
+                                    self.fixture_counts[2] =
+                                        self.fixture_counts[2].checked_add(1).ok_or(HOLD)?;
+                                }
                             }
                             NamespaceEntryKind::CloudFile | NamespaceEntryKind::CloudDirectory => {
                                 // complete() advances ONLY this volatile cursor item.
                                 // No directory writer/offer/session, status completion,
                                 // ownership, clean-content or upload claim is made.
+                                #[cfg(all(test, debug_assertions))]
+                                {
+                                    let index =
+                                        if observed.kind == NamespaceEntryKind::CloudDirectory {
+                                            0
+                                        } else {
+                                            1
+                                        };
+                                    if index == 0
+                                        && components == ["Personal", "provider-directory"]
+                                    {
+                                        self.fixture_provider_directory_skipped = true;
+                                    }
+                                    self.fixture_counts[index] =
+                                        self.fixture_counts[index].checked_add(1).ok_or(HOLD)?;
+                                }
                                 self.cursor.complete().map_err(|_| HOLD)?;
                             }
                             NamespaceEntryKind::PlainFile => return Err(HOLD),
