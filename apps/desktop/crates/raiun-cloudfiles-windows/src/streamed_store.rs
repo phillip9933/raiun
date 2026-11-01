@@ -32,6 +32,8 @@ mod events;
 #[path = "streamed_retention.rs"]
 mod retention;
 #[cfg(windows)]
+pub(crate) use events::CreateSnapshotAcknowledged;
+#[cfg(windows)]
 mod windows;
 pub use events::{
     MAX_STREAMED_HISTORY, StreamedAttemptOutcome, StreamedAttemptState, StreamedDispatchLease,

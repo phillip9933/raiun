@@ -57,7 +57,7 @@ impl<'a> SaveRenameAdmission<'a> {
         }
     }
 
-    fn claim_completion(&self) -> Result<(), StoreError> {
+    pub(crate) fn claim_completion(&self) -> Result<(), StoreError> {
         if self
             .ticket
             .try_borrow_mut()

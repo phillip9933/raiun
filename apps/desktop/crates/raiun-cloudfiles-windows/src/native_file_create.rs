@@ -1,4 +1,4 @@
-//! Explicit capture/send foundation only: never conversion, clean or completion.
+//! Explicit same-owner ordinary Personal file create; never recovered replay.
 use super::*;
 use crate::namespace_intent::{
     CapturedAuthorization, LocalNamespaceEntry, NamespaceFileContent, NamespaceIntent,
@@ -8,6 +8,51 @@ use crate::streamed_snapshot::SnapshotBinding;
 use crate::streamed_store::namespace_file_store::{CapturedCreatePath, FileCreateStore};
 use std::io::{self, Read};
 
+#[link(name = "CldApi")]
+unsafe extern "system" {
+    fn CfConvertToPlaceholder(
+        file: Handle,
+        identity: *const c_void,
+        length: u32,
+        flags: u32,
+        usn: *mut i64,
+        overlapped: *mut c_void,
+    ) -> HResult;
+}
+/// Live same-owner native custody, never serializable or reconstructible.
+pub(crate) struct NativeFileCreateCompletion<'a> {
+    _reference: &'a SourceReference<'a>,
+    store: Arc<crate::streamed_store::SnapshotStore>,
+    join: crate::streamed_store::namespace_file_store::StoredFileJoin,
+    key: crate::streamed_store::StreamedRecordKey,
+    report: crate::namespace_intent::NamespaceDestinationReport,
+}
+impl NativeFileCreateCompletion<'_> {
+    pub(crate) fn binding_valid(&self) -> bool {
+        self.matches(&self.store, &self.join, &self.report)
+    }
+    pub(crate) fn snapshot(
+        &self,
+    ) -> (
+        &Arc<crate::streamed_store::SnapshotStore>,
+        &crate::streamed_store::StreamedRecordKey,
+    ) {
+        (&self.store, &self.key)
+    }
+    pub(crate) fn matches(
+        &self,
+        store: &Arc<crate::streamed_store::SnapshotStore>,
+        join: &crate::streamed_store::namespace_file_store::StoredFileJoin,
+        report: &crate::namespace_intent::NamespaceDestinationReport,
+    ) -> bool {
+        Arc::ptr_eq(store, &self.store)
+            && join.key() == self.join.key()
+            && join.intent() == self.join.intent()
+            && join.snapshot_id() == self.key.record_id()
+            && join.manifest_commitment_sha256() == self.key.commitment_sha256()
+            && report == &self.report
+    }
+}
 struct SourceOwner(Handle);
 impl SourceOwner {
     fn open(path: &[u16]) -> Result<Self, Error> {
@@ -391,6 +436,11 @@ impl ConfiguredRootConnection {
         {
             return Ok(CapturedLocalIncomplete);
         }
+        let original_join = joined.record().clone();
+        let streamed_key = store
+            .snapshot_store()
+            .record_key(original_join.snapshot_id())
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
         match admission.send(backend, joined.into_verified(), || {
             if !after_publication() {
                 return Err(crate::BackendError::Unavailable);
@@ -405,11 +455,151 @@ impl ConfiguredRootConnection {
             Ok(())
         }) {
             Ok(proof) => {
-                if admission.persist(backend, &mut lease, &proof).is_ok() {
-                    Ok(RemoteVerifiedLocalIncomplete)
-                } else {
-                    Ok(SubmittedUncertain)
+                if admission.persist(backend, &mut lease, &proof).is_err() {
+                    return Ok(SubmittedUncertain);
                 }
+                // Full original context/recovery checks occur outside backend.state.
+                if !after_publication() {
+                    return Ok(RemoteVerifiedLocalIncomplete);
+                }
+                let inside_publication = || {
+                    guard.check().is_ok()
+                        && current(authorization)
+                        && self.connected
+                        && !self.namespace_observation_closed
+                        && self.state.readiness.load(Ordering::Acquire) == CALLBACK_READY
+                        && !backend.is_revoked()
+                        && self
+                            .state
+                            .unverifiable_placeholder_closes
+                            .load(Ordering::Acquire)
+                            == 0
+                };
+                let complete = |final_reference: &SourceReference<'_>| -> Result<(), Error> {
+                    if !inside_publication() {
+                        return Err(Error::EditRecoveryUnavailable);
+                    }
+                    admission
+                        .check(backend)
+                        .map_err(|_| Error::ProviderUnavailable)?;
+                    root.verify_identity(true)?;
+                    root.verify_registered()?;
+                    let (now, current_usn) = plain(final_reference)?;
+                    if !same_edit_snapshot(snapshot, now) || current_usn != usn {
+                        return Err(Error::ConfiguredRootChanged);
+                    }
+                    let (_, actual_parent, _pins) =
+                        native_namespace_directory::pin_namespace_parent(
+                            root,
+                            &admission.parent.route,
+                            admission.parent.identity,
+                            &["Personal"],
+                            FILE_READ_ATTRIBUTES,
+                        )?;
+                    if actual_parent.identity != parent_snapshot.identity
+                        || !windows_paths_equal(
+                            &final_path_for_handle(final_reference.raw)
+                                .map_err(|_| Error::ConfiguredRootChanged)?,
+                            &expected,
+                        )
+                    {
+                        return Err(Error::ConfiguredRootChanged);
+                    }
+                    hash_source(final_reference, snapshot.file_size, &capture_job, &digest)?;
+                    let after = plain(final_reference)?;
+                    if !same_edit_snapshot(snapshot, after.0) || after.1 != usn {
+                        return Err(Error::ConfiguredRootChanged);
+                    }
+                    Ok(())
+                };
+                let result = admission.publish_and_complete(backend, &proof, |identity| {
+                    // Metadata HTTP has finished. Re-reference only this SAME owner;
+                    // a foreground break refuses completion, never reopen/rebase.
+                    let final_reference = source.reference()?;
+                    complete(&final_reference)?;
+                    let mut converted_usn = 0i64;
+                    // SAFETY: referenced WRITE_ACCESS Win32 borrow; synchronous NONE
+                    // conversion retains all bytes, with a live 16-byte identity.
+                    let hr = unsafe {
+                        CfConvertToPlaceholder(
+                            final_reference.raw,
+                            identity.as_ptr().cast(),
+                            16,
+                            0,
+                            &mut converted_usn,
+                            null_mut(),
+                        )
+                    };
+                    if hr < 0 {
+                        return Err(native_error("convert fresh file-create", hr));
+                    }
+                    if converted_usn <= 0 {
+                        return Err(Error::EditRecoveryUnavailable);
+                    }
+                    verify_completion_identity(source.0, identity)?;
+                    hash_source(&final_reference, snapshot.file_size, &capture_job, &digest)?;
+                    let mut compare_usn =
+                        completion_usn(final_reference.raw, snapshot.identity.file_index)?;
+                    if compare_usn <= 0 || compare_usn != converted_usn {
+                        return Err(Error::ConfiguredRootChanged);
+                    }
+                    validate_converted(&final_reference, snapshot, &expected, identity, false)?;
+                    guard
+                        .claim_completion()
+                        .map_err(|_| Error::EditRecoveryUnavailable)?;
+                    // SAFETY: same protected owner and a fresh positive compare USN.
+                    // Never NULL/zero fallback; a mismatch is retained incomplete.
+                    let hr = unsafe { CfSetInSyncState(source.0, 1, 0, &mut compare_usn) };
+                    if hr < 0 {
+                        return Err(native_error("complete fresh file-create", hr));
+                    }
+                    validate_converted(&final_reference, snapshot, &expected, identity, true)?;
+                    hash_source(&final_reference, snapshot.file_size, &capture_job, &digest)?;
+                    let after_usn =
+                        completion_usn(final_reference.raw, snapshot.identity.file_index)?;
+                    if compare_usn <= 0 || after_usn != compare_usn {
+                        return Err(Error::ConfiguredRootChanged);
+                    }
+                    root.verify_identity(true)?;
+                    root.verify_registered()?;
+                    if !inside_publication() {
+                        return Err(Error::EditRecoveryUnavailable);
+                    }
+                    Ok(final_reference)
+                });
+                let final_reference = match result {
+                    Ok(reference) if after_publication() => reference,
+                    _ => return Ok(RemoteVerifiedLocalIncomplete),
+                };
+                // Backend state/provider permit are now gone. Keep the SAME source
+                // reference while taking record/quota locks for linked custody.
+                let completion = NativeFileCreateCompletion {
+                    _reference: &final_reference,
+                    store: store.snapshot_store().clone(),
+                    join: original_join,
+                    key: streamed_key,
+                    report: proof
+                        .report_for(lease.record().intent())
+                        .map_err(|_| Error::EditRecoveryUnavailable)?,
+                };
+                let custody = (|| {
+                    if !after_publication() || admission.check(backend).is_err() {
+                        return Err(crate::streamed_store::StoreError::Invalid);
+                    }
+                    let mut snapshot_lease = store
+                        .snapshot_store()
+                        .acquire_dispatch(completion.snapshot().1)?;
+                    let acknowledged = snapshot_lease.acknowledge_create(&completion)?;
+                    if !after_publication() || admission.check(backend).is_err() {
+                        return Err(crate::streamed_store::StoreError::Invalid);
+                    }
+                    lease.record_local_completed(&completion, &acknowledged)
+                })();
+                Ok(if custody.is_ok() {
+                    LocallyCompleted
+                } else {
+                    RemoteVerifiedLocalIncomplete
+                })
             }
             Err(_) => {
                 // Submitted remains factual even if this best-effort attention append fails.
@@ -420,4 +610,65 @@ impl ConfiguredRootConnection {
         }
         // source/parent/ancestor ownership ends only after SDK source-worker join.
     }
+}
+
+fn hash_source(
+    source: &SourceReference<'_>,
+    length: u64,
+    job: &crate::StreamedRecoveryJob,
+    expected: &[u8; 32],
+) -> Result<(), Error> {
+    use sha2::Digest;
+    let stopped = || job.is_stopped();
+    let mut reader = Reader {
+        source,
+        offset: 0,
+        length,
+        eof: false,
+        hash: sha2::Sha256::new(),
+        job,
+        stopped: &stopped,
+    };
+    io::copy(&mut reader, &mut io::sink()).map_err(|_| Error::EditRecoveryUnavailable)?;
+    if !reader.eof
+        || reader.offset != length
+        || <[u8; 32]>::from(reader.hash.finalize()) != *expected
+    {
+        return Err(Error::ConfiguredRootChanged);
+    }
+    Ok(())
+}
+fn validate_converted(
+    source: &SourceReference<'_>,
+    before: RootSnapshot,
+    expected_path: &Path,
+    identity: &[u8; 16],
+    require_in_sync: bool,
+) -> Result<(), Error> {
+    let now = root_snapshot(source.raw)?;
+    let mut info: ByHandleFileInformation = unsafe { zeroed() };
+    if unsafe { GetFileInformationByHandle(source.raw, &mut info) } == 0
+        || info.number_of_links != 1
+        || now.identity != before.identity
+        || now.file_size != before.file_size
+        || now.last_write_time != before.last_write_time
+        || now.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+        || now.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        || !cleanup_cloud_reparse_tag(now.reparse_tag)
+        || now.placeholder_state & CF_PLACEHOLDER_STATE_PLACEHOLDER == 0
+        || now.placeholder_state
+            & (CF_PLACEHOLDER_STATE_PARTIAL | CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK)
+            != 0
+        || now.placeholder_state
+            & !(CF_PLACEHOLDER_STATE_PLACEHOLDER | 0x4 | CF_PLACEHOLDER_STATE_IN_SYNC)
+            != 0
+        || (require_in_sync && now.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC == 0)
+        || !windows_paths_equal(
+            &final_path_for_handle(source.raw).map_err(|_| Error::ConfiguredRootChanged)?,
+            expected_path,
+        )
+    {
+        return Err(Error::ConfiguredRootChanged);
+    }
+    verify_completion_identity(source.owner.0, identity)
 }

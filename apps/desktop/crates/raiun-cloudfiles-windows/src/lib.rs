@@ -508,7 +508,7 @@ pub struct ConfiguredRootConnection {
 pub struct NativePlainFileCapture<'connection, 'parent, 'lease> {
     inner: native::native_plain_file_capture::NativePlainFileCapture<'connection, 'parent, 'lease>,
 }
-/// Explicit foundation outcomes. None grants clean/native completion or replay.
+/// Explicit same-invocation outcomes; retained incomplete states never grant replay.
 #[cfg(windows)]
 #[derive(Debug, Eq, PartialEq)]
 pub enum FreshFileCreateOutcome {
@@ -516,6 +516,7 @@ pub enum FreshFileCreateOutcome {
     CapturedLocalIncomplete,
     SubmittedUncertain,
     RemoteVerifiedLocalIncomplete,
+    LocallyCompleted,
 }
 #[cfg(windows)]
 impl NativePlainFileCapture<'_, '_, '_> {
@@ -826,7 +827,7 @@ impl ConfiguredRootConnection {
             .prepare_plain_file_capture(backend, parent, name, record_generation)
             .map(|inner| NativePlainFileCapture { inner })
     }
-    /// Explicit direct-Personal create foundation, never native clean completion.
+    /// Explicit direct-Personal create with same-invocation native/custody completion.
     /// The currentness callback must use nonblocking original owner/epoch checks.
     #[allow(clippy::too_many_arguments)]
     pub fn reconcile_fresh_personal_file_create(

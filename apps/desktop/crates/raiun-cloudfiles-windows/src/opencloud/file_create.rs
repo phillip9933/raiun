@@ -27,18 +27,135 @@ impl Admission {
         proof: &VerifiedCreateReadback,
     ) -> Result<(), BackendError> {
         self.check(backend)?;
-        let remaining = self
-            .job
-            .deadline()
-            .checked_duration_since(std::time::Instant::now())
-            .ok_or(BackendError::Unavailable)?;
-        let cancellation = crate::CancellationToken::with_timeout(remaining);
-        let _permit = backend.begin_scoped_publish(&cancellation)?;
-        self.check(backend)?;
         lease
             .record_remote_verified(proof)
             .map_err(|_| BackendError::Unavailable)?;
         self.check(backend)
+    }
+    /// Exact FILE publication; no discovery, HTTP or journal I/O under this fence.
+    pub(crate) fn publish_and_complete<T>(
+        &self,
+        backend: &Arc<OpenCloudPlaceholderBackend>,
+        proof: &VerifiedCreateReadback,
+        complete: impl FnOnce(&[u8; 16]) -> Result<T, crate::Error>,
+    ) -> Result<T, crate::Error> {
+        let unavailable = || crate::Error::EditRecoveryUnavailable;
+        self.check(backend).map_err(|_| unavailable())?;
+        let report = proof.report_for(&proof.intent).map_err(|_| unavailable())?;
+        if report.destination.parent.scope != self.parent.scope
+            || report.destination.parent.authorization != self.auth
+            || report.destination.parent.remote != self.parent.remote
+        {
+            return Err(unavailable());
+        }
+        let scope = &self.parent.scope;
+        let path = format!("/{}", report.destination.name);
+        // Refresh the exact historical readback tuple before entering the local
+        // publication fence. This is bounded metadata observation, not remote CAS.
+        let context = RangeReadContext {
+            deadline: self.job.deadline(),
+            token_generation: self.auth.token_generation,
+        };
+        let root = backend
+            .client
+            .stat_with_context(&scope.space_id, "/", context)
+            .map_err(|_| unavailable())?;
+        self.check(backend).map_err(|_| unavailable())?;
+        if !root.directory || root.encrypted || !root.writable || root.id != scope.root_resource_id
+        {
+            return Err(unavailable());
+        }
+        let observed = backend
+            .client
+            .stat_with_context(&scope.space_id, &path, context)
+            .map_err(|_| unavailable())?;
+        self.check(backend).map_err(|_| unavailable())?;
+        if observed.path != path
+            || observed.directory
+            || observed.encrypted
+            || !observed.writable
+            || observed.id != report.remote.resource_id
+            || observed.etag != report.remote.etag
+            || !namespace::strong(&observed.etag)
+            || observed.size != report.remote.byte_len
+        {
+            return Err(unavailable());
+        }
+        let identity = binding_identity(
+            &self.catalog_scope,
+            "file",
+            &[
+                &scope.space_id,
+                &scope.root_resource_id,
+                &path,
+                &report.remote.resource_id,
+            ],
+        );
+        let binding = FileBinding {
+            space_id: scope.space_id.clone(),
+            root_resource_id: scope.root_resource_id.clone(),
+            path,
+            remote_id: report.remote.resource_id.clone(),
+            etag: report.remote.etag.clone(),
+            size: report.remote.byte_len,
+        };
+        let _permit = backend
+            .begin_scoped_publish(self.job.cancellation())
+            .map_err(|_| unavailable())?;
+        self.check(backend).map_err(|_| unavailable())?;
+        let mut state = backend.state.try_lock().map_err(|_| unavailable())?;
+        // Inspect the original tuples under this already-held state guard;
+        // never recurse through owns_composite_root_identity/state.lock here.
+        let composite =
+            composite_root_identity(&backend.scope, &scope.space_id, &scope.root_resource_id);
+        let root_current = matches!(state.namespace_directories.get(&composite),
+            Some(NamespaceDirectory::Root { account_id, personal_space_id, personal_root_id })
+                if account_id == backend.scope.account_id()
+                && personal_space_id == &scope.space_id && personal_root_id == &scope.root_resource_id);
+        let parent_current = state
+            .directories
+            .get(&self.parent.identity)
+            .is_some_and(|parent| {
+                parent.space_id == scope.space_id
+                    && parent.root_resource_id == scope.root_resource_id
+                    && parent.path == self.parent.path
+                    && parent.remote_id == self.parent.remote.resource_id
+            });
+        if !root_current || !parent_current {
+            return Err(unavailable());
+        }
+        if binding_count(&state) >= MAX_IDENTITY_CATALOG_ENTRIES
+            || state.directories.contains_key(&identity)
+            || state.namespace_directories.contains_key(&identity)
+            || state.files.iter().any(|(key, prior)| {
+                (*key == identity && prior != &binding)
+                    || (prior.space_id == binding.space_id
+                        && prior.root_resource_id == binding.root_resource_id
+                        && prior.path == binding.path
+                        && prior != &binding)
+            })
+        {
+            return Err(unavailable());
+        }
+        backend
+            .upsert_identity_binding(
+                &self.catalog_scope,
+                &ProviderIdentityBinding::File {
+                    identity: *identity.as_bytes(),
+                    space_id: binding.space_id.clone(),
+                    root_resource_id: binding.root_resource_id.clone(),
+                    path: binding.path.clone(),
+                    remote_id: binding.remote_id.clone(),
+                    etag: binding.etag.clone(),
+                    size: binding.size,
+                },
+            )
+            .map_err(|_| unavailable())?;
+        state.files.insert(identity, binding);
+        self.check(backend).map_err(|_| unavailable())?;
+        let result = complete(identity.as_bytes())?;
+        self.check(backend).map_err(|_| unavailable())?;
+        Ok(result)
     }
     pub(crate) fn check(
         &self,

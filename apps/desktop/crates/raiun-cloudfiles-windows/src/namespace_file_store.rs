@@ -146,6 +146,8 @@ impl StoredFileJoin {
 struct Loaded {
     record: StoredFileJoin,
     checked: NamespaceIntentProgress,
+    #[cfg(windows)]
+    remote: Option<crate::namespace_intent::NamespaceDestinationReport>,
 }
 /// Complete local byte authentication only. This is not server/native evidence.
 pub struct VerifiedFileJoin {
@@ -596,6 +598,8 @@ impl FileCreateStore {
         } else {
             self.reference_manifest_metadata(&joined, scope, budget)?;
         }
+        #[cfg(windows)]
+        let mut remote = None;
         let mut checked = NamespaceIntentProgress::new(joined.intent.clone())
             .map_err(|_| StoreError::CorruptEvidence)?;
         let mut commitment = join_hash(&plain);
@@ -627,9 +631,22 @@ impl FileCreateStore {
             checked
                 .record(&event)
                 .map_err(|_| StoreError::CorruptEvidence)?;
+            #[cfg(windows)]
+            if let NamespaceEventKind::RemoteVerified { report } = &event.event {
+                remote = Some(report.clone());
+            }
             commitment = event_hash(&commitment, &plain);
         }
         let progress = checked.snapshot();
+        if progress.recorded_complete {
+            let (manifest, directory) = self.reference_manifest_metadata(&joined, scope, budget)?;
+            if !self
+                .base
+                .create_acknowledged_metadata(&manifest, &*directory, budget)?
+            {
+                return Err(StoreError::IncompleteEvidence);
+            }
+        }
         Ok(Loaded {
             record: StoredFileJoin {
                 key,
@@ -638,6 +655,8 @@ impl FileCreateStore {
                 commitment,
             },
             checked,
+            #[cfg(windows)]
+            remote,
         })
     }
     fn seal(
@@ -702,6 +721,23 @@ impl FileCreateLease {
             .map_err(|_| StoreError::Invalid)?;
         self.append(NamespaceEventKind::RemoteVerified { report })
     }
+    #[cfg(windows)]
+    pub(crate) fn record_local_completed(
+        &mut self,
+        completion: &crate::native::NativeFileCreateCompletion<'_>,
+        acknowledged: &crate::streamed_store::CreateSnapshotAcknowledged,
+    ) -> Result<(), StoreError> {
+        let report = self.loaded.remote.as_ref().ok_or(StoreError::Invalid)?;
+        if !self.submitted_here
+            || !acknowledged.matches(completion)
+            || !completion.matches(&self.store.base, &self.loaded.record, report)
+        {
+            return Err(StoreError::Invalid);
+        }
+        self.append_authorized(NamespaceEventKind::LocalCompleted {
+            destination: destination(self.loaded.record.intent())?.clone(),
+        })
+    }
     pub fn record(&self) -> &StoredFileJoin {
         &self.loaded.record
     }
@@ -724,6 +760,12 @@ impl FileCreateLease {
         })
     }
     fn append(&mut self, kind: NamespaceEventKind) -> Result<(), StoreError> {
+        if matches!(kind, NamespaceEventKind::LocalCompleted { .. }) {
+            return Err(StoreError::Invalid);
+        }
+        self.append_authorized(kind)
+    }
+    fn append_authorized(&mut self, kind: NamespaceEventKind) -> Result<(), StoreError> {
         if self.poisoned {
             return Err(StoreError::PublicationUncertain);
         }
@@ -785,6 +827,9 @@ fn check_transition(
         return Err(StoreError::Invalid);
     }
     match kind {
+        NamespaceEventKind::LocalCompleted { .. } if prior.remote == NamespacePhase::Verified => {
+            Ok(())
+        }
         NamespaceEventKind::RemoteVerified { .. } if prior.remote == NamespacePhase::Submitted => {
             Ok(())
         }
@@ -974,8 +1019,8 @@ pub(super) fn validated_catalog_scope_keys(
 
 /// Count authenticated current-scope joins under the caller's existing quota
 /// lease and cumulative budget. No body open, directory creation, lock or
-/// writable capability escapes. Current file events cannot express completion:
-/// every valid joined record remains unresolved, regardless of copied flags.
+/// writable capability escapes. Completed joins require their exact authenticated
+/// snapshot zero-attempt ACK under this same lock and cumulative budget.
 pub(super) fn history_counts_existing(
     root: Arc<dyn Directory>,
     protector: Arc<dyn EditRecordProtector>,
@@ -988,6 +1033,7 @@ pub(super) fn history_counts_existing(
     let files = root.child(ROOT, false)?;
     let scopes = catalogs(&*files, &*protector, budget)?;
     let mut records = 0usize;
+    let mut unresolved = 0usize;
     for (key, scope) in scopes {
         let directory = files.child(&key, false)?;
         let names = directory.entries(budget.remaining_entries())?;
@@ -1034,14 +1080,16 @@ pub(super) fn history_counts_existing(
                 )?,
             };
             for id in ids {
-                decoder.load_names_checked(&*directory, &id, &scope, &names, budget, false)?;
+                let loaded =
+                    decoder.load_names_checked(&*directory, &id, &scope, &names, budget, false)?;
+                unresolved += usize::from(!loaded.record.progress.recorded_complete);
             }
         }
         directory.verify()?;
     }
     files.verify()?;
     root.verify()?;
-    Ok((records, records))
+    Ok((records, unresolved))
 }
 
 pub(super) fn accounted_usage(

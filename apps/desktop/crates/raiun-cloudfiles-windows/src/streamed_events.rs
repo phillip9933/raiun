@@ -256,6 +256,19 @@ impl SnapshotStore {
         body.verify()?;
         Ok(manifest)
     }
+    pub(super) fn create_acknowledged_metadata(
+        &self,
+        manifest: &SnapshotManifest,
+        directory: &dyn Directory,
+        budget: &mut Budget,
+    ) -> Result<bool, StoreError> {
+        let key = StreamedRecordKey::from_manifest(manifest)?;
+        Ok(self.read_history(directory, &key, budget)?.state
+            == (StreamedAttemptState::LocallyAcknowledged {
+                attempt_id: 0,
+                attempts: 0,
+            }))
+    }
     fn read_history(
         &self,
         directory: &dyn Directory,
@@ -430,6 +443,41 @@ impl StreamedDispatchLease {
             )?
             .state)
     }
+    #[cfg(all(test, unix))]
+    pub(super) fn fixture_acknowledge_key(&mut self) -> Result<(), StoreError> {
+        self.acknowledge_local(StreamedLocalCompletion {
+            key: self.key.clone(),
+        })
+    }
+    #[cfg(windows)]
+    pub(crate) fn acknowledge_create(
+        &mut self,
+        completion: &crate::native::NativeFileCreateCompletion<'_>,
+    ) -> Result<CreateSnapshotAcknowledged, StoreError> {
+        let (store, key) = completion.snapshot();
+        if !completion.binding_valid()
+            || !Arc::ptr_eq(store, &self.store)
+            || key != &self.key
+            || self.current_state()? != StreamedAttemptState::NotAttempted
+        {
+            return Err(StoreError::Invalid);
+        }
+        // This ledger made zero PUTs. The file journal owns the actual one PUT.
+        self.finish_outcome(0, 0, StreamedAttemptOutcome::VerifiedApplied)?;
+        self.acknowledge_local(StreamedLocalCompletion { key: key.clone() })?;
+        if self.current_state()?
+            != (StreamedAttemptState::LocallyAcknowledged {
+                attempt_id: 0,
+                attempts: 0,
+            })
+        {
+            return Err(StoreError::IncompleteEvidence);
+        }
+        Ok(CreateSnapshotAcknowledged {
+            store: self.store.clone(),
+            key: key.clone(),
+        })
+    }
     pub fn begin_attempt(&mut self) -> Result<u64, StoreError> {
         if self.finished || self.poisoned || self.puts >= 2 {
             return Err(StoreError::Invalid);
@@ -592,6 +640,21 @@ impl StreamedDispatchLease {
             attempt_id,
             EventAction::LocalAcknowledged { attempts },
         )
+    }
+}
+#[cfg(windows)]
+pub(crate) struct CreateSnapshotAcknowledged {
+    store: Arc<SnapshotStore>,
+    key: StreamedRecordKey,
+}
+#[cfg(windows)]
+impl CreateSnapshotAcknowledged {
+    pub(crate) fn matches(
+        &self,
+        completion: &crate::native::NativeFileCreateCompletion<'_>,
+    ) -> bool {
+        let (store, key) = completion.snapshot();
+        Arc::ptr_eq(store, &self.store) && key == &self.key
     }
 }
 pub(crate) struct StreamedLocalCompletion {

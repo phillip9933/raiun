@@ -43,6 +43,7 @@ use zeroize::Zeroizing;
 
 #[path = "native_file_create.rs"]
 mod native_file_create;
+pub(crate) use native_file_create::NativeFileCreateCompletion;
 #[path = "native_file_rename.rs"]
 pub(super) mod native_file_rename;
 #[path = "native_namespace_directory.rs"]

@@ -916,3 +916,169 @@ fn mapping_constructor_checks_correspondence_and_bounds_but_grants_no_admission(
             .is_err()
     );
 }
+
+// Synthetic authenticated metadata only: these fixtures never mint native proof.
+fn remote_verified_fixture(
+    files: &Arc<FileCreateStore>,
+    base: &Arc<SnapshotStore>,
+) -> FileCreateLease {
+    let published = files
+        .publish_fresh(draft(base, 1), commit(base, 1), mapping(), &mut || false)
+        .unwrap();
+    let mut lease = files.acquire_dispatch(published.record().key()).unwrap();
+    lease.mark_submitted().unwrap();
+    let NamespaceOperation::CreateFile {
+        destination,
+        content,
+    } = lease.record().intent().operation.clone()
+    else {
+        unreachable!()
+    };
+    lease
+        .append(NamespaceEventKind::RemoteVerified {
+            report: crate::namespace_intent::NamespaceDestinationReport {
+                destination,
+                content: Some(content),
+                remote: RemoteEditBaseline {
+                    resource_id: "new-file".into(),
+                    etag: "\"new-v1\"".into(),
+                    byte_len: 1,
+                },
+            },
+        })
+        .unwrap();
+    lease
+}
+#[test]
+fn create_completion_requires_exact_zero_attempt_snapshot_ack() {
+    for variant in 0..5 {
+        let (_temp, base, files, _) = fixture();
+        let mut file = remote_verified_fixture(&files, &base);
+        let key = base.record_key(file.record().snapshot_id()).unwrap();
+        let other = if variant == 3 {
+            Some(commit(&base, 1))
+        } else {
+            None
+        };
+        let selected = other.as_ref().map_or(key.clone(), |receipt| {
+            StreamedRecordKey::from_manifest(receipt.manifest()).unwrap()
+        });
+        let mut stream = base.acquire_dispatch(&selected).unwrap();
+        if variant > 0 {
+            let attempt = if variant == 4 {
+                stream.begin_attempt().unwrap()
+            } else {
+                0
+            };
+            stream
+                .finish_outcome(
+                    attempt,
+                    u8::from(variant == 4),
+                    StreamedAttemptOutcome::VerifiedApplied,
+                )
+                .unwrap();
+        }
+        if variant >= 2 {
+            stream.fixture_acknowledge_key().unwrap();
+        }
+        let destination = destination(file.record().intent()).unwrap().clone();
+        let result = file.append_authorized(NamespaceEventKind::LocalCompleted { destination });
+        assert_eq!(
+            result.is_ok(),
+            variant == 2,
+            "only own 0/0 ACK completes, variant={variant}"
+        );
+        drop(stream);
+        drop(file);
+        if variant == 2 {
+            let retained = files.discover().unwrap().pop().unwrap();
+            assert!(retained.progress().recorded_complete);
+            assert!(
+                files
+                    .acquire_dispatch(retained.key())
+                    .unwrap()
+                    .mark_submitted()
+                    .is_err()
+            );
+        } else {
+            // Invalid terminal pair remains retained and unknown, never healthy.
+            assert!(files.discover().is_err());
+        }
+    }
+}
+#[test]
+fn snapshot_ack_without_file_completion_stays_unresolved() {
+    let (_temp, base, files, _) = fixture();
+    let file = remote_verified_fixture(&files, &base);
+    let key = base.record_key(file.record().snapshot_id()).unwrap();
+    let mut stream = base.acquire_dispatch(&key).unwrap();
+    stream
+        .finish_outcome(0, 0, StreamedAttemptOutcome::VerifiedApplied)
+        .unwrap();
+    stream.fixture_acknowledge_key().unwrap();
+    drop(stream);
+    drop(file);
+    assert!(matches!(
+        base.discover_records().unwrap()[0].state,
+        StreamedAttemptState::LocallyAcknowledged {
+            attempt_id: 0,
+            attempts: 0
+        }
+    ));
+    assert!(!files.discover().unwrap()[0].progress().recorded_complete);
+}
+#[test]
+fn completed_file_history_authenticates_linked_ack_again_after_restart() {
+    let (temp, base, files, observation) = fixture();
+    let mut file = remote_verified_fixture(&files, &base);
+    let id = file.record().snapshot_id().to_owned();
+    let key = base.record_key(&id).unwrap();
+    let mut stream = base.acquire_dispatch(&key).unwrap();
+    stream
+        .finish_outcome(0, 0, StreamedAttemptOutcome::VerifiedApplied)
+        .unwrap();
+    stream.fixture_acknowledge_key().unwrap();
+    drop(stream);
+    let destination = destination(file.record().intent()).unwrap().clone();
+    file.append_authorized(NamespaceEventKind::LocalCompleted { destination })
+        .unwrap();
+    drop(file);
+    assert!(files.discover().unwrap()[0].progress().recorded_complete);
+    let client = raiun_opencloud::OpenCloudClient::new_with_proxy(
+        &base.scope.server_origin,
+        "synthetic-token".into(),
+        &raiun_opencloud::ProxyConfig::Direct,
+    )
+    .unwrap();
+    let provider = crate::ProviderScope::new(
+        &client,
+        base.scope.profile_id.clone(),
+        base.scope.account_subject.clone(),
+        base.scope.server_origin.clone(),
+    )
+    .unwrap();
+    let physical = crate::ConfiguredRootIdentity {
+        volume_serial: base.scope.root_volume_serial,
+        file_index: base.scope.root_file_index,
+    };
+    let summary = || {
+        super::namespace_rename_store::history_summary_existing(
+            Some(base.root.clone()),
+            base.protector.clone(),
+            base.policy,
+            &provider,
+            physical,
+        )
+    };
+    let body_reads = observation.body_reads.load(Ordering::SeqCst);
+    let read = summary().unwrap();
+    assert_eq!((read.file_records, read.file_unresolved), (1, 0));
+    assert_eq!(observation.body_reads.load(Ordering::SeqCst), body_reads);
+    let ack = temp
+        .path()
+        .join(&base.key)
+        .join(format!("{id}.event.{:020}", 2));
+    std::fs::remove_file(ack).unwrap();
+    assert!(summary().is_err());
+    assert!(FileCreateStore::new(base).unwrap().discover().is_err());
+}
