@@ -42,3 +42,7 @@ fn main() {
 #[cfg(all(test, not(windows)))]
 #[path = "windows_file_rename_producer.rs"]
 mod windows_file_rename_producer;
+
+#[cfg(all(test, not(windows)))]
+#[path = "windows_namespace_dispatcher.rs"]
+mod windows_namespace_dispatcher;

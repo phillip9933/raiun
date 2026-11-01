@@ -1,6 +1,5 @@
 //! Single-owner, fresh same-batch Personal file rename dispatch. Hints and the
 //! catalog join are partial evidence; only the live guarded CF entry admits IO.
-const MAX_PAIRS: usize = 32;
 
 /// Generation-bound notice only, never an activation or admission capability.
 #[derive(Default)]
@@ -64,33 +63,6 @@ fn eligible(old: &[String], new: &[String]) -> bool {
             .eq_ignore_ascii_case(new.last().unwrap())
 }
 
-/// A batch is consumed once; a failed dispatch is never requeued. This cursor
-/// cannot join hints from different batches or recreate a mutation capability.
-#[derive(Default)]
-struct BatchCursor {
-    remaining: std::ops::Range<usize>,
-}
-impl BatchCursor {
-    fn admit(&mut self, pairs: usize) -> bool {
-        self.remaining = 0..0;
-        if pairs == 0 || pairs > MAX_PAIRS {
-            return false;
-        }
-        self.remaining = 0..pairs;
-        true
-    }
-    fn next(&mut self, current: bool, initial_save: bool) -> Option<usize> {
-        if !current {
-            self.remaining = 0..0;
-            return None;
-        }
-        if initial_save {
-            return None;
-        }
-        self.remaining.next()
-    }
-}
-
 #[cfg(windows)]
 mod connected {
     use super::*;
@@ -99,15 +71,11 @@ mod connected {
         PlaceholderBackend, ProviderIdentityBinding, ProviderIdentityCatalog,
         ProviderIdentityCatalogScope, namespace_intent::CapturedAuthorization,
     };
-    use raiun_control_windows::{
-        directory_notifications::directory_rename_hints::{RenameHintBatch, pair_rename_hints},
-        directory_notifications::{NotificationBatch, ObserverPoll},
-    };
+    use raiun_control_windows::directory_notifications::directory_rename_hints::RenameHintPair;
     use std::sync::{
         Arc, Weak,
         atomic::{AtomicU64, Ordering},
     };
-    use std::time::Duration;
 
     pub(crate) const UNAVAILABLE: &str =
         "File rename sync is unavailable for this drive. Existing recovery files have been kept.";
@@ -122,10 +90,6 @@ mod connected {
         cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
         catalog: Arc<dyn ProviderIdentityCatalog>,
         scope: ProviderIdentityCatalogScope,
-        attached: bool,
-        instance: Option<u64>,
-        batch: Option<NotificationBatch>,
-        cursor: BatchCursor,
         record_generation: u64,
         held: bool,
     }
@@ -158,10 +122,6 @@ mod connected {
                     personal_root,
                 )
                 .map_err(|_| UNAVAILABLE)?,
-                attached: false,
-                instance: None,
-                batch: None,
-                cursor: BatchCursor::default(),
                 record_generation: 0,
                 held: false,
             };
@@ -173,8 +133,7 @@ mod connected {
         // Values only. This cannot attach/poll, dispatch, clear HOLD or mint custody.
         #[cfg(all(test, debug_assertions))]
         pub(crate) fn native_fixture_snapshot(&self) -> serde_json::Value {
-            serde_json::json!({"attached":self.attached,"instance":self.instance,
-                "held":self.held,"record_generation":self.record_generation,
+            serde_json::json!({"held":self.held,"record_generation":self.record_generation,
                 "agent_generation":self.auth.agent_generation,
                 "token_generation":self.auth.token_generation,"root_volume_serial":self.root.volume_serial,"root_file_index":self.root.file_index})
         }
@@ -229,79 +188,39 @@ mod connected {
                     .upgrade()
                     .is_some_and(|original| Arc::ptr_eq(&original, backend))
         }
-        pub(crate) fn tick(
-            &mut self,
-            connection: &mut ConfiguredRootConnection,
+        pub(crate) fn is_current(
+            &self,
             backend: &Arc<OpenCloudPlaceholderBackend>,
             root: ConfiguredRootIdentity,
+        ) -> bool {
+            !self.held && self.current(self.auth, backend, root)
+        }
+        pub(crate) fn authorization(&self) -> CapturedAuthorization {
+            self.auth
+        }
+        pub(crate) fn hold(&mut self) {
+            self.held = true;
+        }
+        /// One already-paired hint, not admission or replay authority. Only the
+        /// original guarded candidate/public entry may authorize the operation.
+        pub(crate) fn dispatch_pair(
+            &mut self,
+            connection: &ConfiguredRootConnection,
+            backend: &Arc<OpenCloudPlaceholderBackend>,
+            root: ConfiguredRootIdentity,
+            pair: RenameHintPair<'_>,
+            record_generation: u64,
         ) -> Result<(), &'static str> {
-            if !self.current(self.auth, backend, root) || self.held {
-                self.batch = None;
-                self.cursor.next(false, false);
+            if !self.is_current(backend, root)
+                || record_generation == 0
+                || record_generation <= self.record_generation
+            {
+                self.held = true;
                 return Err(HOLD);
             }
-            if self.batch.is_none() {
-                let observation = match if self.attached {
-                    connection.poll_namespace_observer(Duration::ZERO)
-                } else {
-                    self.attached = true;
-                    connection.attach_namespace_observer()
-                } {
-                    Ok(observation) => observation,
-                    Err(_) => {
-                        self.held = true;
-                        self.batch = None;
-                        self.cursor.next(false, false);
-                        return Err(HOLD);
-                    }
-                };
-                if observation.root_identity() != root
-                    || observation.provider_scope() != backend.scope()
-                    || self.instance.is_some_and(|id| id != observation.instance())
-                {
-                    self.held = true;
-                    return Err(HOLD);
-                }
-                self.instance = Some(observation.instance());
-                match observation.poll() {
-                    ObserverPoll::Batch(batch) => {
-                        let RenameHintBatch::Pairs(pairs) = pair_rename_hints(batch) else {
-                            self.held = true;
-                            return Err(HOLD);
-                        };
-                        // Empty batches contain no rename work. Initial attach
-                        // remains inventory-unknown and grants no rescan authority.
-                        if pairs.is_empty() {
-                            return Ok(());
-                        }
-                        if !self.cursor.admit(pairs.len()) {
-                            self.held = true;
-                            return Err(HOLD);
-                        }
-                        self.batch = Some(batch.clone());
-                    }
-                    ObserverPoll::Stopped => {
-                        self.held = true;
-                        return Err(HOLD);
-                    }
-                    ObserverPoll::Idle | ObserverPoll::Pending => return Ok(()),
-                }
-            }
-            let Some(index) = self
-                .cursor
-                .next(self.current(self.auth, backend, root), false)
-            else {
-                self.batch = None;
-                return Ok(());
-            };
-            let result = self.dispatch(connection, backend, root, index);
-            if self.cursor.remaining.is_empty() {
-                self.batch = None;
-            }
-            // Never replay a failed/pre-send/uncertain observation. Hold this
-            // producer until a new explicitly connected owner is established.
+            self.record_generation = record_generation;
+            let result = self.dispatch(connection, backend, root, pair, record_generation);
             if result.is_err() {
-                self.batch = None;
                 self.held = true;
             }
             result
@@ -311,13 +230,9 @@ mod connected {
             connection: &ConfiguredRootConnection,
             backend: &Arc<OpenCloudPlaceholderBackend>,
             root: ConfiguredRootIdentity,
-            index: usize,
+            pair: RenameHintPair<'_>,
+            record_generation: u64,
         ) -> Result<(), &'static str> {
-            let RenameHintBatch::Pairs(pairs) = pair_rename_hints(self.batch.as_ref().ok_or(HOLD)?)
-            else {
-                return Err(HOLD);
-            };
-            let pair = pairs.get(index).ok_or(HOLD)?.clone();
             let old = pair.old_components();
             let new = pair.new_components();
             if !eligible(old, new) {
@@ -372,7 +287,6 @@ mod connected {
             let observed = connection
                 .observe_namespace_file(&parts)
                 .map_err(|_| HOLD)?;
-            self.record_generation = self.record_generation.checked_add(1).ok_or(HOLD)?;
             let current = |auth| self.current(auth, backend, root);
             let candidate = backend
                 .file_rename_binding_candidate(
@@ -388,7 +302,7 @@ mod connected {
                 .reconcile_fresh_file_rename_candidate(
                     backend,
                     &candidate,
-                    self.record_generation,
+                    record_generation,
                     &current,
                 )
                 .map_err(|_| HOLD)?;
@@ -422,24 +336,6 @@ mod tests {
         ] {
             assert!(!eligible(&parts(a), &parts(b)));
         }
-    }
-    #[test]
-    fn command_epoch_and_initial_save_prevent_consumption() {
-        let mut cursor = BatchCursor::default();
-        assert!(cursor.admit(2));
-        assert_eq!(cursor.next(true, true), None);
-        assert_eq!(cursor.next(true, false), Some(0));
-        assert_eq!(cursor.next(false, false), None);
-        assert_eq!(cursor.next(true, false), None);
-    }
-    #[test]
-    fn consumed_failure_is_not_retried_and_batch_bounds_fail_closed() {
-        let mut cursor = BatchCursor::default();
-        assert!(cursor.admit(1));
-        assert_eq!(cursor.next(true, false), Some(0));
-        assert_eq!(cursor.next(true, false), None);
-        assert!(!cursor.admit(MAX_PAIRS + 1));
-        assert_eq!(cursor.next(true, false), None);
     }
     #[test]
     fn catalog_join_requires_unique_exact_original_root_and_real_parent() {

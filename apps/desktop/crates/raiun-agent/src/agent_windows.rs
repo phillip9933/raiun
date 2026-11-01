@@ -78,6 +78,8 @@ mod windows_file_rename_caller_native_test;
 
 #[path = "windows_file_rename_producer.rs"]
 mod windows_file_rename_producer;
+#[path = "windows_namespace_dispatcher.rs"]
+mod windows_namespace_dispatcher;
 #[path = "windows_namespace_producer.rs"]
 mod windows_namespace_producer;
 #[path = "windows_profile_registry.rs"]
@@ -910,7 +912,7 @@ impl ProviderManager {
                 let mut folders: Option<windows_folder_sync::Runtime> = None;
                 let mut cleanup_holds = windows_vault_cleanup_holds::PendingCleanupHolds::<PendingNativeVaultCleanup>::new();
                 let mut namespace_producer:Option<windows_namespace_producer::Producer>=None;
-                let mut file_rename_producer:Option<Box<windows_file_rename_producer::Producer>>=None;
+                let mut namespace_dispatcher:Option<windows_namespace_dispatcher::Dispatcher>=None;
                 let mut pending_command = None;
                 loop {
                     let command = match pending_command.take().map_or_else(
@@ -1379,11 +1381,19 @@ impl ProviderManager {
                                 if worker_generation.load(Ordering::Acquire)!=generation {
                                     return Err("Rename fixture generation retired".into());
                                 }
-                                let value=windows_file_rename_caller_native_test::observe_owner(
+                                let dispatcher=namespace_dispatcher.as_ref().ok_or("Rename fixture dispatcher unavailable")?;
+                                let mut value=windows_file_rename_caller_native_test::observe_owner(
                                     connection.as_ref().ok_or("Rename fixture disconnected")?,
                                     backend.as_ref().ok_or("Rename fixture backend unavailable")?,
-                                    file_rename_producer.as_deref().ok_or("Rename fixture producer unavailable")?,
+                                    dispatcher.rename_for_observation().ok_or("Rename fixture producer unavailable")?,
                                     binding,path)?;
+                                // Observer readiness comes only from this live owner, not the consumer.
+                                let observation=dispatcher.observation();
+                                let producer=value.get_mut("producer").and_then(Value::as_object_mut)
+                                    .ok_or("Rename fixture observation unavailable")?;
+                                producer.insert("attached".into(),json!(observation.attached));
+                                producer.insert("instance".into(),json!(observation.instance));
+                                producer.insert("held".into(),json!(observation.held));
                                 if worker_generation.load(Ordering::Acquire)!=generation {
                                     return Err("Rename fixture generation changed during observation".into());
                                 }
@@ -1515,8 +1525,25 @@ impl ProviderManager {
                                             });
                                         }
                                         vault_custody = custody;
-                                        namespace_producer=namespace_admission.map(|admission| windows_namespace_producer::Producer::new(admission,composite,worker_namespace_controls.clone(),worker_namespace_status.clone()));
-                                        file_rename_producer = next_file_rename_producer;
+                                        // The separately opted-in legacy directory fixture remains exclusive.
+                                        // Shared directory routing is held until typed classification is admitted.
+                                        let shared_directory = if windows_namespace_dispatcher::DIRECTORY_ROUTING_READY {
+                                            namespace_admission.map(|admission| windows_namespace_producer::Producer::new_shared(admission,composite,worker_namespace_controls.clone(),worker_namespace_status.clone()))
+                                        } else {
+                                            namespace_producer=namespace_admission.map(|admission| windows_namespace_producer::Producer::new(admission,composite,worker_namespace_controls.clone(),worker_namespace_status.clone()));
+                                            None
+                                        };
+                                        namespace_dispatcher = if namespace_producer.is_none() && (next_file_rename_producer.is_some() || shared_directory.is_some()) {
+                                            match windows_namespace_dispatcher::Dispatcher::new(next_file_rename_producer,shared_directory) {
+                                                Ok(dispatcher)=>Some(dispatcher),
+                                                Err(message)=> {
+                                                    if let Ok(mut notice)=worker_rename_error.lock() {
+                                                        notice.record(candidate_binding.generation,worker_generation.load(Ordering::Acquire),message);
+                                                    }
+                                                    None
+                                                }
+                                            }
+                                        } else { None };
                                         connection = Some(active);
                                         backend = Some(next_backend);
                                         worker_connected.store(true, Ordering::Release);
@@ -1718,7 +1745,8 @@ impl ProviderManager {
                         }
                         ProviderCommand::Disconnect(response) => {
                             namespace_producer=None;
-                            file_rename_producer=None;
+                            if let Some(dispatcher)=namespace_dispatcher.as_mut() { dispatcher.hold(); }
+                            namespace_dispatcher=None;
                             cleanup_holds.clear();
                             if let Ok(mut handle) = worker_folder_revocation.lock() { if let Some(handle) = handle.take() { handle.revoke(); } }
                             drop(folders.take());
@@ -1740,7 +1768,8 @@ impl ProviderManager {
                         }
                         ProviderCommand::Stop(response) => {
                             namespace_producer=None;
-                            file_rename_producer=None;
+                            if let Some(dispatcher)=namespace_dispatcher.as_mut() { dispatcher.hold(); }
+                            namespace_dispatcher=None;
                             cleanup_holds.clear();
                             if let Ok(mut handle) = worker_folder_revocation.lock() { if let Some(handle) = handle.take() { handle.revoke(); } }
                             drop(folders.take());
@@ -1786,15 +1815,15 @@ impl ProviderManager {
                     }
                     // Commands and captured saves precede one fresh rename pair.
                     // The disabled mkdir producer must not drain this observer.
-                    if !dispatched_initial && file_rename_producer.is_some() {
+                    if !dispatched_initial && namespace_dispatcher.is_some() {
                         match receiver.try_recv() {
                             Ok(command) => { pending_command=Some(command); continue; },
                             Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
                             Err(std::sync::mpsc::TryRecvError::Empty) => (),
                         }
                         if let (Some(producer), Some(active), Some(backend), Some(binding)) =
-                            (file_rename_producer.as_mut(),connection.as_mut(),backend.as_ref(),active_binding.as_ref()) {
-                            if let Err(message) = producer.tick(active,backend,binding.identity) {
+                            (namespace_dispatcher.as_mut(),connection.as_mut(),backend.as_ref(),active_binding.as_ref()) {
+                            if let Err(message) = producer.tick(active,backend,binding.identity,false) {
                                 if let Ok(mut notice) = worker_rename_error.lock() {
                                     notice.record(binding.generation,worker_generation.load(Ordering::Acquire),message);
                                 }
@@ -1992,25 +2021,26 @@ impl ProviderManager {
         } else {
             None
         };
-        let file_rename_producer = if !namespace_enabled {
-            file_rename_catalog
-                .map(|catalog| {
-                    windows_file_rename_producer::Producer::capture(
-                        &backend,
-                        catalog,
-                        &self.authorized_generation,
-                        generation,
-                        expected_identity,
-                        &personal_space_id,
-                        &personal_root_resource_id,
-                    )
-                    .map(Box::new)
-                    .map_err(str::to_owned)
-                })
-                .transpose()?
-        } else {
-            None
-        };
+        let file_rename_producer =
+            if !namespace_enabled || windows_namespace_dispatcher::DIRECTORY_ROUTING_READY {
+                file_rename_catalog
+                    .map(|catalog| {
+                        windows_file_rename_producer::Producer::capture(
+                            &backend,
+                            catalog,
+                            &self.authorized_generation,
+                            generation,
+                            expected_identity,
+                            &personal_space_id,
+                            &personal_root_resource_id,
+                        )
+                        .map(Box::new)
+                        .map_err(str::to_owned)
+                    })
+                    .transpose()?
+            } else {
+                None
+            };
         let fresh_close_publisher = self
             .fresh_close_source
             .lock()

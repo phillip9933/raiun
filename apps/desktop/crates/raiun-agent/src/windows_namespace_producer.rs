@@ -18,6 +18,8 @@ struct Candidate {
     ready: Instant,
     #[cfg(windows)]
     presend: Option<connected::PreSend>,
+    #[cfg(windows)]
+    record_generation: Option<u64>,
 }
 #[derive(Default)]
 struct Candidates {
@@ -60,6 +62,8 @@ impl Candidates {
             ready: Instant::now(),
             #[cfg(windows)]
             presend: None,
+            #[cfg(windows)]
+            record_generation: None,
         });
         true
     }
@@ -353,8 +357,19 @@ mod connected {
         pub(crate) continuity_lost: bool,
         pub(crate) limit_reached: bool,
     }
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum SharedStep {
+        Completed,
+        Waiting,
+        DeferredPristine,
+        Held,
+    }
     pub(crate) struct Producer {
         admission: Admission,
+        shared: bool,
+        shared_active: bool,
+        shared_held: bool,
+        shared_generation: u64,
         composite: OpaqueIdentity,
         queue: Candidates,
         cursor: Option<NamespaceScanCursor>,
@@ -376,6 +391,10 @@ mod connected {
         ) -> Self {
             Self {
                 admission,
+                shared: false,
+                shared_active: false,
+                shared_held: false,
+                shared_generation: 0,
                 composite,
                 queue: Candidates::default(),
                 cursor: None,
@@ -388,6 +407,107 @@ mod connected {
                 controls,
                 status,
             }
+        }
+        /// Shared mode never calls the legacy observer or inventory tick.
+        pub(crate) fn new_shared(
+            admission: Admission,
+            composite: OpaqueIdentity,
+            controls: Arc<Controls>,
+            status: Arc<Mutex<Observation>>,
+        ) -> Self {
+            let mut value = Self::new(admission, composite, controls, status);
+            value.shared = true;
+            value.rescan = false;
+            value
+        }
+        pub(crate) fn is_shared(&self) -> bool {
+            self.shared
+        }
+        pub(crate) fn authorization(&self) -> CapturedAuthorization {
+            self.admission.auth
+        }
+        pub(crate) fn is_current(
+            &self,
+            backend: &Arc<OpenCloudPlaceholderBackend>,
+            root: ConfiguredRootIdentity,
+        ) -> bool {
+            !self.shared_held
+                && root == self.admission.root
+                && self.admission.current(self.admission.auth)
+                && self
+                    .admission
+                    .backend
+                    .upgrade()
+                    .is_some_and(|original| Arc::ptr_eq(&original, backend))
+        }
+        pub(crate) fn is_paused(&self) -> bool {
+            self.controls.paused.load(Ordering::Acquire)
+        }
+        pub(crate) fn hold_shared(&mut self) {
+            self.shared_held = true;
+            self.shared_active = false;
+            self.queue.pending.clear();
+            self.cursor = None;
+            self.status(|s| s.attention = s.attention.saturating_add(1));
+        }
+        pub(crate) fn offer_added(
+            &mut self,
+            components: Vec<String>,
+            record_generation: u64,
+        ) -> Result<(), &'static str> {
+            if !self.shared
+                || self.shared_held
+                || self.shared_active
+                || !self.queue.pending.is_empty()
+                || record_generation == 0
+                || record_generation <= self.shared_generation
+                || components.first().map(String::as_str) != Some("Personal")
+            {
+                self.hold_shared();
+                return Err("Directory namespace work needs attention");
+            }
+            let count = self.queue.pending.len();
+            if !self.queue.push(components, None) || self.queue.pending.len() != count + 1 {
+                self.hold_shared();
+                return Err("Directory namespace work needs attention");
+            }
+            self.queue.pending.back_mut().unwrap().record_generation = Some(record_generation);
+            self.shared_generation = record_generation;
+            self.shared_active = true;
+            Ok(())
+        }
+        pub(crate) fn step_shared(
+            &mut self,
+            connection: &ConfiguredRootConnection,
+            backend: &Arc<OpenCloudPlaceholderBackend>,
+            root: ConfiguredRootIdentity,
+        ) -> SharedStep {
+            if !self.shared || !self.shared_active || !self.is_current(backend, root) {
+                self.hold_shared();
+                return SharedStep::Held;
+            }
+            if self.is_paused() {
+                return SharedStep::Waiting;
+            }
+            let Some(candidate) = self.queue.take() else {
+                if self.queue.pending.is_empty() {
+                    self.hold_shared();
+                    return SharedStep::Held;
+                }
+                return SharedStep::Waiting;
+            };
+            if candidate.record_generation != Some(self.shared_generation) {
+                self.hold_shared();
+                return SharedStep::Held;
+            }
+            self.status(|s| s.ticks = s.ticks.saturating_add(1));
+            let result = self.process(candidate, connection, backend);
+            match result {
+                SharedStep::Completed => self.shared_active = false,
+                SharedStep::Held => self.hold_shared(),
+                SharedStep::Waiting | SharedStep::DeferredPristine => (),
+            }
+            result
         }
         fn status(&self, update: impl FnOnce(&mut Observation)) {
             if let Ok(mut value) = self.status.lock() {
@@ -429,6 +549,10 @@ mod connected {
             backend: &Arc<OpenCloudPlaceholderBackend>,
             root: ConfiguredRootIdentity,
         ) {
+            if self.shared {
+                self.hold_shared();
+                return;
+            }
             if self.controls.paused.load(Ordering::Acquire) {
                 return;
             }
@@ -602,15 +726,17 @@ mod connected {
                 }
             }
         }
-        fn defer(&mut self, candidate: Candidate) {
+        fn defer(&mut self, candidate: Candidate) -> SharedStep {
             #[cfg(test)]
             let selector_present = candidate.presend.is_some();
             if self.queue.defer(candidate) {
                 trace_producer!("candidate_deferred", selector_present);
                 self.status(|s| s.deferred = s.deferred.saturating_add(1));
+                SharedStep::DeferredPristine
             } else {
                 trace_producer!("candidate_defer_exhausted", selector_present);
                 self.status(|s| s.attention = s.attention.saturating_add(1));
+                SharedStep::Held
             }
         }
         fn process(
@@ -618,16 +744,16 @@ mod connected {
             mut candidate: Candidate,
             connection: &ConfiguredRootConnection,
             backend: &Arc<OpenCloudPlaceholderBackend>,
-        ) {
+        ) -> SharedStep {
             trace_producer!("process_enter", candidate.presend.is_some());
             if !self.admission.current(self.admission.auth) {
                 trace_producer!("initial_admission_stale", candidate.presend.is_some());
-                return;
+                return SharedStep::Held;
             }
             let admission = self.admission.clone();
             let Some((name, parents)) = candidate.components.split_last() else {
                 trace_producer!("components_empty", candidate.presend.is_some());
-                return;
+                return SharedStep::Held;
             };
             let refs = parents.iter().map(String::as_str).collect::<Vec<_>>();
             let mut prepared = match connection.prepare_namespace_directory(
@@ -635,7 +761,9 @@ mod connected {
                 &refs,
                 name,
                 admission.auth,
-                admission.auth.agent_generation,
+                candidate
+                    .record_generation
+                    .unwrap_or(admission.auth.agent_generation),
             ) {
                 Ok(value) => value,
                 Err(_) => {
@@ -644,10 +772,14 @@ mod connected {
                         trace_producer!("prepare_error_retire", true);
                         self.queue.retire(candidate);
                         self.status(|s| s.attention = s.attention.saturating_add(1));
+                        return SharedStep::Held;
+                    } else if self.shared {
+                        self.queue.retire(candidate);
+                        self.status(|s| s.attention = s.attention.saturating_add(1));
+                        return SharedStep::Held;
                     } else {
-                        self.defer(candidate);
+                        return self.defer(candidate);
                     }
-                    return;
                 }
             };
             let file = prepared.entry().local_file;
@@ -657,32 +789,35 @@ mod connected {
             {
                 trace_producer!("expected_file_mismatch", candidate.presend.is_some());
                 self.status(|s| s.attention = s.attention.saturating_add(1));
-                return;
+                return SharedStep::Held;
+            }
+            if self.shared && candidate.expected_file.is_none() {
+                // Preserve the first factual raw-directory FileID through any
+                // known-before-session Busy continuation; never name-ABA it.
+                candidate.expected_file = Some((file.volume_serial, file.file_index));
             }
             let store = match self.store(&prepared.entry().parent.scope) {
                 Ok(value) => value,
                 Err(StoreError::Busy) => {
                     trace_producer!("store_busy", candidate.presend.is_some());
-                    self.defer(candidate);
-                    return;
+                    return self.defer(candidate);
                 }
                 Err(_) => {
                     trace_producer!("store_other_error", candidate.presend.is_some());
                     self.status(|s| s.attention = s.attention.saturating_add(1));
-                    return;
+                    return SharedStep::Held;
                 }
             };
             let prior = match store.discover_account_root() {
                 Ok(value) => value,
                 Err(StoreError::Busy) => {
                     trace_producer!("history_busy", candidate.presend.is_some());
-                    self.defer(candidate);
-                    return;
+                    return self.defer(candidate);
                 }
                 Err(_) => {
                     trace_producer!("history_other_error", candidate.presend.is_some());
                     self.status(|s| s.attention = s.attention.saturating_add(1));
-                    return;
+                    return SharedStep::Held;
                 }
             };
             let fresh = prepared.intent();
@@ -691,7 +826,7 @@ mod connected {
                     trace_producer!("owned_history_not_unique", true);
                     self.retained(owned.record.progress);
                     self.status(|s| s.attention = s.attention.saturating_add(1));
-                    return;
+                    return SharedStep::Held;
                 }
                 owned
             } else {
@@ -700,28 +835,27 @@ mod connected {
                     // Discovery, including pristine Pending0, never mints a
                     // selector. Restart and created=false keep this fence.
                     self.retained(record.progress);
-                    return;
+                    return SharedStep::Held;
                 }
                 let published = match store.publish_intent(fresh.clone()) {
                     Ok(value) => value,
                     Err(StoreError::Busy) => {
                         trace_producer!("publish_busy", false);
                         // reserve-before-write Busy; next turn must rediscover.
-                        self.defer(candidate);
-                        return;
+                        return self.defer(candidate);
                     }
                     Err(_) => {
                         trace_producer!("publish_other_error_block", false);
                         // Never republish blindly after Io/uncertain publication.
                         self.queue.block_publication(candidate);
                         self.status(|s| s.attention = s.attention.saturating_add(1));
-                        return;
+                        return SharedStep::Held;
                     }
                 };
                 let Some(owned) = PreSend::created(&published) else {
                     trace_producer!("publication_not_owned_pristine", false);
                     self.retained(published.record.progress);
-                    return;
+                    return SharedStep::Held;
                 };
                 trace_producer!("publication_owned_pristine", true);
                 owned
@@ -731,13 +865,12 @@ mod connected {
                 Err(PreSendError::Busy) => {
                     trace_producer!("owned_acquire_busy", true);
                     candidate.presend = Some(presend);
-                    self.defer(candidate);
-                    return;
+                    return self.defer(candidate);
                 }
                 Err(PreSendError::Retained) => {
                     trace_producer!("owned_acquire_retained", true);
                     self.status(|s| s.attention = s.attention.saturating_add(1));
-                    return;
+                    return SharedStep::Held;
                 }
             };
             let final_guard_reason = if !admission.current(admission.auth) {
@@ -758,7 +891,7 @@ mod connected {
             if final_guard_reason.is_some() {
                 self.retained(lease.progress());
                 self.status(|s| s.attention = s.attention.saturating_add(1));
-                return;
+                return SharedStep::Held;
             }
             // The selector is consumed before session entry, even if the
             // session or reconciler fails before its durable Submitted event.
@@ -791,14 +924,18 @@ mod connected {
             );
             match result {
                 Ok(Ok(DirectoryCreateOutcome::LocalCompleted)) => {
-                    self.rescan = true;
-                    self.cursor = None;
-                    self.queue.exhausted_paths.clear();
+                    if !self.shared {
+                        self.rescan = true;
+                        self.cursor = None;
+                        self.queue.exhausted_paths.clear();
+                    }
                     self.status(|s| s.completed = s.completed.saturating_add(1));
+                    SharedStep::Completed
                 }
                 _ => {
                     self.retained(lease.progress());
                     self.status(|s| s.attention = s.attention.saturating_add(1));
+                    SharedStep::Held
                 }
             }
         }
@@ -1187,6 +1324,7 @@ mod connected {
                     attempts: 0,
                     ready: Instant::now(),
                     presend: Some(owned.clone()),
+                    record_generation: None,
                 };
                 assert!(queue.defer(candidate));
                 drop(record);
@@ -1447,6 +1585,8 @@ mod tests {
                 ready: Instant::now(),
                 #[cfg(windows)]
                 presend: None,
+                #[cfg(windows)]
+                record_generation: None,
             };
             assert!(!q.defer(item));
         }
