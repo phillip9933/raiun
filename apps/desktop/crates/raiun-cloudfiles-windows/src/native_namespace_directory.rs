@@ -514,11 +514,11 @@ impl DirectoryCreateLocal for NativeDirectoryLocal<'_, '_, '_, '_> {
             fixture_diagnostic("completion_binding", None);
             return Err(DirectoryCompletionError::Unavailable);
         }
-        let identity = self.prepared.converted_identity.ok_or_else(|| {
+        let Some(identity) = self.prepared.converted_identity else {
             #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
             fixture_diagnostic("completion_identity", None);
-            DirectoryCompletionError::Unavailable
-        })?;
+            return Err(DirectoryCompletionError::Unavailable);
+        };
         self.session
             .record_directory_completion(readback, &identity, || {
                 self.prepared

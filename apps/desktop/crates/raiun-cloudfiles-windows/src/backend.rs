@@ -733,6 +733,16 @@ impl CancellationToken {
         Self::for_recovery_job_with_deadline(policy, None)
     }
 
+    /// Start one metadata-only namespace job with the existing 30-second
+    /// request budget. Call once before queueing; clones and revocation probes
+    /// retain this same deadline and cancellation state. This grants no
+    /// directory dispatch, storage or native publication authority.
+    pub fn for_metadata_job() -> StreamedRecoveryJob {
+        StreamedRecoveryJob {
+            cancellation: Self::new(),
+        }
+    }
+
     pub(crate) fn for_recovery_job_with_deadline(
         policy: StreamedRecoveryPolicy,
         original: Option<Instant>,
@@ -1265,6 +1275,35 @@ mod tests {
         let expired = StreamedRecoveryJob::for_test_timeout(Duration::ZERO);
         assert!(expired.check().is_err());
         assert!(expired.is_stopped());
+    }
+
+    #[test]
+    fn metadata_job_keeps_original_request_budget_and_shared_cancellation() {
+        use super::{CancellationToken, DEFAULT_FETCH_TIMEOUT};
+        use std::{
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+            },
+            time::Instant,
+        };
+        let before = Instant::now();
+        let job = CancellationToken::for_metadata_job();
+        let after = Instant::now();
+        assert!(job.deadline() >= before + DEFAULT_FETCH_TIMEOUT);
+        assert!(job.deadline() <= after + DEFAULT_FETCH_TIMEOUT);
+        let original_deadline = job.deadline();
+        let revoked = Arc::new(AtomicBool::new(false));
+        let observed = revoked.clone();
+        let queued = job.with_revocation_check(Arc::new(move || observed.load(Ordering::Acquire)));
+        assert_eq!(queued.deadline(), original_deadline);
+        assert!(!queued.is_stopped());
+        revoked.store(true, Ordering::Release);
+        assert!(queued.is_stopped());
+        revoked.store(false, Ordering::Release);
+        assert!(job.is_stopped());
+        assert!(queued.clone().is_stopped());
+        assert_eq!(job.deadline(), original_deadline);
     }
 
     #[test]
