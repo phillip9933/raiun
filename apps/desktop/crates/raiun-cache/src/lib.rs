@@ -62,8 +62,13 @@ mod stage_name;
 pub use content_reader::CacheContentReader;
 mod db_owner;
 mod listing_publication;
+mod ordinary_create;
 mod schema;
 use db_owner::DbOwner;
+pub use ordinary_create::{
+    OrdinaryCreateClaim, OrdinaryCreateCounts, OrdinaryCreatePage, OrdinaryCreateReceipt,
+    OrdinaryCreateRequest, OrdinaryCreateState,
+};
 
 // This is an opt-in Windows storage adapter test fixture only. The production
 // cache remains unavailable on non-Unix until all cache object paths have a
@@ -94,7 +99,7 @@ pub use windows_download_stage::{
     VerifiedPlaintextDownload,
 };
 
-const CACHE_VERSION: u32 = 8;
+const CACHE_VERSION: u32 = 9;
 const MAX_SCOPE_FIELD: usize = 1024;
 const MAX_PATH_BYTES: usize = 32 * 1024;
 const MAX_ENTRY_NAME_BYTES: usize = 4096;
@@ -5777,8 +5782,8 @@ impl Cache {
             .map_err(db_error)?;
         let same_target_pending: bool = db
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM writes WHERE scope_key=?1 AND parent_id=?2 AND name=?3 AND state IN (0,1))",
-                params![scope.key, parent_resource_id, name],
+                "SELECT EXISTS(SELECT 1 FROM writes WHERE scope_key=?1 AND state IN (0,1) AND ((parent_id=?2 AND name=?3) OR path=?4))",
+                params![scope.key, parent_resource_id, name, logical_path],
                 |row| row.get(0),
             )
             .map_err(db_error)?;
@@ -5845,8 +5850,8 @@ impl Cache {
             .map_err(db_error)?;
         let same_target_pending: bool = tx
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM writes WHERE scope_key=?1 AND parent_id=?2 AND name=?3 AND state IN (0,1))",
-                params![scope.key, parent_resource_id, name],
+                "SELECT EXISTS(SELECT 1 FROM writes WHERE scope_key=?1 AND state IN (0,1) AND ((parent_id=?2 AND name=?3) OR path=?4))",
+                params![scope.key, parent_resource_id, name, logical_path],
                 |row| row.get(0),
             )
             .map_err(db_error)?;
@@ -6018,6 +6023,7 @@ impl Cache {
                 .ok_or(CacheError::NotFound)?;
             let (id, base_kind, base_etag, old_resource, state, old_content_key, created_at_unix) =
                 existing;
+            ordinary_create::refuse_ledger_write(&db, id)?;
             let base_matches = match (&base, base_kind) {
                 (WriteCondition::Absent, 0) => base_etag.is_empty(),
                 (WriteCondition::Match(expected), 1) => expected == &base_etag,
@@ -6508,6 +6514,7 @@ impl Cache {
     ) -> Result<(), CacheError> {
         let db = self.lock_db()?;
         validate_registered_scope(&db, scope)?;
+        ordinary_create::refuse_ledger_write(&db, id)?;
         let changed = db
             .execute(
                 "UPDATE writes SET state=?3 WHERE scope_key=?1 AND id=?2",

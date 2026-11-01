@@ -25,6 +25,7 @@ pub(super) fn initialize(db: &Connection, journal: JournalMode) -> Result<(), Ca
         && version != 4
         && version != 5
         && version != 6
+        && version != 8
         && version != 7
         && version != CACHE_VERSION as i64
     {
@@ -329,6 +330,26 @@ pub(super) fn initialize(db: &Connection, journal: JournalMode) -> Result<(), Ca
         db.execute("UPDATE policies SET target_state=1 WHERE policy=1", [])
             .map_err(db_error)?;
     }
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ordinary_create_handoffs (
+        write_id INTEGER PRIMARY KEY REFERENCES writes(id),
+        scope_key TEXT NOT NULL REFERENCES scopes(scope_key),
+        handoff_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        content_key TEXT NOT NULL,
+        state INTEGER NOT NULL CHECK(state BETWEEN 0 AND 5),
+        claim_id TEXT NOT NULL DEFAULT '',
+        remote_id TEXT,
+        remote_etag TEXT,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(scope_key,handoff_id)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS ordinary_create_active_path
+      ON ordinary_create_handoffs(scope_key,path) WHERE state IN (0,1,2,3,4);
+    CREATE INDEX IF NOT EXISTS ordinary_create_ready
+      ON ordinary_create_handoffs(scope_key,state,write_id);",
+    )
+    .map_err(db_error)?;
     db.pragma_update(None, "user_version", CACHE_VERSION)
         .map_err(db_error)?;
     validate_cache_schema(db)?;
