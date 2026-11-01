@@ -1,6 +1,33 @@
 //! Platform-independent cloud protocol boundary. File bodies never enter control JSON.
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+
+/// Irreversible cancellation for one operation owner and its cloned workers.
+/// This token carries no account identity or mutation authority.
+#[derive(Clone, Debug, Default)]
+pub struct OperationCancellation {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl OperationCancellation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CloudSpace {
@@ -122,6 +149,36 @@ pub trait CloudBackend: Send + Sync {
         Err(CloudError::new(
             ErrorKind::Unsupported,
             "root-bound download is unavailable",
+        ))
+    }
+    /// Root-bound transfer tied to the caller's original operation token.
+    /// An implementation must not silently fall back to an uncancellable call.
+    fn upload_in_root_with_cancellation(
+        &self,
+        _space: &str,
+        _path: &str,
+        _source: &Path,
+        _condition: WriteCondition,
+        _expected_root: &str,
+        _cancellation: &OperationCancellation,
+    ) -> Result<RemoteEntry, CloudError> {
+        Err(CloudError::new(
+            ErrorKind::Unsupported,
+            "cancellable root-bound upload is unavailable",
+        ))
+    }
+    fn download_in_root_with_cancellation(
+        &self,
+        _space: &str,
+        _path: &str,
+        _expected_etag: Option<&str>,
+        _destination: &Path,
+        _expected_root: &str,
+        _cancellation: &OperationCancellation,
+    ) -> Result<RemoteEntry, CloudError> {
+        Err(CloudError::new(
+            ErrorKind::Unsupported,
+            "cancellable root-bound download is unavailable",
         ))
     }
     fn mkdir(&self, space: &str, path: &str) -> Result<RemoteEntry, CloudError>;

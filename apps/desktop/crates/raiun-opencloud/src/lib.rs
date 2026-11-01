@@ -9,6 +9,8 @@ mod blocking_reader;
 mod dav_text_tests;
 #[cfg(test)]
 mod dav_upload_regressions;
+#[cfg(test)]
+mod operation_cancellation_tests;
 mod recovery_stream;
 pub use recovery_stream::{RecoveryCreateReadback, RecoveryStreamReadback};
 pub mod avatar;
@@ -46,7 +48,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use percent_encoding::percent_decode_str;
 use quick_xml::{NsReader, events::Event, name::ResolveResult};
 use raiun_core::backend::{
-    CloudBackend, CloudError, CloudSpace, ErrorKind, RemoteEntry, WriteCondition,
+    CloudBackend, CloudError, CloudSpace, ErrorKind, OperationCancellation, RemoteEntry,
+    WriteCondition,
 };
 use reqwest::{
     Method, Proxy, StatusCode,
@@ -1723,6 +1726,17 @@ fn validate_recovery_entry(entry: &RemoteEntry, expected_path: &str) -> Result<(
     Ok(())
 }
 
+fn ensure_operation_active(operation: Option<&OperationCancellation>) -> Result<(), CloudError> {
+    if operation.is_some_and(OperationCancellation::is_cancelled) {
+        Err(CloudError::new(
+            ErrorKind::Offline,
+            "content operation was cancelled",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn ensure_not_cancelled(is_cancelled: &impl Fn() -> bool) -> Result<(), CloudError> {
     if is_cancelled() {
         Err(CloudError::new(ErrorKind::Offline, "range read cancelled"))
@@ -2477,18 +2491,41 @@ impl OpenCloudClient {
         destination: &Path,
         expected_root: Option<&str>,
     ) -> Result<RemoteEntry, CloudError> {
+        self.download_with_root_cancellation(
+            space,
+            path,
+            expected_etag,
+            destination,
+            expected_root,
+            None,
+        )
+    }
+
+    fn download_with_root_cancellation(
+        &self,
+        space: &str,
+        path: &str,
+        expected_etag: Option<&str>,
+        destination: &Path,
+        expected_root: Option<&str>,
+        operation: Option<&OperationCancellation>,
+    ) -> Result<RemoteEntry, CloudError> {
+        ensure_operation_active(operation)?;
         let (mut selected, url) = self.transfer_url(space, path)?;
+        ensure_operation_active(operation)?;
         if let Some(root) = expected_root {
             selected.dav_url = self
                 .validate_identity_addressed_root(&selected, root)?
                 .to_string();
         }
+        ensure_operation_active(operation)?;
         let before = if expected_root.is_some() {
             self.check_transfer_root(&selected, path, expected_root)?;
             self.stat_at_dav(&url, path)?
         } else {
             self.stat(space, path)?
         };
+        ensure_operation_active(operation)?;
         if before.encrypted {
             return Err(CloudError::new(
                 ErrorKind::Unsupported,
@@ -2513,14 +2550,19 @@ impl OpenCloudClient {
         let budget = self.transfer_budget.clone();
         let cancellation = budget.cancellation();
         let watchdog_cancellation = cancellation.clone();
+        let body_operation = operation.cloned();
         let expected_size = before.size;
         let total_timeout =
             transfer_timeout_with_budget(&budget, TransferDirection::Download, expected_size);
         let copied = async_body::run_body_operation_cancellable(
             self.body_idle_timeout,
             total_timeout,
-            || watchdog_cancellation.is_cancelled(),
+            || {
+                watchdog_cancellation.is_cancelled()
+                    || operation.is_some_and(OperationCancellation::is_cancelled)
+            },
             move |progress| async move {
+                ensure_operation_active(body_operation.as_ref())?;
                 let response = request
                     .timeout(total_timeout)
                     .send()
@@ -2539,7 +2581,12 @@ impl OpenCloudClient {
                     &mut output,
                     expected_size,
                     &budget,
-                    || cancellation.is_cancelled(),
+                    || {
+                        cancellation.is_cancelled()
+                            || body_operation
+                                .as_ref()
+                                .is_some_and(OperationCancellation::is_cancelled)
+                    },
                     &progress,
                 )
                 .await?;
@@ -2552,6 +2599,7 @@ impl OpenCloudClient {
                 Ok(copied)
             },
         )?;
+        ensure_operation_active(operation)?;
         if copied != expected_size {
             return Err(invalid("download size did not match Content-Length"));
         }
@@ -2560,12 +2608,14 @@ impl OpenCloudClient {
 
         // Keep the caller's destination intact until the server confirms the
         // same revision is still present after the complete body is staged.
+        ensure_operation_active(operation)?;
         let after = if expected_root.is_some() {
             self.check_transfer_root(&selected, path, expected_root)?;
             self.stat_at_dav(&url, path)?
         } else {
             self.stat(space, path)?
         };
+        ensure_operation_active(operation)?;
         if after.etag != before.etag || after.size != copied {
             return Err(conflict("remote item changed during download"));
         }
@@ -2583,16 +2633,33 @@ impl OpenCloudClient {
         condition: WriteCondition,
         expected_root: Option<&str>,
     ) -> Result<RemoteEntry, CloudError> {
+        self.upload_with_root_cancellation(space, path, source, condition, expected_root, None)
+    }
+
+    fn upload_with_root_cancellation(
+        &self,
+        space: &str,
+        path: &str,
+        source: &Path,
+        condition: WriteCondition,
+        expected_root: Option<&str>,
+        operation: Option<&OperationCancellation>,
+    ) -> Result<RemoteEntry, CloudError> {
+        ensure_operation_active(operation)?;
         let (mut selected, url) = self.transfer_url(space, path)?;
+        ensure_operation_active(operation)?;
         if let Some(root) = expected_root {
             selected.dav_url = self
                 .validate_identity_addressed_root(&selected, root)?
                 .to_string();
         }
+        ensure_operation_active(operation)?;
         self.ensure_writable_target(&selected, &url, path)?;
+        ensure_operation_active(operation)?;
         let root_condition = expected_root
             .map(|root| self.root_write_condition(&selected, path, root))
             .transpose()?;
+        ensure_operation_active(operation)?;
         let file = File::open(source).map_err(io_error)?;
         let size = file.metadata().map_err(io_error)?.len();
         let (mut request, token) = self.request_async(Method::PUT, &url)?;
@@ -2611,18 +2678,28 @@ impl OpenCloudClient {
         let budget = self.transfer_budget.clone();
         let cancellation = budget.cancellation();
         let watchdog_cancellation = cancellation.clone();
+        let body_operation = operation.cloned();
         let total_timeout = transfer_timeout_with_budget(&budget, TransferDirection::Upload, size);
         let response_token = token.clone();
         async_body::run_body_operation_cancellable(
             self.body_idle_timeout,
             total_timeout,
-            || watchdog_cancellation.is_cancelled(),
+            || {
+                watchdog_cancellation.is_cancelled()
+                    || operation.is_some_and(OperationCancellation::is_cancelled)
+            },
             move |progress| async move {
+                ensure_operation_active(body_operation.as_ref())?;
                 let body = async_body::budgeted_upload_stream(
                     tokio::fs::File::from_std(file),
                     size,
                     budget,
-                    move || cancellation.is_cancelled(),
+                    move || {
+                        cancellation.is_cancelled()
+                            || body_operation
+                                .as_ref()
+                                .is_some_and(OperationCancellation::is_cancelled)
+                    },
                     progress,
                 );
                 let response = request
@@ -2639,12 +2716,14 @@ impl OpenCloudClient {
                 Ok(())
             },
         )?;
+        ensure_operation_active(operation)?;
         let entry = if expected_root.is_some() {
             self.check_transfer_root(&selected, path, expected_root)?;
             self.stat_at_dav(&url, path)?
         } else {
             self.stat(space, path)?
         };
+        ensure_operation_active(operation)?;
         if entry.size != size {
             return Err(invalid("uploaded file failed size verification"));
         }
@@ -2765,6 +2844,42 @@ impl CloudBackend for OpenCloudClient {
         self.download_with_root(space, path, expected_etag, destination, Some(expected_root))
     }
 
+    fn upload_in_root_with_cancellation(
+        &self,
+        space: &str,
+        path: &str,
+        source: &Path,
+        condition: WriteCondition,
+        expected_root: &str,
+        cancellation: &OperationCancellation,
+    ) -> Result<RemoteEntry, CloudError> {
+        self.upload_with_root_cancellation(
+            space,
+            path,
+            source,
+            condition,
+            Some(expected_root),
+            Some(cancellation),
+        )
+    }
+    fn download_in_root_with_cancellation(
+        &self,
+        space: &str,
+        path: &str,
+        expected_etag: Option<&str>,
+        destination: &Path,
+        expected_root: &str,
+        cancellation: &OperationCancellation,
+    ) -> Result<RemoteEntry, CloudError> {
+        self.download_with_root_cancellation(
+            space,
+            path,
+            expected_etag,
+            destination,
+            Some(expected_root),
+            Some(cancellation),
+        )
+    }
     fn mkdir(&self, space: &str, path: &str) -> Result<RemoteEntry, CloudError> {
         let (selected, url) = self.transfer_url(space, path)?;
         self.ensure_writable_target(&selected, &url, path)?;
