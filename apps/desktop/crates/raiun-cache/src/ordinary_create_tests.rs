@@ -588,3 +588,148 @@ fn legacy_queue_cannot_alias_handoff_path_after_parent_identity_changes() {
     assert_eq!(body(&cache, &s, &staged), b"body");
     assert_eq!(cache.pending_writes(&s).unwrap(), vec![staged.write]);
 }
+
+#[cfg(unix)]
+#[test]
+fn deferred_wal_snapshot_upgrade_reproduces_busy_snapshot_despite_busy_timeout() {
+    let (dir, cache, s) = fixture();
+    let receipt = ready(&cache, &s, 9001, "/snapshot-repro");
+    let db = cache.lock_db().unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA journal_mode", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "wal"
+    );
+    assert_eq!(
+        db.query_row("PRAGMA busy_timeout", [], |r| r.get::<_, u64>(0))
+            .unwrap(),
+        5000
+    );
+    let old = Transaction::new_unchecked(&db, TransactionBehavior::Deferred).unwrap();
+    let observed = current(&old, &s, &receipt).unwrap();
+    // Real Cache::open uses a separate connection and its schema write. The
+    // following committed metadata update makes the WAL change explicit rather
+    // than depending on whether a no-op schema statement writes a page.
+    let peer = Cache::open(dir.path(), 1024 * 1024).unwrap();
+    peer.lock_db()
+        .unwrap()
+        .execute(
+            "UPDATE cache_settings SET value=value+1 WHERE setting='quota_bytes'",
+            [],
+        )
+        .unwrap();
+    let error = old
+        .execute(
+            "UPDATE ordinary_create_handoffs SET state=2,claim_id=?2 WHERE write_id=?1 AND state=1",
+            params![receipt.write.id, "0123456789abcdef0123456789abcdef"],
+        )
+        .unwrap_err();
+    match error {
+        rusqlite::Error::SqliteFailure(error, _) => {
+            assert_eq!(error.code, rusqlite::ErrorCode::DatabaseBusy);
+            assert_eq!(
+                error.extended_code, 517,
+                "SQLITE_BUSY_SNAPSHOT, not ordinary wait timeout"
+            );
+        }
+        other => panic!("expected WAL snapshot-upgrade failure, got {other:?}"),
+    }
+    drop(old);
+    drop(db);
+    assert_eq!(
+        cache
+            .ordinary_create_for_write(&s, receipt.write.id)
+            .unwrap(),
+        Some(observed)
+    );
+    assert_eq!(body(&cache, &s, &receipt), b"body");
+}
+
+#[cfg(unix)]
+fn probe_peer_writer_after_real_cas_read(peer: Cache) -> std::rc::Rc<std::cell::Cell<usize>> {
+    let probes = std::rc::Rc::new(std::cell::Cell::new(0));
+    let observed = probes.clone();
+    AFTER_CREATE_TRANSACTION_READ.with(|slot| {
+        assert!(slot.borrow().is_none());
+        *slot.borrow_mut() = Some(Box::new(move || {
+            let db = peer.lock_db().unwrap();
+            let timeout = db
+                .query_row("PRAGMA busy_timeout", [], |r| r.get::<_, u64>(0))
+                .unwrap();
+            // This peer-only zero-wait probe identifies reservation placement;
+            // production connections retain their existing five-second policy.
+            db.busy_timeout(std::time::Duration::ZERO).unwrap();
+            let result = db.execute(
+                "UPDATE cache_settings SET value=value+1 WHERE setting='quota_bytes'",
+                [],
+            );
+            db.busy_timeout(std::time::Duration::from_millis(timeout))
+                .unwrap();
+            match result {
+                Err(rusqlite::Error::SqliteFailure(error, _)) => {
+                    assert_eq!(error.code, rusqlite::ErrorCode::DatabaseBusy);
+                    assert_eq!(
+                        error.extended_code, 5,
+                        "peer cannot acquire writer reservation, not a stale reader"
+                    );
+                }
+                other => panic!("peer committed between real custody SELECT and CAS: {other:?}"),
+            }
+            observed.set(observed.get() + 1);
+        }));
+    });
+    probes
+}
+
+#[cfg(unix)]
+#[test]
+fn immediate_real_claim_ack_and_complete_exclude_peer_commit_between_read_and_cas() {
+    let (dir, cache, s) = fixture();
+    let receipt = ready(&cache, &s, 9002, "/immediate-cas");
+    let peer = Cache::open(dir.path(), 1024 * 1024).unwrap();
+    let claim_probe = probe_peer_writer_after_real_cas_read(peer.clone());
+    let claim = cache.claim_ordinary_create(&s, &receipt).unwrap().unwrap();
+    assert_eq!(claim_probe.get(), 1);
+    // ACK's first nontransactional read intentionally does not consume the
+    // hook. Its actual read+UPDATE section must reserve the writer first.
+    let ack_probe = probe_peer_writer_after_real_cas_read(peer.clone());
+    let acknowledged = cache
+        .acknowledge_ordinary_create_handoff(&s, &receipt)
+        .unwrap();
+    assert_eq!(ack_probe.get(), 1);
+    assert!(acknowledged.local_handoff_acknowledged);
+    let complete_probe = probe_peer_writer_after_real_cas_read(peer.clone());
+    let verified = cache
+        .complete_ordinary_create(&s, &claim, &remote("/immediate-cas"), &receipt.sha256)
+        .unwrap();
+    assert_eq!(complete_probe.get(), 1);
+    assert_eq!(verified.state, OrdinaryCreateState::Verified);
+    assert!(verified.local_handoff_acknowledged);
+    AFTER_CREATE_TRANSACTION_READ.with(|slot| assert!(slot.borrow().is_none()));
+    assert_eq!(
+        cache
+            .lock_db()
+            .unwrap()
+            .query_row("PRAGMA busy_timeout", [], |r| r.get::<_, u64>(0))
+            .unwrap(),
+        5000
+    );
+    assert_eq!(
+        peer.lock_db()
+            .unwrap()
+            .query_row("PRAGMA busy_timeout", [], |r| r.get::<_, u64>(0))
+            .unwrap(),
+        5000
+    );
+    // A subsequent real opener observes the committed factual result; no
+    // retry/reset is needed and no second send claim becomes available.
+    let reopened = Cache::open(dir.path(), 1024 * 1024).unwrap();
+    assert_eq!(
+        reopened
+            .ordinary_create_for_write(&s, receipt.write.id)
+            .unwrap(),
+        Some(verified.clone())
+    );
+    assert!(cache.claim_ordinary_create(&s, &receipt).unwrap().is_none());
+    assert_eq!(body(&cache, &s, &verified), b"body");
+}

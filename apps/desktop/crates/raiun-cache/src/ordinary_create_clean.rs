@@ -60,7 +60,8 @@ impl Cache {
         // Keep the verified reader pinned until the transaction commits.
         let _reader = self.open_content(scope, &found.write.content)?;
         let db = self.lock_db()?;
-        let tx = db.unchecked_transaction().map_err(db_error)?;
+        let tx =
+            Transaction::new_unchecked(&db, TransactionBehavior::Immediate).map_err(db_error)?;
         let found = current(&tx, scope, receipt)?;
         if found.local_handoff_acknowledged {
             return Ok(found);
@@ -160,7 +161,8 @@ impl Cache {
             }
             {
                 let db = self.lock_db()?;
-                let tx = db.unchecked_transaction().map_err(db_error)?;
+                let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
+                    .map_err(db_error)?;
                 let found = current(&tx, scope, &receipt)?;
                 verified_custody(&found)?;
                 if policy_holds(&tx, scope, &key)? {
@@ -178,7 +180,8 @@ impl Cache {
             // retained contents row continues to charge quota across all failures.
             hook(CleanupPoint::Retired)?;
             let db = self.lock_db()?;
-            let tx = db.unchecked_transaction().map_err(db_error)?;
+            let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
+                .map_err(db_error)?;
             let found = current(&tx, scope, &receipt)?;
             verified_custody(&found)?;
             if disposition(&tx, scope, id)? != 1 {
@@ -264,7 +267,8 @@ impl Cache {
                 #[cfg(not(windows))]
                 let candidate = prepare_portable(self, &name, &receipt)?;
                 let db = self.lock_db()?;
-                let tx = db.unchecked_transaction().map_err(db_error)?;
+                let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
+                    .map_err(db_error)?;
                 let found = current(&tx, scope, &receipt)?;
                 verified_custody(&found)?;
                 if disposition(&tx, scope, receipt.write.id)? != 2 || policy_holds(&tx, scope, key)?

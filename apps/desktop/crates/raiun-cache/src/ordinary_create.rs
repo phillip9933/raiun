@@ -315,6 +315,11 @@ fn same_binding(a: &OrdinaryCreateReceipt, b: &OrdinaryCreateReceipt) -> bool {
     b.body_evicted = false;
     a == b
 }
+#[cfg(test)]
+std::thread_local! {
+    static AFTER_CREATE_TRANSACTION_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 fn current(
     db: &Connection,
     scope: &CacheScope,
@@ -323,6 +328,13 @@ fn current(
     plain(scope)?;
     validate_registered_scope(db, scope)?;
     let found = load(db, scope, receipt.write.id)?.ok_or(CacheError::NotFound)?;
+    #[cfg(test)]
+    if !db.is_autocommit() {
+        let hook = AFTER_CREATE_TRANSACTION_READ.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
     if !same_binding(&found, receipt) {
         return Err(CacheError::Conflict);
     }
@@ -488,10 +500,12 @@ impl Cache {
             return Err(CacheError::Conflict);
         }
         let db = self.lock_db()?;
-        let tx = db.unchecked_transaction().map_err(db_error)?;
         if let Some(existing) = existing {
-            return load(&tx, scope, existing.write.id)?.ok_or(CacheError::Corrupt);
+            // Exact idempotent custody lookup is read-only, not a writer.
+            return load(&db, scope, existing.write.id)?.ok_or(CacheError::Corrupt);
         }
+        let tx =
+            Transaction::new_unchecked(&db, TransactionBehavior::Immediate).map_err(db_error)?;
         limits(&tx, scope, &request)?;
         tx.execute("INSERT INTO contents(content_key,scope_key,resource_id,etag,protection,byte_len,sha256,relative_path,last_accessed,retention) VALUES(?1,?2,?3,?4,0,?5,?6,?7,?8,1)",params![key,scope.key,content.resource_id,content.etag,i64_from_u64(len)?,digest,relative,now_unix()]).map_err(db_error)?;
         tx.execute("INSERT INTO writes(scope_key,parent_id,name,path,resource_id,base_kind,base_etag,content_key,state,created_at) VALUES(?1,?2,?3,?4,NULL,0,'',?5,0,?6)",params![scope.key,request.parent_resource_id,request.name,request.logical_path,key,now_unix()]).map_err(db_error)?;
@@ -538,7 +552,8 @@ impl Cache {
             return Err(CacheError::Conflict);
         }
         let db = self.lock_db()?;
-        let tx = db.unchecked_transaction().map_err(db_error)?;
+        let tx =
+            Transaction::new_unchecked(&db, TransactionBehavior::Immediate).map_err(db_error)?;
         let found = current(&tx, scope, staged)?;
         if found.state == OrdinaryCreateState::Ready {
             return Ok(found);
@@ -564,7 +579,8 @@ impl Cache {
             .map_err(|_| CacheError::Io("secure random generation failed".into()))?;
         let nonce: String = random.iter().map(|b| format!("{b:02x}")).collect();
         let db = self.lock_db()?;
-        let tx = db.unchecked_transaction().map_err(db_error)?;
+        let tx =
+            Transaction::new_unchecked(&db, TransactionBehavior::Immediate).map_err(db_error)?;
         let found = current(&tx, scope, ready)?;
         if found.state != OrdinaryCreateState::Ready {
             return Ok(None);
@@ -580,7 +596,8 @@ impl Cache {
         receipt: &OrdinaryCreateReceipt,
     ) -> Result<OrdinaryCreateReceipt, CacheError> {
         let db = self.lock_db()?;
-        let tx = db.unchecked_transaction().map_err(db_error)?;
+        let tx =
+            Transaction::new_unchecked(&db, TransactionBehavior::Immediate).map_err(db_error)?;
         let found = current(&tx, scope, receipt)?;
         if found.state != receipt.state
             || !matches!(
@@ -639,7 +656,8 @@ impl Cache {
         remote: Option<&RemoteEntry>,
     ) -> Result<OrdinaryCreateReceipt, CacheError> {
         let db = self.lock_db()?;
-        let tx = db.unchecked_transaction().map_err(db_error)?;
+        let tx =
+            Transaction::new_unchecked(&db, TransactionBehavior::Immediate).map_err(db_error)?;
         let found = current(&tx, scope, &claim.receipt)?;
         if found.state != OrdinaryCreateState::Claimed
             || claim.receipt.state != OrdinaryCreateState::Claimed
@@ -684,7 +702,8 @@ impl Cache {
         plain(scope)?;
         let db = self.lock_db()?;
         validate_registered_scope(&db, scope)?;
-        let tx = db.unchecked_transaction().map_err(db_error)?;
+        let tx =
+            Transaction::new_unchecked(&db, TransactionBehavior::Immediate).map_err(db_error)?;
         let ids = ids(
             &tx,
             scope,
