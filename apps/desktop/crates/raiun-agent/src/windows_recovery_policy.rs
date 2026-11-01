@@ -53,11 +53,21 @@ pub(super) fn provider(
     let settings = configured_settings(headless)?;
     let provider = DurableEditRecoveryProvider::current_user(scope, root)
         .map_err(|_| "Protected recovery storage is unavailable".to_owned())?;
-    if !WINDOWS_STREAMED_RECOVERY_ENABLED {
-        return Ok(provider);
-    }
-    activate(provider, settings, headless)
-        .map_err(|_| "Configured Windows recovery storage could not be admitted".to_owned())
+    let storage = settings.storage;
+    let mut provider = if WINDOWS_STREAMED_RECOVERY_ENABLED {
+        activate(provider, settings, headless)
+            .map_err(|_| "Configured Windows recovery storage could not be admitted".to_owned())?
+    } else {
+        provider
+    };
+    // Optional namespace support never replaces the original provider after a
+    // refusal. The mount caller surfaces unavailable without declaring clean.
+    let _ = if headless {
+        provider.try_enable_modern_namespace_file_rename(storage)
+    } else {
+        provider.try_enable_gui_namespace_file_rename(storage)
+    };
+    Ok(provider)
 }
 
 fn activate(

@@ -11,8 +11,12 @@ pub(super) fn current_user(
     policy: Option<&raiun_core::WindowsRecoveryPolicy>,
 ) -> Result<DurableEditRecoveryProvider, JournalError> {
     let (storage, transfer) = policies(policy)?;
-    DurableEditRecoveryProvider::current_user(scope, root)?
-        .with_gui_streamed_recovery_policy(storage, transfer)
+    let mut provider = DurableEditRecoveryProvider::current_user(scope, root)?
+        .with_gui_streamed_recovery_policy(storage, transfer)?;
+    // Namespace admission is optional. Preserve this exact GUI provider and
+    // all existing evidence if admission fails; browsing remains available.
+    let _ = provider.try_enable_gui_namespace_file_rename(storage);
+    Ok(provider)
 }
 
 fn policies(

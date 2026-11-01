@@ -554,6 +554,18 @@ pub struct NamespaceDirectoryObservation {
     pub placeholder_state: u32,
     pub opaque_identity: Option<[u8; 16]>,
 }
+/// Copied physical metadata from a live connected root. These values are
+/// untrusted hints; they carry no retained pin, classification, publication
+/// permission or native completion authority.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NamespaceFileObservation {
+    pub local_file: LocalFileIdentity,
+    pub attributes: u32,
+    pub reparse_tag: u32,
+    pub placeholder_state: u32,
+    pub byte_len: u64,
+}
 #[cfg(windows)]
 pub struct NativeDirectoryCreateLocal<'pin, 'connection, 'session, 'backend> {
     inner: native::native_namespace_directory::NativeDirectoryLocal<
@@ -675,8 +687,10 @@ impl fmt::Debug for NamespaceObservation {
 #[cfg(windows)]
 #[allow(dead_code)]
 impl ConfiguredRootConnection {
-    /// Explicit owner-thread opt-in only. No production caller attaches it.
-    /// The first result requires an independent bounded initial inventory.
+    /// Owner-thread observation only. Each fresh complete batch may supply
+    /// rename hints, which still require independent live admission. Neither
+    /// the first result nor later hints establish inventory continuity or
+    /// permit adoption; inventory work requires its own bounded scan.
     pub fn attach_namespace_observer(&mut self) -> Result<NamespaceObservation, Error> {
         self.inner.attach_namespace_observer()
     }
@@ -694,6 +708,15 @@ impl ConfiguredRootConnection {
     /// A pending error retains the same observer/root/connection aggregate.
     pub fn stop_namespace_observer(&mut self, wait: std::time::Duration) -> Result<(), Error> {
         self.inner.stop_namespace_observer(wait)
+    }
+    /// Read metadata only for an existing Personal file placeholder beneath
+    /// this connected root. Returned values never replace the public rename
+    /// entry's independent account, catalog, native and capture admission.
+    pub fn observe_namespace_file(
+        &self,
+        components: &[&str],
+    ) -> Result<NamespaceFileObservation, Error> {
+        self.inner.observe_namespace_file(components)
     }
     #[cfg(feature = "synthetic-agent-integration")]
     pub fn namespace_observer_fixture_file(

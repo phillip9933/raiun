@@ -38,3 +38,7 @@ fn main() {
     eprintln!("Raiun: This target is not supported");
     std::process::exit(1);
 }
+
+#[cfg(all(test, not(windows)))]
+#[path = "windows_file_rename_producer.rs"]
+mod windows_file_rename_producer;

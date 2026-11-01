@@ -68,6 +68,8 @@ mod windows_headless;
 #[path = "windows_headless_edits.rs"]
 mod windows_headless_edits;
 
+#[path = "windows_file_rename_producer.rs"]
+mod windows_file_rename_producer;
 #[path = "windows_namespace_producer.rs"]
 mod windows_namespace_producer;
 #[path = "windows_profile_registry.rs"]
@@ -495,6 +497,7 @@ struct ProviderManager {
     folder_generation: Arc<AtomicU64>,
     folder_revocation: Arc<Mutex<Option<raiun_engine::SyncRevocationHandle>>>,
     folder_error: Arc<Mutex<Option<String>>>,
+    rename_error: Arc<Mutex<windows_file_rename_producer::Notice>>,
     folder_pause: Arc<Mutex<Option<FolderPauseSnapshot>>>,
     // Per-instance native-test capability; absent from production binaries and
     // never controlled by environment, IPC, configuration, or another agent.
@@ -747,6 +750,7 @@ enum ProviderCommand {
         custody_store: Arc<dyn SessionStore>,
         fresh_close_publisher: Option<windows_vault_close_worker::VaultClosePublisher>,
         namespace_admission: Option<windows_namespace_producer::Admission>,
+        file_rename_producer: Option<Box<windows_file_rename_producer::Producer>>,
         response: std::sync::mpsc::SyncSender<Result<(), String>>,
     },
     DispatchRecovery {
@@ -868,6 +872,8 @@ impl ProviderManager {
         let worker_folder_revocation = Arc::clone(&folder_revocation);
         let folder_error = Arc::new(Mutex::new(None));
         let worker_folder_error = Arc::clone(&folder_error);
+        let rename_error = Arc::new(Mutex::new(windows_file_rename_producer::Notice::default()));
+        let worker_rename_error = Arc::clone(&rename_error);
         let folder_pause = Arc::new(Mutex::new(None::<FolderPauseSnapshot>));
         let worker_folder_pause = Arc::clone(&folder_pause);
         let namespace_controls = Arc::new(windows_namespace_producer::Controls::default());
@@ -890,6 +896,7 @@ impl ProviderManager {
                 let mut folders: Option<windows_folder_sync::Runtime> = None;
                 let mut cleanup_holds = windows_vault_cleanup_holds::PendingCleanupHolds::<PendingNativeVaultCleanup>::new();
                 let mut namespace_producer:Option<windows_namespace_producer::Producer>=None;
+                let mut file_rename_producer:Option<Box<windows_file_rename_producer::Producer>>=None;
                 let mut pending_command = None;
                 loop {
                     let command = match pending_command.take().map_or_else(
@@ -1395,6 +1402,7 @@ impl ProviderManager {
                             custody_store,
                             fresh_close_publisher,
                             namespace_admission,
+                            file_rename_producer: next_file_rename_producer,
                             response,
                         } => {
                             let candidate_binding = ActiveProviderBinding {
@@ -1474,6 +1482,7 @@ impl ProviderManager {
                                         }
                                         vault_custody = custody;
                                         namespace_producer=namespace_admission.map(|admission| windows_namespace_producer::Producer::new(admission,composite,worker_namespace_controls.clone(),worker_namespace_status.clone()));
+                                        file_rename_producer = next_file_rename_producer;
                                         connection = Some(active);
                                         backend = Some(next_backend);
                                         worker_connected.store(true, Ordering::Release);
@@ -1675,6 +1684,7 @@ impl ProviderManager {
                         }
                         ProviderCommand::Disconnect(response) => {
                             namespace_producer=None;
+                            file_rename_producer=None;
                             cleanup_holds.clear();
                             if let Ok(mut handle) = worker_folder_revocation.lock() { if let Some(handle) = handle.take() { handle.revoke(); } }
                             drop(folders.take());
@@ -1696,6 +1706,7 @@ impl ProviderManager {
                         }
                         ProviderCommand::Stop(response) => {
                             namespace_producer=None;
+                            file_rename_producer=None;
                             cleanup_holds.clear();
                             if let Ok(mut handle) = worker_folder_revocation.lock() { if let Some(handle) = handle.take() { handle.revoke(); } }
                             drop(folders.take());
@@ -1736,6 +1747,23 @@ impl ProviderManager {
                                     Ok(Some(raiun_cloudfiles_windows::ReconciliationOutcome::Deferred)) => "deferred".into(),
                                     Ok(None) => unreachable!("empty dispatch is not observed"),
                                 });
+                            }
+                        }
+                    }
+                    // Commands and captured saves precede one fresh rename pair.
+                    // The disabled mkdir producer must not drain this observer.
+                    if !dispatched_initial && file_rename_producer.is_some() {
+                        match receiver.try_recv() {
+                            Ok(command) => { pending_command=Some(command); continue; },
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                            Err(std::sync::mpsc::TryRecvError::Empty) => (),
+                        }
+                        if let (Some(producer), Some(active), Some(backend), Some(binding)) =
+                            (file_rename_producer.as_mut(),connection.as_mut(),backend.as_ref(),active_binding.as_ref()) {
+                            if let Err(message) = producer.tick(active,backend,binding.identity) {
+                                if let Ok(mut notice) = worker_rename_error.lock() {
+                                    notice.record(binding.generation,worker_generation.load(Ordering::Acquire),message);
+                                }
                             }
                         }
                     }
@@ -1810,6 +1838,7 @@ impl ProviderManager {
             folder_generation,
             folder_revocation,
             folder_error,
+            rename_error,
             folder_pause,
             offline_jobs,
             recovery_cursor_nonce: {
@@ -1865,6 +1894,36 @@ impl ProviderManager {
         custody_account: Vec<u8>,
         custody_store: Arc<dyn SessionStore>,
     ) -> Result<(), String> {
+        self.connect_with_file_rename(
+            path,
+            generation,
+            expected_identity,
+            already_registered,
+            personal_space_id,
+            personal_root_resource_id,
+            backend,
+            recovery,
+            None,
+            custody_account,
+            custody_store,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn connect_with_file_rename(
+        &self,
+        path: PathBuf,
+        generation: u64,
+        expected_identity: raiun_cloudfiles_windows::ConfiguredRootIdentity,
+        already_registered: bool,
+        personal_space_id: String,
+        personal_root_resource_id: String,
+        backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
+        recovery: Arc<dyn raiun_cloudfiles_windows::EditRecoveryProvider>,
+        file_rename_catalog: Option<Arc<dyn raiun_cloudfiles_windows::ProviderIdentityCatalog>>,
+        custody_account: Vec<u8>,
+        custody_store: Arc<dyn SessionStore>,
+    ) -> Result<(), String> {
         let namespace_enabled = windows_namespace_producer::PRODUCTION_ENABLED;
         #[cfg(all(test, debug_assertions))]
         let namespace_enabled =
@@ -1877,6 +1936,25 @@ impl ProviderManager {
                 expected_identity,
                 windows_recovery_policy::directory_storage_policy,
             )?)
+        } else {
+            None
+        };
+        let file_rename_producer = if !namespace_enabled {
+            file_rename_catalog
+                .map(|catalog| {
+                    windows_file_rename_producer::Producer::capture(
+                        &backend,
+                        catalog,
+                        &self.authorized_generation,
+                        generation,
+                        expected_identity,
+                        &personal_space_id,
+                        &personal_root_resource_id,
+                    )
+                    .map(Box::new)
+                    .map_err(str::to_owned)
+                })
+                .transpose()?
         } else {
             None
         };
@@ -1901,6 +1979,7 @@ impl ProviderManager {
                 custody_store,
                 fresh_close_publisher,
                 namespace_admission,
+                file_rename_producer,
                 response,
             })
             .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
@@ -3539,6 +3618,14 @@ impl WindowsAgent {
         let pause = self
             .provider
             .pause_snapshot(state.active_generation, state.online_authenticated);
+        let rename_error = self.provider.rename_error.lock().ok().and_then(|notice| {
+            notice.get(
+                state.active_generation,
+                mounted
+                    && state.active_generation
+                        == self.provider.authorized_generation.load(Ordering::Acquire),
+            )
+        });
         let mut status = json!({
             "agent_version": env!("CARGO_PKG_VERSION"),
             "connected": session.is_some() && state.online_authenticated,
@@ -3556,7 +3643,7 @@ impl WindowsAgent {
                 "registration_state": value.registration_ownership.as_ref().map(|owner| owner.state.as_str()),
                 "recovery_scope_token": self.provider.configuration_recovery_scope_token(value, state.active_generation).ok(),
             })),
-            "error": state.error.as_deref().or(folder_error.as_deref()).or_else(|| (!provider_supported).then_some(PROVIDER_UNAVAILABLE)),
+            "error": state.error.as_deref().or(rename_error).or(folder_error.as_deref()).or_else(|| (!provider_supported).then_some(PROVIDER_UNAVAILABLE)),
             "autostart": autostart,
             "recovery_folder": null,
             "encrypted_edit_recovery_available": false,
@@ -4997,6 +5084,7 @@ impl WindowsAgent {
         } else {
             recovery
         };
+        let file_rename_enabled = recovery.namespace_file_rename_configured();
         let recovery: Arc<dyn raiun_cloudfiles_windows::EditRecoveryProvider> = Arc::new(recovery);
         let identity_catalog = recovery
             .identity_catalog()
@@ -5013,7 +5101,7 @@ impl WindowsAgent {
                 client,
                 scope,
                 identity,
-                identity_catalog,
+                Arc::clone(&identity_catalog),
                 cache,
             )
             .map_err(|_| "Could not prepare the authenticated Windows drive")?,
@@ -5115,7 +5203,7 @@ impl WindowsAgent {
             state.root_configuration = Some(connecting.clone());
         }
 
-        provider.connect(
+        provider.connect_with_file_rename(
             PathBuf::from(&configuration.path),
             generation,
             identity,
@@ -5127,6 +5215,7 @@ impl WindowsAgent {
                 .ok_or("The saved Windows drive has no verified Personal root identity")?,
             Arc::clone(&backend),
             recovery,
+            file_rename_enabled.then_some(identity_catalog),
             bandwidth_scope.bytes().to_vec(),
             Arc::clone(session_store),
         )?;
@@ -5164,7 +5253,13 @@ impl WindowsAgent {
                         &bytes,
                     )
                     .map_err(|_| "Could not persist Windows registration ownership".to_owned())
-                    .map(|()| state.root_configuration = Some(updated))
+                    .map(|()| {
+                        state.root_configuration = Some(updated);
+                        if !file_rename_enabled && state.error.is_none() {
+                            state.error =
+                                Some(windows_file_rename_producer::UNAVAILABLE.to_owned());
+                        }
+                    })
             }
         })();
         if let Err(error) = persist_result {

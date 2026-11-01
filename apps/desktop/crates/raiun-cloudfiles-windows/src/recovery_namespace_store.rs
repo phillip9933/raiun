@@ -143,6 +143,18 @@ impl DurableEditRecoveryProvider {
         mut self,
         policy: crate::streamed_store::StorePolicy,
     ) -> Result<Self, crate::JournalError> {
+        self.try_enable_modern_namespace_file_rename(policy)?;
+        Ok(self)
+    }
+
+    /// Admit namespace storage without consuming the existing recovery owner
+    /// on failure. No failed admission grants a namespace writer or discards
+    /// the provider's original streamed/legacy recovery context.
+    #[cfg(windows)]
+    pub fn try_enable_modern_namespace_file_rename(
+        &mut self,
+        policy: crate::streamed_store::StorePolicy,
+    ) -> Result<(), crate::JournalError> {
         if self.namespace_rename.is_some() {
             return Err(crate::JournalError::InvalidState);
         }
@@ -156,8 +168,7 @@ impl DurableEditRecoveryProvider {
         } else {
             open_modern_state(&self.state_directory)?
         };
-        self.attach_namespace_rename(Some(state), policy)?;
-        Ok(self)
+        self.attach_namespace_rename(Some(state), policy)
     }
 
     /// Explicit GUI compatibility opt-in at the existing DPAPI state root.
@@ -167,6 +178,18 @@ impl DurableEditRecoveryProvider {
         mut self,
         policy: crate::streamed_store::StorePolicy,
     ) -> Result<Self, crate::JournalError> {
+        self.try_enable_gui_namespace_file_rename(policy)?;
+        Ok(self)
+    }
+
+    /// Preserve the same GUI recovery owner when optional namespace admission
+    /// is unavailable. Existing ACLs and retained recovery evidence are never
+    /// repaired, removed or reinterpreted by this operation.
+    #[cfg(windows)]
+    pub fn try_enable_gui_namespace_file_rename(
+        &mut self,
+        policy: crate::streamed_store::StorePolicy,
+    ) -> Result<(), crate::JournalError> {
         if self.namespace_rename.is_some() {
             return Err(crate::JournalError::InvalidState);
         }
@@ -181,8 +204,14 @@ impl DurableEditRecoveryProvider {
             crate::recovery_state::RecoveryStateRoot::existing_gui(&self.state_directory)
                 .map_err(|_| crate::JournalError::ProtectionFailed)?
         };
-        self.attach_namespace_rename(Some(state), policy)?;
-        Ok(self)
+        self.attach_namespace_rename(Some(state), policy)
+    }
+
+    /// Scheduler information only; live prepared-store and native admission
+    /// checks remain required for every attempted rename.
+    #[cfg(windows)]
+    pub fn namespace_file_rename_configured(&self) -> bool {
+        self.namespace_rename.is_some()
     }
 
     fn attach_namespace_rename(

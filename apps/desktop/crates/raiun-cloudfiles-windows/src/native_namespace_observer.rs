@@ -271,6 +271,96 @@ impl ConfiguredRootConnection {
 }
 
 impl ConfiguredRootConnection {
+    pub(crate) fn observe_namespace_file(
+        &self,
+        components: &[&str],
+    ) -> Result<crate::NamespaceFileObservation, Error> {
+        if components.len() < 2
+            || components.len() > 256
+            || components.first().copied() != Some("Personal")
+            || components.iter().any(|part| !valid_component(part))
+            || components.iter().map(|part| part.len() + 1).sum::<usize>() > 32_768
+        {
+            return Err(Error::InvalidConfiguredRoot);
+        }
+        let context = self.namespace_observation_context()?;
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        let mut path = root.path.clone();
+        let mut ancestors = Vec::with_capacity(components.len() - 1);
+        for component in &components[..components.len() - 1] {
+            path.push(component);
+            let handle = open_root(
+                &path,
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+            )?;
+            let snapshot = root_snapshot(handle.0)?;
+            if snapshot.identity.volume_serial != root.identity.volume_serial
+                || !valid_callback_directory_snapshot(snapshot)
+                || !windows_paths_equal(
+                    &final_path_for_handle(handle.0).map_err(|_| Error::ConfiguredRootChanged)?,
+                    &path,
+                )
+            {
+                return Err(Error::ConfiguredRootChanged);
+            }
+            // No FILE_SHARE_DELETE: retain every no-follow directory handle
+            // until the final file and live root have both been rechecked.
+            ancestors.push(handle);
+        }
+        path.push(components.last().ok_or(Error::InvalidConfiguredRoot)?);
+        let wide = wide_path(&path)?;
+        // SAFETY: bounded validated components under the live registered root;
+        // all ancestors remain pinned and disallow replacement. Open only the
+        // entry itself for metadata, never its reparse target or file data.
+        let raw = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        };
+        if raw.is_null() || raw == INVALID_HANDLE_VALUE {
+            return Err(win32_io_error("observe connected namespace file metadata"));
+        }
+        let file = RawOwnedHandle(raw);
+        let snapshot = root_snapshot(file.0)?;
+        if snapshot.identity.volume_serial != root.identity.volume_serial
+            || snapshot.identity.file_index == 0
+            || snapshot.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+            || snapshot.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
+            || !cleanup_cloud_reparse_tag(snapshot.reparse_tag)
+            || snapshot.placeholder_state & CF_PLACEHOLDER_STATE_PLACEHOLDER == 0
+            || snapshot.placeholder_state & CF_PLACEHOLDER_STATE_SYNC_ROOT != 0
+            || snapshot.placeholder_state & !0x3f != 0
+            || !windows_paths_equal(
+                &final_path_for_handle(file.0).map_err(|_| Error::ConfiguredRootChanged)?,
+                &path,
+            )
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        // This is a value-only observation. A subsequent rename attempt must
+        // acquire its own pins and revalidate content, identity and currentness.
+        if self.namespace_observation_context()? != context {
+            return Err(Error::ProviderUnavailable);
+        }
+        Ok(crate::NamespaceFileObservation {
+            local_file: LocalFileIdentity {
+                volume_serial: snapshot.identity.volume_serial,
+                file_index: snapshot.identity.file_index,
+            },
+            attributes: snapshot.file_attributes,
+            reparse_tag: snapshot.reparse_tag,
+            placeholder_state: snapshot.placeholder_state,
+            byte_len: snapshot.file_size,
+        })
+    }
+
     /// Fixed synthetic-file metadata only, not a caller-selected path or
     /// publication/capture capability. Compiled solely with diagnostic feature.
     #[cfg(feature = "synthetic-agent-integration")]
