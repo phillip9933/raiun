@@ -3494,7 +3494,8 @@ acceptance and expanded feature parity remain open. No new release is implied.
 ### Windows new-file source integration — 2 November 2026
 
 The unpublished candidate now includes guarded creation of an ordinary file
-directly inside Personal. It retains the original connected root, prepared
+directly inside Personal or an existing managed Personal subfolder. It retains
+the complete original parent path and its identity/revision, connected root, prepared
 recovery provider, immutable snapshot, account/token generation and deadline
 through SDK upload/readback, native conversion and linked custody completion.
 Native ownership stays on the connection thread. Owned SDK tasks run on a joined
@@ -3507,13 +3508,15 @@ Notification routing now validates the complete raw batch before live metadata
 classification. Personal/Spaces containers and cloud-shaped entries can be
 skipped without granting ownership or claiming completed uploads. Unsupported
 plain entries, missing or changed metadata and removals retain attention; this
-does not add deletion, nested-file or Space-file creation support.
+does not add deletion, creation of parent folders or Space-file creation support.
 
-Source checks pass 1,767 host cases with 17 explicit ignores, strict Linux and
+Source checks pass 1,772 host cases with 17 explicit ignores, strict Linux and
 Windows checks, and Windows test compilation. The two public-entry create
 fixtures and full manager/worker upload-and-stop fixture are compiled, not
 executed. The latter's Windows-only test changes reuse the unchanged host
 baseline with explicit source proof.
+Existing-subfolder runtime wiring is source-checked; its connected native
+acceptance case is being prepared and is not covered by the earlier root cases.
 Production creation remains disabled. Native and exact-package acceptance,
 plus a verified create-only server contract, are still required: HTTP 201 and
 full readback alone do not establish atomic no-clobber semantics. No installed

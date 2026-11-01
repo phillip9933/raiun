@@ -246,11 +246,12 @@ parity remain unfinished. Reuse historical evidence only within its tested scope
 
 ## Integration ownership and owner-ready queue
 
-The 2 November source checkpoint adds guarded direct-Personal new-file creation,
+The 2 November source checkpoint adds guarded new-file creation in Personal and
+existing managed Personal subfolders,
 owned SDK worker phases and metadata-only population classification. Production
 creation remains disabled; compiled fixtures do not establish native or package
 acceptance, and the verified create-only server-contract gate remains open.
-Nested/Space creation, replacement, deletion and encrypted parity are separate
+Parent-folder/Space creation, replacement, deletion and encrypted parity are separate
 remaining work. See [implementation status](IMPLEMENTATION.md).
 
 The Desktop coordinator owns shared provider/filesystem, CLI, GUI, security and
