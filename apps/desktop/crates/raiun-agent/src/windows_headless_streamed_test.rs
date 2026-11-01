@@ -1,4 +1,4 @@
-//! Explicit ignored diagnostic only. No production activation or body logging.
+//! Ignored normal-headless-factory qualification. Production activation stays off.
 use super::*;
 use raiun_cloudfiles_windows::{
     DpapiEditRecordProtector, DurableEditRecoveryProvider, EditJournalScope, JournalError,
@@ -29,7 +29,7 @@ const CHUNK: usize = 64 * 1024;
 
 fn requested_cases(input: Option<&std::ffi::OsStr>) -> Result<Vec<&'static str>, &'static str> {
     match input {
-        None => Ok(ALL_CASES.to_vec()),
+        None => Ok(vec!["personal-success"]),
         Some(input) => {
             let value = input.to_str().ok_or("invalid diagnostic case encoding")?;
             let case = ALL_CASES
@@ -74,15 +74,14 @@ fn loopback_origin(origin: &str) -> bool {
         })
 }
 
-/// Parent's two cfg(test,debug_assertions) constructor hooks call only this
-/// process-local diagnostic guard. Env absence leaves all defaults untouched.
-pub(in super::super) fn maybe_enable_recovery(
-    provider: DurableEditRecoveryProvider,
+/// Only normal policy assembly calls this before admitting streaming and then
+/// namespace support. No provider/store is reconstructed or enabled afterward.
+pub(in super::super) fn qualify_normal_factory(
     scope: &raiun_cloudfiles_windows::ProviderScope,
     root: raiun_cloudfiles_windows::ConfiguredRootIdentity,
-) -> Result<DurableEditRecoveryProvider, JournalError> {
+) -> Result<bool, JournalError> {
     let Some(directory) = std::env::var_os(DIRECTORY) else {
-        return Ok(provider);
+        return Ok(false);
     };
     let directory = PathBuf::from(directory);
     let selected = std::env::var_os(CASE);
@@ -103,6 +102,9 @@ pub(in super::super) fn maybe_enable_recovery(
         || !same_path(&config.mount_path, &directory.join("cloud-root"))
         || scope.profile_id() != "default"
         || config.profile != "default"
+        || !super::super::mount_only()
+        || config.remember_login
+        || config.auto_mount
         || config.auth != raiun_headless::AuthMethod::AppToken
         || config.username.as_deref() != Some("synthetic-user")
         || !directory
@@ -121,7 +123,27 @@ pub(in super::super) fn maybe_enable_recovery(
     if pinned.identity() != root {
         return Err(JournalError::InvalidScope);
     }
-    super::super::windows_recovery_policy::activate_for_diagnostic(provider)
+    Ok(true)
+}
+
+/// Keep the existing mount and recovery-context hooks as verification only:
+/// qualification must already have passed through the normal factory.
+pub(in super::super) fn maybe_enable_recovery(
+    provider: DurableEditRecoveryProvider,
+    scope: &raiun_cloudfiles_windows::ProviderScope,
+    root: raiun_cloudfiles_windows::ConfiguredRootIdentity,
+) -> Result<DurableEditRecoveryProvider, JournalError> {
+    if qualify_normal_factory(scope, root)? {
+        // Observation only. This prepared value is discarded, never installed
+        // into the owner or used to mint a fresh-dispatch receipt.
+        let observed =
+            raiun_cloudfiles_windows::EditRecoveryProvider::prepare(&provider, scope, root)
+                .map_err(|_| JournalError::InvalidState)?;
+        if !observed.supports_streamed_capture() {
+            return Err(JournalError::InvalidState);
+        }
+    }
+    Ok(provider)
 }
 
 fn byte(offset: u64, edited: bool) -> u8 {
@@ -403,7 +425,7 @@ fn synthetic_headless_streamed_existing_file_save() {
         if paced(&case_dir) {
             fixture.pace_streamed_readback(readback_rate(&case_dir));
         }
-        let mut config = json!({"schema_version":1,"server":server,"auth":"app_token","username":"synthetic-user","mount_path":case_dir.join("cloud-root"),"auto_mount":true,"remember_login":true,"reconnect_interval_seconds":1,"profile":"default"});
+        let mut config = json!({"schema_version":1,"server":server,"auth":"app_token","username":"synthetic-user","mount_path":case_dir.join("cloud-root"),"auto_mount":false,"remember_login":false,"reconnect_interval_seconds":1,"profile":"default"});
         if paced(&case_dir) {
             config["windows_recovery"] =
                 json!({"total_timeout_seconds":job_timeout_seconds(&case_dir)});
@@ -594,6 +616,13 @@ fn runtime(directory: &Path, role: &str) {
     let runtime_started = Instant::now();
     let expected_len = case_length(directory);
     let config = crate::headless_runtime::config().unwrap().unwrap();
+    let context = raiun_control_windows::headless_context().unwrap().unwrap();
+    assert!(same_path(context.state_root(), &directory.join("state")));
+    let protector = DpapiEditRecordProtector::current_user().unwrap();
+    assert!(same_path(
+        protector.local_state_directory(),
+        &context.state_root().join("sessions")
+    ));
     assert!(loopback_origin(config.server.trim_end_matches('/')));
     assert!(same_path(&config.mount_path, &directory.join("cloud-root")));
     let broker =
@@ -608,11 +637,17 @@ fn runtime(directory: &Path, role: &str) {
         .initial_save_test_activation
         .store(true, Ordering::Release);
     let exercise=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||->Result<Value,String>{
-        if role=="save"{
-            broker.handle_owned(windows_vault_requests::OwnedControlRequest::new(json!({"action":"auth_app_token","required_mode":"mount_only","profile_id":"default","server":config.server,"username":"synthetic-user","app_token":"synthetic-headless-app-token"})))?;
-            wait_for(Duration::from_secs(45),||Ok(agent.state.lock().unwrap().online_authenticated))?;
-            let mount=agent.headless_configured_mount_request()?.ok_or("configured auto mount missing")?;broker.handle(&mount)?;
-        }else{wait_for(Duration::from_secs(45),||{broker.refresh_all()?;Ok(agent.state.lock().unwrap().online_authenticated && agent.provider.is_connected())})?;}
+        if config.remember_login || config.auto_mount { return Err("qualification requires memory-only manual mounting".into()); }
+        {
+            let state=agent.state.lock().unwrap();
+            if state.online_authenticated || state.session.is_some() || agent.provider.is_connected() {
+                return Err("startup restored authentication or connected without fresh login".into());
+            }
+        }
+        broker.handle_owned(windows_vault_requests::OwnedControlRequest::new(json!({"action":"auth_app_token","required_mode":"mount_only","profile_id":"default","server":config.server,"username":"synthetic-user","app_token":"synthetic-headless-app-token"})))?;
+        wait_for(Duration::from_secs(45),||Ok(agent.state.lock().unwrap().online_authenticated))?;
+        if agent.headless_configured_mount_request()?.is_some() { return Err("automatic mounting unexpectedly available".into()); }
+        broker.handle(&json!({"action":"mount","required_mode":"mount_only","profile_id":"default","cloud_root":config.mount_path}))?;
         if !agent.provider.is_connected(){return Err("actual provider not connected".into());}
         let identity=root_identity(&agent);
         if role=="save"{write_json(&directory.join("ROOT.json"),json!({"volume":identity.volume_serial,"file":identity.file_index}));}
@@ -685,7 +720,7 @@ fn runtime(directory: &Path, role: &str) {
     let passed = exercise.is_ok() && normal && retained;
     write_json(
         &directory.join(format!("{role}.RESULTS.json")),
-        json!({"passed":passed,"detail":exercise.as_ref().ok(),"error":exercise.as_ref().err(),"normal_unmount_stop":normal,"edited_bytes_registration_retained":retained,"forced_cleanup":false,"runtime_elapsed_millis":runtime_started.elapsed().as_millis()}),
+        json!({"passed":passed,"detail":exercise.as_ref().ok(),"error":exercise.as_ref().err(),"normal_unmount_stop":normal,"edited_bytes_registration_retained":retained,"forced_cleanup":false,"runtime_elapsed_millis":runtime_started.elapsed().as_millis(),"normal_factory_qualification":true,"memory_only_login":!config.remember_login,"manual_mount":!config.auto_mount}),
     );
     assert!(passed, "streamed fixture incomplete; evidence retained");
 }
@@ -729,9 +764,9 @@ fn diagnostic_guard_and_pattern_parameters_are_exact() {
 }
 
 #[test]
-fn diagnostic_case_selection_is_exact_and_absence_preserves_full_matrix() {
+fn qualification_case_selection_is_exact_and_defaults_to_one_personal_case() {
     use std::ffi::OsStr;
-    assert_eq!(requested_cases(None).unwrap(), ALL_CASES);
+    assert_eq!(requested_cases(None).unwrap(), ["personal-success"]);
     for case in ALL_CASES.into_iter().chain(POLICY_CASES) {
         assert_eq!(requested_cases(Some(OsStr::new(case))).unwrap(), [case]);
     }

@@ -51,10 +51,19 @@ pub(super) fn provider(
 ) -> Result<DurableEditRecoveryProvider, String> {
     let headless = super::mount_only();
     let settings = configured_settings(headless)?;
+    // Qualification is bound to this exact invocation/scope/root, before any
+    // provider is assembled. Production has no environment activation path.
+    let streamed = WINDOWS_STREAMED_RECOVERY_ENABLED;
+    #[cfg(all(test, debug_assertions))]
+    let streamed = streamed
+        || super::windows_profiles::windows_headless_streamed_test::qualify_normal_factory(
+            &scope, root,
+        )
+        .map_err(|_| "Synthetic normal factory qualification was refused".to_owned())?;
     let provider = DurableEditRecoveryProvider::current_user(scope, root)
         .map_err(|_| "Protected recovery storage is unavailable".to_owned())?;
     let storage = settings.storage;
-    let mut provider = if WINDOWS_STREAMED_RECOVERY_ENABLED {
+    let mut provider = if streamed {
         activate(provider, settings, headless)
             .map_err(|_| "Configured Windows recovery storage could not be admitted".to_owned())?
     } else {
@@ -80,18 +89,6 @@ fn activate(
     } else {
         provider.with_gui_streamed_recovery_policy(settings.storage, settings.transfer)
     }
-}
-
-// Only the separately guarded native fixture calls this. Configuration cannot
-// enable this entry point in a production agent.
-#[cfg(all(test, debug_assertions))]
-pub(super) fn activate_for_diagnostic(
-    provider: DurableEditRecoveryProvider,
-) -> Result<DurableEditRecoveryProvider, raiun_cloudfiles_windows::JournalError> {
-    let headless = super::mount_only();
-    let settings = configured_settings(headless)
-        .map_err(|_| raiun_cloudfiles_windows::JournalError::InvalidScope)?;
-    activate(provider, settings, headless)
 }
 
 #[cfg(test)]
