@@ -170,6 +170,47 @@ mod connected {
             }
             Ok(value)
         }
+        // Values only. This cannot attach/poll, dispatch, clear HOLD or mint custody.
+        #[cfg(all(test, debug_assertions))]
+        pub(crate) fn native_fixture_snapshot(&self) -> serde_json::Value {
+            serde_json::json!({"attached":self.attached,"instance":self.instance,
+                "held":self.held,"record_generation":self.record_generation,
+                "agent_generation":self.auth.agent_generation,
+                "token_generation":self.auth.token_generation,"root_volume_serial":self.root.volume_serial,"root_file_index":self.root.file_index})
+        }
+        #[cfg(all(test, debug_assertions))]
+        pub(crate) fn native_fixture_catalog(&self) -> Result<serde_json::Value, &'static str> {
+            let entries = self
+                .catalog
+                .load(&self.scope)
+                .map_err(|_| "Original catalog unavailable")?;
+            let mut source = None;
+            let mut destination = None;
+            for entry in entries {
+                if let ProviderIdentityBinding::File {
+                    ref space_id,
+                    ref root_resource_id,
+                    ref path,
+                    ..
+                } = entry
+                {
+                    if space_id != &self.scope.personal_space_id
+                        || root_resource_id != &self.scope.personal_root_resource_id
+                    {
+                        continue;
+                    }
+                    let slot = match path.as_str() {
+                        "/source.bin" => &mut source,
+                        "/renamed.bin" => &mut destination,
+                        _ => continue,
+                    };
+                    if slot.replace(*entry.identity().as_bytes()).is_some() {
+                        return Err("Duplicate original catalog binding");
+                    }
+                }
+            }
+            Ok(serde_json::json!({"source":source,"destination":destination}))
+        }
         fn current(
             &self,
             auth: CapturedAuthorization,

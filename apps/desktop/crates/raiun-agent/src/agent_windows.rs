@@ -68,6 +68,10 @@ mod windows_headless;
 #[path = "windows_headless_edits.rs"]
 mod windows_headless_edits;
 
+#[cfg(all(test, windows, debug_assertions))]
+#[path = "windows_file_rename_caller_native_test.rs"]
+mod windows_file_rename_caller_native_test;
+
 #[path = "windows_file_rename_producer.rs"]
 mod windows_file_rename_producer;
 #[path = "windows_namespace_producer.rs"]
@@ -612,6 +616,12 @@ struct PendingNativeVaultCleanup {
 type PendingVaultCleanupTicket = windows_vault_cleanup_holds::PendingCleanupTicket;
 
 enum ProviderCommand {
+    #[cfg(all(test, windows, debug_assertions))]
+    RenameCallerObservation {
+        generation: u64,
+        path: windows_file_rename_caller_native_test::ObservedPath,
+        response: std::sync::mpsc::SyncSender<Result<Value, String>>,
+    },
     #[cfg(all(test, debug_assertions))]
     NamespaceDirectoryObservation {
         generation: u64,
@@ -1357,6 +1367,26 @@ impl ProviderManager {
                                 else { Err("The Windows drive changed during cleanup inspection".to_owned()) };
                             let _ = response.send(result);
                         }
+                        #[cfg(all(test, windows, debug_assertions))]
+                        ProviderCommand::RenameCallerObservation { generation, path, response } => {
+                            let result=(|| {
+                                let binding=active_binding.as_ref().filter(|b| b.generation==generation)
+                                    .ok_or("Rename fixture is disconnected or retired")?;
+                                if worker_generation.load(Ordering::Acquire)!=generation {
+                                    return Err("Rename fixture generation retired".into());
+                                }
+                                let value=windows_file_rename_caller_native_test::observe_owner(
+                                    connection.as_ref().ok_or("Rename fixture disconnected")?,
+                                    backend.as_ref().ok_or("Rename fixture backend unavailable")?,
+                                    file_rename_producer.as_deref().ok_or("Rename fixture producer unavailable")?,
+                                    binding,path)?;
+                                if worker_generation.load(Ordering::Acquire)!=generation {
+                                    return Err("Rename fixture generation changed during observation".into());
+                                }
+                                Ok(value)
+                            })();
+                            let _=response.send(result);
+                        }
                         ProviderCommand::InspectConnection { binding, response } => {
                             let result = if worker_generation.load(Ordering::Acquire) != binding.generation {
                                 Err("The account changed before Windows drive inspection".to_owned())
@@ -1858,6 +1888,25 @@ impl ProviderManager {
             #[cfg(all(test, debug_assertions))]
             disconnect_test_calls: AtomicU64::new(0),
         }
+    }
+
+    #[cfg(all(test, windows, debug_assertions))]
+    fn rename_caller_observation(
+        &self,
+        path: windows_file_rename_caller_native_test::ObservedPath,
+    ) -> Result<Value, String> {
+        let generation = self.authorized_generation.load(Ordering::Acquire);
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::RenameCallerObservation {
+                generation,
+                path,
+                response,
+            })
+            .map_err(|_| "Rename fixture owner unavailable".to_owned())?;
+        result
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "Rename fixture owner observation timed out".to_owned())?
     }
 
     #[cfg(all(test, debug_assertions))]
@@ -17412,6 +17461,68 @@ pub(super) mod tests {
             Arc<Mutex<super::windows_profiles::windows_headless_directory_test::DirectoryModel>>,
         >,
     ) -> (String, SyntheticPersonalSpacesFixture) {
+        synthetic_personal_spaces_server_with_models(
+            emit_stage,
+            native_read_files_enabled,
+            recovery_read_probe_enabled,
+            initially_absent,
+            initialized_vault,
+            vault_payload,
+            allow_vault_upload,
+            expected_authorization,
+            write_control,
+            directory_model,
+            #[cfg(debug_assertions)]
+            None,
+        )
+    }
+
+    #[cfg(debug_assertions)]
+    pub(super) fn synthetic_caller_rename_server(
+        headless: bool,
+        model: Arc<super::windows_file_rename_caller_native_test::RenameModel>,
+    ) -> (String, SyntheticPersonalSpacesFixture) {
+        use base64::Engine as _;
+        let authorization = headless.then(|| {
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD
+                    .encode("synthetic-user:synthetic-headless-app-token")
+            )
+        });
+        synthetic_personal_spaces_server_with_models(
+            |_| {},
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            authorization,
+            None,
+            None,
+            Some(model),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn synthetic_personal_spaces_server_with_models(
+        emit_stage: impl Fn(&str),
+        native_read_files_enabled: bool,
+        recovery_read_probe_enabled: bool,
+        initially_absent: bool,
+        initialized_vault: bool,
+        vault_payload: bool,
+        allow_vault_upload: bool,
+        expected_authorization: Option<String>,
+        write_control: Option<(PathBuf, SyntheticOrdinaryWriteMode)>,
+        directory_model: Option<
+            Arc<Mutex<super::windows_profiles::windows_headless_directory_test::DirectoryModel>>,
+        >,
+        #[cfg(debug_assertions)] rename_model: Option<
+            Arc<super::windows_file_rename_caller_native_test::RenameModel>,
+        >,
+    ) -> (String, SyntheticPersonalSpacesFixture) {
         assert!(!allow_vault_upload || (initialized_vault && vault_payload));
         let personal_write = write_control.as_ref().is_some_and(|(_, mode)| {
             matches!(
@@ -17663,6 +17774,18 @@ pub(super) mod tests {
                     .map(|(_, value)| value.as_str());
                 if authorization != Some(expected_access) {
                     write!(request_stream, "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                    continue;
+                }
+                #[cfg(debug_assertions)]
+                if let Some(model) = &rename_model
+                    && model.handle(
+                        &worker_server,
+                        &request,
+                        &headers,
+                        &body,
+                        &mut request_stream,
+                    )
+                {
                     continue;
                 }
                 // Directory model is explicit test-only and remains behind the
@@ -18787,7 +18910,11 @@ pub(super) mod tests {
         preserved_b();
     }
 
-    fn synthetic_session(server: &str, client_id: &str, expires_at: u64) -> auth::Session {
+    pub(super) fn synthetic_session(
+        server: &str,
+        client_id: &str,
+        expires_at: u64,
+    ) -> auth::Session {
         auth::Session {
             app_token_username: None,
             server: server.to_owned(),
@@ -18858,7 +18985,7 @@ pub(super) mod tests {
         agent_b.stop_and_join().unwrap();
     }
 
-    fn seed_active_session(store: &MemoryStore, scope: &str, session: auth::Session) {
+    pub(super) fn seed_active_session(store: &MemoryStore, scope: &str, session: auth::Session) {
         let identity = (
             scope.to_owned(),
             session.server.clone(),
