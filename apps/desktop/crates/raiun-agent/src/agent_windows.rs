@@ -4885,254 +4885,302 @@ impl WindowsAgent {
     }
 
     fn configure_root(&self, request: &Value) -> Result<Value, String> {
-        let _folder_lifecycle = self
-            .folder_lifecycle
-            .lock()
-            .map_err(|_| "Folder setup is unavailable")?;
-        // Drain ordinary folder work before changing its cloud-root boundary.
-        // Preserve the existing native-only configure path while C04 is gated.
-        if WINDOWS_FOLDER_SYNC_ENABLED
-            || self.provider.folder_generation.load(Ordering::Acquire) != 0
-        {
-            self.provider.disconnect()?;
-        }
         let (session, generation, previous_root) = {
-            let state = self
+            let mut state = self
                 .state
                 .lock()
                 .map_err(|_| "Account state is unavailable")?;
             let session = state
                 .session
-                .as_ref()
+                .clone()
                 .ok_or("Sign in before choosing a drive folder")?;
-            if !state.online_authenticated || state.authenticating || state.refreshing {
+            if !state.online_authenticated
+                || state.authenticating
+                || state.refreshing
+                || state.retiring
+                || state.logout_pending
+            {
                 return Err("Connect this account before choosing a drive folder".into());
             }
+            // Reuse the existing auth admission fence while this root is reserved.
+            state.authenticating = true;
             (
-                session.clone(),
+                session,
                 state.active_generation,
                 state.root_configuration.clone(),
             )
         };
-        let path = request
-            .get("cloud_root")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty() && value.len() <= 32_000)
-            .ok_or("Choose a valid local Windows folder")?;
-        if path.chars().any(char::is_control) {
-            return Err("Choose a valid local Windows folder".into());
-        }
-        let candidate = PathBuf::from(path);
-        let root_lease = if let Some(previous) = previous_root.as_ref().filter(|previous| {
-            previous
-                .registration_ownership
-                .as_ref()
-                .is_some_and(|owner| owner.state != "prepared_not_registered")
-        }) {
-            pin_registered_configured_root(
-                &candidate,
-                raiun_cloudfiles_windows::ConfiguredRootIdentity {
-                    volume_serial: previous.volume_serial,
-                    file_index: previous.file_index,
-                },
-            )
-            .map_err(root_error_text)?
-        } else {
-            pin_configured_root(&candidate).map_err(root_error_text)?
-        };
-        let identity = root_lease.identity();
-        let registered_identity = previous_root.as_ref().and_then(|previous| {
-            previous
-                .registration_ownership
-                .as_ref()
-                .filter(|owner| owner.state != "prepared_not_registered")
-                .map(|_| identity)
-        });
-        if overlaps_private_state(&candidate, registered_identity)? {
-            return Err("The selected folder overlaps Raiun's private app data".into());
-        }
-        if let Some(previous) = previous_root.as_ref()
-            && previous
-                .registration_ownership
-                .as_ref()
-                .is_some_and(|owner| owner.state != "prepared_not_registered")
-            && (identity.volume_serial != previous.volume_serial
-                || identity.file_index != previous.file_index)
-        {
-            return Err("This account already owns a registered drive folder; disconnect it before choosing another folder".into());
-        }
-        if let Some(previous) = previous_root.as_ref()
-            && Path::new(&previous.path).exists()
-            && (identity.volume_serial != previous.volume_serial
-                || identity.file_index != previous.file_index)
-            && configured_roots_overlap(&candidate, Path::new(&previous.path))
+        let mut owns_reservation = true;
+        let result: Result<Value, String> = (|| {
+            // No account/model/lifecycle lock may span the actual SDK-worker drain.
+            self.provider.disconnect()?;
+            {
+                let state = self
+                    .state
+                    .lock()
+                    .map_err(|_| "Account state is unavailable")?;
+                if state.active_generation != generation
+                    || self.generation.load(Ordering::Acquire) != generation
+                    || !state.authenticating
+                    || !state.online_authenticated
+                    || state.refreshing
+                    || state.retiring
+                    || state.logout_pending
+                    || state.root_configuration != previous_root
+                    || !Self::same_session(state.session.as_ref(), Some(&session))
+                {
+                    return Err("Account changed while configuring the drive folder".into());
+                }
+            }
+            let _folder_lifecycle = self
+                .folder_lifecycle
+                .lock()
+                .map_err(|_| "Folder setup is unavailable")?;
+            let path = request
+                .get("cloud_root")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty() && value.len() <= 32_000)
+                .ok_or("Choose a valid local Windows folder")?;
+            if path.chars().any(char::is_control) {
+                return Err("Choose a valid local Windows folder".into());
+            }
+            let candidate = PathBuf::from(path);
+            let root_lease = if let Some(previous) = previous_root.as_ref().filter(|previous| {
+                previous
+                    .registration_ownership
+                    .as_ref()
+                    .is_some_and(|owner| owner.state != "prepared_not_registered")
+            }) {
+                pin_registered_configured_root(
+                    &candidate,
+                    raiun_cloudfiles_windows::ConfiguredRootIdentity {
+                        volume_serial: previous.volume_serial,
+                        file_index: previous.file_index,
+                    },
+                )
                 .map_err(root_error_text)?
-        {
-            return Err("The selected folder overlaps this account's existing drive folder".into());
-        }
-        let (personal_drive_id, account_id, personal_root_resource_id) =
-            verified_personal_root_identity(&session)?;
-        if previous_root.as_ref().is_some_and(|previous| {
-            previous
-                .registration_ownership
+            } else {
+                pin_configured_root(&candidate).map_err(root_error_text)?
+            };
+            let identity = root_lease.identity();
+            let registered_identity = previous_root.as_ref().and_then(|previous| {
+                previous
+                    .registration_ownership
+                    .as_ref()
+                    .filter(|owner| owner.state != "prepared_not_registered")
+                    .map(|_| identity)
+            });
+            if overlaps_private_state(&candidate, registered_identity)? {
+                return Err("The selected folder overlaps Raiun's private app data".into());
+            }
+            if let Some(previous) = previous_root.as_ref()
+                && previous
+                    .registration_ownership
+                    .as_ref()
+                    .is_some_and(|owner| owner.state != "prepared_not_registered")
+                && (identity.volume_serial != previous.volume_serial
+                    || identity.file_index != previous.file_index)
+            {
+                return Err("This account already owns a registered drive folder; disconnect it before choosing another folder".into());
+            }
+            if let Some(previous) = previous_root.as_ref()
+                && Path::new(&previous.path).exists()
+                && (identity.volume_serial != previous.volume_serial
+                    || identity.file_index != previous.file_index)
+                && configured_roots_overlap(&candidate, Path::new(&previous.path))
+                    .map_err(root_error_text)?
+            {
+                return Err(
+                    "The selected folder overlaps this account's existing drive folder".into(),
+                );
+            }
+            let (personal_drive_id, account_id, personal_root_resource_id) =
+                verified_personal_root_identity(&session)?;
+            if previous_root.as_ref().is_some_and(|previous| {
+                previous
+                    .registration_ownership
+                    .as_ref()
+                    .is_some_and(|owner| {
+                        owner.state != "prepared_not_registered"
+                            && (owner.account_id != account_id
+                                || owner.personal_drive_id != personal_drive_id)
+                    })
+            }) {
+                return Err(
+                    "This registered folder belongs to a different verified account".into(),
+                );
+            }
+            if previous_root.as_ref().is_some_and(|previous| {
+                previous
+                    .registration_ownership
+                    .as_ref()
+                    .is_some_and(|owner| {
+                        owner.state != "prepared_not_registered"
+                            && owner.personal_root_resource_id.as_deref()
+                                != Some(personal_root_resource_id.as_str())
+                    })
+            }) {
+                return Err("The registered Personal drive root changed; choose a new local folder after safely removing the old registration".into());
+            }
+            let registration_state = previous_root
                 .as_ref()
-                .is_some_and(|owner| {
-                    owner.state != "prepared_not_registered"
-                        && (owner.account_id != account_id
-                            || owner.personal_drive_id != personal_drive_id)
+                .filter(|previous| {
+                    previous.volume_serial == identity.volume_serial
+                        && previous.file_index == identity.file_index
+                        && previous.server == session.server
+                        && previous.client_id == session.client_id
                 })
-        }) {
-            return Err("This registered folder belongs to a different verified account".into());
-        }
-        if previous_root.as_ref().is_some_and(|previous| {
-            previous
-                .registration_ownership
-                .as_ref()
-                .is_some_and(|owner| {
-                    owner.state != "prepared_not_registered"
-                        && owner.personal_root_resource_id.as_deref()
-                            != Some(personal_root_resource_id.as_str())
-                })
-        }) {
-            return Err("The registered Personal drive root changed; choose a new local folder after safely removing the old registration".into());
-        }
-        let registration_state = previous_root
-            .as_ref()
-            .filter(|previous| {
-                previous.volume_serial == identity.volume_serial
-                    && previous.file_index == identity.file_index
-                    && previous.server == session.server
-                    && previous.client_id == session.client_id
-            })
-            .and_then(|previous| previous.registration_ownership.as_ref())
-            .map(|owner| owner.state.clone())
-            .unwrap_or_else(|| "prepared_not_registered".into());
-        let configuration = RootConfiguration {
-            profile_scope: self.profile_scope.as_str().into(),
-            server: session.server.clone(),
-            client_id: session.client_id.clone(),
-            issuer: session.expected_issuer.clone(),
-            path: candidate.to_string_lossy().into_owned(),
-            volume_serial: identity.volume_serial,
-            file_index: identity.file_index,
-            registration_ownership: Some(RegistrationOwnership {
-                state: registration_state,
-                account_id,
-                personal_drive_id,
-                personal_root_resource_id: Some(personal_root_resource_id),
+                .and_then(|previous| previous.registration_ownership.as_ref())
+                .map(|owner| owner.state.clone())
+                .unwrap_or_else(|| "prepared_not_registered".into());
+            let configuration = RootConfiguration {
+                profile_scope: self.profile_scope.as_str().into(),
+                server: session.server.clone(),
+                client_id: session.client_id.clone(),
+                issuer: session.expected_issuer.clone(),
+                path: candidate.to_string_lossy().into_owned(),
                 volume_serial: identity.volume_serial,
                 file_index: identity.file_index,
-            }),
-            valid: true,
-        };
-        let bytes = encode_root_configuration(&configuration)?;
-        if bytes.len() > MAX_ROOT_CONFIG_BYTES {
-            return Err("The selected folder configuration exceeds the storage limit".into());
-        }
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "Account state is unavailable")?;
-        // Hold the state lock across persistence so logout/auth refresh cannot
-        // change the identity between validation and durable publication.
-        if state.active_generation != generation
-            || !state.online_authenticated
-            || state.authenticating
-            || state.refreshing
-            || state.session.as_ref().is_none_or(|current| {
-                current.server != configuration.server
-                    || current.client_id != configuration.client_id
-            })
-        {
-            return Err("Account changed while configuring the drive folder".into());
-        }
-        if overlaps_private_state(&candidate, registered_identity)? {
-            return Err("The selected folder overlaps Raiun's private app data".into());
-        }
-        let registered_root = configuration
-            .registration_ownership
-            .as_ref()
-            .is_some_and(|owner| owner.state != "prepared_not_registered");
-        let inspect_current_root = || {
-            let lease = if registered_root {
-                pin_registered_configured_root(&candidate, identity)
-            } else {
-                pin_configured_root(&candidate)
-            }?;
-            Ok::<_, raiun_cloudfiles_windows::Error>(lease.identity())
-        };
-        let current_identity = inspect_current_root().map_err(root_error_text)?;
-        if current_identity != identity {
-            return Err("The selected folder changed while it was being configured".into());
-        }
-        self.session_store
-            .save_root_config(
-                &configuration.profile_scope,
-                &configuration.server,
-                &configuration.client_id,
-                &bytes,
-            )
-            .map_err(|_| "Could not save the drive folder in private Windows storage")?;
-        let still_same_root = inspect_current_root().is_ok_and(|current| current == identity);
-        if !still_same_root {
-            state.root_configuration = None;
-            let cleared = self
-                .session_store
-                .remove_root_config(
+                registration_ownership: Some(RegistrationOwnership {
+                    state: registration_state,
+                    account_id,
+                    personal_drive_id,
+                    personal_root_resource_id: Some(personal_root_resource_id),
+                    volume_serial: identity.volume_serial,
+                    file_index: identity.file_index,
+                }),
+                valid: true,
+            };
+            let bytes = encode_root_configuration(&configuration)?;
+            if bytes.len() > MAX_ROOT_CONFIG_BYTES {
+                return Err("The selected folder configuration exceeds the storage limit".into());
+            }
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            // Compare the original binding after the drain and before publication.
+            if state.active_generation != generation
+                || self.generation.load(Ordering::Acquire) != generation
+                || !state.online_authenticated
+                || !state.authenticating
+                || state.refreshing
+                || state.logout_pending
+                || state.retiring
+                || state.root_configuration != previous_root
+                || !state
+                    .session
+                    .as_ref()
+                    .is_some_and(|current| Self::same_session(Some(current), Some(&session)))
+            {
+                return Err("Account changed while configuring the drive folder".into());
+            }
+            if overlaps_private_state(&candidate, registered_identity)? {
+                return Err("The selected folder overlaps Raiun's private app data".into());
+            }
+            let registered_root = configuration
+                .registration_ownership
+                .as_ref()
+                .is_some_and(|owner| owner.state != "prepared_not_registered");
+            let inspect_current_root = || {
+                let lease = if registered_root {
+                    pin_registered_configured_root(&candidate, identity)
+                } else {
+                    pin_configured_root(&candidate)
+                }?;
+                Ok::<_, raiun_cloudfiles_windows::Error>(lease.identity())
+            };
+            let current_identity = inspect_current_root().map_err(root_error_text)?;
+            if current_identity != identity {
+                return Err("The selected folder changed while it was being configured".into());
+            }
+            self.session_store
+                .save_root_config(
                     &configuration.profile_scope,
                     &configuration.server,
                     &configuration.client_id,
+                    &bytes,
                 )
-                .is_ok();
-            return Err(if cleared {
-                "The selected folder changed while setup was being saved; choose it again".into()
-            } else {
-                "The selected folder changed and its saved setup could not be cleared; no drive was mounted".into()
-            });
-        }
-        state.root_configuration = Some(configuration.clone());
-        // The lifecycle hook reacquires account state. Keep persistence atomic
-        // above, then release the guard before entering that hook.
-        drop(state);
-        drop(root_lease);
-        Self::maybe_connect_provider_with_exclusions(
-            &self.session_store,
-            &self.state,
-            &self.provider,
-            self.source_admissions.as_ref(),
-        )?;
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| "Account state is unavailable")?;
-        let current = state
-            .root_configuration
-            .as_ref()
-            .filter(|current| {
-                current.server == configuration.server
-                    && current.client_id == configuration.client_id
-                    && current.path == configuration.path
-                    && current.volume_serial == configuration.volume_serial
-                    && current.file_index == configuration.file_index
-                    && current
-                        .registration_ownership
-                        .as_ref()
-                        .map(|owner| &owner.account_id)
-                        == configuration
+                .map_err(|_| "Could not save the drive folder in private Windows storage")?;
+            let still_same_root = inspect_current_root().is_ok_and(|current| current == identity);
+            if !still_same_root {
+                state.root_configuration = None;
+                let cleared = self
+                    .session_store
+                    .remove_root_config(
+                        &configuration.profile_scope,
+                        &configuration.server,
+                        &configuration.client_id,
+                    )
+                    .is_ok();
+                return Err(if cleared {
+                    "The selected folder changed while setup was being saved; choose it again"
+                        .into()
+                } else {
+                    "The selected folder changed and its saved setup could not be cleared; no drive was mounted".into()
+                });
+            }
+            state.root_configuration = Some(configuration.clone());
+            state.authenticating = false;
+            owns_reservation = false;
+            // The lifecycle hook reacquires account state. Keep persistence atomic
+            // above, then release the guard before entering that hook.
+            drop(state);
+            drop(root_lease);
+            Self::maybe_connect_provider_with_exclusions(
+                &self.session_store,
+                &self.state,
+                &self.provider,
+                self.source_admissions.as_ref(),
+            )?;
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            let current = state
+                .root_configuration
+                .as_ref()
+                .filter(|current| {
+                    current.server == configuration.server
+                        && current.client_id == configuration.client_id
+                        && current.path == configuration.path
+                        && current.volume_serial == configuration.volume_serial
+                        && current.file_index == configuration.file_index
+                        && current
                             .registration_ownership
                             .as_ref()
                             .map(|owner| &owner.account_id)
-            })
-            .filter(|_| state.active_generation == generation)
-            .ok_or("The account or root changed while connecting the drive folder")?;
-        Ok(json!({
-            "configured": true,
-            "cloud_root": current.path,
-            "mounted": self.provider.is_connected(),
-            "provider_supported": self.provider.activation_enabled(),
-            "root_identity_bound": current.registration_ownership.is_some(),
-            "registration_state": current.registration_ownership.as_ref().map(|owner| owner.state.as_str()),
-        }))
+                            == configuration
+                                .registration_ownership
+                                .as_ref()
+                                .map(|owner| &owner.account_id)
+                })
+                .filter(|_| state.active_generation == generation)
+                .ok_or("The account or root changed while connecting the drive folder")?;
+            Ok(json!({
+                "configured": true,
+                "cloud_root": current.path,
+                "mounted": self.provider.is_connected(),
+                "provider_supported": self.provider.activation_enabled(),
+                "root_identity_bound": current.registration_ownership.is_some(),
+                "registration_state": current.registration_ownership.as_ref().map(|owner| owner.state.as_str()),
+            }))
+        })();
+        // Every failure releases the reservation after all inner locks/leases drop.
+        // A cancellation or replacement generation owns its own admission flags.
+        if owns_reservation
+            && let Ok(mut state) = self.state.lock()
+            && state.active_generation == generation
+            && self.generation.load(Ordering::Acquire) == generation
+            && state.authenticating
+            && Self::same_session(state.session.as_ref(), Some(&session))
+        {
+            state.authenticating = false;
+            if let Err(error) = &result {
+                state.error = Some(error.clone());
+            }
+        }
+        result
     }
 
     /// Normal lifecycle entry point. It is called after authentication,
@@ -5543,7 +5591,7 @@ impl WindowsAgent {
             }
         }
 
-        let (session, generation) = {
+        let (session, generation, original_root) = {
             let mut state = self
                 .state
                 .lock()
@@ -5573,7 +5621,7 @@ impl WindowsAgent {
             state.needs_refresh = false;
             state.refreshing = true;
             state.online_authenticated = false;
-            (session, generation)
+            (session, generation, state.root_configuration.clone())
         };
 
         let state = Arc::clone(&self.state);
@@ -5582,32 +5630,64 @@ impl WindowsAgent {
         let profile_scope = self.profile_scope.clone();
         let provider = Arc::clone(&self.provider);
         let admissions = self.source_admissions.clone();
+        let vault_sessions = Arc::clone(&self.vault_sessions);
         let worker = thread::spawn(move || {
+            // Drain on this worker, keeping the periodic/control loop responsive.
+            if let Err(error) = provider.disconnect() {
+                if let Ok(mut state) = state.lock()
+                    && current_generation.load(Ordering::Acquire) == generation
+                    && state.active_generation == generation
+                    && state.refreshing
+                {
+                    state.refreshing = false;
+                    state.refresh_retry_at =
+                        unix_time_now().saturating_add(windows_headless::retry_seconds());
+                    state.error = Some(error);
+                }
+                return;
+            }
+            {
+                let Ok(mut state) = state.lock() else { return };
+                if current_generation.load(Ordering::Acquire) != generation
+                    || state.active_generation != generation
+                    || !state.refreshing
+                    || state.authenticating
+                    || state.logout_pending
+                    || state.retiring
+                    || state.root_configuration != original_root
+                    || !state.session.as_ref().is_some_and(|current| {
+                        WindowsAgent::same_session(Some(current), Some(&session))
+                    })
+                {
+                    return;
+                }
+                if vault_sessions.logout_account(&profile_scope).is_err() {
+                    state.refreshing = false;
+                    state.refresh_retry_at =
+                        unix_time_now().saturating_add(windows_headless::retry_seconds());
+                    state.error = Some("Could not revoke the account vault sessions".into());
+                    return;
+                }
+            }
             let mut refreshed = session.clone();
             let result = refreshed
                 .refresh_classified()
                 .and_then(|()| refreshed.verify_app_token());
             match result {
                 Ok(()) => {
-                    if let Err(error) = provider.disconnect() {
-                        if let Ok(mut state) = state.lock()
-                            && current_generation.load(Ordering::Acquire) == generation
-                            && state.active_generation == generation
-                            && state.refreshing
-                        {
-                            state.refreshing = false;
-                            state.online_authenticated = false;
-                            state.refresh_retry_at =
-                                unix_time_now().saturating_add(windows_headless::retry_seconds());
-                            state.error = Some(error);
-                        }
-                        return;
-                    }
                     let mut cleanup = false;
+                    let mut installed = false;
                     if let Ok(mut state) = state.lock()
                         && current_generation.load(Ordering::Acquire) == generation
                         && state.active_generation == generation
                         && state.refreshing
+                        && !state.retiring
+                        && !state.logout_pending
+                        && !state.authenticating
+                        && state.root_configuration == original_root
+                        && state.session.as_ref().is_some_and(|current| {
+                            WindowsAgent::same_session(Some(current), Some(&session))
+                        })
                     {
                         match store.save_pending(profile_scope.as_str(), &refreshed) {
                             Ok(()) => {
@@ -5617,6 +5697,7 @@ impl WindowsAgent {
                                 state.refresh_retry_at = 0;
                                 state.error = None;
                                 state.session_cleanup_uncertain = false;
+                                installed = true;
                             }
                             Err(error) => {
                                 state.session = None;
@@ -5629,42 +5710,54 @@ impl WindowsAgent {
                         }
                     }
                     if cleanup {
-                        let uncertain = revoke_and_remove(&store, &profile_scope, &session);
-                        if let Ok(mut state) = state.lock() {
-                            state.session_cleanup_uncertain = uncertain;
-                        }
-                    } else if let Err(error) = WindowsAgent::maybe_connect_provider_with_exclusions(
-                        &store,
-                        &state,
-                        &provider,
-                        admissions.as_ref(),
-                    ) {
+                        // Do not let stale cleanup revoke a newer session's restore pointer.
                         if let Ok(mut state) = state.lock()
+                            && current_generation.load(Ordering::Acquire) == generation
                             && state.active_generation == generation
+                            && !state.authenticating
+                            && !state.refreshing
+                            && !state.logout_pending
+                            && !state.retiring
+                            && state.session.is_none()
+                            && state.root_configuration.is_none()
                         {
-                            state.error = Some(error);
+                            state.session_cleanup_uncertain =
+                                revoke_and_remove(&store, &profile_scope, &session);
                         }
+                    } else if installed
+                        && let Err(error) = WindowsAgent::maybe_connect_provider_with_exclusions(
+                            &store,
+                            &state,
+                            &provider,
+                            admissions.as_ref(),
+                        )
+                        && let Ok(mut state) = state.lock()
+                        && state.active_generation == generation
+                    {
+                        state.error = Some(error);
                     }
                 }
                 Err(error) => {
                     let is_rejected = matches!(error, auth::RefreshError::Rejected(_));
                     let message = error.to_string();
-                    let provider_error = if is_rejected {
-                        provider.disconnect().err()
-                    } else {
-                        None
-                    };
                     let mut cleanup = false;
                     if let Ok(mut state) = state.lock()
                         && current_generation.load(Ordering::Acquire) == generation
                         && state.active_generation == generation
                         && state.refreshing
+                        && !state.retiring
+                        && !state.logout_pending
+                        && !state.authenticating
+                        && state.root_configuration == original_root
+                        && state.session.as_ref().is_some_and(|current| {
+                            WindowsAgent::same_session(Some(current), Some(&session))
+                        })
                     {
                         state.refreshing = false;
                         state.online_authenticated = false;
                         state.refresh_retry_at =
                             unix_time_now().saturating_add(windows_headless::retry_seconds());
-                        state.error = Some(provider_error.unwrap_or(message));
+                        state.error = Some(message);
                         if is_rejected {
                             state.session = None;
                             state.root_configuration = None;
@@ -5672,9 +5765,19 @@ impl WindowsAgent {
                         }
                     }
                     if cleanup {
-                        let uncertain = revoke_and_remove(&store, &profile_scope, &session);
-                        if let Ok(mut state) = state.lock() {
-                            state.session_cleanup_uncertain = uncertain;
+                        // Do not let stale cleanup revoke a newer session's restore pointer.
+                        if let Ok(mut state) = state.lock()
+                            && current_generation.load(Ordering::Acquire) == generation
+                            && state.active_generation == generation
+                            && !state.authenticating
+                            && !state.refreshing
+                            && !state.logout_pending
+                            && !state.retiring
+                            && state.session.is_none()
+                            && state.root_configuration.is_none()
+                        {
+                            state.session_cleanup_uncertain =
+                                revoke_and_remove(&store, &profile_scope, &session);
                         }
                     }
                 }
@@ -5688,31 +5791,6 @@ impl WindowsAgent {
     }
 
     fn begin_auth(self: &Arc<Self>, request: &Value) -> Result<Value, String> {
-        let _credential_operation = self
-            .vault_credential_operation
-            .lock()
-            .map_err(|_| "Vault credential changes are unavailable")?;
-
-        {
-            let state = self
-                .state
-                .lock()
-                .map_err(|_| "Account state is unavailable")?;
-            if state.session.is_some() {
-                return Err(
-                    "This Windows account is already connected. Sign out before signing in again"
-                        .into(),
-                );
-            }
-            if state.authenticating {
-                return Err("Sign-in is already in progress".into());
-            }
-        }
-        self.provider.disconnect()?;
-        self.join_finished_auth()?;
-        // A failed refresh may have cleared credentials without explicit logout.
-        // New sign-in must never inherit the prior subject's preferences owner.
-        self.provider.bandwidth.clear();
         let raw = request
             .get("server")
             .and_then(Value::as_str)
@@ -5744,20 +5822,58 @@ impl WindowsAgent {
         if mount_only() {
             crate::headless_runtime::validate_login(&self.profile_scope, &server, app_username)?;
         }
-        let generation = self.next_generation()?;
-        {
+        let (generation, original_root) = {
             let mut state = self
                 .state
                 .lock()
                 .map_err(|_| "Account state is unavailable")?;
-            if state.session.is_some() || state.authenticating {
+            if state.session.is_some() {
+                return Err(
+                    "This Windows account is already connected. Sign out before signing in again"
+                        .into(),
+                );
+            }
+            if state.authenticating || state.refreshing || state.logout_pending || state.retiring {
+                return Err("Account lifecycle operation is already in progress".into());
+            }
+            let generation = self.next_generation()?;
+            state.active_generation = generation;
+            state.authenticating = true;
+            state.error = None;
+            (generation, state.root_configuration.clone())
+        };
+        if let Err(error) = self.provider.disconnect() {
+            if let Ok(mut state) = self.state.lock()
+                && state.active_generation == generation
+            {
+                state.authenticating = false;
+                state.error = Some(error.clone());
+            }
+            return Err(error);
+        }
+        let _credential_operation = self
+            .vault_credential_operation
+            .lock()
+            .map_err(|_| "Vault credential changes are unavailable")?;
+        {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if state.active_generation != generation
+                || self.generation.load(Ordering::Acquire) != generation
+                || !state.authenticating
+                || state.session.is_some()
+                || state.refreshing
+                || state.logout_pending
+                || state.retiring
+                || state.root_configuration != original_root
+            {
                 return Err("Account state changed while starting sign-in".into());
             }
-            state.authenticating = true;
-            state.active_generation = generation;
-            state.error = None;
-        }
-        let flow = (|| {
+            self.vault_sessions
+                .logout_account(&self.profile_scope)
+                .map_err(|_| "Could not revoke the account vault sessions")?;
             if !mount_only() && WINDOWS_VAULT_SESSIONS_ENABLED {
                 windows_vault_credentials::revoke_profile(
                     &VaultCredentialStore {
@@ -5767,6 +5883,20 @@ impl WindowsAgent {
                     &self.profile_scope,
                 )?;
             }
+        }
+        if let Err(error) = self.join_finished_auth() {
+            if let Ok(mut state) = self.state.lock()
+                && state.active_generation == generation
+            {
+                state.authenticating = false;
+                state.error = Some(error.clone());
+            }
+            return Err(error);
+        }
+        // A failed refresh may have cleared credentials without explicit logout.
+        // New sign-in must never inherit the prior subject's preferences owner.
+        self.provider.bandwidth.clear();
+        let flow = (|| {
             let proxy = self.provider.proxy.auth_proxy(
                 &self.profile_scope,
                 generation,
@@ -5809,55 +5939,43 @@ impl WindowsAgent {
         let expected_server = expected_server.to_owned();
         let expected_client_id = expected_client_id.to_owned();
         {
-            let state = self
+            let mut state = self
                 .state
                 .lock()
                 .map_err(|_| "Account state is unavailable")?;
             if state.active_generation != generation
+                || self.generation.load(Ordering::Acquire) != generation
                 || !state.authenticating
                 || state.session.is_some()
-                || self.generation.load(Ordering::Acquire) != generation
+                || state.refreshing
+                || state.logout_pending
+                || state.retiring
+                || state.root_configuration != original_root
             {
                 return Err("Sign-in was cancelled while preparing its proxy route".into());
             }
-        }
-        let previous_identity = self.session_store.revoke_active();
-        let previous_identity = match previous_identity {
-            Ok(identity) => identity,
-            Err(_) => {
-                if let Ok(mut state) = self.state.lock() {
-                    if state.active_generation == generation {
-                        state.authenticating = false;
-                        state.error = Some(
-                            "Could not revoke the previous saved session; sign-in was not started"
-                                .into(),
-                        );
-                    }
-                }
-                return Err(
-                    "Could not revoke the previous saved session; sign-in was not started".into(),
-                );
-            }
-        };
-        if let Some((scope, server, client_id)) = previous_identity
-            && self
-                .session_store
-                .remove(&scope, &server, &client_id)
-                .is_err()
-        {
-            if let Ok(mut state) = self.state.lock() {
-                if state.active_generation == generation {
+            let previous_identity = match self.session_store.revoke_active() {
+                Ok(identity) => identity,
+                Err(_) => {
+                    let error =
+                        "Could not revoke the previous saved session; sign-in was not started";
                     state.authenticating = false;
-                    state.session_cleanup_uncertain = true;
-                    state.error = Some(
-                        "Could not remove the previous saved session; sign-in was not started"
-                            .into(),
-                    );
+                    state.error = Some(error.into());
+                    return Err(error.into());
                 }
+            };
+            if let Some((scope, server, client_id)) = previous_identity
+                && self
+                    .session_store
+                    .remove(&scope, &server, &client_id)
+                    .is_err()
+            {
+                let error = "Could not remove the previous saved session; sign-in was not started";
+                state.authenticating = false;
+                state.session_cleanup_uncertain = true;
+                state.error = Some(error.into());
+                return Err(error.into());
             }
-            return Err(
-                "Could not remove the previous saved session; sign-in was not started".into(),
-            );
         }
         let state = Arc::clone(&self.state);
         let current_generation = Arc::clone(&self.generation);
@@ -5974,12 +6092,18 @@ impl WindowsAgent {
     }
 
     fn cancel_auth(&self) -> Result<Value, String> {
-        let active = {
+        let (active, generation, original_session, original_root, retiring, logout_pending) = {
             let mut state = self
                 .state
                 .lock()
                 .map_err(|_| "Account state is unavailable")?;
             let active = state.authenticating || state.refreshing;
+            if !active {
+                return Ok(
+                    json!({"cancelled":false,"cleanup_uncertain":state.session_cleanup_uncertain}),
+                );
+            }
+
             if active {
                 state.active_generation = self.next_generation()?;
                 state.authenticating = false;
@@ -5991,35 +6115,63 @@ impl WindowsAgent {
                 }
                 state.error = None;
             }
-            active
+            (
+                active,
+                state.active_generation,
+                state.session.clone(),
+                state.root_configuration.clone(),
+                state.retiring,
+                state.logout_pending,
+            )
         };
-        if active {
-            // Revoke callbacks as soon as the account generation changes.
-            // Do this before waiting for a possibly slow browser/refresh
-            // worker so the old token cannot continue serving Cloud Files
-            // requests during cancellation.
-            let disconnect_result = self.provider.disconnect();
-            let handle = self
-                .auth_thread
-                .lock()
-                .map_err(|_| "Sign-in worker state is unavailable")?
-                .take();
-            if let Some(handle) = handle {
-                handle
-                    .join()
-                    .map_err(|_| "Sign-in worker stopped unexpectedly")?;
+        // A refused/broken owner queue is not proof of completed SDK drain.
+        self.provider.disconnect().inspect_err(|error| {
+            if let Ok(mut state) = self.state.lock()
+                && state.active_generation == generation
+            {
+                state.error = Some(error.clone());
             }
-            let handle = self
-                .refresh_thread
+        })?;
+        {
+            let state = self
+                .state
                 .lock()
-                .map_err(|_| "Session refresh worker state is unavailable")?
-                .take();
-            if let Some(handle) = handle {
-                handle
-                    .join()
-                    .map_err(|_| "Session refresh worker stopped unexpectedly")?;
+                .map_err(|_| "Account state is unavailable")?;
+            if state.active_generation != generation
+                || self.generation.load(Ordering::Acquire) != generation
+                || state.authenticating
+                || state.refreshing
+                || state.retiring != retiring
+                || state.logout_pending != logout_pending
+                || state.root_configuration != original_root
+                || !Self::same_session(state.session.as_ref(), original_session.as_ref())
+            {
+                return Err("Account changed while stopping sign-in".into());
             }
-            disconnect_result?;
+            self.vault_sessions
+                .logout_account(&self.profile_scope)
+                .map_err(|_| "Could not revoke the account vault sessions")?;
+        }
+        // Join only after the provider has acknowledged the actual drain.
+        let handle = self
+            .auth_thread
+            .lock()
+            .map_err(|_| "Sign-in worker state is unavailable")?
+            .take();
+        if let Some(handle) = handle {
+            handle
+                .join()
+                .map_err(|_| "Sign-in worker stopped unexpectedly")?;
+        }
+        let handle = self
+            .refresh_thread
+            .lock()
+            .map_err(|_| "Session refresh worker state is unavailable")?
+            .take();
+        if let Some(handle) = handle {
+            handle
+                .join()
+                .map_err(|_| "Session refresh worker stopped unexpectedly")?;
         }
         let cleanup_uncertain = self
             .state
@@ -6030,10 +6182,74 @@ impl WindowsAgent {
     }
 
     fn logout(&self) -> Result<Value, String> {
+        let (generation, session, root_configuration, retiring) = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            state.active_generation = self.next_generation()?;
+            state.online_authenticated = false;
+            state.logout_pending = true;
+            state.needs_refresh = state.session.is_some();
+            state.authenticating = false;
+            state.refreshing = false;
+            (
+                state.active_generation,
+                state.session.clone(),
+                state.root_configuration.clone(),
+                state.retiring,
+            )
+        };
+        self.provider.disconnect().inspect_err(|error| {
+            if let Ok(mut state) = self.state.lock()
+                && state.active_generation == generation
+            {
+                state.error = Some(error.clone());
+            }
+        })?;
+        // The original auth workers became stale above; drain precedes their joins.
+        let auth = self
+            .auth_thread
+            .lock()
+            .map_err(|_| "Sign-in worker state is unavailable")?
+            .take();
+        if let Some(handle) = auth {
+            handle
+                .join()
+                .map_err(|_| "Sign-in worker stopped unexpectedly")?;
+        }
+        let refresh = self
+            .refresh_thread
+            .lock()
+            .map_err(|_| "Session refresh worker state is unavailable")?
+            .take();
+        if let Some(handle) = refresh {
+            handle
+                .join()
+                .map_err(|_| "Session refresh worker stopped unexpectedly")?;
+        }
         let _credential_operation = self
             .vault_credential_operation
             .lock()
             .map_err(|_| "Vault credential changes are unavailable")?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?;
+        if state.active_generation != generation
+            || self.generation.load(Ordering::Acquire) != generation
+            || !state.logout_pending
+            || state.retiring != retiring
+            || state.authenticating
+            || state.refreshing
+            || state.root_configuration != root_configuration
+            || !Self::same_session(state.session.as_ref(), session.as_ref())
+        {
+            return Err("Account changed while signing out".into());
+        }
+        self.vault_sessions
+            .logout_account(&self.profile_scope)
+            .map_err(|_| "Could not revoke the account vault sessions")?;
         if !mount_only() && WINDOWS_VAULT_SESSIONS_ENABLED {
             windows_vault_credentials::revoke_profile(
                 &VaultCredentialStore {
@@ -6043,30 +6259,7 @@ impl WindowsAgent {
                 &self.profile_scope,
             )?;
         }
-
         self.provider.bandwidth.clear();
-        {
-            let mut state = self
-                .state
-                .lock()
-                .map_err(|_| "Account state is unavailable")?;
-            // Revoke both queued worker commands and new lifecycle admission
-            // before disconnect. A failed logout retains credentials/recovery
-            // for retry, but cannot reconnect a drive from that old session.
-            state.active_generation = self.next_generation()?;
-            state.online_authenticated = false;
-            state.logout_pending = true;
-            state.needs_refresh = state.session.is_some();
-        }
-        let _ = self.cancel_auth()?;
-        self.provider.disconnect()?;
-        let (session, root_configuration) = {
-            let state = self
-                .state
-                .lock()
-                .map_err(|_| "Account state is unavailable")?;
-            (state.session.clone(), state.root_configuration.clone())
-        };
         let preserve_registered_root = root_configuration
             .as_ref()
             .and_then(|configuration| configuration.registration_ownership.as_ref())
@@ -6107,10 +6300,6 @@ impl WindowsAgent {
                     .is_err();
             }
         }
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "Account state is unavailable")?;
         state.session = None;
         state.root_configuration = None;
         state.logout_pending = false;
@@ -6166,6 +6355,35 @@ impl WindowsAgent {
         }
     }
 
+    // Borrow credentials solely for exact currentness checks; never stage/log tokens.
+    fn same_session(left: Option<&auth::Session>, right: Option<&auth::Session>) -> bool {
+        let (Some(left), Some(right)) = (left, right) else {
+            return left.is_none() && right.is_none();
+        };
+        let auth::Session {
+            server,
+            client_id,
+            access_token,
+            app_token_username,
+            refresh_token,
+            expires_at,
+            token_endpoint,
+            expected_issuer,
+            last_refresh_at,
+            proxy,
+        } = left;
+        server == &right.server
+            && client_id == &right.client_id
+            && access_token == &right.access_token
+            && app_token_username == &right.app_token_username
+            && refresh_token == &right.refresh_token
+            && expires_at == &right.expires_at
+            && token_endpoint == &right.token_endpoint
+            && expected_issuer == &right.expected_issuer
+            && last_refresh_at == &right.last_refresh_at
+            && proxy == &right.proxy
+    }
+
     fn next_generation(&self) -> Result<u64, String> {
         let mut current = self.generation.load(Ordering::Acquire);
         loop {
@@ -6180,9 +6398,6 @@ impl WindowsAgent {
             ) {
                 Ok(_) => {
                     self.provider.authorize_generation(next);
-                    self.vault_sessions
-                        .logout_account(&self.profile_scope)
-                        .map_err(|_| "Could not revoke the account vault sessions")?;
                     return Ok(next);
                 }
                 Err(actual) => current = actual,
@@ -6213,13 +6428,57 @@ impl WindowsAgent {
 
     fn stop_and_join(&self) -> Result<(), String> {
         self.provider.cancel_fresh_close();
-        let _ = self.cancel_auth()?;
-        let handle = self
+        let (generation, session, root, retiring) = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            state.active_generation = self.next_generation()?;
+            state.authenticating = false;
+            state.refreshing = false;
+            state.online_authenticated = false;
+            state.logout_pending = true;
+            state.needs_refresh = false;
+            (
+                state.active_generation,
+                state.session.clone(),
+                state.root_configuration.clone(),
+                state.retiring,
+            )
+        };
+        self.provider.disconnect().inspect_err(|error| {
+            if let Ok(mut state) = self.state.lock()
+                && state.active_generation == generation
+            {
+                state.error = Some(error.clone());
+            }
+        })?;
+        {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if state.active_generation != generation
+                || self.generation.load(Ordering::Acquire) != generation
+                || state.authenticating
+                || state.refreshing
+                || !state.logout_pending
+                || state.retiring != retiring
+                || state.root_configuration != root
+                || !Self::same_session(state.session.as_ref(), session.as_ref())
+            {
+                return Err("Account changed while stopping the agent".into());
+            }
+            self.vault_sessions
+                .logout_account(&self.profile_scope)
+                .map_err(|_| "Could not revoke the account vault sessions")?;
+        }
+        let auth = self
             .auth_thread
             .lock()
             .map_err(|_| "Sign-in worker state is unavailable")?
             .take();
-        if let Some(handle) = handle {
+        if let Some(handle) = auth {
             handle
                 .join()
                 .map_err(|_| "Sign-in worker stopped unexpectedly")?;
@@ -6234,10 +6493,7 @@ impl WindowsAgent {
                 .join()
                 .map_err(|_| "Session refresh worker stopped unexpectedly")?;
         }
-        let disconnect = self.provider.disconnect();
-        let worker = self.stop_fresh_close_worker();
-        disconnect?;
-        worker?;
+        self.stop_fresh_close_worker()?;
         Ok(())
     }
 }
@@ -7622,6 +7878,9 @@ fn request_timeout(request: &Value) -> Duration {
 
 #[cfg(test)]
 pub(super) mod tests {
+    mod windows_auth_drain_tests {
+        include!("windows_auth_drain_tests.rs");
+    }
     mod windows_media_worker_test {
         include!("windows_media_worker_test.rs");
     }
