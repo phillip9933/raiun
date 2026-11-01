@@ -154,7 +154,8 @@ mod connected {
     };
     use super::*;
     use raiun_cloudfiles_windows::{
-        ConfiguredRootConnection, ConfiguredRootIdentity, OpenCloudPlaceholderBackend,
+        ConfiguredRootConnection, ConfiguredRootIdentity, NamespaceEntryKind,
+        OpenCloudPlaceholderBackend,
     };
     use raiun_control_windows::directory_notifications::{
         DirectoryAction, NotificationBatch, ObserverPoll,
@@ -353,24 +354,57 @@ mod connected {
                     if !DIRECTORY_ROUTING_READY {
                         return Err(HOLD);
                     }
-                    let directory = self.mkdir.as_mut().ok_or(HOLD)?;
                     if !self.cursor.directory_started {
                         let NotificationBatch::Hints(hints) = self.batch.as_ref().ok_or(HOLD)?
                         else {
                             return Err(HOLD);
                         };
-                        directory
-                            .offer_added(
-                                hints.get(index).ok_or(HOLD)?.components().to_vec(),
-                                generation,
-                            )
+                        let components = hints.get(index).ok_or(HOLD)?.components().to_vec();
+                        let refs = components.iter().map(String::as_str).collect::<Vec<_>>();
+                        if !self.current(backend, root) {
+                            return Err(HOLD);
+                        }
+                        let observed = connection
+                            .observe_namespace_entry(&refs)
                             .map_err(|_| HOLD)?;
-                        self.cursor.directory_started = true;
+                        if !self.current(backend, root) {
+                            return Err(HOLD);
+                        }
+                        match observed.kind {
+                            NamespaceEntryKind::PlainDirectory => {
+                                // Kind/FileID are hints only. The original consumer
+                                // independently reacquires all pins and admission.
+                                self.mkdir
+                                    .as_mut()
+                                    .ok_or(HOLD)?
+                                    .offer_added(components, generation)
+                                    .map_err(|_| HOLD)?;
+                                self.cursor.directory_started = true;
+                            }
+                            NamespaceEntryKind::CloudFile | NamespaceEntryKind::CloudDirectory => {
+                                // complete() advances ONLY this volatile cursor item.
+                                // No directory writer/offer/session, status completion,
+                                // ownership, clean-content or upload claim is made.
+                                self.cursor.complete().map_err(|_| HOLD)?;
+                            }
+                            NamespaceEntryKind::PlainFile => return Err(HOLD),
+                        }
                     }
-                    match directory.step_shared(connection, backend, root) {
-                        mkdir::SharedStep::Completed => self.cursor.complete().map_err(|_| HOLD)?,
-                        mkdir::SharedStep::Waiting | mkdir::SharedStep::DeferredPristine => (),
-                        mkdir::SharedStep::Held => return Err(HOLD),
+                    // A deferred/started head keeps its original generation,
+                    // FileID and publication selector; never filter it afresh.
+                    if self.cursor.directory_started {
+                        match self
+                            .mkdir
+                            .as_mut()
+                            .ok_or(HOLD)?
+                            .step_shared(connection, backend, root)
+                        {
+                            mkdir::SharedStep::Completed => {
+                                self.cursor.complete().map_err(|_| HOLD)?
+                            }
+                            mkdir::SharedStep::Waiting | mkdir::SharedStep::DeferredPristine => (),
+                            mkdir::SharedStep::Held => return Err(HOLD),
+                        }
                     }
                 }
             }
