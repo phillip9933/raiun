@@ -12,7 +12,7 @@ mod dav_upload_regressions;
 #[cfg(test)]
 mod operation_cancellation_tests;
 mod recovery_stream;
-pub use recovery_stream::{RecoveryCreateReadback, RecoveryStreamReadback};
+pub use recovery_stream::{RecoveryCreateParent, RecoveryCreateReadback, RecoveryStreamReadback};
 pub mod avatar;
 pub mod guest_permissions;
 pub mod sharing_inventory;
@@ -1678,13 +1678,24 @@ fn is_strong_etag(value: &str) -> bool {
 }
 
 fn recovery_target_path(root: &str, relative: &str) -> Result<String, CloudError> {
+    recovery_target_path_checked(root, relative, false)
+}
+// Only the explicit bound-parent create/readback accepts literal filename ?/#.
+// URL construction still goes exclusively through append_logical_path segments.
+fn recovery_parent_create_target_path(root: &str, relative: &str) -> Result<String, CloudError> {
+    recovery_target_path_checked(root, relative, true)
+}
+fn recovery_target_path_checked(
+    root: &str,
+    relative: &str,
+    literal_names: bool,
+) -> Result<String, CloudError> {
     const MAX_RECOVERY_PATH: usize = 32 * 1024;
     if root.is_empty()
         || root.len() > MAX_RECOVERY_PATH
         || !root.starts_with('/')
         || root.contains('\\')
-        || root.contains('?')
-        || root.contains('#')
+        || (!literal_names && (root.contains('?') || root.contains('#')))
         || root.chars().any(char::is_control)
         || root.split('/').any(|part| matches!(part, "." | ".."))
         || relative.is_empty()
@@ -1692,8 +1703,7 @@ fn recovery_target_path(root: &str, relative: &str) -> Result<String, CloudError
         || relative.starts_with('/')
         || relative.ends_with('/')
         || relative.contains('\\')
-        || relative.contains('?')
-        || relative.contains('#')
+        || (!literal_names && (relative.contains('?') || relative.contains('#')))
         || relative.chars().any(char::is_control)
         || relative
             .split('/')

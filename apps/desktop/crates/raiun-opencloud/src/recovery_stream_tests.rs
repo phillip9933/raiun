@@ -130,6 +130,9 @@ enum Fault {
     CreateLost,
     CreateLateRoot,
     CreateDigest,
+    ParentCreate,
+    ParentId,
+    ParentEtag,
 }
 struct Fixture {
     url: String,
@@ -168,6 +171,9 @@ impl Fixture {
                     | Fault::CreateLost
                     | Fault::CreateLateRoot
                     | Fault::CreateDigest
+                    | Fault::ParentCreate
+                    | Fault::ParentId
+                    | Fault::ParentEtag
             );
             let dav = if creating {
                 "/dav/spaces/drive-1/"
@@ -175,6 +181,16 @@ impl Fixture {
                 "/dav/personal/"
             };
             let root_id = if creating { "drive-1!root" } else { "root" };
+            let parent_bound = matches!(
+                fault,
+                Fault::ParentCreate | Fault::ParentId | Fault::ParentEtag
+            );
+            let parent_url = append_logical_path(
+                &Url::parse(&format!("http://{address}{dav}")).unwrap(),
+                "/Courses & CEUs #1",
+            )
+            .unwrap();
+            let parent_suffix = parent_url.path().strip_prefix(dav).unwrap().to_owned();
             while !stop.load(Ordering::Acquire) {
                 let (mut socket, _) = match listener.accept() {
                     Ok(v) => v,
@@ -243,12 +259,36 @@ impl Fixture {
                             | Fault::CreateLost
                             | Fault::CreateLateRoot
                             | Fault::CreateDigest
+                            | Fault::ParentCreate
+                            | Fault::ParentId
+                            | Fault::ParentEtag
                     ) {
                         let lower = text.to_lowercase();
                         assert!(lower.contains("if-none-match: *"));
                         assert!(!lower.contains("if-match:"));
                         assert!(lower.contains("if: <"));
                         assert!(lower.contains("([\"root-tag\"])"));
+                        if parent_bound {
+                            let condition = text
+                                .lines()
+                                .find_map(|line| {
+                                    line.split_once(':')
+                                        .filter(|(k, _)| k.eq_ignore_ascii_case("if"))
+                                        .map(|(_, v)| v.trim())
+                                })
+                                .unwrap();
+                            assert_eq!(
+                                condition,
+                                format!(
+                                    "<http://{address}{dav}> ([\"root-tag\"]) <{parent_url}> ([\"parent-v1\"])"
+                                )
+                            );
+                            assert!(
+                                !condition.contains("%2520")
+                                    && !condition.contains("%2526")
+                                    && !condition.contains("%2523")
+                            );
+                        }
                     } else {
                         assert!(text.to_lowercase().contains("if-match: \"v1\""));
                     }
@@ -293,6 +333,9 @@ impl Fixture {
                                 | Fault::CreateLost
                                 | Fault::CreateLateRoot
                                 | Fault::CreateDigest
+                                | Fault::ParentCreate
+                                | Fault::ParentId
+                                | Fault::ParentEtag
                         ) {
                             "201 Created"
                         } else {
@@ -347,8 +390,14 @@ impl Fixture {
                 } else {
                     assert!(text.starts_with("PROPFIND /dav/"), "{text}");
                     let root = text.starts_with(&format!("PROPFIND {dav} HTTP"));
+                    // Writable-target admission intentionally probes a directory
+                    // with a trailing slash; bound-parent stat uses no slash.
+                    let parent = parent_bound
+                        && (text.starts_with(&format!("PROPFIND {} HTTP", parent_url.path()))
+                            || text.starts_with(&format!("PROPFIND {}/ HTTP", parent_url.path())));
                     let changed = put_count.load(Ordering::Relaxed) > 0;
                     if !root
+                        && !parent
                         && !changed
                         && matches!(
                             fault,
@@ -357,6 +406,9 @@ impl Fixture {
                                 | Fault::CreateLost
                                 | Fault::CreateLateRoot
                                 | Fault::CreateDigest
+                                | Fault::ParentCreate
+                                | Fault::ParentId
+                                | Fault::ParentEtag
                         )
                     {
                         let _ = write!(
@@ -375,6 +427,12 @@ impl Fixture {
                         } else {
                             root_id
                         }
+                    } else if parent {
+                        if matches!(fault, Fault::ParentId) {
+                            "wrong-parent"
+                        } else {
+                            "parent"
+                        }
                     } else if matches!(fault, Fault::Resource) {
                         "wrong-file"
                     } else {
@@ -382,6 +440,14 @@ impl Fixture {
                     };
                     let etag = if root {
                         "root-tag"
+                    } else if parent {
+                        if matches!(fault, Fault::ParentEtag) {
+                            "wrong-parent-tag"
+                        } else if changed {
+                            "parent-v2"
+                        } else {
+                            "parent-v1"
+                        }
                     } else if matches!(fault, Fault::Etag) {
                         "wrong"
                     } else if changed {
@@ -389,7 +455,16 @@ impl Fixture {
                     } else {
                         "v1"
                     };
-                    let path = if root { "" } else { "file.bin" };
+                    let path = if root {
+                        String::new()
+                    } else if parent {
+                        parent_suffix.clone()
+                    } else if parent_bound {
+                        format!("{parent_suffix}/file.bin")
+                    } else {
+                        "file.bin".into()
+                    };
+                    let path = path.replace('&', "&amp;");
                     let permissions = if !root
                         && (matches!(fault, Fault::Role)
                             || (matches!(fault, Fault::LateRole) && late))
@@ -402,8 +477,12 @@ impl Fixture {
                         "207 Multi-Status",
                         format!(
                             r#"<d:multistatus xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns"><d:response><d:href>{dav}{path}</d:href><d:propstat><d:prop><d:resourcetype>{}</d:resourcetype><d:getcontentlength>{}</d:getcontentlength><d:getetag>"{etag}"</d:getetag><oc:fileid>{id}</oc:fileid><oc:permissions>{permissions}</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>"#,
-                            if root { "<d:collection/>" } else { "" },
-                            if root {
+                            if root || parent {
+                                "<d:collection/>"
+                            } else {
+                                ""
+                            },
+                            if root || parent {
                                 0
                             } else if changed {
                                 size
@@ -1308,4 +1387,132 @@ fn create_zero_source_must_prove_real_eof_and_empty_digest_before_dispatch() {
         assert_eq!(fixture.puts.load(Ordering::Acquire), 0);
         assert_eq!(dropped.load(Ordering::Acquire), 1);
     }
+}
+
+impl Fixture {
+    fn parent_create(
+        &self,
+        parent: &RecoveryCreateParent<'_>,
+        dropped: Arc<AtomicU64>,
+        cancelled: bool,
+    ) -> Result<RecoveryCreateReadback, CloudError> {
+        let client =
+            OpenCloudClient::new_with_proxy(&self.url, "synthetic".into(), &ProxyConfig::Direct)
+                .unwrap();
+        client.recovery_create_blocking_reader_with_parent_cancellable_with_context(
+            "drive-1",
+            "/",
+            "drive-1!root",
+            "Courses & CEUs #1/file.bin",
+            parent,
+            BlockingGenerated {
+                remaining: self.size,
+                dropped,
+                max_read: Arc::new(AtomicU64::new(0)),
+                panic_on_drop: false,
+            },
+            self.size,
+            digest(self.size),
+            RangeReadContext {
+                deadline: Instant::now() + Duration::from_secs(10),
+                token_generation: client.token_generation(),
+            },
+            Arc::new(move || cancelled),
+        )
+    }
+}
+#[test]
+fn parent_create_preserves_original_encoded_parent_condition_and_allows_child_revision_change() {
+    assert!(
+        recovery_target_path("/", "Courses & CEUs #1/file.bin").is_err(),
+        "legacy parser behavior unchanged"
+    );
+    let dropped = Arc::new(AtomicU64::new(0));
+    let fixture = Fixture::with_pin_observer(3, Fault::ParentCreate, Some(dropped.clone()));
+    let parent = RecoveryCreateParent {
+        path: "/Courses & CEUs #1",
+        resource_id: "parent",
+        etag: "\"parent-v1\"",
+    };
+    let proof = fixture
+        .parent_create(&parent, dropped.clone(), false)
+        .unwrap();
+    assert_eq!(proof.observed.entry.path, "/Courses & CEUs #1/file.bin");
+    assert_eq!(proof.observed.sha256, digest(3));
+    assert_eq!(proof.observed.bytes, 3);
+    assert_eq!(parent.etag, "\"parent-v1\"");
+    assert_eq!(fixture.puts.load(Ordering::Acquire), 1);
+    assert_eq!(fixture.gets.load(Ordering::Acquire), 1);
+    assert!(fixture.pin_observations.load(Ordering::Acquire) >= 3);
+    assert_eq!(dropped.load(Ordering::Acquire), 1);
+}
+#[test]
+fn parent_create_changed_original_id_or_revision_never_puts_or_rebases() {
+    for fault in [Fault::ParentId, Fault::ParentEtag] {
+        let fixture = Fixture::new(3, fault);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let parent = RecoveryCreateParent {
+            path: "/Courses & CEUs #1",
+            resource_id: "parent",
+            etag: "\"parent-v1\"",
+        };
+        let error = fixture
+            .parent_create(&parent, dropped.clone(), false)
+            .err()
+            .expect("original parent mismatch must refuse");
+        assert_eq!(error.kind, ErrorKind::Conflict);
+        assert_eq!(
+            error.message,
+            "create parent identity, revision or role changed"
+        );
+        assert_eq!(fixture.puts.load(Ordering::Acquire), 0);
+        assert_eq!(fixture.gets.load(Ordering::Acquire), 0);
+        assert_eq!(parent.etag, "\"parent-v1\"");
+        assert_eq!(dropped.load(Ordering::Acquire), 1);
+    }
+}
+#[test]
+fn parent_create_unsafe_paths_or_tags_and_precancel_refuse_before_put_and_join() {
+    for (path, id, tag) in [
+        ("/Courses & CEUs #1/..", "parent", "\"parent-v1\""),
+        ("/Courses & CEUs #1/", "parent", "\"parent-v1\""),
+        ("//Courses & CEUs #1", "parent", "\"parent-v1\""),
+        ("/other", "parent", "\"parent-v1\""),
+        (
+            "/Courses & CEUs #1",
+            "https://foreign/parent",
+            "\"parent-v1\"",
+        ),
+        ("/Courses & CEUs #1", "parent", "W/\"parent-v1\""),
+        ("/Courses & CEUs #1", "parent", "\"tag\"\r\nIf: injected"),
+    ] {
+        let fixture = Fixture::new(3, Fault::ParentCreate);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let parent = RecoveryCreateParent {
+            path,
+            resource_id: id,
+            etag: tag,
+        };
+        assert!(
+            fixture
+                .parent_create(&parent, dropped.clone(), false)
+                .is_err()
+        );
+        assert_eq!(fixture.puts.load(Ordering::Acquire), 0);
+        assert_eq!(dropped.load(Ordering::Acquire), 1);
+    }
+    let fixture = Fixture::new(3, Fault::ParentCreate);
+    let dropped = Arc::new(AtomicU64::new(0));
+    let parent = RecoveryCreateParent {
+        path: "/Courses & CEUs #1",
+        resource_id: "parent",
+        etag: "\"parent-v1\"",
+    };
+    assert!(
+        fixture
+            .parent_create(&parent, dropped.clone(), true)
+            .is_err()
+    );
+    assert_eq!(fixture.puts.load(Ordering::Acquire), 0);
+    assert_eq!(dropped.load(Ordering::Acquire), 1);
 }

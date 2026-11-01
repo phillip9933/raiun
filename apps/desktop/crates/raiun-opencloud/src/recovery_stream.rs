@@ -19,6 +19,38 @@ pub struct RecoveryCreateReadback {
     pub observed: RecoveryStreamReadback,
 }
 
+/// Immutable expected parent tuple for one create. These inputs are not an
+/// authorization capability or proof that a server atomically enforces DAV If.
+/// Debug formatting is intentionally absent for remote metadata.
+pub struct RecoveryCreateParent<'a> {
+    pub path: &'a str,
+    pub resource_id: &'a str,
+    pub etag: &'a str,
+}
+
+fn validate_create_parent(
+    root: &str,
+    target: &str,
+    parent: &RecoveryCreateParent<'_>,
+) -> Result<(), CloudError> {
+    for path in [root, parent.path] {
+        if path.len() > 32 * 1024 || path.contains("//") || (path != "/" && path.ends_with('/')) {
+            return Err(invalid("create parent path is not canonical"));
+        }
+        validate_logical_path(path)?;
+    }
+    if parent.path != logical_parent(target)
+        || parent.resource_id.len() > 4096
+        || parent.resource_id.trim() != parent.resource_id
+        || parent.resource_id.starts_with('/')
+        || Url::parse(parent.resource_id).is_ok()
+        || parent.etag.len() > 4096
+    {
+        return Err(invalid("create parent binding is invalid"));
+    }
+    stream_metadata(parent.resource_id, parent.etag)
+}
+
 /// A complete, revision-conditioned readback; not authority to discard local
 /// recovery data or acknowledge a native file without its separate guards.
 pub struct RecoveryStreamReadback {
@@ -504,6 +536,54 @@ impl OpenCloudClient {
         }
     }
 
+    /// Parent-bound sibling; same joined source-worker disposal and original
+    /// context/cancellation. No fallback to an unbound create is performed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn recovery_create_blocking_reader_with_parent_cancellable_with_context<R>(
+        &self,
+        space: &str,
+        remote_root_path: &str,
+        expected_root_id: &str,
+        relative_path: &str,
+        parent: &RecoveryCreateParent<'_>,
+        reader: R,
+        content_length: u64,
+        expected_sha256: [u8; 32],
+        context: RangeReadContext,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<RecoveryCreateReadback, CloudError>
+    where
+        R: std::io::Read + Send + 'static,
+    {
+        let original_cancel = self.transfer_budget.cancellation();
+        let cancelled: Arc<dyn Fn() -> bool + Send + Sync> =
+            Arc::new(move || cancelled() || original_cancel.is_cancelled());
+        let (mut worker, reader) = crate::blocking_reader::start(reader)
+            .map_err(|_| invalid("create source worker could not start"))?;
+        let result = self.recovery_create_reader_with_parent_cancellable_with_context(
+            space,
+            remote_root_path,
+            expected_root_id,
+            relative_path,
+            parent,
+            reader,
+            content_length,
+            expected_sha256,
+            context,
+            Arc::clone(&cancelled),
+        );
+        let completion = worker.cancel_and_join();
+        match result {
+            Err(error) => Err(error),
+            Ok(proof) if completion == crate::blocking_reader::WorkerCompletion::Eof => {
+                self.stream_context_current(context)?;
+                ensure_not_cancelled(&|| cancelled())?;
+                Ok(proof)
+            }
+            Ok(_) => Err(invalid("create source worker did not complete safely")),
+        }
+    }
+
     /// Create an ordinary file with one Absent/root-conditioned PUT and require
     /// HTTP 201 followed by an independent exact-ETag/ID/length/hash full GET.
     /// Not an atomic created-ID receipt. OC9 normal PUT can resolve an existing
@@ -529,6 +609,74 @@ impl OpenCloudClient {
     where
         R: AsyncRead + Unpin + Send + 'static,
     {
+        self.recovery_create_reader_inner(
+            space,
+            remote_root_path,
+            expected_root_id,
+            relative_path,
+            reader,
+            content_length,
+            expected_sha256,
+            context,
+            cancelled,
+            None,
+        )
+    }
+
+    /// One parent-bound Absent/root-conditioned create. The exact captured
+    /// parent ID/revision is freshly checked before PUT and emitted as an
+    /// additional tagged If condition. Post-create parent revision may change;
+    /// its original ID/path/plain writable role must still match after readback.
+    /// These observations/headers do not prove server-side atomicity or justify
+    /// retry, local ACK or production activation on an unqualified server.
+    #[allow(clippy::too_many_arguments)]
+    pub fn recovery_create_reader_with_parent_cancellable_with_context<R>(
+        &self,
+        space: &str,
+        remote_root_path: &str,
+        expected_root_id: &str,
+        relative_path: &str,
+        parent: &RecoveryCreateParent<'_>,
+        reader: R,
+        content_length: u64,
+        expected_sha256: [u8; 32],
+        context: RangeReadContext,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<RecoveryCreateReadback, CloudError>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+    {
+        self.recovery_create_reader_inner(
+            space,
+            remote_root_path,
+            expected_root_id,
+            relative_path,
+            reader,
+            content_length,
+            expected_sha256,
+            context,
+            cancelled,
+            Some(parent),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn recovery_create_reader_inner<R>(
+        &self,
+        space: &str,
+        remote_root_path: &str,
+        expected_root_id: &str,
+        relative_path: &str,
+        reader: R,
+        content_length: u64,
+        expected_sha256: [u8; 32],
+        context: RangeReadContext,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+        parent: Option<&RecoveryCreateParent<'_>>,
+    ) -> Result<RecoveryCreateReadback, CloudError>
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+    {
         // Capture the original cancellation epoch before metadata/source work;
         // composed callback also fences the independently invoked readback.
         let original_cancel = self.transfer_budget.cancellation();
@@ -537,7 +685,14 @@ impl OpenCloudClient {
         self.stream_context_current(context)?;
         ensure_not_cancelled(&|| cancelled())?;
         let _guard = RangeContextGuard::enter(context);
-        let path = recovery_target_path(remote_root_path, relative_path)?;
+        let path = if parent.is_some() {
+            recovery_parent_create_target_path(remote_root_path, relative_path)?
+        } else {
+            recovery_target_path(remote_root_path, relative_path)?
+        };
+        if let Some(parent) = parent {
+            validate_create_parent(remote_root_path, &path, parent)?;
+        }
         stream_metadata_step(self, context, || {
             self.validate_recovery_root(space, remote_root_path, expected_root_id)
         })?;
@@ -557,6 +712,15 @@ impl OpenCloudClient {
             self.ensure_writable_target(&selected, &url, &path)?;
             self.root_write_condition(&selected, &path, expected_root_id)
         })?;
+        let condition = if let Some(parent) = parent {
+            ensure_not_cancelled(&|| cancelled())?;
+            let tag = stream_metadata_step(self, context, || {
+                self.create_parent_condition(&selected, parent, true)
+            })?;
+            format!("{root_condition} {tag}")
+        } else {
+            root_condition
+        };
         self.stream_context_current(context)?;
         ensure_not_cancelled(&|| cancelled())?;
         let (request, token) = self.request_async(Method::PUT, &url)?;
@@ -605,7 +769,7 @@ impl OpenCloudClient {
                     .header(CONTENT_LENGTH, content_length)
                     .header(CONTENT_TYPE, "application/octet-stream")
                     .header(IF_NONE_MATCH, "*")
-                    .header("If", root_condition)
+                    .header("If", condition)
                     .header("Cache-Control", "no-cache")
                     .timeout(timeout)
                     .body(reqwest::Body::wrap_stream(body))
@@ -638,7 +802,7 @@ impl OpenCloudClient {
         {
             return Err(conflict("recovery upload could not be verified"));
         }
-        let readback = self.recovery_read_digest_cancellable_with_context(
+        let readback = self.recovery_read_digest_inner(
             space,
             remote_root_path,
             expected_root_id,
@@ -649,11 +813,55 @@ impl OpenCloudClient {
             expected_sha256,
             context,
             Arc::clone(&cancelled),
+            parent.is_some(),
         )?;
         self.stream_context_current(context)?;
         ensure_not_cancelled(&|| cancelled())?;
         ensure_not_cancelled(&|| cancel.is_cancelled())?;
+        if let Some(parent) = parent {
+            stream_metadata_step(self, context, || {
+                self.create_parent_condition(&selected, parent, false)
+            })?;
+            self.stream_context_current(context)?;
+            ensure_not_cancelled(&|| cancelled())?;
+            ensure_not_cancelled(&|| cancel.is_cancelled())?;
+        }
         Ok(RecoveryCreateReadback { observed: readback })
+    }
+
+    fn create_parent_condition(
+        &self,
+        selected: &CloudSpace,
+        parent: &RecoveryCreateParent<'_>,
+        captured_revision: bool,
+    ) -> Result<String, CloudError> {
+        let root = Url::parse(&selected.dav_url)
+            .map_err(|_| invalid("create parent DAV root is invalid"))?;
+        if !same_origin(&self.server, &root)
+            || !root.username().is_empty()
+            || root.password().is_some()
+            || root.query().is_some()
+            || root.fragment().is_some()
+        {
+            return Err(invalid(
+                "create parent DAV root is outside the original origin",
+            ));
+        }
+        let url = append_logical_path(&root, parent.path)?;
+        let entry = self.stat_at_dav(&url, parent.path)?;
+        validate_recovery_entry(&entry, parent.path)?;
+        stream_metadata(&entry.id, &entry.etag)?;
+        if entry.id != parent.resource_id
+            || !entry.directory
+            || entry.encrypted
+            || !entry.writable
+            || entry.etag.len() > 4096
+            || (captured_revision && entry.etag != parent.etag)
+        {
+            return Err(conflict("create parent identity, revision or role changed"));
+        }
+        // Always emit the ORIGINAL captured revision, never a refreshed rebase.
+        Ok(format!("<{url}> ([{}])", parent.etag))
     }
 
     /// Verify the entire decoded HTTP entity without returning its plaintext.
@@ -700,11 +908,45 @@ impl OpenCloudClient {
         context: RangeReadContext,
         cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> Result<RecoveryStreamReadback, CloudError> {
+        self.recovery_read_digest_inner(
+            space,
+            remote_root_path,
+            expected_root_id,
+            relative_path,
+            expected_resource_id,
+            expected_etag,
+            expected_size,
+            expected_sha256,
+            context,
+            cancelled,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn recovery_read_digest_inner(
+        &self,
+        space: &str,
+        remote_root_path: &str,
+        expected_root_id: &str,
+        relative_path: &str,
+        expected_resource_id: &str,
+        expected_etag: &str,
+        expected_size: u64,
+        expected_sha256: [u8; 32],
+        context: RangeReadContext,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+        parent_create_literal_names: bool,
+    ) -> Result<RecoveryStreamReadback, CloudError> {
         stream_metadata(expected_resource_id, expected_etag)?;
         self.stream_context_current(context)?;
         ensure_not_cancelled(&|| cancelled())?;
         let _guard = RangeContextGuard::enter(context);
-        let path = recovery_target_path(remote_root_path, relative_path)?;
+        let path = if parent_create_literal_names {
+            recovery_parent_create_target_path(remote_root_path, relative_path)?
+        } else {
+            recovery_target_path(remote_root_path, relative_path)?
+        };
         stream_metadata_step(self, context, || {
             self.validate_recovery_root(space, remote_root_path, expected_root_id)
         })?;
