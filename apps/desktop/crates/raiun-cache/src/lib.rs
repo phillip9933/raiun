@@ -622,6 +622,15 @@ pub struct PendingWriteItem {
     pub state: WriteState,
     pub bytes: u64,
     pub created_at_unix: i64,
+    /// Local durable-create lifecycle, not remote completion. Legacy writes
+    /// have no handoff and retain their existing recovery workflow.
+    pub create_handoff: Option<PendingCreateLifecycle>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingCreateLifecycle {
+    pub state: OrdinaryCreateState,
+    pub local_handoff_acknowledged: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6276,12 +6285,13 @@ impl Cache {
         }.map_err(db_error)?;
         let mut statement = match origin {
             Some(_) => db.prepare(
-                "SELECT s.space_id,s.root_resource_id,w.id,w.path,w.state,c.byte_len,w.created_at FROM writes w JOIN scopes s ON s.scope_key=w.scope_key JOIN contents c ON c.content_key=w.content_key AND c.scope_key=w.scope_key WHERE s.origin=?1 AND s.account_id=?2 AND s.protection=?3 AND w.state IN (0,1) AND w.id>?4 ORDER BY w.id LIMIT ?5",
+                "SELECT s.space_id,s.root_resource_id,w.id,w.path,w.state,c.byte_len,w.created_at,s.origin,s.account_id FROM writes w JOIN scopes s ON s.scope_key=w.scope_key JOIN contents c ON c.content_key=w.content_key AND c.scope_key=w.scope_key WHERE s.origin=?1 AND s.account_id=?2 AND s.protection=?3 AND w.state IN (0,1) AND w.id>?4 ORDER BY w.id LIMIT ?5",
             ),
             None => db.prepare(
-                "SELECT s.space_id,s.root_resource_id,w.id,w.path,w.state,c.byte_len,w.created_at FROM writes w JOIN scopes s ON s.scope_key=w.scope_key JOIN contents c ON c.content_key=w.content_key AND c.scope_key=w.scope_key WHERE s.account_id=?1 AND s.protection=?2 AND w.state IN (0,1) AND w.id>?3 ORDER BY w.id LIMIT ?4",
+                "SELECT s.space_id,s.root_resource_id,w.id,w.path,w.state,c.byte_len,w.created_at,s.origin,s.account_id FROM writes w JOIN scopes s ON s.scope_key=w.scope_key JOIN contents c ON c.content_key=w.content_key AND c.scope_key=w.scope_key WHERE s.account_id=?1 AND s.protection=?2 AND w.state IN (0,1) AND w.id>?3 ORDER BY w.id LIMIT ?4",
             ),
         }.map_err(db_error)?;
+        let with_lifecycle = |row: &rusqlite::Row<'_>| pending_write_lifecycle_from_row(&db, row);
         let rows = match origin {
             Some(origin) => statement.query_map(
                 params![
@@ -6291,7 +6301,7 @@ impl Cache {
                     after,
                     (limit + 1) as i64
                 ],
-                pending_write_item_from_row,
+                with_lifecycle,
             ),
             None => statement.query_map(
                 params![
@@ -6300,7 +6310,7 @@ impl Cache {
                     after,
                     (limit + 1) as i64
                 ],
-                pending_write_item_from_row,
+                with_lifecycle,
             ),
         }
         .map_err(db_error)?;
@@ -6485,6 +6495,7 @@ impl Cache {
             path,
             state: write_state,
             bytes: copied,
+            create_handoff: None,
             created_at_unix: {
                 let db = self.lock_db()?;
                 db.query_row(
@@ -8087,7 +8098,44 @@ fn pending_write_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Pend
         state: decode_write_state(state).map_err(|_| rusqlite::Error::InvalidQuery)?,
         bytes: bytes.max(0) as u64,
         created_at_unix: row.get(6)?,
+        create_handoff: None,
     })
+}
+fn pending_write_lifecycle_from_row(
+    db: &Connection,
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<PendingWriteItem> {
+    let mut item = pending_write_item_from_row(row)?;
+    let invalid = || rusqlite::Error::InvalidQuery;
+    let origin: String = row.get(7)?;
+    let account: String = row.get(8)?;
+    let scope = CacheScope::new(
+        &origin,
+        &account,
+        &item.space_id,
+        &item.root_resource_id,
+        ScopeProtection::PlaintextAllowed,
+    )
+    .map_err(|_| invalid())?;
+    // The outer pending SELECT and this exact-scope receipt read share the
+    // same connection/snapshot; a worker cannot produce a contradictory UI
+    // lifecycle by completing between two independently opened caches.
+    if let Some(receipt) =
+        ordinary_create::load(db, &scope, item.write_id).map_err(|_| invalid())?
+    {
+        if receipt.write.logical_path != item.path
+            || receipt.write.state != item.state
+            || receipt.byte_len != item.bytes
+            || receipt.state == OrdinaryCreateState::Verified
+        {
+            return Err(invalid());
+        }
+        item.create_handoff = Some(PendingCreateLifecycle {
+            state: receipt.state,
+            local_handoff_acknowledged: receipt.local_handoff_acknowledged,
+        });
+    }
+    Ok(item)
 }
 fn i64_from_u64(value: u64) -> Result<i64, CacheError> {
     i64::try_from(value).map_err(|_| CacheError::LimitExceeded)
@@ -9471,6 +9519,75 @@ mod tests {
     }
 
     #[test]
+    fn pending_write_view_preserves_durable_create_lifecycle_and_local_ack() {
+        let (_temp, cache) = cache();
+        let scope = scope(ScopeProtection::PlaintextAllowed);
+        let staged = cache
+            .stage_ordinary_create(
+                &scope,
+                OrdinaryCreateRequest {
+                    max_pending_bytes: 1024,
+                    handoff_id: "1234567890abcdef1234567890abcdef".into(),
+                    parent_resource_id: "root-a".into(),
+                    name: "new.txt".into(),
+                    logical_path: "/new.txt".into(),
+                    expected_len: 4,
+                    expected_sha256: format!("{:x}", Sha256::digest(b"body")),
+                },
+                &mut Cursor::new(b"body"),
+            )
+            .unwrap();
+        let check = |state, acknowledged, write_state| {
+            for page in [
+                cache
+                    .pending_write_page_for_account("account-a", None, 10)
+                    .unwrap(),
+                cache
+                    .pending_write_page("https://cloud.example.test/", "account-a", None, 10)
+                    .unwrap(),
+            ] {
+                assert_eq!(page.items.len(), 1);
+                assert_eq!(page.items[0].state, write_state);
+                assert_eq!(
+                    page.items[0].create_handoff,
+                    Some(PendingCreateLifecycle {
+                        state,
+                        local_handoff_acknowledged: acknowledged,
+                    })
+                );
+            }
+        };
+        check(OrdinaryCreateState::Staged, false, WriteState::Pending);
+        let ready = cache.admit_ordinary_create(&scope, &staged).unwrap();
+        check(OrdinaryCreateState::Ready, false, WriteState::Pending);
+        let ready = cache
+            .acknowledge_ordinary_create_handoff(&scope, &ready)
+            .unwrap();
+        let claim = cache
+            .claim_ordinary_create(&scope, &ready)
+            .unwrap()
+            .unwrap();
+        check(OrdinaryCreateState::Claimed, true, WriteState::Pending);
+        cache.mark_ordinary_create_uncertain(&scope, claim).unwrap();
+        check(OrdinaryCreateState::Uncertain, true, WriteState::Conflict);
+        // A corrupt lifecycle must fail the entire view, not become a legacy
+        // retry button which appears to authorize another send.
+        cache
+            .lock_db()
+            .unwrap()
+            .execute(
+                "UPDATE ordinary_create_handoffs SET state=1 WHERE write_id=?1",
+                params![ready.write.id],
+            )
+            .unwrap();
+        assert!(
+            cache
+                .pending_write_page_for_account("account-a", None, 10)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn pending_write_page_is_account_scoped_bounded_and_offline_safe() {
         let (_temp, cache) = cache();
         let scope = scope(ScopeProtection::PlaintextAllowed);
@@ -9499,6 +9616,7 @@ mod tests {
         assert_eq!(first.pending_count, 2);
         assert_eq!(first.conflict_count, 0);
         assert_eq!(first.items.len(), 1);
+        assert!(first.items[0].create_handoff.is_none());
         assert!(first.truncated);
         let cursor = first.next_after.as_deref().unwrap();
         let second = cache

@@ -3,11 +3,15 @@ export type PendingWriteScopeItem = {
   root_resource_id?: string | null;
 };
 
+export type PendingCreateState = 'staged' | 'ready' | 'claimed' | 'uncertain' | 'conflict';
+
 export type PendingOfflineWrite = PendingWriteScopeItem & {
   space_label?: string | null;
   write_id: string;
   path: string;
   state: 'pending' | 'conflict';
+  create_state?: PendingCreateState;
+  local_handoff_acknowledged?: boolean;
   bytes: number;
   created_at_unix: number;
 };
@@ -32,6 +36,14 @@ export function pendingWritePageIsValid(value: unknown): PendingOfflineWritesPag
     if (!item || typeof item !== 'object') return false;
     const row = item as Record<string, unknown>;
     const root = row.root_resource_id;
+    const hasCreateState = Object.hasOwn(row, 'create_state');
+    const hasLocalAck = Object.hasOwn(row, 'local_handoff_acknowledged');
+    const validCreate = !hasCreateState && !hasLocalAck || hasCreateState && hasLocalAck &&
+      typeof row.local_handoff_acknowledged === 'boolean' &&
+      (['staged', 'ready', 'claimed'].includes(row.create_state as string) && row.state === 'pending' ||
+       ['uncertain', 'conflict'].includes(row.create_state as string) && row.state === 'conflict') &&
+      !(row.create_state === 'staged' && row.local_handoff_acknowledged);
+    if (!validCreate) return false;
     return typeof row.space_id === 'string' && row.space_id.length > 0 && row.space_id.length <= 1024 &&
       (root == null || (typeof root === 'string' && root.trim().length > 0 && root.length <= 1024 && !/[\u0000-\u001f\u007f]/.test(root))) &&
       typeof row.write_id === 'string' && row.write_id.length > 0 && row.write_id.length <= 512 &&
@@ -92,4 +104,29 @@ export function savedRootDisclosure(
     ? rootResourceId ? `<code>${escape(rootResourceId)}</code>` : '<span>Saved root unavailable</span>'
     : '';
   return `<button type="button" class="small-action quiet pending-write-root-toggle" data-action="toggle-saved-write-root" data-scope-key="${escape(scopeKey)}" aria-expanded="${expanded}" aria-controls="${escape(regionId)}">Saved location identity</button><div class="pending-write-root-region" id="${escape(regionId)}"${expanded ? '' : ' hidden'}>${content}</div>`;
+}
+
+export function pendingWritePresentation(item: PendingOfflineWrite): { label: string; help: string } {
+  if (item.create_state) {
+    const presentation: Record<PendingCreateState, { label: string; help: string }> = {
+      staged: { label: 'Saved locally', help: 'A local copy is saved. It has not been queued for upload.' },
+      ready: { label: 'Queued for upload', help: 'The file is queued. Cloud delivery is not confirmed.' },
+      claimed: { label: 'Uploading', help: 'An upload attempt is in progress. Cloud delivery is not confirmed.' },
+      uncertain: { label: 'Outcome uncertain', help: 'The upload may have reached the cloud. The local copy is retained for review; it will not be retried automatically.' },
+      conflict: { label: 'Needs review', help: 'The local copy is retained for review. This create will not be retried automatically.' }
+    };
+    const status = presentation[item.create_state];
+    const acceptance = item.local_handoff_acknowledged ? 'Local acceptance is recorded.' : 'Local acceptance has not been confirmed.';
+    return { label: status.label, help: `${status.help} ${acceptance}` };
+  }
+  return item.state === 'conflict'
+    ? { label: 'Needs review', help: 'The local copy is retained for review.' }
+    : { label: 'Waiting to upload', help: 'A retained local edit is waiting to upload.' };
+}
+
+// The legacy command covers a whole Space. A visible create job anywhere on
+// this page conservatively suppresses it, including mixed/root-paged results.
+export function canRetryLegacyPendingWrites(items: PendingOfflineWrite[], spaceId: string): boolean {
+  return !items.some(item => item.create_state !== undefined) &&
+    items.some(item => item.space_id === spaceId && item.state === 'pending');
 }

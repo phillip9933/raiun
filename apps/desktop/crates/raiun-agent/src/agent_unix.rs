@@ -42,6 +42,41 @@ use storage::Settings;
 
 const MAX_PENDING_SPACE_SYNCS: usize = 256;
 
+fn pending_write_response(item: raiun_cache::PendingWriteItem) -> Result<Value, String> {
+    let mut response = json!({
+        "space_id": item.space_id,
+        "root_resource_id": item.root_resource_id,
+        "write_id": item.write_id.to_string(),
+        "path": item.path,
+        "state": match item.state {
+            raiun_cache::WriteState::Pending => "pending",
+            raiun_cache::WriteState::Conflict => "conflict",
+            raiun_cache::WriteState::Verified => "verified",
+        },
+        "bytes": item.bytes,
+        "created_at_unix": item.created_at_unix,
+    });
+    if let Some(handoff) = item.create_handoff {
+        use raiun_cache::{OrdinaryCreateState as Create, WriteState};
+        let (state, expected) = match handoff.state {
+            Create::Staged => ("staged", WriteState::Pending),
+            Create::Ready => ("ready", WriteState::Pending),
+            Create::Claimed => ("claimed", WriteState::Pending),
+            Create::Uncertain => ("uncertain", WriteState::Conflict),
+            Create::Conflict => ("conflict", WriteState::Conflict),
+            Create::Verified => return Err("Completed upload appeared in pending edits".into()),
+        };
+        if item.state != expected
+            || (handoff.state == Create::Staged && handoff.local_handoff_acknowledged)
+        {
+            return Err("Saved upload lifecycle is inconsistent".into());
+        }
+        response["create_state"] = json!(state);
+        response["local_handoff_acknowledged"] = json!(handoff.local_handoff_acknowledged);
+    }
+    Ok(response)
+}
+
 fn remote_listing_response(entries: Vec<RemoteEntry>) -> Result<Value, String> {
     let warnings = windows_name_warnings(&entries);
     let mut response = serde_json::to_value(entries).map_err(|error| error.to_string())?;
@@ -127,11 +162,18 @@ struct AuthState {
 }
 
 trait MountedCloud: Send {
+    fn stop_create_uploads(&mut self) -> Result<(), String> {
+        Ok(())
+    }
     fn unmount(&mut self) -> Result<(), String>;
     fn is_mounted(&self) -> bool;
 }
 
 impl MountedCloud for raiun_fuse::MountHandle {
+    fn stop_create_uploads(&mut self) -> Result<(), String> {
+        raiun_fuse::MountHandle::stop_create_uploads(self)
+    }
+
     fn unmount(&mut self) -> Result<(), String> {
         raiun_fuse::MountHandle::unmount(self)
     }
@@ -891,6 +933,17 @@ impl Runtime {
         Ok(())
     }
 
+    // Workers use immutable Engine/account bindings and atomic currentness
+    // hooks only. Join them before taking settings/auth/sync locks or revoking
+    // the original account. A busy unmount must not leave an uploader running.
+    fn stop_mounted_create_uploads(&self) -> Result<(), String> {
+        let mut mounted = self.mount.lock().map_err(|_| "Mount state poisoned")?;
+        if let Some(handle) = mounted.as_mut() {
+            handle.stop_create_uploads()?;
+        }
+        Ok(())
+    }
+
     fn mount_if_enabled(&self, expected_generation: u64) -> Result<(), String> {
         // Serialize restoration with explicit unmount/configuration updates.
         // Otherwise a stale enabled snapshot could remount after unmount wins.
@@ -916,7 +969,36 @@ impl Runtime {
                     .ok_or("Account identity is unavailable; sign in again")?,
             )
         };
-        self.mount_engine(engine, &settings, &account_id)
+        self.mount_engine(engine, &settings, &account_id, expected_generation)
+    }
+
+    fn create_upload_hooks(
+        &self,
+        expected_generation: u64,
+        account_id: &str,
+    ) -> raiun_engine::CreateUploadHooks {
+        let generation = self.auth_generation.clone();
+        let shutdown = self.shutdown.clone();
+        let transition = self.auth_transition.clone();
+        let account_id = account_id.to_owned();
+        raiun_engine::CreateUploadHooks {
+            // Never capture Runtime locks: logout/unmount must join workers
+            // before tearing down their original account and mounted Engine.
+            is_current: Arc::new(move || {
+                generation.load(Ordering::Acquire) == expected_generation
+                    && !shutdown.load(Ordering::Acquire)
+                    && !transition.load(Ordering::Acquire)
+            }),
+            // Explicit bounded policy: retain the existing ordinary-create
+            // contract (fresh absence/parent/root plus conditional PUT), now
+            // with two owned workers and no ambiguous-send replay. This does
+            // not assert server-side atomic no-clobber; see IMPLEMENTATION.md.
+            // Engine independently checks origin, root and plaintext ancestry.
+            dispatch_allowed: Arc::new(move |scope| {
+                scope.account_id() == account_id
+                    && scope.protection() == raiun_cache::ScopeProtection::PlaintextAllowed
+            }),
+        }
     }
 
     fn mount_engine(
@@ -924,7 +1006,13 @@ impl Runtime {
         engine: Engine,
         settings: &Settings,
         account_id: &str,
+        expected_generation: u64,
     ) -> Result<(), String> {
+        let hooks = self.create_upload_hooks(expected_generation, account_id);
+        let current = hooks.is_current.clone();
+        if !current() {
+            return Err("Sign-in was canceled".into());
+        }
         let account_dir = account_engine_dir(&self.dir, account_id);
         raiun_fuse::recover_stale_mount(&settings.config.cloud_root, &account_dir)?;
         let root = ensure_cloud_root(&settings.config, &self.dir, &account_dir)?;
@@ -932,20 +1020,49 @@ impl Runtime {
             self.configure_vault_mount_routes(settings, account_id)?;
         }
         let mut mounted = self.mount.lock().map_err(|_| "Mount state poisoned")?;
-        if self.shutdown.load(Ordering::Acquire) {
-            return Err("Agent is shutting down".into());
+        if !current() {
+            return Err("Sign-in was canceled".into());
         }
         if mounted.as_ref().is_some_and(|handle| !handle.is_mounted()) {
             *mounted = None;
         }
         if mounted.is_none() {
-            *mounted = Some(Box::new(raiun_fuse::mount_with_vault_registry_for_profile(
-                engine,
-                &root,
-                &account_dir,
-                &self.local_profile_id,
-                self.vault_mounts.clone(),
-            )?));
+            // The first handoff freezes its creating descriptor, so this is
+            // presently a copy-workflow experiment, not general POSIX fsync
+            // semantics. Normal Desktop and headless mounts stay unchanged.
+            let handoff = if self.mode == RuntimeMode::Desktop
+                && std::env::var_os("RAIUN_EXPERIMENTAL_CREATE_HANDOFF").as_deref()
+                    == Some(std::ffi::OsStr::new("1"))
+            {
+                Some(raiun_fuse::CreateHandoffOptions {
+                    hooks,
+                    max_pending_bytes: engine
+                        .offline_cache_usage()
+                        .map_err(|error| error.to_string())?
+                        .quota_bytes,
+                })
+            } else {
+                None
+            };
+            *mounted = Some(Box::new(
+                raiun_fuse::mount_with_vault_registry_and_create_handoff(
+                    engine,
+                    &root,
+                    &account_dir,
+                    &self.local_profile_id,
+                    self.vault_mounts.clone(),
+                    handoff,
+                )?,
+            ));
+            if !current() {
+                // Keep a failed/busy mount owned so normal teardown can retry;
+                // never detach a stale account's upload workers.
+                let handle = mounted.as_mut().expect("newly mounted handle");
+                handle.stop_create_uploads()?;
+                handle.unmount()?;
+                *mounted = None;
+                return Err("Sign-in was canceled".into());
+            }
         }
         drop(mounted);
         *self.error.lock().map_err(|_| "Error state poisoned")? = None;
@@ -953,6 +1070,7 @@ impl Runtime {
     }
 
     fn enable_mount(&self) -> Result<(), String> {
+        let expected_generation = self.operation_generation()?;
         let mut settings = self.settings.lock().map_err(|_| "Settings poisoned")?;
         let (engine, account_id) = {
             let auth = self
@@ -966,7 +1084,7 @@ impl Runtime {
                     .ok_or("Account identity is unavailable; sign in again")?,
             )
         };
-        self.mount_engine(engine, &settings, &account_id)?;
+        self.mount_engine(engine, &settings, &account_id, expected_generation)?;
         if !settings.mount_enabled {
             let mut next = settings.clone();
             next.mount_enabled = true;
@@ -977,6 +1095,7 @@ impl Runtime {
     }
 
     fn disable_mount(&self) -> Result<(), String> {
+        self.stop_mounted_create_uploads()?;
         let mut settings = self.settings.lock().map_err(|_| "Settings poisoned")?;
         // Stop exposing decrypted route snapshots before the mount is detached.
         // The verified session remains unlocked for sync and a later remount.
@@ -1029,6 +1148,7 @@ impl Runtime {
         }
         self.auth_generation.fetch_add(1, Ordering::AcqRel);
         let mut transfer_fence = self.fence_transfer_admission()?;
+        self.stop_mounted_create_uploads()?;
         self.vault_edit_reconcile_jobs.cancel_all_and_wait()?;
         self.vault_pin_jobs.cancel_all_and_wait()?;
         self.cache_jobs.cancel_active();
@@ -1161,6 +1281,7 @@ impl Runtime {
         let _transition = AuthTransition::begin(&self.auth_transition)?;
         self.auth_generation.fetch_add(1, Ordering::AcqRel);
         let mut transfer_fence = self.fence_transfer_admission()?;
+        self.stop_mounted_create_uploads()?;
         self.vault_edit_reconcile_jobs.cancel_all_and_wait()?;
         self.vault_pin_jobs.cancel_all_and_wait()?;
         self.cache_jobs.cancel_active();
@@ -3747,6 +3868,11 @@ impl Runtime {
                     .unwrap_or(50)
                     .clamp(1, 100) as usize;
                 let page = self.pending_write_page(after, limit)?;
+                let items = page
+                    .items
+                    .into_iter()
+                    .map(pending_write_response)
+                    .collect::<Result<Vec<_>, _>>()?;
                 ensure_generation(&self.auth_generation, generation)?;
                 let latest = self.settings.lock().map_err(|_| "Settings poisoned")?;
                 if latest.server != saved_settings.server
@@ -3757,19 +3883,7 @@ impl Runtime {
                 Ok(json!({
                     "auth_generation": generation,
                     "account_scope": Self::saved_write_account_scope(&saved_settings),
-                    "items": page.items.into_iter().map(|item| json!({
-                        "space_id": item.space_id,
-                        "root_resource_id": item.root_resource_id,
-                        "write_id": item.write_id.to_string(),
-                        "path": item.path,
-                        "state": match item.state {
-                            raiun_cache::WriteState::Pending => "pending",
-                            raiun_cache::WriteState::Conflict => "conflict",
-                            raiun_cache::WriteState::Verified => "verified",
-                        },
-                        "bytes": item.bytes,
-                        "created_at_unix": item.created_at_unix,
-                    })).collect::<Vec<_>>(),
+                    "items": items,
                     "next_after": page.next_after,
                     "pending_count": page.pending_count,
                     "conflict_count": page.conflict_count,
@@ -6925,6 +7039,172 @@ mod tests {
 
         assert!(operation.join().unwrap());
         logout.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn pending_write_response_distinguishes_create_lifecycle_from_legacy_retry() {
+        use raiun_cache::{
+            OrdinaryCreateState as Create, PendingCreateLifecycle, PendingWriteItem, WriteState,
+        };
+        let legacy = PendingWriteItem {
+            space_id: "space".into(),
+            root_resource_id: "root".into(),
+            write_id: 1,
+            path: "/new".into(),
+            state: WriteState::Pending,
+            bytes: 4,
+            created_at_unix: 1,
+            create_handoff: None,
+        };
+        let value = pending_write_response(legacy.clone()).unwrap();
+        assert!(value.get("create_state").is_none());
+        assert!(value.get("local_handoff_acknowledged").is_none());
+        for (state, expected, base) in [
+            (Create::Staged, "staged", WriteState::Pending),
+            (Create::Ready, "ready", WriteState::Pending),
+            (Create::Claimed, "claimed", WriteState::Pending),
+            (Create::Uncertain, "uncertain", WriteState::Conflict),
+            (Create::Conflict, "conflict", WriteState::Conflict),
+        ] {
+            let mut item = legacy.clone();
+            item.state = base;
+            item.create_handoff = Some(PendingCreateLifecycle {
+                state,
+                local_handoff_acknowledged: state != Create::Staged,
+            });
+            let value = pending_write_response(item.clone()).unwrap();
+            assert_eq!(value["create_state"], expected);
+            assert_eq!(value["local_handoff_acknowledged"], state != Create::Staged);
+            item.state = WriteState::Verified;
+            assert!(pending_write_response(item).is_err());
+        }
+        let mut completed = legacy;
+        completed.create_handoff = Some(PendingCreateLifecycle {
+            state: Create::Verified,
+            local_handoff_acknowledged: true,
+        });
+        assert!(pending_write_response(completed).is_err());
+    }
+
+    #[test]
+    fn create_upload_hooks_keep_original_generation_without_runtime_locks() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = runtime_for_mount_test(dir.path().to_path_buf(), false, None);
+        runtime.auth_generation.store(7, Ordering::Release);
+        let hooks = runtime.create_upload_hooks(7, "account-a");
+        // Worker checks remain safe while teardown owns these locks.
+        let _settings = runtime.settings.lock().unwrap();
+        let _auth = runtime.auth_state.lock().unwrap();
+        let _mount = runtime.mount.lock().unwrap();
+        assert!((hooks.is_current)());
+        runtime.auth_transition.store(true, Ordering::Release);
+        assert!(!(hooks.is_current)());
+        runtime.auth_transition.store(false, Ordering::Release);
+        assert!((hooks.is_current)());
+        runtime.shutdown.store(true, Ordering::Release);
+        assert!(!(hooks.is_current)());
+        runtime.shutdown.store(false, Ordering::Release);
+        runtime.auth_generation.store(8, Ordering::Release);
+        assert!(!(hooks.is_current)());
+        // Constructing an owner for an old Engine cannot adopt the new epoch.
+        let stale = runtime.create_upload_hooks(7, "account-a");
+        assert!(!(stale.is_current)());
+        let scope = |account| {
+            raiun_cache::CacheScope::new(
+                "https://example.invalid/",
+                account,
+                "space",
+                "root",
+                raiun_cache::ScopeProtection::PlaintextAllowed,
+            )
+            .unwrap()
+        };
+        assert!((hooks.dispatch_allowed)(&scope("account-a")));
+        assert!(!(hooks.dispatch_allowed)(&scope("account-b")));
+    }
+
+    struct CreateStoppingMount {
+        events: Arc<Mutex<Vec<&'static str>>>,
+        fail_stop: bool,
+    }
+
+    impl MountedCloud for CreateStoppingMount {
+        fn stop_create_uploads(&mut self) -> Result<(), String> {
+            self.events.lock().unwrap().push("stop-create-uploads");
+            if self.fail_stop {
+                Err("fixture create owner could not drain".into())
+            } else {
+                Ok(())
+            }
+        }
+
+        fn unmount(&mut self) -> Result<(), String> {
+            self.events.lock().unwrap().push("unmount");
+            Err("fixture busy mount".into())
+        }
+
+        fn is_mounted(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn create_owner_drain_failure_preserves_account_and_mount_before_teardown() {
+        for action in ["unmount", "logout", "shutdown"] {
+            let dir = tempfile::tempdir().unwrap();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let runtime = runtime_for_mount_test(
+                dir.path().to_path_buf(),
+                true,
+                Some(Box::new(CreateStoppingMount {
+                    events: events.clone(),
+                    fail_stop: true,
+                })),
+            );
+            {
+                let mut settings = runtime.settings.lock().unwrap();
+                settings.account_id = Some("synthetic-account".into());
+                settings.server = Some("https://example.invalid/".into());
+            }
+            let result = match action {
+                "unmount" => runtime.disable_mount(),
+                "logout" => runtime.logout(),
+                _ => runtime.shutdown_safely(),
+            };
+            assert!(result.unwrap_err().contains("create owner could not drain"));
+            assert_eq!(*events.lock().unwrap(), ["stop-create-uploads"]);
+            let settings = runtime.settings.lock().unwrap();
+            assert_eq!(settings.account_id.as_deref(), Some("synthetic-account"));
+            assert_eq!(settings.server.as_deref(), Some("https://example.invalid/"));
+            assert!(settings.mount_enabled);
+            assert!(runtime.mount.lock().unwrap().as_ref().unwrap().is_mounted());
+            assert!(!runtime.shutdown.load(Ordering::Acquire));
+            assert!(!dir.path().join("settings.json").exists());
+        }
+    }
+
+    #[test]
+    fn create_owner_stops_before_busy_unmount_without_clearing_mount_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let runtime = runtime_for_mount_test(
+            dir.path().to_path_buf(),
+            true,
+            Some(Box::new(CreateStoppingMount {
+                events: events.clone(),
+                fail_stop: false,
+            })),
+        );
+        assert!(
+            runtime
+                .disable_mount()
+                .unwrap_err()
+                .contains("mount remains active")
+        );
+        assert_eq!(*events.lock().unwrap(), ["stop-create-uploads", "unmount"]);
+        assert!(runtime.settings.lock().unwrap().mount_enabled);
+        assert!(runtime.mount.lock().unwrap().as_ref().unwrap().is_mounted());
+        assert!(!dir.path().join("settings.json").exists());
     }
 
     struct FakeMount {

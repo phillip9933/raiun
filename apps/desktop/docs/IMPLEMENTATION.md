@@ -3394,3 +3394,51 @@ The owner's NAS-wide outage also affected the web client; its blocked Unraid
 shared-folder workers were investigated separately, and the owner reports
 stability after upgrading from 7.3.2 to 7.3.4. This is not Desktop acceptance or
 proof of a single cause for the earlier upload errors.
+
+### Durable Linux Desktop create uploads — unpublished candidate
+
+An experimental Linux Desktop mount can opt into a durable queue for new
+ordinary files, with exactly two account-owned upload workers. Normal mounts
+remain synchronous; `RAIUN_EXPERIMENTAL_CREATE_HANDOFF=1` is required for the
+development experiment. File-manager flush/close accepts
+verified local custody; it does **not** mean the file has reached the cloud.
+Existing-file saves, encrypted files and headless mount-only mode retain their
+previous behavior. Directories are still created synchronously. Pending files
+remain readable locally and appear in the retained-write journal. The creating
+descriptor becomes immutable after its first handoff, even after cloud delivery,
+until it is closed. Applications that fsync a new file and continue writing to
+that descriptor are therefore outside this experiment's supported copy workflow.
+General write-after-fsync behavior must be resolved before enabling it by default.
+Editing,
+renaming or deleting their paths or ancestors is refused until their upload is
+resolved. Queued bytes use the configured offline-cache allowance and require
+space for both the original spool and the immutable queue copy.
+
+The explicit server policy retains the existing ordinary-create contract:
+fresh account/root/ordinary-parent/absence checks and a root-bound conditional
+PUT. Concurrency is limited to two; a durable one-use claim prevents automatic
+replay after an ambiguous send. OpenCloud's public create route is not certified
+as an atomic no-clobber operation against competing external writers. This queue
+does not strengthen that server guarantee. Each successful upload still needs
+independent full-byte, length, ID and revision verification before completion.
+Unknown outcomes retain local bytes and require attention rather than a blind
+retry. Pausing prevents new claims; an already claimed interrupted operation may
+remain uncertain. Logout, unmount and shutdown cancel and join both workers
+before account teardown. A busy unmount leaves the drive attached with its
+uploader stopped until unmount can be retried; it does not silently restart it.
+
+Cache format 10 retains immutable custody receipts after clean-body eviction.
+Only locally acknowledged, fully verified new-create bodies qualify for cleanup;
+unresolved edits and legacy history do not. Existing offline pins or policies
+conservatively prevent cleanup across their scope, so the cache can still require
+attention at its limit. Downgrading a migrated cache to an older binary is not
+supported. Windows cleanup helpers are source-checked, not newly native-tested.
+
+An exact synthetic test binary passed inside an isolated Ubuntu VM using a real
+FUSE mount: sequential fsync/close admitted two held uploads, preserved pending
+reads/listing and completed verified delivery. This is mechanism acceptance,
+not an installed-package or real-server throughput result. The owner reports
+that the same approximately 250 MB / 211-file tree uploaded through the web UI
+in under a minute after the NAS recovered; Desktop's candidate has not yet been
+measured against that baseline. Final integrated gates and package acceptance
+remain separate from these component and VM results.
