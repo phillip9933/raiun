@@ -76,10 +76,7 @@ pub(super) fn has_unresolved_namespace(
         physical_root,
     )
     .map_err(|_| BackendError::Unavailable)?;
-    if summary.other_namespace_evidence || (namespace.is_none() && summary.records != 0) {
-        return Err(BackendError::Unavailable);
-    }
-    Ok(summary.unresolved != 0)
+    crate::streamed_store::namespace_rename_store::history_unresolved(&summary, namespace.is_some())
 }
 
 pub(super) fn prepared_store(

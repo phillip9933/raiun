@@ -1190,6 +1190,7 @@ fn discover_scope_catalogs_inner(
 struct RootCatalogScopes {
     snapshots: Vec<EditJournalScope>,
     rename: Vec<EditJournalScope>,
+    directories: Vec<EditJournalScope>,
     keys: std::collections::HashSet<String>,
 }
 
@@ -1214,6 +1215,7 @@ fn validate_root_catalog_scope_union(
     let mut result = RootCatalogScopes {
         snapshots: Vec::new(),
         rename: Vec::new(),
+        directories: Vec::new(),
         keys: std::collections::HashSet::new(),
     };
     for name in names {
@@ -1247,13 +1249,14 @@ fn validate_root_catalog_scope_union(
                 result.keys.insert(scope_key(scope)?);
             }
         } else if name == namespace_store::ROOT {
-            result
-                .keys
-                .extend(namespace_store::validated_catalog_scope_keys(
-                    &*root.child(name, false)?,
-                    protector,
-                    budget,
-                )?);
+            result.directories = namespace_store::validated_catalog_scopes(
+                &*root.child(name, false)?,
+                protector,
+                budget,
+            )?;
+            for scope in &result.directories {
+                result.keys.insert(scope_key(scope)?);
+            }
         } else if let Some(key) = name.strip_suffix(".scope") {
             if !valid_key(key) || !names.contains(&key.to_owned()) {
                 return Err(StoreError::IncompleteEvidence);

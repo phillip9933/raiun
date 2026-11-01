@@ -46,12 +46,33 @@ struct Loaded {
 }
 
 /// Authenticated metadata classification only; never native completion proof,
-/// publication custody or replay authority. Other namespace formats stay unknown.
+/// publication custody or replay authority. Directory-create history is decoded
+/// separately; unsupported namespace formats stay unknown.
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) struct NamespaceHistorySummary {
     pub(crate) records: usize,
     pub(crate) unresolved: usize,
+    // Presence matters even when this format has no catalog or record yet.
+    // Unconfigured consumers must not turn retained evidence into absence.
+    pub(crate) directory_evidence: bool,
+    pub(crate) directory_records: usize,
+    pub(crate) directory_unresolved: usize,
     pub(crate) other_namespace_evidence: bool,
+}
+
+/// Classification of authenticated metadata, not publication or replay
+/// authority. Retained directory-format presence remains unknown to an
+/// unconfigured consumer, including a valid empty root or catalog.
+pub(crate) fn history_unresolved(
+    summary: &NamespaceHistorySummary,
+    configured: bool,
+) -> Result<bool, crate::BackendError> {
+    if summary.other_namespace_evidence
+        || (!configured && (summary.records != 0 || summary.directory_evidence))
+    {
+        return Err(crate::BackendError::Unavailable);
+    }
+    Ok(summary.unresolved != 0 || summary.directory_unresolved != 0)
 }
 
 /// One existing quota lease and one budget cover catalogs and selected prefixes.
@@ -101,9 +122,8 @@ pub(super) fn history_summary_existing(
     budget.entries(names.len())?;
     let catalogs = validate_root_catalog_scope_union(&*root, &*protector, &names, &mut budget)?;
     let mut result = NamespaceHistorySummary {
-        other_namespace_evidence: names
-            .iter()
-            .any(|name| name == namespace_store::ROOT || name == namespace_file_store::ROOT),
+        directory_evidence: names.iter().any(|name| name == namespace_store::ROOT),
+        other_namespace_evidence: names.iter().any(|name| name == namespace_file_store::ROOT),
         ..NamespaceHistorySummary::default()
     };
     if names.iter().any(|name| name == ROOT) {
@@ -127,7 +147,12 @@ pub(super) fn history_summary_existing(
                 )?;
                 let decoder = FileRenameStore { base };
                 let remaining = MAX_RECORDS
-                    .checked_sub(result.records)
+                    .checked_sub(
+                        result
+                            .records
+                            .checked_add(result.directory_records)
+                            .ok_or(StoreError::ScanLimit)?,
+                    )
                     .ok_or(StoreError::ScanLimit)?;
                 let rows =
                     decoder.load_records(&*directory, &scope, &names, &mut budget, remaining)?;
@@ -140,6 +165,36 @@ pub(super) fn history_summary_existing(
             directory.verify()?;
         }
         rename.verify()?;
+    }
+    if result.directory_evidence {
+        let directories = root.child(namespace_store::ROOT, false)?;
+        for scope in catalogs.directories {
+            let directory = directories.child(&scope_key(&scope)?, false)?;
+            let remaining = MAX_RECORDS
+                .checked_sub(
+                    result
+                        .records
+                        .checked_add(result.directory_records)
+                        .ok_or(StoreError::ScanLimit)?,
+                )
+                .ok_or(StoreError::ScanLimit)?;
+            // Borrowed metadata decoder only. The outer quota lock and this
+            // same remaining budget cover both formats; no writer, admission,
+            // body access or second independently observed snapshot is made.
+            let (records, unresolved) = namespace_store::history_counts_existing(
+                &*directory,
+                &*protector,
+                &scope,
+                provider,
+                physical_root,
+                &mut budget,
+                remaining,
+            )?;
+            result.directory_records += records;
+            result.directory_unresolved += unresolved;
+            directory.verify()?;
+        }
+        directories.verify()?;
     }
     root.verify()?;
     lock.verify()?;

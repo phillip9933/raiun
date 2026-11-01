@@ -527,25 +527,6 @@ impl DirectoryIntentStore {
         }
         Ok(sealed)
     }
-    fn open(
-        &self,
-        scope: &EditJournalScope,
-        key: &DirectoryIntentKey,
-        seq: u64,
-        previous: &[u8; 32],
-        sealed: &[u8],
-    ) -> Result<Zeroizing<Vec<u8>>, StoreError> {
-        let plain = Zeroizing::new(
-            self.base
-                .protector
-                .open(&record_aad(scope, key, seq, previous)?, sealed)
-                .map_err(|_| StoreError::CorruptEvidence)?,
-        );
-        if plain.len() > META_LIMIT / 2 {
-            return Err(StoreError::CorruptEvidence);
-        }
-        Ok(plain)
-    }
     fn load_all(&self, directory: &dyn Directory) -> Result<Vec<Loaded>, StoreError> {
         let mut budget = Budget::new(self.base.policy);
         self.load_all_bounded(directory, &mut budget)
@@ -564,6 +545,65 @@ impl DirectoryIntentStore {
         scope: &EditJournalScope,
         record_limit: usize,
     ) -> Result<Vec<Loaded>, StoreError> {
+        DirectoryHistoryDecoder {
+            protector: &*self.base.protector,
+        }
+        .load_scope_bounded(directory, budget, scope, record_limit)
+    }
+    fn load(
+        &self,
+        directory: &dyn Directory,
+        id: &str,
+        budget: &mut Budget,
+    ) -> Result<Loaded, StoreError> {
+        let names = directory.entries(budget.remaining_entries())?;
+        budget.entries(names.len())?;
+        self.load_scoped(directory, id, budget, &self.base.scope, &names)
+    }
+    fn load_scoped(
+        &self,
+        directory: &dyn Directory,
+        id: &str,
+        budget: &mut Budget,
+        scope: &EditJournalScope,
+        names: &[String],
+    ) -> Result<Loaded, StoreError> {
+        DirectoryHistoryDecoder {
+            protector: &*self.base.protector,
+        }
+        .load_scoped(directory, id, budget, scope, names)
+    }
+}
+
+/// Borrowed metadata decoder shared with the original writer's reopen paths.
+/// No root, admission, storage reservation, writer or dispatch lease is held.
+struct DirectoryHistoryDecoder<'a> {
+    protector: &'a dyn EditRecordProtector,
+}
+impl DirectoryHistoryDecoder<'_> {
+    fn open(
+        &self,
+        scope: &EditJournalScope,
+        key: &DirectoryIntentKey,
+        seq: u64,
+        previous: &[u8; 32],
+        sealed: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, StoreError> {
+        let plain = Zeroizing::new(
+            self.protector
+                .open(&record_aad(scope, key, seq, previous)?, sealed)
+                .map_err(|_| StoreError::CorruptEvidence)?,
+        );
+        if plain.len() > META_LIMIT / 2 {
+            return Err(StoreError::CorruptEvidence);
+        }
+        Ok(plain)
+    }
+    fn record_names(
+        &self,
+        directory: &dyn Directory,
+        budget: &mut Budget,
+    ) -> Result<(Vec<String>, std::collections::BTreeSet<String>), StoreError> {
         let names = directory.entries(budget.remaining_entries())?;
         budget.entries(names.len())?;
         let mut ids = std::collections::BTreeSet::new();
@@ -580,24 +620,24 @@ impl DirectoryIntentStore {
             if suffix == "dispatch.lock" && directory.open(name)?.len()? != 0 {
                 return Err(StoreError::CorruptEvidence);
             }
-            ids.insert(id);
+            ids.insert(id.to_owned());
         }
+        Ok((names, ids))
+    }
+    fn load_scope_bounded(
+        &self,
+        directory: &dyn Directory,
+        budget: &mut Budget,
+        scope: &EditJournalScope,
+        record_limit: usize,
+    ) -> Result<Vec<Loaded>, StoreError> {
+        let (names, ids) = self.record_names(directory, budget)?;
         if ids.len() > record_limit {
             return Err(StoreError::ScanLimit);
         }
         ids.into_iter()
-            .map(|id| self.load_scoped(directory, id, budget, scope, &names))
+            .map(|id| self.load_scoped(directory, &id, budget, scope, &names))
             .collect()
-    }
-    fn load(
-        &self,
-        directory: &dyn Directory,
-        id: &str,
-        budget: &mut Budget,
-    ) -> Result<Loaded, StoreError> {
-        let names = directory.entries(budget.remaining_entries())?;
-        budget.entries(names.len())?;
-        self.load_scoped(directory, id, budget, &self.base.scope, &names)
     }
     fn load_scoped(
         &self,
@@ -677,6 +717,48 @@ impl DirectoryIntentStore {
             progress,
         })
     }
+}
+
+/// Read one catalog-authenticated directory scope under the caller's existing
+/// quota lease and cumulative budget. Foreign scopes are structurally checked,
+/// never reinterpreted as selected records or granted any mutation authority.
+pub(super) fn history_counts_existing(
+    directory: &dyn Directory,
+    protector: &dyn EditRecordProtector,
+    scope: &EditJournalScope,
+    provider: &crate::ProviderScope,
+    physical: crate::ConfiguredRootIdentity,
+    budget: &mut Budget,
+    remaining: usize,
+) -> Result<(usize, usize), StoreError> {
+    validate_scope(scope)?;
+    directory.verify()?;
+    let decoder = DirectoryHistoryDecoder { protector };
+    let (names, ids) = decoder.record_names(directory, budget)?;
+    let selected = scope.profile_id == provider.profile_id()
+        && scope.server_origin == provider.server_origin()
+        && scope.account_subject == provider.account_id()
+        && scope.root_volume_serial == physical.volume_serial
+        && scope.root_file_index == physical.file_index;
+    if !selected {
+        directory.verify()?;
+        return Ok((0, 0));
+    }
+    if ids.len() > remaining {
+        return Err(StoreError::ScanLimit);
+    }
+    let mut unresolved = 0;
+    for id in &ids {
+        let row = decoder.load_scoped(directory, id, budget, scope, &names)?;
+        unresolved += usize::from(!row.record.progress.recorded_complete);
+    }
+    directory.verify()?;
+    Ok((ids.len(), unresolved))
+}
+
+#[cfg(all(test, unix))]
+pub(super) fn synthetic_history_store(base: Arc<SnapshotStore>) -> Arc<DirectoryIntentStore> {
+    Arc::new(DirectoryIntentStore { base })
 }
 
 /// Existing-only metadata reader for namespace catalogs and authenticated
@@ -1158,11 +1240,27 @@ fn authenticate_namespace_scope(
 
 /// Catalog-only validation for a neighboring typed store's shared scope
 /// budget. This never returns mkdir intents or grants a dispatch lease.
+// Retain the key-only compatibility seam; Windows health now keeps full
+// authenticated scopes, so invoking this wrapper there would duplicate a scan.
+#[cfg_attr(windows, allow(dead_code))]
 pub(super) fn validated_catalog_scope_keys(
     root: &dyn Directory,
     protector: &dyn EditRecordProtector,
     budget: &mut Budget,
 ) -> Result<Vec<String>, StoreError> {
+    validated_catalog_scopes(root, protector, budget)?
+        .iter()
+        .map(scope_key)
+        .collect()
+}
+
+/// Authenticate actual typed scopes once, retaining their immutable bindings
+/// for the caller's same-lock existing-only metadata scan.
+pub(super) fn validated_catalog_scopes(
+    root: &dyn Directory,
+    protector: &dyn EditRecordProtector,
+    budget: &mut Budget,
+) -> Result<Vec<EditJournalScope>, StoreError> {
     root.verify()?;
     let names = root.entries(budget.remaining_entries())?;
     budget.entries(names.len())?;
@@ -1176,9 +1274,9 @@ pub(super) fn validated_catalog_scope_keys(
             if !valid_key(key) || !names.contains(&key.to_owned()) {
                 return Err(StoreError::IncompleteEvidence);
             }
-            authenticate_namespace_scope(root, protector, key, budget)?;
+            let scope = authenticate_namespace_scope(root, protector, key, budget)?;
             root.child(key, false)?.verify()?;
-            result.push(key.to_owned());
+            result.push(scope);
             if result.len() > 256 {
                 return Err(StoreError::ScanLimit);
             }
