@@ -407,3 +407,94 @@ impl ConfiguredRootConnection {
         ))
     }
 }
+
+impl ConfiguredRootConnection {
+    #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
+    pub(crate) fn rename_public_entry_fixture_activity_source(
+        &self,
+    ) -> crate::RenamePublicEntryFixtureActivitySource {
+        let state = Arc::downgrade(&self.state);
+        Arc::new(move || {
+            let state = state.upgrade()?;
+            if state.readiness.load(Ordering::Acquire) != CALLBACK_READY {
+                return None;
+            }
+            let activity = state.activity.try_lock().ok()?;
+            Some(crate::RenamePublicEntryFixtureActivity {
+                active_callbacks: activity.active_callbacks,
+                active_fetches: activity.active_fetches,
+                staged_fetches: activity.staged_fetches,
+                modified_closes: state.modified_placeholder_closes.load(Ordering::Acquire),
+                journaled_closes: state.journaled_placeholder_closes.load(Ordering::Acquire),
+                unverifiable_closes: state
+                    .unverifiable_placeholder_closes
+                    .load(Ordering::Acquire),
+            })
+        })
+    }
+    /// Diagnostic snapshot only; never callback/capture admission authority.
+    #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
+    pub(crate) fn rename_public_entry_fixture_callback_counts(
+        &self,
+    ) -> Option<(usize, usize, usize)> {
+        if !self.connected || self.state.readiness.load(Ordering::Acquire) != CALLBACK_READY {
+            return None;
+        }
+        let activity = self.state.activity.try_lock().ok()?;
+        Some((
+            activity.active_callbacks,
+            activity.active_fetches,
+            activity.staged_fetches,
+        ))
+    }
+    /// Fixed R58 diagnostic metadata only. No arbitrary route/body or authority.
+    #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
+    pub(crate) fn rename_public_entry_fixture_observation(
+        &self,
+        selected: crate::RenamePublicEntryFixturePath,
+    ) -> Result<crate::NamespaceDirectoryObservation, Error> {
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        let parent = root.path.join("Personal");
+        let parent_handle = open_root(
+            &parent,
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+        )?;
+        let parent_snapshot = root_snapshot(parent_handle.0)?;
+        if parent_snapshot.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+            || !cleanup_cloud_reparse_tag(parent_snapshot.reparse_tag)
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        let name = match selected {
+            crate::RenamePublicEntryFixturePath::Source => "source.bin",
+            crate::RenamePublicEntryFixturePath::Destination => "renamed.bin",
+        };
+        let file = open_root(
+            &parent.join(name),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+        )?;
+        let snapshot = root_snapshot(file.0)?;
+        if snapshot.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+            || !cleanup_cloud_reparse_tag(snapshot.reparse_tag)
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        let opaque = native_namespace_directory::opaque_directory_identity(file.0)?;
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        Ok(crate::NamespaceDirectoryObservation {
+            local_file: crate::LocalFileIdentity {
+                volume_serial: snapshot.identity.volume_serial,
+                file_index: snapshot.identity.file_index,
+            },
+            attributes: snapshot.file_attributes,
+            reparse_tag: snapshot.reparse_tag,
+            placeholder_state: snapshot.placeholder_state,
+            opaque_identity: Some(opaque),
+        })
+    }
+}

@@ -134,6 +134,8 @@ impl<L: FileRenameLocal + ?Sized> FileRenameLocal for GuardedLocal<'_, '_, L> {
             // The short claim orders this commit before subsequently starting
             // closes. Capture remains enabled; no mutex spans journal I/O.
             // Once granted, do not undo a factual append because of later work.
+            #[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
+            completion_fixture::run(intent);
             if self.admission.claim_completion().is_err() {
                 refused.set(true);
                 return Err(StoreError::Busy);
@@ -153,3 +155,92 @@ impl<L: FileRenameLocal + ?Sized> FileRenameLocal for GuardedLocal<'_, '_, L> {
 #[cfg(test)]
 #[path = "save_rename_admission_tests.rs"]
 mod tests;
+
+/// Diagnostic ordering only. Exact semantic operation and generation include
+/// original scope/account/authorization/physical root. Publication replaces the
+/// caller's record ID; the barrier receives that factual live intent and must
+/// authenticate it against the retained store before acting. No capability.
+#[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
+pub(crate) mod completion_fixture {
+    use super::*;
+    use std::{marker::PhantomData, rc::Rc};
+    type Barrier = Box<dyn FnOnce(&NamespaceIntent)>;
+    struct Armed {
+        id: u64,
+        expected: NamespaceIntent,
+        barrier: Barrier,
+    }
+    thread_local! {
+        static ARMED: RefCell<Option<Armed>> = const { RefCell::new(None) };
+    }
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    pub struct Guard {
+        id: u64,
+        _owner_thread: PhantomData<Rc<()>>,
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ARMED.with(|slot| {
+                let mut slot = slot.borrow_mut();
+                if slot.as_ref().is_some_and(|armed| armed.id == self.id) {
+                    slot.take();
+                }
+            });
+        }
+    }
+    pub fn arm(
+        expected: NamespaceIntent,
+        barrier: impl FnOnce(&NamespaceIntent) + 'static,
+    ) -> Result<Guard, crate::Error> {
+        expected
+            .validate()
+            .map_err(|_| crate::Error::EditRecoveryUnavailable)?;
+        let mut id = NEXT.load(std::sync::atomic::Ordering::Relaxed);
+        loop {
+            let next = id
+                .checked_add(1)
+                .ok_or(crate::Error::EditRecoveryUnavailable)?;
+            match NEXT.compare_exchange_weak(
+                id,
+                next,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => id = actual,
+            }
+        }
+        ARMED.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_some() {
+                return Err(crate::Error::EditRecoveryUnavailable);
+            }
+            *slot = Some(Armed {
+                id,
+                expected,
+                barrier: Box::new(barrier),
+            });
+            Ok(Guard {
+                id,
+                _owner_thread: PhantomData,
+            })
+        })
+    }
+    pub(super) fn run(intent: &NamespaceIntent) {
+        let armed = ARMED.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.as_ref().is_some_and(|armed| {
+                armed.expected.schema_version == intent.schema_version
+                    && armed.expected.record_generation == intent.record_generation
+                    && armed.expected.operation == intent.operation
+            }) {
+                slot.take()
+            } else {
+                None
+            }
+        });
+        if let Some(armed) = armed {
+            (armed.barrier)(intent);
+        }
+    }
+}

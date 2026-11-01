@@ -543,6 +543,27 @@ pub struct NamespaceScanPage {
 pub struct PreparedNamespaceDirectory<'connection> {
     inner: native::native_namespace_directory::PinnedNamespaceDirectory<'connection>,
 }
+/// Value-only diagnostic snapshot; no admission, clean-state or completion authority.
+#[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RenamePublicEntryFixtureActivity {
+    pub active_callbacks: usize,
+    pub active_fetches: usize,
+    pub staged_fetches: usize,
+    pub modified_closes: usize,
+    pub journaled_closes: usize,
+    pub unverifiable_closes: usize,
+}
+#[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
+pub type RenamePublicEntryFixtureActivitySource =
+    std::sync::Arc<dyn Fn() -> Option<RenamePublicEntryFixtureActivity> + Send + Sync>;
+/// Only the two fixed R58 fixture file names; never a caller-provided path.
+#[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
+#[derive(Clone, Copy)]
+pub enum RenamePublicEntryFixturePath {
+    Source,
+    Destination,
+}
 /// Physical metadata only. Constructing or serializing these values cannot
 /// construct native admission, a live session or a publication capability.
 #[cfg(windows)]
@@ -723,6 +744,26 @@ impl ConfiguredRootConnection {
         &self,
     ) -> Result<(LocalFileIdentity, u32, u32, u64), Error> {
         self.inner.namespace_observer_fixture_file()
+    }
+    /// Weak, value-only source tied to this callback owner. No native handles escape.
+    #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
+    pub fn rename_public_entry_fixture_activity_source(
+        &self,
+    ) -> RenamePublicEntryFixtureActivitySource {
+        self.inner.rename_public_entry_fixture_activity_source()
+    }
+    /// Nonblocking diagnostic snapshot, never a quiescence/admission capability.
+    #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
+    pub fn rename_public_entry_fixture_callback_counts(&self) -> Option<(usize, usize, usize)> {
+        self.inner.rename_public_entry_fixture_callback_counts()
+    }
+    /// Read-only fixed R58 file metadata; no capture or publication authority.
+    #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
+    pub fn rename_public_entry_fixture_observation(
+        &self,
+        selected: RenamePublicEntryFixturePath,
+    ) -> Result<NamespaceDirectoryObservation, Error> {
+        self.inner.rename_public_entry_fixture_observation(selected)
     }
     /// Open only the namespace-rename store already associated with this live
     /// connection's prepared recovery capability. This grants storage access
@@ -982,6 +1023,12 @@ impl ConfiguredRootConnection {
 /// not expose this entry point, and the application has no call site for it.
 #[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
 pub mod synthetic_agent_integration {
+    /// One-shot owner-thread diagnostic barrier; never a send or completion permit.
+    #[cfg(debug_assertions)]
+    pub use crate::save_rename_admission::completion_fixture::{
+        Guard as FileRenameCompletionFixtureGuard, arm as arm_file_rename_completion_fixture,
+    };
+
     use std::sync::Arc;
 
     use super::{

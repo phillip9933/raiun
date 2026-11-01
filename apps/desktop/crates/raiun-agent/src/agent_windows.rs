@@ -3,6 +3,10 @@
 //! isolated native save/recovery/lifecycle acceptance. Package acceptance and
 //! publication remain separate; other feature gates are independent.
 
+#[cfg(all(test, windows, debug_assertions))]
+#[path = "windows_rename_public_entry_test.rs"]
+mod windows_rename_public_entry_test;
+
 #[path = "auth.rs"]
 pub(super) mod auth;
 
