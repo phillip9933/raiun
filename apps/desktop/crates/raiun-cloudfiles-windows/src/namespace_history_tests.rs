@@ -245,13 +245,16 @@ fn budget_is_shared_between_catalogs_and_selected_event_prefixes() {
 }
 
 #[test]
-fn other_namespace_formats_force_unknown_flag_and_their_catalogs_are_authenticated() {
+fn file_format_presence_requires_configuration_and_catalogs_are_authenticated() {
     {
         let name = namespace_file_store::ROOT;
         let (_temp, base, _) = fixture();
         drop(base.acquire_lock().unwrap());
         let other = base.root.child(name, true).unwrap();
-        assert!(summary(&base, policy()).unwrap().other_namespace_evidence);
+        let read = summary(&base, policy()).unwrap();
+        assert!(read.file_evidence);
+        assert!(history_unresolved(&read, false).is_err());
+        assert_eq!(history_unresolved(&read, true), Ok(false));
         other.child(&"a".repeat(64), true).unwrap();
         let (mut stage, _) = other.create(&format!("{}.scope", "a".repeat(64))).unwrap();
         stage.write_all(b"corrupt catalog").unwrap();
@@ -596,4 +599,293 @@ fn mixed_formats_use_one_allowance_and_directory_remaining_record_limit() {
     .unwrap();
     assert_eq!(scopes, vec![base.scope.clone()]);
     assert_eq!(keys, vec![scope_key(&base.scope).unwrap()]);
+}
+
+fn publish_file(base: &Arc<SnapshotStore>, generation: u64) -> namespace_file_store::FileCreateKey {
+    let name = format!("created-{generation}.bin");
+    let destination = LocalNamespaceEntry {
+        parent: parent(base),
+        name: name.clone(),
+        local_file: LocalFileIdentity {
+            volume_serial: base.scope.root_volume_serial,
+            file_index: 20000 + generation,
+        },
+        object_kind: NamespaceObjectKind::File,
+    };
+    let path = format!("Documents/{name}");
+    let reservation = base
+        .try_begin_capture(SnapshotBinding {
+            record_id: String::new(),
+            scope: base.scope.clone(),
+            generation,
+            local_file: destination.local_file,
+            relative_path: path.clone(),
+            remote: None,
+            content_len: 3,
+        })
+        .unwrap();
+    let committed = reservation
+        .capture(&mut std::io::Cursor::new(b"abc"), &mut || false)
+        .unwrap()
+        .verify_and_commit(&mut || false)
+        .unwrap();
+    let digest = hex(committed.manifest().content_sha256());
+    let files = namespace_file_store::FileCreateStore::new(Arc::clone(base)).unwrap();
+    files
+        .publish_fresh(
+            NamespaceIntent {
+                schema_version: 1,
+                record_id: "0".repeat(32),
+                record_generation: generation,
+                operation: NamespaceOperation::CreateFile {
+                    destination,
+                    content: crate::namespace_intent::NamespaceFileContent {
+                        byte_len: 3,
+                        sha256: digest,
+                    },
+                },
+            },
+            committed,
+            namespace_file_store::CapturedCreatePath::new(
+                vec!["Personal".into(), "Documents".into(), name],
+                path,
+            )
+            .unwrap(),
+            &mut || false,
+        )
+        .unwrap()
+        .record()
+        .key()
+        .clone()
+}
+fn file_path(temp: &tempfile::TempDir, base: &SnapshotStore) -> std::path::PathBuf {
+    temp.path()
+        .join(namespace_file_store::ROOT)
+        .join(scope_key(&base.scope).unwrap())
+}
+#[test]
+fn file_pending_submitted_and_attention_remain_unresolved_without_body_access() {
+    let (_temp, base, _) = fixture();
+    publish(&base, 1, true);
+    publish_directory(&base, 2, true);
+    let key = publish_file(&base, 3);
+    let files = namespace_file_store::FileCreateStore::new(Arc::clone(&base)).unwrap();
+    let mut lease = files.acquire_dispatch(&key).unwrap();
+    for step in 0..3 {
+        if step > 0 {
+            if step == 1 {
+                lease.mark_submitted().unwrap();
+            } else {
+                lease
+                    .record_attention(crate::namespace_intent::NamespaceAttention::Uncertain)
+                    .unwrap();
+            }
+        }
+        let read = summary(&base, policy()).unwrap();
+        assert_eq!(
+            (
+                read.records,
+                read.directory_records,
+                read.file_records,
+                read.file_unresolved
+            ),
+            (1, 1, 1, 1)
+        );
+        assert!(read.file_evidence);
+        assert_eq!(history_unresolved(&read, true), Ok(true));
+        assert!(history_unresolved(&read, false).is_err());
+    }
+}
+#[test]
+fn empty_file_catalog_stays_configuration_bound_and_missing_body_is_never_clean() {
+    let (temp, base, _) = fixture();
+    let key = publish_file(&base, 1);
+    let files = namespace_file_store::FileCreateStore::new(Arc::clone(&base)).unwrap();
+    let record = files.discover().unwrap().pop().unwrap();
+    std::fs::remove_file(
+        temp.path()
+            .join(scope_key(&base.scope).unwrap())
+            .join(format!("{}.body", record.snapshot_id())),
+    )
+    .unwrap();
+    assert!(files.discover().is_err());
+    assert!(files.open_joined(&key, &mut || false).is_err());
+    let read = summary(&base, policy()).unwrap();
+    assert_eq!((read.file_records, read.file_unresolved), (1, 1));
+    assert_eq!(history_unresolved(&read, true), Ok(true));
+    std::fs::remove_file(file_path(&temp, &base).join(format!("{}.intent", key.record_id())))
+        .unwrap();
+    let read = summary(&base, policy()).unwrap();
+    assert_eq!(read.file_records, 0);
+    assert_eq!(history_unresolved(&read, true), Ok(false));
+    assert!(history_unresolved(&read, false).is_err());
+}
+#[test]
+fn create_join_corruption_missing_reference_or_stage_never_becomes_clean() {
+    for case in 0..5 {
+        let (temp, base, _) = fixture();
+        let key = publish_file(&base, 1);
+        let dir = file_path(&temp, &base);
+        match case {
+            0 => std::fs::write(
+                dir.join(format!("{}.intent", key.record_id())),
+                b"corrupt join",
+            )
+            .unwrap(),
+            1 => std::fs::write(
+                temp.path()
+                    .join(namespace_file_store::ROOT)
+                    .join(format!("{}.scope", scope_key(&base.scope).unwrap())),
+                b"corrupt catalog",
+            )
+            .unwrap(),
+            2 => std::fs::write(
+                dir.join(format!("{}.event.{:020}", key.record_id(), 2)),
+                b"missing first event",
+            )
+            .unwrap(),
+            3 => std::fs::write(dir.join("unknown.stage"), b"incomplete").unwrap(),
+            _ => {
+                let files = namespace_file_store::FileCreateStore::new(Arc::clone(&base)).unwrap();
+                let row = files.discover().unwrap().pop().unwrap();
+                std::fs::remove_file(
+                    temp.path()
+                        .join(scope_key(&base.scope).unwrap())
+                        .join(format!("{}.manifest", row.snapshot_id())),
+                )
+                .unwrap();
+            }
+        }
+        assert!(summary(&base, policy()).is_err(), "case={case}");
+    }
+}
+#[test]
+fn legitimate_foreign_create_scope_is_not_adopted_but_selected_transplant_fails() {
+    let (temp, base, _) = fixture();
+    let foreign = related(&base, |s| s.root_file_index += 1);
+    let foreign_key = publish_file(&foreign, 1);
+    let read = summary(&base, policy()).unwrap();
+    assert!(read.file_evidence);
+    assert_eq!((read.file_records, read.file_unresolved), (0, 0));
+    assert_eq!(history_unresolved(&read, true), Ok(false));
+    assert!(history_unresolved(&read, false).is_err());
+    let key = publish_file(&base, 2);
+    let bytes = std::fs::read(
+        file_path(&temp, &foreign).join(format!("{}.intent", foreign_key.record_id())),
+    )
+    .unwrap();
+    std::fs::write(
+        file_path(&temp, &base).join(format!("{}.intent", key.record_id())),
+        bytes,
+    )
+    .unwrap();
+    assert!(summary(&base, policy()).is_err());
+}
+#[test]
+fn all_three_formats_share_entry_metadata_and_remaining_record_allowance() {
+    let (_temp, base, _) = fixture();
+    publish(&base, 1, true);
+    let rename_floor = entry_floor(&base);
+    let (_dtemp, directory, _) = fixture();
+    publish_directory(&directory, 1, true);
+    let directory_floor = entry_floor(&directory);
+    let (_ftemp, file, _) = fixture();
+    publish_file(&file, 1);
+    let file_floor = entry_floor(&file);
+    publish_directory(&base, 2, true);
+    publish_file(&base, 3);
+    let mut limit = policy();
+    limit.max_entries = rename_floor.max(directory_floor).max(file_floor);
+    assert!(matches!(summary(&base, limit), Err(StoreError::ScanLimit)));
+    publish_file(&base, 4);
+    let (provider, physical) = group(&base);
+    let read = |budget: &mut Budget, remaining| {
+        namespace_file_store::history_counts_existing(
+            Arc::new(ReadOnly(Arc::clone(&base.root))),
+            Arc::new(ReadOnlyProtector(Arc::clone(&base.protector))),
+            policy(),
+            &provider,
+            physical,
+            budget,
+            remaining,
+        )
+    };
+    assert!(matches!(
+        read(&mut Budget::new(policy()), 1),
+        Err(StoreError::ScanLimit)
+    ));
+    assert_eq!(read(&mut Budget::new(policy()), 2).unwrap(), (2, 2));
+    let mut tight = Budget::new(policy());
+    tight.bytes = 1;
+    assert!(matches!(read(&mut tight, 2), Err(StoreError::ScanLimit)));
+    // Keep a valid StorePolicy while simulating the caller's partially spent
+    // metadata allowance. The SAME budget passes through all three decoders.
+    let _quota = base.acquire_lock().unwrap();
+    let rename_directory = base
+        .root
+        .child(ROOT, false)
+        .unwrap()
+        .child(&scope_key(&base.scope).unwrap(), false)
+        .unwrap();
+    let directory_directory = base
+        .root
+        .child(namespace_store::ROOT, false)
+        .unwrap()
+        .child(&scope_key(&base.scope).unwrap(), false)
+        .unwrap();
+    let rename_decoder = FileRenameStore {
+        base: SnapshotStore::from_directory(
+            Arc::new(ReadOnly(Arc::clone(&base.root))),
+            base.scope.clone(),
+            Arc::new(ReadOnlyProtector(Arc::clone(&base.protector))),
+            policy(),
+        )
+        .unwrap(),
+    };
+    let rename_read = |budget: &mut Budget| {
+        let names = record_names(&*rename_directory, budget)?;
+        rename_decoder
+            .load_records(
+                &ReadOnly(rename_directory.clone()),
+                &base.scope,
+                &names,
+                budget,
+                1,
+            )
+            .map(|_| ())
+    };
+    let directory_read = |budget: &mut Budget| {
+        namespace_store::history_counts_existing(
+            &ReadOnly(directory_directory.clone()),
+            &ReadOnlyProtector(Arc::clone(&base.protector)),
+            &base.scope,
+            &provider,
+            physical,
+            budget,
+            1,
+        )
+    };
+    let mut rb = Budget::new(policy());
+    rename_read(&mut rb).unwrap();
+    let mut db = Budget::new(policy());
+    directory_read(&mut db).unwrap();
+    let mut fb = Budget::new(policy());
+    read(&mut fb, 2).unwrap();
+    let used = |b: &Budget| policy().max_metadata_bytes_per_scan - b.bytes;
+    let mut shared = Budget::new(policy());
+    shared.bytes = used(&rb) + used(&db) + used(&fb) - 1;
+    rename_read(&mut shared).unwrap();
+    directory_read(&mut shared).unwrap();
+    assert!(matches!(read(&mut shared, 2), Err(StoreError::ScanLimit)));
+    drop(_quota);
+    let aggregate = summary(&base, policy()).unwrap();
+    assert_eq!(
+        (
+            aggregate.records,
+            aggregate.directory_records,
+            aggregate.file_records
+        ),
+        (1, 1, 2)
+    );
+    assert_eq!(history_unresolved(&aggregate, true), Ok(true));
 }

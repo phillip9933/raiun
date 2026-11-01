@@ -492,6 +492,22 @@ impl FileCreateStore {
         scope: &EditJournalScope,
         budget: &mut Budget,
     ) -> Result<SnapshotManifest, StoreError> {
+        let (manifest, directory) = self.reference_manifest_metadata(joined, scope, budget)?;
+        let body = directory.open(&format!("{}.body", joined.snapshot.id))?;
+        if body.len()? != manifest.container_len() {
+            return Err(StoreError::IncompleteEvidence);
+        }
+        body.verify()?;
+        Ok(manifest)
+    }
+    // Same authenticated join/reservation/manifest checks without touching body
+    // handles. Only the existing-lock history reader uses this distinction.
+    fn reference_manifest_metadata(
+        &self,
+        joined: &FileJoin,
+        scope: &EditJournalScope,
+        budget: &mut Budget,
+    ) -> Result<(SnapshotManifest, Arc<dyn Directory>), StoreError> {
         let scope_key = scope_key(scope)?;
         if self.base.authenticate_scope(&scope_key, budget)? != *scope {
             return Err(StoreError::CorruptEvidence);
@@ -516,12 +532,7 @@ impl FileCreateStore {
             return Err(StoreError::CorruptEvidence);
         }
         validate_join(joined, scope, &manifest).map_err(|_| StoreError::CorruptEvidence)?;
-        let body = directory.open(&format!("{}.body", reference.id))?;
-        if body.len()? != manifest.container_len() {
-            return Err(StoreError::IncompleteEvidence);
-        }
-        body.verify()?;
-        Ok(manifest)
+        Ok((manifest, directory))
     }
     fn load(
         &self,
@@ -541,6 +552,17 @@ impl FileCreateStore {
         scope: &EditJournalScope,
         names: &[String],
         budget: &mut Budget,
+    ) -> Result<Loaded, StoreError> {
+        self.load_names_checked(directory, id, scope, names, budget, true)
+    }
+    fn load_names_checked(
+        &self,
+        directory: &dyn Directory,
+        id: &str,
+        scope: &EditJournalScope,
+        names: &[String],
+        budget: &mut Budget,
+        require_body: bool,
     ) -> Result<Loaded, StoreError> {
         if !valid_id(id) {
             return Err(StoreError::Invalid);
@@ -569,7 +591,11 @@ impl FileCreateStore {
         {
             return Err(StoreError::CorruptEvidence);
         }
-        self.reference_manifest(&joined, scope, budget)?;
+        if require_body {
+            self.reference_manifest(&joined, scope, budget)?;
+        } else {
+            self.reference_manifest_metadata(&joined, scope, budget)?;
+        }
         let mut checked = NamespaceIntentProgress::new(joined.intent.clone())
             .map_err(|_| StoreError::CorruptEvidence)?;
         let mut commitment = join_hash(&plain);
@@ -928,6 +954,78 @@ pub(super) fn validated_catalog_scope_keys(
         .into_iter()
         .map(|(key, _scope)| key)
         .collect())
+}
+
+/// Count authenticated current-scope joins under the caller's existing quota
+/// lease and cumulative budget. No body open, directory creation, lock or
+/// writable capability escapes. Current file events cannot express completion:
+/// every valid joined record remains unresolved, regardless of copied flags.
+pub(super) fn history_counts_existing(
+    root: Arc<dyn Directory>,
+    protector: Arc<dyn EditRecordProtector>,
+    policy: StorePolicy,
+    provider: &crate::ProviderScope,
+    physical: crate::ConfiguredRootIdentity,
+    budget: &mut Budget,
+    remaining: usize,
+) -> Result<(usize, usize), StoreError> {
+    let files = root.child(ROOT, false)?;
+    let scopes = catalogs(&*files, &*protector, budget)?;
+    let mut records = 0usize;
+    for (key, scope) in scopes {
+        let directory = files.child(&key, false)?;
+        let names = directory.entries(budget.remaining_entries())?;
+        budget.entries(names.len())?;
+        let mut ids = std::collections::BTreeSet::new();
+        let mut unique = std::collections::HashSet::new();
+        for name in &names {
+            if !unique.insert(name) {
+                return Err(StoreError::CorruptEvidence);
+            }
+            let (id, suffix) = record_name(name)?;
+            if !names.contains(&format!("{id}.intent")) {
+                return Err(StoreError::IncompleteEvidence);
+            }
+            if suffix == "dispatch.lock" {
+                let pin = directory.open(name)?;
+                if pin.len()? != 0 {
+                    return Err(StoreError::CorruptEvidence);
+                }
+                pin.verify()?;
+            }
+            ids.insert(id.to_owned());
+        }
+        if scope.profile_id == provider.profile_id()
+            && scope.server_origin == provider.server_origin()
+            && scope.account_subject == provider.account_id()
+            && scope.root_volume_serial == physical.volume_serial
+            && scope.root_file_index == physical.file_index
+        {
+            records = records
+                .checked_add(ids.len())
+                .ok_or(StoreError::ScanLimit)?;
+            if records > remaining {
+                return Err(StoreError::ScanLimit);
+            }
+            // This ephemeral context uses an authenticated real scope and the
+            // caller's pinned root; from_directory neither creates nor locks.
+            let decoder = FileCreateStore {
+                base: SnapshotStore::from_directory(
+                    Arc::clone(&root),
+                    scope.clone(),
+                    Arc::clone(&protector),
+                    policy,
+                )?,
+            };
+            for id in ids {
+                decoder.load_names_checked(&*directory, &id, &scope, &names, budget, false)?;
+            }
+        }
+        directory.verify()?;
+    }
+    files.verify()?;
+    root.verify()?;
+    Ok((records, records))
 }
 
 pub(super) fn accounted_usage(
