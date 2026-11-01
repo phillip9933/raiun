@@ -4,6 +4,9 @@
 //! publication remain separate; other feature gates are independent.
 
 #[cfg(all(test, windows, debug_assertions))]
+#[path = "windows_file_create_public_entry_test.rs"]
+mod windows_file_create_public_entry_test;
+#[cfg(all(test, windows, debug_assertions))]
 #[path = "windows_rename_public_entry_test.rs"]
 mod windows_rename_public_entry_test;
 
