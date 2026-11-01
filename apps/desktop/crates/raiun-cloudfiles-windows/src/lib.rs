@@ -878,6 +878,14 @@ impl ConfiguredRootConnection {
     ) -> Result<NamespaceDirectoryObservation, Error> {
         self.inner.rename_public_entry_fixture_observation(selected)
     }
+    /// Fixed synthetic Personal/Courses & CEUs #1/source.bin parent+file values;
+    /// no caller path, native handle, read, mutation or completion capability.
+    #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
+    pub fn create_worker_subfolder_fixture_observation(
+        &self,
+    ) -> Result<(NamespaceDirectoryObservation, NamespaceDirectoryObservation), Error> {
+        self.inner.create_worker_subfolder_fixture_observation()
+    }
     /// Open only the namespace-rename store already associated with this live
     /// connection's prepared recovery capability. This grants storage access
     /// only; rename admission still requires the explicit live producer call.

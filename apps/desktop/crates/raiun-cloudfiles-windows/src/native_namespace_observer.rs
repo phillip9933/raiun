@@ -604,3 +604,96 @@ impl ConfiguredRootConnection {
         })
     }
 }
+
+impl ConfiguredRootConnection {
+    /// Fixed synthetic-only copied metadata. No body/handle/admission escapes.
+    #[cfg(all(debug_assertions, feature = "synthetic-agent-integration"))]
+    pub(crate) fn create_worker_subfolder_fixture_observation(
+        &self,
+    ) -> Result<
+        (
+            crate::NamespaceDirectoryObservation,
+            crate::NamespaceDirectoryObservation,
+        ),
+        Error,
+    > {
+        let context = self.namespace_observation_context()?;
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        let mut path = root.path.clone();
+        let mut pins = Vec::with_capacity(3);
+        for (index, component) in ["Personal", "Courses & CEUs #1", "source.bin"]
+            .iter()
+            .enumerate()
+        {
+            path.push(component);
+            // open_root is metadata-only BACKUP_SEMANTICS|OPEN_REPARSE_POINT.
+            // No DELETE sharing: every no-follow ancestor remains pinned.
+            let handle = open_root(
+                &path,
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+            )?;
+            let snapshot = root_snapshot(handle.0)?;
+            let kind = crate::namespace_entry_observation::classify(
+                snapshot.file_attributes,
+                snapshot.reparse_tag,
+                snapshot.placeholder_state,
+                cleanup_cloud_reparse_tag(snapshot.reparse_tag),
+            );
+            let expected = if index < 2 {
+                crate::NamespaceEntryKind::CloudDirectory
+            } else {
+                crate::NamespaceEntryKind::CloudFile
+            };
+            if snapshot.identity.volume_serial != root.identity.volume_serial
+                || snapshot.identity.file_index == 0
+                || kind != Some(expected)
+                || !windows_paths_equal(
+                    &final_path_for_handle(handle.0).map_err(|_| Error::ConfiguredRootChanged)?,
+                    &path,
+                )
+            {
+                return Err(Error::ConfiguredRootChanged);
+            }
+            let opaque = native_namespace_directory::opaque_directory_identity(handle.0)?;
+            pins.push((handle, snapshot, opaque, path.clone()));
+        }
+        for (handle, before, opaque, path) in &pins {
+            let after = root_snapshot(handle.0)?;
+            if after.identity != before.identity
+                || after.file_attributes != before.file_attributes
+                || after.reparse_tag != before.reparse_tag
+                || after.placeholder_state != before.placeholder_state
+                || after.file_size != before.file_size
+                || native_namespace_directory::opaque_directory_identity(handle.0)? != *opaque
+                || !windows_paths_equal(
+                    &final_path_for_handle(handle.0).map_err(|_| Error::ConfiguredRootChanged)?,
+                    path,
+                )
+            {
+                return Err(Error::ConfiguredRootChanged);
+            }
+        }
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        if self.namespace_observation_context()? != context {
+            return Err(Error::ProviderUnavailable);
+        }
+        let copied = |index: usize| {
+            let (_, snapshot, opaque, _) = &pins[index];
+            crate::NamespaceDirectoryObservation {
+                local_file: crate::LocalFileIdentity {
+                    volume_serial: snapshot.identity.volume_serial,
+                    file_index: snapshot.identity.file_index,
+                },
+                attributes: snapshot.file_attributes,
+                reparse_tag: snapshot.reparse_tag,
+                placeholder_state: snapshot.placeholder_state,
+                opaque_identity: Some(*opaque),
+            }
+        };
+        Ok((copied(1), copied(2)))
+    }
+}

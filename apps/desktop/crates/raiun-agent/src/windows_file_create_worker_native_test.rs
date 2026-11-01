@@ -1,4 +1,4 @@
-//! One ignored actual observer -> owner -> SDK-worker acceptance fixture.
+//! Root held-stop and one existing-subfolder positive native worker fixture.
 //! No dispatch/custody/health admission is supplied by this module.
 use super::windows_file_create_public_entry_test::{RetainedFactory, digest, generated, policy};
 use super::*;
@@ -22,6 +22,62 @@ use std::{
     time::{Duration, Instant},
 };
 const SELECTOR: &str = "agent_windows::windows_file_create_worker_native_test::owner_workers_complete_then_cancel_held_create";
+const NESTED_SELECTOR: &str = "agent_windows::windows_file_create_worker_native_test::owner_workers_existing_personal_subfolder_completes";
+const FOLDER: &str = "Courses & CEUs #1";
+const PARENT_ID: &str = "managed-parent";
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum Case {
+    RootHeldStop,
+    ExistingSubfolder,
+}
+impl Case {
+    fn selector(self) -> &'static str {
+        if self == Self::RootHeldStop {
+            SELECTOR
+        } else {
+            NESTED_SELECTOR
+        }
+    }
+    fn nested(self) -> bool {
+        self == Self::ExistingSubfolder
+    }
+    fn relative(self, name: &str) -> String {
+        if self.nested() {
+            format!("{FOLDER}/{name}")
+        } else {
+            name.into()
+        }
+    }
+    fn parent(self, cloud: &Path) -> PathBuf {
+        let personal = cloud.join("Personal");
+        if self.nested() {
+            personal.join(FOLDER)
+        } else {
+            personal
+        }
+    }
+    fn components(self) -> Vec<&'static str> {
+        if self.nested() {
+            vec!["Personal", FOLDER, A]
+        } else {
+            vec!["Personal", A]
+        }
+    }
+    fn url(self, base: &str, name: Option<&str>) -> url::Url {
+        let mut value = url::Url::parse(base).unwrap();
+        if self.nested() || name.is_some() {
+            let mut parts = value.path_segments_mut().unwrap();
+            parts.pop_if_empty();
+            if self.nested() {
+                parts.push(FOLDER);
+            }
+            if let Some(name) = name {
+                parts.push(name);
+            }
+        }
+        value
+    }
+}
 const FLAG: &str = "RAIUN_CREATE_WORKER_NATIVE";
 const DIRECTORY: &str = "RAIUN_CREATE_WORKER_FIXTURE_DIR";
 const ROLE: &str = "RAIUN_CREATE_WORKER_CHILD_ROLE";
@@ -63,10 +119,10 @@ fn wait(mut predicate: impl FnMut() -> bool, label: &str) {
         thread::sleep(Duration::from_millis(10));
     }
 }
-fn guard() -> PathBuf {
+fn guard(case: Case) -> PathBuf {
     assert_eq!(std::env::var(FLAG).as_deref(), Ok("fresh-owned-state"));
     let args = std::env::args().collect::<Vec<_>>();
-    for value in ["--ignored", "--exact", "--test-threads=1", SELECTOR] {
+    for value in ["--ignored", "--exact", "--test-threads=1", case.selector()] {
         assert!(args.iter().any(|s| s == value));
     }
     assert!(
@@ -98,7 +154,7 @@ fn guard() -> PathBuf {
     assert_eq!(fs::read(root.join("OWNER.txt")).unwrap(), OWNER);
     root
 }
-fn spawn(root: &Path, role: &str) -> Child {
+fn spawn(root: &Path, role: &str, case: Case) -> Child {
     let mut c = Command::new(std::env::current_exe().unwrap());
     c.env_clear();
     for key in [
@@ -133,7 +189,7 @@ fn spawn(root: &Path, role: &str) -> Child {
         .args([
             "--ignored",
             "--exact",
-            SELECTOR,
+            case.selector(),
             "--test-threads=1",
             "--nocapture",
         ])
@@ -166,13 +222,18 @@ fn terminal(mut child: Child) -> bool {
         thread::sleep(Duration::from_millis(20));
     }
 }
-fn io_child(root: &Path, name: &str) {
+fn io_child(root: &Path, name: &str, case: Case) {
     assert!(terminal(spawn(
         root,
-        if name == A { "create-a" } else { "create-b" }
+        if name == A { "create-a" } else { "create-b" },
+        case
     )));
 }
-fn filesystem(root: &Path, role: &str) {
+fn filesystem(root: &Path, role: &str, case: Case) {
+    assert!(
+        !case.nested() || role == "create-a",
+        "Nested case has one positive file only"
+    );
     let name = if role == "create-a" { A } else { B };
     let personal = root.join("cloud-root/Personal");
     fs::read_dir(root.join("cloud-root"))
@@ -183,10 +244,19 @@ fn filesystem(root: &Path, role: &str) {
         .unwrap()
         .collect::<io::Result<Vec<_>>>()
         .unwrap();
+    let parent = case.parent(&root.join("cloud-root"));
+    if case.nested() {
+        // Enumerate the existing server directory through actual Cloud Files;
+        // no mkdir/manual placeholder/producer call supplies this parent.
+        fs::read_dir(&parent)
+            .unwrap()
+            .collect::<io::Result<Vec<_>>>()
+            .unwrap();
+    }
     let mut f = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(personal.join(name))
+        .open(parent.join(name))
         .unwrap();
     if name == A {
         generated(&mut f);
@@ -200,15 +270,26 @@ pub(super) fn observe_owner(
     connection: &cf::ConfiguredRootConnection,
     backend: &Arc<cf::OpenCloudPlaceholderBackend>,
     binding: &ActiveProviderBinding,
+    case: Case,
 ) -> Result<Value, String> {
     if backend.is_revoked() {
         return Err("Create worker owner retired".into());
     }
-    let o = connection
-        .rename_public_entry_fixture_observation(cf::RenamePublicEntryFixturePath::Source)
-        .map_err(|_| "Create worker native metadata unavailable")?;
+    let (parent, o) = if case.nested() {
+        let (parent, file) = connection
+            .create_worker_subfolder_fixture_observation()
+            .map_err(|_| "Create worker nested metadata unavailable")?;
+        (Some(parent), file)
+    } else {
+        (
+            None,
+            connection
+                .rename_public_entry_fixture_observation(cf::RenamePublicEntryFixturePath::Source)
+                .map_err(|_| "Create worker native metadata unavailable")?,
+        )
+    };
     let e = connection
-        .observe_namespace_entry(&["Personal", A])
+        .observe_namespace_entry(&case.components())
         .map_err(|_| "Create worker entry metadata unavailable")?;
     if backend.is_revoked() {
         return Err("Create worker owner retired during observation".into());
@@ -217,9 +298,11 @@ pub(super) fn observe_owner(
     {
         return Err("Create worker native scope mismatch".into());
     }
-    Ok(
-        json!({"file_index":o.local_file.file_index,"volume_serial":o.local_file.volume_serial,"attributes":o.attributes,"tag":o.reparse_tag,"state":o.placeholder_state,"identity":o.opaque_identity,"bytes":e.byte_len,"cloud_file":e.kind==cf::NamespaceEntryKind::CloudFile}),
-    )
+    let mut value = json!({"file_index":o.local_file.file_index,"volume_serial":o.local_file.volume_serial,"attributes":o.attributes,"tag":o.reparse_tag,"state":o.placeholder_state,"identity":o.opaque_identity,"bytes":e.byte_len,"cloud_file":e.kind==cf::NamespaceEntryKind::CloudFile});
+    if let Some(parent) = parent {
+        value["parent"] = json!({"file_index":parent.local_file.file_index,"volume_serial":parent.local_file.volume_serial,"attributes":parent.attributes,"tag":parent.reparse_tag,"state":parent.placeholder_state,"identity":parent.opaque_identity});
+    }
+    Ok(value)
 }
 fn inspect(agent: &WindowsAgent, binding: &ActiveProviderBinding) {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
@@ -237,19 +320,20 @@ fn inspect(agent: &WindowsAgent, binding: &ActiveProviderBinding) {
             .unwrap()
     );
 }
-fn observe(agent: &WindowsAgent, binding: &ActiveProviderBinding) -> Value {
+fn observe(agent: &WindowsAgent, binding: &ActiveProviderBinding, case: Case) -> Value {
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     agent
         .provider
         .commands
         .try_send(ProviderCommand::CreateWorkerObservation {
             binding: binding.clone(),
+            selected: case,
             response: tx,
         })
         .unwrap_or_else(|_| panic!("Original owner observation queue unavailable"));
     rx.recv_timeout(Duration::from_secs(3)).unwrap().unwrap()
 }
-fn owner(root_dir: &Path) {
+fn owner(root_dir: &Path, case: Case) {
     assert_eq!(
         std::env::var_os("LOCALAPPDATA").unwrap(),
         root_dir.join("gui-localappdata")
@@ -466,7 +550,7 @@ fn owner(root_dir: &Path) {
             },
             "actual original observer attached",
         );
-        io_child(root_dir, A);
+        io_child(root_dir, A, case);
         wait(
             || root_dir.join("A-HELD.json").is_file(),
             "worker A SDK response held",
@@ -544,7 +628,7 @@ fn owner(root_dir: &Path) {
                     .has_unresolved_content_authenticated_legacy()
                     .unwrap()
         );
-        let native = observe(&agent, &binding);
+        let native = observe(&agent, &binding, case);
         assert_eq!(native["file_index"], destination.local_file.file_index);
         assert_eq!(
             native["volume_serial"],
@@ -571,7 +655,7 @@ fn owner(root_dir: &Path) {
                     size,
                 } if space_id == SPACE
                     && root_resource_id == ROOT_ID
-                    && path == "/source.bin"
+                    && path == &format!("/{}", case.relative(A))
                     && remote_id == "created-a"
                     && etag == "\"created-a-v1\""
                     && *size == LENGTH =>
@@ -584,10 +668,65 @@ fn owner(root_dir: &Path) {
         assert_eq!(exact.len(), 1);
         assert_eq!(native["identity"], json!(exact[0]));
         assert_eq!(
-            digest(fs::File::open(cloud.join("Personal").join(A)).unwrap()),
+            digest(fs::File::open(case.parent(&cloud).join(A)).unwrap()),
             expected(A)
         );
-        io_child(root_dir, B);
+        if case.nested() {
+            assert_eq!(
+                destination.parent.local_components,
+                vec!["Personal".to_owned(), FOLDER.to_owned()]
+            );
+            assert_eq!(destination.parent.remote.resource_id, PARENT_ID);
+            assert_eq!(destination.parent.remote.etag, "\"parent-v1\"");
+            assert_eq!(
+                streams[0].manifest.binding().relative_path,
+                case.relative(A)
+            );
+            assert_eq!(
+                native["parent"]["file_index"],
+                destination.parent.local_file.file_index
+            );
+            assert_eq!(
+                native["parent"]["volume_serial"],
+                destination.parent.local_file.volume_serial
+            );
+            assert_eq!(
+                native["parent"]["attributes"].as_u64().unwrap() & 0x410,
+                0x410
+            );
+            assert_eq!(
+                native["parent"]["tag"].as_u64().unwrap() & !0xf000,
+                0x9000001a
+            );
+            let parents = entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    cf::ProviderIdentityBinding::Directory {
+                        identity,
+                        space_id,
+                        root_resource_id,
+                        path,
+                        remote_id,
+                    } if space_id == SPACE
+                        && root_resource_id == ROOT_ID
+                        && path == &format!("/{FOLDER}")
+                        && remote_id == PARENT_ID =>
+                    {
+                        Some(*identity)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(parents.len(), 1);
+            assert_eq!(native["parent"]["identity"], json!(parents[0]));
+            report(
+                root_dir,
+                "CASE.json",
+                json!({"passed":true,"existing_managed_parent":true,"original_parent_intent_retained":true,"nested_native_catalog_and_linked_ack":true,"one_put":true,"forced_cleanup":false}),
+            );
+            return;
+        }
+        io_child(root_dir, B, case);
         wait(
             || root_dir.join("B-HELD.json").is_file(),
             "worker B SDK response held",
@@ -647,6 +786,12 @@ fn owner(root_dir: &Path) {
     let disconnected = agent.provider.disconnect().is_ok();
     let close_joined = agent.stop_fresh_close_worker().is_ok();
     let stopped = agent.stop_and_join().is_ok();
+    if case.nested() && exercise.is_ok() && disconnected {
+        assert_eq!(
+            digest(fs::File::open(case.parent(&cloud).join(A)).unwrap()),
+            expected(A)
+        );
+    }
     let registration = cf::pin_registered_configured_root(&cloud, physical).is_ok();
     let private = state.verify_path().is_ok() && sessions.verify_path().is_ok();
     report(
@@ -666,6 +811,7 @@ struct Server {
     gets: [Arc<AtomicUsize>; 2],
     invalid: Arc<AtomicUsize>,
     worker: Option<thread::JoinHandle<()>>,
+    case: Case,
 }
 fn etag(index: usize) -> &'static str {
     if index == 0 {
@@ -710,8 +856,47 @@ fn xml(path: &str, index: Option<usize>, created: [bool; 2], children: bool) -> 
         "<d:multistatus xmlns:d=\"DAV:\" xmlns:oc=\"http://owncloud.org/ns\">{all}</d:multistatus>"
     )
 }
+fn nested_xml(
+    path: &str,
+    parent: bool,
+    leaf: bool,
+    created: bool,
+    children: bool,
+    parent_path: &str,
+    file_path: &str,
+) -> String {
+    let entry = |path: &str, directory: bool, id: &str, tag: &str, length: u64| {
+        let href = path.replace('&', "&amp;");
+        format!(
+            r#"<d:response><d:href>{href}</d:href><d:propstat><d:prop><d:resourcetype>{}</d:resourcetype><d:getcontentlength>{length}</d:getcontentlength><d:getetag>{tag}</d:getetag><oc:fileid>{id}</oc:fileid><oc:permissions>RDNVW</oc:permissions></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"#,
+            if directory { "<d:collection/>" } else { "" }
+        )
+    };
+    let parent_tag = if created {
+        "\"parent-v2\""
+    } else {
+        "\"parent-v1\""
+    };
+    let mut body = if leaf {
+        entry(path, false, remote_id(0), etag(0), LENGTH)
+    } else if parent {
+        entry(path, true, PARENT_ID, parent_tag, 0)
+    } else {
+        entry(path, true, ROOT_ID, "\"root-v1\"", 0)
+    };
+    if children && !leaf {
+        if !parent {
+            body.push_str(&entry(parent_path, true, PARENT_ID, parent_tag, 0));
+        } else if created {
+            body.push_str(&entry(file_path, false, remote_id(0), etag(0), LENGTH));
+        }
+    }
+    format!(
+        "<d:multistatus xmlns:d=\"DAV:\" xmlns:oc=\"http://owncloud.org/ns\">{body}</d:multistatus>"
+    )
+}
 impl Server {
-    fn start(root: &Path) -> Self {
+    fn start(root: &Path, case: Case) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
@@ -728,6 +913,9 @@ impl Server {
             root.to_path_buf(),
         );
         let worker = thread::spawn(move || {
+            let base = format!("http://{address}{DAV}");
+            let parent_url = case.url(&base, None);
+            let file_urls = [case.url(&base, Some(A)), case.url(&base, Some(B))];
             let mut created = [false; 2];
             let deadline = Instant::now() + Duration::from_secs(180);
             while !st.load(Ordering::Acquire) && Instant::now() < deadline {
@@ -791,9 +979,8 @@ impl Server {
                     let mut body = vec![0u8; length];
                     socket.read_exact(&mut body).unwrap();
                 }
-                let index = [A, B]
-                    .iter()
-                    .position(|name| path == format!("{DAV}{name}"));
+                let index = file_urls.iter().position(|url| path == url.path());
+                let is_parent = case.nested() && path.trim_end_matches('/') == parent_url.path();
                 if method == "PUT" {
                     let Some(i) = index else {
                         bad.fetch_add(1, Ordering::AcqRel);
@@ -818,6 +1005,14 @@ impl Server {
                         condition.contains(&format!("<http://{address}{DAV}>"))
                             && condition.contains("([\"root-v1\"])")
                     );
+                    if case.nested() {
+                        assert_eq!(i, 0, "one nested positive only");
+                        assert_eq!(
+                            condition,
+                            &format!("<{base}> ([\"root-v1\"]) <{parent_url}> ([\"parent-v1\"])")
+                        );
+                        assert!(!condition.contains("%2520") && !condition.contains("%2523"));
+                    }
                     let label = if i == 0 { "A" } else { "B" };
                     let mut out = fs::OpenOptions::new()
                         .write(true)
@@ -888,18 +1083,59 @@ impl Server {
                     if !response(
                         &mut socket,
                         "207 Multi-Status",
-                        &xml(path, None, created, children),
+                        &if case.nested() {
+                            nested_xml(
+                                path,
+                                false,
+                                false,
+                                created[0],
+                                children,
+                                parent_url.path(),
+                                file_urls[0].path(),
+                            )
+                        } else {
+                            xml(path, None, created, children)
+                        },
                         &[],
                     ) {
                         bad.fetch_add(1, Ordering::AcqRel);
                     }
-                } else if method == "PROPFIND" && index.is_some() {
-                    let i = index.unwrap();
+                } else if method == "PROPFIND" && is_parent {
+                    let children = headers.get("depth").is_some_and(|value| value != "0");
+                    if !response(
+                        &mut socket,
+                        "207 Multi-Status",
+                        &nested_xml(
+                            path,
+                            true,
+                            false,
+                            created[0],
+                            children,
+                            parent_url.path(),
+                            file_urls[0].path(),
+                        ),
+                        &[],
+                    ) {
+                        bad.fetch_add(1, Ordering::AcqRel);
+                    }
+                } else if let ("PROPFIND", Some(i)) = (method, index) {
                     let wrote = if created[i] {
                         response(
                             &mut socket,
                             "207 Multi-Status",
-                            &xml(path, Some(i), created, false),
+                            &if case.nested() {
+                                nested_xml(
+                                    path,
+                                    false,
+                                    true,
+                                    created[0],
+                                    false,
+                                    parent_url.path(),
+                                    file_urls[0].path(),
+                                )
+                            } else {
+                                xml(path, Some(i), created, false)
+                            },
                             &[],
                         )
                     } else {
@@ -932,6 +1168,7 @@ impl Server {
             gets,
             invalid,
             worker: Some(worker),
+            case,
         }
     }
     fn finish(mut self) -> bool {
@@ -940,7 +1177,7 @@ impl Server {
         joined
             && self.invalid.load(Ordering::Acquire) == 0
             && self.puts[0].load(Ordering::Acquire) == 1
-            && self.puts[1].load(Ordering::Acquire) == 1
+            && self.puts[1].load(Ordering::Acquire) == if self.case.nested() { 0 } else { 1 }
             && self.gets[0].load(Ordering::Acquire) == 1
             && self.gets[1].load(Ordering::Acquire) == 0
     }
@@ -956,11 +1193,19 @@ impl Drop for Server {
 #[test]
 #[ignore = "actual native observer/owner/two SDK workers; fresh isolated ordinary Windows user +explicit controller admission required"]
 fn owner_workers_complete_then_cancel_held_create() {
-    let root = guard();
+    run(Case::RootHeldStop);
+}
+#[test]
+#[ignore = "actual existing managed Personal subfolder/create/native/custody; fresh ordinary Windows user and controller admission required"]
+fn owner_workers_existing_personal_subfolder_completes() {
+    run(Case::ExistingSubfolder);
+}
+fn run(case: Case) {
+    let root = guard(case);
     if let Some(role) = std::env::var_os(ROLE) {
         match role.to_str().unwrap() {
-            "owner" => owner(&root),
-            "create-a" | "create-b" => filesystem(&root, role.to_str().unwrap()),
+            "owner" => owner(&root, case),
+            "create-a" | "create-b" => filesystem(&root, role.to_str().unwrap(), case),
             _ => panic!("unknown fixed native child role"),
         };
         return;
@@ -972,10 +1217,10 @@ fn owner_workers_complete_then_cancel_held_create() {
     report(
         &root,
         "STARTED.json",
-        json!({"selector":SELECTOR,"passed":false,"runtime_admission_by_controller_required":true}),
+        json!({"selector":case.selector(),"passed":false,"runtime_admission_by_controller_required":true}),
     );
     fs::create_dir(root.join("gui-localappdata")).unwrap();
-    let server = Server::start(&root);
+    let server = Server::start(&root, case);
     let mut f = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -984,7 +1229,7 @@ fn owner_workers_complete_then_cancel_held_create() {
     f.write_all(server.origin.as_bytes()).unwrap();
     f.sync_all().unwrap();
     drop(f);
-    let exercise = terminal(spawn(&root, "owner"));
+    let exercise = terminal(spawn(&root, "owner", case));
     let protocol = server.finish();
     let owner_report: Value =
         serde_json::from_slice(&fs::read(root.join("OWNER-RESULTS.json")).unwrap()).unwrap();
