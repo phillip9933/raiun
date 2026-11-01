@@ -11,6 +11,8 @@ mod backend;
 #[cfg(any(windows, test))]
 mod close_capture_admission;
 mod edit_journal;
+#[cfg(any(windows, test))]
+mod file_create_phase;
 mod initial_edit_queue;
 #[cfg(any(windows, test))]
 mod namespace_entry_observation;
@@ -131,6 +133,8 @@ pub use vault_custody::{
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod native;
+#[cfg(windows)]
+pub use native::native_file_create::{FileCreateReply, FileCreateStep, FileCreateTask};
 
 /// Cloud Files API platform version. This reports API capability only; it is
 /// not evidence that Raiun has connected a provider or mounted a drive.
@@ -826,6 +830,41 @@ impl ConfiguredRootConnection {
         self.inner
             .prepare_plain_file_capture(backend, parent, name, record_generation)
             .map(|inner| NativePlainFileCapture { inner })
+    }
+    /// Start one owner-held attempt. Only the returned task may travel to a
+    /// joined SDK worker; native custody stays inside this original connection.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_fresh_personal_file_create(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        name: &str,
+        authorization: namespace_intent::CapturedAuthorization,
+        generation: u64,
+        job: &StreamedRecoveryJob,
+        current: std::sync::Arc<
+            dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync,
+        >,
+    ) -> Result<FileCreateStep, Error> {
+        self.inner.begin_fresh_personal_file_create(
+            backend,
+            name,
+            authorization,
+            generation,
+            job,
+            current,
+        )
+    }
+    /// Consume exactly the original attempt's next reply on the owner thread.
+    pub fn advance_fresh_personal_file_create(
+        &self,
+        reply: FileCreateReply,
+    ) -> Result<FileCreateStep, Error> {
+        self.inner.advance_fresh_personal_file_create(reply)
+    }
+    /// Close admission/cancel original jobs. False retains root/native custody
+    /// until actual task-owned SDK data is dropped; caller still joins workers.
+    pub fn close_fresh_personal_file_create(&self) -> bool {
+        self.inner.close_fresh_personal_file_create()
     }
     /// Explicit direct-Personal create with same-invocation native/custody completion.
     /// The currentness callback must use nonblocking original owner/epoch checks.

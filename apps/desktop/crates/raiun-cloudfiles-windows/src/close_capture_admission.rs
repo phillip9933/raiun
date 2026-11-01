@@ -350,6 +350,7 @@ impl DispatchProbeLifetime {
 
 impl SaveRenameTicket<'_> {
     #[cfg(any(windows, test))]
+    #[cfg_attr(not(test), allow(dead_code))] // Phased create uses owned custody; retain borrowed contract/tests.
     pub(crate) fn dispatch_probe(
         &self,
         tracker: Arc<CloseCaptureAdmission>,

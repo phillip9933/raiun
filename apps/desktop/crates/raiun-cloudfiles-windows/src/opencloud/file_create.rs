@@ -32,16 +32,16 @@ impl Admission {
             .map_err(|_| BackendError::Unavailable)?;
         self.check(backend)
     }
-    /// Exact FILE publication; no discovery, HTTP or journal I/O under this fence.
-    pub(crate) fn publish_and_complete<T>(
+    pub(crate) fn refresh(
         &self,
         backend: &Arc<OpenCloudPlaceholderBackend>,
-        proof: &VerifiedCreateReadback,
-        complete: impl FnOnce(&[u8; 16]) -> Result<T, crate::Error>,
-    ) -> Result<T, crate::Error> {
-        let unavailable = || crate::Error::EditRecoveryUnavailable;
-        self.check(backend).map_err(|_| unavailable())?;
-        let report = proof.report_for(&proof.intent).map_err(|_| unavailable())?;
+        proof: VerifiedCreateReadback,
+    ) -> Result<RefreshedCreateReadback, BackendError> {
+        let unavailable = || BackendError::Unavailable;
+        self.check(backend).map_err(|_| BackendError::Unavailable)?;
+        let report = proof
+            .report_for(&proof.intent)
+            .map_err(|_| BackendError::Unavailable)?;
         if report.destination.parent.scope != self.parent.scope
             || report.destination.parent.authorization != self.auth
             || report.destination.parent.remote != self.parent.remote
@@ -59,8 +59,8 @@ impl Admission {
         let root = backend
             .client
             .stat_with_context(&scope.space_id, "/", context)
-            .map_err(|_| unavailable())?;
-        self.check(backend).map_err(|_| unavailable())?;
+            .map_err(|_| BackendError::Unavailable)?;
+        self.check(backend).map_err(|_| BackendError::Unavailable)?;
         if !root.directory || root.encrypted || !root.writable || root.id != scope.root_resource_id
         {
             return Err(unavailable());
@@ -68,8 +68,8 @@ impl Admission {
         let observed = backend
             .client
             .stat_with_context(&scope.space_id, &path, context)
-            .map_err(|_| unavailable())?;
-        self.check(backend).map_err(|_| unavailable())?;
+            .map_err(|_| BackendError::Unavailable)?;
+        self.check(backend).map_err(|_| BackendError::Unavailable)?;
         if observed.path != path
             || observed.directory
             || observed.encrypted
@@ -81,6 +81,27 @@ impl Admission {
         {
             return Err(unavailable());
         }
+        Ok(RefreshedCreateReadback { proof })
+    }
+    /// Local publication only; all HTTP finished in the consumed refresh task.
+    pub(crate) fn publish_and_complete<T>(
+        &self,
+        backend: &Arc<OpenCloudPlaceholderBackend>,
+        refreshed: &RefreshedCreateReadback,
+        complete: impl FnOnce(&[u8; 16]) -> Result<T, crate::Error>,
+    ) -> Result<T, crate::Error> {
+        let unavailable = || crate::Error::EditRecoveryUnavailable;
+        self.check(backend).map_err(|_| unavailable())?;
+        let proof = &refreshed.proof;
+        let report = proof.report_for(&proof.intent).map_err(|_| unavailable())?;
+        if report.destination.parent.scope != self.parent.scope
+            || report.destination.parent.authorization != self.auth
+            || report.destination.parent.remote != self.parent.remote
+        {
+            return Err(unavailable());
+        }
+        let scope = &self.parent.scope;
+        let path = format!("/{}", report.destination.name);
         let identity = binding_identity(
             &self.catalog_scope,
             "file",
@@ -276,6 +297,18 @@ impl Admission {
             content: Some(content.clone()),
         };
         Ok(VerifiedCreateReadback { intent, report })
+    }
+}
+/// Move-only evidence that exact original metadata was refreshed off-owner.
+pub(crate) struct RefreshedCreateReadback {
+    proof: VerifiedCreateReadback,
+}
+impl RefreshedCreateReadback {
+    pub(crate) fn report_for(
+        &self,
+        intent: &NamespaceIntent,
+    ) -> Result<NamespaceDestinationReport, BackendError> {
+        self.proof.report_for(intent)
     }
 }
 /// Constructor is private: only this original live SDK call can mint this fact.

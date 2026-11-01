@@ -42,7 +42,7 @@ use std::{
 use zeroize::Zeroizing;
 
 #[path = "native_file_create.rs"]
-mod native_file_create;
+pub(super) mod native_file_create;
 pub(crate) use native_file_create::NativeFileCreateCompletion;
 #[path = "native_file_rename.rs"]
 pub(super) mod native_file_rename;
@@ -968,6 +968,7 @@ pub(super) struct ConfiguredRootConnection {
     namespace_observer: Option<native_namespace_observer::NamespaceObserver>,
     namespace_binding: native_namespace_observer::NamespaceObserverBinding,
     namespace_observation_closed: bool,
+    create_owner: std::cell::RefCell<native_file_create::CreateOwner>,
 }
 
 #[allow(dead_code)]
@@ -3556,6 +3557,7 @@ impl ConfiguredRootConnection {
                 namespace_observer: None,
                 namespace_binding,
                 namespace_observation_closed: false,
+                create_owner: Default::default(),
             };
             if connection.finish(false).is_err() {
                 let _ = Box::leak(Box::new(connection));
@@ -3572,6 +3574,7 @@ impl ConfiguredRootConnection {
             namespace_observer: None,
             namespace_binding,
             namespace_observation_closed: false,
+            create_owner: Default::default(),
         };
         if already_registered {
             if let Some(history) = vault_history {
@@ -3712,6 +3715,11 @@ impl ConfiguredRootConnection {
     }
 
     fn finish(&mut self, unregister: bool) -> Result<(), Error> {
+        if !self.close_fresh_personal_file_create() {
+            // Cancelled but actual SDK/body ownership is still in flight.
+            // Caller must drain/join; keep this same root/attempt connected.
+            return Err(Error::EditRecoveryUnavailable);
+        }
         if self.root.is_none() && !self.connected {
             if self.namespace_observer.is_some() {
                 return Err(Error::ConnectionStateInvalid);
@@ -3782,6 +3790,7 @@ impl ConfiguredRootConnection {
             self.context_key,
             self.connection_key,
             self.connected,
+            std::mem::take(self.create_owner.get_mut()),
         )));
         self.connected = false;
     }
