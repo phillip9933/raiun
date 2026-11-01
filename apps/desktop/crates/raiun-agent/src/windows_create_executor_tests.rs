@@ -183,3 +183,188 @@ fn owner_unwind_cancels_before_joining_actual_worker() {
     assert!(result.is_err());
     assert!(finished.recv_timeout(Duration::from_secs(2)).unwrap());
 }
+
+#[test]
+fn mixed_kinds_share_two_workers_and_backpressure_preserves_original_task() {
+    use super::super::windows_namespace_dispatcher::{CreateKind, matching_create_completion};
+    struct Tagged {
+        kind: CreateKind,
+        original: Arc<()>,
+        deadline: std::time::Instant,
+        work: Work,
+    }
+    fn execute(task: Tagged) -> CreateKind {
+        held(task.work);
+        task.kind
+    }
+    let mut pool = Executor::start(execute).unwrap();
+    let (file, file_started, release_file, file_dropped) = job();
+    let (directory, directory_started, release_directory, directory_dropped) = job();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let file_id = pool
+        .submit(Tagged {
+            kind: CreateKind::File,
+            original: Arc::new(()),
+            deadline,
+            work: file,
+        })
+        .ok()
+        .unwrap();
+    let directory_id = pool
+        .submit(Tagged {
+            kind: CreateKind::Directory,
+            original: Arc::new(()),
+            deadline,
+            work: directory,
+        })
+        .ok()
+        .unwrap();
+    file_started.recv_timeout(Duration::from_secs(2)).unwrap();
+    directory_started
+        .recv_timeout(Duration::from_secs(2))
+        .unwrap();
+    let (third, _, _, third_dropped) = job();
+    let original = Arc::new(());
+    let third = pool
+        .submit(Tagged {
+            kind: CreateKind::Directory,
+            original: original.clone(),
+            deadline,
+            work: third,
+        })
+        .err()
+        .unwrap();
+    assert!(Arc::ptr_eq(&third.original, &original));
+    assert_eq!(third.deadline, deadline);
+    assert!(!third_dropped.load(Ordering::Acquire));
+    release_file.send(()).unwrap();
+    release_directory.send(()).unwrap();
+    let wait_until = std::time::Instant::now() + Duration::from_secs(2);
+    while !(file_dropped.load(Ordering::Acquire) && directory_dropped.load(Ordering::Acquire)) {
+        assert!(std::time::Instant::now() < wait_until);
+        thread::yield_now();
+    }
+    // Replies retain both permits until owner polling; the same unexecuted
+    // directory task and its original deadline return under backpressure.
+    let third = pool.submit(third).err().unwrap();
+    assert!(Arc::ptr_eq(&third.original, &original));
+    assert_eq!(third.deadline, deadline);
+    drop(third);
+    assert!(third_dropped.load(Ordering::Acquire));
+    let mut completed = 0;
+    while completed < 2 {
+        assert!(std::time::Instant::now() < wait_until);
+        if let Some(reply) = pool.poll() {
+            let kind = reply.result.unwrap();
+            let expected_id = if kind == CreateKind::File {
+                file_id
+            } else {
+                directory_id
+            };
+            assert!(matching_create_completion(
+                kind,
+                expected_id,
+                kind,
+                reply.id
+            ));
+            let wrong = if kind == CreateKind::File {
+                CreateKind::Directory
+            } else {
+                CreateKind::File
+            };
+            assert!(!matching_create_completion(
+                wrong,
+                expected_id,
+                kind,
+                reply.id
+            ));
+            assert!(!matching_create_completion(
+                kind,
+                expected_id + 2,
+                kind,
+                reply.id
+            ));
+            completed += 1;
+        } else {
+            thread::yield_now();
+        }
+    }
+    pool.stop_and_join();
+}
+
+#[test]
+fn mixed_owner_unwind_cancels_both_jobs_before_join_and_native_drop() {
+    use super::super::windows_namespace_dispatcher::CreateKind;
+    struct Running {
+        kind: CreateKind,
+        cancelled: Arc<AtomicBool>,
+        started: mpsc::Sender<()>,
+        completed: Arc<AtomicBool>,
+    }
+    fn execute(task: Running) -> CreateKind {
+        task.started.send(()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !task.cancelled.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        task.completed
+            .store(task.cancelled.load(Ordering::Acquire), Ordering::Release);
+        task.kind
+    }
+    struct NativeCustody {
+        completed: [Arc<AtomicBool>; 2],
+        dropped_after_join: Arc<AtomicBool>,
+    }
+    impl Drop for NativeCustody {
+        fn drop(&mut self) {
+            self.dropped_after_join.store(
+                self.completed
+                    .iter()
+                    .all(|done| done.load(Ordering::Acquire)),
+                Ordering::Release,
+            );
+        }
+    }
+    let completed = [
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    ];
+    let dropped_after_join = Arc::new(AtomicBool::new(false));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _native = NativeCustody {
+            completed: completed.clone(),
+            dropped_after_join: dropped_after_join.clone(),
+        };
+        let mut workers = Executor::start(execute).unwrap();
+        let cancelled = [
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        ];
+        let cancel = cancelled.clone();
+        let _owner = CancelOnDrop::new(Arc::new(move || {
+            for job in &cancel {
+                job.store(true, Ordering::Release);
+            }
+        }));
+        for (index, kind) in [CreateKind::File, CreateKind::Directory]
+            .into_iter()
+            .enumerate()
+        {
+            let (start, ready) = mpsc::channel();
+            workers
+                .submit(Running {
+                    kind,
+                    cancelled: cancelled[index].clone(),
+                    started: start,
+                    completed: completed[index].clone(),
+                })
+                .ok()
+                .unwrap();
+            ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        }
+        panic!("owned mixed lifecycle test panic");
+    }));
+    assert!(result.is_err());
+    assert!(dropped_after_join.load(Ordering::Acquire));
+    assert!(completed.iter().all(|done| done.load(Ordering::Acquire)));
+}

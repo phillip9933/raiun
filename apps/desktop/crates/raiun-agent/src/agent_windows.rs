@@ -504,6 +504,8 @@ struct ProviderManager {
     mixed_namespace_test_activation: AtomicBool,
     #[cfg(all(test, debug_assertions))]
     create_test_activation: AtomicBool,
+    #[cfg(all(test, debug_assertions))]
+    directory_phase_test_activation: AtomicBool,
     // Serializes explicit mount preference with every automatic reconnect.
     mount_preference: Mutex<bool>,
     ordinary_edits: Arc<Mutex<Option<windows_headless_edits::CachedStatus>>>,
@@ -795,6 +797,7 @@ enum ProviderCommand {
         mixed_namespace_fixture: bool,
         file_rename_producer: Option<Box<windows_file_rename_producer::Producer>>,
         create_enabled: bool,
+        directory_phase_enabled: bool,
         response: std::sync::mpsc::SyncSender<Result<(), String>>,
     },
     DispatchRecovery {
@@ -1510,6 +1513,7 @@ impl ProviderManager {
                             mixed_namespace_fixture,
                             file_rename_producer: next_file_rename_producer,
                             create_enabled,
+                            directory_phase_enabled,
                             response,
                         } => {
                             let candidate_binding = ActiveProviderBinding {
@@ -1599,14 +1603,18 @@ impl ProviderManager {
                                             namespace_producer=namespace_admission.map(|admission| windows_namespace_producer::Producer::new(admission,composite,worker_namespace_controls.clone(),worker_namespace_status.clone()));
                                             None
                                         };
-                                        if create_enabled {
-                                            match windows_file_create_producer::Workers::start(raiun_cloudfiles_windows::FileCreateTask::execute) {
+                                        if create_enabled || directory_phase_enabled {
+                                            match windows_file_create_producer::Workers::start(windows_file_create_producer::Task::execute) {
                                                 Ok(workers)=>create_workers=Some(workers),
                                                 Err(_)=>if let Ok(mut notice)=worker_rename_error.lock() {notice.record(generation,worker_generation.load(Ordering::Acquire),windows_file_create_producer::HOLD);},
                                             }
                                         }
-                                        namespace_dispatcher = if namespace_producer.is_none() && (next_file_rename_producer.is_some() || shared_directory.is_some()) {
+                                        namespace_dispatcher = if namespace_producer.is_none() && (next_file_rename_producer.is_some() || shared_directory.is_some() || directory_phase_enabled) {
                                             let make_dispatcher = || {
+                                                if directory_phase_enabled {
+                                                    if create_workers.is_none() { return Err(windows_file_create_producer::HOLD); }
+                                                    return windows_namespace_dispatcher::Dispatcher::new_create(next_file_rename_producer, windows_file_create_producer::Producer::new(&next_backend,&worker_generation,generation,expected_identity,create_enabled,true));
+                                                }
                                                 #[cfg(all(test, debug_assertions))]
                                                 if mixed_namespace_fixture {
                                                     return windows_namespace_dispatcher::Dispatcher::new_mixed_fixture(next_file_rename_producer, shared_directory.ok_or("Mixed directory consumer missing")?);
@@ -1614,8 +1622,8 @@ impl ProviderManager {
                                                 windows_namespace_dispatcher::Dispatcher::new(next_file_rename_producer,shared_directory)
                                             };
                                             match make_dispatcher() {
-                                                Ok(dispatcher)=>Some(if create_workers.is_some() {
-                                                    dispatcher.with_create(windows_file_create_producer::Producer::new(&next_backend,&worker_generation,generation,expected_identity))
+                                                Ok(dispatcher)=>Some(if create_workers.is_some() && !directory_phase_enabled {
+                                                    dispatcher.with_create(windows_file_create_producer::Producer::new(&next_backend,&worker_generation,generation,expected_identity,create_enabled,false))
                                                 } else {dispatcher}),
                                                 Err(message)=> {
                                                     if let Ok(mut notice)=worker_rename_error.lock() {
@@ -1825,7 +1833,11 @@ impl ProviderManager {
                             let _ = response.send(result);
                         }
                         ProviderCommand::Disconnect(response) => {
-                            stop_create_workers(namespace_dispatcher.as_mut(),connection.as_ref(),&mut create_workers);
+                            if let Err(error) = stop_create_workers(namespace_dispatcher.as_mut(),connection.as_ref(),&mut create_workers) {
+                                if let Ok(mut notice) = worker_rename_error.lock() { notice.record(worker_generation.load(Ordering::Acquire),worker_generation.load(Ordering::Acquire),windows_file_create_producer::HOLD); }
+                                let _ = response.send(Err(error));
+                                continue;
+                            }
                             namespace_producer=None;
                             if let Some(dispatcher)=namespace_dispatcher.as_mut() { dispatcher.hold(); }
                             namespace_dispatcher=None;
@@ -1849,7 +1861,11 @@ impl ProviderManager {
                             let _ = response.send(result);
                         }
                         ProviderCommand::Stop(response) => {
-                            stop_create_workers(namespace_dispatcher.as_mut(),connection.as_ref(),&mut create_workers);
+                            if let Err(error) = stop_create_workers(namespace_dispatcher.as_mut(),connection.as_ref(),&mut create_workers) {
+                                if let Ok(mut notice) = worker_rename_error.lock() { notice.record(worker_generation.load(Ordering::Acquire),worker_generation.load(Ordering::Acquire),windows_file_create_producer::HOLD); }
+                                let _ = response.send(Err(error));
+                                continue;
+                            }
                             namespace_producer=None;
                             if let Some(dispatcher)=namespace_dispatcher.as_mut() { dispatcher.hold(); }
                             namespace_dispatcher=None;
@@ -1955,10 +1971,10 @@ impl ProviderManager {
                         }
                     }
                 }
-                stop_create_workers(namespace_dispatcher.as_mut(),connection.as_ref(),&mut create_workers);
+                let create_drained = stop_create_workers(namespace_dispatcher.as_mut(),connection.as_ref(),&mut create_workers).is_ok();
                 cleanup_holds.clear();
                 worker_jobs.cancel_all();
-                if disconnect_provider_connection(
+                if !create_drained || disconnect_provider_connection(
                     &mut retired_vaults,
                     &mut connection,
                     &mut backend,
@@ -1985,6 +2001,8 @@ impl ProviderManager {
             mixed_namespace_test_activation: AtomicBool::new(false),
             #[cfg(all(test, debug_assertions))]
             create_test_activation: AtomicBool::new(false),
+            #[cfg(all(test, debug_assertions))]
+            directory_phase_test_activation: AtomicBool::new(false),
             mount_preference: Mutex::new(!headless),
             ordinary_edits,
             proxy: windows_proxy::Service::default(),
@@ -2120,6 +2138,10 @@ impl ProviderManager {
         let create_enabled = windows_file_create_producer::PRODUCTION_ENABLED;
         #[cfg(all(test, debug_assertions))]
         let create_enabled = create_enabled || self.create_test_activation.load(Ordering::Acquire);
+        let directory_phase_enabled = false;
+        #[cfg(all(test, debug_assertions))]
+        let directory_phase_enabled =
+            directory_phase_enabled || self.directory_phase_test_activation.load(Ordering::Acquire);
         let shared_directory_ready = windows_namespace_dispatcher::DIRECTORY_ROUTING_READY;
         #[cfg(all(test, debug_assertions))]
         let shared_directory_ready = shared_directory_ready || mixed_namespace_fixture;
@@ -2128,6 +2150,9 @@ impl ProviderManager {
         let namespace_enabled = namespace_enabled
             || self.namespace_test_activation.load(Ordering::Acquire)
             || mixed_namespace_fixture;
+        if directory_phase_enabled && namespace_enabled {
+            return Err("Directory phase and legacy fixture routes are exclusive".to_owned());
+        }
         let namespace_admission = if namespace_enabled {
             Some(windows_namespace_producer::Admission::capture(
                 &backend,
@@ -2183,6 +2208,7 @@ impl ProviderManager {
                 mixed_namespace_fixture,
                 file_rename_producer,
                 create_enabled,
+                directory_phase_enabled,
                 response,
             })
             .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
@@ -2864,20 +2890,28 @@ fn stop_create_workers(
     dispatcher: Option<&mut windows_namespace_dispatcher::Dispatcher>,
     connection: Option<&raiun_cloudfiles_windows::ConfiguredRootConnection>,
     workers: &mut Option<windows_file_create_producer::Workers>,
-) {
+) -> Result<(), String> {
     if let Some(active) = connection {
         if let Some(dispatcher) = dispatcher {
             dispatcher.stop_create(active);
         }
         let _ = active.close_fresh_personal_file_create();
+        let _ = active.close_fresh_personal_directory_create();
     }
     // No Agent/model/error mutex is held while joining. Results cannot block send.
     if let Some(mut workers) = workers.take() {
         workers.stop_and_join();
     }
     if let Some(active) = connection {
-        let _ = active.close_fresh_personal_file_create();
+        // Evaluate BOTH closes even if the first refuses. Neither cancellation
+        // nor a close=false is proof that the original task data was drained.
+        let file_closed = active.close_fresh_personal_file_create();
+        let directory_closed = active.close_fresh_personal_directory_create();
+        if !file_closed || !directory_closed {
+            return Err(windows_file_create_producer::HOLD.to_owned());
+        }
     }
+    Ok(())
 }
 
 fn disconnect_provider_connection(

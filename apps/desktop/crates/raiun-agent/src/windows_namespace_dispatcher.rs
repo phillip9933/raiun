@@ -7,6 +7,20 @@ const MAX_PAIRS: usize = 32;
 pub(crate) const DIRECTORY_ROUTING_READY: bool = false;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CreateKind {
+    File,
+    Directory,
+}
+pub(crate) fn matching_create_completion(
+    expected: CreateKind,
+    flight: u64,
+    actual: CreateKind,
+    reply: u64,
+) -> bool {
+    flight != 0 && flight == reply && expected == actual
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Action {
     Added,
     Modified,
@@ -72,6 +86,31 @@ fn select_observed(
             Ok(Selection::CreateFile)
         }
         Some(ObservedShape::PlainDirectory) if directories && personal(parts) => {
+            Ok(Selection::OfferDirectory)
+        }
+        _ => Err("Observed entry needs attention"),
+    }
+}
+/// Separate permissions for the owner-phase route. Legacy diagnostics keep
+/// their existing selector; no file/mixed-fixture flag admits directory work.
+fn select_create_observed(
+    parts: &[String],
+    shape: Option<ObservedShape>,
+    allow_file: bool,
+    allow_directory: bool,
+    added: bool,
+) -> Result<Selection, &'static str> {
+    if !(allow_file || allow_directory) || !observation_namespace(parts) {
+        return Err("Unsupported create namespace");
+    }
+    match shape {
+        Some(ObservedShape::Cloud) => Ok(Selection::SkipCloud),
+        Some(ObservedShape::PlainFile) if allow_file && create_personal(parts) => {
+            Ok(Selection::CreateFile)
+        }
+        Some(ObservedShape::PlainDirectory)
+            if allow_directory && added && create_personal(parts) =>
+        {
             Ok(Selection::OfferDirectory)
         }
         _ => Err("Observed entry needs attention"),
@@ -267,7 +306,7 @@ mod connected {
             if mkdir.is_some() && !DIRECTORY_ROUTING_READY {
                 return Err("Shared directory routing is not admitted");
             }
-            Self::build(rename, mkdir)
+            Self::build(rename, mkdir, None)
         }
         // Test admission changes routing only; original shared/authorization
         // checks and every actual consumer/native guard remain mandatory.
@@ -276,15 +315,22 @@ mod connected {
             rename: Option<Box<rename::Producer>>,
             mkdir: mkdir::Producer,
         ) -> Result<Self, &'static str> {
-            let mut value = Self::build(rename, Some(mkdir))?;
+            let mut value = Self::build(rename, Some(mkdir), None)?;
             value.fixture_directory = true;
             Ok(value)
+        }
+        pub(crate) fn new_create(
+            rename: Option<Box<rename::Producer>>,
+            create: create::Producer,
+        ) -> Result<Self, &'static str> {
+            Self::build(rename, None, Some(create))
         }
         fn build(
             rename: Option<Box<rename::Producer>>,
             mkdir: Option<mkdir::Producer>,
+            create: Option<create::Producer>,
         ) -> Result<Self, &'static str> {
-            if rename.is_none() && mkdir.is_none() {
+            if rename.is_none() && mkdir.is_none() && create.is_none() {
                 return Err(rename::UNAVAILABLE);
             }
             if let Some(directory) = &mkdir {
@@ -301,7 +347,7 @@ mod connected {
             Ok(Self {
                 rename,
                 mkdir,
-                create: None,
+                create,
                 attached: false,
                 instance: None,
                 batch: None,
@@ -369,7 +415,11 @@ mod connected {
             root: ConfiguredRootIdentity,
         ) -> bool {
             !self.cursor.held
-                && (self.rename.is_some() || self.mkdir.is_some())
+                && (self.rename.is_some() || self.mkdir.is_some() || self.create.is_some())
+                && self
+                    .create
+                    .as_ref()
+                    .is_none_or(|create| create.is_current(backend, root))
                 && self
                     .rename
                     .as_ref()
@@ -464,8 +514,16 @@ mod connected {
                                 components: hint.components(),
                             })
                             .collect::<Vec<_>>();
-                        let work = route(&inputs, self.mkdir.is_some(), self.create.is_some())
-                            .map_err(|_| HOLD)?;
+                        let work = route(
+                            &inputs,
+                            self.mkdir.is_some()
+                                || self
+                                    .create
+                                    .as_ref()
+                                    .is_some_and(create::Producer::allows_directory),
+                            self.create.is_some(),
+                        )
+                        .map_err(|_| HOLD)?;
                         if work.is_empty() {
                             return Ok(());
                         }
@@ -496,7 +554,11 @@ mod connected {
                     self.cursor.complete().map_err(|_| HOLD)?;
                 }
                 Work::Directory(index) => {
-                    let directory_ready = DIRECTORY_ROUTING_READY;
+                    let directory_ready = DIRECTORY_ROUTING_READY
+                        || self
+                            .create
+                            .as_ref()
+                            .is_some_and(create::Producer::allows_directory);
                     #[cfg(all(test, debug_assertions))]
                     let directory_ready = directory_ready || self.fixture_directory;
                     if !directory_ready && self.create.is_none() {
@@ -511,12 +573,18 @@ mod connected {
                         if !create_personal(components) {
                             return Err(HOLD);
                         }
+                        let kind = self
+                            .create
+                            .as_ref()
+                            .and_then(create::Producer::active_kind)
+                            .ok_or(HOLD)?;
                         if self.create.as_mut().ok_or(HOLD)?.step(
                             connection,
                             backend,
                             root,
                             components,
                             generation,
+                            kind,
                             workers.ok_or(HOLD)?,
                         )? {
                             self.cursor.complete().map_err(|_| HOLD)?;
@@ -542,27 +610,57 @@ mod connected {
                                 ObservedShape::Cloud
                             }
                         });
-                        match select_observed(
-                            &components,
-                            shape,
-                            directory_ready,
-                            self.create.is_some(),
-                        )
-                        .map_err(|_| HOLD)?
-                        {
+                        let selection = if self.create.is_some() && self.mkdir.is_none() {
+                            let create = self.create.as_ref().ok_or(HOLD)?;
+                            select_create_observed(
+                                &components,
+                                shape,
+                                create.allows_file(),
+                                create.allows_directory(),
+                                hints.get(index).ok_or(HOLD)?.action() == DirectoryAction::Added,
+                            )
+                        } else {
+                            select_observed(
+                                &components,
+                                shape,
+                                directory_ready,
+                                self.create
+                                    .as_ref()
+                                    .is_some_and(create::Producer::allows_file),
+                            )
+                        };
+                        match selection.map_err(|_| HOLD)? {
                             Selection::OfferDirectory => {
-                                // Kind/FileID are hints only. The original consumer
-                                // independently reacquires all pins and admission.
-                                self.mkdir
-                                    .as_mut()
-                                    .ok_or(HOLD)?
-                                    .offer_added(components, generation)
-                                    .map_err(|_| HOLD)?;
-                                self.cursor.directory_started = true;
-                                #[cfg(all(test, debug_assertions))]
+                                if self
+                                    .create
+                                    .as_ref()
+                                    .is_some_and(create::Producer::allows_directory)
                                 {
-                                    self.fixture_counts[2] =
-                                        self.fixture_counts[2].checked_add(1).ok_or(HOLD)?;
+                                    if self.create.as_mut().ok_or(HOLD)?.step(
+                                        connection,
+                                        backend,
+                                        root,
+                                        &components,
+                                        generation,
+                                        CreateKind::Directory,
+                                        workers.ok_or(HOLD)?,
+                                    )? {
+                                        self.cursor.complete().map_err(|_| HOLD)?;
+                                    }
+                                } else {
+                                    // Kind/FileID are hints only. The original consumer
+                                    // independently reacquires all pins and admission.
+                                    self.mkdir
+                                        .as_mut()
+                                        .ok_or(HOLD)?
+                                        .offer_added(components, generation)
+                                        .map_err(|_| HOLD)?;
+                                    self.cursor.directory_started = true;
+                                    #[cfg(all(test, debug_assertions))]
+                                    {
+                                        self.fixture_counts[2] =
+                                            self.fixture_counts[2].checked_add(1).ok_or(HOLD)?;
+                                    }
                                 }
                             }
                             Selection::SkipCloud => {
@@ -597,6 +695,7 @@ mod connected {
                                     root,
                                     &components,
                                     generation,
+                                    CreateKind::File,
                                     workers,
                                 )? {
                                     self.cursor.complete().map_err(|_| HOLD)?;
@@ -640,6 +739,86 @@ mod tests {
     use super::*;
     fn parts(path: &str) -> Vec<String> {
         path.split('/').map(str::to_owned).collect()
+    }
+    #[test]
+    fn phase_permissions_are_independent_and_directories_require_added_personal() {
+        let path = parts("Personal/new");
+        for file in [false, true] {
+            for directory in [false, true] {
+                assert_eq!(
+                    select_create_observed(
+                        &path,
+                        Some(ObservedShape::PlainFile),
+                        file,
+                        directory,
+                        true
+                    )
+                    .is_ok(),
+                    file
+                );
+                assert_eq!(
+                    select_create_observed(
+                        &path,
+                        Some(ObservedShape::PlainDirectory),
+                        file,
+                        directory,
+                        true
+                    )
+                    .is_ok(),
+                    directory
+                );
+                assert!(
+                    select_create_observed(
+                        &path,
+                        Some(ObservedShape::PlainDirectory),
+                        file,
+                        directory,
+                        false
+                    )
+                    .is_err()
+                );
+                assert!(select_create_observed(&path, None, file, directory, true).is_err());
+                for unsupported in ["Personal", "Spaces", "Spaces/team/new"] {
+                    for shape in [ObservedShape::PlainDirectory, ObservedShape::PlainFile] {
+                        assert!(
+                            select_create_observed(
+                                &parts(unsupported),
+                                Some(shape),
+                                file,
+                                directory,
+                                true
+                            )
+                            .is_err()
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            select_create_observed(&path, Some(ObservedShape::Cloud), false, true, true),
+            Ok(Selection::SkipCloud)
+        );
+        assert!(
+            select_create_observed(&path, Some(ObservedShape::Cloud), false, false, true).is_err()
+        );
+        // The legacy selector remains separately admitted, including old mixed fixtures.
+        assert_eq!(
+            select_observed(&path, Some(ObservedShape::PlainDirectory), true, false),
+            Ok(Selection::OfferDirectory)
+        );
+    }
+    #[test]
+    fn completion_requires_original_kind_and_nonzero_executor_id() {
+        for expected in [CreateKind::File, CreateKind::Directory] {
+            for actual in [CreateKind::File, CreateKind::Directory] {
+                for (flight, reply) in [(0, 0), (0, 1), (4, 3), (4, 4), (4, 5)] {
+                    assert_eq!(
+                        matching_create_completion(expected, flight, actual, reply),
+                        expected == actual && flight == 4 && reply == 4
+                    );
+                }
+            }
+        }
     }
     #[test]
     fn optin_routes_navigation_and_space_hints_only_for_live_classification() {
