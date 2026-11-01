@@ -3,6 +3,10 @@
 //! isolated native save/recovery/lifecycle acceptance. Package acceptance and
 //! publication remain separate; other feature gates are independent.
 
+#[cfg(all(test, debug_assertions))]
+#[path = "windows_directory_create_worker_native_test.rs"]
+mod windows_directory_create_worker_native_test;
+
 #[cfg(all(test, windows, debug_assertions))]
 #[path = "windows_file_create_public_entry_test.rs"]
 mod windows_file_create_public_entry_test;
