@@ -14,9 +14,9 @@
   },
   "gaps": [],
   "lock_sha256": {
-    "Cargo.lock": "ab2d96cf08c100183cbb474a8d64e61d3ff7af5ff9ea36f33061c0959139d5e0",
+    "Cargo.lock": "f36510a206ea6fb2559695994162e9f1146538f73876dba36e6adc625547fb93",
     "desktop-shell/package-lock.json": "d0965d09c758ed7e5f3d1dcc1b1d869d5113f836fdf30c0915ddc850d3387932",
-    "desktop-shell/src-tauri/Cargo.lock": "601b59218b2517a01a22c3826364d84122ab3b161a1e7e4c011bd814776d3875",
+    "desktop-shell/src-tauri/Cargo.lock": "35a639be4853ce1fdf6fbcd5cdcd860e4dd34e24062b3b4bbeaf891cd93aa9cd",
     "package-lock.json": "fc694dd4b238d9f55909d1a8229f1cfb8f063f042f2bb0256c20c73495dad64d"
   },
   "production_ui_packages": [
@@ -7154,6 +7154,44 @@
       "repository": "https://github.com/briansmith/ring",
       "source": "registry+https://github.com/rust-lang/crates.io-index",
       "version": "0.17.14"
+    },
+    {
+      "declared_license": "Apache-2.0",
+      "description": "Read passwords in console applications (unix, windows, macos, wasm).",
+      "ecosystem": "cargo",
+      "graphs": [
+        "Cargo.toml"
+      ],
+      "name": "rpassword",
+      "notice_files": [
+        {
+          "bytes": 10173,
+          "path": "legal/rust/rpassword-7.5.4/LICENSE-APACHE",
+          "sha256": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9"
+        }
+      ],
+      "repository": "https://github.com/conradkleinespel/rpassword",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "7.5.4"
+    },
+    {
+      "declared_license": "Apache-2.0",
+      "description": "Utility functions for other crates, no backwards compatibility guarantees.",
+      "ecosystem": "cargo",
+      "graphs": [
+        "Cargo.toml"
+      ],
+      "name": "rtoolbox",
+      "notice_files": [
+        {
+          "bytes": 10173,
+          "path": "legal/rust/rtoolbox-0.0.6/LICENSE-APACHE",
+          "sha256": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9"
+        }
+      ],
+      "repository": "https://github.com/conradkleinespel/rtoolbox",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "version": "0.0.6"
     },
     {
       "declared_license": "MIT",
