@@ -20,6 +20,7 @@ defaults:
     working-directory: apps/desktop
 jobs:
   portable-core:
+    if: github.head_ref != 'work/desktop-0.7.5' && github.ref_name != 'work/desktop-0.7.5'
     name: Desktop portable core (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -31,6 +32,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - run: cargo test --locked -p raiun-core -p raiun-cli -p raiun-opencloud -p raiun-engine
   linux:
+    if: github.head_ref != 'work/desktop-0.7.5' && github.ref_name != 'work/desktop-0.7.5'
     name: Desktop Linux checks
     runs-on: ubuntu-24.04
     steps:

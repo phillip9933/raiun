@@ -222,6 +222,8 @@ The exact target lock hashes, declared license expressions, source references, r
 - `reqwest 0.13.5` — MIT OR Apache-2.0; `legal/windows/rust/reqwest-0.13.5/LICENSE-APACHE`, `legal/windows/rust/reqwest-0.13.5/LICENSE-MIT`
 - `rfd 0.16.0` — MIT; `legal/windows/rust/rfd-0.16.0/LICENSE`
 - `ring 0.17.14` — Apache-2.0 AND ISC; `legal/windows/rust/ring-0.17.14/LICENSE`, `legal/windows/rust/ring-0.17.14/LICENSE-BoringSSL`, `legal/windows/rust/ring-0.17.14/LICENSE-other-bits`, `legal/windows/rust/ring-0.17.14/src/polyfill/once_cell/LICENSE-APACHE`, `legal/windows/rust/ring-0.17.14/src/polyfill/once_cell/LICENSE-MIT`, `legal/windows/rust/ring-0.17.14/third_party/fiat/LICENSE`
+- `rpassword 7.5.4` — Apache-2.0; `legal/windows/rust/rpassword-7.5.4/LICENSE-APACHE`
+- `rtoolbox 0.0.6` — Apache-2.0; `legal/windows/rust/rtoolbox-0.0.6/LICENSE-APACHE`
 - `rusqlite 0.32.1` — MIT; `legal/windows/rust/rusqlite-0.32.1/LICENSE`
 - `rustc-hash 2.1.3` — Apache-2.0 OR MIT; `legal/windows/rust/rustc-hash-2.1.3/LICENSE-APACHE`, `legal/windows/rust/rustc-hash-2.1.3/LICENSE-MIT`
 - `rustc_version 0.4.1` — MIT OR Apache-2.0; `legal/windows/rust/rustc_version-0.4.1/LICENSE-APACHE`, `legal/windows/rust/rustc_version-0.4.1/LICENSE-MIT`
