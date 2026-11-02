@@ -578,14 +578,39 @@ impl ConfiguredRootConnection {
             crate::RenamePublicEntryFixturePath::Source => "source.bin",
             crate::RenamePublicEntryFixturePath::Destination => "renamed.bin",
         };
-        let file = open_root(
-            &parent.join(name),
-            FILE_READ_ATTRIBUTES,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-        )?;
+        let path = parent.join(name);
+        let wide = wide_path(&path)?;
+        // SAFETY: fixed synthetic child under the registered root; its no-follow
+        // parent remains pinned without DELETE sharing. Metadata-only access
+        // opens the file itself, never its reparse target. No handle escapes.
+        let raw = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        };
+        if raw.is_null() || raw == INVALID_HANDLE_VALUE {
+            return Err(win32_io_error("inspect rename public-entry synthetic file"));
+        }
+        let file = RawOwnedHandle(raw);
         let snapshot = root_snapshot(file.0)?;
-        if snapshot.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+        if snapshot.identity.volume_serial != root.identity.volume_serial
+            || snapshot.identity.file_index == 0
+            || snapshot.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+            || snapshot.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
             || !cleanup_cloud_reparse_tag(snapshot.reparse_tag)
+            || snapshot.placeholder_state & CF_PLACEHOLDER_STATE_PLACEHOLDER == 0
+            || snapshot.placeholder_state & CF_PLACEHOLDER_STATE_SYNC_ROOT != 0
+            || snapshot.placeholder_state & !0x3f != 0
+            || !windows_paths_equal(
+                &final_path_for_handle(file.0).map_err(|_| Error::ConfiguredRootChanged)?,
+                &path,
+            )
         {
             return Err(Error::ConfiguredRootChanged);
         }
