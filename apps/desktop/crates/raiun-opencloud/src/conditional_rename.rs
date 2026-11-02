@@ -60,8 +60,29 @@ impl OpenCloudClient {
         request: ConditionalRenameRequest<'_>,
         before_send: impl FnOnce() -> Result<(), CloudError>,
     ) -> Result<ConditionalRenameResponse, CloudError> {
+        self.conditional_rename_kind(request, false, before_send)
+    }
+
+    /// One source-ID-addressed empty-directory MOVE; no subtree/recursive rename.
+    pub fn conditional_empty_directory_rename_with_context_before_send(
+        &self,
+        request: ConditionalRenameRequest<'_>,
+        before_send: impl FnOnce() -> Result<(), CloudError>,
+    ) -> Result<ConditionalRenameResponse, CloudError> {
+        self.conditional_rename_kind(request, true, before_send)
+    }
+
+    fn conditional_rename_kind(
+        &self,
+        request: ConditionalRenameRequest<'_>,
+        directory: bool,
+        before_send: impl FnOnce() -> Result<(), CloudError>,
+    ) -> Result<ConditionalRenameResponse, CloudError> {
         let _guard = RangeContextGuard::enter(request.context);
         validate_request(&request)?;
+        if directory && request.expected_source_size != 0 {
+            return Err(invalid("directory metadata size must be zero"));
+        }
         self.ensure_context_current(request.context)?;
 
         let source_path =
@@ -124,16 +145,19 @@ impl OpenCloudClient {
         self.ensure_writable_target(&selected, &source_url, &source_path)?;
         let source = self.stat_at_dav(&source_url, &source_path)?;
         if source.id != request.expected_source_id
-            || source.size != request.expected_source_size
+            || (!directory && source.size != request.expected_source_size)
             || source.etag != request.expected_source_etag
             || !is_strong_etag(&source.etag)
-            || source.directory
+            || source.directory != directory
             || source.encrypted
             || !source.writable
         {
             return Err(conflict("source identity, revision, or file kind changed"));
         }
 
+        if directory {
+            self.empty_directory_move_source(&source_url, &source_path, &request)?;
+        }
         match self.stat_leaf_direct_with_context(
             &destination_url,
             &destination_path,
@@ -155,10 +179,10 @@ impl OpenCloudClient {
         )?;
         let fresh_source = self.stat_at_dav(&source_url, &source_path)?;
         if fresh_source.id != request.expected_source_id
-            || fresh_source.size != request.expected_source_size
+            || (!directory && fresh_source.size != request.expected_source_size)
             || fresh_source.etag != request.expected_source_etag
             || !is_strong_etag(&fresh_source.etag)
-            || fresh_source.directory
+            || fresh_source.directory != directory
             || fresh_source.encrypted
             || !fresh_source.writable
         {
@@ -173,11 +197,25 @@ impl OpenCloudClient {
             Ok(_) => return Err(conflict("rename destination appeared before MOVE")),
             Err(error) => return Err(error),
         }
+        if directory {
+            self.empty_directory_move_source(&source_url, &source_path, &request)?;
+        }
         self.ensure_context_current(request.context)?;
 
         let method = Method::from_bytes(b"MOVE").expect("static HTTP method");
+        let mutation_url = if directory {
+            super::conditional_delete::resource_delete_url(
+                &self.server,
+                &root_url,
+                &selected.id,
+                request.expected_root_id,
+                request.expected_source_id,
+            )?
+        } else {
+            source_url.clone()
+        };
         let (builder, token) =
-            self.request_with_context(method, &source_url, Some(request.context))?;
+            self.request_with_context(method, &mutation_url, Some(request.context))?;
         let destination = HeaderValue::from_str(destination_url.as_str())
             .map_err(|_| invalid("conditional MOVE destination header is invalid"))?;
         let etag = HeaderValue::from_str(request.expected_source_etag)
@@ -213,6 +251,41 @@ impl OpenCloudClient {
             return Ok(ConditionalRenameResponse::Uncertain(context_error));
         }
         Ok(ConditionalRenameResponse::Uncertain(error))
+    }
+
+    fn empty_directory_move_source(
+        &self,
+        url: &Url,
+        path: &str,
+        request: &ConditionalRenameRequest<'_>,
+    ) -> Result<(), CloudError> {
+        let mut roots = 0;
+        self.propfind_with_context(
+            url,
+            "1",
+            path,
+            &mut |entry| {
+                if entry.path.trim_end_matches('/') != path.trim_end_matches('/')
+                    || !entry.directory
+                    || entry.id != request.expected_source_id
+                    || entry.etag != request.expected_source_etag
+                    || entry.encrypted
+                    || !entry.writable
+                {
+                    return Err(conflict("rename source is not an exact empty directory"));
+                }
+                roots += 1;
+                if roots != 1 {
+                    return Err(conflict("directory listing is ambiguous"));
+                }
+                Ok(())
+            },
+            Some(request.context),
+        )?;
+        if roots != 1 {
+            return Err(conflict("directory listing has no source witness"));
+        }
+        Ok(())
     }
 
     fn validate_root_entry(

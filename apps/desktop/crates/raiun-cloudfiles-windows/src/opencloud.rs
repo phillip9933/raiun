@@ -22,6 +22,8 @@ mod verified_edit;
 pub use file_rename::FileRenameBindingCandidate;
 #[cfg(any(windows, test))]
 pub(crate) use file_rename::VerifiedRenameSourceContent;
+#[cfg(windows)]
+pub(crate) use file_rename::{EmptyDirectoryRenameBinding, EmptyDirectoryRenameSession};
 #[cfg(any(windows, test))]
 pub use file_rename::{FileRenameSession, VerifiedFileRenamePublication};
 pub use initial_save::InitialEditSession;

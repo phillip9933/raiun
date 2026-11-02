@@ -988,3 +988,6 @@ impl FileRenameLocal for NativeFileRenameLocal<'_, '_, '_, '_> {
             })
     }
 }
+
+#[path = "native_empty_directory_rename.rs"]
+mod empty_directory;

@@ -1028,8 +1028,13 @@ fn supported_intent(intent: &NamespaceIntent) -> bool {
     else {
         return false;
     };
-    source.local.object_kind == NamespaceObjectKind::File
-        && destination.object_kind == NamespaceObjectKind::File
+    source.local.object_kind == destination.object_kind
+        && matches!(
+            source.local.object_kind,
+            NamespaceObjectKind::File | NamespaceObjectKind::Directory
+        )
+        && (source.local.object_kind != NamespaceObjectKind::Directory
+            || source.remote.byte_len == 0)
         && source.local.parent == destination.parent
         && match source
             .local

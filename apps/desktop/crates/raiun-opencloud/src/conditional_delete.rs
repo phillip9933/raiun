@@ -232,7 +232,7 @@ fn reference(value: &str) -> Result<ResourceReference<'_>, CloudError> {
 /// Graph serializes drive.id/DAV root as FormatResourceID(root), omitting the
 /// opaque root only when it equals SpaceId. PROPFIND fileid retains the full
 /// ResourceID. Match parsed components; never assume selected.id is an ID prefix.
-fn resource_delete_url(
+pub(super) fn resource_delete_url(
     server: &Url,
     root: &Url,
     selected: &str,

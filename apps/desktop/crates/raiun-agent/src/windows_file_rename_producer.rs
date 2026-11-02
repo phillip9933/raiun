@@ -36,10 +36,12 @@ fn eligible(old: &[String], new: &[String]) -> bool {
 #[cfg(windows)]
 mod connected {
     use super::*;
+    #[cfg(all(test, debug_assertions))]
+    use raiun_cloudfiles_windows::ProviderIdentityBinding;
     use raiun_cloudfiles_windows::{
         ConfiguredRootConnection, ConfiguredRootIdentity, OpenCloudPlaceholderBackend,
-        PlaceholderBackend, ProviderIdentityBinding, ProviderIdentityCatalog,
-        ProviderIdentityCatalogScope, namespace_intent::CapturedAuthorization,
+        PlaceholderBackend, ProviderIdentityCatalog, ProviderIdentityCatalogScope,
+        namespace_intent::CapturedAuthorization,
     };
     use raiun_control_windows::directory_notifications::directory_rename_hints::RenameHintPair;
     use std::sync::{
@@ -214,9 +216,28 @@ mod connected {
             self.catalog.load(&self.scope).map_err(|_| HOLD)?;
             let parts = new.iter().map(String::as_str).collect::<Vec<_>>();
             let observed = connection
-                .observe_namespace_file(&parts)
+                .observe_namespace_entry(&parts)
                 .map_err(|_| HOLD)?;
             let current = |auth| self.current(auth, backend, root);
+            if observed.kind == raiun_cloudfiles_windows::NamespaceEntryKind::CloudDirectory {
+                let outcome = connection
+                    .reconcile_fresh_empty_directory_rename(
+                        backend,
+                        pair,
+                        observed.local_file,
+                        self.auth,
+                        record_generation,
+                        &current,
+                    )
+                    .map_err(|_| HOLD)?;
+                if !current(self.auth) || outcome != raiun_cloudfiles_windows::namespace_file_rename::FileRenameOutcome::Completed {
+                    return Err(HOLD);
+                }
+                return Ok(());
+            }
+            if observed.kind != raiun_cloudfiles_windows::NamespaceEntryKind::CloudFile {
+                return Err(HOLD);
+            }
             let candidate = backend
                 .file_rename_binding_candidate_from_hint(
                     pair,
