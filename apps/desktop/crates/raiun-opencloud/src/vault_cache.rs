@@ -1180,6 +1180,59 @@ impl VaultOfflineCache {
         Ok(retarget)
     }
 
+    /// Windows CopyFile envelopes contain plaintext only in bounded zeroizing
+    /// RAM. The existing encrypted on-disk journal format is unchanged.
+    #[cfg(windows)]
+    fn encrypt_copy_envelope_in_memory<R: Read + Seek>(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        source: &mut R,
+        metadata: &[u8],
+        body_len: u64,
+        ciphertext_path: &Path,
+    ) -> Result<u64, CloudError> {
+        if body_len > 16 * 1024 * 1024
+            || metadata.is_empty()
+            || metadata.len() > MAX_EDIT_METADATA_BYTES
+        {
+            return Err(invalid("encrypted copy envelope exceeds its size limit"));
+        }
+        let envelope_len = EDIT_HEADER_BYTES
+            .checked_add(metadata.len() as u64)
+            .and_then(|n| n.checked_add(body_len))
+            .ok_or_else(|| invalid("encrypted edit size overflowed"))?;
+        let capacity = usize::try_from(envelope_len)
+            .map_err(|_| invalid("encrypted copy envelope exceeds its size limit"))?;
+        let mut envelope = zeroize::Zeroizing::new(Vec::new());
+        envelope
+            .try_reserve_exact(capacity)
+            .map_err(|_| invalid("encrypted copy envelope allocation failed"))?;
+        envelope.extend_from_slice(&EDIT_MAGIC);
+        envelope.extend_from_slice(&EDIT_VERSION.to_be_bytes());
+        envelope.extend_from_slice(&(metadata.len() as u32).to_be_bytes());
+        envelope.extend_from_slice(&body_len.to_be_bytes());
+        envelope.extend_from_slice(metadata);
+        let body_offset = envelope.len();
+        envelope.resize(capacity, 0);
+        source.seek(SeekFrom::Start(0)).map_err(io_error)?;
+        source
+            .read_exact(&mut envelope[body_offset..])
+            .map_err(io_error)?;
+        let mut extra = zeroize::Zeroizing::new([0u8; 1]);
+        if source.read(&mut *extra).map_err(io_error)? != 0 {
+            return Err(invalid("encrypted edit source exceeds its declared size"));
+        }
+        sessions
+            .encrypt_file_transactional(
+                &self.scope,
+                &mut std::io::Cursor::new(&*envelope),
+                ciphertext_path,
+                envelope_len,
+                16 * 1024 * 1024 + EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64,
+            )
+            .map_err(vault_error)
+    }
+
     fn queue_operation_inner<R: Read + Seek>(
         &self,
         sessions: &VaultSessionCoordinator,
@@ -1209,6 +1262,12 @@ impl VaultOfflineCache {
             receipt_etag,
             receipt_for_revision,
         } = request;
+        // The Windows copy admission is deliberately bounded and does not use
+        // the generic plaintext tempfile path used by other queued operations.
+        #[cfg(windows)]
+        if operation == VaultPendingOperationKind::CopyFile && body_len > 16 * 1024 * 1024 {
+            return Err(invalid("cross-vault copy exceeds the 16 MiB limit"));
+        }
         let mut base_resource_id = base_resource_id.map(str::to_owned);
         let mut parent_resource_id = parent_resource_id.map(str::to_owned);
         let mut parent_etag = parent_etag.map(str::to_owned);
@@ -1642,46 +1701,66 @@ impl VaultOfflineCache {
             .checked_add(metadata.len() as u64)
             .and_then(|length| length.checked_add(body_len))
             .ok_or_else(|| invalid("encrypted edit size overflowed"))?;
+        #[cfg(windows)]
+        let metadata = zeroize::Zeroizing::new(metadata);
         let private = tempdir().map_err(io_error)?;
-        let envelope_path = private.path().join("edit-envelope.tmp");
-        let mut envelope = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&envelope_path)
-            .map_err(io_error)?;
-        set_private_file(&envelope)?;
-        envelope.write_all(&EDIT_MAGIC).map_err(io_error)?;
-        envelope
-            .write_all(&EDIT_VERSION.to_be_bytes())
-            .map_err(io_error)?;
-        envelope
-            .write_all(&(metadata.len() as u32).to_be_bytes())
-            .map_err(io_error)?;
-        envelope
-            .write_all(&body_len.to_be_bytes())
-            .map_err(io_error)?;
-        envelope.write_all(&metadata).map_err(io_error)?;
-        source.seek(SeekFrom::Start(0)).map_err(io_error)?;
-        copy_exact_bounded(source, &mut envelope, body_len)?;
-        let mut extra = [0u8; 1];
-        if source.read(&mut extra).map_err(io_error)? != 0 {
-            return Err(invalid("encrypted edit source exceeds its declared size"));
-        }
-        envelope.flush().map_err(io_error)?;
-        envelope.sync_all().map_err(io_error)?;
-        drop(envelope);
-
         let ciphertext_path = private.path().join("edit-ciphertext.tmp");
-        let mut plaintext = File::open(&envelope_path).map_err(io_error)?;
-        let encrypted_len = sessions
-            .encrypt_file_transactional(
-                &self.scope,
-                &mut plaintext,
+        #[cfg(windows)]
+        let memory_copy_length = if operation == VaultPendingOperationKind::CopyFile {
+            Some(self.encrypt_copy_envelope_in_memory(
+                sessions,
+                source,
+                &metadata,
+                body_len,
                 &ciphertext_path,
-                envelope_len,
-                MAX_EDIT_BYTES + EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64,
-            )
-            .map_err(vault_error)?;
+            )?)
+        } else {
+            None
+        };
+        #[cfg(not(windows))]
+        let memory_copy_length: Option<u64> = None;
+        let encrypted_len = if let Some(length) = memory_copy_length {
+            length
+        } else {
+            let envelope_path = private.path().join("edit-envelope.tmp");
+            let mut envelope = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&envelope_path)
+                .map_err(io_error)?;
+            set_private_file(&envelope)?;
+            envelope.write_all(&EDIT_MAGIC).map_err(io_error)?;
+            envelope
+                .write_all(&EDIT_VERSION.to_be_bytes())
+                .map_err(io_error)?;
+            envelope
+                .write_all(&(metadata.len() as u32).to_be_bytes())
+                .map_err(io_error)?;
+            envelope
+                .write_all(&body_len.to_be_bytes())
+                .map_err(io_error)?;
+            envelope.write_all(&metadata).map_err(io_error)?;
+            source.seek(SeekFrom::Start(0)).map_err(io_error)?;
+            copy_exact_bounded(source, &mut envelope, body_len)?;
+            let mut extra = [0u8; 1];
+            if source.read(&mut extra).map_err(io_error)? != 0 {
+                return Err(invalid("encrypted edit source exceeds its declared size"));
+            }
+            envelope.flush().map_err(io_error)?;
+            envelope.sync_all().map_err(io_error)?;
+            drop(envelope);
+
+            let mut plaintext = File::open(&envelope_path).map_err(io_error)?;
+            sessions
+                .encrypt_file_transactional(
+                    &self.scope,
+                    &mut plaintext,
+                    &ciphertext_path,
+                    envelope_len,
+                    MAX_EDIT_BYTES + EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64,
+                )
+                .map_err(vault_error)?
+        };
         if encrypted_len != envelope_len {
             return Err(invalid("encrypted edit length did not match its envelope"));
         }

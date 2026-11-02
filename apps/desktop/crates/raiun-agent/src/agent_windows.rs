@@ -122,6 +122,7 @@ const WINDOWS_VAULT_SESSIONS_ENABLED: bool = !cfg!(test);
 const WINDOWS_REFRESH_LEAD_SECONDS: u64 = 30;
 include!("windows_vault_session_control.rs");
 include!("windows_vault_create.rs");
+include!("windows_vault_copy.rs");
 include!("windows_vault_edit_upload.rs");
 
 use clap::{Parser, Subcommand};
@@ -462,6 +463,8 @@ struct WindowsRecoveryContext {
 type SharedSourceAdmissions = Arc<Mutex<Arc<windows_profile_registry::Registry>>>;
 
 struct WindowsAgent {
+    vault_copy_jobs: Arc<crate::vault_edit_jobs::VaultEditReconcileJobs>,
+    vault_copy_serialization: Arc<crate::vault_pin_jobs::VaultPinJobs>,
     source_admissions: Option<SharedSourceAdmissions>,
     vault_sessions: Arc<raiun_vault::session::VaultSessionCoordinator>,
     profile_scope: String,
@@ -3273,6 +3276,8 @@ impl WindowsAgent {
             return Err("Windows runtime and session store profiles differ".into());
         }
         let agent = Self {
+            vault_copy_jobs: Arc::new(crate::vault_edit_jobs::VaultEditReconcileJobs::default()),
+            vault_copy_serialization: Arc::new(crate::vault_pin_jobs::VaultPinJobs::default()),
             source_admissions,
             vault_sessions,
             profile_scope: profile.into(),
@@ -3580,6 +3585,12 @@ impl WindowsAgent {
                 Ok((self.inspect_windows_vault_create_parent(request)?, false))
             }
             "vault_list" => Ok((self.browse_windows_vault(request)?, false)),
+            "vault_copy_parent" if WINDOWS_VAULT_SESSIONS_ENABLED => {
+                Ok((self.windows_vault_copy_parent(request)?, false))
+            }
+            "vault_copy_status" | "vault_copy_cancel" if WINDOWS_VAULT_SESSIONS_ENABLED => {
+                Ok((self.windows_vault_copy_status(request)?, false))
+            }
             "vault_upload_capture" => {
                 if !WINDOWS_VAULT_EDIT_UPLOAD_ENABLED {
                     return Err(
@@ -3963,6 +3974,7 @@ impl WindowsAgent {
             "media_jobs_supported": WINDOWS_MEDIA_METADATA_ENABLED,
             "vaults_supported": WINDOWS_VAULT_SESSIONS_ENABLED,
             "vault_create_supported": WINDOWS_VAULT_SESSIONS_ENABLED,
+            "vault_copy_supported": WINDOWS_VAULT_SESSIONS_ENABLED,
             "vault_in_app_browse_supported": true,
             "account_switch_supported": false,
             "pause_supported": WINDOWS_FOLDER_SYNC_ENABLED,
@@ -6444,6 +6456,9 @@ impl WindowsAgent {
             ) {
                 Ok(_) => {
                     self.provider.authorize_generation(next);
+                    // Publish invalidation before joining. Copy workers never
+                    // acquire account state, broker or credential-operation locks.
+                    self.vault_copy_jobs.cancel_all_and_wait()?;
                     return Ok(next);
                 }
                 Err(actual) => current = actual,
@@ -6546,6 +6561,7 @@ impl WindowsAgent {
 
 impl Drop for WindowsAgent {
     fn drop(&mut self) {
+        let _ = self.vault_copy_jobs.cancel_all_and_wait();
         self.provider.cancel_fresh_close();
         let worker = self
             .fresh_close_worker
@@ -18995,6 +19011,8 @@ pub(super) mod tests {
             br#"{"old_user_root":"never_reuse"}"#.to_vec(),
         );
         let agent = Arc::new(WindowsAgent {
+            vault_copy_jobs: Arc::new(crate::vault_edit_jobs::VaultEditReconcileJobs::default()),
+            vault_copy_serialization: Arc::new(crate::vault_pin_jobs::VaultPinJobs::default()),
             source_admissions: None,
             vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
             profile_scope: "default".into(),
@@ -19099,6 +19117,8 @@ pub(super) mod tests {
             ..AccountState::default()
         }));
         let agent = Arc::new(WindowsAgent {
+            vault_copy_jobs: Arc::new(crate::vault_edit_jobs::VaultEditReconcileJobs::default()),
+            vault_copy_serialization: Arc::new(crate::vault_pin_jobs::VaultPinJobs::default()),
             source_admissions: None,
             vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
             profile_scope: "default".into(),
@@ -19162,6 +19182,8 @@ pub(super) mod tests {
             br#"{"old_user_root":"never_reuse"}"#.to_vec(),
         );
         let agent = Arc::new(WindowsAgent {
+            vault_copy_jobs: Arc::new(crate::vault_edit_jobs::VaultEditReconcileJobs::default()),
+            vault_copy_serialization: Arc::new(crate::vault_pin_jobs::VaultPinJobs::default()),
             source_admissions: None,
             vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
             profile_scope: "default".into(),
@@ -19895,6 +19917,8 @@ pub(super) mod tests {
         let store = Arc::new(MemoryStore::default());
         *store.fail_saves.lock().unwrap() = true;
         let agent = Arc::new(WindowsAgent {
+            vault_copy_jobs: Arc::new(crate::vault_edit_jobs::VaultEditReconcileJobs::default()),
+            vault_copy_serialization: Arc::new(crate::vault_pin_jobs::VaultPinJobs::default()),
             source_admissions: None,
             vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
             profile_scope: "default".into(),
@@ -19952,6 +19976,8 @@ pub(super) mod tests {
         let (server, fixture) = synthetic_oidc_server(false);
         let store = Arc::new(MemoryStore::default());
         let agent = Arc::new(WindowsAgent {
+            vault_copy_jobs: Arc::new(crate::vault_edit_jobs::VaultEditReconcileJobs::default()),
+            vault_copy_serialization: Arc::new(crate::vault_pin_jobs::VaultPinJobs::default()),
             source_admissions: None,
             vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
             profile_scope: "default".into(),
@@ -19993,6 +20019,8 @@ pub(super) mod tests {
             release: Mutex::new(release_rx),
         }));
         let agent = Arc::new(WindowsAgent {
+            vault_copy_jobs: Arc::new(crate::vault_edit_jobs::VaultEditReconcileJobs::default()),
+            vault_copy_serialization: Arc::new(crate::vault_pin_jobs::VaultPinJobs::default()),
             source_admissions: None,
             vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
             profile_scope: "default".into(),

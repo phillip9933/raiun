@@ -14,6 +14,13 @@ mod runtime_mode;
 mod headless_runtime;
 
 #[cfg(windows)]
+#[allow(dead_code)]
+mod vault_edit_jobs;
+#[cfg(windows)]
+#[allow(dead_code)]
+mod vault_pin_jobs;
+
+#[cfg(windows)]
 use agent_windows::auth;
 
 #[cfg(unix)]

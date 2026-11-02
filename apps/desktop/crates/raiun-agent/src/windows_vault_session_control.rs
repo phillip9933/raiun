@@ -499,6 +499,8 @@ impl WindowsAgent {
             &target.root_resource_id,
         )
         .map_err(|_| "The vault scope is invalid")?;
+        // Cancel and drain before credential removal, without a session/token fence.
+        self.vault_copy_jobs.cancel_scope_and_wait(&vault)?;
         let scope = windows_vault_credentials::Scope::from_trusted_account(
             &self.profile_scope,
             account.bytes(),
@@ -596,6 +598,9 @@ impl WindowsAgent {
             target.root_path.trim_end_matches('/')
         }
         .to_owned();
+        // The broker/credential operation gate excludes new admissions. Publish
+        // cancellation and join before native/key revocation takes its fences.
+        self.vault_copy_jobs.cancel_scope_and_wait(&scope)?;
         let cleanup = self.provider.begin_lock_vault_route(
             binding.clone(),
             target.space_id.clone(),

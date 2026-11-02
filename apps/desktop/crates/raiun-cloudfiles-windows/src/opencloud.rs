@@ -1263,6 +1263,51 @@ impl OpenCloudPlaceholderBackend {
         }
     }
 
+    /// Retain an already installed exact online vault route for explicit copy.
+    /// The local publication proof ends here, before any caller starts HTTP.
+    #[cfg(windows)]
+    pub fn verified_vault_copy_route(
+        &self,
+        expected_root: crate::ConfiguredRootIdentity,
+        space: &str,
+        root_id: &str,
+        root_path: &str,
+    ) -> Result<Arc<crate::vault_routes::VerifiedVaultRoute>, BackendError> {
+        let _lease = self
+            .lease_gate
+            .read()
+            .map_err(|_| BackendError::Unavailable)?;
+        self.ensure_active()?;
+        if self.local_root_identity != Some(expected_root) {
+            return Err(BackendError::Unavailable);
+        }
+        let route = self
+            .vault_routes
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?
+            .exact_root(space, root_path, root_id)?
+            .ok_or(BackendError::NotFound)?;
+        if route.local_root() != expected_root {
+            return Err(BackendError::Unavailable);
+        }
+        route
+            .backend()
+            .binding()
+            .with_publication(|| Ok(()))
+            .map_err(|_| BackendError::Unavailable)?;
+        Ok(route)
+    }
+
+    /// Pure atomics only: copy invokes cancellation inside token/session fences.
+    /// Retain the original Arc, never resolve a replacement route here.
+    #[cfg(windows)]
+    pub fn vault_copy_route_cancelled(
+        &self,
+        route: &crate::vault_routes::VerifiedVaultRoute,
+    ) -> bool {
+        self.is_revoked() || route.backend().binding().is_revoked()
+    }
+
     /// Current exact-route capability only; it does not grant a caller native
     /// mutation authority or change any previously published file attributes.
     #[cfg(windows)]
