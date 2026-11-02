@@ -1309,6 +1309,9 @@ fn run(case: Case) {
             );
         } else {
             join_child(&mut child);
+            // Process exit is not callback completion; the nonblocking history
+            // scan requires the actual capture to have completed first.
+            assert_capture_transition(&connection, capture_before);
             wait_fact(
                 || {
                     prepared
@@ -1334,6 +1337,7 @@ fn run(case: Case) {
             fs::write(barrier_dir.join("release"), b"r58").unwrap();
             join_child(&mut child);
         }
+        assert_capture_transition(&connection, capture_before);
         wait_fact(
             || {
                 prepared
@@ -1343,7 +1347,6 @@ fn run(case: Case) {
             "capture still durable after refusal",
         );
         assert_retained_capture(Arc::clone(&state), &scope, &protector, SOURCE_NAME);
-        assert_capture_transition(&connection, capture_before);
         let pending = connection
             .take_initial_edit()
             .unwrap()
