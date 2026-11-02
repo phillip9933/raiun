@@ -30,8 +30,28 @@ impl OpenCloudClient {
         request: ConditionalDeleteRequest<'_>,
         before_send: impl FnOnce() -> Result<(), CloudError>,
     ) -> Result<ConditionalDeleteResponse, CloudError> {
+        self.conditional_delete_kind(request, false, before_send)
+    }
+
+    /// Delete only a freshly proven empty ordinary directory with its actual
+    /// strong revision. No recursive or unversioned directory operation exists.
+    pub fn conditional_empty_directory_delete_with_context_before_send(
+        &self,
+        request: ConditionalDeleteRequest<'_>,
+        before_send: impl FnOnce() -> Result<(), CloudError>,
+    ) -> Result<ConditionalDeleteResponse, CloudError> {
+        self.conditional_delete_kind(request, true, before_send)
+    }
+
+    fn conditional_delete_kind(
+        &self,
+        request: ConditionalDeleteRequest<'_>,
+        directory: bool,
+        before_send: impl FnOnce() -> Result<(), CloudError>,
+    ) -> Result<ConditionalDeleteResponse, CloudError> {
         let _guard = RangeContextGuard::enter(request.context);
-        if !is_strong_etag(request.expected_source_etag)
+        if (directory && request.expected_source_size != 0)
+            || !is_strong_etag(request.expected_source_etag)
             || request.expected_source_etag.len() > MAX_DAV_ENTRY
             || HeaderValue::from_str(request.expected_source_etag).is_err()
         {
@@ -44,16 +64,16 @@ impl OpenCloudClient {
             || is_vault_path(&source_path)
         {
             return Err(invalid(
-                "conditional DELETE requires an ordinary nonroot file",
+                "conditional DELETE requires an ordinary nonroot item",
             ));
         }
         self.ensure_context_current(request.context)?;
         let spaces = self.discover_spaces(Some(request.context), MAX_ENTRIES)?;
-        let selected = spaces
-            .iter()
-            .find(|space| space.id == request.space)
+        let mut matches = spaces.iter().filter(|space| space.id == request.space);
+        let selected = matches
+            .next()
             .ok_or_else(|| CloudError::new(ErrorKind::NotFound, "cloud space was not found"))?;
-        if !selected.writable || selected.encrypted {
+        if matches.next().is_some() || !selected.writable || selected.encrypted {
             return Err(CloudError::new(
                 ErrorKind::Forbidden,
                 "ordinary file deletion is unavailable",
@@ -85,16 +105,44 @@ impl OpenCloudClient {
             self.ensure_writable_target(selected, &source_url, &source_path)?;
             let entry = self.stat_at_dav(&source_url, &source_path)?;
             if entry.id != request.expected_source_id
-                || entry.size != request.expected_source_size
+                || (!directory && entry.size != request.expected_source_size)
                 || entry.etag != request.expected_source_etag
                 || !is_strong_etag(&entry.etag)
-                || entry.directory
+                || entry.directory != directory
                 || entry.encrypted
                 || !entry.writable
             {
                 return Err(conflict(
                     "conditional DELETE source identity or revision changed",
                 ));
+            }
+            if directory {
+                let mut roots = 0;
+                self.propfind_with_context(
+                    &source_url,
+                    "1",
+                    &source_path,
+                    &mut |child| {
+                        if child.path.trim_end_matches('/') != source_path.trim_end_matches('/')
+                            || !child.directory
+                            || child.id != request.expected_source_id
+                            || child.etag != request.expected_source_etag
+                            || child.encrypted
+                            || !child.writable
+                        {
+                            return Err(conflict("directory is not a qualified empty source"));
+                        }
+                        roots += 1;
+                        if roots != 1 {
+                            return Err(conflict("directory listing is ambiguous"));
+                        }
+                        Ok(())
+                    },
+                    Some(request.context),
+                )?;
+                if roots != 1 {
+                    return Err(conflict("directory listing has no source witness"));
+                }
             }
             Ok(())
         };

@@ -23,7 +23,8 @@ fn refusal(kind: ErrorKind) -> CloudError {
 }
 fn source(intent: &NamespaceIntent) -> Option<&ExistingNamespaceEntry> {
     match &intent.operation {
-        NamespaceOperation::DeleteFile { source } => Some(source),
+        NamespaceOperation::DeleteFile { source }
+        | NamespaceOperation::DeleteDirectory { source } => Some(source),
         _ => None,
     }
 }
@@ -31,7 +32,10 @@ fn supported(intent: &NamespaceIntent) -> bool {
     let Some(source) = source(intent) else {
         return false;
     };
-    source.local.object_kind == NamespaceObjectKind::File
+    matches!(
+        source.local.object_kind,
+        NamespaceObjectKind::File | NamespaceObjectKind::Directory
+    ) && (source.local.object_kind != NamespaceObjectKind::Directory || source.remote.byte_len == 0)
         && source.local.parent.classification == StorageClassification::Ordinary
         && local_prefix(&source.local.parent.local_components).is_some()
         && namespace::strong(&source.remote.etag)
@@ -204,22 +208,39 @@ impl OpenCloudPlaceholderBackend {
             return Err(BackendError::Unavailable);
         }
         let relative = relative_to_root(&root.path, &path).ok_or(BackendError::Unavailable)?;
-        let (source_identity, source_binding) = self
-            .state
-            .lock()
-            .map_err(|_| BackendError::Unavailable)?
-            .files
-            .iter()
-            .find(|(_, binding)| {
-                binding.space_id == scope.space_id
-                    && binding.root_resource_id == scope.root_resource_id
-                    && binding.path == path
-                    && binding.remote_id == source.remote.resource_id
-                    && binding.etag == source.remote.etag
-                    && binding.size == source.remote.byte_len
-            })
-            .map(|(identity, binding)| (*identity, binding.clone()))
-            .ok_or(BackendError::Unavailable)?;
+        let (source_identity, source_binding) =
+            if source.local.object_kind == NamespaceObjectKind::Directory {
+                let state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
+                let mut matches = state.directories.iter().filter(|(_, binding)| {
+                    binding.space_id == scope.space_id
+                        && binding.root_resource_id == scope.root_resource_id
+                        && binding.path == path
+                        && binding.remote_id == source.remote.resource_id
+                });
+                let (identity, binding) = matches.next().ok_or(BackendError::Unavailable)?;
+                if matches.next().is_some() {
+                    return Err(BackendError::Unavailable);
+                }
+                (*identity, DeleteBinding::Directory(binding.clone()))
+            } else {
+                let (identity, binding) = self
+                    .state
+                    .lock()
+                    .map_err(|_| BackendError::Unavailable)?
+                    .files
+                    .iter()
+                    .find(|(_, binding)| {
+                        binding.space_id == scope.space_id
+                            && binding.root_resource_id == scope.root_resource_id
+                            && binding.path == path
+                            && binding.remote_id == source.remote.resource_id
+                            && binding.etag == source.remote.etag
+                            && binding.size == source.remote.byte_len
+                    })
+                    .map(|(identity, binding)| (*identity, binding.clone()))
+                    .ok_or(BackendError::Unavailable)?;
+                (identity, DeleteBinding::File(binding))
+            };
         let cancellation = self.client.transfer_budget().cancellation();
         let remote = LiveFileDelete {
             backend: self,
@@ -244,13 +265,17 @@ impl OpenCloudPlaceholderBackend {
     }
 }
 
+enum DeleteBinding {
+    File(FileBinding),
+    Directory(DirectoryBinding),
+}
 struct LiveFileDelete<'a> {
     backend: &'a OpenCloudPlaceholderBackend,
     intent: NamespaceIntent,
     parent_identity: OpaqueIdentity,
     parent: DirectoryBinding,
     source_identity: OpaqueIdentity,
-    source_binding: FileBinding,
+    source_binding: DeleteBinding,
     root_path: String,
     path: String,
     relative: String,
@@ -259,6 +284,12 @@ struct LiveFileDelete<'a> {
     attempted: Cell<bool>,
     deleted: Cell<bool>,
     cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+}
+fn below(parent: &str, child: &str) -> bool {
+    child.trim_end_matches('/') == parent.trim_end_matches('/')
+        || child
+            .strip_prefix(parent.trim_end_matches('/'))
+            .is_some_and(|tail| tail.starts_with('/'))
 }
 impl LiveFileDelete<'_> {
     fn original(&self) -> &ExistingNamespaceEntry {
@@ -289,8 +320,22 @@ impl LiveFileDelete<'_> {
             .state
             .lock()
             .map_err(|_| refusal(ErrorKind::Io))?;
-        let current = state.files.get(&self.source_identity) == Some(&self.source_binding)
-            && state.directories.get(&self.parent_identity) == Some(&self.parent);
+        let current_source = match &self.source_binding {
+            DeleteBinding::File(binding) => state.files.get(&self.source_identity) == Some(binding),
+            DeleteBinding::Directory(binding) => {
+                state.directories.get(&self.source_identity) == Some(binding)
+                    && !state.files.values().any(|child| {
+                        child.space_id == binding.space_id && below(&binding.path, &child.path)
+                    })
+                    && !state.directories.iter().any(|(id, child)| {
+                        *id != self.source_identity
+                            && child.space_id == binding.space_id
+                            && below(&binding.path, &child.path)
+                    })
+            }
+        };
+        let current =
+            current_source && state.directories.get(&self.parent_identity) == Some(&self.parent);
         drop(state);
         if !current {
             return Err(refusal(ErrorKind::Conflict));
@@ -361,12 +406,26 @@ impl FileDeleteRemote for LiveFileDelete<'_> {
                 if entry.path.trim_end_matches('/') == self.path.trim_end_matches('/')
                     && entry.id == self.original().remote.resource_id
                     && entry.etag == self.original().remote.etag
-                    && entry.size == self.original().remote.byte_len
+                    && (self.original().local.object_kind == NamespaceObjectKind::Directory
+                        || entry.size == self.original().remote.byte_len)
                     && namespace::strong(&entry.etag)
-                    && !entry.directory
+                    && entry.directory
+                        == (self.original().local.object_kind
+                            == NamespaceObjectKind::Directory)
                     && !entry.encrypted
                     && entry.writable => {}
             _ => return Err(self.authoritative(refusal(ErrorKind::Conflict))),
+        }
+        if self.original().local.object_kind == NamespaceObjectKind::Directory {
+            self.backend
+                .client
+                .list_with_context(
+                    &self.original().local.parent.scope.space_id,
+                    &self.path,
+                    self.context,
+                    &mut |_| Err(refusal(ErrorKind::Conflict)),
+                )
+                .map_err(|error| self.authoritative(error))?;
         }
         self.check_parent(true)?;
         Ok(self.original().clone())
@@ -383,30 +442,33 @@ impl FileDeleteRemote for LiveFileDelete<'_> {
         self.preflight(intent)?;
         let scope = &self.original().local.parent.scope;
         let hook_refused = Cell::new(false);
-        let response = self
-            .backend
-            .client
-            .conditional_delete_with_context_before_send(
-                ConditionalDeleteRequest {
-                    space: &scope.space_id,
-                    remote_root_path: &self.root_path,
-                    expected_root_id: &scope.root_resource_id,
-                    source_relative_path: &self.relative,
-                    expected_source_id: &self.original().remote.resource_id,
-                    expected_source_size: self.original().remote.byte_len,
-                    expected_source_etag: &self.original().remote.etag,
-                    context: self.context,
-                },
-                || {
-                    // SDK preflight checks the remote target. Its final claim
-                    // hook must not perform network I/O or re-enter the client.
-                    let result = self.ensure_authorized(intent).and_then(|()| before_send());
-                    if result.is_err() {
-                        hook_refused.set(true);
-                    }
-                    result
-                },
-            );
+        let request = ConditionalDeleteRequest {
+            space: &scope.space_id,
+            remote_root_path: &self.root_path,
+            expected_root_id: &scope.root_resource_id,
+            source_relative_path: &self.relative,
+            expected_source_id: &self.original().remote.resource_id,
+            expected_source_size: self.original().remote.byte_len,
+            expected_source_etag: &self.original().remote.etag,
+            context: self.context,
+        };
+        // Local-only claim: all remote emptiness/role/root work precedes this hook.
+        let guard = || {
+            let result = self.ensure_authorized(intent).and_then(|()| before_send());
+            if result.is_err() {
+                hook_refused.set(true);
+            }
+            result
+        };
+        let response = if self.original().local.object_kind == NamespaceObjectKind::Directory {
+            self.backend
+                .client
+                .conditional_empty_directory_delete_with_context_before_send(request, guard)
+        } else {
+            self.backend
+                .client
+                .conditional_delete_with_context_before_send(request, guard)
+        };
         match response {
             Ok(ConditionalDeleteResponse::Deleted) => {
                 if self.ensure_authorized(intent).is_err() {

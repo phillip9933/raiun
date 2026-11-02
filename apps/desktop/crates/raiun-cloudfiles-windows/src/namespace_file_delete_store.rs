@@ -94,7 +94,8 @@ impl FileDeleteStore {
             return Err(StoreError::Invalid);
         }
         let source_scope = match &intent.operation {
-            NamespaceOperation::DeleteFile { source } => &source.local.parent.scope,
+            NamespaceOperation::DeleteFile { source }
+            | NamespaceOperation::DeleteDirectory { source } => &source.local.parent.scope,
             _ => return Err(StoreError::Invalid),
         };
         if source_scope != &self.base.scope {
@@ -668,7 +669,10 @@ fn supported_intent(intent: &NamespaceIntent) -> bool {
         return false;
     };
     let parent = &source.local.parent;
-    source.local.object_kind == NamespaceObjectKind::File
+    matches!(
+        source.local.object_kind,
+        NamespaceObjectKind::File | NamespaceObjectKind::Directory
+    ) && (source.local.object_kind != NamespaceObjectKind::Directory || source.remote.byte_len == 0)
         && (parent.local_components.first().map(String::as_str) == Some("Personal")
             || (parent.local_components.first().map(String::as_str) == Some("Spaces")
                 && parent.local_components.len() >= 2))
@@ -700,7 +704,8 @@ fn conflicts_with_unresolved(existing: &NamespaceIntent, requested: &NamespaceIn
 }
 fn delete_source(intent: &NamespaceIntent) -> Option<&ExistingNamespaceEntry> {
     match &intent.operation {
-        NamespaceOperation::DeleteFile { source } => Some(source),
+        NamespaceOperation::DeleteFile { source }
+        | NamespaceOperation::DeleteDirectory { source } => Some(source),
         _ => None,
     }
 }

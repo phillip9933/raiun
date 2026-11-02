@@ -17,7 +17,7 @@ use crate::streamed_store::namespace_file_delete_store::{
 };
 use raiun_core::backend::{CloudError, ErrorKind};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     sync::{
         Weak,
         atomic::{AtomicBool, AtomicI64},
@@ -68,6 +68,7 @@ struct Ticket {
     key: Key,
     path: PathBuf,
     size: u64,
+    kind: NamespaceObjectKind,
     deadline: Instant,
 }
 struct Slot {
@@ -280,13 +281,17 @@ impl Shared {
         self.changed.notify_all();
         true
     }
-    fn completion(&self, key: Key) {
+    fn completion(&self, key: Key, size: i64) {
         let Ok(mut inner) = self.inner.lock() else {
             self.closed.store(true, Ordering::Release);
             return;
         };
         if let Some(slot) = inner.slot.as_mut()
             && slot.ticket.key == key
+            // Completion flags carry no kind. Only the original matched
+            // ticket supplies it; zero size never turns an empty file into a directory.
+            && (slot.ticket.kind != NamespaceObjectKind::Directory
+                || (slot.ticket.size == 0 && size == 0))
             && slot.ack_attempted
         {
             slot.completed = true;
@@ -486,11 +491,21 @@ fn execute(shared: &Arc<Shared>, ticket: &Ticket) -> FileDeleteOutcome {
         let raw = unsafe {
             CreateFileW(
                 path.as_ptr(),
-                FILE_READ_ATTRIBUTES,
+                FILE_READ_ATTRIBUTES
+                    | if ticket.kind == NamespaceObjectKind::Directory {
+                        1
+                    } else {
+                        0
+                    },
                 FILE_SHARE_READ | FILE_SHARE_DELETE,
                 null(),
                 OPEN_EXISTING,
-                FILE_FLAG_OPEN_REPARSE_POINT,
+                FILE_FLAG_OPEN_REPARSE_POINT
+                    | if ticket.kind == NamespaceObjectKind::Directory {
+                        FILE_FLAG_BACKUP_SEMANTICS
+                    } else {
+                        0
+                    },
                 null_mut(),
             )
         };
@@ -499,37 +514,68 @@ fn execute(shared: &Arc<Shared>, ticket: &Ticket) -> FileDeleteOutcome {
         }
         let leaf = RawOwnedHandle(raw);
         let leaf_snapshot = root_snapshot(leaf.0)?;
-        // Existing backend API pins the original opaque binding under a read
-        // lease. Copy its metadata, then drop that lease before store access or
-        // opening the later deletion session (no nested read/write acquisition).
-        let prepared = shared
-            .backend
-            .prepare_edit_binding(&ticket.key.identity)
-            .map_err(|_| Error::ProviderUnavailable)?;
-        let binding = prepared.binding().clone();
-        drop(prepared);
-        let logical = format!("{}/{}", captured.path.trim_end_matches('/'), name);
-        if binding.profile_id != captured.scope.profile_id
-            || binding.server_origin != captured.scope.server_origin
-            || binding.account_subject != captured.scope.account_subject
-            || binding.account_generation != shared.config.authorization.token_generation
-            || binding.space_id != captured.scope.space_id
-            || binding.root_resource_id != captured.scope.root_resource_id
-            || binding.virtual_path != logical
-            || binding.base_size != ticket.size
-        {
-            return Err(Error::ProviderUnavailable);
-        }
-        let original_identity = crate::ProviderIdentityBinding::File {
-            identity: ticket.key.identity,
-            space_id: binding.space_id.clone(),
-            root_resource_id: binding.root_resource_id.clone(),
-            path: binding.virtual_path.clone(),
-            remote_id: binding.remote_resource_id.clone(),
-            etag: binding.base_etag.clone(),
-            size: binding.base_size,
-        }
-        .identity();
+        let (remote, original_identity) = if ticket.kind == NamespaceObjectKind::Directory {
+            let mut source_components = refs.clone();
+            source_components.push(name.as_str());
+            // Fresh actual catalog traversal, not callback path/label-as-ID.
+            let directory = shared
+                .backend
+                .capture_namespace_parent(
+                    &source_components,
+                    shared.root,
+                    shared.config.authorization,
+                )
+                .map_err(|_| Error::ProviderUnavailable)?;
+            let logical = format!("{}/{}", captured.path.trim_end_matches('/'), name);
+            if directory.scope != captured.scope
+                || directory.path != logical
+                || directory.identity.as_bytes() != &ticket.key.identity
+                || ticket.size != 0
+            {
+                return Err(Error::ProviderUnavailable);
+            }
+            (directory.remote, directory.identity)
+        } else {
+            // Existing backend API pins the original opaque binding under a read
+            // lease. Copy its metadata, then drop that lease before store access or
+            // opening the later deletion session (no nested read/write acquisition).
+            let prepared = shared
+                .backend
+                .prepare_edit_binding(&ticket.key.identity)
+                .map_err(|_| Error::ProviderUnavailable)?;
+            let binding = prepared.binding().clone();
+            drop(prepared);
+            let logical = format!("{}/{}", captured.path.trim_end_matches('/'), name);
+            if binding.profile_id != captured.scope.profile_id
+                || binding.server_origin != captured.scope.server_origin
+                || binding.account_subject != captured.scope.account_subject
+                || binding.account_generation != shared.config.authorization.token_generation
+                || binding.space_id != captured.scope.space_id
+                || binding.root_resource_id != captured.scope.root_resource_id
+                || binding.virtual_path != logical
+                || binding.base_size != ticket.size
+            {
+                return Err(Error::ProviderUnavailable);
+            }
+            let original_identity = crate::ProviderIdentityBinding::File {
+                identity: ticket.key.identity,
+                space_id: binding.space_id.clone(),
+                root_resource_id: binding.root_resource_id.clone(),
+                path: binding.virtual_path.clone(),
+                remote_id: binding.remote_resource_id.clone(),
+                etag: binding.base_etag.clone(),
+                size: binding.base_size,
+            }
+            .identity();
+            (
+                RemoteEditBaseline {
+                    resource_id: binding.remote_resource_id,
+                    etag: binding.base_etag,
+                    byte_len: binding.base_size,
+                },
+                original_identity,
+            )
+        };
         let source = ExistingNamespaceEntry {
             local: LocalNamespaceEntry {
                 parent: NamespaceParent {
@@ -548,13 +594,9 @@ fn execute(shared: &Arc<Shared>, ticket: &Ticket) -> FileDeleteOutcome {
                     volume_serial: ticket.key.volume,
                     file_index: ticket.key.file,
                 },
-                object_kind: NamespaceObjectKind::File,
+                object_kind: ticket.kind,
             },
-            remote: RemoteEditBaseline {
-                resource_id: binding.remote_resource_id.clone(),
-                etag: binding.base_etag.clone(),
-                byte_len: binding.base_size,
-            },
+            remote,
         };
         let rename = file_rename_store_from_prepared(
             Some(recovery),
@@ -578,14 +620,21 @@ fn execute(shared: &Arc<Shared>, ticket: &Ticket) -> FileDeleteOutcome {
             snapshot: leaf_snapshot,
             source,
             acknowledged: false,
+            empty_verified: Cell::new(false),
         };
         local.check().map_err(|_| Error::EditRecoveryUnavailable)?;
         let candidate = NamespaceIntent {
             schema_version: 1,
             record_id: "0".repeat(32),
             record_generation: 1,
-            operation: NamespaceOperation::DeleteFile {
-                source: local.source.clone(),
+            operation: if ticket.kind == NamespaceObjectKind::Directory {
+                NamespaceOperation::DeleteDirectory {
+                    source: local.source.clone(),
+                }
+            } else {
+                NamespaceOperation::DeleteFile {
+                    source: local.source.clone(),
+                }
             },
         };
         let publication = match store
@@ -675,6 +724,91 @@ impl FileDeleteRemote for GuardedRemote<'_, '_> {
 fn cloud() -> CloudError {
     CloudError::new(ErrorKind::Forbidden, "owned native delete unavailable")
 }
+// FILE_ID_BOTH_DIR_INFO and enum values from the pinned MinGW winbase/minwinbase headers.
+#[repr(C)]
+struct DirectoryInfo {
+    next: u32,
+    index: u32,
+    times: [i64; 6],
+    attributes: u32,
+    name_bytes: u32,
+    ea_size: u32,
+    short_length: u8,
+    short_name: [u16; 12],
+    file_id: i64,
+    name: [u16; 1],
+}
+const _: () = {
+    assert!(std::mem::offset_of!(DirectoryInfo, name) == 104);
+    assert!(std::mem::offset_of!(DirectoryInfo, name_bytes) == 60);
+    assert!(size_of::<DirectoryInfo>() == 112);
+    assert!(std::mem::align_of::<DirectoryInfo>() == 8);
+};
+fn physically_empty(handle: Handle) -> Result<bool, Error> {
+    let mut class = 11; // FileIdBothDirectoryRestartInfo, then continuation10.
+    // At most dot entries may be skipped. Any other entry is nonempty;
+    // malformed, oversized or nonterminating metadata never proves emptiness.
+    for _ in 0..4 {
+        let mut words = [0u64; 512];
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                handle,
+                class,
+                words.as_mut_ptr().cast(),
+                std::mem::size_of_val(&words) as u32,
+            )
+        };
+        if ok == 0 {
+            return if unsafe { GetLastError() } == 18 {
+                Ok(true)
+            } else {
+                Err(win32_io_error("inspect pinned empty directory"))
+            };
+        }
+        class = 10;
+        let bytes = unsafe {
+            std::slice::from_raw_parts(words.as_ptr().cast::<u8>(), std::mem::size_of_val(&words))
+        };
+        let mut offset = 0usize;
+        loop {
+            if offset + size_of::<DirectoryInfo>() > bytes.len() {
+                return Ok(false);
+            }
+            let entry = unsafe {
+                std::ptr::read_unaligned(bytes.as_ptr().add(offset).cast::<DirectoryInfo>())
+            };
+            let start = offset + std::mem::offset_of!(DirectoryInfo, name);
+            let len = entry.name_bytes as usize;
+            if len == 0
+                || len % 2 != 0
+                || start.checked_add(len).is_none_or(|end| end > bytes.len())
+            {
+                return Ok(false);
+            }
+            let name = bytes[start..start + len]
+                .chunks_exact(2)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .collect::<Vec<_>>();
+            if name.as_slice() != [46] && name.as_slice() != [46, 46] {
+                return Ok(false);
+            }
+            if entry.next == 0 {
+                break;
+            }
+            let next = entry.next as usize;
+            if next % std::mem::align_of::<DirectoryInfo>() != 0
+                || next < std::mem::offset_of!(DirectoryInfo, name) + len
+                || offset
+                    .checked_add(next)
+                    .is_none_or(|end| end >= bytes.len())
+            {
+                return Ok(false);
+            }
+            offset += next;
+        }
+    }
+    Ok(false)
+}
 struct Local<'a, 'b> {
     shared: &'a Shared,
     ticket: &'a Ticket,
@@ -687,6 +821,7 @@ struct Local<'a, 'b> {
     snapshot: RootSnapshot,
     source: ExistingNamespaceEntry,
     acknowledged: bool,
+    empty_verified: Cell<bool>,
 }
 impl Local<'_, '_> {
     fn check(&self) -> Result<(), CloudError> {
@@ -714,13 +849,37 @@ impl Local<'_, '_> {
             || now.identity.file_index != self.ticket.key.file
             || now.file_size != self.ticket.size
             || now.last_write_time != self.snapshot.last_write_time
-            || now.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+            || (now.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0)
+                != (self.ticket.kind == NamespaceObjectKind::Directory)
             || now.placeholder_state & CF_PLACEHOLDER_STATE_PLACEHOLDER == 0
             || now.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC == 0
             || native_namespace_directory::opaque_directory_identity(leaf.0).map_err(|_| cloud())?
                 != self.ticket.key.identity
-            || modified_ranges_for_handle(leaf.0).map_err(|_| cloud())?
+            || (self.ticket.kind == NamespaceObjectKind::File
+                && modified_ranges_for_handle(leaf.0).map_err(|_| cloud())?)
         {
+            return Err(cloud());
+        }
+        if self.ticket.kind == NamespaceObjectKind::Directory && !self.empty_verified.get() {
+            // Establish the physical witness before publication. Later SDK
+            // guards only recheck pinned identity/timestamps/admission, never
+            // enumerate (which could recall a Cloud Files directory).
+            if !physically_empty(leaf.0).map_err(|_| cloud())? {
+                return Err(cloud());
+            }
+            let after = root_snapshot(leaf.0).map_err(|_| cloud())?;
+            if after.identity != now.identity
+                || after.file_attributes != now.file_attributes
+                || after.reparse_tag != now.reparse_tag
+                || after.placeholder_state != now.placeholder_state
+                || after.file_size != now.file_size
+                || after.last_write_time != now.last_write_time
+            {
+                return Err(cloud());
+            }
+            self.empty_verified.set(true);
+        }
+        if !self.admission.borrow().is_current() || !self.shared.live(self.ticket) {
             return Err(cloud());
         }
         let final_path = final_path_for_handle(leaf.0).map_err(|_| cloud())?;
@@ -782,6 +941,9 @@ impl FileDeleteLocal for Local<'_, '_> {
     where
         F: FnOnce() -> Result<(), crate::streamed_store::StoreError>,
     {
+        // Separate factual local emptiness refresh after HTTP returned,
+        // outside the SDK before-send callback and before success ACK.
+        self.empty_verified.set(false);
         if readback.source() != &self.source || self.check().is_err() {
             return Err(FileDeleteCompletionError::Unavailable);
         }
@@ -980,10 +1142,18 @@ pub(super) unsafe extern "system" fn notify(
         }
         let parameters = unsafe { &*parameters };
         if !valid_close_completion_param_size(parameters.param_size as usize)
-            || unsafe { parameters.data.delete.flags } != 0
+            || unsafe { parameters.data.delete.flags } > 1
             || info.file_size < 0
             || guard.0.readiness.load(Ordering::Acquire) != CALLBACK_READY
         {
+            return false;
+        }
+        let kind = if unsafe { parameters.data.delete.flags } == 1 {
+            NamespaceObjectKind::Directory
+        } else {
+            NamespaceObjectKind::File
+        };
+        if kind == NamespaceObjectKind::Directory && info.file_size != 0 {
             return false;
         }
         let Some(path) = path(info) else {
@@ -993,6 +1163,7 @@ pub(super) unsafe extern "system" fn notify(
             key,
             path,
             size: info.file_size as u64,
+            kind,
             deadline: Instant::now() + LIMIT,
         })
     }))
@@ -1028,7 +1199,10 @@ pub(super) unsafe extern "system" fn completed(
     if valid_close_completion_param_size(parameters.param_size as usize)
         && unsafe { parameters.data.delete_completion.flags } == 0
     {
-        shared.completion(key);
+        // CF_CALLBACK_DELETE_COMPLETION_FLAGS defines NONE only. The original
+        // active request owns its kind, and record_completion still requires
+        // successful ACK plus this separate factual exact-key completion.
+        shared.completion(key, info.file_size);
     }
 }
 pub(super) fn deleted_close(
