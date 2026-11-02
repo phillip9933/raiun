@@ -335,3 +335,167 @@ fn upload_with_truly_missing_followup_etag_fails_after_one_put_without_retry() {
     assert_eq!(seen[4].body, CONTENT);
     assert_eq!(std::fs::read(source.path()).unwrap(), CONTENT);
 }
+
+fn directory_without_validator(href: &str) -> String {
+    dav(href, true, None, 0).replace(
+        "</d:response>",
+        "<d:propstat><d:prop><d:getetag/></d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat></d:response>",
+    )
+}
+fn unqualified_root() -> String {
+    directory_without_validator("/dav/personal/")
+}
+fn unqualified_folder() -> String {
+    directory_without_validator("/dav/personal/Courses%20&amp;%20CEUs/")
+}
+
+#[test]
+fn directory_without_etag_can_list_and_create_but_does_not_invent_a_revision() {
+    let file_xml = file(Some("&quot;file-v1&quot;"));
+    let child = &file_xml
+        [file_xml.find("<d:response>").unwrap()..file_xml.find("</d:multistatus>").unwrap()];
+    let listing =
+        unqualified_folder().replace("</d:multistatus>", &format!("{child}</d:multistatus>"));
+    let fixture = Fixture::new(vec![
+        graph(),
+        prop(unqualified_root()),
+        prop(unqualified_folder()),
+        prop(listing),
+    ]);
+    let mut entries = Vec::new();
+    fixture
+        .client()
+        .list("drive-1", FOLDER, &mut |entry| {
+            entries.push(entry);
+            Ok(())
+        })
+        .unwrap();
+    let seen = fixture.finish();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].path, FILE);
+    assert_eq!(entries[0].etag, "\"file-v1\"");
+    assert_eq!(seen.len(), 4);
+    let directory = parse(
+        &unqualified_folder(),
+        "https://cloud.invalid/dav/personal/Courses%20&%20CEUs/",
+        FOLDER,
+    )
+    .unwrap();
+    assert!(directory[0].directory);
+    assert!(directory[0].etag.is_empty());
+
+    let fixture = Fixture::new(vec![
+        graph(),
+        prop(unqualified_root()),
+        prop(unqualified_folder()),
+        ("404 Not Found", String::new()),
+        prop(unqualified_folder()),
+        ("201 Created", String::new()),
+        graph(),
+        prop(unqualified_root()),
+        prop(unqualified_folder()),
+        prop(file(Some("&quot;created-v1&quot;"))),
+    ]);
+    let source = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(source.path(), CONTENT).unwrap();
+    let entry = fixture
+        .client()
+        .upload("drive-1", FILE, source.path(), WriteCondition::Absent)
+        .unwrap();
+    let seen = fixture.finish();
+    assert_eq!(entry.etag, "\"created-v1\"");
+    assert_eq!(seen.len(), 10);
+    assert_eq!(seen[5].line, format!("PUT {FILE_WIRE} HTTP/1.1"));
+    assert_eq!(seen[5].if_none_match.as_deref(), Some("*"));
+    assert!(seen[5].if_match.is_none());
+    assert_eq!(seen[5].body, CONTENT);
+}
+
+#[test]
+fn directory_without_validator_refuses_delete_and_move_before_mutation_send() {
+    let fixture = Fixture::new(vec![
+        graph(),
+        prop(unqualified_root()),
+        prop(unqualified_folder()),
+    ]);
+    let error = fixture
+        .client()
+        .delete("drive-1", FOLDER, "\"previous-directory-v1\"")
+        .unwrap_err();
+    let seen = fixture.finish();
+    assert_eq!(error.kind, ErrorKind::InvalidResponse);
+    assert!(
+        seen.iter()
+            .all(|request| !request.line.starts_with("DELETE "))
+    );
+
+    let fixture = Fixture::new(vec![
+        graph(),
+        graph(),
+        prop(unqualified_root()),
+        prop(unqualified_folder()),
+    ]);
+    let error = fixture
+        .client()
+        .rename("drive-1", FOLDER, "/renamed", "\"previous-directory-v1\"")
+        .unwrap_err();
+    let seen = fixture.finish();
+    assert_eq!(error.kind, ErrorKind::InvalidResponse);
+    assert!(
+        seen.iter()
+            .all(|request| !request.line.starts_with("MOVE "))
+    );
+
+    let fixture = Fixture::new(vec![
+        graph(),
+        prop(unqualified_root()),
+        prop(unqualified_folder()),
+        prop(file(None)),
+    ]);
+    let source = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(source.path(), CONTENT).unwrap();
+    let error = fixture
+        .client()
+        .upload(
+            "drive-1",
+            FILE,
+            source.path(),
+            WriteCondition::Match("\"old\"".into()),
+        )
+        .unwrap_err();
+    let seen = fixture.finish();
+    assert_eq!(error.kind, ErrorKind::InvalidResponse);
+    assert!(seen.iter().all(|request| !request.line.starts_with("PUT ")));
+
+    let fixture = Fixture::new(vec![
+        graph(),
+        prop(unqualified_root()),
+        prop(folder()),
+        ("204 No Content", String::new()),
+    ]);
+    fixture
+        .client()
+        .delete("drive-1", FOLDER, "\"original-directory\"")
+        .unwrap();
+    let seen = fixture.finish();
+    assert_eq!(seen[3].line, format!("DELETE {FOLDER_WIRE} HTTP/1.1"));
+    assert_eq!(seen[3].if_match.as_deref(), Some("\"original-directory\""));
+
+    // No metadata request, let alone a mutation, may use an absent/weak token.
+    let fixture = Fixture::new(vec![]);
+    let client = fixture.client();
+    for expected in ["", "W/\"directory-v1\"", "*", "unquoted"] {
+        assert_eq!(
+            client.delete("drive-1", FOLDER, expected).unwrap_err().kind,
+            ErrorKind::InvalidResponse
+        );
+        assert_eq!(
+            client
+                .rename("drive-1", FOLDER, "/renamed", expected)
+                .unwrap_err()
+                .kind,
+            ErrorKind::InvalidResponse
+        );
+    }
+    assert!(fixture.finish().is_empty());
+}

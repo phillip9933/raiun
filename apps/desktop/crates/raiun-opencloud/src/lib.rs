@@ -971,7 +971,7 @@ impl OpenCloudClient {
         space: &CloudSpace,
         target_url: &Url,
         logical_path: &str,
-    ) -> Result<(), CloudError> {
+    ) -> Result<RemoteEntry, CloudError> {
         if space.encrypted {
             return Err(CloudError::new(
                 ErrorKind::Unsupported,
@@ -1039,7 +1039,7 @@ impl OpenCloudClient {
                 "remote folder or item is read only",
             ));
         }
-        Ok(())
+        Ok(checked_entry)
     }
 
     /// Freshly inspect each ancestor because encryption metadata can appear
@@ -1677,6 +1677,21 @@ fn is_strong_etag(value: &str) -> bool {
         && bytes[1..bytes.len() - 1]
             .iter()
             .all(|byte| *byte == 0x21 || (0x23..=0x7e).contains(byte))
+}
+
+fn require_directory_mutation_validator(
+    entry: &RemoteEntry,
+    logical_path: &str,
+) -> Result<(), CloudError> {
+    if entry.directory
+        && (entry.path.trim_end_matches('/') != logical_path.trim_end_matches('/')
+            || !is_strong_etag(&entry.etag))
+    {
+        return Err(invalid(
+            "conditional directory mutation requires a strong entity tag",
+        ));
+    }
+    Ok(())
 }
 
 fn recovery_target_path(root: &str, relative: &str) -> Result<String, CloudError> {
@@ -2695,7 +2710,13 @@ impl OpenCloudClient {
                 .to_string();
         }
         ensure_operation_active(operation)?;
-        self.ensure_writable_target(&selected, &url, path)?;
+        let target = self.ensure_writable_target(&selected, &url, path)?;
+        if let WriteCondition::Match(etag) = &condition {
+            if !is_strong_etag(etag) {
+                return Err(invalid("conditional upload requires a strong entity tag"));
+            }
+            require_directory_mutation_validator(&target, path)?;
+        }
         ensure_operation_active(operation)?;
         let root_condition = expected_root
             .map(|root| self.root_write_condition(&selected, path, root))
@@ -2965,8 +2986,12 @@ impl CloudBackend for OpenCloudClient {
                 "cannot delete a cloud Space root",
             ));
         }
+        if !is_strong_etag(expected_etag) {
+            return Err(invalid("conditional delete requires a strong entity tag"));
+        }
         let (selected, url) = self.transfer_url(space, path)?;
-        self.ensure_writable_target(&selected, &url, path)?;
+        let target = self.ensure_writable_target(&selected, &url, path)?;
+        require_directory_mutation_validator(&target, path)?;
         let (request, token) = self.request(Method::DELETE, &url)?;
         let response = request
             .header(IF_MATCH, expected_etag)
@@ -2994,12 +3019,16 @@ impl CloudBackend for OpenCloudClient {
                 "cannot rename a cloud Space root or replace it",
             ));
         }
+        if !is_strong_etag(expected_etag) {
+            return Err(invalid("conditional move requires a strong entity tag"));
+        }
         let (selected, source) = self.transfer_url(space, from)?;
         let (_, destination) = self.transfer_url(space, to)?;
         if source == destination {
             return self.stat(space, from);
         }
-        self.ensure_writable_target(&selected, &source, from)?;
+        let target = self.ensure_writable_target(&selected, &source, from)?;
+        require_directory_mutation_validator(&target, from)?;
         self.ensure_writable_target(&selected, &destination, to)?;
         let (request, token) =
             self.request(Method::from_bytes(b"MOVE").expect("static method"), &source)?;
@@ -3386,7 +3415,10 @@ fn to_remote_entry(
         .cloned()
         .unwrap_or_else(|| "root".to_owned());
     let etag = item.etag.trim().to_owned();
-    if etag.is_empty() {
+    // Collections can advertise getetag in a 404 propstat. Their identity and
+    // ordinary-ancestry metadata remain useful, but an absent validator grants
+    // no conditional mutation authority. Regular-file revisions stay required.
+    if etag.is_empty() && !item.directory {
         return Err(invalid("DAV response omitted an entity tag"));
     }
     let encrypted = item.encrypted
