@@ -121,6 +121,7 @@ const WINDOWS_MEDIA_METADATA_ENABLED: bool = !cfg!(test);
 const WINDOWS_VAULT_SESSIONS_ENABLED: bool = !cfg!(test);
 const WINDOWS_REFRESH_LEAD_SECONDS: u64 = 30;
 include!("windows_vault_session_control.rs");
+include!("windows_vault_create.rs");
 include!("windows_vault_edit_upload.rs");
 
 use clap::{Parser, Subcommand};
@@ -3575,6 +3576,9 @@ impl WindowsAgent {
             }
             // Inspection is read-only and grants no session, key or native route.
             "vault_inspect" => Ok((self.inspect_windows_vault(request)?, false)),
+            "vault_create_parent" if WINDOWS_VAULT_SESSIONS_ENABLED => {
+                Ok((self.inspect_windows_vault_create_parent(request)?, false))
+            }
             "vault_list" => Ok((self.browse_windows_vault(request)?, false)),
             "vault_upload_capture" => {
                 if !WINDOWS_VAULT_EDIT_UPLOAD_ENABLED {
@@ -3958,6 +3962,7 @@ impl WindowsAgent {
             "proxy_edit_requires_sign_out": state.session.is_some(),
             "media_jobs_supported": WINDOWS_MEDIA_METADATA_ENABLED,
             "vaults_supported": WINDOWS_VAULT_SESSIONS_ENABLED,
+            "vault_create_supported": WINDOWS_VAULT_SESSIONS_ENABLED,
             "vault_in_app_browse_supported": true,
             "account_switch_supported": false,
             "pause_supported": WINDOWS_FOLDER_SYNC_ENABLED,

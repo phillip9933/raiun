@@ -21,6 +21,9 @@ impl OwnedControlRequest {
     ) -> Result<session_requests::VaultSessionRequest, String> {
         session_requests::decode(std::mem::take(&mut self.value))
     }
+    pub(super) fn decode_create(self) -> Result<create_requests::VaultCreateRequest, String> {
+        create_requests::decode(&self.value)
+    }
     pub(super) fn value(&self) -> &Value {
         &self.value
     }
@@ -196,6 +199,9 @@ pub(super) mod session_requests {
     /// No Debug, Clone, or serialization implementation.
     pub struct VaultPassword(Zeroizing<Vec<u8>>);
     impl VaultPassword {
+        pub fn from_owned(bytes: Zeroizing<Vec<u8>>) -> Self {
+            Self(bytes)
+        }
         pub fn as_mut_bytes(&mut self) -> &mut [u8] {
             self.0.as_mut_slice()
         }
@@ -496,5 +502,87 @@ pub(super) mod session_requests {
                 assert!(decode(bad).is_err());
             }
         }
+    }
+}
+
+/// Separate owned create admission. The enclosing OwnedControlRequest wipes the
+/// original JSON on every exit; only this bounded zeroized password survives.
+pub(super) mod create_requests {
+    use super::*;
+    pub struct VaultCreateRequest {
+        pub target: super::session_requests::VaultTarget,
+        pub name: String,
+        pub expected_auth_generation: u64,
+        pub password: zeroize::Zeroizing<Vec<u8>>,
+    }
+    pub(super) fn decode(value: &Value) -> Result<VaultCreateRequest, String> {
+        let invalid = || "Invalid vault creation request".to_owned();
+        let fields = value.as_object().ok_or_else(invalid)?;
+        if fields.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "action"
+                    | "profile_id"
+                    | "space_id"
+                    | "parent_path"
+                    | "parent_resource_id"
+                    | "name"
+                    | "password"
+                    | "expected_auth_generation"
+            )
+        }) {
+            return Err(invalid());
+        }
+        let text = |key: &str, limit: usize| -> Result<&str, String> {
+            fields
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|s| {
+                    !s.is_empty()
+                        && s.len() <= limit
+                        && s.trim() == *s
+                        && !s.chars().any(char::is_control)
+                })
+                .ok_or_else(invalid)
+        };
+        if text("action", 64)? != "vault_create" {
+            return Err(invalid());
+        }
+        let profile = text("profile_id", 128)?;
+        if !super::super::valid_runtime_profile(profile) {
+            return Err(invalid());
+        }
+        let space = text("space_id", 512)?;
+        let parent = text("parent_path", 4096)?;
+        validate_remote_path(parent).map_err(|_| invalid())?;
+        let parent_id = text("parent_resource_id", 512)?;
+        let name = text("name", 255)?;
+        if name.len() <= 6
+            || name.contains(['/', '\\'])
+            || !name.to_ascii_lowercase().ends_with(".vault")
+        {
+            return Err(invalid());
+        }
+        let generation = fields
+            .get("expected_auth_generation")
+            .and_then(Value::as_u64)
+            .filter(|g| *g != 0)
+            .ok_or_else(invalid)?;
+        let password = fields
+            .get("password")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty() && s.len() <= 4096)
+            .ok_or_else(invalid)?;
+        Ok(VaultCreateRequest {
+            target: super::session_requests::VaultTarget {
+                profile_id: Some(profile.to_owned()),
+                space_id: space.to_owned(),
+                root_path: parent.to_owned(),
+                root_resource_id: parent_id.to_owned(),
+            },
+            name: name.to_owned(),
+            expected_auth_generation: generation,
+            password: zeroize::Zeroizing::new(password.as_bytes().to_vec()),
+        })
     }
 }

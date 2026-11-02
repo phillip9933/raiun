@@ -338,6 +338,13 @@ impl WindowsProfiles {
         request: windows_vault_requests::OwnedControlRequest,
     ) -> Result<(Value, bool), String> {
         runtime_mode()?.validate_request(request.value())?;
+        if request.value().get("action").and_then(Value::as_str) == Some("vault_create") {
+            let request = request.decode_create()?;
+            if !WINDOWS_VAULT_SESSIONS_ENABLED {
+                return Err("Windows vault sessions are not available yet".into());
+            }
+            return self.dispatch_vault_create(request);
+        }
         let session_action = request
             .value()
             .get("action")
@@ -351,6 +358,70 @@ impl WindowsProfiles {
             return Err("Windows vault sessions are not available yet".into());
         }
         self.dispatch_vault_session(request)
+    }
+
+    fn dispatch_vault_create(
+        &self,
+        request: windows_vault_requests::create_requests::VaultCreateRequest,
+    ) -> Result<(Value, bool), String> {
+        let _gate = self
+            .mutation_gate
+            .lock()
+            .map_err(|_| "Vault changes are unavailable")?;
+        let (profile, runtime) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            let profile = request
+                .target
+                .profile_id
+                .as_deref()
+                .or(state.registry.selected())
+                .ok_or("No active account is selected")?
+                .to_owned();
+            if state
+                .registry
+                .profiles()
+                .get(&profile)
+                .is_none_or(|record| record.removed())
+            {
+                return Err("Account has been removed".into());
+            }
+            let runtime = state
+                .runtimes
+                .get(&profile)
+                .cloned()
+                .ok_or("Unknown profile_id")?;
+            (profile, runtime)
+        };
+        let _credential_operation = runtime
+            .vault_credential_operation
+            .lock()
+            .map_err(|_| "Vault credential changes are unavailable")?;
+        let prepared = runtime.prepare_windows_vault_create(request)?;
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if state
+                .runtimes
+                .get(&profile)
+                .is_none_or(|active| !Arc::ptr_eq(active, &runtime))
+            {
+                return Err("The vault account runtime changed".into());
+            }
+            runtime.check_vault_preparation(&prepared)?;
+            // Write the historical encrypted-location exclusion BEFORE
+            // any live route can expose a native decrypted identity.
+            let next = state
+                .registry
+                .with_reserved_vault(&profile, prepared.reservation.clone())?;
+            self.persist(&next)?;
+            state.registry = next;
+        }
+        Ok((runtime.publish_windows_vault_unlock(prepared)?, false))
     }
 
     // The public action gate is deliberately outside this shared implementation.
