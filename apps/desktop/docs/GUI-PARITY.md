@@ -5,24 +5,37 @@
 Desktop GUI and CLI now have one coordinator and one canonical integration
 worktree, `worktrees/desktop-followup-ui`. The CLI-only chat is archived; its
 independent worktree is a preserved reference. The source checkpoint is
-`130bcb3a15ae70f34f3ea9a544c187daad870857`. The dated assessments below retain
+`2978d8b`. The dated assessments below retain
 their original scope; this checkpoint supersedes their older ownership and
 rename-wiring descriptions, not their outstanding feature or native gates.
 
 Windows now has an automatic owner-thread caller for fresh ASCII Personal
 same-parent file renames, using the original account/root/catalog binding.
 The shared notification dispatcher and metadata-only plain/cloud entry
-classification are integrated. Shared directory routing remains disabled;
-new-file creation, replacement, deletion, Space operations and cross-parent
+classification are integrated. Guarded Personal file and directory creation
+now has owned SDK phases on two shared joined workers; production creation
+remains disabled. Replacement, deletion, Space operations and cross-parent
 moves remain separate implementation/acceptance gaps. The corrected five
 native rename controls and two owner-loop controls are packaged, but none has
 yet executed on the laptop. Download/hash verification is not native acceptance.
 The original failed fixture execution remains failed. Encrypted parity gaps
 in the matrix are not resolved by these ordinary-file changes.
 
+Account changes now drain the original workers before changing authority.
+File preparation and final refresh metadata share a 30-second phase budget
+while retaining the original cancellation state and file-body deadline. Source
+validation passed 1,792 host cases with 17 explicit ignores, including a real
+held-HTTP timeout regression. The final assertion-style-only revision has an
+exact host-result reuse proof and fresh strict Linux/Windows checks and Windows
+compilation. The new create, directory and account-lifecycle fixtures remain
+compiled only; they do not replace the pending original device-test cohort.
+
 Linux new ordinary Desktop creates now use a durable final-close handoff with
 two upload workers. An isolated actual-FUSE fixture and the unsigned preview's
-Agent/CLI smoke, signed-out GUI rendering and normal Quit passed. The owner's
+Agent/CLI smoke, signed-out GUI rendering and normal Quit passed. A separate
+isolated actual-FUSE run passed all 211 files / 250,000,000 bytes, independent
+remote byte verification and responsive pending reads with two upload workers.
+Its elapsed time includes setup and verification, not pure upload throughput. The owner's
 real-server 250-MB/211-file comparison and final-package connected acceptance
 remain pending. Headless, existing-file and vault save paths are unchanged by
 this Linux create-upload work. See [the implementation checkpoint](IMPLEMENTATION.md#windows-namespace-integration--1-november-2026-source-checkpoint)

@@ -3510,7 +3510,7 @@ skipped without granting ownership or claiming completed uploads. Unsupported
 plain entries, missing or changed metadata and removals retain attention; this
 does not add deletion, creation of parent folders or Space-file creation support.
 
-Source checks pass 1,791 host cases with 17 explicit ignores, strict Linux and
+Source checks pass 1,792 host cases with 17 explicit ignores, strict Linux and
 Windows checks, and Windows test compilation. The two public-entry create
 fixtures and full manager/worker upload-and-stop fixture are compiled, not
 executed. The latter's Windows-only test changes reuse the unchanged host
@@ -3538,6 +3538,15 @@ checks reject stale completions; root configuration reserves admission through
 its persistence handoff. Nine focused Windows lifecycle tests are compiled, not
 executed. Connected directory-worker and exact-package acceptance remain open;
 revocation alone is not a completed drain.
+Owned file preparation and final refresh now each share one metadata deadline
+capped at 30 seconds. Previously, a stalled blocking metadata request could
+inherit the file job's remaining six-hour budget and delay the joined drain.
+The bounded clone preserves the original cancellation and owner checks; file
+body transfers retain their original total deadline. This bounds the wait,
+rather than interrupting an in-flight blocking request immediately. A real
+held-HTTP regression and full host suite passed. The final assertion-style-only
+revision reuses those executions with an exact equivalence proof; strict checks
+and Windows compilation passed on that revision. Native execution remains open.
 The ignored directory-worker case and panic-safe lifecycle test fixtures now
 pass Windows compilation and strict source checks. They have not run on a
 Windows device. Directory conversion deliberately retains its existing
