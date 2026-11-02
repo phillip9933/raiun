@@ -2160,11 +2160,18 @@ impl ProviderManager {
         let mixed_namespace_fixture = self.mixed_namespace_test_activation.load(Ordering::Acquire);
         let create_enabled = windows_file_create_producer::PRODUCTION_ENABLED;
         #[cfg(all(test, debug_assertions))]
-        let create_enabled = create_enabled || self.create_test_activation.load(Ordering::Acquire);
-        let directory_phase_enabled = false;
+        // Explicit legacy fixtures retain their original route; normal GUI/CLI
+        // mounts use the shared file/directory creation workers.
+        let create_enabled = (create_enabled
+            && !self.namespace_test_activation.load(Ordering::Acquire)
+            && !mixed_namespace_fixture)
+            || self.create_test_activation.load(Ordering::Acquire);
+        let directory_phase_enabled = true;
         #[cfg(all(test, debug_assertions))]
-        let directory_phase_enabled =
-            directory_phase_enabled || self.directory_phase_test_activation.load(Ordering::Acquire);
+        let directory_phase_enabled = (directory_phase_enabled
+            && !self.namespace_test_activation.load(Ordering::Acquire)
+            && !mixed_namespace_fixture)
+            || self.directory_phase_test_activation.load(Ordering::Acquire);
         let shared_directory_ready = windows_namespace_dispatcher::DIRECTORY_ROUTING_READY;
         #[cfg(all(test, debug_assertions))]
         let shared_directory_ready = shared_directory_ready || mixed_namespace_fixture;

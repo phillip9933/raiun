@@ -167,7 +167,10 @@ fn route(hints: &[Hint<'_>], directories: bool, creates: bool) -> Result<Vec<Wor
                 names.push(hint.components);
                 Some(Work::Directory(index))
             }
-            Action::Removed if creates || (directories && personal(hint.components)) => {
+            // Removal observations are not cloud-delete or completion authority.
+            // Modern create mode keeps them only as whole-batch alias fences.
+            Action::Removed if creates => None,
+            Action::Removed if directories && personal(hint.components) => {
                 return Err("Unsupported namespace removal");
             }
             // File-only mode preserves existing ignore behavior for non-rename
@@ -179,7 +182,12 @@ fn route(hints: &[Hint<'_>], directories: bool, creates: bool) -> Result<Vec<Wor
                 return Err("Namespace batch limit");
             }
             for name in names {
-                if endpoints.iter().any(|old| aliases(old, name)) {
+                if endpoints.iter().any(|old| aliases(old, name))
+                    || (creates
+                        && hints.iter().any(|hint| {
+                            hint.action == Action::Removed && aliases(hint.components, name)
+                        }))
+                {
                     return Err("Ambiguous namespace endpoints");
                 }
                 endpoints.push(name);
@@ -1000,9 +1008,9 @@ mod tests {
                 Ok(vec![])
             );
         }
-        // Refuse the whole volatile plan before any SDK/native dispatch. This
-        // never maps local cache eviction into remote deletion authority.
-        assert!(
+        // A removal alone is healthy empty work, never cloud deletion or
+        // completion authority. Same-batch work still checks every removal alias.
+        assert_eq!(
             route(
                 &[Hint {
                     action: Action::Removed,
@@ -1010,8 +1018,8 @@ mod tests {
                 }],
                 false,
                 true
-            )
-            .is_err()
+            ),
+            Ok(vec![])
         );
         let alias = parts("Personal/NEW.bin");
         let hints = [

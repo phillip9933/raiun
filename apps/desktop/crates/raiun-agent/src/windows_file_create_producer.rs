@@ -66,7 +66,7 @@ fn directory_step(step: DirectoryCreateStep) -> Step {
         DirectoryCreateStep::Finished(_) => Step::Held,
     }
 }
-pub(crate) const PRODUCTION_ENABLED: bool = false;
+pub(crate) const PRODUCTION_ENABLED: bool = true;
 pub(crate) const HOLD: &str =
     "Creation sync needs attention. Existing recovery files have been kept.";
 struct Candidate {
