@@ -1,30 +1,39 @@
 # Linux / Windows GUI parity gate
 
-## Current checkpoint — 2 November 2026
+## Current checkpoint — 3 November 2026
 
 GUI and CLI share the canonical `worktrees/desktop-followup-ui` source. The
-current Windows runtime checkpoint is `ebde91a`; older dated descriptions below
+current Windows runtime checkpoint is `3e912d9`; older dated descriptions below
 retain their historical scope and do not describe the newly activated factories.
 
-Normal Windows GUI and CLI mounts now connect ordinary Personal file and folder
-creation through the existing two joined SDK workers. They also connect clean
-Personal file deletion through account-bound native callbacks and protected
-history. Same-parent ordinary ASCII Personal file rename was already connected.
+Normal Windows GUI and CLI mounts now connect ordinary file and folder creation
+in Personal and writable, unencrypted Spaces through the existing two joined SDK
+workers. Clean-file deletion and same-folder ASCII file rename are also connected
+in those locations. Personal remains the account anchor; each target Space/root
+is separately qualified. These newer Spaces changes have not been packaged yet.
 Removal notifications are observation hints only: they cannot authorize a cloud
 delete or mark work complete, and conflicting same-batch endpoints still refuse.
 Both entrypoints use streamed ordinary existing-file saves; the CLI no longer
 keeps the legacy whole-body 16-MiB activation limit. Account changes revoke new
 backend work before a fallible worker drain and retain unresolved local custody.
 
-This is source integration with affected Windows compilation and formatting
-passed, not finished-package native acceptance. The owner removed the seven-case
-R58/R59 gate, full-suite reruns and expanded matrices from this release phase.
-Finish packaging, then check basic upgrade/startup/sign-in, one normal file
-workflow and essential data preservation. Preserve earlier failures without
-rerunning unchanged cohorts or treating compilation as a native pass.
+The composed source passed affected Windows compilation and formatting. The
+previous unsigned `d8233c1` installer passed its 0.7.4-to-0.7.5 same-user upgrade,
+retained synthetic settings/documents/DPAPI state and normal Agent exit on CI.
+It was also installed and visibly started in the laptop's standard synthetic
+account. That account could not open the normal Windows browser outside Raiun
+either, so current sign-in and file workflow remain unverified there; this does
+not establish an application sign-in regression. No further browser/account setup
+or expanded test matrix is part of this release work.
 
-Broader writable-Space operations, folder rename/delete, cross-parent moves,
-replacement saves and encrypted Windows equivalents remain implementation gaps.
+The owner removed the seven-case R58/R59 gate, full-suite reruns and expanded
+matrices from this phase. Only finished-candidate basic build/upgrade/startup,
+sign-in, one normal file workflow and essential preservation checks remain.
+Prior failures and the exact scope of reused evidence are retained.
+
+Folder rename/delete, cross-parent moves, atomic replacement saves and broader
+encrypted Windows equivalents remain implementation gaps. Empty-folder deletion
+is being reviewed separately and is not claimed as native acceptance.
 These are feature work, not missing exhaustive tests. Removing extra testing does
 not claim those capabilities are complete or authorize signing/publication.
 The shared OpenCloud conditional-create protocol has the same documented server
@@ -34,10 +43,12 @@ The unsigned Linux 0.7.5 AppImage from `ee17f62` is built, including the paralle
 ordinary-create workers, pending-directory correction and validated DAV directory
 metadata compatibility fix. Its exact artifact is SHA256
 `e082932ce5285711382c154a8507785836080830e935ee00357fbc5ec4bae873`.
-It has not been installed on the owner laptop or published. Earlier successful
-Linux native/package evidence and the later 210-of-211 failure remain separate;
-no new large workload or throughput claim is made for this artifact. Missing file
-ETags still refuse; only valid directory metadata may omit its ETag.
+It passed one isolated basic workflow: synthetic sign-in, one 1-MiB ordinary
+upload with independent body verification, pending-work drain, normal unmount,
+Quit and VM shutdown with originals preserved. It has not been installed on the
+owner laptop or published. The earlier 210-of-211 failure remains preserved; this
+is no large-workload or real-server throughput claim. Missing file ETags still
+refuse; only valid directory metadata may omit its ETag.
 
 ## Earlier assessment and feature matrix
 

@@ -3625,3 +3625,26 @@ failures and evidence remain preserved. See GUI-PARITY.md for actual remaining
 feature gaps; this activation does not implement broad Space, folder mutation,
 replacement or encrypted equivalents. No new release or owner installation is
 claimed by this source checkpoint.
+
+
+### Windows Spaces namespace integration — 3 November 2026
+
+Local source through `3e912d9` extends the shared ordinary Personal pipeline to
+writable, unencrypted Spaces: new files, mkdir, clean-file deletion and same-parent
+ASCII file rename. The target Space/root comes from fresh actual managed namespace
+traversal and metadata; the verified Personal root still identifies the account.
+The conditional-delete SDK's earlier Personal-only gate was removed while its
+writable/encrypted/root/source checks remain. Final SDK send-admission callbacks
+stay local and perform no network reentry; remote qualification occurs beforehand.
+The exact composed Windows Agent/CLI compile and formatting passed before these
+last narrow guard corrections; their final combined check follows current folder
+work. No repeated full suite or expanded native matrix was run.
+
+The unsigned `d8233c1` Windows installer built and passed the basic same-user
+0.7.4-to-0.7.5 upgrade with retained synthetic DPAPI/settings/documents and normal
+Agent exit. The laptop installed and started the exact payload under its standard
+synthetic user. Its default browser also failed to appear when opened outside
+Raiun; current sign-in and file workflow remain unverified, with no proven app
+regression and no further account/browser setup loop. Newer Spaces source has not
+been delivered over that installed candidate. Broader folder, replacement-save and
+encrypted parity remain implementation work, not extra test gates.

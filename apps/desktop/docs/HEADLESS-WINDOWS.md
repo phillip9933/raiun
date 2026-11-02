@@ -301,3 +301,17 @@ the link. Permission loss, revocation,
 cancellation or timeout must preserve edited bytes and recovery evidence without
 a clean acknowledgement. The finished Windows candidate's basic large-save check
 remains pending; source activation alone is not native acceptance.
+
+
+## Current ordinary namespace source — 3 November 2026
+
+The shared GUI/CLI runtime at `3e912d9` now wires new files, new folders, clean-file
+deletion and same-folder ASCII file rename in Personal and writable, unencrypted
+Spaces. Fresh Space/root qualification stays separate from the Personal account
+anchor. Root and encrypted operations, directory rename/delete, cross-parent moves
+and atomic replacement saves are not implied by these file capabilities. These
+newer Spaces changes are source-checked, not yet packaged or natively exercised.
+The earlier `d8233c1` installer passed basic install/upgrade/startup checks; a fresh
+laptop test account's unavailable browser route leaves its sign-in/file workflow
+unverified. Existing-headless state, memory-only credentials, explicit mount and
+folder-sync/autostart restrictions are unchanged.
