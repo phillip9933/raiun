@@ -3604,3 +3604,24 @@ Linux code; strict default/synthetic source gates and Agent test compilation
 passed. The corrected R6 packet from `b9c8ad1` was transferred through private
 OpenCloud; Windows download and native results remain pending. Production
 activation, capabilities and the current MVP acceptance gaps are unchanged.
+
+
+### Normal Windows runtime activation — 2 November 2026
+
+Source `ebde91a` connects the reviewed clean ordinary Personal-file deletion owner
+and enables existing Personal file/mkdir SDK workers for normal GUI and CLI
+mounts. The CLI now activates existing streamed recovery. The native deletion
+owner retains original account/root/generation binding and protected one-attempt
+history; remote verification, native acknowledgement and actual local completion
+remain distinct. Revocation is published before fallible worker joins, retaining
+uncertain custody. Ordinary removal observations no longer disable later creation;
+they grant no mutation authority and still fence conflicting batch endpoints.
+
+Affected normal Windows Agent/CLI compilation and formatting passed. No additional
+tests or native executions were run for this composition. The current owner
+instruction limits this release phase to basic finished-candidate checks and
+withdraws the seven-case gate and repeated full suites. Existing tests, prior
+failures and evidence remain preserved. See GUI-PARITY.md for actual remaining
+feature gaps; this activation does not implement broad Space, folder mutation,
+replacement or encrypted equivalents. No new release or owner installation is
+claimed by this source checkpoint.

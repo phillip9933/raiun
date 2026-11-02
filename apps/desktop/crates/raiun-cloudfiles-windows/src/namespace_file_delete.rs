@@ -1,4 +1,4 @@
-//! Unwired, one-attempt deletion of an ordinary clean Personal file.
+//! One-attempt deletion of an ordinary clean Personal file.
 //!
 //! This safe coordinator implements no persistent store, HTTP request, SDK ACK,
 //! observer, worker or eviction path. Its trusted adapters must retain the

@@ -1,5 +1,5 @@
-//! Original-lease ordinary Personal-file deletion session. This is an unwired
-//! safe HTTP adapter; no native SDK operation, journal admission or activation.
+//! Original-lease ordinary Personal-file deletion session.
+//! Native callback ownership and journal admission remain with the caller.
 use super::*;
 use crate::namespace_file_delete::{
     FileDeleteAbsence, FileDeleteDispatch, FileDeleteRemote, FileDeleteSend,

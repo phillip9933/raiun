@@ -2,54 +2,42 @@
 
 ## Current checkpoint — 2 November 2026
 
-Desktop GUI and CLI now have one coordinator and one canonical integration
-worktree, `worktrees/desktop-followup-ui`. The CLI-only chat is archived; its
-independent worktree is a preserved reference. The source checkpoint is
-`2978d8b`. The dated assessments below retain
-their original scope; this checkpoint supersedes their older ownership and
-rename-wiring descriptions, not their outstanding feature or native gates.
+GUI and CLI share the canonical `worktrees/desktop-followup-ui` source. The
+current Windows runtime checkpoint is `ebde91a`; older dated descriptions below
+retain their historical scope and do not describe the newly activated factories.
 
-Windows now has an automatic owner-thread caller for fresh ASCII Personal
-same-parent file renames, using the original account/root/catalog binding.
-The shared notification dispatcher and metadata-only plain/cloud entry
-classification are integrated. Guarded Personal file and directory creation
-now has owned SDK phases on two shared joined workers; production creation
-remains disabled. Replacement, deletion, Space operations and cross-parent
-moves remain separate implementation/acceptance gaps. The corrected five
-native rename controls and two owner-loop controls are packaged, but none has
-yet executed on the laptop. Download/hash verification is not native acceptance.
-The original failed fixture execution remains failed. Encrypted parity gaps
-in the matrix are not resolved by these ordinary-file changes.
+Normal Windows GUI and CLI mounts now connect ordinary Personal file and folder
+creation through the existing two joined SDK workers. They also connect clean
+Personal file deletion through account-bound native callbacks and protected
+history. Same-parent ordinary ASCII Personal file rename was already connected.
+Removal notifications are observation hints only: they cannot authorize a cloud
+delete or mark work complete, and conflicting same-batch endpoints still refuse.
+Both entrypoints use streamed ordinary existing-file saves; the CLI no longer
+keeps the legacy whole-body 16-MiB activation limit. Account changes revoke new
+backend work before a fallible worker drain and retain unresolved local custody.
 
-Account changes now drain the original workers before changing authority.
-File preparation and final refresh metadata share a 30-second phase budget
-while retaining the original cancellation state and file-body deadline. Source
-validation passed 1,792 host cases with 17 explicit ignores, including a real
-held-HTTP timeout regression. The final assertion-style-only revision has an
-exact host-result reuse proof and fresh strict Linux/Windows checks and Windows
-compilation. The new create, directory and account-lifecycle fixtures remain
-compiled only; they do not replace the pending original device-test cohort.
+This is source integration with affected Windows compilation and formatting
+passed, not finished-package native acceptance. The owner removed the seven-case
+R58/R59 gate, full-suite reruns and expanded matrices from this release phase.
+Finish packaging, then check basic upgrade/startup/sign-in, one normal file
+workflow and essential data preservation. Preserve earlier failures without
+rerunning unchanged cohorts or treating compilation as a native pass.
 
-Linux new ordinary Desktop creates now use a durable final-close handoff with
-two upload workers. An isolated actual-FUSE fixture and the unsigned preview's
-Agent/CLI smoke, signed-out GUI rendering and normal Quit passed. A separate
-isolated actual-FUSE run passed all 211 files / 250,000,000 bytes, independent
-remote byte verification and responsive pending reads with two upload workers.
-Its elapsed time includes setup and verification, not pure upload throughput. The owner's
-real-server 250-MB/211-file comparison and final-package connected acceptance
-remain pending. Headless, existing-file and vault save paths are unchanged by
-this Linux create-upload work. See [the implementation checkpoint](IMPLEMENTATION.md#windows-namespace-integration--1-november-2026-source-checkpoint)
-for the source and acceptance boundaries.
+Broader writable-Space operations, folder rename/delete, cross-parent moves,
+replacement saves and encrypted Windows equivalents remain implementation gaps.
+These are feature work, not missing exhaustive tests. Removing extra testing does
+not claim those capabilities are complete or authorize signing/publication.
+The shared OpenCloud conditional-create protocol has the same documented server
+qualification on Linux and Windows; no extra Windows-only global-CAS gate applies.
 
-The consolidated Linux headless package at `92dc9d4` also passed one native
-workflow with 13 asserted checks in a separate ordinary-user KVM guest. The
-packaged CLI and Agent performed real FUSE reads in Personal and Projects, one
-conditional update with independent remote readback, busy-unmount refusal,
-normal stop and a saved-session restart with updated reads. Only an explicitly
-remembered synthetic loopback login was used. All owned processes exited and
-the guest shut down normally, with its original disks unchanged. This is CLI
-package lifecycle evidence; GUI, boot-service, real-server and Windows checks
-remain separate.
+The unsigned Linux 0.7.5 AppImage from `ee17f62` is built, including the parallel
+ordinary-create workers, pending-directory correction and validated DAV directory
+metadata compatibility fix. Its exact artifact is SHA256
+`e082932ce5285711382c154a8507785836080830e935ee00357fbc5ec4bae873`.
+It has not been installed on the owner laptop or published. Earlier successful
+Linux native/package evidence and the later 210-of-211 failure remain separate;
+no new large workload or throughput claim is made for this artifact. Missing file
+ETags still refuse; only valid directory metadata may omit its ETag.
 
 ## Earlier assessment and feature matrix
 
