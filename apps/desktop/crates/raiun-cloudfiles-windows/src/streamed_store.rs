@@ -18,6 +18,9 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+#[path = "namespace_file_delete_store.rs"]
+pub mod namespace_file_delete_store;
+
 #[path = "namespace_file_store.rs"]
 pub mod namespace_file_store;
 
@@ -820,6 +823,22 @@ fn v2_inventory_state(
                 .ok_or(StoreError::ScanLimit)?;
             continue;
         }
+        if name == namespace_file_delete_store::ROOT {
+            if !root_names.iter().any(|entry| entry == V2_QUOTA_LOCK) {
+                return Err(StoreError::IncompleteEvidence);
+            }
+            let usage = namespace_file_delete_store::accounted_usage(
+                &*root.child(name, false)?,
+                protector,
+                &mut budget,
+            )?;
+            result.add(usage.bytes)?;
+            result.entries = result
+                .entries
+                .checked_add(usage.entries)
+                .ok_or(StoreError::ScanLimit)?;
+            continue;
+        }
         if name == namespace_rename_store::ROOT {
             if !root_names.iter().any(|entry| entry == V2_QUOTA_LOCK) {
                 return Err(StoreError::IncompleteEvidence);
@@ -1192,6 +1211,7 @@ fn discover_scope_catalogs_inner(
 struct RootCatalogScopes {
     snapshots: Vec<EditJournalScope>,
     rename: Vec<EditJournalScope>,
+    delete: Vec<EditJournalScope>,
     directories: Vec<EditJournalScope>,
     keys: std::collections::HashSet<String>,
 }
@@ -1217,6 +1237,7 @@ fn validate_root_catalog_scope_union(
     let mut result = RootCatalogScopes {
         snapshots: Vec::new(),
         rename: Vec::new(),
+        delete: Vec::new(),
         directories: Vec::new(),
         keys: std::collections::HashSet::new(),
     };
@@ -1238,6 +1259,18 @@ fn validate_root_catalog_scope_union(
                     protector,
                     budget,
                 )?);
+        } else if name == namespace_file_delete_store::ROOT {
+            if !names.iter().any(|entry| entry == V2_QUOTA_LOCK) {
+                return Err(StoreError::IncompleteEvidence);
+            }
+            result.delete = namespace_file_delete_store::validate_catalogs(
+                &*root.child(name, false)?,
+                protector,
+                budget,
+            )?;
+            for scope in &result.delete {
+                result.keys.insert(scope_key(scope)?);
+            }
         } else if name == namespace_rename_store::ROOT {
             if !names.iter().any(|entry| entry == V2_QUOTA_LOCK) {
                 return Err(StoreError::IncompleteEvidence);

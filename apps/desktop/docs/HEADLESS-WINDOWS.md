@@ -250,11 +250,11 @@ nonsecret explanation on stderr; scripts must inspect both fields before acting.
 
 ## Windows recovery policy candidate
 
-The optional schema-1 `windows_recovery` object is parsed and mapped by the new
-candidate. **Production streamed recovery is still disabled.** These settings
-currently take effect only in the separately guarded diagnostic fixtures; they
-cannot enable that pipeline, expand supported file operations or configure folder
-sync. Desktop uses its own defaults and does not read the headless config.
+The optional schema-1 `windows_recovery` object now configures normal headless
+ordinary existing-file streamed saves and explicit recovery contexts in source.
+The configured limits replace the legacy whole-body 16-MiB capture ceiling for
+that pipeline. File/folder namespace operations and encrypted-vault limits remain
+separate. Desktop uses its own defaults and does not read the headless config.
 Linux rejects this Windows-only section. Configuration changes require restart.
 
 ```json
@@ -297,7 +297,7 @@ can outlast the logical deadline while owners and buffers remain retained.
 
 At 128 KiB/s in each direction, a 1 GiB upload plus full verification takes about
 4.6 hours before other work; at 64 KiB/s, about 9.1 hours. Configure the total for
-the link when this pipeline becomes available. Permission loss, revocation,
+the link. Permission loss, revocation,
 cancellation or timeout must preserve edited bytes and recovery evidence without
-a clean acknowledgement. Native paced-success tests do not by themselves prove
-expiry/cancellation retention or release readiness.
+a clean acknowledgement. The finished Windows candidate's basic large-save check
+remains pending; source activation alone is not native acceptance.

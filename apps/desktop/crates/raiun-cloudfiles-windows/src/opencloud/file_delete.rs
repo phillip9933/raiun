@@ -1,0 +1,420 @@
+//! Original-lease ordinary Personal-file deletion session. This is an unwired
+//! safe HTTP adapter; no native SDK operation, journal admission or activation.
+use super::*;
+use crate::namespace_file_delete::{
+    FileDeleteAbsence, FileDeleteDispatch, FileDeleteRemote, FileDeleteSend,
+};
+use crate::namespace_intent::{
+    CapturedAuthorization, ExistingNamespaceEntry, NamespaceIntent, NamespaceObjectKind,
+    NamespaceOperation, StorageClassification,
+};
+use raiun_core::backend::CloudError;
+use raiun_opencloud::{
+    ConditionalDeleteRequest, ConditionalDeleteResponse, OrdinaryPresenceRequest,
+    OrdinaryTargetPresence,
+};
+use std::{
+    cell::Cell,
+    time::{Duration, Instant},
+};
+
+fn refusal(kind: ErrorKind) -> CloudError {
+    CloudError::new(kind, "ordinary file delete evidence unavailable")
+}
+fn source(intent: &NamespaceIntent) -> Option<&ExistingNamespaceEntry> {
+    match &intent.operation {
+        NamespaceOperation::DeleteFile { source } => Some(source),
+        _ => None,
+    }
+}
+fn supported(intent: &NamespaceIntent) -> bool {
+    let Some(source) = source(intent) else {
+        return false;
+    };
+    source.local.object_kind == NamespaceObjectKind::File
+        && source.local.parent.classification == StorageClassification::Ordinary
+        && source
+            .local
+            .parent
+            .local_components
+            .first()
+            .map(String::as_str)
+            == Some("Personal")
+        && namespace::strong(&source.remote.etag)
+        && valid_remote_id(&source.remote.resource_id)
+}
+fn relative_to_root(root: &str, path: &str) -> Option<String> {
+    let root = root.trim_end_matches('/');
+    path.strip_prefix(root)
+        .and_then(|tail| tail.strip_prefix('/'))
+        .filter(|tail| !tail.is_empty())
+        .map(str::to_owned)
+}
+fn parent_path_matches(path: &str, components: &[String]) -> bool {
+    let Some((_, tail)) = components.split_first() else {
+        return false;
+    };
+    let remote = path
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    remote.len() == tail.len()
+        && remote
+            .iter()
+            .zip(tail)
+            .all(|(remote, local)| *remote == local)
+}
+
+impl OpenCloudPlaceholderBackend {
+    /// The ORIGINAL backend read lease brackets the complete closure, including
+    /// remote verification and any later caller-owned local completion. No
+    /// callback metadata, path string or record can create native authority.
+    pub fn with_file_delete_session<T>(
+        &self,
+        intent: &NamespaceIntent,
+        parent_identity: OpaqueIdentity,
+        owner_current: &dyn Fn(CapturedAuthorization) -> bool,
+        run: impl FnOnce(&super::FileDeleteSession<'_>) -> T,
+    ) -> Result<T, BackendError> {
+        intent.validate().map_err(|_| BackendError::Unavailable)?;
+        if !supported(intent) {
+            return Err(BackendError::Unavailable);
+        }
+        let source = source(intent).ok_or(BackendError::Unavailable)?;
+        let scope = &source.local.parent.scope;
+        let authorization = source.local.parent.authorization;
+        if authorization.token_generation != self.token_generation
+            || scope.profile_id != self.scope.profile_id
+            || scope.account_subject != self.scope.account_id
+            || scope.server_origin != self.scope.server_origin
+            || !owner_current(authorization)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let _lease = self
+            .lease_gate
+            .read()
+            .map_err(|_| BackendError::Unavailable)?;
+        self.ensure_active()?;
+        let catalog = self
+            .catalog_scope_snapshot()?
+            .ok_or(BackendError::Unavailable)?;
+        if catalog.local_root() != self.local_root_identity.ok_or(BackendError::Unavailable)?
+            || catalog.root_volume_serial != scope.root_volume_serial
+            || catalog.root_file_index != scope.root_file_index
+            || catalog.profile_id != scope.profile_id
+            || catalog.account_id != scope.account_subject
+            || catalog.server_origin != scope.server_origin
+            || catalog.personal_space_id != scope.space_id
+            || catalog.personal_root_resource_id != scope.root_resource_id
+            || !owner_current(authorization)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let parent = self
+            .state
+            .lock()
+            .map_err(|_| BackendError::Unavailable)?
+            .directories
+            .get(&parent_identity)
+            .cloned()
+            .ok_or(BackendError::NotFound)?;
+        if parent.space_id != scope.space_id
+            || parent.root_resource_id != scope.root_resource_id
+            || parent.remote_id != source.local.parent.remote.resource_id
+            || !parent.path.starts_with('/')
+            || !parent_path_matches(&parent.path, &source.local.parent.local_components)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let context = RangeReadContext {
+            deadline: Instant::now() + Duration::from_secs(30),
+            token_generation: self.token_generation,
+        };
+        let spaces = self
+            .client
+            .spaces_with_context_limited(context, MAX_PROVIDER_SPACES)
+            .map_err(|error| self.reject_cached_cloud_error(error))?;
+        let space = verified_personal(&spaces)
+            .map_err(|_| self.reject_cached_cloud_error(refusal(ErrorKind::Conflict)))?;
+        if space.id != catalog.personal_space_id
+            || space.id != scope.space_id
+            || derive_account_id(&self.client.configured_server_url(), &space.id)
+                != self.scope.account_id
+            || !space.writable
+            || space.encrypted
+        {
+            return Err(self.reject_cached_cloud_error(refusal(ErrorKind::Conflict)));
+        }
+        let root = self
+            .client
+            .stat_discovered_space_root_with_context(space, context)
+            .map_err(|error| self.reject_cached_cloud_error(error))?;
+        if !root.directory
+            || root.encrypted
+            || !root.writable
+            || root.id != scope.root_resource_id
+            || !valid_remote_path(&scope.space_id, &scope.root_resource_id, &root.path, true)
+        {
+            return Err(self.reject_cached_cloud_error(refusal(ErrorKind::Conflict)));
+        }
+        let path = format!(
+            "{}/{}",
+            parent.path.trim_end_matches('/'),
+            source.local.name
+        );
+        if !valid_remote_path(&scope.space_id, &scope.root_resource_id, &path, false) {
+            return Err(BackendError::Unavailable);
+        }
+        let relative = relative_to_root(&root.path, &path).ok_or(BackendError::Unavailable)?;
+        let (source_identity, source_binding) = self
+            .state
+            .lock()
+            .map_err(|_| BackendError::Unavailable)?
+            .files
+            .iter()
+            .find(|(_, binding)| {
+                binding.space_id == scope.space_id
+                    && binding.root_resource_id == scope.root_resource_id
+                    && binding.path == path
+                    && binding.remote_id == source.remote.resource_id
+                    && binding.etag == source.remote.etag
+                    && binding.size == source.remote.byte_len
+            })
+            .map(|(identity, binding)| (*identity, binding.clone()))
+            .ok_or(BackendError::Unavailable)?;
+        let cancellation = self.client.transfer_budget().cancellation();
+        let remote = LiveFileDelete {
+            backend: self,
+            intent: intent.clone(),
+            parent_identity,
+            parent,
+            source_identity,
+            source_binding,
+            root_path: root.path,
+            path,
+            relative,
+            context,
+            owner_current,
+            attempted: Cell::new(false),
+            deleted: Cell::new(false),
+            cancelled: Arc::new(move || cancellation.is_cancelled()),
+        };
+        remote
+            .ensure_authorized(intent)
+            .map_err(|_| BackendError::Unavailable)?;
+        Ok(run(&FileDeleteSession { remote }))
+    }
+}
+
+struct LiveFileDelete<'a> {
+    backend: &'a OpenCloudPlaceholderBackend,
+    intent: NamespaceIntent,
+    parent_identity: OpaqueIdentity,
+    parent: DirectoryBinding,
+    source_identity: OpaqueIdentity,
+    source_binding: FileBinding,
+    root_path: String,
+    path: String,
+    relative: String,
+    context: RangeReadContext,
+    owner_current: &'a dyn Fn(CapturedAuthorization) -> bool,
+    attempted: Cell<bool>,
+    deleted: Cell<bool>,
+    cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+}
+impl LiveFileDelete<'_> {
+    fn original(&self) -> &ExistingNamespaceEntry {
+        source(&self.intent).expect("private constructor accepts only file deletes")
+    }
+    fn authoritative(&self, error: CloudError) -> CloudError {
+        let _ = self.backend.reject_cached_cloud_error(error.clone());
+        error
+    }
+    fn ensure_authorized(&self, intent: &NamespaceIntent) -> Result<(), CloudError> {
+        self.backend
+            .ensure_active()
+            .map_err(|_| refusal(ErrorKind::Unauthorized))?;
+        let authorization = self.original().local.parent.authorization;
+        if intent != &self.intent
+            || Instant::now() >= self.context.deadline
+            || authorization.token_generation != self.backend.token_generation
+            || !(self.owner_current)(authorization)
+            || (self.cancelled)()
+        {
+            return Err(refusal(ErrorKind::Unauthorized));
+        }
+        self.backend
+            .ensure_ordinary_location(&self.original().local.parent.scope.space_id, &self.path)
+            .map_err(|_| refusal(ErrorKind::Forbidden))?;
+        let state = self
+            .backend
+            .state
+            .lock()
+            .map_err(|_| refusal(ErrorKind::Io))?;
+        let current = state.files.get(&self.source_identity) == Some(&self.source_binding)
+            && state.directories.get(&self.parent_identity) == Some(&self.parent);
+        drop(state);
+        if !current {
+            return Err(refusal(ErrorKind::Conflict));
+        }
+        self.backend
+            .client
+            .with_token_generation(self.context.token_generation, || ())?;
+        Ok(())
+    }
+    fn check_parent(&self, captured_etag: bool) -> Result<(), CloudError> {
+        self.ensure_authorized(&self.intent)?;
+        let scope = &self.original().local.parent.scope;
+        let root = self
+            .backend
+            .client
+            .stat_with_context(&scope.space_id, &self.root_path, self.context)
+            .map_err(|error| self.authoritative(error))?;
+        if !root.directory
+            || root.encrypted
+            || !root.writable
+            || root.id != scope.root_resource_id
+            || root.path.trim_end_matches('/') != self.root_path.trim_end_matches('/')
+        {
+            return Err(self.authoritative(refusal(ErrorKind::Conflict)));
+        }
+        let parent = self
+            .backend
+            .client
+            .stat_with_context(&scope.space_id, &self.parent.path, self.context)
+            .map_err(|error| self.authoritative(error))?;
+        if !parent.directory
+            || parent.encrypted
+            || !parent.writable
+            || parent.id != self.parent.remote_id
+            || parent.path.trim_end_matches('/') != self.parent.path.trim_end_matches('/')
+            || !namespace::strong(&parent.etag)
+            || (captured_etag && parent.etag != self.original().local.parent.remote.etag)
+        {
+            return Err(self.authoritative(refusal(ErrorKind::Conflict)));
+        }
+        self.ensure_authorized(&self.intent)
+    }
+    fn leaf(&self) -> Result<OrdinaryTargetPresence, CloudError> {
+        let scope = &self.original().local.parent.scope;
+        self.backend
+            .client
+            .ordinary_target_presence_with_context(OrdinaryPresenceRequest {
+                space: &scope.space_id,
+                remote_root_path: &self.root_path,
+                expected_root_id: &scope.root_resource_id,
+                relative_path: &self.relative,
+                context: self.context,
+            })
+            .map_err(|error| self.authoritative(error))
+    }
+}
+impl FileDeleteRemote for LiveFileDelete<'_> {
+    fn ensure_authorized(&self, intent: &NamespaceIntent) -> Result<(), CloudError> {
+        LiveFileDelete::ensure_authorized(self, intent)
+    }
+    fn preflight(&self, intent: &NamespaceIntent) -> Result<ExistingNamespaceEntry, CloudError> {
+        self.ensure_authorized(intent)?;
+        self.check_parent(true)?;
+        match self.leaf()? {
+            OrdinaryTargetPresence::Present(entry)
+                if entry.path.trim_end_matches('/') == self.path.trim_end_matches('/')
+                    && entry.id == self.original().remote.resource_id
+                    && entry.etag == self.original().remote.etag
+                    && entry.size == self.original().remote.byte_len
+                    && namespace::strong(&entry.etag)
+                    && !entry.directory
+                    && !entry.encrypted
+                    && entry.writable => {}
+            _ => return Err(self.authoritative(refusal(ErrorKind::Conflict))),
+        }
+        self.check_parent(true)?;
+        Ok(self.original().clone())
+    }
+    fn delete_with_send_guard(
+        &self,
+        dispatch: &FileDeleteDispatch<'_>,
+        before_send: &mut dyn FnMut() -> Result<(), CloudError>,
+    ) -> Result<FileDeleteSend, CloudError> {
+        if self.attempted.replace(true) {
+            return Err(refusal(ErrorKind::Conflict));
+        }
+        let intent = dispatch.intent();
+        self.preflight(intent)?;
+        let scope = &self.original().local.parent.scope;
+        let hook_refused = Cell::new(false);
+        let response = self
+            .backend
+            .client
+            .conditional_delete_with_context_before_send(
+                ConditionalDeleteRequest {
+                    space: &scope.space_id,
+                    remote_root_path: &self.root_path,
+                    expected_root_id: &scope.root_resource_id,
+                    source_relative_path: &self.relative,
+                    expected_source_id: &self.original().remote.resource_id,
+                    expected_source_size: self.original().remote.byte_len,
+                    expected_source_etag: &self.original().remote.etag,
+                    context: self.context,
+                },
+                || {
+                    let result = self.ensure_authorized(intent).and_then(|()| before_send());
+                    if result.is_err() {
+                        hook_refused.set(true);
+                    }
+                    result
+                },
+            );
+        match response {
+            Ok(ConditionalDeleteResponse::Deleted) => {
+                if self.ensure_authorized(intent).is_err() {
+                    return Ok(FileDeleteSend::Uncertain);
+                }
+                self.deleted.set(true);
+                Ok(FileDeleteSend::Deleted)
+            }
+            Ok(ConditionalDeleteResponse::Uncertain(error)) => {
+                self.authoritative(error);
+                Ok(FileDeleteSend::Uncertain)
+            }
+            Err(error) if hook_refused.get() => Err(error),
+            Err(error) => Err(self.authoritative(error)),
+        }
+    }
+    fn observe_absence(&self, intent: &NamespaceIntent) -> Result<FileDeleteAbsence, CloudError> {
+        self.ensure_authorized(intent)?;
+        if !self.deleted.get() {
+            return Err(refusal(ErrorKind::Conflict));
+        }
+        self.check_parent(false)?;
+        match self.leaf()? {
+            OrdinaryTargetPresence::Absent => (),
+            OrdinaryTargetPresence::Present(_) => {
+                return Err(self.authoritative(refusal(ErrorKind::Conflict)));
+            }
+        }
+        self.check_parent(false)?;
+        self.ensure_authorized(intent)?;
+        Ok(FileDeleteAbsence {
+            source: self.original().clone(),
+            original_path_absent: true,
+        })
+    }
+}
+
+pub struct FileDeleteSession<'backend> {
+    remote: LiveFileDelete<'backend>,
+}
+impl FileDeleteSession<'_> {
+    pub fn remote(&self) -> &dyn FileDeleteRemote {
+        &self.remote
+    }
+    pub fn intent(&self) -> &NamespaceIntent {
+        &self.remote.intent
+    }
+}
+
+#[cfg(test)]
+#[path = "file_delete_tests.rs"]
+mod tests;

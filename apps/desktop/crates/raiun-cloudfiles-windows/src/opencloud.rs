@@ -9,6 +9,10 @@
 #[cfg(windows)]
 pub(crate) mod file_create;
 #[cfg(any(windows, test))]
+mod file_delete;
+#[cfg(any(windows, test))]
+pub use file_delete::FileDeleteSession;
+#[cfg(any(windows, test))]
 mod file_rename;
 mod initial_save;
 #[cfg(any(windows, test))]
@@ -2005,17 +2009,22 @@ impl OpenCloudPlaceholderBackend {
         self.revoked.load(Ordering::Acquire)
     }
 
+    /// Publish fail-closed revocation without waiting for backend read leases
+    /// or changing the retained vault cleanup inventory. Owners call this
+    /// before any fallible worker join, then `revoke` for the existing barrier.
+    pub fn begin_revocation(&self) {
+        let _publication = self
+            .publish_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.revoked.store(true, Ordering::Release);
+    }
+
     /// Revoke all identities before the authenticated client token or account
     /// state is mutated. In-flight reads observe revocation and discard staged
     /// bytes before returning them to Cloud Files.
     pub fn revoke(&self) {
-        {
-            let _publication = self
-                .publish_gate
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.revoked.store(true, Ordering::Release);
-        }
+        self.begin_revocation();
         #[cfg(windows)]
         if let Some(routes) = &self.vault_routes {
             // Every later vault permit fails before auth owner changes keys.

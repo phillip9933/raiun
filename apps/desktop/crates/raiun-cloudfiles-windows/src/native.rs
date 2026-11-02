@@ -41,6 +41,9 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+#[path = "native_file_delete.rs"]
+pub(super) mod native_file_delete;
+
 #[path = "native_file_create.rs"]
 pub(super) mod native_file_create;
 pub(crate) use native_file_create::NativeFileCreateCompletion;
@@ -401,6 +404,8 @@ union CfCallbackParameterData {
     fetch_placeholders: CfCallbackFetchPlaceholders,
     cancel_fetch_placeholders: CfCallbackCancelFetchPlaceholders,
     close_completion: CfCallbackCloseCompletion,
+    delete: native_file_delete::CallbackDelete,
+    delete_completion: native_file_delete::CallbackDelete,
     align: u64,
 }
 
@@ -449,6 +454,7 @@ struct CfTransferPlaceholdersParameters {
 #[repr(C)]
 #[allow(dead_code)]
 union CfOperationParameterData {
+    ack_delete: native_file_delete::AckDelete,
     transfer_data: CfTransferDataParameters,
     transfer_placeholders: CfTransferPlaceholdersParameters,
     // The Windows SDK union is 40 bytes on x64 (RetrieveData is its largest
@@ -970,6 +976,7 @@ pub(super) struct ConfiguredRootConnection {
     namespace_observation_closed: bool,
     create_owner: std::cell::RefCell<native_file_create::CreateOwner>,
     directory_owner: std::cell::RefCell<native_namespace_directory::DirectoryOwner>,
+    delete_owner: Option<native_file_delete::Owner>,
 }
 
 #[allow(dead_code)]
@@ -3446,6 +3453,18 @@ impl ConfiguredRootConnection {
     }
 
     pub(super) fn connect(runtime: PreparedConfiguredRootRuntime) -> Result<Self, Error> {
+        Self::connect_inner(runtime, None)
+    }
+    pub(crate) fn connect_owned_delete(
+        runtime: PreparedConfiguredRootRuntime,
+        config: native_file_delete::Config,
+    ) -> Result<Self, Error> {
+        Self::connect_inner(runtime, Some(config))
+    }
+    fn connect_inner(
+        runtime: PreparedConfiguredRootRuntime,
+        delete: Option<native_file_delete::Config>,
+    ) -> Result<Self, Error> {
         let PreparedConfiguredRootRuntime {
             root: configured_root,
             backend,
@@ -3464,6 +3483,7 @@ impl ConfiguredRootConnection {
             &backend,
             composite_root_identity,
         );
+        let delete_backend = backend.clone();
         let backend: Arc<dyn PlaceholderBackend> = backend;
         if identity != lease.identity {
             return Err(Error::InvalidConfiguredRoot);
@@ -3501,12 +3521,32 @@ impl ConfiguredRootConnection {
         if !already_registered || vault_history.is_none() {
             state.record_reconnect_scan(scan_registered_root(&root.path, root.identity));
         }
+        let mut delete_owner = match delete {
+            Some(config) => Some(native_file_delete::Owner::start(
+                &state,
+                delete_backend,
+                composite_root_identity,
+                config,
+            )?),
+            None => None,
+        };
+        if let Some(owner) = delete_owner.as_ref() {
+            *state
+                .delete_shared
+                .lock()
+                .map_err(|_| Error::EditRecoveryUnavailable)? = Some(owner.shared());
+        }
         let context_key = Arc::as_ptr(&state) as usize;
         callback_registry()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(context_key, Arc::clone(&state));
         let callback_table = callback_table();
+        let callback_table = if delete_owner.is_some() {
+            native_file_delete::table().into_iter().collect::<Vec<_>>()
+        } else {
+            callback_table.into_iter().collect::<Vec<_>>()
+        };
         let mut connection_key = CfConnectionKey { internal: 0 };
         // SAFETY: root path and callback table stay alive for the call. The
         // context is an opaque key resolved only through the protected map.
@@ -3545,6 +3585,9 @@ impl ConfiguredRootConnection {
             return Err(native_error("CfConnectSyncRoot configured root", result));
         }
 
+        if let Some(owner) = delete_owner.as_ref() {
+            owner.connected(connection_key);
+        }
         root.connected = true;
         if let Err(error) = root.verify_identity(true) {
             state.fail_initial_readiness();
@@ -3560,6 +3603,7 @@ impl ConfiguredRootConnection {
                 namespace_observation_closed: false,
                 create_owner: Default::default(),
                 directory_owner: Default::default(),
+                delete_owner: delete_owner.take(),
             };
             if connection.finish(false).is_err() {
                 let _ = Box::leak(Box::new(connection));
@@ -3578,6 +3622,7 @@ impl ConfiguredRootConnection {
             namespace_observation_closed: false,
             create_owner: Default::default(),
             directory_owner: Default::default(),
+            delete_owner,
         };
         if already_registered {
             if let Some(history) = vault_history {
@@ -3717,7 +3762,20 @@ impl ConfiguredRootConnection {
         self.finish(true)
     }
 
+    /// Stop and positively join owned deletion before a backend lease writer.
+    pub(super) fn cancel_file_delete(&mut self) -> Result<(), Error> {
+        if self
+            .delete_owner
+            .as_mut()
+            .is_some_and(|owner| !owner.stop_and_join())
+        {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        Ok(())
+    }
+
     fn finish(&mut self, unregister: bool) -> Result<(), Error> {
+        self.cancel_file_delete()?;
         if !self.close_fresh_personal_directory_create() || !self.close_fresh_personal_file_create()
         {
             // Cancelled but actual SDK/body ownership is still in flight.
@@ -3796,6 +3854,7 @@ impl ConfiguredRootConnection {
             self.connected,
             std::mem::take(self.create_owner.get_mut()),
             std::mem::take(self.directory_owner.get_mut()),
+            self.delete_owner.take(),
         )));
         self.connected = false;
     }
@@ -3888,6 +3947,11 @@ unsafe extern "system" fn notify_file_close_completion_callback(
             .0
             .unverifiable_placeholder_closes
             .fetch_add(1, Ordering::AcqRel);
+        return;
+    }
+    if flags == CF_CALLBACK_CLOSE_COMPLETION_FLAG_DELETED
+        && native_file_delete::deleted_close(&guard.0, info, &mut close_permit)
+    {
         return;
     }
     let notification = guard
@@ -5657,6 +5721,7 @@ struct CallbackState {
     activity: Mutex<CallbackActivity>,
     drained: Condvar,
     close_capture_admission: Arc<CloseCaptureAdmission>,
+    delete_shared: Mutex<Option<Arc<native_file_delete::Shared>>>,
     backend: Arc<dyn PlaceholderBackend>,
     recovery: Option<Arc<dyn PreparedEditRecovery>>,
     initial_edits: crate::initial_edit_queue::InitialEditQueue,
@@ -5775,6 +5840,7 @@ impl CallbackState {
             }),
             drained: Condvar::new(),
             close_capture_admission: Arc::new(CloseCaptureAdmission::default()),
+            delete_shared: Mutex::new(None),
             backend,
             recovery,
             initial_edits: crate::initial_edit_queue::InitialEditQueue::default(),

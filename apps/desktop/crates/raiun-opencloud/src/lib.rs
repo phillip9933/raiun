@@ -24,6 +24,9 @@ pub mod vault_backend;
 pub mod vault_cache;
 pub mod vault_create;
 
+mod conditional_delete;
+pub use conditional_delete::{ConditionalDeleteRequest, ConditionalDeleteResponse};
+
 mod conditional_rename;
 pub use conditional_rename::{ConditionalRenameRequest, ConditionalRenameResponse};
 mod ordinary_presence;

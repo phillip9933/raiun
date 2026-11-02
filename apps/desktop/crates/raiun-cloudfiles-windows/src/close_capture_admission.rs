@@ -198,6 +198,30 @@ impl CloseCapturePermit<'_> {
         self.finished = true;
     }
 
+    /// Transfer only this exact Arc-backed tracker; the close remains active
+    /// until actual owned deletion completion or fail-closed retirement. This
+    /// is not a clean classification or permission from NOTIFY/ACK metadata.
+    #[cfg(any(windows, test))]
+    pub(crate) fn defer_owned_deleted(
+        &mut self,
+        tracker: &Arc<CloseCaptureAdmission>,
+    ) -> Option<DeferredDeletedClose> {
+        if !std::ptr::eq(self.tracker, Arc::as_ptr(tracker))
+            || !self.active
+            || self.finished
+            || self.dirty
+            || self.tracker.unknown.load(Ordering::Acquire)
+        {
+            return None;
+        }
+        self.active = false;
+        self.finished = true;
+        Some(DeferredDeletedClose {
+            tracker: Arc::clone(tracker),
+            active: true,
+        })
+    }
+
     /// Record known modified ranges before any body open or recovery write.
     /// The permit remains active until `finish_durable` after the handoff.
     pub(crate) fn mark_dirty_before_capture(&mut self) {
@@ -241,6 +265,37 @@ impl Drop for CloseCapturePermit<'_> {
         if self.active {
             let _ = self.tracker.decrement_active();
             self.active = false;
+        }
+    }
+}
+
+/// Owned pending bookkeeping only. Its sole successful consumer must hold an
+/// exact native successful delete-completion receipt. Drop preserves unknown;
+/// no path in this type clears an already unknown admission state.
+#[cfg(any(windows, test))]
+pub(crate) struct DeferredDeletedClose {
+    tracker: Arc<CloseCaptureAdmission>,
+    active: bool,
+}
+#[cfg(any(windows, test))]
+impl DeferredDeletedClose {
+    pub(crate) fn finish_after_owned_completion(mut self) -> bool {
+        let known = !self.tracker.unknown.load(Ordering::Acquire);
+        let decremented = self.tracker.decrement_active();
+        self.active = false;
+        if !known || !decremented {
+            self.tracker.mark_unknown();
+            return false;
+        }
+        !self.tracker.unknown.load(Ordering::Acquire)
+    }
+}
+#[cfg(any(windows, test))]
+impl Drop for DeferredDeletedClose {
+    fn drop(&mut self) {
+        if self.active {
+            self.tracker.mark_unknown();
+            let _ = self.tracker.decrement_active();
         }
     }
 }
@@ -783,5 +838,36 @@ mod tests {
         close.finish_durable();
         drop(ticket);
         assert!(tracker.try_begin_rename().is_some());
+    }
+}
+
+#[cfg(test)]
+mod owned_deleted_close_tests {
+    use super::*;
+    #[test]
+    fn transfer_requires_same_arc_and_keeps_admission_active_until_completion() {
+        let tracker = Arc::new(CloseCaptureAdmission::default());
+        let other = Arc::new(CloseCaptureAdmission::default());
+        let ticket = tracker.try_begin_rename().unwrap();
+        let mut close = tracker.begin_close();
+        assert!(close.defer_owned_deleted(&other).is_none());
+        let pending = close.defer_owned_deleted(&tracker).unwrap();
+        drop(close);
+        assert!(!ticket.is_current());
+        assert!(pending.finish_after_owned_completion());
+        assert!(ticket.is_current());
+    }
+    #[test]
+    fn uncertain_retirement_and_existing_unknown_can_never_be_cleaned() {
+        let tracker = Arc::new(CloseCaptureAdmission::default());
+        let mut close = tracker.begin_close();
+        let pending = close.defer_owned_deleted(&tracker).unwrap();
+        drop(close);
+        drop(pending);
+        assert!(tracker.unknown.load(Ordering::Acquire));
+        let mut close = tracker.begin_close();
+        assert!(close.defer_owned_deleted(&tracker).is_none());
+        close.finish_clean();
+        assert!(tracker.unknown.load(Ordering::Acquire));
     }
 }

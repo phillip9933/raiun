@@ -27,6 +27,8 @@ mod save_rename_admission;
 #[cfg(windows)]
 pub use native_file_rename_producer::NativeFileRenameError;
 #[cfg(any(windows, test))]
+pub mod namespace_file_delete;
+#[cfg(any(windows, test))]
 pub mod namespace_file_rename;
 pub mod namespace_intent;
 #[cfg(any(windows, test))]
@@ -496,6 +498,25 @@ pub fn connect_configured_root(
     Ok(ConfiguredRootConnection {
         inner: native::ConfiguredRootConnection::connect(runtime)?,
     })
+}
+
+/// Connect the normal account-bound Windows drive with clean-file delete
+/// callbacks. The owner supplies its original generation fence; no path or
+/// recovered history can create a new dispatch capability.
+#[cfg(windows)]
+pub fn connect_configured_root_with_file_delete(
+    runtime: PreparedConfiguredRootRuntime,
+    authorization: namespace_intent::CapturedAuthorization,
+    current: std::sync::Arc<dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync>,
+) -> Result<ConfiguredRootConnection, Error> {
+    native::ConfiguredRootConnection::connect_owned_delete(
+        runtime,
+        native::native_file_delete::Config {
+            authorization,
+            current,
+        },
+    )
+    .map(|inner| ConfiguredRootConnection { inner })
 }
 
 /// Owner-thread-only held writable eviction proof. Dropping it releases native
@@ -1275,6 +1296,12 @@ impl ConfiguredRootConnection {
         self.inner.hydrate_test_placeholder(relative_components)
     }
 
+    /// Cancel/join the original delete owner before revoking backend read
+    /// leases. Failure retains this connection and its original native custody.
+    pub fn cancel_file_delete_in_place(&mut self) -> Result<(), Error> {
+        self.inner.cancel_file_delete()
+    }
+
     /// Retry a disconnect without discarding the lease if the OS rejects the
     /// operation. The caller retains the connection object on error and must
     /// keep its authenticated scope revoked until a later disconnect succeeds.
@@ -1333,6 +1360,23 @@ pub mod synthetic_agent_integration {
         let runtime: PreparedConfiguredRootRuntime =
             prepare_configured_root_runtime(lease, backend, composite_root_identity, recovery)?;
         connect_configured_root(runtime).map(Connection)
+    }
+
+    /// Explicit pre-connect delete diagnostic using the same owned delete
+    /// callbacks as the normal account-bound app factory.
+    pub fn connect_owned_delete(
+        runtime: PreparedConfiguredRootRuntime,
+        authorization: crate::namespace_intent::CapturedAuthorization,
+        current: Arc<dyn Fn(crate::namespace_intent::CapturedAuthorization) -> bool + Send + Sync>,
+    ) -> Result<Connection, Error> {
+        crate::native::ConfiguredRootConnection::connect_owned_delete(
+            runtime,
+            crate::native::native_file_delete::Config {
+                authorization,
+                current,
+            },
+        )
+        .map(|inner| Connection(ConfiguredRootConnection { inner }))
     }
 
     impl Connection {

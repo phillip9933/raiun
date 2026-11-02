@@ -1579,8 +1579,15 @@ impl ProviderManager {
                                             prepared, Arc::clone(history) as Arc<dyn raiun_cloudfiles_windows::vault_custody::VaultPublishedHistorySource>,
                                         ).map_err(|_| "Could not bind protected vault history".to_owned())?
                                     } else { prepared };
-                                    raiun_cloudfiles_windows::connect_configured_root(prepared)
-                                        .map(|active| (active, custody, composite_root_identity))
+                                    let authorization = raiun_cloudfiles_windows::namespace_intent::CapturedAuthorization {
+                                        agent_generation: generation,
+                                        token_generation: next_backend.scope().token_generation(),
+                                    };
+                                    let delete_generation = Arc::clone(&worker_generation);
+                                    raiun_cloudfiles_windows::connect_configured_root_with_file_delete(
+                                        prepared, authorization,
+                                        Arc::new(move |captured| captured == authorization && delete_generation.load(Ordering::Acquire) == generation),
+                                    ).map(|active| (active, custody, composite_root_identity))
                                         .map_err(|_| "Could not connect the Windows Cloud Files drive".to_owned())
                                 });
                                 match lease {
@@ -1643,8 +1650,10 @@ impl ProviderManager {
                                         Ok(())
                                     }
                                     Ok((mut active, _custody, _composite)) => {
-                                        next_backend.revoke();
-                                        if active.disconnect_in_place().is_err() {
+                                        next_backend.begin_revocation();
+                                        let delete_drained = active.cancel_file_delete_in_place().is_ok();
+                                        if delete_drained { next_backend.revoke(); }
+                                        if !delete_drained || active.disconnect_in_place().is_err() {
                                             connection = Some(active);
                                             backend = Some(next_backend);
                                             worker_connected.store(true, Ordering::Release);
@@ -1660,7 +1669,13 @@ impl ProviderManager {
                                 }
                             };
                             if result.is_err() {
-                                candidate_backend.revoke();
+                                // Fail closed even if the original native owner cannot join.
+                                candidate_backend.begin_revocation();
+                                // Preserve a retained delete owner before any backend writer.
+                                let retained = backend.as_ref().is_some_and(|active| Arc::ptr_eq(active, &candidate_backend));
+                                if !retained || connection.as_mut().is_some_and(|active| active.cancel_file_delete_in_place().is_ok()) {
+                                    candidate_backend.revoke();
+                                }
                             }
                             let _ = response.send(result);
                         }
@@ -1712,9 +1727,13 @@ impl ProviderManager {
                         }
                         #[cfg(all(test, debug_assertions))]
                         ProviderCommand::RevokeBackendForTest(response) => {
+                            if let Some(active_backend) = backend.as_ref() { active_backend.begin_revocation(); }
                             cleanup_holds.clear();
-                            let result = backend.as_ref().map(|backend| backend.revoke())
-                                .ok_or_else(|| "No active backend to revoke".to_owned());
+                            let result = connection.as_mut()
+                                .map(|active| active.cancel_file_delete_in_place().map_err(|_| "Delete worker drain is incomplete".to_owned()))
+                                .unwrap_or(Ok(()))
+                                .and_then(|()| backend.as_ref().map(|backend| backend.revoke())
+                                    .ok_or_else(|| "No active backend to revoke".to_owned()));
                             let _ = response.send(result);
                         }
                         #[cfg(test)]
@@ -2924,6 +2943,17 @@ fn disconnect_provider_connection(
     backend: &mut Option<Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>>,
     connected: &AtomicBool,
 ) -> Result<(), String> {
+    // Reject new old-account hydration/publication before any fallible join.
+    // This does not drain or discard the vault cleanup catalogue.
+    if let Some(active_backend) = backend.as_ref() {
+        active_backend.begin_revocation();
+    }
+    // Cancel/join before revoke/retire can wait for the original read lease.
+    if let Some(active) = connection.as_mut() {
+        active.cancel_file_delete_in_place().map_err(|_| {
+            "Windows file deletion is still draining; the original drive was retained".to_owned()
+        })?;
+    }
     if let Some(active_backend) = backend.as_ref() {
         // Retain every route before revocation can fail. Native cleanup must
         // never lose the catalogue that owns previously published plaintext.

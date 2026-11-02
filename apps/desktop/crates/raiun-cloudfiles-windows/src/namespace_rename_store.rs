@@ -61,6 +61,9 @@ pub(crate) struct NamespaceHistorySummary {
     pub(crate) file_evidence: bool,
     pub(crate) file_records: usize,
     pub(crate) file_unresolved: usize,
+    pub(crate) delete_evidence: bool,
+    pub(crate) delete_records: usize,
+    pub(crate) delete_unresolved: usize,
 }
 
 /// Classification of authenticated metadata, not publication or replay
@@ -72,15 +75,17 @@ pub(crate) fn history_unresolved(
 ) -> Result<bool, crate::BackendError> {
     if summary.other_namespace_evidence
         || (!configured
-            && (summary.records != 0 || summary.directory_evidence || summary.file_evidence))
+            && (summary.records != 0
+                || summary.directory_evidence
+                || summary.file_evidence
+                || summary.delete_evidence))
     {
         return Err(crate::BackendError::Unavailable);
     }
-    Ok(
-        summary.unresolved != 0
-            || summary.directory_unresolved != 0
-            || summary.file_unresolved != 0,
-    )
+    Ok(summary.unresolved != 0
+        || summary.directory_unresolved != 0
+        || summary.file_unresolved != 0
+        || summary.delete_unresolved != 0)
 }
 
 /// One existing quota lease and one budget cover catalogs and selected prefixes.
@@ -132,6 +137,9 @@ pub(super) fn history_summary_existing(
     let mut result = NamespaceHistorySummary {
         directory_evidence: names.iter().any(|name| name == namespace_store::ROOT),
         file_evidence: names.iter().any(|name| name == namespace_file_store::ROOT),
+        delete_evidence: names
+            .iter()
+            .any(|name| name == namespace_file_delete_store::ROOT),
         ..NamespaceHistorySummary::default()
     };
     if names.iter().any(|name| name == ROOT) {
@@ -160,6 +168,7 @@ pub(super) fn history_summary_existing(
                             .records
                             .checked_add(result.directory_records)
                             .and_then(|n| n.checked_add(result.file_records))
+                            .and_then(|n| n.checked_add(result.delete_records))
                             .ok_or(StoreError::ScanLimit)?,
                     )
                     .ok_or(StoreError::ScanLimit)?;
@@ -185,6 +194,7 @@ pub(super) fn history_summary_existing(
                         .records
                         .checked_add(result.directory_records)
                         .and_then(|n| n.checked_add(result.file_records))
+                        .and_then(|n| n.checked_add(result.delete_records))
                         .ok_or(StoreError::ScanLimit)?,
                 )
                 .ok_or(StoreError::ScanLimit)?;
@@ -213,6 +223,7 @@ pub(super) fn history_summary_existing(
                     .records
                     .checked_add(result.directory_records)
                     .and_then(|n| n.checked_add(result.file_records))
+                    .and_then(|n| n.checked_add(result.delete_records))
                     .ok_or(StoreError::ScanLimit)?,
             )
             .ok_or(StoreError::ScanLimit)?;
@@ -227,6 +238,29 @@ pub(super) fn history_summary_existing(
         )?;
         result.file_records += records;
         result.file_unresolved += unresolved;
+    }
+    if result.delete_evidence {
+        let remaining = MAX_RECORDS
+            .checked_sub(
+                result
+                    .records
+                    .checked_add(result.directory_records)
+                    .and_then(|n| n.checked_add(result.file_records))
+                    .and_then(|n| n.checked_add(result.delete_records))
+                    .ok_or(StoreError::ScanLimit)?,
+            )
+            .ok_or(StoreError::ScanLimit)?;
+        let (records, unresolved) = namespace_file_delete_store::history_counts_existing(
+            &*root.child(namespace_file_delete_store::ROOT, false)?,
+            &*protector,
+            &catalogs.delete,
+            provider,
+            physical_root,
+            &mut budget,
+            remaining,
+        )?;
+        result.delete_records += records;
+        result.delete_unresolved += unresolved;
     }
     root.verify()?;
     lock.verify()?;

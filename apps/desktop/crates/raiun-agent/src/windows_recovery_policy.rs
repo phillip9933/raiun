@@ -6,9 +6,9 @@ use raiun_cloudfiles_windows::{
 use raiun_core::WindowsRecoveryPolicy;
 use std::time::Duration;
 
-// Keep production activation separate from parsing settings and native
-// diagnostic opt-ins until the shared pipeline/deployment gates are accepted.
-const WINDOWS_STREAMED_RECOVERY_ENABLED: bool = false;
+// Normal headless mounts and explicit recovery use the admitted streamed policy.
+// Existing private-state, root binding and transfer-budget checks still apply.
+const WINDOWS_STREAMED_RECOVERY_ENABLED: bool = true;
 
 struct Settings {
     storage: StorePolicy,
@@ -51,8 +51,8 @@ pub(super) fn provider(
 ) -> Result<DurableEditRecoveryProvider, String> {
     let headless = super::mount_only();
     let settings = configured_settings(headless)?;
-    // Qualification is bound to this exact invocation/scope/root, before any
-    // provider is assembled. Production has no environment activation path.
+    // Normal activation has no environment opt-in; scope/root admission remains
+    // mandatory when the configured provider is assembled.
     let streamed = WINDOWS_STREAMED_RECOVERY_ENABLED;
     #[cfg(all(test, debug_assertions))]
     let streamed = streamed
