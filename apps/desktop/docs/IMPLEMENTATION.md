@@ -3767,3 +3767,39 @@ formatting; the canonical affected Linux Agent/CLI compilation also passed.
 Initial compiler failures remain retained. No extra suite, native run, package,
 owner installation or publication is implied. Encrypted child namespace writes,
 replacement editors and offline parity remain separate implementation gaps.
+
+
+### Windows encrypted file and folder creation — 3 November 2026
+
+Source `812d11f` connects new FILE/DIRECTORY creation through the normal
+Windows observer and joined SDK workers. One typed phase owner retains the
+original account, vault, opaque unlock epoch, registered root, parent and native
+identities. New regular files are limited to 1 GiB; their actual source bytes
+are privately captured and authenticated before a single conditional encrypted
+PUT and full authenticated readback. Folder MKCOL uses the original parent
+condition and a sealed readback proof. Native conversion/publication follows
+protected catalogue and hydration enrollment; factual completion supplies the
+normal cleanup receipt. Existing local children are preserved independently.
+
+The separate vault-specific DPAPI intent/history uses full-scope AAD and the
+unchanged protected snapshot codec. Durable attempts and uncertain publication
+never become automatic replay or ordinary recovery authority. Admission reopens
+the current root/vault custody; completed FILE history reauthenticates its stored
+body. First-open sharing/lock violations wait before capture with the original
+candidate and deadline. Other errors and all admitted uncertainty preserve
+original custody. Ordinary factory checks remain unchanged; a local dispatch
+preference prevents unnecessary vault-discovery requests for ordinary creates.
+
+Lock cleanup now pins and checks the exact retained route's on-disk local
+inventory before dehydration and after key clearing. It reads metadata only,
+refuses unknown/plain/foreign/dirty entries and enumeration errors, and never
+adopts or deletes those bytes. The inventory is bounded to 10,000 entries,
+64 descendant levels and 16 MiB of component storage.
+
+The 22-file composition and narrow first-pin busy correction passed normal
+Windows Agent/CLI compilation and formatting. The canonical affected Linux
+Agent/CLI compile and format checks passed too; exact unchanged bytes reuse
+those results. Initial compiler failures remain retained. No suite, native
+workflow, new package, owner installation, signing or publication is claimed.
+Encrypted rename/move/delete, replacement editors and offline parity remain
+implementation gaps.
