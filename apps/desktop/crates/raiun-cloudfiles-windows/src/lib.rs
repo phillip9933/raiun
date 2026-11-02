@@ -868,6 +868,24 @@ impl ConfiguredRootConnection {
     pub fn stop_namespace_observer(&mut self, wait: std::time::Duration) -> Result<(), Error> {
         self.inner.stop_namespace_observer(wait)
     }
+    /// Scheduling reservation only; no mutation/credential authority.
+    pub fn namespace_file_operation_pending(&self) -> bool {
+        self.inner.namespace_file_operation_pending()
+    }
+    /// Ignore duplicate hints only after exact original native publication and
+    /// a fresh same-FileID/opaque/root metadata observation.
+    pub fn completed_file_replacement(&self, components: &[&str]) -> Result<bool, Error> {
+        self.inner.completed_file_replacement(components)
+    }
+    /// Retire an oldsource hint only with a completed target, fresh physical
+    /// source absence and no admitted source catalog binding. No MOVE authority.
+    pub fn completed_replacement_source_absent(
+        &self,
+        old: &[&str],
+        new: &[&str],
+    ) -> Result<bool, Error> {
+        self.inner.completed_replacement_source_absent(old, new)
+    }
     /// Inspect physical kind without admission, adoption, hydration or cloud I/O.
     /// A cloud-shaped entry can be excluded from ordinary-directory candidates;
     /// it must never be treated as proof of a healthy or completed upload.

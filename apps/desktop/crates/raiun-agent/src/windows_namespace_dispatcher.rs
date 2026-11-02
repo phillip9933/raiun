@@ -136,13 +136,46 @@ fn aliases(a: &[String], b: &[String]) -> bool {
 /// one ambiguous/unsupported item refuses the plan before any side effect.
 /// Keep every planned endpoint, including future cloud-shaped skips, through
 /// the whole-batch alias/rename checks; classification happens only afterward.
+#[cfg(test)]
 fn route(hints: &[Hint<'_>], directories: bool, creates: bool) -> Result<Vec<Work>, &'static str> {
+    route_accounted(hints, directories, creates, &[])
+}
+fn route_accounted(
+    hints: &[Hint<'_>],
+    directories: bool,
+    creates: bool,
+    accounted: &[bool],
+) -> Result<Vec<Work>, &'static str> {
     let mut result = Vec::new();
     let mut endpoints: Vec<&[String]> = Vec::new();
     let mut pair = 0;
     let mut index = 0;
     while index < hints.len() {
         let hint = &hints[index];
+        if accounted.get(index).copied().unwrap_or(false) {
+            if hint.action == Action::Old {
+                if !hints
+                    .get(index + 1)
+                    .is_some_and(|next| next.action == Action::New)
+                    || !accounted.get(index + 1).copied().unwrap_or(false)
+                    || pair == MAX_PAIRS
+                {
+                    return Err("Unpaired completed replacement hint");
+                }
+                pair += 1;
+                index += 1;
+            } else if hint.action == Action::New {
+                return Err("Unpaired completed replacement hint");
+            }
+            index += 1;
+            continue;
+        }
+        if hints.iter().enumerate().any(|(i, other)| {
+            accounted.get(i).copied().unwrap_or(false) && aliases(hint.components, other.components)
+        }) {
+            return Err("Ambiguous completed replacement endpoints");
+        }
+
         if creates
             && !observation_namespace(hint.components)
             && matches!(
@@ -200,8 +233,10 @@ fn route(hints: &[Hint<'_>], directories: bool, creates: bool) -> Result<Vec<Wor
             for name in names {
                 if endpoints.iter().any(|old| aliases(old, name))
                     || (creates
-                        && hints.iter().any(|hint| {
-                            hint.action == Action::Removed && aliases(hint.components, name)
+                        && hints.iter().enumerate().any(|(i, hint)| {
+                            !accounted.get(i).copied().unwrap_or(false)
+                                && hint.action == Action::Removed
+                                && aliases(hint.components, name)
                         }))
                 {
                     return Err("Ambiguous namespace endpoints");
@@ -489,6 +524,9 @@ mod connected {
             if !self.current(backend, root) {
                 return Err(HOLD);
             }
+            if connection.namespace_file_operation_pending() {
+                return Ok(());
+            }
             if save_or_command_active || self.mkdir.as_ref().is_some_and(mkdir::Producer::is_paused)
             {
                 return Ok(());
@@ -538,7 +576,58 @@ mod connected {
                                 components: hint.components(),
                             })
                             .collect::<Vec<_>>();
-                        let work = route(
+                        let mut accounted = inputs
+                            .iter()
+                            .map(|hint| {
+                                let refs = hint
+                                    .components
+                                    .iter()
+                                    .map(String::as_str)
+                                    .collect::<Vec<_>>();
+                                connection
+                                    .completed_file_replacement(&refs)
+                                    .map_err(|_| HOLD)
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        // A published replacement may arrive as temp->target.
+                        // Suppress both pair endpoints only when the actual new
+                        // target still matches that ORIGINAL completed receipt.
+                        let mut retired_sources = Vec::new();
+                        for i in 0..inputs.len().saturating_sub(1) {
+                            if inputs[i].action == Action::Old
+                                && inputs[i + 1].action == Action::New
+                                && accounted[i + 1]
+                                && inputs[i].components.len() == inputs[i + 1].components.len()
+                                && inputs[i].components[..inputs[i].components.len() - 1]
+                                    == inputs[i + 1].components
+                                        [..inputs[i + 1].components.len() - 1]
+                            {
+                                let old = inputs[i]
+                                    .components
+                                    .iter()
+                                    .map(String::as_str)
+                                    .collect::<Vec<_>>();
+                                let new = inputs[i + 1]
+                                    .components
+                                    .iter()
+                                    .map(String::as_str)
+                                    .collect::<Vec<_>>();
+                                if !connection
+                                    .completed_replacement_source_absent(&old, &new)
+                                    .map_err(|_| HOLD)?
+                                {
+                                    return Err(HOLD);
+                                }
+                                accounted[i] = true;
+                                retired_sources.push(inputs[i].components);
+                            }
+                        }
+                        for (i, hint) in inputs.iter().enumerate() {
+                            if retired_sources.iter().any(|old| *old == hint.components) {
+                                accounted[i] = true;
+                            }
+                        }
+                        let work = route_accounted(
                             &inputs,
                             self.mkdir.is_some()
                                 || self
@@ -546,6 +635,7 @@ mod connected {
                                     .as_ref()
                                     .is_some_and(create::Producer::allows_directory),
                             self.create.is_some(),
+                            &accounted,
                         )
                         .map_err(|_| HOLD)?;
                         if work.is_empty() {
@@ -571,11 +661,40 @@ mod connected {
                         return Err(HOLD);
                     };
                     let pair = pairs.get(index).cloned().ok_or(HOLD)?;
-                    self.rename
-                        .as_mut()
-                        .ok_or(HOLD)?
-                        .dispatch_pair(connection, backend, root, pair, generation)?;
-                    self.cursor.complete().map_err(|_| HOLD)?;
+                    let components = pair.new_components().to_vec();
+                    let refs = components.iter().map(String::as_str).collect::<Vec<_>>();
+                    let plain = connection
+                        .observe_namespace_entry(&refs)
+                        .map_err(|_| HOLD)?
+                        .kind
+                        == NamespaceEntryKind::PlainFile;
+                    if plain
+                        && self
+                            .create
+                            .as_ref()
+                            .is_some_and(create::Producer::allows_file)
+                    {
+                        // A plain destination has no original cloud MOVE
+                        // admission. Reuse fresh create-only/If-None-Match;
+                        // neither hint nor this path deletes the source.
+                        if self.create.as_mut().ok_or(HOLD)?.step(
+                            connection,
+                            backend,
+                            root,
+                            &components,
+                            generation,
+                            CreateKind::File,
+                            workers.ok_or(HOLD)?,
+                        )? {
+                            self.cursor.complete().map_err(|_| HOLD)?;
+                        }
+                    } else {
+                        self.rename
+                            .as_mut()
+                            .ok_or(HOLD)?
+                            .dispatch_pair(connection, backend, root, pair, generation)?;
+                        self.cursor.complete().map_err(|_| HOLD)?;
+                    }
                 }
                 Work::Directory(index) => {
                     let directory_ready = DIRECTORY_ROUTING_READY

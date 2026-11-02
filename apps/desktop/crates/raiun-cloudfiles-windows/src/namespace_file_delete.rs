@@ -83,6 +83,16 @@ pub trait FileDeleteRemote {
 }
 
 pub trait FileDeleteLocal {
+    /// Optional local-first witness: the ORIGINAL clean snapshot joined to its
+    /// positive owned kernel deletion-completion receipt and current pinned
+    /// ancestry/absence. This is not a present-old-leaf observation. Only the
+    /// live original native owner may implement it; history/path alone cannot.
+    fn observe_original_removal(
+        &mut self,
+        _intent: &NamespaceIntent,
+    ) -> Result<Option<FileDeleteLocalObservation>, CloudError> {
+        Ok(None)
+    }
     /// Fresh native exact-object/full-ancestry proof and authoritative dirty and
     /// pending-capture/upload/recovery checks under the original operation's
     /// fence. A name lookup or cached clean bit cannot satisfy this contract.
@@ -170,7 +180,10 @@ fn admit_clean(
     local: &mut (impl FileDeleteLocal + ?Sized),
     intent: &NamespaceIntent,
 ) -> Result<(), CloudError> {
-    let observation = local.observe_clean(intent)?;
+    let observation = match local.observe_original_removal(intent)? {
+        Some(receipt) => receipt,
+        None => local.observe_clean(intent)?,
+    };
     if observation.ancestry != StorageClassification::Ordinary
         || observation.dirty
         || observation.pending

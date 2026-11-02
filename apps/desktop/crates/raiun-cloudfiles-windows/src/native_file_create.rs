@@ -170,6 +170,154 @@ impl Read for Reader<'_, '_> {
     }
 }
 
+/// Private same-owner body guard for an admitted replacement. This supplies
+/// no remote-create admission: the caller retains the original delete receipt
+/// and existing remote baseline through this owner's complete lifetime.
+pub(super) struct ReplacementBody {
+    source: SourceOwner,
+    snapshot: RootSnapshot,
+    usn: i64,
+    digest: [u8; 32],
+    path: PathBuf,
+}
+impl ReplacementBody {
+    pub(super) fn capture<T>(
+        path: &Path,
+        volume: u32,
+        original_file: u64,
+        job: &crate::StreamedRecoveryJob,
+        stopped: &dyn Fn() -> bool,
+        capture: impl FnOnce(&mut dyn Read, RootSnapshot) -> Result<T, Error>,
+    ) -> Result<(Self, T), Error> {
+        use sha2::Digest;
+        if stopped() || job.is_stopped() {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        let source = SourceOwner::open(&wide_path(path)?)?;
+        let reference = source.reference()?;
+        let (snapshot, usn) = plain(&reference)?;
+        if snapshot.identity.volume_serial != volume
+            || snapshot.identity.file_index == original_file
+            || usn <= 0
+            || !windows_paths_equal(
+                &final_path_for_handle(reference.raw).map_err(|_| Error::ConfiguredRootChanged)?,
+                path,
+            )
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        let mut reader = Reader {
+            source: &reference,
+            offset: 0,
+            length: snapshot.file_size,
+            eof: false,
+            hash: sha2::Sha256::new(),
+            job,
+            stopped,
+        };
+        let value = capture(&mut reader, snapshot)?;
+        if !reader.eof || reader.offset != snapshot.file_size {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        let digest: [u8; 32] = reader.hash.finalize().into();
+        let after = plain(&reference)?;
+        if !same_edit_snapshot(snapshot, after.0) || after.1 != usn || stopped() {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        drop(reference);
+        let body = Self {
+            source,
+            snapshot,
+            usn,
+            digest,
+            path: path.to_owned(),
+        };
+        body.check(job, stopped)?;
+        Ok((body, value))
+    }
+    pub(super) fn local_file(&self) -> LocalFileIdentity {
+        LocalFileIdentity {
+            volume_serial: self.snapshot.identity.volume_serial,
+            file_index: self.snapshot.identity.file_index,
+        }
+    }
+    pub(super) fn check(
+        &self,
+        job: &crate::StreamedRecoveryJob,
+        stopped: &dyn Fn() -> bool,
+    ) -> Result<(), Error> {
+        if stopped() || job.is_stopped() {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        let reference = self.source.reference()?;
+        let now = plain(&reference)?;
+        if !same_edit_snapshot(self.snapshot, now.0)
+            || now.1 != self.usn
+            || !windows_paths_equal(
+                &final_path_for_handle(reference.raw).map_err(|_| Error::ConfiguredRootChanged)?,
+                &self.path,
+            )
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        hash_source(&reference, self.snapshot.file_size, job, &self.digest)?;
+        let after = plain(&reference)?;
+        if stopped() || !same_edit_snapshot(self.snapshot, after.0) || after.1 != self.usn {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        Ok(())
+    }
+    pub(super) fn convert(
+        &self,
+        identity: &[u8; 16],
+        job: &crate::StreamedRecoveryJob,
+        stopped: &dyn Fn() -> bool,
+        claim: impl FnOnce() -> bool,
+    ) -> Result<(), Error> {
+        self.check(job, stopped)?;
+        let reference = self.source.reference()?;
+        let mut converted_usn = 0i64;
+        // Same protected WRITE_ACCESS owner and synchronous NONE conversion
+        // used by the ordinary create path. No re-open or fallback handle.
+        let hr = unsafe {
+            CfConvertToPlaceholder(
+                reference.raw,
+                identity.as_ptr().cast(),
+                16,
+                0,
+                &mut converted_usn,
+                null_mut(),
+            )
+        };
+        if hr < 0 {
+            return Err(native_error("convert admitted replacement", hr));
+        }
+        if converted_usn <= 0 {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        verify_completion_identity(self.source.0, identity)?;
+        hash_source(&reference, self.snapshot.file_size, job, &self.digest)?;
+        let mut usn = completion_usn(reference.raw, self.snapshot.identity.file_index)?;
+        if usn <= 0 || usn != converted_usn || stopped() {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        validate_converted(&reference, self.snapshot, &self.path, identity, false)?;
+        if !claim() {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        let hr = unsafe { CfSetInSyncState(self.source.0, 1, 0, &mut usn) };
+        if hr < 0 {
+            return Err(native_error("complete admitted replacement", hr));
+        }
+        validate_converted(&reference, self.snapshot, &self.path, identity, true)?;
+        hash_source(&reference, self.snapshot.file_size, job, &self.digest)?;
+        if stopped() || completion_usn(reference.raw, self.snapshot.identity.file_index)? != usn {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 pub(super) struct CreateOwner {
     closed: bool,

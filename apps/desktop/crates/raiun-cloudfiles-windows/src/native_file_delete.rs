@@ -31,6 +31,9 @@ pub(super) const DELETE_COMPLETION: i32 = 10;
 const ACK_DELETE: i32 = 6;
 // Microsoft windows-sys Foundation STATUS_CLOUD_FILE_UNSUCCESSFUL.
 const DELETE_REFUSED: i32 = 0xC000_CF12_u32 as i32;
+#[path = "native_file_replacement.rs"]
+mod replacement;
+
 const LIMIT: Duration = Duration::from_secs(45);
 const DRAIN_LIMIT: Duration = Duration::from_secs(2);
 #[repr(C)]
@@ -70,6 +73,7 @@ struct Ticket {
     size: u64,
     kind: NamespaceObjectKind,
     deadline: Instant,
+    post_ack_job: Arc<std::sync::OnceLock<crate::StreamedRecoveryJob>>,
 }
 struct Slot {
     ticket: Ticket,
@@ -83,6 +87,7 @@ struct Inner {
     slot: Option<Slot>,
     last: Option<Ticket>,
     result: Option<FileDeleteOutcome>,
+    replacements: Vec<replacement::CompletedReplacement>,
 }
 pub(super) struct Shared {
     state: Weak<CallbackState>,
@@ -91,7 +96,7 @@ pub(super) struct Shared {
     root: crate::ConfiguredRootIdentity,
     composite: [u8; 16],
     connection: AtomicI64,
-    closed: AtomicBool,
+    closed: Arc<AtomicBool>,
     done: AtomicBool,
     poisoned: AtomicBool,
     inner: Mutex<Inner>,
@@ -126,13 +131,14 @@ impl Owner {
             },
             composite: *composite.as_bytes(),
             connection: AtomicI64::new(0),
-            closed: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
             done: AtomicBool::new(false),
             poisoned: AtomicBool::new(false),
             inner: Mutex::new(Inner {
                 slot: None,
                 last: None,
                 result: None,
+                replacements: Vec::new(),
             }),
             changed: Condvar::new(),
         });
@@ -238,7 +244,10 @@ impl Inner {
 impl Shared {
     fn live(&self, ticket: &Ticket) -> bool {
         !self.closed.load(Ordering::Acquire)
-            && Instant::now() < ticket.deadline
+            && ticket
+                .post_ack_job
+                .get()
+                .map_or_else(|| Instant::now() < ticket.deadline, |job| !job.is_stopped())
             && !self.backend.is_revoked()
             && (self.config.current)(self.config.authorization)
             && self.backend.scope().token_generation() == self.config.authorization.token_generation
@@ -318,7 +327,10 @@ impl Shared {
             && slot.ticket.key == key
             && slot.ack_attempted
             && !self.closed.load(Ordering::Acquire)
-            && Instant::now() < slot.ticket.deadline
+            && slot.ticket.post_ack_job.get().map_or_else(
+                || Instant::now() < slot.ticket.deadline,
+                |job| !job.is_stopped(),
+            )
             && slot.deferred.len() < 8
         {
             let Some(owned) = permit.defer_owned_deleted(&state.close_capture_admission) else {
@@ -333,7 +345,10 @@ impl Shared {
         if let Some(last) = inner.last.as_ref()
             && last.key == key
             && !self.closed.load(Ordering::Acquire)
-            && Instant::now() < last.deadline
+            && last
+                .post_ack_job
+                .get()
+                .map_or_else(|| Instant::now() < last.deadline, |job| !job.is_stopped())
         {
             let Some(owned) = permit.defer_owned_deleted(&state.close_capture_admission) else {
                 return false;
@@ -608,7 +623,7 @@ fn execute(shared: &Arc<Shared>, ticket: &Ticket) -> FileDeleteOutcome {
         .ok_or(Error::EditRecoveryUnavailable)?;
         let store = FileDeleteStore::new(rename.snapshot_store().clone())
             .map_err(|_| Error::EditRecoveryUnavailable)?;
-        let mut local = Local {
+        let mut local = LocalCustody(Some(Local {
             shared,
             ticket,
             state: &state,
@@ -620,8 +635,10 @@ fn execute(shared: &Arc<Shared>, ticket: &Ticket) -> FileDeleteOutcome {
             snapshot: leaf_snapshot,
             source,
             acknowledged: false,
+            locally_removed: false,
+            terminal: false,
             empty_verified: Cell::new(false),
-        };
+        }));
         local.check().map_err(|_| Error::EditRecoveryUnavailable)?;
         let candidate = NamespaceIntent {
             schema_version: 1,
@@ -637,6 +654,29 @@ fn execute(shared: &Arc<Shared>, ticket: &Ticket) -> FileDeleteOutcome {
                 }
             },
         };
+        if ticket.kind == NamespaceObjectKind::File {
+            // Fresh original remote baseline/role before releasing the local
+            // operation. No remote mutation or durable DELETE row exists yet.
+            let current = |auth| {
+                auth == shared.config.authorization
+                    && shared.live(ticket)
+                    && admission.borrow().is_current()
+            };
+            shared
+                .backend
+                .with_file_delete_session(&candidate, captured.identity, &current, |session| {
+                    session.remote().preflight(&candidate)
+                })
+                .map_err(|_| Error::ProviderUnavailable)?
+                .map_err(|_| Error::EditRecoveryUnavailable)?;
+            replacement::allow_local_and_wait(&mut local, recovery)?;
+            if let Some(new_file) = replacement::classify(&local)? {
+                let outcome = replacement::replace(&mut local, recovery, new_file)?;
+                local.terminal = outcome == FileDeleteOutcome::Completed;
+                return Ok(outcome);
+            }
+            local.check().map_err(|_| Error::EditRecoveryUnavailable)?;
+        }
         let publication = match store
             .publish_intent(candidate)
             .map_err(|_| Error::EditRecoveryUnavailable)?
@@ -660,7 +700,7 @@ fn execute(shared: &Arc<Shared>, ticket: &Ticket) -> FileDeleteOutcome {
                     remote: session.remote(),
                     admission: &admission,
                 };
-                reconcile_file_delete(&mut journal, &remote, &mut local)
+                reconcile_file_delete(&mut journal, &remote, &mut *local)
             })
             .map_err(|_| Error::ProviderUnavailable)?
             .map_err(|_| Error::EditRecoveryUnavailable)?;
@@ -674,6 +714,9 @@ fn execute(shared: &Arc<Shared>, ticket: &Ticket) -> FileDeleteOutcome {
                 .backend
                 .unregister_file(original_identity)
                 .map_err(|_| Error::EditRecoveryUnavailable)?;
+        }
+        if outcome == FileDeleteOutcome::Completed {
+            local.terminal = true;
         }
         Ok(outcome)
     })();
@@ -821,7 +864,36 @@ struct Local<'a, 'b> {
     snapshot: RootSnapshot,
     source: ExistingNamespaceEntry,
     acknowledged: bool,
+    locally_removed: bool,
+    terminal: bool,
     empty_verified: Cell<bool>,
+}
+// Owner-thread RAII only. An unresolved local-first FILE operation keeps its
+// actual native pins alongside the already retained Slot/owner. No detached
+// thread, restoration, cross-thread handle transfer or replay is introduced.
+struct LocalCustody<'a, 'b>(Option<Local<'a, 'b>>);
+impl<'a, 'b> std::ops::Deref for LocalCustody<'a, 'b> {
+    type Target = Local<'a, 'b>;
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("live local custody")
+    }
+}
+impl std::ops::DerefMut for LocalCustody<'_, '_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0.as_mut().expect("live local custody")
+    }
+}
+impl Drop for LocalCustody<'_, '_> {
+    fn drop(&mut self) {
+        if let Some(local) = self.0.take() {
+            if local.ticket.kind == NamespaceObjectKind::File
+                && local.acknowledged
+                && !local.terminal
+            {
+                std::mem::forget(local);
+            }
+        }
+    }
 }
 impl Local<'_, '_> {
     fn check(&self) -> Result<(), CloudError> {
@@ -842,6 +914,9 @@ impl Local<'_, '_> {
             return Err(cloud());
         }
         drop(activity);
+        if self.locally_removed {
+            return replacement::check_removed(self, true).map_err(|_| cloud());
+        }
         let leaf = self.leaf.as_ref().ok_or_else(cloud)?;
         let now = root_snapshot(leaf.0).map_err(|_| cloud())?;
         if now.identity != self.snapshot.identity
@@ -932,6 +1007,21 @@ impl FileDeleteLocal for Local<'_, '_> {
             pending: false,
         })
     }
+    fn observe_original_removal(
+        &mut self,
+        _: &NamespaceIntent,
+    ) -> Result<Option<FileDeleteLocalObservation>, CloudError> {
+        if !self.locally_removed {
+            return Ok(None);
+        }
+        self.check()?;
+        Ok(Some(FileDeleteLocalObservation {
+            source: self.source.clone(),
+            ancestry: StorageClassification::Ordinary,
+            dirty: false,
+            pending: false,
+        }))
+    }
     fn record_completion<F>(
         &mut self,
         _: &NamespaceIntent,
@@ -941,6 +1031,15 @@ impl FileDeleteLocal for Local<'_, '_> {
     where
         F: FnOnce() -> Result<(), crate::streamed_store::StoreError>,
     {
+        if self.locally_removed {
+            if readback.source() != &self.source
+                || self.check().is_err()
+                || !self.admission.borrow_mut().claim_completion()
+            {
+                return Err(FileDeleteCompletionError::Unavailable);
+            }
+            return record().map_err(FileDeleteCompletionError::Store);
+        }
         // Separate factual local emptiness refresh after HTTP returned,
         // outside the SDK before-send callback and before success ACK.
         self.empty_verified.set(false);
@@ -1165,6 +1264,7 @@ pub(super) unsafe extern "system" fn notify(
             size: info.file_size as u64,
             kind,
             deadline: Instant::now() + LIMIT,
+            post_ack_job: Arc::new(std::sync::OnceLock::new()),
         })
     }))
     .unwrap_or(false);
@@ -1270,6 +1370,7 @@ mod drain_tests {
             slot: None,
             last: None,
             result: Some(FileDeleteOutcome::Completed),
+            replacements: Vec::new(),
         }));
         let gate = Arc::new(std::sync::Barrier::new(2));
         let run = inner.clone();
@@ -1290,6 +1391,7 @@ mod drain_tests {
             slot: None,
             last: None,
             result: None,
+            replacements: Vec::new(),
         };
         assert!(inner.releasable(false));
         inner.result = Some(FileDeleteOutcome::Completed);
@@ -1298,5 +1400,173 @@ mod drain_tests {
         assert!(!inner.releasable(false));
         inner.result = Some(FileDeleteOutcome::RemoteVerifiedLocalPending);
         assert!(!inner.releasable(false));
+    }
+}
+
+impl ConfiguredRootConnection {
+    /// Value-only scheduling reservation. A busy/unknown owner pauses observers;
+    /// this does not admit a local or remote mutation or clear recovery state.
+    pub(crate) fn namespace_file_operation_pending(&self) -> bool {
+        let Ok(owner) = self.state.delete_shared.try_lock() else {
+            return true;
+        };
+        let Some(owner) = owner.as_ref() else {
+            return false;
+        };
+        owner.poisoned.load(Ordering::Acquire)
+            || owner
+                .inner
+                .try_lock()
+                .map_or(true, |inner| inner.slot.is_some())
+    }
+    /// Positive current metadata for suppressing a duplicate observer hint only.
+    /// Original live publication + same new FileID/opaque identity/root required.
+    pub(crate) fn completed_file_replacement(&self, components: &[&str]) -> Result<bool, Error> {
+        if components.is_empty()
+            || components.len() > 256
+            || components.iter().any(|part| !valid_component(part))
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        let owner = self
+            .state
+            .delete_shared
+            .lock()
+            .map_err(|_| Error::EditRecoveryUnavailable)?
+            .clone();
+        let Some(owner) = owner else {
+            return Ok(false);
+        };
+        if owner.closed.load(Ordering::Acquire)
+            || !(owner.config.current)(owner.config.authorization)
+        {
+            return Err(Error::ProviderUnavailable);
+        }
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        let path = components
+            .iter()
+            .fold(root.path.clone(), |path, part| path.join(part));
+        let found = {
+            let inner = owner
+                .inner
+                .lock()
+                .map_err(|_| Error::EditRecoveryUnavailable)?;
+            inner
+                .replacements
+                .iter()
+                .rev()
+                .find(|receipt| windows_paths_equal(&receipt.path, &path))
+                .map(|receipt| (receipt.file, receipt.identity))
+        };
+        let Some((file, identity)) = found else {
+            return Ok(false);
+        };
+        let Ok(actual) = self.observe_namespace_file(components) else {
+            return Ok(false);
+        };
+        if actual.local_file != file || actual.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC == 0
+        {
+            return Ok(false);
+        }
+        let (_, _ancestors, leaf, snapshot) = pin_callback_path_chain(
+            &path,
+            root.identity,
+            file.file_index,
+            CallbackSizePolicy::Exact(actual.byte_len),
+        )
+        .map_err(|_| Error::ConfiguredRootChanged)?;
+        Ok(snapshot.identity.volume_serial == file.volume_serial
+            && native_namespace_directory::opaque_directory_identity(leaf.0)? == identity
+            && root.identity.volume_serial == owner.root.volume_serial
+            && root.identity.file_index == owner.root.file_index)
+    }
+}
+
+impl ConfiguredRootConnection {
+    /// Read-only hint retirement. A published target alone cannot account for
+    /// an unrelated source: require actual source absence and no admitted
+    /// source binding under the exact completed target's Space/root.
+    pub(crate) fn completed_replacement_source_absent(
+        &self,
+        old: &[&str],
+        new: &[&str],
+    ) -> Result<bool, Error> {
+        if old.len() < 2
+            || old.len() != new.len()
+            || old[..old.len() - 1] != new[..new.len() - 1]
+            || old.last() == new.last()
+            || old.iter().any(|part| !valid_component(part))
+            || !self.completed_file_replacement(new)?
+        {
+            return Ok(false);
+        }
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        let target = new
+            .iter()
+            .fold(root.path.clone(), |path, part| path.join(part));
+        let source = old
+            .iter()
+            .fold(root.path.clone(), |path, part| path.join(part));
+        let owner = self
+            .state
+            .delete_shared
+            .lock()
+            .map_err(|_| Error::EditRecoveryUnavailable)?
+            .clone()
+            .ok_or(Error::EditRecoveryUnavailable)?;
+        let (file, identity) = {
+            let inner = owner
+                .inner
+                .lock()
+                .map_err(|_| Error::EditRecoveryUnavailable)?;
+            let receipt = inner
+                .replacements
+                .iter()
+                .rev()
+                .find(|r| windows_paths_equal(&r.path, &target))
+                .ok_or(Error::EditRecoveryUnavailable)?;
+            (receipt.file, receipt.identity)
+        };
+        let (_root, _ancestors, leaf, snapshot) = pin_callback_path_chain(
+            &target,
+            root.identity,
+            file.file_index,
+            CallbackSizePolicy::ObservedModifiedClose,
+        )
+        .map_err(|_| Error::ConfiguredRootChanged)?;
+        if snapshot.identity.volume_serial != file.volume_serial
+            || native_namespace_directory::opaque_directory_identity(leaf.0)? != identity
+        {
+            return Ok(false);
+        }
+        let wide = wide_path(&source)?;
+        let raw = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                null_mut(),
+            )
+        };
+        if !raw.is_null() && raw != INVALID_HANDLE_VALUE {
+            drop(RawOwnedHandle(raw));
+            return Ok(false);
+        }
+        if unsafe { GetLastError() } != 2 {
+            return Err(win32_io_error("inspect replacement source hint"));
+        }
+        if !owner
+            .backend
+            .replacement_source_unbound(&identity, old.last().ok_or(Error::ConfiguredRootChanged)?)
+            .map_err(|_| Error::EditRecoveryUnavailable)?
+        {
+            return Ok(false);
+        }
+        self.completed_file_replacement(new)
     }
 }

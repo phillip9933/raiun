@@ -521,3 +521,89 @@ impl FileDeleteSession<'_> {
 #[cfg(test)]
 #[path = "file_delete_tests.rs"]
 mod tests;
+
+impl OpenCloudPlaceholderBackend {
+    /// Read-only suppression proof for a completed replacement's old temp
+    /// source hint. Never admits delete/MOVE or reconstructs native custody.
+    #[cfg(windows)]
+    pub(crate) fn replacement_source_unbound(
+        &self,
+        target_identity: &[u8; 16],
+        source_name: &str,
+    ) -> Result<bool, BackendError> {
+        if !valid_windows_component(source_name) {
+            return Err(BackendError::Unavailable);
+        }
+        // ASCII-only old-temp hint retirement: ASCII case comparison cannot
+        // prove NTFS alias absence for Unicode names. This is advisory metadata
+        // suppression only; Unicode create/read/replacement admission is unchanged.
+        if !source_name.is_ascii() {
+            return Ok(false);
+        }
+        let _lease = self
+            .lease_gate
+            .read()
+            .map_err(|_| BackendError::Unavailable)?;
+        self.ensure_active()?;
+        let scope = self
+            .catalog_scope_snapshot()?
+            .ok_or(BackendError::Unavailable)?;
+        let catalog = self
+            .identity_catalog
+            .as_ref()
+            .ok_or(BackendError::Unavailable)?;
+        let rows = catalog.load(&scope)?;
+        let mut targets = rows.iter().filter_map(|row| match row {
+            ProviderIdentityBinding::File {
+                identity,
+                space_id,
+                root_resource_id,
+                path,
+                ..
+            } if identity == target_identity => Some((space_id, root_resource_id, path)),
+            _ => None,
+        });
+        let (space, root, target) = targets.next().ok_or(BackendError::Unavailable)?;
+        if targets.next().is_some() {
+            return Err(BackendError::Unavailable);
+        }
+        let parent = target.rsplit_once('/').ok_or(BackendError::Unavailable)?.0;
+        if !parent.is_ascii() {
+            return Ok(false);
+        }
+        let source = format!("{parent}/{source_name}");
+        if source == *target {
+            return Ok(false);
+        }
+        let absent = !rows.iter().any(|row| match row {
+            ProviderIdentityBinding::File {
+                space_id,
+                root_resource_id,
+                path,
+                ..
+            }
+            | ProviderIdentityBinding::Directory {
+                space_id,
+                root_resource_id,
+                path,
+                ..
+            } => {
+                if space_id != space || root_resource_id != root {
+                    return false;
+                }
+                let Some((other_parent, basename)) = path.rsplit_once('/') else {
+                    return true;
+                };
+                // A non-ASCII parent cannot be compared for NTFS aliasing here.
+                // For an ASCII same-parent route, any Unicode sibling also
+                // prevents this advisory absence claim.
+                !other_parent.is_ascii()
+                    || (other_parent.eq_ignore_ascii_case(parent) && !basename.is_ascii())
+                    || path.eq_ignore_ascii_case(&source)
+            }
+            _ => false,
+        });
+        self.ensure_active()?;
+        Ok(absent)
+    }
+}
