@@ -744,7 +744,7 @@ const _: () = {
     assert!(size_of::<DirectoryInfo>() == 112);
     assert!(std::mem::align_of::<DirectoryInfo>() == 8);
 };
-fn physically_empty(handle: Handle) -> Result<bool, Error> {
+pub(super) fn physically_empty(handle: Handle) -> Result<bool, Error> {
     let mut class = 11; // FileIdBothDirectoryRestartInfo, then continuation10.
     // At most dot entries may be skipped. Any other entry is nonempty;
     // malformed, oversized or nonterminating metadata never proves emptiness.
