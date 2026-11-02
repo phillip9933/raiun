@@ -3,7 +3,7 @@
 ## Current checkpoint — 3 November 2026
 
 GUI and CLI share the canonical `worktrees/desktop-followup-ui` source. The
-current Windows runtime checkpoint is `f8789e4`; older dated descriptions below
+current Windows runtime checkpoint is `c95aa44`; older dated descriptions below
 retain their historical scope and do not describe the newly activated factories.
 
 Normal Windows GUI and CLI mounts now connect ordinary file and folder creation
@@ -52,6 +52,14 @@ bounded zeroizing memory and persists ciphertext only. Source/destination proofs
 cancel/join, verified readback and retained uncertain records remain separate from
 general encrypted writes and offline support.
 
+Connected encrypted existing-file saves now have an additive streamed path up to
+1 GiB, with protected chunked local recovery, conditional upload and full
+authenticated readback. Legacy small-file recovery records keep their original
+format and 512-KiB bound. Capture, upload, native completion and Lock cleanup use
+bounded reads; Save Copy uses one fixed operation deadline and no-clobber
+publication. Full account/vault/root identity and live unlock authority remain
+required. This source has not yet been packaged or exercised natively.
+
 The composed source passed affected Windows compilation and formatting. The
 previous unsigned `d8233c1` installer passed its 0.7.4-to-0.7.5 same-user upgrade,
 retained synthetic settings/documents/DPAPI state and normal Agent exit on CI.
@@ -68,9 +76,8 @@ Prior failures and the exact scope of reused evidence are retained.
 
 Additional replacement strategies and broader encrypted Windows equivalents
 remain implementation gaps. The new ordinary operations and explicit encrypted
-Copy are source-checked, not native acceptance. Streaming larger existing-file
-encrypted saves is being implemented without changing legacy recovery records;
-new encrypted child operations and encrypted offline parity remain separate gaps.
+Copy and streamed existing-file saves are source-checked, not native acceptance.
+New encrypted child operations and encrypted offline parity remain separate gaps.
 These are feature work, not missing exhaustive tests. Removing extra testing does
 not claim those capabilities are complete or authorize signing/publication.
 The shared OpenCloud conditional-create protocol has the same documented server

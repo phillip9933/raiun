@@ -3739,3 +3739,31 @@ compile passed. No full suite or new native run was performed. These local
 sources have not replaced the installed `d8233c1` Windows candidate or the earlier
 Linux AppImage. Larger encrypted existing-file saves and the remaining encrypted
 operation gaps are implementation work, not additional test gates.
+
+
+### Streamed Windows encrypted existing-file saves — 3 November 2026
+
+Source `c95aa44` adds the complete encrypted existing-file save pipeline up to
+1 GiB. A separate full-vault-bound protected chunk store and explicit StreamedV1
+descriptor preserve the legacy small-body format and its 512-KiB limit. The
+original native handle, identity, positive USN, modified ranges and complete
+resident coverage are checked around capture. Durable enrollment and descriptor
+readback precede body capture; original-source postproof precedes committed
+manifest verification. Serialized epochs remain historical, never live authority.
+
+The online conditional overwrite consumes an authenticated one-shot reader,
+hashes the exact bytes used by the existing encoder and independently decrypts
+the returned ciphertext into a digest sink. Only ciphertext reaches private
+staging files. Original live account/vault/root and epoch admission remain;
+possible post-dispatch failures retain uncertain custody without automatic replay.
+The async HTTP client disables automatic request retries. Native completion and
+Lock cleanup use bounded hashing, and Save Copy retains one fixed operation
+deadline through authenticated reopen and no-clobber destination verification.
+The per-vault store admits at most 4 GiB and 4,096 entries, with no pending-edit
+eviction or conversion into ordinary recovery authority.
+
+The exact 21-file composition passed normal Windows Agent compilation and
+formatting; the canonical affected Linux Agent/CLI compilation also passed.
+Initial compiler failures remain retained. No extra suite, native run, package,
+owner installation or publication is implied. Encrypted child namespace writes,
+replacement editors and offline parity remain separate implementation gaps.
