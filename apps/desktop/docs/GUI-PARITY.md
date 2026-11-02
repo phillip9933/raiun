@@ -94,6 +94,18 @@ owner laptop or published. The earlier 210-of-211 failure remains preserved; thi
 is no large-workload or real-server throughput claim. Missing file ETags still
 refuse; only valid directory metadata may omit its ETag.
 
+A newer unsigned `32bd051` Linux GUI AppImage and headless CLI bundle are also
+built. Basic packaged signed-out GUI startup, Agent status/version, CLI help and
+version, and normal Quit passed; the build VM shut down normally and original
+images were preserved. AppImage SHA256 is
+`556bf710430a2467ace6a94ca4566c0082adbb2b2c767bf75ad5e9ecdc3f30dd`;
+headless archive SHA256 is
+`ea95b4a38163ade60a9e8915d7fcbd89dd1fdcded380e436fbcb072c88dfe757`.
+These previews have not been installed on the owner laptop or published, and
+no new sign-in/file workflow is claimed. They predate the shared encrypted-folder
+parent-condition correction in `a327393`; final delivery must include that fix.
+
+
 ## Earlier assessment and feature matrix
 
 Assessment: **29 October 2026**, Desktop `work/desktop-0.7.5`, production behavior assessed at source
