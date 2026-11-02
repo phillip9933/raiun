@@ -219,12 +219,6 @@ mod connected {
                 .map_err(|_| HOLD)?;
             let current = |auth| self.current(auth, backend, root);
             if observed.kind == raiun_cloudfiles_windows::NamespaceEntryKind::CloudDirectory {
-                // General path eligibility now includes FILE moves. Directory
-                // operations remain restricted to their existing same-parent path.
-                if old[..old.len() - 1] != new[..new.len() - 1] {
-                    return Err(HOLD);
-                }
-
                 let outcome = connection
                     .reconcile_fresh_directory_rename(
                         backend,

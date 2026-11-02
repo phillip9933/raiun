@@ -1,4 +1,4 @@
-//! One bounded nonempty directory ID-MOVE. The subtree observations are not an
+//! One bounded ordinary directory ID-MOVE. The subtree observations are not an
 //! atomic server subtree condition. Callers retain all original native/catalog
 //! custody; any ambiguous send must remain unresolved and must never be replayed.
 use super::*;
@@ -7,7 +7,7 @@ impl OpenCloudClient {
     /// synchronous local-only: no network I/O or client re-entry is permitted.
     pub fn conditional_directory_rename_with_context_before_send(
         &self,
-        request: ConditionalRenameRequest<'_>,
+        request: ConditionalMoveRequest<'_>,
         expected_subtree: &[RemoteEntry],
         before_send: impl FnOnce() -> Result<(), CloudError>,
     ) -> Result<ConditionalRenameResponse, CloudError> {
@@ -80,6 +80,7 @@ impl OpenCloudClient {
             return Err(conflict("source and destination ancestry changed"));
         }
 
+        self.verify_directory_move_parents(&request, &source_path, &destination_path)?;
         self.ensure_writable_target(&selected, &source_url, &source_path)?;
         let source = self.stat_at_dav(&source_url, &source_path)?;
         if source.id != request.expected_source_id
@@ -132,6 +133,7 @@ impl OpenCloudClient {
             Err(error) => return Err(error),
         }
         self.check_directory_rename_subtree(&request, expected_subtree)?;
+        self.verify_directory_move_parents(&request, &source_path, &destination_path)?;
         self.ensure_context_current(request.context)?;
 
         let method = Method::from_bytes(b"MOVE").expect("static HTTP method");
@@ -148,9 +150,21 @@ impl OpenCloudClient {
             .map_err(|_| invalid("conditional MOVE destination header is invalid"))?;
         let etag = HeaderValue::from_str(request.expected_source_etag)
             .map_err(|_| invalid("conditional MOVE source validator is invalid"))?;
+        let source_parent_url = append_logical_path(&root_url, &logical_parent(&source_path))?;
+        let destination_parent_url =
+            append_logical_path(&root_url, &logical_parent(&destination_path))?;
+        let parent_conditions = HeaderValue::from_str(&format!(
+            "<{}> ([{}]) <{}> ([{}])",
+            source_parent_url,
+            request.source_parent_etag,
+            destination_parent_url,
+            request.destination_parent_etag
+        ))
+        .map_err(|_| invalid("conditional directory MOVE parent conditions are invalid"))?;
         let move_request = builder
             .header("Destination", destination)
             .header("Overwrite", "F")
+            .header("If", parent_conditions)
             .header(IF_MATCH, etag)
             .build()
             .map_err(|_| invalid("conditional MOVE request is invalid"))?;
@@ -183,13 +197,11 @@ impl OpenCloudClient {
 
     fn check_directory_rename_subtree(
         &self,
-        request: &ConditionalRenameRequest<'_>,
+        request: &ConditionalMoveRequest<'_>,
         expected: &[RemoteEntry],
     ) -> Result<(), CloudError> {
-        if expected.len() < 2 || expected.len() > 1024 {
-            return Err(invalid(
-                "directory rename requires a bounded nonempty subtree",
-            ));
+        if expected.is_empty() || expected.len() > 1024 {
+            return Err(invalid("directory move requires a bounded managed subtree"));
         }
         let root = recovery_target_path(request.remote_root_path, request.source_relative_path)?;
         let mut pending = vec![root.clone()];
@@ -233,6 +245,37 @@ impl OpenCloudClient {
         }
         Ok(())
     }
+    fn verify_directory_move_parents(
+        &self,
+        request: &ConditionalMoveRequest<'_>,
+        source: &str,
+        destination: &str,
+    ) -> Result<(), CloudError> {
+        for (path, id, etag) in [
+            (
+                logical_parent(source),
+                request.source_parent_id,
+                request.source_parent_etag,
+            ),
+            (
+                logical_parent(destination),
+                request.destination_parent_id,
+                request.destination_parent_etag,
+            ),
+        ] {
+            let entry = self.stat_with_context(request.space, &path, request.context)?;
+            if !entry.directory
+                || entry.encrypted
+                || !entry.writable
+                || entry.id != id
+                || entry.etag != etag
+                || !is_strong_etag(&entry.etag)
+            {
+                return Err(conflict("conditional MOVE original parent changed"));
+            }
+        }
+        Ok(())
+    }
     fn validate_directory_rename_root(
         &self,
         root_url: &Url,
@@ -246,7 +289,7 @@ impl OpenCloudClient {
         Ok(())
     }
 }
-fn validate_request(request: &ConditionalRenameRequest<'_>) -> Result<(), CloudError> {
+fn validate_request(request: &ConditionalMoveRequest<'_>) -> Result<(), CloudError> {
     if request.space.is_empty()
         || request.space.len() > MAX_DAV_ENTRY
         || request.space.chars().any(char::is_control)
@@ -262,17 +305,39 @@ fn validate_request(request: &ConditionalRenameRequest<'_>) -> Result<(), CloudE
     {
         return Err(invalid("conditional MOVE identity or validator is invalid"));
     }
+    for (id, etag) in [
+        (request.source_parent_id, request.source_parent_etag),
+        (
+            request.destination_parent_id,
+            request.destination_parent_etag,
+        ),
+    ] {
+        if id.is_empty()
+            || id.len() > MAX_DAV_ENTRY
+            || id.chars().any(char::is_control)
+            || !is_strong_etag(etag)
+            || etag.len() > MAX_DAV_ENTRY
+            || HeaderValue::from_str(etag).is_err()
+        {
+            return Err(invalid(
+                "conditional MOVE parent identity/validator is invalid",
+            ));
+        }
+    }
     let source = recovery_target_path(request.remote_root_path, request.source_relative_path)?;
     let destination =
         recovery_target_path(request.remote_root_path, request.destination_relative_path)?;
     let source_leaf = source.rsplit('/').next().unwrap_or_default();
     let destination_leaf = destination.rsplit('/').next().unwrap_or_default();
-    if source == destination
-        || logical_parent(&source) != logical_parent(&destination)
-        || source_leaf.eq_ignore_ascii_case(destination_leaf)
+    if source.eq_ignore_ascii_case(&destination)
+        || (logical_parent(&source) == logical_parent(&destination)
+            && source_leaf.eq_ignore_ascii_case(destination_leaf))
+        || destination
+            .to_lowercase()
+            .starts_with(&format!("{}/", source.to_lowercase()))
     {
         return Err(invalid(
-            "conditional MOVE requires distinct names in the exact same parent",
+            "conditional directory MOVE requires distinct paths outside the source subtree",
         ));
     }
     if source.trim_end_matches('/') == request.remote_root_path.trim_end_matches('/')

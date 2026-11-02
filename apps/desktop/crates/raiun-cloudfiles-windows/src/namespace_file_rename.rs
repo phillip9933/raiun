@@ -186,8 +186,10 @@ fn supported(intent: &NamespaceIntent) -> bool {
         && (source.local.object_kind != NamespaceObjectKind::Directory
             || source.remote.byte_len == 0)
         && (source.local.parent == destination.parent
-            || (source.local.object_kind == NamespaceObjectKind::File
-                && source.local.parent.scope == destination.parent.scope
+            || (matches!(
+                source.local.object_kind,
+                NamespaceObjectKind::File | NamespaceObjectKind::Directory
+            ) && source.local.parent.scope == destination.parent.scope
                 && source.local.parent.authorization == destination.parent.authorization
                 && source.local.parent.classification
                     == crate::namespace_intent::StorageClassification::Ordinary

@@ -1,4 +1,4 @@
-//! Metadata-only completion of an already observed same-parent bounded nonempty directory rename.
+//! Metadata-only completion of an already observed same-Space bounded directory rename.
 //! Rebase only the exact pinned catalog/remote subtree; no file digest, caller
 //! pathname authority, recovered replay or server subtree-CAS claim.
 use super::*;
@@ -111,6 +111,10 @@ struct Pins<'a> {
     root_path: PathBuf,
     old: PathBuf,
     parent_identity: crate::OpaqueIdentity,
+    destination_parent: RawOwnedHandle,
+    destination_parent_snapshot: RootSnapshot,
+    destination_ancestors: Vec<(RawOwnedHandle, RootSnapshot)>,
+    destination_parent_identity: crate::OpaqueIdentity,
 }
 impl Pins<'_> {
     fn check(&self, enumerate: bool) -> Result<(), Error> {
@@ -134,11 +138,17 @@ impl Pins<'_> {
             || !same_snapshot(root_snapshot(self.parent.0)?, self.parent_snapshot)
             || native_namespace_directory::opaque_directory_identity(self.parent.0)?
                 != *self.parent_identity.as_bytes()
+            || !same_snapshot(
+                root_snapshot(self.destination_parent.0)?,
+                self.destination_parent_snapshot,
+            )
+            || native_namespace_directory::opaque_directory_identity(self.destination_parent.0)?
+                != *self.destination_parent_identity.as_bytes()
             || !absent(&self.old)?
         {
             return Err(Error::ConfiguredRootChanged);
         }
-        for (handle, snapshot) in &self.ancestors {
+        for (handle, snapshot) in self.ancestors.iter().chain(&self.destination_ancestors) {
             if !same_snapshot(root_snapshot(handle.0)?, *snapshot) {
                 return Err(Error::ConfiguredRootChanged);
             }
@@ -383,7 +393,7 @@ impl crate::ConfiguredRootConnection {
                 &guarded,
             )
             .map_err(N::Backend)?;
-        if binding.nodes.len() == 1 {
+        if binding.nodes.len() == 1 && old[..old.len() - 1] == new[..new.len() - 1] {
             drop(admission);
             return self.reconcile_fresh_empty_directory_rename(
                 backend, pair, file, auth, generation, current,
@@ -404,6 +414,19 @@ impl crate::ConfiguredRootConnection {
                 &binding.parent.route,
                 binding.parent.identity,
                 &refs,
+                FILE_READ_ATTRIBUTES,
+            )
+            .map_err(N::Local)?;
+        let destination_refs = new[..new.len() - 1]
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let (destination_parent, destination_parent_snapshot, destination_ancestors) =
+            native_namespace_directory::pin_namespace_parent(
+                root,
+                &binding.destination_parent.route,
+                binding.destination_parent.identity,
+                &destination_refs,
                 FILE_READ_ATTRIBUTES,
             )
             .map_err(N::Local)?;
@@ -479,6 +502,10 @@ impl crate::ConfiguredRootConnection {
             root_path: root.path.clone(),
             old: source_path,
             parent_identity: binding.parent.identity,
+            destination_parent,
+            destination_parent_snapshot,
+            destination_ancestors,
+            destination_parent_identity: binding.destination_parent.identity,
         });
         pins.borrow().check(true).map_err(N::Local)?;
         let pinned_current = |a| {
@@ -498,6 +525,17 @@ impl crate::ConfiguredRootConnection {
             local_components: old[..old.len() - 1].to_vec(),
             remote: binding.parent.remote.clone(),
         };
+        let destination_namespace_parent = NamespaceParent {
+            scope: binding.destination_parent.scope.clone(),
+            authorization: auth,
+            classification: StorageClassification::Ordinary,
+            local_file: LocalFileIdentity {
+                volume_serial: destination_parent_snapshot.identity.volume_serial,
+                file_index: destination_parent_snapshot.identity.file_index,
+            },
+            local_components: new[..new.len() - 1].to_vec(),
+            remote: binding.destination_parent.remote.clone(),
+        };
         let source = ExistingNamespaceEntry {
             local: LocalNamespaceEntry {
                 parent: parent.clone(),
@@ -514,7 +552,7 @@ impl crate::ConfiguredRootConnection {
             operation: NamespaceOperation::MoveWithinScope {
                 source,
                 destination: LocalNamespaceEntry {
-                    parent,
+                    parent: destination_namespace_parent,
                     name: new.last().unwrap().clone(),
                     local_file: file,
                     object_kind: NamespaceObjectKind::Directory,

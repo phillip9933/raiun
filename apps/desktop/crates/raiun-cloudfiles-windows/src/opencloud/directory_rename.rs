@@ -12,7 +12,7 @@ use crate::namespace_intent::{
 };
 use raiun_core::backend::{CloudError, ErrorKind, RemoteEntry};
 use raiun_opencloud::{
-    ConditionalRenameRequest, ConditionalRenameResponse, OrdinaryPresenceRequest,
+    ConditionalMoveRequest, ConditionalRenameResponse, OrdinaryPresenceRequest,
     OrdinaryTargetPresence,
 };
 use std::{
@@ -144,6 +144,7 @@ use std::time::Instant;
 /// One original bounded catalog and fresh remote subtree; never reconstructed for replay.
 pub(crate) struct DirectoryRenameBinding {
     pub(crate) parent: namespace::CapturedDirectoryParent,
+    pub(crate) destination_parent: namespace::CapturedDirectoryParent,
     pub(crate) source_identity: OpaqueIdentity,
     pub(crate) source_remote: RemoteEditBaseline,
     pub(crate) nodes: Vec<DirectoryRenameNode>,
@@ -170,12 +171,11 @@ impl OpenCloudPlaceholderBackend {
         let old = pair.old_components();
         let new = pair.new_components();
         if old.len() < 2
-            || old.len() != new.len()
-            || old[..old.len() - 1] != new[..new.len() - 1]
+            || new.len() < 2
             || old
-                .last()
-                .unwrap()
-                .eq_ignore_ascii_case(new.last().unwrap())
+                .iter()
+                .map(|p| p.to_lowercase())
+                .eq(new.iter().map(|p| p.to_lowercase()))
             || !current(auth)
         {
             return Err(BackendError::Unavailable);
@@ -184,7 +184,14 @@ impl OpenCloudPlaceholderBackend {
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        if crate::personal_create_relative(&parent_parts, old.last().unwrap()).is_none() {
+        let destination_parent_parts = new[..new.len() - 1]
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        if crate::personal_create_relative(&parent_parts, old.last().unwrap()).is_none()
+            || crate::personal_create_relative(&destination_parent_parts, new.last().unwrap())
+                .is_none()
+        {
             return Err(BackendError::Unavailable);
         }
         let cancellation = self.client.transfer_budget().cancellation();
@@ -199,6 +206,13 @@ impl OpenCloudPlaceholderBackend {
             return Err(BackendError::Unavailable);
         }
         let parent = self.capture_namespace_parent(&parent_parts, root, auth)?;
+        let destination_parent =
+            self.capture_namespace_parent(&destination_parent_parts, root, auth)?;
+        if parent.scope != destination_parent.scope
+            || parent.scope.root_resource_id != destination_parent.scope.root_resource_id
+        {
+            return Err(BackendError::Unavailable);
+        }
         let source_path = format!(
             "{}/{}",
             parent.path.trim_end_matches('/'),
@@ -206,9 +220,15 @@ impl OpenCloudPlaceholderBackend {
         );
         let destination_path = format!(
             "{}/{}",
-            parent.path.trim_end_matches('/'),
+            destination_parent.path.trim_end_matches('/'),
             new.last().unwrap()
         );
+        if subtree_overlap(
+            &source_path.to_lowercase(),
+            &destination_parent.path.to_lowercase(),
+        ) {
+            return Err(BackendError::Unavailable);
+        }
         let (source_identity, source) = {
             let state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
             let mut found = state.directories.iter().filter(|(_, d)| {
@@ -270,6 +290,7 @@ impl OpenCloudPlaceholderBackend {
         }
         let result = DirectoryRenameBinding {
             parent,
+            destination_parent,
             source_identity,
             source_remote: RemoteEditBaseline {
                 resource_id: entry.id,
@@ -342,27 +363,34 @@ impl DirectoryRenameSession<'_> {
     }
     fn metadata(&self, captured: bool) -> Result<(), CloudError> {
         self.ensure_authorized(&self.intent)?;
-        let (source, _) = self.parts();
-        let scope = &source.local.parent.scope;
-        namespace::qualify_create_target(
-            self.backend,
-            scope,
-            &source.local.parent.local_components,
-            self.binding.context,
-        )?;
-        let parent = self.backend.client.stat_with_context(
-            &scope.space_id,
-            &self.binding.parent.path,
-            self.binding.context,
-        )?;
-        if !parent.directory
-            || parent.encrypted
-            || !parent.writable
-            || parent.id != self.binding.parent.remote.resource_id
-            || !strong(&parent.etag)
-            || (captured && parent.etag != self.binding.parent.remote.etag)
-        {
-            return Err(refusal(ErrorKind::Conflict));
+        let (source, destination) = self.parts();
+        for (parent, components) in [
+            (&self.binding.parent, &source.local.parent.local_components),
+            (
+                &self.binding.destination_parent,
+                &destination.parent.local_components,
+            ),
+        ] {
+            namespace::qualify_create_target(
+                self.backend,
+                &parent.scope,
+                components,
+                self.binding.context,
+            )?;
+            let entry = self.backend.client.stat_with_context(
+                &parent.scope.space_id,
+                &parent.path,
+                self.binding.context,
+            )?;
+            if !entry.directory
+                || entry.encrypted
+                || !entry.writable
+                || entry.id != parent.remote.resource_id
+                || !strong(&entry.etag)
+                || (captured && entry.etag != parent.remote.etag)
+            {
+                return Err(refusal(ErrorKind::Conflict));
+            }
         }
         self.ensure_authorized(&self.intent)
     }
@@ -418,6 +446,15 @@ impl DirectoryRenameSession<'_> {
                     && p.path == b.parent.path
                     && p.remote_id == b.parent.remote.resource_id
             })
+            && state
+                .directories
+                .get(&b.destination_parent.identity)
+                .is_some_and(|p| {
+                    p.space_id == b.destination_parent.scope.space_id
+                        && p.root_resource_id == b.destination_parent.scope.root_resource_id
+                        && p.path == b.destination_parent.path
+                        && p.remote_id == b.destination_parent.remote.resource_id
+                })
             && catalog_nodes(
                 state,
                 &b.source.space_id,
@@ -624,7 +661,10 @@ impl FileRenameRemote for DirectoryRenameSession<'_> {
             || source.local.parent.authorization != b.authorization
             || source.remote != b.source_remote
             || source.remote.byte_len != 0
-            || source.local.parent != destination.parent
+            || source.local.parent.scope != destination.parent.scope
+            || source.local.parent.authorization != destination.parent.authorization
+            || destination.parent.scope != b.destination_parent.scope
+            || destination.parent.remote != b.destination_parent.remote
             || source.local.local_file != destination.local_file
             || source.local.parent.authorization.token_generation != self.backend.token_generation
             || !(self.current)(source.local.parent.authorization)
@@ -637,7 +677,7 @@ impl FileRenameRemote for DirectoryRenameSession<'_> {
             ) != b.source.path
             || format!(
                 "{}/{}",
-                b.parent.path.trim_end_matches('/'),
+                b.destination_parent.path.trim_end_matches('/'),
                 destination.name
             ) != b.destination_path
         {
@@ -714,7 +754,7 @@ impl FileRenameRemote for DirectoryRenameSession<'_> {
             .backend
             .client
             .conditional_directory_rename_with_context_before_send(
-                ConditionalRenameRequest {
+                ConditionalMoveRequest {
                     space: &b.source.space_id,
                     remote_root_path: "/",
                     expected_root_id: &b.source.root_resource_id,
@@ -723,6 +763,10 @@ impl FileRenameRemote for DirectoryRenameSession<'_> {
                     expected_source_id: &b.source.remote_id,
                     expected_source_size: 0,
                     expected_source_etag: &b.source_remote.etag,
+                    source_parent_id: &b.parent.remote.resource_id,
+                    source_parent_etag: &b.parent.remote.etag,
+                    destination_parent_id: &b.destination_parent.remote.resource_id,
+                    destination_parent_etag: &b.destination_parent.remote.etag,
                     context: b.context,
                 },
                 &b.nodes.iter().map(|n| n.entry.clone()).collect::<Vec<_>>(),
