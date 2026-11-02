@@ -3561,3 +3561,25 @@ Production creation remains disabled. Native and exact-package acceptance,
 plus a verified create-only server contract, are still required: HTTP 201 and
 full readback alone do not establish atomic no-clobber semantics. No installed
 application or published release has changed.
+
+### Linux packaged headless acceptance — 2 November 2026
+
+The unsigned headless package built from consolidated source `92dc9d4` passed
+one native workflow with 13 asserted checks in a fresh isolated KVM guest as
+ordinary UID 1000 with no effective capabilities. The packaged CLI and Agent
+created their private state, signed in to a synthetic loopback account, mounted
+real FUSE, read Personal and Projects, and performed one revision-conditioned
+ordinary update with independent exact ETag/body readback. An open file caused
+an explicit busy-unmount refusal; closing it allowed normal unmount and stop.
+The opted-in synthetic login remained private, and a fresh Agent process
+restored it, mounted again and read the updated content. Folder-sync and
+desktop-autostart mutations remained refused in mount-only mode.
+
+All 23 owned processes reached terminal states, including the expected refused
+unmount command. No task mount or Raiun process remained. Actual guest shutdown,
+original QEMU process disappearance, closed SSH transport, absent image writers
+and unchanged original disk metadata were verified. The task's new disk and
+synthetic private state are retained. This is distinct from the earlier
+211-file internal test and signed-out package smoke. It does not establish GUI,
+boot-service, real-server throughput, broader file operations or Windows
+acceptance, and changes no installed host application or release.

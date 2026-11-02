@@ -41,6 +41,16 @@ remain pending. Headless, existing-file and vault save paths are unchanged by
 this Linux create-upload work. See [the implementation checkpoint](IMPLEMENTATION.md#windows-namespace-integration--1-november-2026-source-checkpoint)
 for the source and acceptance boundaries.
 
+The consolidated Linux headless package at `92dc9d4` also passed one native
+workflow with 13 asserted checks in a separate ordinary-user KVM guest. The
+packaged CLI and Agent performed real FUSE reads in Personal and Projects, one
+conditional update with independent remote readback, busy-unmount refusal,
+normal stop and a saved-session restart with updated reads. Only an explicitly
+remembered synthetic loopback login was used. All owned processes exited and
+the guest shut down normally, with its original disks unchanged. This is CLI
+package lifecycle evidence; GUI, boot-service, real-server and Windows checks
+remain separate.
+
 ## Earlier assessment and feature matrix
 
 Assessment: **29 October 2026**, Desktop `work/desktop-0.7.5`, production behavior assessed at source
