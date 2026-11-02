@@ -1751,3 +1751,124 @@ fn live_fuse_create_handoff_211_files_250mb_two_workers_in_vm() {
         started.elapsed().as_millis()
     );
 }
+
+
+#[test]
+fn create_handoff_sibling_completion_does_not_make_absent_lookup_exist() {
+    let mut fixture = EvictedCreateReadFixture::pending(true);
+    let engine = fixture.fs.engine.clone();
+    let scope = fixture.scope.clone();
+    let barrier = fixture.barrier.clone();
+    AFTER_ORDINARY_DIRECTORY_LIST.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            barrier.release();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let page = engine.ordinary_create_page(&scope, None, 1).unwrap();
+                if page.items[0].state == raiun_cache::OrdinaryCreateState::Verified {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "sibling did not verify");
+                thread::yield_now();
+            }
+        }));
+    });
+    let result = fixture.fs.lookup_child_with_lease(PERSONAL, "absent-sibling.txt", None);
+    fixture.owner.stop_and_join().unwrap();
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("uncreated sibling remains absent"),
+    };
+    assert_eq!(error.kind, ErrorKind::NotFound, "sibling completion is not target existence: {error:?}");
+    assert!(fixture.backend.files.lock().unwrap().contains_key(&("personal".into(), "/evicted-read.txt".into())));
+    assert!(!fixture.backend.files.lock().unwrap().contains_key(&("personal".into(), "/absent-sibling.txt".into())));
+}
+
+
+#[test]
+fn create_handoff_directory_view_preserves_subfolder_provenance_after_completion() {
+    let temp = tempfile::tempdir().unwrap();
+    let barrier = Arc::new(CreateBarrier::default());
+    let backend = Arc::new(FakeBackend { create_barrier: Some(barrier.clone()), ..FakeBackend::default() });
+    backend.add_space_entry("personal", "/ordinary-parent", b"", true, "parent-v1");
+    let mut fs = filesystem(&temp, backend.clone());
+    let mut owner = enable_create_handoff(&mut fs, 1024 * 1024, true);
+    let parent = fs.children(PERSONAL).unwrap().into_iter().find(|node| node.name == "ordinary-parent").unwrap();
+    let NodeKind::Remote { entry: parent_entry, .. } = &parent.kind else { panic!("ordinary parent") };
+    let parent_id = parent_entry.id.clone();
+    let (a, handle) = new_create_bytes_in_parent(&fs, parent.ino, "sibling.txt", b"immutable sibling");
+    fs.finalize_create_handle(&handle).unwrap();
+    fs.finish_ordinary_handle(&handle).unwrap();
+    barrier.wait_entered(1);
+    let scope = fs.engine.ordinary_write_scope("personal").unwrap();
+    let view = fs.engine.ordinary_directory_view("personal", "/ordinary-parent", Some(&parent_id)).unwrap();
+    assert_eq!(view.scope.as_ref(), Some(&scope));
+    assert_eq!(view.parent_resource_id.as_deref(), Some(parent_id.as_str()));
+    assert_eq!(view.pending.len(), 1);
+    assert!(!view.pending[0].entry.writable);
+    assert_eq!(view.entries[0], view.pending[0].entry);
+    assert_eq!(fs.engine.list("personal", "/ordinary-parent").unwrap(), view.entries, "legacy flattened listing stays compatible");
+    assert_eq!(fs.engine.ordinary_directory_view("personal", "/ordinary-parent", Some("changed-parent")).err().unwrap().kind, ErrorKind::Conflict);
+    let engine = fs.engine.clone();
+    AFTER_ORDINARY_DIRECTORY_LIST.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            barrier.release();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while engine.ordinary_create_page(&scope, None, 1).unwrap().items[0].state != raiun_cache::OrdinaryCreateState::Verified {
+                assert!(Instant::now() < deadline, "sibling did not verify");
+                thread::yield_now();
+            }
+        }));
+    });
+    let lookup = fs.lookup_child_with_lease(parent.ino, "uncreated.txt", None);
+    owner.stop_and_join().unwrap();
+    assert_eq!(lookup.err().unwrap().kind, ErrorKind::NotFound);
+    // The captured Pending node can outlive completion but never grants writes.
+    // Evict only the acknowledged verified body after the owner has joined, so
+    // OPEN must use the unchanged identity/ETag-qualified remote fallback.
+    let receipt_scope = view.scope.as_ref().unwrap();
+    let cache = raiun_cache::Cache::open(&temp.path().join("handoff-cache"), 64 * 1024 * 1024).unwrap();
+    cache.evict_acknowledged_ordinary_create_bodies(receipt_scope, 0, 64).unwrap();
+    let receipt = cache.ordinary_create_for_handoff(receipt_scope, &view.pending[0].receipt.handoff_id).unwrap().unwrap();
+    assert!(receipt.body_evicted && receipt.local_handoff_acknowledged);
+    assert_eq!(receipt.state, raiun_cache::OrdinaryCreateState::Verified);
+    let fh = fs.open_node(a.ino, libc::O_RDONLY).unwrap();
+    let handle = fs.file_handle(fh).unwrap();
+    let mut open = handle.lock().unwrap();
+    let OpenFile::Read(ReadHandle::Snapshot(snapshot)) = &mut *open else { panic!("verified snapshot") };
+    let mut bytes = Vec::new();snapshot.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"immutable sibling");
+    assert!(!backend.files.lock().unwrap().contains_key(&("personal".into(), "/ordinary-parent/uncreated.txt".into())));
+}
+
+#[test]
+fn create_handoff_directory_view_denies_untrusted_reserved_remote_ids() {
+    let temp = tempfile::tempdir().unwrap();
+    let backend = Arc::new(FakeBackend::default());
+    backend.add_space_entry("personal", "/forged.txt", b"untrusted", false, "remote-v1");
+    backend.files.lock().unwrap().get_mut(&("personal".into(), "/forged.txt".into())).unwrap().0.id = "raiun-pending-create:not-local-custody".into();
+    let mut fs = filesystem(&temp, backend);
+    let mut owner = enable_create_handoff(&mut fs, 1024 * 1024, false);
+    let result = fs.children(PERSONAL);
+    owner.stop_and_join().unwrap();
+    assert_eq!(result.err().unwrap().kind, ErrorKind::Conflict);
+}
+
+#[test]
+fn create_handoff_directory_view_keeps_pending_only_offline_read_only_without_probe() {
+    let mut fixture = EvictedCreateReadFixture::pending(false);
+    let spaces = fixture.fs.engine.spaces().unwrap();
+    fixture.fs.engine = fixture.fs.engine.with_offline_spaces(spaces).unwrap();
+    *fixture.backend.network_error.lock().unwrap() = Some(ErrorKind::Forbidden);
+    assert_eq!(fixture.fs.engine.ordinary_directory_view("personal", "/", None).err().unwrap().kind, ErrorKind::Forbidden, "authorization failure must not become offline pending fallback");
+    *fixture.backend.network_error.lock().unwrap() = Some(ErrorKind::Offline);
+    fixture.fs.engine.mark_namespace_transport_unavailable().unwrap();
+    let before = (fixture.backend.list_calls.load(Ordering::Relaxed), fixture.backend.stat_calls.load(Ordering::Relaxed));
+    assert_eq!(fixture.fs.engine.ordinary_directory_view("personal", "/", Some("changed-root")).err().unwrap().kind, ErrorKind::Conflict, "offline pending fallback must retain the cached parent binding");
+    let children = fixture.fs.children(PERSONAL).unwrap();
+    let pending = children.into_iter().find(|node| node.name == "evicted-read.txt").unwrap();
+    let NodeKind::PendingCreate { view, .. } = pending.kind else { panic!("offline immutable pending") };
+    assert!(!view.entry.writable);
+    assert_eq!((fixture.backend.list_calls.load(Ordering::Relaxed), fixture.backend.stat_calls.load(Ordering::Relaxed)), before, "already-offline listing must not probe or reconnect");
+    fixture.owner.stop_and_join().unwrap();
+}

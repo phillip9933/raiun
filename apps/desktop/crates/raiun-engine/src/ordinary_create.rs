@@ -64,7 +64,7 @@ fn active(state: OrdinaryCreateState) -> bool {
 }
 
 impl Engine {
-    fn create_cache(&self, scope: &CacheScope) -> Result<&Cache, CloudError> {
+    pub(super) fn create_cache(&self, scope: &CacheScope) -> Result<&Cache, CloudError> {
         let identity = self.account_scope.as_ref().ok_or_else(refused)?;
         if self.vault_binding.is_some()
             || scope.protection() != ScopeProtection::PlaintextAllowed

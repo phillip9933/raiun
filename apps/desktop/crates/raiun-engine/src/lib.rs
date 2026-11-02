@@ -318,6 +318,16 @@ pub struct WriteReconcileReport {
     pub remaining: u64,
 }
 
+/// One read-only ordinary directory observation. Pending provenance is captured
+/// by the same overlay pass as `entries`, never reconstructed from entry IDs.
+#[derive(Default)]
+pub struct OrdinaryDirectoryView {
+    pub entries: Vec<RemoteEntry>,
+    pub scope: Option<CacheScope>,
+    pub parent_resource_id: Option<String>,
+    pub pending: Vec<PendingCreateView>,
+}
+
 /// A verified download whose temporary file is removed when the snapshot is
 /// dropped. Use this for short-lived provider reads that should not accumulate
 /// in the persistent engine cache.
@@ -1181,11 +1191,78 @@ impl Engine {
     }
 
     pub fn list(&self, space: &str, path: &str) -> Result<Vec<RemoteEntry>, CloudError> {
+        self.list_inner(space, path, None)
+    }
+
+    /// Read-only provider view; this does not authorize a create or a write.
+    pub fn ordinary_directory_view(
+        &self,
+        space: &str,
+        path: &str,
+        expected_parent_id: Option<&str>,
+    ) -> Result<OrdinaryDirectoryView, CloudError> {
+        if self.vault_binding.is_some() {
+            return Err(unsupported_encrypted_cache());
+        }
+        let mut view = OrdinaryDirectoryView::default();
+        match self.list_inner(space, path, Some(&mut view)) {
+            Ok(entries) => view.entries = entries,
+            Err(error) if error.kind == ErrorKind::Offline => {
+                // Match the provider's existing pending-only offline overlay.
+                // Never use an incomplete remote listing or probe/reconnect here.
+                let Some(context) = &self.offline_cache else {
+                    return Err(error);
+                };
+                let scope = self
+                    .cached_scope(space, context)
+                    .map_err(cache_cloud_error)?;
+                let parent = expected_parent_id.unwrap_or(scope.root_resource_id());
+                if context
+                    .cache
+                    .resource_id_for_path(&scope, path)
+                    .map_err(cache_cloud_error)?
+                    .is_some_and(|known| known != parent)
+                {
+                    return Err(CloudError::new(
+                        ErrorKind::Conflict,
+                        "ordinary directory parent changed",
+                    ));
+                }
+                let pending = self.pending_create_children(&scope, parent)?;
+                if pending.is_empty() {
+                    return Err(error);
+                }
+                view.entries = pending.iter().map(|item| item.entry.clone()).collect();
+                view.parent_resource_id = Some(parent.to_owned());
+                view.scope = Some(scope);
+                view.pending = pending;
+            }
+            Err(error) => return Err(error),
+        }
+        if expected_parent_id.is_some_and(|expected| {
+            view.parent_resource_id
+                .as_deref()
+                .is_some_and(|actual| actual != expected)
+        }) {
+            return Err(CloudError::new(
+                ErrorKind::Conflict,
+                "ordinary directory parent changed",
+            ));
+        }
+        Ok(view)
+    }
+
+    fn list_inner(
+        &self,
+        space: &str,
+        path: &str,
+        capture: Option<&mut OrdinaryDirectoryView>,
+    ) -> Result<Vec<RemoteEntry>, CloudError> {
         if self.namespace_transport_unavailable() {
-            return self.cached_list_without_probe(space, path);
+            return self.cached_list_without_probe(space, path, capture);
         }
         if self.offline_cache.is_some() {
-            return self.cached_list(space, path);
+            return self.cached_list(space, path, capture);
         }
         let mut entries = Vec::new();
         let mut metadata_bytes = 0usize;
@@ -1235,6 +1312,7 @@ impl Engine {
         &self,
         space: &str,
         path: &str,
+        capture: Option<&mut OrdinaryDirectoryView>,
     ) -> Result<Vec<RemoteEntry>, CloudError> {
         let Some(context) = &self.offline_cache else {
             return Err(CloudError::new(
@@ -1249,7 +1327,7 @@ impl Engine {
         let scope = self
             .cached_scope(space, context)
             .map_err(|error| offline_cache_error(error, offline.clone()))?;
-        self.cached_listing(context, &scope, path, offline)
+        self.cached_listing(context, &scope, path, offline, capture)
     }
 
     pub fn stat(&self, space: &str, path: &str) -> Result<RemoteEntry, CloudError> {
@@ -1300,7 +1378,12 @@ impl Engine {
         }
     }
 
-    fn cached_list(&self, space: &str, path: &str) -> Result<Vec<RemoteEntry>, CloudError> {
+    fn cached_list(
+        &self,
+        space: &str,
+        path: &str,
+        capture: Option<&mut OrdinaryDirectoryView>,
+    ) -> Result<Vec<RemoteEntry>, CloudError> {
         // A mutation may retain this publication guard through a long PUT
         // and verification read. Fresh online namespace reads can proceed,
         // but must neither publish cache metadata nor fall back to old cache
@@ -1325,7 +1408,7 @@ impl Engine {
                 let scope = self
                     .cached_scope(space, context)
                     .map_err(|cache_error| offline_cache_error(cache_error, error.clone()))?;
-                return self.cached_listing(context, &scope, path, error);
+                return self.cached_listing(context, &scope, path, error, capture);
             }
             Err(error) => return Err(error),
         };
@@ -1342,7 +1425,7 @@ impl Engine {
                 }
                 Ok(parent) => parent.id,
                 Err(error) if error.kind == ErrorKind::Offline && metadata.is_some() => {
-                    return self.cached_listing(context, &scope, path, error);
+                    return self.cached_listing(context, &scope, path, error, capture);
                 }
                 Err(error) => return Err(error),
             }
@@ -1371,11 +1454,11 @@ impl Engine {
                         let _ = context.cache.evict_to_quota();
                     }
                 }
-                self.overlay_pending_entries(&scope, &parent_id, &mut entries)?;
+                self.overlay_pending_entries(&scope, &parent_id, &mut entries, capture)?;
                 Ok(entries)
             }
             Err(error) if error.kind == ErrorKind::Offline && metadata.is_some() => {
-                self.cached_listing(context, &scope, path, error)
+                self.cached_listing(context, &scope, path, error, capture)
             }
             Err(error) => Err(error),
         }
@@ -1534,6 +1617,7 @@ impl Engine {
         scope: &CacheScope,
         path: &str,
         offline: CloudError,
+        capture: Option<&mut OrdinaryDirectoryView>,
     ) -> Result<Vec<RemoteEntry>, CloudError> {
         let parent_id = context
             .cache
@@ -1552,7 +1636,7 @@ impl Engine {
             .into_iter()
             .map(|item| item.entry)
             .collect::<Vec<_>>();
-        self.overlay_pending_entries(scope, &parent_id, &mut entries)?;
+        self.overlay_pending_entries(scope, &parent_id, &mut entries, capture)?;
         Ok(entries)
     }
 
@@ -1606,10 +1690,18 @@ impl Engine {
         scope: &CacheScope,
         parent_id: &str,
         entries: &mut Vec<RemoteEntry>,
+        mut capture: Option<&mut OrdinaryDirectoryView>,
     ) -> Result<(), CloudError> {
         let Some(context) = &self.offline_cache else {
             return Ok(());
         };
+        if let Some(view) = capture.as_deref_mut() {
+            // Retain pending_create_children's exact account/origin/plaintext
+            // gate, using this listing's already resolved scope and parent.
+            self.create_cache(scope)?;
+            view.scope = Some(scope.clone());
+            view.parent_resource_id = Some(parent_id.to_owned());
+        }
         let writes = context
             .cache
             .pending_writes_for_parent(scope, parent_id)
@@ -1626,7 +1718,17 @@ impl Engine {
                 if receipt.state != raiun_cache::OrdinaryCreateState::Staged
                     && receipt.state != raiun_cache::OrdinaryCreateState::Verified
                 {
-                    let local = self.create_view(scope, receipt)?.entry;
+                    let pending = self.create_view(scope, receipt)?;
+                    if let Some(view) = capture.as_deref_mut() {
+                        if view.pending.len() >= MAX_LIST_ENTRIES {
+                            return Err(CloudError::new(
+                                ErrorKind::Conflict,
+                                "ordinary directory pending view exceeds listing limit",
+                            ));
+                        }
+                        view.pending.push(pending.clone());
+                    }
+                    let local = pending.entry;
                     if let Some(index) = entries.iter().position(|entry| entry.path == local.path) {
                         entries[index] = local;
                     } else {
@@ -6802,6 +6904,34 @@ mod tests {
         assert_eq!(
             fs::read(pair2.local_path.join("downloads/2026/clip.MP4")).unwrap(),
             b"video bytes"
+        );
+    }
+
+    #[test]
+    fn ordinary_directory_view_retains_the_exact_account_scope_gate() {
+        let (_state, _local, _cloud, engine, _pair) = setup();
+        let temp = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(
+            temp.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        let cache = Cache::open(temp.path(), 64 * 1024 * 1024).unwrap();
+        let mut engine = engine
+            .with_offline_cache(cache, "profile-a".into(), "https://example.invalid".into())
+            .unwrap();
+        engine.list("space", "/").unwrap();
+        // Model an inconsistent caller identity: a typed pending view must not
+        // gain the weaker legacy listing path's lack of create_cache validation.
+        engine.account_scope.as_mut().unwrap().account_id = "profile-b".into();
+        assert_eq!(
+            engine
+                .ordinary_directory_view("space", "/", None)
+                .err()
+                .unwrap()
+                .kind,
+            ErrorKind::Conflict
         );
     }
 

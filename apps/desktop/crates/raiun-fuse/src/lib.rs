@@ -55,7 +55,7 @@ use raiun_core::{
 };
 use raiun_engine::{
     CreateUploadHandle, CreateUploadHooks, CreateUploadOwner, Engine, FetchSnapshot,
-    PendingCreateView,
+    OrdinaryDirectoryView, PendingCreateView,
 };
 
 mod create_handoff;
@@ -106,6 +106,21 @@ fn trace_fuse_namespace_error(_stage: &str, _error: &CloudError) {}
 const PERSONAL: u64 = 2;
 const SPACES: u64 = 3;
 const TTL: Duration = Duration::from_secs(1);
+
+#[cfg(test)]
+thread_local! {
+    static AFTER_ORDINARY_DIRECTORY_LIST: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn after_ordinary_directory_list_for_test() {
+    let hook = AFTER_ORDINARY_DIRECTORY_LIST.with(|hook| hook.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 const MAX_READ: u32 = 1024 * 1024;
 const MAX_NODES: usize = 100_000;
 const MAX_DIRECTORY_ENTRIES: usize = 10_000;
@@ -3608,23 +3623,6 @@ impl RaiunFilesystem {
         Ok(())
     }
 
-    fn pending_children(
-        &self,
-        space: &str,
-        parent_id: Option<&str>,
-    ) -> Result<(Option<CacheScope>, Vec<PendingCreateView>), CloudError> {
-        let Some(scope) = self.engine.ordinary_create_scope(space)? else {
-            return Ok((None, Vec::new()));
-        };
-        let views = self
-            .engine
-            .pending_create_children(&scope, parent_id.unwrap_or(scope.root_resource_id()))?;
-        if views.len() > MAX_DIRECTORY_ENTRIES {
-            return Err(invalid("pending directory exceeds listing limit"));
-        }
-        Ok((Some(scope), views))
-    }
-
     fn append_pending_children(
         &self,
         parent: u64,
@@ -3633,6 +3631,9 @@ impl RaiunFilesystem {
         views: Vec<PendingCreateView>,
         result: &mut Vec<Node>,
     ) -> Result<(), CloudError> {
+        if views.len() > MAX_DIRECTORY_ENTRIES {
+            return Err(invalid("pending directory exceeds listing limit"));
+        }
         for view in views {
             let scope = scope
                 .as_ref()
@@ -3691,16 +3692,27 @@ impl RaiunFilesystem {
             NodeKind::Personal { space } | NodeKind::Space { space } => {
                 let engine = self.engine.clone();
                 let request_space = space.clone();
-                let listing = self.pool.call(move || engine.list(&request_space, "/"))?;
-                let (mut entries, unavailable) = match listing {
-                    Ok(entries) => (entries, None),
-                    Err(error) if error.kind == ErrorKind::Offline => (Vec::new(), Some(error)),
+                let listing = self
+                    .pool
+                    .call(move || engine.ordinary_directory_view(&request_space, "/", None))?;
+                let (view, unavailable) = match listing {
+                    Ok(view) => (view, None),
+                    Err(error) if error.kind == ErrorKind::Offline => {
+                        (OrdinaryDirectoryView::default(), Some(error))
+                    }
                     Err(error) => {
                         trace_fuse_namespace_error("personal_listing", &error);
                         return Err(error);
                     }
                 };
-                let (pending_scope, pending) = self.pending_children(&space, None)?;
+                #[cfg(test)]
+                after_ordinary_directory_list_for_test();
+                let OrdinaryDirectoryView {
+                    mut entries,
+                    scope: pending_scope,
+                    pending,
+                    ..
+                } = view;
                 entries.retain(|entry| !pending.iter().any(|v| v.entry.path == entry.path));
                 self.append_pending_children(
                     parent_ino,
@@ -3768,15 +3780,28 @@ impl RaiunFilesystem {
                 let engine = self.engine.clone();
                 let request_space = space.clone();
                 let request_path = path.clone();
-                let (mut entries, unavailable) = match self
-                    .pool
-                    .call(move || engine.list(&request_space, &request_path))?
-                {
-                    Ok(entries) => (entries, None),
-                    Err(error) if error.kind == ErrorKind::Offline => (Vec::new(), Some(error)),
+                let request_parent_id = parent_id.clone();
+                let (view, unavailable) = match self.pool.call(move || {
+                    engine.ordinary_directory_view(
+                        &request_space,
+                        &request_path,
+                        Some(&request_parent_id),
+                    )
+                })? {
+                    Ok(view) => (view, None),
+                    Err(error) if error.kind == ErrorKind::Offline => {
+                        (OrdinaryDirectoryView::default(), Some(error))
+                    }
                     Err(error) => return Err(error),
                 };
-                let (pending_scope, pending) = self.pending_children(&space, Some(&parent_id))?;
+                #[cfg(test)]
+                after_ordinary_directory_list_for_test();
+                let OrdinaryDirectoryView {
+                    mut entries,
+                    scope: pending_scope,
+                    pending,
+                    ..
+                } = view;
                 entries.retain(|entry| !pending.iter().any(|v| v.entry.path == entry.path));
                 self.append_pending_children(
                     parent_ino,
