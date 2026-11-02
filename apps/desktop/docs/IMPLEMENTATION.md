@@ -3690,3 +3690,19 @@ enable general encrypted writes or attach a sync pair. Partial remote folders
 remain on failure. Author formatting, TypeScript and affected Windows compilation
 passed; the composed source check follows integration of the directory-rename
 change. No new tests, native creation or replacement-save acceptance are claimed.
+
+### Composed Windows mutation checkpoint — 3 November 2026
+
+Source `0a93f7b` adds same-parent rename of a qualified empty ordinary managed
+directory. Fresh source/destination metadata, no catalog descendants and native
+handle enumeration establish the supported empty case. The SDK uses one
+resource-ID MOVE with the actual strong source ETag and overwrite disabled.
+After remote readback, a pinned positive-USN native metadata update and identity
+readback precede retiring the original catalog row. The final SDK send hook
+rechecks the actual pinned native identity, path, parent and USN without network
+reentry or enumeration. Nonempty subtrees and cross-parent moves are excluded.
+
+The composed source, including replacement saves and Windows vault creation,
+passed formatting and one normal Windows Agent/CLI compile (7.10 seconds).
+This is not a new package or native workflow result. The existing laptop
+installation remains the older unsigned `d8233c1` candidate.

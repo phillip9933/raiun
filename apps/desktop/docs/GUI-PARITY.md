@@ -3,7 +3,7 @@
 ## Current checkpoint — 3 November 2026
 
 GUI and CLI share the canonical `worktrees/desktop-followup-ui` source. The
-current Windows runtime checkpoint is `985392c`; older dated descriptions below
+current Windows runtime checkpoint is `0a93f7b`; older dated descriptions below
 retain their historical scope and do not describe the newly activated factories.
 
 Normal Windows GUI and CLI mounts now connect ordinary file and folder creation
@@ -11,7 +11,9 @@ in Personal and writable, unencrypted Spaces through the existing two joined SDK
 workers. Clean-file deletion and same-folder ASCII file rename are also connected
 in those locations. Qualified empty-directory deletion is also connected: native,
 catalogue and remote checks must find no children, and an actual strong directory
-ETag is required. No recursive deletion is performed. Personal remains the account
+ETag is required. Same-parent empty-directory rename is also connected, using a
+conditional resource-ID MOVE and pinned native metadata completion. No recursive
+deletion or nonempty subtree rename is performed. Personal remains the account
 anchor; each target Space/root is separately qualified. These newer changes have
 not been packaged yet.
 Removal notifications are observation hints only: they cannot authorize a cloud
@@ -50,10 +52,10 @@ matrices from this phase. Only finished-candidate basic build/upgrade/startup,
 sign-in, one normal file workflow and essential preservation checks remain.
 Prior failures and the exact scope of reused evidence are retained.
 
-Folder rename, cross-parent moves, additional replacement strategies and broader
+Nonempty folder rename, cross-parent moves, additional replacement strategies and broader
 encrypted Windows equivalents remain implementation gaps. Empty-folder deletion
-is source-checked, not native acceptance. Same-parent empty-folder rename and
-explicit cross-vault file Copy are being implemented in separate isolated
+and rename are source-checked, not native acceptance. Ordinary same-Space file
+moves and explicit cross-vault file Copy are being implemented in separate isolated
 checkouts.
 These are feature work, not missing exhaustive tests. Removing extra testing does
 not claim those capabilities are complete or authorize signing/publication.
