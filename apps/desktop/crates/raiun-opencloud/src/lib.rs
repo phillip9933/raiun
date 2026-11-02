@@ -2781,6 +2781,31 @@ impl CloudBackend for OpenCloudClient {
         self.discover_spaces(None, MAX_ENTRIES)
     }
 
+    fn space_root_metadata(&self, space: &str) -> Result<(CloudSpace, RemoteEntry), CloudError> {
+        // One metadata operation only: never store resolved Graph facts on the
+        // client or carry them into another admission/body phase.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let context = ACTIVE_RANGE_CONTEXT.with(Cell::get).map_or_else(
+            || RangeReadContext {
+                deadline,
+                token_generation: self.token_generation(),
+            },
+            |outer| RangeReadContext {
+                deadline: outer.deadline.min(deadline),
+                token_generation: outer.token_generation,
+            },
+        );
+        let _guard = RangeContextGuard::enter(context);
+        self.ensure_context_current(context)?;
+        let (selected, url) = self.resolve_dav_with_context(space, "/", Some(context))?;
+        // Preserve stat's ordinary-ancestry and exact root response checks;
+        // only its second Graph discovery is removed.
+        self.ensure_plain_ancestors_with_context(&selected, "/", false, Some(context))?;
+        let root = self.stat_at_dav(&url, "/")?;
+        self.ensure_context_current(context)?;
+        Ok((selected, root))
+    }
+
     fn list(
         &self,
         space: &str,
@@ -5563,3 +5588,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod metadata_scope_tests;

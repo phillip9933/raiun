@@ -101,6 +101,26 @@ pub trait CloudBackend: Send + Sync {
         None
     }
     fn spaces(&self) -> Result<Vec<CloudSpace>, CloudError>;
+    /// Observe one ordinary Space and its root within one read-only metadata
+    /// operation. Returned values grant no mutation authority or cache lease.
+    /// Backends may reuse freshly resolved routing only inside this call; the
+    /// default preserves separate discovery/stat calls. Read-only Spaces remain
+    /// readable; unknown or encrypted Spaces refuse before root observation.
+    fn space_root_metadata(&self, space: &str) -> Result<(CloudSpace, RemoteEntry), CloudError> {
+        let selected = self
+            .spaces()?
+            .into_iter()
+            .find(|candidate| candidate.id == space)
+            .ok_or_else(|| CloudError::new(ErrorKind::NotFound, "cloud Space was not found"))?;
+        if selected.encrypted {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "encrypted cloud locations are unavailable to the ordinary cache",
+            ));
+        }
+        let root = self.stat(space, "/")?;
+        Ok((selected, root))
+    }
     fn list(
         &self,
         space: &str,

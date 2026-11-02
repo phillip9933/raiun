@@ -1389,16 +1389,16 @@ impl Engine {
             .offline_cache
             .as_ref()
             .expect("online cache scope requires a cache context");
-        let space = self
-            .backend
-            .spaces()?
-            .into_iter()
-            .find(|space| space.id == space_id)
-            .ok_or_else(|| CloudError::new(ErrorKind::NotFound, "cloud Space was not found"))?;
+        let (space, root) = self.backend.space_root_metadata(space_id)?;
+        if space.id != space_id {
+            return Err(CloudError::new(
+                ErrorKind::InvalidResponse,
+                "cloud Space identity does not match the requested Space",
+            ));
+        }
         if space.encrypted {
             return Err(unsupported_encrypted_cache());
         }
-        let root = self.backend.stat(space_id, "/")?;
         if root.encrypted || !root.directory || root.path != "/" {
             return Err(CloudError::new(
                 ErrorKind::InvalidResponse,
@@ -8008,6 +8008,103 @@ mod tests {
         assert!(cloud.bytes("/item.txt").is_none());
         assert_eq!(cloud.bytes("/renamed.txt").unwrap(), b"keep");
         assert_eq!(cloud.remote_entry("/").unwrap().etag, root.etag);
+    }
+
+    #[test]
+    fn cache_scope_rejects_mismatched_space_metadata_override() {
+        struct WrongSpace(FakeCloud);
+        impl CloudBackend for WrongSpace {
+            fn server_origin(&self) -> Option<String> {
+                self.0.server_origin()
+            }
+            fn space_root_metadata(
+                &self,
+                space: &str,
+            ) -> Result<(CloudSpace, RemoteEntry), CloudError> {
+                assert_eq!(space, "space");
+                let mut selected = self.0.spaces()?.remove(0);
+                selected.id = "another-space".into();
+                Ok((selected, self.0.stat(space, "/")?))
+            }
+            fn spaces(&self) -> Result<Vec<CloudSpace>, CloudError> {
+                self.0.spaces()
+            }
+            fn list(
+                &self,
+                space: &str,
+                path: &str,
+                visit: &mut dyn FnMut(RemoteEntry) -> Result<(), CloudError>,
+            ) -> Result<(), CloudError> {
+                self.0.list(space, path, visit)
+            }
+            fn stat(&self, space: &str, path: &str) -> Result<RemoteEntry, CloudError> {
+                self.0.stat(space, path)
+            }
+            fn download(
+                &self,
+                space: &str,
+                path: &str,
+                expected_etag: Option<&str>,
+                destination: &Path,
+            ) -> Result<RemoteEntry, CloudError> {
+                self.0.download(space, path, expected_etag, destination)
+            }
+            fn upload(
+                &self,
+                space: &str,
+                path: &str,
+                source: &Path,
+                condition: WriteCondition,
+            ) -> Result<RemoteEntry, CloudError> {
+                self.0.upload(space, path, source, condition)
+            }
+            fn mkdir(&self, space: &str, path: &str) -> Result<RemoteEntry, CloudError> {
+                self.0.mkdir(space, path)
+            }
+            fn delete(
+                &self,
+                space: &str,
+                path: &str,
+                expected_etag: &str,
+            ) -> Result<(), CloudError> {
+                self.0.delete(space, path, expected_etag)
+            }
+            fn rename(
+                &self,
+                space: &str,
+                from: &str,
+                to: &str,
+                expected_etag: &str,
+            ) -> Result<RemoteEntry, CloudError> {
+                self.0.rename(space, from, to, expected_etag)
+            }
+        }
+        let state = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(
+            state.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        let cloud = Arc::new(WrongSpace(FakeCloud::new()));
+        let cache = Cache::open(state.path(), 64 * 1024 * 1024).unwrap();
+        let engine = Engine::open(state.path(), cloud.clone())
+            .unwrap()
+            .with_offline_cache(
+                cache.clone(),
+                "profile-account-1".into(),
+                "https://example.invalid/".into(),
+            )
+            .unwrap();
+        let error = engine.stat("space", "/").unwrap_err();
+        assert_eq!(error.kind, ErrorKind::InvalidResponse);
+        assert!(
+            cache
+                .find_plaintext_scope("https://example.invalid/", "profile-account-1", "space")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(*cloud.0.list_calls.lock().unwrap(), 0);
     }
 
     #[test]
