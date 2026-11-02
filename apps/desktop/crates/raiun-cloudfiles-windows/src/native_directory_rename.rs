@@ -536,9 +536,15 @@ impl crate::ConfiguredRootConnection {
             .map_err(N::Backend)?
             .map_err(|_| N::DeferredBeforePublication)?;
         pins.borrow().check(true).map_err(N::Local)?;
-        let fresh = match store.publish_intent(intent).map_err(N::Store)? {
-            FileRenamePublishResult::Fresh(v) => v,
-            FileRenamePublishResult::Retained => return Ok(FileRenameOutcome::Retained),
+        let fresh = match store.publish_intent(intent) {
+            Ok(FileRenamePublishResult::Fresh(v)) => v,
+            Ok(FileRenamePublishResult::Retained) => return Ok(FileRenameOutcome::Retained),
+            Err(error) => {
+                // Publication can fail after its protected intent is durable.
+                // Keep original custody even when no fresh receipt was returned.
+                std::mem::forget(pins);
+                return Err(N::Store(error));
+            }
         };
         // Every fallible step after fresh publication shares one custody exit.
         // Acquisition/admission/backend-entry failures cannot drop the subtree.
