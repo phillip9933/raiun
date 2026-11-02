@@ -3666,3 +3666,27 @@ kind is never inferred from a zero-byte body. Source `1efde93` exposes the uncha
 read-only emptiness helper for the sibling directory-rename implementation.
 Formatting and one composed normal Windows Agent/CLI compile passed. No new tests,
 native execution or package are claimed by this source checkpoint.
+
+### Windows replacement saves and vault creation — 3 November 2026
+
+Source `985392c` changes ordinary file deletion to release the local operation
+before selecting a cloud mutation. Positive original-key acknowledgement and
+deletion completion are required. Actual absence admits a conditional deletion;
+a new plain file at the original name instead captures a durable streamed body,
+conditionally writes the original remote resource and verifies its content before
+native publication. No deletion intent is recorded for that replacement branch.
+Unknown identity, open writers and uncertain outcomes retain custody and recovery.
+Completed-only observer metadata is bounded without imposing a lifetime save
+limit. Retiring a temporary source hint additionally requires actual source
+absence and an unbound admitted catalog name; Unicode alias uncertainty refuses
+that optional retirement. Native editor acceptance remains open.
+
+Source `1da7b8e` adds explicit new encrypted-folder creation through the existing
+owned secret broker. Fresh parent identity and account generation are required;
+the shared creation codec initializes and reads back its proof before session
+publication. The broker persists the historical encrypted-location exclusion
+before installing a native route. Creation does not opt into password storage,
+enable general encrypted writes or attach a sync pair. Partial remote folders
+remain on failure. Author formatting, TypeScript and affected Windows compilation
+passed; the composed source check follows integration of the directory-rename
+change. No new tests, native creation or replacement-save acceptance are claimed.

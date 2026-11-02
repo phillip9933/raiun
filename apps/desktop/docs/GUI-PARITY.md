@@ -3,7 +3,7 @@
 ## Current checkpoint — 3 November 2026
 
 GUI and CLI share the canonical `worktrees/desktop-followup-ui` source. The
-current Windows runtime checkpoint is `1efde93`; older dated descriptions below
+current Windows runtime checkpoint is `985392c`; older dated descriptions below
 retain their historical scope and do not describe the newly activated factories.
 
 Normal Windows GUI and CLI mounts now connect ordinary file and folder creation
@@ -20,6 +20,22 @@ Both entrypoints use streamed ordinary existing-file saves; the CLI no longer
 keeps the legacy whole-body 16-MiB activation limit. Account changes revoke new
 backend work before a fallible worker drain and retain unresolved local custody.
 
+The local candidate also adds file deletion after positive local completion and
+same-name replacement by a newly observed plain file. Before either cloud action,
+the original clean placeholder, exact account/root and remote revision are pinned.
+A replacement body is durably retained before a conditional write to the original
+remote resource and independent readback; uncertain results preserve recovery and
+native custody. This is source integration, not acceptance of every editor's
+replacement strategy. Foreign placeholder identities and unqualified writers
+still refuse. Duplicate temporary-name hint retirement is an ASCII-only
+optimization and does not grant mutation authority.
+
+Explicit new encrypted-folder creation now uses the existing Windows secret
+broker, shared bound-parent creation/proof codec and native route publication.
+It neither remembers the creation password nor enables general encrypted writes.
+Partial remote folders are retained on failure. Positive native creation remains
+unverified.
+
 The composed source passed affected Windows compilation and formatting. The
 previous unsigned `d8233c1` installer passed its 0.7.4-to-0.7.5 same-user upgrade,
 retained synthetic settings/documents/DPAPI state and normal Agent exit on CI.
@@ -34,11 +50,11 @@ matrices from this phase. Only finished-candidate basic build/upgrade/startup,
 sign-in, one normal file workflow and essential preservation checks remain.
 Prior failures and the exact scope of reused evidence are retained.
 
-Folder rename, cross-parent moves, atomic replacement saves and broader
+Folder rename, cross-parent moves, additional replacement strategies and broader
 encrypted Windows equivalents remain implementation gaps. Empty-folder deletion
 is source-checked, not native acceptance. Same-parent empty-folder rename and
-local-first file deletion/replacement classification are being implemented in
-separate isolated checkouts.
+explicit cross-vault file Copy are being implemented in separate isolated
+checkouts.
 These are feature work, not missing exhaustive tests. Removing extra testing does
 not claim those capabilities are complete or authorize signing/publication.
 The shared OpenCloud conditional-create protocol has the same documented server
