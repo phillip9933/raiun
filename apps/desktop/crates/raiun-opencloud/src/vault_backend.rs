@@ -3957,7 +3957,7 @@ impl VaultBackend {
             .client
             .request(Method::from_bytes(b"MKCOL").expect("static method"), &url)?;
         let parent_url = self.target_url(&state, &logical_parent(path))?;
-        let parent_condition = format!("<{parent_url}> [{expected_parent_etag}]");
+        let parent_condition = format!("<{parent_url}> ([{expected_parent_etag}])");
         let request = request
             .header(IF_NONE_MATCH, "*")
             .header("If", parent_condition);
