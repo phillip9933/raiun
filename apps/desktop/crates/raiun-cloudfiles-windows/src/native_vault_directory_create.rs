@@ -322,23 +322,51 @@ impl VaultDirectorySendProof {
             file_index: self.root.file_index,
         };
         let lease = pin_registered_configured_root(&self.root_path, identity)?;
-        let root = OwnedConfiguredRoot::new(self.root_path.clone(), lease, true)?;
         let (name, parts) = self
             .components
             .split_last()
             .ok_or(Error::ConfiguredRootChanged)?;
-        let pinned =
-            VaultDirectoryPins::pin_root(&root, parts, &self.route, self.parent_identity, name)?;
-        if pinned.original.identity != self.original.identity
-            || pinned.parent_snapshot.identity != self.parent.identity
-            || !same_edit_snapshot(pinned.original, self.original)
-            || pinned.parent_usn != self.parent_usn
-            || pinned.usn != self.usn
+        let refs: Vec<_> = parts.iter().map(String::as_str).collect();
+        let (parent, parent_snapshot, _ancestors) =
+            native_namespace_directory::pin_reinspected_namespace_parent(
+                &lease,
+                &self.root_path,
+                &self.route,
+                self.parent_identity,
+                &refs,
+            )?;
+        let parent_usn = completion_usn(parent.0, parent_snapshot.identity.file_index)?;
+        let mut path = self.root_path.clone();
+        for p in parts {
+            path.push(p);
+        }
+        path.push(name);
+        let child = open_root(
+            &path,
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+        )?;
+        let original = root_snapshot(child.0)?;
+        let usn = completion_usn(child.0, original.identity.file_index)?;
+        if original.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+            || original.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || original.reparse_tag != 0
+            || original.placeholder_state != 0
+            || !windows_paths_equal(
+                &final_path_for_handle(child.0).map_err(|_| Error::ConfiguredRootChanged)?,
+                &path,
+            )
         {
             return Err(Error::ConfiguredRootChanged);
         }
-        pinned.verify_handles(false)?;
-        root.verify_identity(false)?;
-        root.verify_registered()
+        if original.identity != self.original.identity
+            || parent_snapshot.identity != self.parent.identity
+            || !same_edit_snapshot(original, self.original)
+            || parent_usn != self.parent_usn
+            || usn != self.usn
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        native_namespace_directory::verify_reinspected_namespace_root(&lease, &self.root_path)
     }
 }

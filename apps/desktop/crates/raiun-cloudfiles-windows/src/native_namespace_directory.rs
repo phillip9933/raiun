@@ -1200,3 +1200,79 @@ const _: fn() = || {
     send::<DirectoryCreateTask>();
     send::<DirectoryCreateReply>();
 };
+
+/// Read-only worker proof of the original OS registration and actual cloud
+/// root state. This creates no connection owner and sets no ownership flags.
+pub(super) fn verify_reinspected_namespace_root(
+    lease: &RootInspectionLease,
+    path: &Path,
+) -> Result<(), Error> {
+    let identity = RootIdentity {
+        volume_serial: lease.identity.volume_serial,
+        file_index: lease.identity.file_index,
+    };
+    let root = lease._pinned.last().ok_or(Error::ConfiguredRootChanged)?;
+    if !valid_root_snapshot(
+        root_snapshot(root.0)?,
+        identity,
+        RootSnapshotState::Connected,
+    ) || !windows_paths_equal(
+        &final_path_for_handle(root.0).map_err(|_| Error::ConfiguredRootChanged)?,
+        path,
+    ) {
+        return Err(Error::ConfiguredRootChanged);
+    }
+    verify_sync_root_registration(path, identity)
+}
+
+/// Actual metadata pins for a joined worker, not an OwnedConfiguredRoot or a
+/// fabricated connected flag. The original connection/cap stays with caller.
+pub(super) fn pin_reinspected_namespace_parent(
+    lease: &RootInspectionLease,
+    root_path: &Path,
+    route: &[crate::PlaceholderChild],
+    identity: crate::OpaqueIdentity,
+    components: &[&str],
+) -> Result<PinnedPopulationDirectory, Error> {
+    verify_reinspected_namespace_root(lease, root_path)?;
+    if components.is_empty()
+        || components.len() > 256
+        || route.len() != components.len()
+        || route
+            .last()
+            .is_none_or(|r| r.identity.as_slice() != identity.as_bytes())
+    {
+        return Err(Error::ConfiguredRootChanged);
+    }
+    let mut path = root_path.to_owned();
+    let mut pins = Vec::with_capacity(components.len());
+    for (part, expected) in components.iter().zip(route) {
+        if !valid_component(part) || expected.name != *part || !expected.metadata.is_directory {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        path.push(part);
+        let handle = open_root(
+            &path,
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+        )?;
+        let snapshot = root_snapshot(handle.0)?;
+        if snapshot.identity.volume_serial != lease.identity.volume_serial
+            || snapshot.identity.file_index == 0
+            || snapshot.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+            || !cleanup_cloud_reparse_tag(snapshot.reparse_tag)
+            || !valid_callback_directory_snapshot(snapshot)
+            || opaque_directory_identity(handle.0)?.as_slice() != expected.identity
+            || !windows_paths_equal(
+                &final_path_for_handle(handle.0).map_err(|_| Error::ConfiguredRootChanged)?,
+                &path,
+            )
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        pins.push((handle, snapshot));
+    }
+    verify_reinspected_namespace_root(lease, root_path)?;
+    let (parent, snapshot) = pins.pop().ok_or(Error::ConfiguredRootChanged)?;
+    Ok((parent, snapshot, pins))
+}

@@ -527,19 +527,19 @@ impl VaultFileSendProof {
             file_index: self.root.file_index,
         };
         let lease = pin_registered_configured_root(&self.root_path, rootid)?;
-        let root = OwnedConfiguredRoot::new(self.root_path.clone(), lease, true)?;
         let (name, parts) = self
             .components
             .split_last()
             .ok_or(Error::ConfiguredRootChanged)?;
         let refs: Vec<_> = parts.iter().map(String::as_str).collect();
-        let (parent, snapshot, _ancestors) = native_namespace_directory::pin_namespace_parent(
-            &root,
-            &self.route,
-            self.parent_identity,
-            &refs,
-            FILE_READ_ATTRIBUTES,
-        )?;
+        let (parent, snapshot, _ancestors) =
+            native_namespace_directory::pin_reinspected_namespace_parent(
+                &lease,
+                &self.root_path,
+                &self.route,
+                self.parent_identity,
+                &refs,
+            )?;
         if !same_edit_snapshot(snapshot, self.parent)
             || completion_usn(parent.0, snapshot.identity.file_index)? != self.parent_usn
         {
@@ -570,7 +570,6 @@ impl VaultFileSendProof {
         {
             return Err(Error::ConfiguredRootChanged);
         }
-        root.verify_identity(false)?;
-        root.verify_registered()
+        native_namespace_directory::verify_reinspected_namespace_root(&lease, &self.root_path)
     }
 }
