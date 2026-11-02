@@ -3583,3 +3583,24 @@ synthetic private state are retained. This is distinct from the earlier
 211-file internal test and signed-out package smoke. It does not establish GUI,
 boot-service, real-server throughput, broader file operations or Windows
 acceptance, and changes no installed host application or release.
+
+### Packaged GUI and Windows fixture checkpoint — 2 November 2026
+
+The unsigned 0.7.5 AppImage from `a54ecee` (runtime code `2978d8b`) is
+99,568,120 bytes, SHA256
+`e54cb4c08fb0f88d634db77bbd9cb1f8bf14b3a3f9af0892d9308d14a9768555`.
+Parent-reviewed Ubuntu 24.04 acceptance rendered the signed-out GUI with its
+matching packaged Agent, private child HOME and unchanged guest account HOME.
+One normal tray Quit exited both processes; actual guest shutdown and unchanged
+original images were verified. Signing, installation, upgrade and live-account
+acceptance remain separate; this establishes no Windows acceptance.
+
+The original Windows R58/R59 preflight listed all seven selectors; the first
+executed case failed with exit 101 at line 1185. The corroborated
+`SyntheticRootChanged` result identifies a directory-only fixture opener used
+for a file observation; that failure and six unrun cases remain preserved.
+The `b9c8ad1`/`8c3085f` corrections affect only Windows debug fixtures, preserving
+Linux code; strict default/synthetic source gates and Agent test compilation
+passed. The corrected R6 packet from `b9c8ad1` was transferred through private
+OpenCloud; Windows download and native results remain pending. Production
+activation, capabilities and the current MVP acceptance gaps are unchanged.
