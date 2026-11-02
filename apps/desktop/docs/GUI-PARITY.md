@@ -3,7 +3,7 @@
 ## Current checkpoint — 3 November 2026
 
 GUI and CLI share the canonical `worktrees/desktop-followup-ui` source. The
-current Windows runtime checkpoint is `812d11f`; older dated descriptions below
+current Windows runtime checkpoint is `faf96c5`; older dated descriptions below
 retain their historical scope and do not describe the newly activated factories.
 
 Normal Windows GUI and CLI mounts now connect ordinary file and folder creation
@@ -93,6 +93,13 @@ Encrypted rename/move/delete, replacement editors and encrypted offline parity
 remain separate gaps.
 These are feature work, not missing exhaustive tests. Removing extra testing does
 not claim those capabilities are complete or authorize signing/publication.
+
+Delivery checkpoint, 3 November: package the completed composition now, with
+those limitations stated explicitly. The unfinished encrypted FILE-rename work
+is preserved separately and is excluded from this candidate. This packaging
+checkpoint does not claim full feature parity or authorize publication. The
+Windows laptop's fresh-profile browser issue is not a packaging gate.
+
 The shared OpenCloud conditional-create protocol has the same documented server
 qualification on Linux and Windows; no extra Windows-only global-CAS gate applies.
 

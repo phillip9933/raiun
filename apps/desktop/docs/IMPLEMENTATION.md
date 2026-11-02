@@ -3803,3 +3803,24 @@ those results. Initial compiler failures remain retained. No suite, native
 workflow, new package, owner installation, signing or publication is claimed.
 Encrypted rename/move/delete, replacement editors and offline parity remain
 implementation gaps.
+
+
+### Composed candidate delivery freeze — 3 November 2026
+
+Source `faf96c5` corrects the FILE/DIRECTORY create worker-parent proof. The
+previous code constructed an unconnected ownership object and then requested
+connected-owner validation, which would reject every proof. The replacement
+uses the retained read-only root inspection lease, actual cloud-root state, OS
+registration and exact native/opaque path ancestry. It creates no connection
+owner; the original live connection/capability stays with the caller. Affected
+Windows Agent/CLI compilation passed in 7.29 seconds and formatting in 1.98
+seconds. No native result is inferred from those checks.
+
+The completed composition is frozen for package delivery. Unfinished encrypted
+rename work remains in its independent dirty worktree and external WIP snapshot,
+including its unresolved custody compatibility. It is not part of this
+candidate. Remaining encrypted rename/move/delete, replacement-editor and
+offline gaps remain explicit limitations. Do not hold package production for
+further optional additions, broader suites or the laptop's fresh-profile browser
+problem. Packaging does not claim full parity, grant publication authority or
+turn compiled behavior into native acceptance.
