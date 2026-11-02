@@ -774,6 +774,15 @@ impl CancellationToken {
         self.deadline.min(Instant::now() + DEFAULT_FETCH_TIMEOUT)
     }
 
+    /// One bounded metadata phase sharing the original cancellation/currentness.
+    /// Only the clone's deadline changes; the original total job stays intact.
+    #[cfg(any(windows, test))]
+    pub(crate) fn bounded_request(&self) -> Self {
+        let mut request = self.clone();
+        request.deadline = self.request_deadline();
+        request
+    }
+
     /// Mark the request cancelled. Repeated calls are harmless.
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
@@ -1337,6 +1346,161 @@ mod tests {
         assert!(reader.is_cancelled());
         reader.cancel();
         assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn bounded_metadata_request_times_out_held_graph_and_preserves_original_job() {
+        use super::{CancellationToken, StreamedRecoveryPolicy};
+        use raiun_opencloud::{OpenCloudClient, ProxyConfig, RangeReadContext};
+        use std::{
+            io::Read,
+            net::TcpListener,
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+                mpsc,
+            },
+            thread,
+            time::{Duration, Instant},
+        };
+
+        // Even a failed factual barrier/assertion releases the peer before either
+        // thread joins. No detached client, kill, network retry or test timeout kill.
+        struct HeldGraph {
+            release: Option<mpsc::Sender<()>>,
+            peer: Option<thread::JoinHandle<bool>>,
+            client: Option<thread::JoinHandle<()>>,
+        }
+        impl HeldGraph {
+            fn cleanup(&mut self) -> (bool, bool) {
+                drop(self.release.take());
+                let peer = self
+                    .peer
+                    .take()
+                    .is_none_or(|peer| peer.join().unwrap_or(false));
+                let client = self
+                    .client
+                    .take()
+                    .is_none_or(|client| client.join().is_ok());
+                (peer, client)
+            }
+        }
+        impl Drop for HeldGraph {
+            fn drop(&mut self) {
+                let _ = self.cleanup();
+            }
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = OpenCloudClient::new_with_proxy(
+            &format!("http://{address}"),
+            "synthetic-metadata-cap".into(),
+            &ProxyConfig::Direct,
+        )
+        .unwrap();
+        let owner_revoked = Arc::new(AtomicBool::new(false));
+        let probe = owner_revoked.clone();
+        let original = CancellationToken::for_recovery_job(
+            StreamedRecoveryPolicy::new(Duration::from_secs(60)).unwrap(),
+        )
+        .with_revocation_check(Arc::new(move || probe.load(Ordering::Acquire)));
+        let original_deadline = original.deadline();
+        let started = Instant::now();
+        // This is the same production helper the owned file Prepare path uses.
+        let metadata = original.cancellation().bounded_request();
+        let bounded_at = Instant::now();
+        let context = RangeReadContext {
+            deadline: metadata.deadline(),
+            token_generation: client.token_generation(),
+        };
+        let same_cancel = Arc::ptr_eq(&metadata.cancelled, &original.cancellation().cancelled);
+        let same_owner = match (
+            &metadata.owner_cancelled,
+            &original.cancellation().owner_cancelled,
+        ) {
+            (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+            _ => false,
+        };
+        let (release, released) = mpsc::channel();
+        let (accepted, accepted_request) = mpsc::channel();
+        let peer_released = Arc::new(AtomicBool::new(false));
+        let peer_done = peer_released.clone();
+        let mut held = HeldGraph {
+            release: Some(release),
+            peer: None,
+            client: None,
+        };
+        held.peer = Some(thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(40);
+            let mut socket = loop {
+                if !matches!(released.try_recv(), Err(mpsc::TryRecvError::Empty))
+                    || Instant::now() >= deadline
+                {
+                    return false;
+                }
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(_) => return false,
+                }
+            };
+            if socket.set_nonblocking(false).is_err()
+                || socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .is_err()
+            {
+                return false;
+            }
+            let mut bytes = Vec::new();
+            let mut byte = [0];
+            while !bytes.ends_with(b"\r\n\r\n") && bytes.len() < 32768 {
+                if socket.read_exact(&mut byte).is_err() {
+                    return false;
+                }
+                bytes.push(byte[0]);
+            }
+            let request = String::from_utf8_lossy(&bytes);
+            let valid = bytes.ends_with(b"\r\n\r\n")
+                && request.lines().next() == Some("GET /graph/v1.0/me/drives HTTP/1.1");
+            if accepted.send(valid).is_err() {
+                return false;
+            }
+            // No response headers/body are sent before the test releases this peer.
+            // The finite safety bound is longer than the request/result assertion.
+            let _ = released.recv_timeout(Duration::from_secs(40));
+            peer_done.store(true, Ordering::Release);
+            drop(socket);
+            valid
+        }));
+        let (completed, result) = mpsc::channel();
+        held.client = Some(thread::spawn(move || {
+            let value = client.spaces_with_context_limited(context, 1);
+            let _ = completed.send((value, started.elapsed()));
+        }));
+        let factual_request = accepted_request.recv_timeout(Duration::from_secs(5));
+        original.cancel();
+        let outcome = result.recv_timeout(Duration::from_secs(33));
+        let terminal_while_peer_held = outcome.is_ok() && !peer_released.load(Ordering::Acquire);
+        // These joins precede every assertion after threads were started. The
+        // old long-context path is released at 33s and fails without hanging.
+        let joined = held.cleanup();
+        assert_eq!(joined, (true, true));
+        assert_eq!(factual_request.ok(), Some(true));
+        assert!(same_cancel && same_owner);
+        assert_eq!(original.deadline(), original_deadline);
+        assert!(metadata.deadline() <= original_deadline);
+        assert!(metadata.deadline() <= bounded_at + Duration::from_secs(30));
+        assert!(original.is_stopped() && metadata.is_cancelled());
+        assert!(
+            terminal_while_peer_held,
+            "metadata must finish before peer release at the real production request cap"
+        );
+        let (value, elapsed) = outcome.expect("bounded metadata result before 33s");
+        assert!(value.is_err());
+        assert!((Duration::from_secs(25)..=Duration::from_secs(33)).contains(&elapsed));
     }
 
     #[test]

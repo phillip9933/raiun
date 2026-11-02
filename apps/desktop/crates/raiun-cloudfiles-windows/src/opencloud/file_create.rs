@@ -59,8 +59,9 @@ impl Admission {
         let path = self.child_path(&report.destination.name)?;
         // Refresh the exact historical readback tuple before entering the local
         // publication fence. This is bounded metadata observation, not remote CAS.
+        let metadata = self.job.cancellation().bounded_request();
         let context = RangeReadContext {
-            deadline: self.job.deadline(),
+            deadline: metadata.deadline(),
             token_generation: self.auth.token_generation,
         };
         let root = backend
@@ -409,13 +410,15 @@ impl OpenCloudPlaceholderBackend {
                         || b.client.token_generation() != auth.token_generation
                 })
         }));
-        // Keep the ORIGINAL deadline/epoch; no backend lease escapes discovery.
+        // Bound this complete metadata phase while keeping the ORIGINAL job
+        // deadline/epoch for admission/body. No backend lease escapes discovery.
+        let metadata = job.cancellation().bounded_request();
         let parent = {
             let _lease = self
                 .lease_gate
                 .read()
                 .map_err(|_| BackendError::Unavailable)?;
-            self.capture_namespace_parent_under_lease(components, root, auth, job.cancellation())?
+            self.capture_namespace_parent_under_lease(components, root, auth, &metadata)?
         };
         if catalog_scope.local_root() != root
             || parent.path
