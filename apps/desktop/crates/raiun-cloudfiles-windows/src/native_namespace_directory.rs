@@ -798,7 +798,7 @@ impl ConfiguredRootConnection {
         original_current: DirectoryCurrent,
     ) -> Result<DirectoryCreateStep, Error> {
         if generation == 0
-            || components.first().copied() != Some("Personal")
+            || crate::personal_create_relative(components, name).is_none()
             || components.len() > 255
             || components.iter().any(|part| !valid_component(part))
             || !valid_component(name)

@@ -172,9 +172,13 @@ impl Producer {
         kind: CreateKind,
         workers: &mut Workers,
     ) -> Result<bool, &'static str> {
-        if components.len() < 2
+        let supported_leaf = match components.first().map(String::as_str) {
+            Some("Personal") => components.len() >= 2,
+            Some("Spaces") => components.len() >= 3,
+            _ => false,
+        };
+        if !supported_leaf
             || components.len() > 256
-            || components.first().map(String::as_str) != Some("Personal")
             || (kind == CreateKind::File && !self.allow_file)
             || (kind == CreateKind::Directory && !self.allow_directory)
             || self.held

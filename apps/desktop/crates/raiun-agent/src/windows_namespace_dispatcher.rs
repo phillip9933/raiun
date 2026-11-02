@@ -59,7 +59,12 @@ fn rename_file_path(parts: &[String]) -> bool {
         }
 }
 fn create_personal(parts: &[String]) -> bool {
-    (2..=256).contains(&parts.len()) && parts.first().map(String::as_str) == Some("Personal")
+    parts.len() <= 256
+        && match parts.first().map(String::as_str) {
+            Some("Personal") => parts.len() >= 2,
+            Some("Spaces") => parts.len() >= 3,
+            _ => false,
+        }
 }
 #[derive(Clone, Copy)]
 enum ObservedShape {
@@ -797,7 +802,7 @@ mod tests {
                     .is_err()
                 );
                 assert!(select_create_observed(&path, None, file, directory, true).is_err());
-                for unsupported in ["Personal", "Spaces", "Spaces/team/new"] {
+                for unsupported in ["Personal", "Spaces", "Spaces/team"] {
                     for shape in [ObservedShape::PlainDirectory, ObservedShape::PlainFile] {
                         assert!(
                             select_create_observed(
@@ -857,7 +862,9 @@ mod tests {
                 assert_eq!(route(&hints, false, true), Ok(vec![Work::Directory(0)]));
                 assert_eq!(route(&hints, false, false), Ok(vec![]));
             }
-            assert!(
+            // Observing removal grants no delete/root authority; the native
+            // delete owner rejects roots and original physical pins remain.
+            assert_eq!(
                 route(
                     &[Hint {
                         action: Action::Removed,
@@ -865,8 +872,8 @@ mod tests {
                     }],
                     false,
                     true
-                )
-                .is_err()
+                ),
+                Ok(vec![])
             );
         }
         for components in [
@@ -890,7 +897,7 @@ mod tests {
     }
     #[test]
     fn live_selection_skips_only_cloud_shape_and_never_admits_unsupported_plain() {
-        for path in ["Personal", "Spaces", "Spaces/team", "Spaces/team/file.bin"] {
+        for path in ["Personal", "Spaces", "Spaces/team"] {
             let components = parts(path);
             assert_eq!(
                 select_observed(&components, Some(ObservedShape::Cloud), true, true),
@@ -927,7 +934,8 @@ mod tests {
             ),
             Ok(Selection::CreateFile)
         );
-        assert!(!create_personal(&parts("Spaces/team/file.bin")));
+        // A Space child is eligible; namespace/Space roots remain excluded.
+        assert!(create_personal(&parts("Spaces/team/file.bin")));
         assert!(!create_personal(&parts("Personal")));
         assert!(!create_personal(&vec!["Personal".into(); 257]));
         // A later Skip must never erase an endpoint from the raw batch plan.

@@ -16,6 +16,73 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Shared create metadata qualification, outside publication/catalog locks.
+/// Personal identifies the account; the captured target Space is independent.
+pub(super) fn qualify_create_target(
+    backend: &OpenCloudPlaceholderBackend,
+    scope: &crate::EditJournalScope,
+    components: &[String],
+    context: RangeReadContext,
+) -> Result<RemoteEntry, CloudError> {
+    backend
+        .ensure_active()
+        .map_err(|_| refusal(ErrorKind::Unauthorized))?;
+    let refs = components.iter().map(String::as_str).collect::<Vec<_>>();
+    if crate::personal_create_relative(&refs, "probe").is_none()
+        || context.token_generation != backend.token_generation
+    {
+        return Err(refusal(ErrorKind::Conflict));
+    }
+    let catalog = backend
+        .catalog_scope_snapshot()
+        .map_err(|_| refusal(ErrorKind::Conflict))?
+        .ok_or_else(|| refusal(ErrorKind::Conflict))?;
+    if catalog.local_root().volume_serial != scope.root_volume_serial
+        || catalog.local_root().file_index != scope.root_file_index
+        || catalog.profile_id != scope.profile_id
+        || catalog.account_id != scope.account_subject
+        || catalog.server_origin != scope.server_origin
+    {
+        return Err(refusal(ErrorKind::Conflict));
+    }
+    let spaces = backend
+        .validate_namespace_scope(
+            backend.scope.account_id(),
+            catalog.personal_space_id(),
+            catalog.personal_root_resource_id(),
+            context.deadline,
+        )
+        .map_err(|_| refusal(ErrorKind::Conflict))?;
+    let mut targets = spaces.iter().filter(|space| space.id == scope.space_id);
+    let target = targets.next().ok_or_else(|| refusal(ErrorKind::Conflict))?;
+    if targets.next().is_some()
+        || !target.writable
+        || target.encrypted
+        || match components.first().map(String::as_str) {
+            Some("Personal") => !target.personal || target.id != catalog.personal_space_id,
+            Some("Spaces") => target.personal || target.id == catalog.personal_space_id,
+            _ => true,
+        }
+    {
+        return Err(refusal(ErrorKind::Conflict));
+    }
+    let root = backend
+        .client
+        .stat_discovered_space_root_with_context(target, context)?;
+    if !root.directory
+        || root.encrypted
+        || !root.writable
+        || root.id != scope.root_resource_id
+        || !valid_remote_path(&scope.space_id, &scope.root_resource_id, &root.path, true)
+    {
+        return Err(refusal(ErrorKind::Conflict));
+    }
+    backend
+        .ensure_active()
+        .map_err(|_| refusal(ErrorKind::Unauthorized))?;
+    Ok(root)
+}
+
 impl OpenCloudPlaceholderBackend {
     /// Retain the backend lease through the entire closure. The owner guard must
     /// freshly compare the supplied captured agent generation on every call.
@@ -88,24 +155,9 @@ impl OpenCloudPlaceholderBackend {
             deadline,
             token_generation: self.token_generation,
         };
-        let spaces = self.validate_namespace_scope(
-            self.scope.account_id(),
-            catalog.personal_space_id(),
-            catalog.personal_root_resource_id(),
-            deadline,
-        )?;
-        let space = spaces
-            .iter()
-            .find(|s| s.id == scope.space_id && s.writable && !s.encrypted)
-            .ok_or(BackendError::Unavailable)?;
-        let root = self
-            .client
-            .stat_discovered_space_root_with_context(space, context)
-            .map_err(|error| self.reject_cached_cloud_error(error))?;
-        if !root.directory || root.encrypted || !root.writable || root.id != scope.root_resource_id
-        {
-            return Err(BackendError::Unavailable);
-        }
+        let root =
+            qualify_create_target(self, scope, &destination.parent.local_components, context)
+                .map_err(|error| self.reject_cached_cloud_error(error))?;
         let path = format!("{}/{}", parent.path.trim_end_matches('/'), destination.name);
         if !valid_remote_path(&scope.space_id, &scope.root_resource_id, &path, false) {
             return Err(BackendError::Unavailable);
@@ -173,13 +225,13 @@ impl LiveDirectoryCreate<'_> {
     }
     fn check_parent(&self, captured_etag: bool) -> Result<(), CloudError> {
         let scope = &self.destination().parent.scope;
-        let root = self.backend.client.stat_with_context(
-            &scope.space_id,
-            &self.root_path,
+        let root = qualify_create_target(
+            self.backend,
+            scope,
+            &self.destination().parent.local_components,
             self.context,
         )?;
-        if !root.directory || root.encrypted || !root.writable || root.id != scope.root_resource_id
-        {
+        if root.path.trim_end_matches('/') != self.root_path.trim_end_matches('/') {
             return Err(refusal(ErrorKind::Conflict));
         }
         let parent = self.backend.client.stat_with_context(
@@ -753,7 +805,7 @@ impl OwnedDirectorySession {
         current: Arc<dyn Fn(CapturedAuthorization) -> bool + Send + Sync>,
     ) -> Result<Self, BackendError> {
         job.check()?;
-        if components.first().copied() != Some("Personal") || !(current)(auth) {
+        if crate::personal_create_relative(components, "probe").is_none() || !(current)(auth) {
             return Err(BackendError::Unavailable);
         }
         let catalog = backend
@@ -791,12 +843,21 @@ impl OwnedDirectorySession {
             current,
         };
         result.check()?;
-        if result.captured.scope.space_id != result.catalog_scope.personal_space_id
-            || result.captured.scope.root_resource_id
-                != result.catalog_scope.personal_root_resource_id
-        {
-            return Err(BackendError::Unavailable);
-        }
+        let metadata = result.job.cancellation().bounded_request();
+        qualify_create_target(
+            &result.backend,
+            &result.captured.scope,
+            &components
+                .iter()
+                .map(|part| (*part).to_owned())
+                .collect::<Vec<_>>(),
+            RangeReadContext {
+                deadline: metadata.deadline(),
+                token_generation: auth.token_generation,
+            },
+        )
+        .map_err(|_| BackendError::Unavailable)?;
+        result.check()?;
         Ok(result)
     }
     pub(crate) fn check(&self) -> Result<(), BackendError> {
@@ -939,10 +1000,10 @@ impl OwnedDirectorySession {
         let mut state = self.backend.state.try_lock().map_err(|_| unavailable())?;
         let composite = composite_root_identity(
             &self.backend.scope,
-            &scope.space_id,
-            &scope.root_resource_id,
+            self.catalog_scope.personal_space_id(),
+            self.catalog_scope.personal_root_resource_id(),
         );
-        if !matches!(state.namespace_directories.get(&composite), Some(NamespaceDirectory::Root { account_id, personal_space_id, personal_root_id }) if account_id == self.backend.scope.account_id() && personal_space_id == &scope.space_id && personal_root_id == &scope.root_resource_id)
+        if !matches!(state.namespace_directories.get(&composite), Some(NamespaceDirectory::Root { account_id, personal_space_id, personal_root_id }) if account_id == self.backend.scope.account_id() && personal_space_id == self.catalog_scope.personal_space_id() && personal_root_id == self.catalog_scope.personal_root_resource_id())
             || state
                 .directories
                 .get(&self.captured.identity)

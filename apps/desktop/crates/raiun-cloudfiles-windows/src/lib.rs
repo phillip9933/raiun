@@ -769,7 +769,12 @@ impl fmt::Debug for NamespaceObservation {
 // remain mandatory. The first component is the local namespace, never a Space.
 #[cfg(any(windows, test))]
 fn personal_create_relative(parent: &[&str], leaf: &str) -> Option<String> {
-    if parent.first() != Some(&"Personal") || parent.len() >= 256 {
+    let prefix = match parent.first().copied() {
+        Some("Personal") => 1,
+        Some("Spaces") if parent.len() >= 2 => 2,
+        _ => return None,
+    };
+    if parent.len() >= 256 {
         return None;
     }
     let valid = |part: &str| {
@@ -792,13 +797,13 @@ fn personal_create_relative(parent: &[&str], leaf: &str) -> Option<String> {
     if total > 32768 {
         return None;
     }
-    let relative = parent[1..]
+    let relative = parent[prefix..]
         .iter()
         .copied()
         .chain(std::iter::once(leaf))
         .collect::<Vec<_>>()
         .join("/");
-    (relative.len() <= 32768 && relative.len() + "Personal/".len() <= 32768).then_some(relative)
+    (relative.len() <= 32768).then_some(relative)
 }
 
 #[cfg(test)]

@@ -24,6 +24,25 @@ impl Admission {
             crate::personal_create_relative(&components, leaf).ok_or(BackendError::Unavailable)?;
         Ok(format!("/{relative}"))
     }
+    // HTTP only in worker metadata phases, never under native/catalog publication.
+    fn qualify_target(
+        &self,
+        backend: &Arc<OpenCloudPlaceholderBackend>,
+    ) -> Result<(), BackendError> {
+        self.check(backend)?;
+        let metadata = self.job.cancellation().bounded_request();
+        namespace::qualify_create_target(
+            backend,
+            &self.parent.scope,
+            &self.parent_components,
+            RangeReadContext {
+                deadline: metadata.deadline(),
+                token_generation: self.auth.token_generation,
+            },
+        )
+        .map_err(|error| backend.reject_cached_cloud_error(error))?;
+        self.check(backend)
+    }
     pub(crate) fn capture_job(&self) -> crate::StreamedRecoveryJob {
         self.job.clone()
     }
@@ -64,16 +83,15 @@ impl Admission {
             deadline: metadata.deadline(),
             token_generation: self.auth.token_generation,
         };
-        let root = backend
-            .client
-            .stat_with_context(&scope.space_id, "/", context)
-            .map_err(|_| BackendError::Unavailable)?;
+        let root =
+            namespace::qualify_create_target(backend, scope, &self.parent_components, context)
+                .map_err(|error| backend.reject_cached_cloud_error(error))?;
         self.check(backend).map_err(|_| BackendError::Unavailable)?;
         if !root.directory || root.encrypted || !root.writable || root.id != scope.root_resource_id
         {
             return Err(unavailable());
         }
-        if self.parent_components.len() > 1 {
+        if self.parent.path != "/" {
             let parent = backend
                 .client
                 .stat_with_context(&scope.space_id, &self.parent.path, context)
@@ -105,6 +123,7 @@ impl Admission {
         {
             return Err(unavailable());
         }
+        self.qualify_target(backend)?;
         Ok(RefreshedCreateReadback { proof })
     }
     /// Local publication only; all HTTP finished in the consumed refresh task.
@@ -153,12 +172,15 @@ impl Admission {
         let mut state = backend.state.try_lock().map_err(|_| unavailable())?;
         // Inspect the original tuples under this already-held state guard;
         // never recurse through owns_composite_root_identity/state.lock here.
-        let composite =
-            composite_root_identity(&backend.scope, &scope.space_id, &scope.root_resource_id);
+        let composite = composite_root_identity(
+            &backend.scope,
+            self.catalog_scope.personal_space_id(),
+            self.catalog_scope.personal_root_resource_id(),
+        );
         let root_current = matches!(state.namespace_directories.get(&composite),
             Some(NamespaceDirectory::Root { account_id, personal_space_id, personal_root_id })
                 if account_id == backend.scope.account_id()
-                && personal_space_id == &scope.space_id && personal_root_id == &scope.root_resource_id);
+                && personal_space_id == self.catalog_scope.personal_space_id() && personal_root_id == self.catalog_scope.personal_root_resource_id());
         let parent_current = state
             .directories
             .get(&self.parent.identity)
@@ -232,7 +254,7 @@ impl Admission {
         joined: VerifiedFileJoin,
         before_sdk: impl FnOnce() -> Result<(), BackendError>,
     ) -> Result<VerifiedCreateReadback, BackendError> {
-        self.check(backend)?;
+        self.qualify_target(backend)?;
         if self.attempted {
             return Err(BackendError::Unavailable);
         }
@@ -290,7 +312,7 @@ impl Admission {
             deadline: self.job.deadline(),
             token_generation: self.auth.token_generation,
         };
-        let proof = if self.parent_components.len() == 1 {
+        let proof = if self.parent.path == "/" {
             // Preserve the established explicit root wrapper's SDK behavior.
             backend
                 .client
@@ -327,7 +349,7 @@ impl Admission {
                 )
         }
         .map_err(|_| BackendError::Unavailable)?;
-        self.check(backend)?;
+        self.qualify_target(backend)?;
         let observed = proof.observed;
         if observed.entry.path != path
             || observed.entry.directory
@@ -420,15 +442,13 @@ impl OpenCloudPlaceholderBackend {
                 .map_err(|_| BackendError::Unavailable)?;
             self.capture_namespace_parent_under_lease(components, root, auth, &metadata)?
         };
+        let prefix = if components.first().copied() == Some("Personal") {
+            1
+        } else {
+            2
+        };
         if catalog_scope.local_root() != root
-            || parent.path
-                != if components.len() == 1 {
-                    "/".into()
-                } else {
-                    format!("/{}", components[1..].join("/"))
-                }
-            || parent.scope.space_id != catalog_scope.personal_space_id
-            || parent.scope.root_resource_id != catalog_scope.personal_root_resource_id
+            || parent.path != format!("/{}", components[prefix..].join("/"))
         {
             return Err(BackendError::Unavailable);
         }
@@ -443,7 +463,7 @@ impl OpenCloudPlaceholderBackend {
             attempted: false,
             backend: Arc::downgrade(self),
         };
-        result.check(self)?;
+        result.qualify_target(self)?;
         Ok(result)
     }
 }
