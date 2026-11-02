@@ -653,13 +653,34 @@ impl ConfiguredRootConnection {
             .enumerate()
         {
             path.push(component);
-            // open_root is metadata-only BACKUP_SEMANTICS|OPEN_REPARSE_POINT.
             // No DELETE sharing: every no-follow ancestor remains pinned.
-            let handle = open_root(
-                &path,
-                FILE_READ_ATTRIBUTES,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-            )?;
+            let handle = if index < 2 {
+                open_root(
+                    &path,
+                    FILE_READ_ATTRIBUTES,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                )?
+            } else {
+                let wide = wide_path(&path)?;
+                // SAFETY: fixed synthetic source.bin under pinned no-follow
+                // directories; metadata-only access opens the file itself,
+                // never its reparse target. RAII keeps the handle local.
+                let raw = unsafe {
+                    CreateFileW(
+                        wide.as_ptr(),
+                        FILE_READ_ATTRIBUTES,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        null(),
+                        OPEN_EXISTING,
+                        FILE_FLAG_OPEN_REPARSE_POINT,
+                        null_mut(),
+                    )
+                };
+                if raw.is_null() || raw == INVALID_HANDLE_VALUE {
+                    return Err(win32_io_error("inspect create-worker synthetic file"));
+                }
+                RawOwnedHandle(raw)
+            };
             let snapshot = root_snapshot(handle.0)?;
             let kind = crate::namespace_entry_observation::classify(
                 snapshot.file_attributes,
