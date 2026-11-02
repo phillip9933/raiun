@@ -53,10 +53,10 @@ impl OpenCloudClient {
             .iter()
             .find(|space| space.id == request.space)
             .ok_or_else(|| CloudError::new(ErrorKind::NotFound, "cloud space was not found"))?;
-        if !selected.personal || !selected.writable || selected.encrypted {
+        if !selected.writable || selected.encrypted {
             return Err(CloudError::new(
                 ErrorKind::Forbidden,
-                "ordinary Personal file deletion is unavailable",
+                "ordinary file deletion is unavailable",
             ));
         }
         let root_url =
