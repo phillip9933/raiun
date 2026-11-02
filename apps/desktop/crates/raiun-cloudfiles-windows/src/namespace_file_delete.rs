@@ -142,7 +142,9 @@ fn supported(intent: &NamespaceIntent) -> bool {
     };
     let parent = &source.local.parent;
     source.local.object_kind == NamespaceObjectKind::File
-        && parent.local_components.first().map(String::as_str) == Some("Personal")
+        && (parent.local_components.first().map(String::as_str) == Some("Personal")
+            || (parent.local_components.first().map(String::as_str) == Some("Spaces")
+                && parent.local_components.len() >= 2))
         && [
             &source.remote.resource_id,
             &parent.remote.resource_id,

@@ -452,10 +452,12 @@ fn execute(shared: &Arc<Shared>, ticket: &Ticket) -> FileDeleteOutcome {
             })
             .collect::<Option<Vec<_>>>()
             .ok_or(Error::ConfiguredRootChanged)?;
-        if components.len() < 2
-            || components.first().map(String::as_str) != Some("Personal")
-            || components.iter().any(|part| !valid_component(part))
-        {
+        let supported_leaf = match components.first().map(String::as_str) {
+            Some("Personal") => components.len() >= 2,
+            Some("Spaces") => components.len() >= 3,
+            _ => false,
+        };
+        if !supported_leaf || components.iter().any(|part| !valid_component(part)) {
             return Err(Error::ConfiguredRootChanged);
         }
         let name = components.pop().ok_or(Error::ConfiguredRootChanged)?;

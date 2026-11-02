@@ -1,4 +1,4 @@
-//! Original-lease ordinary Personal-file deletion session.
+//! Original-lease ordinary Personal or writable Space-file deletion session.
 //! Native callback ownership and journal admission remain with the caller.
 use super::*;
 use crate::namespace_file_delete::{
@@ -33,13 +33,7 @@ fn supported(intent: &NamespaceIntent) -> bool {
     };
     source.local.object_kind == NamespaceObjectKind::File
         && source.local.parent.classification == StorageClassification::Ordinary
-        && source
-            .local
-            .parent
-            .local_components
-            .first()
-            .map(String::as_str)
-            == Some("Personal")
+        && local_prefix(&source.local.parent.local_components).is_some()
         && namespace::strong(&source.remote.etag)
         && valid_remote_id(&source.remote.resource_id)
 }
@@ -50,10 +44,18 @@ fn relative_to_root(root: &str, path: &str) -> Option<String> {
         .filter(|tail| !tail.is_empty())
         .map(str::to_owned)
 }
+fn local_prefix(components: &[String]) -> Option<usize> {
+    match components.first().map(String::as_str) {
+        Some("Personal") => Some(1),
+        Some("Spaces") if components.len() >= 2 => Some(2),
+        _ => None,
+    }
+}
 fn parent_path_matches(path: &str, components: &[String]) -> bool {
-    let Some((_, tail)) = components.split_first() else {
+    let Some(prefix) = local_prefix(components) else {
         return false;
     };
+    let tail = &components[prefix..];
     let remote = path
         .split('/')
         .filter(|part| !part.is_empty())
@@ -63,6 +65,67 @@ fn parent_path_matches(path: &str, components: &[String]) -> bool {
             .iter()
             .zip(tail)
             .all(|(remote, local)| *remote == local)
+}
+
+/// Personal remains the account anchor; the target is selected only by its
+/// captured Space ID. A displayed Spaces label never becomes a remote ID.
+fn verified_target_root(
+    backend: &OpenCloudPlaceholderBackend,
+    scope: &crate::EditJournalScope,
+    components: &[String],
+    context: RangeReadContext,
+) -> Result<raiun_core::backend::RemoteEntry, CloudError> {
+    let catalog = backend
+        .catalog_scope_snapshot()
+        .map_err(|_| refusal(ErrorKind::Conflict))?
+        .ok_or_else(|| refusal(ErrorKind::Conflict))?;
+    let spaces = backend
+        .client
+        .spaces_with_context_limited(context, MAX_PROVIDER_SPACES)?;
+    let personal = verified_personal(&spaces).map_err(|_| refusal(ErrorKind::Conflict))?;
+    if personal.id != catalog.personal_space_id
+        || derive_account_id(&backend.client.configured_server_url(), &personal.id)
+            != backend.scope.account_id
+    {
+        return Err(refusal(ErrorKind::Conflict));
+    }
+    let anchor = backend
+        .client
+        .stat_discovered_space_root_with_context(personal, context)?;
+    if !anchor.directory || anchor.encrypted || anchor.id != catalog.personal_root_resource_id {
+        return Err(refusal(ErrorKind::Conflict));
+    }
+    let mut candidates = spaces.iter().filter(|space| space.id == scope.space_id);
+    let target = candidates
+        .next()
+        .ok_or_else(|| refusal(ErrorKind::Conflict))?;
+    if candidates.next().is_some()
+        || !target.writable
+        || target.encrypted
+        || match local_prefix(components) {
+            Some(1) => !target.personal || target.id != personal.id,
+            Some(2) => target.personal || target.id == personal.id,
+            _ => true,
+        }
+    {
+        return Err(refusal(ErrorKind::Conflict));
+    }
+    let root = if target.id == personal.id {
+        anchor
+    } else {
+        backend
+            .client
+            .stat_discovered_space_root_with_context(target, context)?
+    };
+    if !root.directory
+        || root.encrypted
+        || !root.writable
+        || root.id != scope.root_resource_id
+        || !valid_remote_path(&scope.space_id, &scope.root_resource_id, &root.path, true)
+    {
+        return Err(refusal(ErrorKind::Conflict));
+    }
+    Ok(root)
 }
 
 impl OpenCloudPlaceholderBackend {
@@ -105,8 +168,6 @@ impl OpenCloudPlaceholderBackend {
             || catalog.profile_id != scope.profile_id
             || catalog.account_id != scope.account_subject
             || catalog.server_origin != scope.server_origin
-            || catalog.personal_space_id != scope.space_id
-            || catalog.personal_root_resource_id != scope.root_resource_id
             || !owner_current(authorization)
         {
             return Err(BackendError::Unavailable);
@@ -131,33 +192,9 @@ impl OpenCloudPlaceholderBackend {
             deadline: Instant::now() + Duration::from_secs(30),
             token_generation: self.token_generation,
         };
-        let spaces = self
-            .client
-            .spaces_with_context_limited(context, MAX_PROVIDER_SPACES)
-            .map_err(|error| self.reject_cached_cloud_error(error))?;
-        let space = verified_personal(&spaces)
-            .map_err(|_| self.reject_cached_cloud_error(refusal(ErrorKind::Conflict)))?;
-        if space.id != catalog.personal_space_id
-            || space.id != scope.space_id
-            || derive_account_id(&self.client.configured_server_url(), &space.id)
-                != self.scope.account_id
-            || !space.writable
-            || space.encrypted
-        {
-            return Err(self.reject_cached_cloud_error(refusal(ErrorKind::Conflict)));
-        }
-        let root = self
-            .client
-            .stat_discovered_space_root_with_context(space, context)
-            .map_err(|error| self.reject_cached_cloud_error(error))?;
-        if !root.directory
-            || root.encrypted
-            || !root.writable
-            || root.id != scope.root_resource_id
-            || !valid_remote_path(&scope.space_id, &scope.root_resource_id, &root.path, true)
-        {
-            return Err(self.reject_cached_cloud_error(refusal(ErrorKind::Conflict)));
-        }
+        let root =
+            verified_target_root(self, scope, &source.local.parent.local_components, context)
+                .map_err(|error| self.reject_cached_cloud_error(error))?;
         let path = format!(
             "{}/{}",
             parent.path.trim_end_matches('/'),
@@ -266,11 +303,13 @@ impl LiveFileDelete<'_> {
     fn check_parent(&self, captured_etag: bool) -> Result<(), CloudError> {
         self.ensure_authorized(&self.intent)?;
         let scope = &self.original().local.parent.scope;
-        let root = self
-            .backend
-            .client
-            .stat_with_context(&scope.space_id, &self.root_path, self.context)
-            .map_err(|error| self.authoritative(error))?;
+        let root = verified_target_root(
+            self.backend,
+            scope,
+            &self.original().local.parent.local_components,
+            self.context,
+        )
+        .map_err(|error| self.authoritative(error))?;
         if !root.directory
             || root.encrypted
             || !root.writable
@@ -359,7 +398,10 @@ impl FileDeleteRemote for LiveFileDelete<'_> {
                     context: self.context,
                 },
                 || {
-                    let result = self.ensure_authorized(intent).and_then(|()| before_send());
+                    let result = self
+                        .check_parent(true)
+                        .and_then(|()| self.ensure_authorized(intent))
+                        .and_then(|()| before_send());
                     if result.is_err() {
                         hook_refused.set(true);
                     }
