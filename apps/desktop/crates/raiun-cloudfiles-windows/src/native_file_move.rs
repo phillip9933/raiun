@@ -47,7 +47,7 @@ struct Pins<'a> {
     destination_parent_snapshot: RootSnapshot,
     destination_ancestors: Vec<(RawOwnedHandle, RootSnapshot)>,
     destination_parent_identity: crate::OpaqueIdentity,
-    digest: [u8; 32],
+    digest: Option<[u8; 32]>,
     cancellation: crate::CancellationToken,
     ancestors: Vec<(RawOwnedHandle, RootSnapshot)>,
     protected: ProtectedCompletionFile,
@@ -102,6 +102,16 @@ impl Pins<'_> {
             )
             || native_namespace_directory::opaque_directory_identity(self.protected.raw)?
                 != *identity
+            || (self.digest.is_none()
+                && !clean_cloud_only_entry(
+                    root_snapshot(self.protected.raw)?,
+                    self.root,
+                    LocalFileIdentity {
+                        volume_serial: self.snapshot.identity.volume_serial,
+                        file_index: self.snapshot.identity.file_index,
+                    },
+                    self.snapshot.file_size,
+                ))
             || !same_snapshot(root_snapshot(self.protected.raw)?, self.snapshot)
             || completion_usn(self.protected.raw, self.snapshot.identity.file_index)? != self.usn
             || completion_basic_info(self.protected.raw)? != self.basic
@@ -123,13 +133,13 @@ impl Pins<'_> {
             return Err(Error::EditRecoveryUnavailable);
         }
         drop(activity);
-        if enumerate {
+        if let Some(expected_digest) = self.digest.filter(|_| enumerate) {
             let digest = native_digest(
                 &self
                     .protected
                     .digest_complete(self.snapshot.file_size, Some(&self.cancellation))?,
             )?;
-            if digest != self.digest
+            if digest != expected_digest
                 || !same_snapshot(root_snapshot(self.protected.raw)?, self.snapshot)
                 || completion_usn(self.protected.raw, self.snapshot.identity.file_index)?
                     != self.usn
@@ -191,7 +201,7 @@ impl FileRenameLocal for Local<'_, '_, '_> {
                         16,
                         null(),
                         0,
-                        2,
+                        if pins.digest.is_some() { 2 } else { 0 },
                         &mut usn,
                         null_mut(),
                     )
@@ -326,7 +336,7 @@ impl crate::ConfiguredRootConnection {
             ProtectedCompletionFile::open(&wide_path(&destination_path).map_err(N::Local)?)
                 .map_err(N::Local)?;
         let snapshot = root_snapshot(protected.raw).map_err(N::Local)?;
-        if !same_root_entry(
+        if !admitted_file_entry(
             snapshot,
             root.identity,
             file,
@@ -345,12 +355,23 @@ impl crate::ConfiguredRootConnection {
                 .checked_duration_since(std::time::Instant::now())
                 .ok_or(N::Local(Error::EditRecoveryUnavailable))?,
         );
-        let digest = native_digest(
-            &protected
-                .digest_complete(binding.source_remote.byte_len, Some(&cancellation))
+        let digest = if clean_cloud_only_entry(
+            snapshot,
+            root.identity,
+            file,
+            binding.source_remote.byte_len,
+        ) {
+            None
+        } else {
+            Some(
+                native_digest(
+                    &protected
+                        .digest_complete(binding.source_remote.byte_len, Some(&cancellation))
+                        .map_err(N::Local)?,
+                )
                 .map_err(N::Local)?,
-        )
-        .map_err(N::Local)?;
+            )
+        };
         let basic = completion_basic_info(protected.raw).map_err(N::Local)?;
         let usn = completion_usn(protected.raw, file.file_index).map_err(N::Local)?;
         if usn <= 0 {

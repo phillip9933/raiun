@@ -706,6 +706,7 @@ impl OpenCloudPlaceholderBackend {
             attempted: Cell::new(false),
             renamed: Cell::new(false),
             publication_claimed: Cell::new(false),
+            clean_cloud_source: RefCell::new(None),
             observed: RefCell::new(None),
             cancelled: Arc::new(move || transfer_cancellation.is_cancelled()),
         };
@@ -716,6 +717,13 @@ impl OpenCloudPlaceholderBackend {
     }
 }
 
+// Private readonly original revision proof; never a body-write or replay grant.
+#[derive(Eq, PartialEq)]
+struct CleanCloudSourceProof {
+    scope: crate::EditJournalScope,
+    authorization: CapturedAuthorization,
+    remote: RemoteEditBaseline,
+}
 struct LiveFileRename<'a> {
     backend: &'a OpenCloudPlaceholderBackend,
     intent: NamespaceIntent,
@@ -733,6 +741,7 @@ struct LiveFileRename<'a> {
     attempted: Cell<bool>,
     renamed: Cell<bool>,
     publication_claimed: Cell<bool>,
+    clean_cloud_source: RefCell<Option<CleanCloudSourceProof>>,
     observed: RefCell<Option<(NamespaceDestinationReport, bool)>>,
     cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
 }
@@ -1047,6 +1056,64 @@ impl<'backend> FileRenameSession<'backend> {
         content::prepare_content_verified_file_rename(self, readback, source_content)
     }
 
+    #[cfg(windows)]
+    pub(crate) fn verify_clean_cloud_source_metadata(&self) -> Result<(), CloudError> {
+        let remote = &self.remote;
+        remote.ensure_authorized(&remote.intent)?;
+        let source = remote.source();
+        let expected = CleanCloudSourceProof {
+            scope: source.local.parent.scope.clone(),
+            authorization: source.local.parent.authorization,
+            remote: source.remote.clone(),
+        };
+        {
+            let proof = remote
+                .clean_cloud_source
+                .try_borrow()
+                .map_err(|_| refusal(ErrorKind::Io))?;
+            if let Some(proof) = proof.as_ref() {
+                return if *proof == expected {
+                    Ok(())
+                } else {
+                    Err(refusal(ErrorKind::Conflict))
+                };
+            }
+        }
+        if remote.attempted.get() || !strong(&source.remote.etag) {
+            return Err(refusal(ErrorKind::Conflict));
+        }
+        remote.preflight(&remote.intent)?;
+        remote.ensure_authorized(&remote.intent)?;
+        *remote
+            .clean_cloud_source
+            .try_borrow_mut()
+            .map_err(|_| refusal(ErrorKind::Io))? = Some(expected);
+        Ok(())
+    }
+    #[cfg(windows)]
+    pub(crate) fn prepare_clean_cloud_file_rename<'session>(
+        &'session self,
+        readback: &'session FileRenameReadback,
+    ) -> Result<VerifiedFileRenamePublication<'session, 'backend>, BackendError> {
+        let source = self.remote.source();
+        if !self
+            .remote
+            .clean_cloud_source
+            .try_borrow()
+            .map_err(|_| BackendError::Unavailable)?
+            .as_ref()
+            .is_some_and(|p| {
+                p.scope == source.local.parent.scope
+                    && p.authorization == source.local.parent.authorization
+                    && p.remote == source.remote
+            })
+            || readback.destination().remote != source.remote
+            || !strong(&source.remote.etag)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        publication::prepare(self, readback)
+    }
     #[cfg(windows)]
     pub(crate) fn backend(&self) -> &OpenCloudPlaceholderBackend {
         self.remote.backend

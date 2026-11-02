@@ -177,7 +177,7 @@ impl OpenCloudPlaceholderBackend {
         &self,
         binding: &FileMoveBinding,
         intent: &NamespaceIntent,
-        digest: [u8; 32],
+        digest: Option<[u8; 32]>,
         current: &dyn Fn(CapturedAuthorization) -> bool,
         run: impl FnOnce(&FileMoveSession<'_>) -> T,
     ) -> Result<T, BackendError> {
@@ -191,7 +191,10 @@ impl OpenCloudPlaceholderBackend {
             binding,
             intent: intent.clone(),
             current,
-            digest,
+            content: match digest {
+                Some(digest) => MoveContent::ResidentDigest(digest),
+                None => MoveContent::CleanCloudOnly,
+            },
             attempted: Cell::new(false),
             renamed: Cell::new(false),
             observed: RefCell::new(None),
@@ -202,12 +205,17 @@ impl OpenCloudPlaceholderBackend {
         Ok(run(&session))
     }
 }
+// No digest is manufactured for a clean cloud-only original revision.
+enum MoveContent {
+    ResidentDigest([u8; 32]),
+    CleanCloudOnly,
+}
 pub(crate) struct FileMoveSession<'a> {
     backend: &'a OpenCloudPlaceholderBackend,
     binding: &'a FileMoveBinding,
     intent: NamespaceIntent,
     current: &'a dyn Fn(CapturedAuthorization) -> bool,
-    digest: [u8; 32],
+    content: MoveContent,
     attempted: Cell<bool>,
     renamed: Cell<bool>,
     observed: RefCell<Option<NamespaceDestinationReport>>,
@@ -267,13 +275,26 @@ impl FileMoveSession<'_> {
             return Err(refusal(ErrorKind::Conflict));
         }
         let b = self.binding;
+        let digest = match self.content {
+            MoveContent::ResidentDigest(digest) => digest,
+            MoveContent::CleanCloudOnly => {
+                // Fresh ID/size/path/role/root checks surround this call. A
+                // metadata-only completion accepts ONLY the original strong
+                // revision; changed ETag is uncertain, never blind adoption.
+                return if etag == b.source_remote.etag && strong(&b.source_remote.etag) {
+                    self.ensure_authorized(&self.intent)
+                } else {
+                    Err(refusal(ErrorKind::Conflict))
+                };
+            }
+        };
         let expected = ContentProof {
             scope: b.parent.scope.clone(),
             auth_generation: b.context.token_generation,
             resource_id: b.source.remote_id.clone(),
             etag: etag.to_owned(),
             size: b.source.size,
-            sha256: self.digest,
+            sha256: digest,
         };
         let cell = if source {
             &b.source_content
@@ -304,12 +325,12 @@ impl FileMoveSession<'_> {
                 &b.source.remote_id,
                 etag,
                 b.source.size,
-                self.digest,
+                digest,
                 b.context,
                 Arc::clone(&b.cancelled),
             )?;
         if proof.bytes != b.source.size
-            || proof.sha256 != self.digest
+            || proof.sha256 != digest
             || proof.entry.id != b.source.remote_id
             || proof.entry.etag != etag
             || proof.entry.directory

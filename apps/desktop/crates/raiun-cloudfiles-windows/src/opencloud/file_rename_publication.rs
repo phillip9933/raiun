@@ -71,8 +71,6 @@ pub(super) fn prepare<'session, 'backend>(
         || scope.server_origin != expected_scope.server_origin
         || scope.root_volume_serial != expected_scope.root_volume_serial
         || scope.root_file_index != expected_scope.root_file_index
-        || scope.personal_space_id != expected_scope.space_id
-        || scope.personal_root_resource_id != expected_scope.root_resource_id
     {
         return Err(BackendError::Unavailable);
     }

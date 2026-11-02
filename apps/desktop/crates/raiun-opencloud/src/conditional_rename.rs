@@ -212,7 +212,13 @@ impl OpenCloudClient {
                 request.expected_source_id,
             )?
         } else {
-            source_url.clone()
+            super::conditional_delete::resource_delete_url(
+                &self.server,
+                &root_url,
+                &selected.id,
+                request.expected_root_id,
+                request.expected_source_id,
+            )?
         };
         let (builder, token) =
             self.request_with_context(method, &mutation_url, Some(request.context))?;

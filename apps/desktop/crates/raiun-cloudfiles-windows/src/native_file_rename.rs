@@ -90,6 +90,44 @@ fn same_root_entry(
         && snapshot.placeholder_state == CF_PLACEHOLDER_STATE_PLACEHOLDER
         && snapshot.file_size == size
 }
+/// Metadata-only admission is distinct from a resident-body digest. Positive
+/// CF IN_SYNC, cloud-only/partial shape and NoModifiedRanges are all required;
+/// a rename that clears IN_SYNC never acquires this capability.
+fn clean_cloud_only_entry(
+    snapshot: RootSnapshot,
+    root: RootIdentity,
+    file: LocalFileIdentity,
+    size: u64,
+) -> bool {
+    snapshot.identity.volume_serial == root.volume_serial
+        && snapshot.identity.file_index == file.file_index
+        && file.volume_serial == root.volume_serial
+        && snapshot.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0
+        && snapshot.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        && cleanup_cloud_reparse_tag(snapshot.reparse_tag)
+        && snapshot.placeholder_state & CF_PLACEHOLDER_STATE_PLACEHOLDER != 0
+        && snapshot.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC != 0
+        && snapshot.placeholder_state
+            & (CF_PLACEHOLDER_STATE_PARTIAL | CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK)
+            != 0
+        && snapshot.placeholder_state
+            & !(CF_PLACEHOLDER_STATE_PLACEHOLDER
+                | 0x4
+                | CF_PLACEHOLDER_STATE_IN_SYNC
+                | CF_PLACEHOLDER_STATE_PARTIAL
+                | CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK)
+            == 0
+        && snapshot.file_size == size
+}
+fn admitted_file_entry(
+    snapshot: RootSnapshot,
+    root: RootIdentity,
+    file: LocalFileIdentity,
+    size: u64,
+) -> bool {
+    same_root_entry(snapshot, root, file, size)
+        || clean_cloud_only_entry(snapshot, root, file, size)
+}
 fn same_snapshot(left: RootSnapshot, right: RootSnapshot) -> bool {
     left.identity == right.identity
         && left.file_attributes == right.file_attributes
@@ -163,7 +201,7 @@ pub(crate) struct PinnedFileRename<'connection> {
     file: LocalFileIdentity,
     source_path: PathBuf,
     destination_path: PathBuf,
-    digest: [u8; 32],
+    digest: Option<[u8; 32]>,
     size: u64,
     identity_update_attempted: bool,
 }
@@ -386,7 +424,7 @@ impl ConfiguredRootConnection {
         )
         .map_err(|_| Error::ConfiguredRootChanged)?;
         if !windows_paths_equal(&root_final, &root.path)
-            || !same_root_entry(
+            || !admitted_file_entry(
                 snapshot,
                 root.identity,
                 candidate.local_file_hint(),
@@ -553,7 +591,7 @@ impl ConfiguredRootConnection {
         )
         .map_err(|_| Error::ConfiguredRootChanged)?;
         if !windows_paths_equal(&root_final, &root.path)
-            || !same_root_entry(
+            || !admitted_file_entry(
                 snapshot,
                 root_identity,
                 source.local.local_file,
@@ -591,7 +629,7 @@ impl ConfiguredRootConnection {
         let protected_snapshot = root_snapshot(protected.raw)?;
         let basic = completion_basic_info(protected.raw)?;
         if !same_snapshot(protected_snapshot, snapshot)
-            || !same_root_entry(
+            || !admitted_file_entry(
                 protected_snapshot,
                 root_identity,
                 source.local.local_file,
@@ -618,9 +656,19 @@ impl ConfiguredRootConnection {
             .checked_duration_since(Instant::now())
             .ok_or(Error::EditRecoveryUnavailable)?;
         let cancellation = crate::CancellationToken::with_timeout(remaining);
-        let digest = native_digest(
-            &protected.digest_complete(source.remote.byte_len, Some(&cancellation))?,
-        )?;
+        let digest = if clean_cloud_only_entry(
+            protected_snapshot,
+            root_identity,
+            source.local.local_file,
+            source.remote.byte_len,
+        ) {
+            None
+        } else {
+            Some(native_digest(&protected.digest_complete(
+                source.remote.byte_len,
+                Some(&cancellation),
+            )?)?)
+        };
         let after_hash = root_snapshot(protected.raw)?;
         let after_basic = completion_basic_info(protected.raw)?;
         let after_usn = completion_usn(protected.raw, source.local.local_file.file_index)?;
@@ -729,8 +777,11 @@ impl<'connection> PinnedFileRename<'connection> {
             return Err(Error::ConfiguredRootChanged);
         }
         let snapshot = root_snapshot(self.protected.raw)?;
-        if !same_root_entry(snapshot, self.root, self.file, self.size)
-            || !same_snapshot(snapshot, self.destination_snapshot)
+        if !(if self.digest.is_some() {
+            same_root_entry(snapshot, self.root, self.file, self.size)
+        } else {
+            clean_cloud_only_entry(snapshot, self.root, self.file, self.size)
+        }) || !same_snapshot(snapshot, self.destination_snapshot)
             || !same_snapshot(root_snapshot(self._destination.0)?, snapshot)
         {
             return Err(Error::ConfiguredRootChanged);
@@ -786,6 +837,14 @@ impl FileRenameLocal for NativeFileRenameLocal<'_, '_, '_, '_> {
         self.pins
             .verify_native(self.pins.source_identity.as_bytes())
             .map_err(|_| conflict())?;
+        if self.pins.digest.is_none() {
+            self.session.verify_clean_cloud_source_metadata()?;
+            self.pins
+                .verify_native(self.pins.source_identity.as_bytes())
+                .map_err(|_| conflict())?;
+            return self.session.remote().ensure_authorized(intent);
+        }
+        let expected_digest = self.pins.digest.ok_or_else(conflict)?;
         let remaining = self
             .session
             .deadline()
@@ -800,7 +859,7 @@ impl FileRenameLocal for NativeFileRenameLocal<'_, '_, '_, '_> {
                 .map_err(|_| conflict())?,
         )
         .map_err(|_| conflict())?;
-        if digest != self.pins.digest {
+        if digest != expected_digest {
             return Err(conflict());
         }
         let (after_hash, after_hash_basic, after_hash_usn) = self
@@ -839,6 +898,13 @@ impl FileRenameLocal for NativeFileRenameLocal<'_, '_, '_, '_> {
     where
         F: FnOnce() -> Result<(), crate::streamed_store::StoreError>,
     {
+        if self.pins.digest.is_none() {
+            return self.record_clean_cloud_completion(intent, readback, record);
+        }
+        let expected_digest = self
+            .pins
+            .digest
+            .ok_or(FileRenameCompletionError::Unavailable)?;
         if !self.pins.matches(intent) || self.source_proof.is_none() {
             return Err(FileRenameCompletionError::Unavailable);
         }
@@ -853,7 +919,7 @@ impl FileRenameLocal for NativeFileRenameLocal<'_, '_, '_, '_> {
             .prepare_content_verified_file_rename(readback, proof)
             .map_err(|_| FileRenameCompletionError::Unavailable)?;
         if proof.byte_len() != self.pins.size
-            || publication.digest() != &self.pins.digest
+            || publication.digest() != &expected_digest
             || publication.byte_len() != self.pins.size
             || publication.source_identity() != self.pins.source_identity
         {
@@ -879,7 +945,7 @@ impl FileRenameLocal for NativeFileRenameLocal<'_, '_, '_, '_> {
                     .digest_complete(self.pins.size, Some(&cancellation))
                     .map_err(|_| FileRenameCompletionError::Unavailable)?;
                 if native_digest(&body).map_err(|_| FileRenameCompletionError::Unavailable)?
-                    != self.pins.digest
+                    != expected_digest
                     || before_usn <= 0
                 {
                     return Err(FileRenameCompletionError::Unavailable);
@@ -945,7 +1011,7 @@ impl FileRenameLocal for NativeFileRenameLocal<'_, '_, '_, '_> {
                     || after_hash_usn != after_usn
                     || native_digest(&after_body)
                         .map_err(|_| FileRenameCompletionError::Uncertain)?
-                        != self.pins.digest
+                        != expected_digest
                 {
                     return Err(FileRenameCompletionError::Uncertain);
                 }
@@ -975,7 +1041,7 @@ impl FileRenameLocal for NativeFileRenameLocal<'_, '_, '_, '_> {
                     || final_after_usn != final_usn
                     || native_digest(&final_body)
                         .map_err(|_| FileRenameCompletionError::Uncertain)?
-                        != self.pins.digest
+                        != expected_digest
                 {
                     return Err(FileRenameCompletionError::Uncertain);
                 }
@@ -986,6 +1052,96 @@ impl FileRenameLocal for NativeFileRenameLocal<'_, '_, '_, '_> {
                     FileRenameCompletionError::Uncertain
                 } else {
                     error
+                }
+            })
+    }
+}
+impl NativeFileRenameLocal<'_, '_, '_, '_> {
+    fn record_clean_cloud_completion<F>(
+        &mut self,
+        intent: &NamespaceIntent,
+        readback: &FileRenameReadback,
+        record: F,
+    ) -> Result<(), FileRenameCompletionError>
+    where
+        F: FnOnce() -> Result<(), crate::streamed_store::StoreError>,
+    {
+        use FileRenameCompletionError as E;
+        if !self.pins.matches(intent) || self.pins.digest.is_some() {
+            return Err(E::Unavailable);
+        }
+        self.admit(intent).map_err(|_| E::Unavailable)?;
+        let publication = self
+            .session
+            .prepare_clean_cloud_file_rename(readback)
+            .map_err(|_| E::Unavailable)?;
+        if publication.source_identity() != self.pins.source_identity {
+            return Err(E::Unavailable);
+        }
+        let identity = *publication.identity().as_bytes();
+        let called = Cell::new(false);
+        publication
+            .publish_file_rename_completion(|| {
+                let (before, basic, usn) = self
+                    .pins
+                    .verify_native(self.pins.source_identity.as_bytes())
+                    .map_err(|_| E::Unavailable)?;
+                if usn <= 0 {
+                    return Err(E::Unavailable);
+                }
+                let mut update_usn = usn;
+                self.pins.identity_update_attempted = true;
+                called.set(true);
+                // Identity-only update on the SAME exclusive protected file. No
+                // content/range/dehydrate/mark-in-sync flag and no body read.
+                let hr = unsafe {
+                    CfUpdatePlaceholder(
+                        self.pins.protected.protected,
+                        null(),
+                        identity.as_ptr().cast(),
+                        16,
+                        null(),
+                        0,
+                        0,
+                        &mut update_usn,
+                        null_mut(),
+                    )
+                };
+                if hr < 0 || update_usn <= 0 {
+                    return Err(E::Uncertain);
+                }
+                let (after, after_basic, after_usn) = self
+                    .pins
+                    .verify_native(&identity)
+                    .map_err(|_| E::Uncertain)?;
+                if !same_snapshot(before, after)
+                    || after_basic.creation_time != basic.creation_time
+                    || after_basic.last_access_time != basic.last_access_time
+                    || after_basic.last_write_time != basic.last_write_time
+                    || after_basic.file_attributes != basic.file_attributes
+                    || after_basic.change_time < basic.change_time
+                    || after_usn < usn
+                    || after_usn != update_usn
+                    || after_usn <= 0
+                {
+                    return Err(E::Uncertain);
+                }
+                record().map_err(E::Store)?;
+                let (last, last_basic, last_usn) = self
+                    .pins
+                    .verify_native(&identity)
+                    .map_err(|_| E::Uncertain)?;
+                if !same_snapshot(last, after) || last_basic != after_basic || last_usn != after_usn
+                {
+                    return Err(E::Uncertain);
+                }
+                Ok(())
+            })
+            .map_err(|e| {
+                if called.get() && e == E::Unavailable {
+                    E::Uncertain
+                } else {
+                    e
                 }
             })
     }
