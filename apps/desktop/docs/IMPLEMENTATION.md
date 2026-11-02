@@ -3706,3 +3706,36 @@ The composed source, including replacement saves and Windows vault creation,
 passed formatting and one normal Windows Agent/CLI compile (7.10 seconds).
 This is not a new package or native workflow result. The existing laptop
 installation remains the older unsigned `d8233c1` candidate.
+
+### Ordinary Windows moves and encrypted Copy — 3 November 2026
+
+Source `f8789e4` composes same-Space file moves, bounded clean directory subtree
+rename/move and clean cloud-only file metadata operations. Directory operations
+join at most 1,024 actual native, catalog and remote nodes, hold both parents and
+every child identity, stage all new protected rows before native updates and
+retain old rows until all native readbacks pass. Uncertain publication errors also
+retain original pins; duplicate ordinary resource aliases refuse catalog startup
+without rewriting evidence. A directory MOVE has the original source validator,
+overwrite disabled and captured parent conditions, with no aggregate subtree or
+final-parent transaction guarantee.
+
+Cloud-only file metadata operations require positive in-sync state, no modified
+ranges, original native identity/USN and unchanged remote ID/strong ETag/size.
+They read no content and do not mark unknown data clean. Resident-file moves reuse
+only exact live revision-bound content proofs, limiting full downloads to one
+source and one destination. A separate two-line publication correction retains
+the Personal account anchor while accepting the independently verified target
+Space/root.
+
+Explicit Windows cross-vault Copy reuses the shared 16-MiB copy protocol and
+existing jobs, with original installed routes, account/generation/root checks and
+cancel-before-join. Its Windows copy envelope stays in bounded zeroizing memory;
+only ciphertext reaches the private journal. Generic plaintext staging, offline
+writes, replay and retry paths are not enabled. Both source and destination are
+already unlocked online vaults, and Copy preserves the source.
+
+The combined normal Windows Agent/CLI compile, formatting and affected Linux SDK
+compile passed. No full suite or new native run was performed. These local
+sources have not replaced the installed `d8233c1` Windows candidate or the earlier
+Linux AppImage. Larger encrypted existing-file saves and the remaining encrypted
+operation gaps are implementation work, not additional test gates.

@@ -3,7 +3,7 @@
 ## Current checkpoint — 3 November 2026
 
 GUI and CLI share the canonical `worktrees/desktop-followup-ui` source. The
-current Windows runtime checkpoint is `0a93f7b`; older dated descriptions below
+current Windows runtime checkpoint is `f8789e4`; older dated descriptions below
 retain their historical scope and do not describe the newly activated factories.
 
 Normal Windows GUI and CLI mounts now connect ordinary file and folder creation
@@ -11,9 +11,13 @@ in Personal and writable, unencrypted Spaces through the existing two joined SDK
 workers. Clean-file deletion and same-folder ASCII file rename are also connected
 in those locations. Qualified empty-directory deletion is also connected: native,
 catalogue and remote checks must find no children, and an actual strong directory
-ETag is required. Same-parent empty-directory rename is also connected, using a
-conditional resource-ID MOVE and pinned native metadata completion. No recursive
-deletion or nonempty subtree rename is performed. Personal remains the account
+ETag is required. File and directory moves between parents in the same verified
+Space/root are connected. Directory rename/move admits at most 1,024 exact clean
+native/catalog/remote nodes; unknown or dirty descendants refuse. All new catalog
+rows precede native identity updates, and original rows remain until every native
+readback succeeds. Partial publication retains custody and unresolved history;
+ambiguous old/new resource aliases refuse restart authority. No recursive deletion
+is performed. Personal remains the account
 anchor; each target Space/root is separately qualified. These newer changes have
 not been packaged yet.
 Removal notifications are observation hints only: they cannot authorize a cloud
@@ -32,11 +36,21 @@ replacement strategy. Foreign placeholder identities and unqualified writers
 still refuse. Duplicate temporary-name hint retirement is an ASCII-only
 optimization and does not grant mutation authority.
 
+Clean cloud-only file rename/move has a separate metadata path with no body read
+or hydration. It requires positive native in-sync state, no modified ranges and
+the unchanged original remote ID, strong ETag and size. Changed or unknown state
+refuses clean completion. Resident-file moves retain content verification, with
+one source and one destination full-body read rather than repeated downloads.
+
 Explicit new encrypted-folder creation now uses the existing Windows secret
 broker, shared bound-parent creation/proof codec and native route publication.
 It neither remembers the creation password nor enables general encrypted writes.
 Partial remote folders are retained on failure. Positive native creation remains
-unverified.
+unverified. Explicit Copy between two already-unlocked online vaults is also
+integrated for one regular file up to 16 MiB. Windows stages its copy envelope in
+bounded zeroizing memory and persists ciphertext only. Source/destination proofs,
+cancel/join, verified readback and retained uncertain records remain separate from
+general encrypted writes and offline support.
 
 The composed source passed affected Windows compilation and formatting. The
 previous unsigned `d8233c1` installer passed its 0.7.4-to-0.7.5 same-user upgrade,
@@ -52,11 +66,11 @@ matrices from this phase. Only finished-candidate basic build/upgrade/startup,
 sign-in, one normal file workflow and essential preservation checks remain.
 Prior failures and the exact scope of reused evidence are retained.
 
-Nonempty folder rename, cross-parent moves, additional replacement strategies and broader
-encrypted Windows equivalents remain implementation gaps. Empty-folder deletion
-and rename are source-checked, not native acceptance. Ordinary same-Space file
-moves and explicit cross-vault file Copy are being implemented in separate isolated
-checkouts.
+Additional replacement strategies and broader encrypted Windows equivalents
+remain implementation gaps. The new ordinary operations and explicit encrypted
+Copy are source-checked, not native acceptance. Streaming larger existing-file
+encrypted saves is being implemented without changing legacy recovery records;
+new encrypted child operations and encrypted offline parity remain separate gaps.
 These are feature work, not missing exhaustive tests. Removing extra testing does
 not claim those capabilities are complete or authorize signing/publication.
 The shared OpenCloud conditional-create protocol has the same documented server
