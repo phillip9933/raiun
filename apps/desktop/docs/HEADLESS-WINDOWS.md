@@ -308,7 +308,10 @@ remains pending; source activation alone is not native acceptance.
 The shared GUI/CLI runtime at `3e912d9` now wires new files, new folders, clean-file
 deletion and same-folder ASCII file rename in Personal and writable, unencrypted
 Spaces. Fresh Space/root qualification stays separate from the Personal account
-anchor. Root and encrypted operations, directory rename/delete, cross-parent moves
+anchor. Qualified empty-directory deletion is also connected, with pinned native
+emptiness, no catalog descendants, a fresh empty remote listing and an actual
+strong directory ETag. It performs no recursive deletion. Root and encrypted
+operations, directory rename, cross-parent moves
 and atomic replacement saves are not implied by these file capabilities. These
 newer Spaces changes are source-checked, not yet packaged or natively exercised.
 The earlier `d8233c1` installer passed basic install/upgrade/startup checks; a fresh

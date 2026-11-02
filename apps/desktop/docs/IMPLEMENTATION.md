@@ -3636,9 +3636,9 @@ traversal and metadata; the verified Personal root still identifies the account.
 The conditional-delete SDK's earlier Personal-only gate was removed while its
 writable/encrypted/root/source checks remain. Final SDK send-admission callbacks
 stay local and perform no network reentry; remote qualification occurs beforehand.
-The exact composed Windows Agent/CLI compile and formatting passed before these
-last narrow guard corrections; their final combined check follows current folder
-work. No repeated full suite or expanded native matrix was run.
+The composed Windows Agent/CLI compile and formatting passed, including the last
+narrow guard corrections and the empty-directory work below. No repeated full
+suite or expanded native matrix was run.
 
 The unsigned `d8233c1` Windows installer built and passed the basic same-user
 0.7.4-to-0.7.5 upgrade with retained synthetic DPAPI/settings/documents and normal
@@ -3648,3 +3648,21 @@ Raiun; current sign-in and file workflow remain unverified, with no proven app
 regression and no further account/browser setup loop. Newer Spaces source has not
 been delivered over that installed candidate. Broader folder, replacement-save and
 encrypted parity remain implementation work, not extra test gates.
+
+### Empty Windows directory deletion — 3 November 2026
+
+Source `6d29b26` adds deletion of an ordinary empty managed directory in Personal
+or a writable, unencrypted Space. The original native directory handle and exact
+file identity must remain clean; handle-based enumeration, the protected catalog
+and fresh remote listing must all exclude children. A typed directory intent uses
+one resource-ID DELETE with the actual strong directory ETag. Missing validators,
+unknown contents or uncertain completion refuse or retain custody. This is the
+same conditional-operation qualification as the shared Linux SDK, not a new
+server transaction or a recursive-delete feature.
+
+Native acknowledgement and positive local completion remain separate. Completion
+uses the documented zero flags and the original captured object kind; directory
+kind is never inferred from a zero-byte body. Source `1efde93` exposes the unchanged
+read-only emptiness helper for the sibling directory-rename implementation.
+Formatting and one composed normal Windows Agent/CLI compile passed. No new tests,
+native execution or package are claimed by this source checkpoint.
