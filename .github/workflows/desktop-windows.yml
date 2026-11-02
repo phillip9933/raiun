@@ -1,6 +1,14 @@
 name: Desktop Windows candidate
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - work/desktop-0.7.5
+    paths:
+      - '.gitattributes'
+      - 'apps/desktop/**'
+      - 'design/raiun/**'
+      - '.github/workflows/desktop-windows.yml'
   pull_request:
     paths:
       - '.gitattributes'
@@ -15,6 +23,9 @@ defaults:
     shell: pwsh
 jobs:
   windows:
+    # This candidate builds once from its pushed head even while the draft
+    # cannot produce a merge ref. Other PR branches keep their original route.
+    if: github.event_name != 'pull_request' || github.head_ref != 'work/desktop-0.7.5'
     runs-on: windows-2022
     timeout-minutes: 60
     outputs:
