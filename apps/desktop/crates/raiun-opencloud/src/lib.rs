@@ -27,6 +27,7 @@ pub mod vault_create;
 mod conditional_delete;
 pub use conditional_delete::{ConditionalDeleteRequest, ConditionalDeleteResponse};
 
+mod conditional_directory_rename;
 mod conditional_move;
 pub use conditional_move::{ConditionalMoveRequest, ConditionalMoveResponse};
 mod conditional_rename;

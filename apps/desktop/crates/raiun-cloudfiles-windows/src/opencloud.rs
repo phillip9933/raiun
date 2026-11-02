@@ -13,11 +13,15 @@ mod file_delete;
 #[cfg(any(windows, test))]
 pub use file_delete::FileDeleteSession;
 #[cfg(windows)]
+mod directory_rename;
+#[cfg(windows)]
 mod file_move;
 #[cfg(windows)]
 pub(crate) use file_move::{FileMoveBinding, FileMoveSession};
 #[cfg(any(windows, test))]
 mod file_rename;
+#[cfg(windows)]
+pub(crate) use directory_rename::{DirectoryRenameBinding, DirectoryRenameSession};
 mod initial_save;
 #[cfg(any(windows, test))]
 mod namespace;
@@ -798,6 +802,9 @@ impl OpenCloudPlaceholderBackend {
             namespace_directories: HashMap::new(),
             location_labels: HashMap::new(),
         };
+        // Preserve staged originals on disk, but never restore either alias as
+        // fresh authority after a partially completed native subtree update.
+        let mut ordinary_targets = std::collections::HashSet::new();
         for binding in bindings {
             let identity = validate_catalog_binding(&catalog_scope, &binding)?;
             #[cfg(windows)]
@@ -815,6 +822,26 @@ impl OpenCloudPlaceholderBackend {
                     }
                 }
                 ProviderIdentityBinding::SpacesNamespace { .. } => {}
+            }
+            if let ProviderIdentityBinding::Directory {
+                space_id,
+                root_resource_id,
+                remote_id,
+                ..
+            }
+            | ProviderIdentityBinding::File {
+                space_id,
+                root_resource_id,
+                remote_id,
+                ..
+            } = &binding
+                && !ordinary_targets.insert((
+                    space_id.clone(),
+                    root_resource_id.clone(),
+                    remote_id.clone(),
+                ))
+            {
+                return Err(BackendError::Unavailable);
             }
             if identity_in_use(&loaded, identity) {
                 return Err(BackendError::Unavailable);

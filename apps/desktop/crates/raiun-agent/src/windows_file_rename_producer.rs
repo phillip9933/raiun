@@ -226,7 +226,7 @@ mod connected {
                 }
 
                 let outcome = connection
-                    .reconcile_fresh_empty_directory_rename(
+                    .reconcile_fresh_directory_rename(
                         backend,
                         pair,
                         observed.local_file,
