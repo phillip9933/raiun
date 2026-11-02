@@ -305,7 +305,7 @@ remains pending; source activation alone is not native acceptance.
 
 ## Current ordinary namespace source — 3 November 2026
 
-The shared GUI/CLI runtime at `0a93f7b` now wires new files, new folders, clean-file
+The shared GUI/CLI runtime at `f8789e4` now wires new files, new folders, clean-file
 deletion and same-folder ASCII file rename in Personal and writable, unencrypted
 Spaces. Fresh Space/root qualification stays separate from the Personal account
 anchor. Qualified empty-directory deletion is also connected, with pinned native
@@ -315,8 +315,13 @@ conditional resource-ID MOVE and pinned native identity completion. File deletio
 now follows positive local completion; a qualified new plain file at the original
 name instead uses retained streamed recovery and conditional original-resource
 write/readback. Foreign placeholder replacements and unqualified writers refuse.
-Root and encrypted operations, nonempty-directory rename, cross-parent moves and
-other editor replacement strategies remain outside these source capabilities.
+Clean file and bounded directory-subtree moves between parents in the same
+verified Space/root are also connected. Subtrees require at most 1,024 exact clean
+native/catalog/remote nodes. Clean cloud-only file metadata operations require
+positive native in-sync state, no modified ranges and unchanged strong remote
+revision, without downloading or hydrating the body. Root and encrypted
+operations, cross-Space moves and other editor replacement strategies remain
+outside these headless source capabilities.
 These newer changes are source-checked, not yet packaged or natively exercised.
 The earlier `d8233c1` installer passed basic install/upgrade/startup checks; a fresh
 laptop test account's unavailable browser route leaves its sign-in/file workflow
