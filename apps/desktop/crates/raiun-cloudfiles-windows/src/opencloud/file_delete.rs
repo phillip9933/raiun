@@ -398,10 +398,9 @@ impl FileDeleteRemote for LiveFileDelete<'_> {
                     context: self.context,
                 },
                 || {
-                    let result = self
-                        .check_parent(true)
-                        .and_then(|()| self.ensure_authorized(intent))
-                        .and_then(|()| before_send());
+                    // SDK preflight checks the remote target. Its final claim
+                    // hook must not perform network I/O or re-enter the client.
+                    let result = self.ensure_authorized(intent).and_then(|()| before_send());
                     if result.is_err() {
                         hook_refused.set(true);
                     }

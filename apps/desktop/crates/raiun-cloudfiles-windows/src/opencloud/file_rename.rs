@@ -925,13 +925,10 @@ impl FileRenameRemote for LiveFileRename<'_> {
                     context: self.context,
                 },
                 || {
-                    // SDK metadata proofs may outlive Space role/root or owner
-                    // authority. Recheck the target and original parent before
-                    // the native admission hook permits this one send.
-                    let result = self
-                        .check_parent(true)
-                        .and_then(|()| self.ensure_authorized(intent))
-                        .and_then(|()| before_send());
+                    // Remote qualification completed in caller/SDK preflight.
+                    // This hook must stay local: no network or client reentry
+                    // while consuming the one-use native admission claim.
+                    let result = self.ensure_authorized(intent).and_then(|()| before_send());
                     if result.is_err() {
                         local_hook_refused.set(true);
                     }
