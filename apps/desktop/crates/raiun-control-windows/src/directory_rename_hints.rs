@@ -62,6 +62,15 @@ pub enum RenameHintBatch<'a> {
 /// already-parsed batch. Only ASCII endpoint components are compared; any
 /// ambiguity, unsupported name, or incomplete pair invalidates the whole set.
 pub fn pair_rename_hints(batch: &NotificationBatch) -> RenameHintBatch<'_> {
+    pair_hints(batch, false)
+}
+/// Opt-in adjacent cross-parent pairs for consumers that independently prove
+/// both parents, original FileID and same account/Space/root. Hints still grant
+/// no MOVE or object authority; all original bounds/alias fences remain.
+pub fn pair_move_hints(batch: &NotificationBatch) -> RenameHintBatch<'_> {
+    pair_hints(batch, true)
+}
+fn pair_hints(batch: &NotificationBatch, cross_parent: bool) -> RenameHintBatch<'_> {
     let hints = match batch {
         NotificationBatch::RescanRequired(reason) => {
             return RenameHintBatch::RescanRequired(RenameHintReason::SourceRescan(*reason));
@@ -100,7 +109,10 @@ pub fn pair_rename_hints(batch: &NotificationBatch) -> RenameHintBatch<'_> {
                 {
                     return RenameHintBatch::RescanRequired(RenameHintReason::UnsupportedName);
                 }
-                if !same_parent(old_components, new_components) {
+                if !same_parent(old_components, new_components)
+                    && (!cross_parent
+                        || same_parent_ascii_case_insensitive(old_components, new_components))
+                {
                     let reason =
                         if same_parent_ascii_case_insensitive(old_components, new_components) {
                             RenameHintReason::CaseAmbiguousEndpoint
@@ -109,10 +121,11 @@ pub fn pair_rename_hints(batch: &NotificationBatch) -> RenameHintBatch<'_> {
                         };
                     return RenameHintBatch::RescanRequired(reason);
                 }
-                if old_components
-                    .last()
-                    .zip(new_components.last())
-                    .is_some_and(|(old_name, new_name)| old_name.eq_ignore_ascii_case(new_name))
+                if same_parent(old_components, new_components)
+                    && old_components
+                        .last()
+                        .zip(new_components.last())
+                        .is_some_and(|(old_name, new_name)| old_name.eq_ignore_ascii_case(new_name))
                 {
                     return RenameHintBatch::RescanRequired(RenameHintReason::CaseOnlyRename);
                 }

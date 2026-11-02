@@ -325,7 +325,7 @@ mod connected {
     };
     use raiun_control_windows::directory_notifications::{
         DirectoryAction, NotificationBatch, ObserverPoll,
-        directory_rename_hints::{RenameHintBatch, pair_rename_hints},
+        directory_rename_hints::{RenameHintBatch, pair_move_hints},
     };
     use std::{sync::Arc, time::Duration};
 
@@ -554,7 +554,7 @@ mod connected {
                     ObserverPoll::Idle | ObserverPoll::Pending => return Ok(()),
                     ObserverPoll::Stopped => return Err(HOLD),
                     ObserverPoll::Batch(batch) => {
-                        let RenameHintBatch::Pairs(pairs) = pair_rename_hints(batch) else {
+                        let RenameHintBatch::Pairs(pairs) = pair_move_hints(batch) else {
                             return Err(HOLD);
                         };
                         if pairs.len() > MAX_PAIRS {
@@ -656,7 +656,7 @@ mod connected {
             match work {
                 Work::Rename(index) => {
                     let RenameHintBatch::Pairs(pairs) =
-                        pair_rename_hints(self.batch.as_ref().ok_or(HOLD)?)
+                        pair_move_hints(self.batch.as_ref().ok_or(HOLD)?)
                     else {
                         return Err(HOLD);
                     };

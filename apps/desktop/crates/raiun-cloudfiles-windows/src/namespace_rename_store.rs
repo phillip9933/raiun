@@ -1035,7 +1035,24 @@ fn supported_intent(intent: &NamespaceIntent) -> bool {
         )
         && (source.local.object_kind != NamespaceObjectKind::Directory
             || source.remote.byte_len == 0)
-        && source.local.parent == destination.parent
+        && (source.local.parent == destination.parent
+            || (source.local.object_kind == NamespaceObjectKind::File
+                && source.local.parent.scope == destination.parent.scope
+                && source.local.parent.authorization == destination.parent.authorization
+                && source.local.parent.classification
+                    == crate::namespace_intent::StorageClassification::Ordinary
+                && destination.parent.classification
+                    == crate::namespace_intent::StorageClassification::Ordinary
+                && match destination
+                    .parent
+                    .local_components
+                    .first()
+                    .map(String::as_str)
+                {
+                    Some("Personal") => true,
+                    Some("Spaces") => destination.parent.local_components.len() >= 2,
+                    _ => false,
+                }))
         && match source
             .local
             .parent
@@ -1048,7 +1065,8 @@ fn supported_intent(intent: &NamespaceIntent) -> bool {
             _ => false,
         }
         && source.local.local_file == destination.local_file
-        && !source.local.name.eq_ignore_ascii_case(&destination.name)
+        && (source.local.parent != destination.parent
+            || !source.local.name.eq_ignore_ascii_case(&destination.name))
         && !source
             .remote
             .resource_id

@@ -12,6 +12,10 @@ pub(crate) mod file_create;
 mod file_delete;
 #[cfg(any(windows, test))]
 pub use file_delete::FileDeleteSession;
+#[cfg(windows)]
+mod file_move;
+#[cfg(windows)]
+pub(crate) use file_move::{FileMoveBinding, FileMoveSession};
 #[cfg(any(windows, test))]
 mod file_rename;
 mod initial_save;

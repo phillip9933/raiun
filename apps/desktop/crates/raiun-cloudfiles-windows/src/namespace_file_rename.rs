@@ -185,20 +185,39 @@ fn supported(intent: &NamespaceIntent) -> bool {
         )
         && (source.local.object_kind != NamespaceObjectKind::Directory
             || source.remote.byte_len == 0)
-        && source.local.parent == destination.parent
+        && (source.local.parent == destination.parent
+            || (source.local.object_kind == NamespaceObjectKind::File
+                && source.local.parent.scope == destination.parent.scope
+                && source.local.parent.authorization == destination.parent.authorization
+                && source.local.parent.classification
+                    == crate::namespace_intent::StorageClassification::Ordinary
+                && destination.parent.classification
+                    == crate::namespace_intent::StorageClassification::Ordinary
+                && match destination
+                    .parent
+                    .local_components
+                    .first()
+                    .map(String::as_str)
+                {
+                    Some("Personal") => true,
+                    Some("Spaces") => destination.parent.local_components.len() >= 2,
+                    _ => false,
+                }))
         && match parent.local_components.first().map(String::as_str) {
             Some("Personal") => true,
             Some("Spaces") => parent.local_components.len() >= 2,
             _ => false,
         }
         && source.local.local_file == destination.local_file
-        && !source.local.name.eq_ignore_ascii_case(&destination.name)
+        && (source.local.parent != destination.parent
+            || !source.local.name.eq_ignore_ascii_case(&destination.name))
         && source.remote.etag.starts_with('"')
         && source.remote.etag.ends_with('"')
         && !looks_like_url_resource_id(&source.remote.resource_id)
 }
 
-/// Attempt exactly one same-parent ordinary Personal or writable Space file rename.
+/// Attempt one ordinary file rename/move within one verified Space/root, or
+/// the existing same-parent empty-directory rename.
 ///
 /// The only accepted entry state is the exact authenticated intent at sequence
 /// zero with Pending remote/source-removal phases, no attention, and no local

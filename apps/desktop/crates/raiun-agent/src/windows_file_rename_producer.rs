@@ -18,19 +18,18 @@ impl Notice {
 }
 
 fn eligible(old: &[String], new: &[String]) -> bool {
-    old.len() >= 2
-        && old.len() <= 256
-        && old.len() == new.len()
-        && match old[0].as_str() {
-            "Personal" => true,
-            "Spaces" => old.len() >= 3,
-            _ => false,
-        }
-        && old[..old.len() - 1] == new[..new.len() - 1]
-        && !old
-            .last()
-            .unwrap()
-            .eq_ignore_ascii_case(new.last().unwrap())
+    fn file_path(parts: &[String]) -> bool {
+        (2..=256).contains(&parts.len())
+            && match parts[0].as_str() {
+                "Personal" => true,
+                "Spaces" => parts.len() >= 3,
+                _ => false,
+            }
+    }
+    file_path(old)
+        && file_path(new)
+        && old[0] == new[0]
+        && !(old.len() == new.len() && old.iter().zip(new).all(|(a, b)| a.eq_ignore_ascii_case(b)))
 }
 
 #[cfg(windows)]
@@ -220,6 +219,12 @@ mod connected {
                 .map_err(|_| HOLD)?;
             let current = |auth| self.current(auth, backend, root);
             if observed.kind == raiun_cloudfiles_windows::NamespaceEntryKind::CloudDirectory {
+                // General path eligibility now includes FILE moves. Directory
+                // operations remain restricted to their existing same-parent path.
+                if old[..old.len() - 1] != new[..new.len() - 1] {
+                    return Err(HOLD);
+                }
+
                 let outcome = connection
                     .reconcile_fresh_empty_directory_rename(
                         backend,
@@ -237,6 +242,22 @@ mod connected {
             }
             if observed.kind != raiun_cloudfiles_windows::NamespaceEntryKind::CloudFile {
                 return Err(HOLD);
+            }
+            if old[..old.len() - 1] != new[..new.len() - 1] {
+                let outcome = connection
+                    .reconcile_fresh_file_move(
+                        backend,
+                        pair,
+                        observed.local_file,
+                        self.auth,
+                        record_generation,
+                        &current,
+                    )
+                    .map_err(|_| HOLD)?;
+                if !current(self.auth) || outcome!=raiun_cloudfiles_windows::namespace_file_rename::FileRenameOutcome::Completed {
+                    return Err(HOLD);
+                }
+                return Ok(());
             }
             let candidate = backend
                 .file_rename_binding_candidate_from_hint(
@@ -274,11 +295,10 @@ mod tests {
         path.split('/').map(str::to_owned).collect()
     }
     #[test]
-    fn pair_scope_excludes_cross_parent_case_only_and_namespace_roots() {
+    fn pair_scope_excludes_case_only_and_namespace_roots() {
         assert!(eligible(&parts("Personal/a"), &parts("Personal/b")));
         for (a, b) in [
             ("Personal/a", "Personal/A"),
-            ("Personal/x/a", "Personal/y/b"),
             ("Spaces/a", "Spaces/b"),
             ("Personal", "Personal"),
         ] {

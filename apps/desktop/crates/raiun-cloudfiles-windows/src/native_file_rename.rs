@@ -1,4 +1,6 @@
 //! Narrow native admission and identity-only completion for same-parent file rename.
+#[path = "native_file_move.rs"]
+mod file_move;
 use super::*;
 use crate::FileRenameBindingCandidate;
 use crate::namespace_file_rename::{
