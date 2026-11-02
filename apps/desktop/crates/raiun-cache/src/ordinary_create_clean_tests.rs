@@ -449,6 +449,19 @@ fn bounded_scope_cleanup_does_not_touch_other_scope_or_live_reader() {
     .unwrap();
     let c = clean(&cache, &other, 3);
     let mut reader = cache.open_content(&s, &a.write.content).unwrap();
+    // Opening A refreshes its wall-clock access time. Pin the intended LRU
+    // order after that touch so crossing a second cannot make B the victim.
+    {
+        let db = cache.lock_db().unwrap();
+        assert_eq!(
+            db.execute(
+                "UPDATE contents SET last_accessed=CASE content_key WHEN ?1 THEN 1 WHEN ?2 THEN 2 END WHERE content_key IN (?1,?2)",
+                params![content_key(&s, &a.write.content), content_key(&s, &b.write.content)],
+            )
+            .unwrap(),
+            2
+        );
+    }
     assert_eq!(
         cache
             .evict_acknowledged_ordinary_create_bodies(&s, 0, 1)
