@@ -50,10 +50,12 @@ use crate::{
 };
 
 mod copy;
+mod streamed_overwrite;
 pub use copy::{
     VaultCopyOutcome, VaultCopyReconciliationReason, VaultCopyRequest, VaultCopyResolutionOutcome,
     VaultCopyResolutionReason,
 };
+pub use streamed_overwrite::MAX_GUARDED_VAULT_STREAMED_OVERWRITE_BYTES;
 
 const MAX_VAULT_PLAINTEXT_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
 const MAX_VAULT_PIN_ENTRIES: usize = 100_000;
@@ -169,10 +171,12 @@ struct ExistingOverwriteGuard<'a> {
     request: &'a VaultExistingOverwriteRequest<'a>,
     plaintext_len: u64,
     private_ciphertext_directory: &'a Path,
+    maximum_plaintext_len: u64,
+    expected_plaintext_sha256: Option<[u8; 32]>,
     dispatched: Cell<bool>,
 }
 impl ExistingOverwriteGuard<'_> {
-    fn check(&self, backend: &VaultBackend) -> Result<(), CloudError> {
+    fn check_local(&self, backend: &VaultBackend) -> Result<(), CloudError> {
         let request = self.request;
         if (request.cancelled)() {
             return Err(CloudError::new(
@@ -189,6 +193,11 @@ impl ExistingOverwriteGuard<'_> {
                 "encrypted overwrite generation changed",
             ));
         }
+        Ok(())
+    }
+    fn check(&self, backend: &VaultBackend) -> Result<(), CloudError> {
+        self.check_local(backend)?;
+        let request = self.request;
         // A busy registry is fail-closed, not an excuse to block a network
         // watchdog on local crypto. The short opaque lease is dropped here.
         backend
@@ -5205,6 +5214,8 @@ impl VaultBackend {
             request,
             plaintext_len,
             private_ciphertext_directory,
+            maximum_plaintext_len: MAX_GUARDED_VAULT_OVERWRITE_BYTES,
+            expected_plaintext_sha256: None,
             dispatched: Cell::new(false),
         };
         let result = (|| {
@@ -6044,16 +6055,33 @@ impl VaultBackend {
         };
         let ciphertext_path = temp.path().join("ciphertext.bin");
         if let Some(guard) = guarded {
-            self.sessions
-                .encrypt_file_transactional_at_epoch(
-                    &self.scope,
-                    guard.request.epoch,
-                    source,
-                    &ciphertext_path,
-                    plaintext_size,
-                    MAX_GUARDED_VAULT_OVERWRITE_BYTES,
-                )
-                .map_err(vault_error)?;
+            if let Some(expected) = guard.expected_plaintext_sha256 {
+                // Hash exactly the bytes consumed by the existing encoder, not
+                // a prior pass over an input that could subsequently change.
+                let mut verified = streamed_overwrite::DigestReader::new(source, self, guard);
+                self.sessions
+                    .encrypt_file_transactional_at_epoch(
+                        &self.scope,
+                        guard.request.epoch,
+                        &mut verified,
+                        &ciphertext_path,
+                        plaintext_size,
+                        guard.maximum_plaintext_len,
+                    )
+                    .map_err(vault_error)?;
+                verified.verify(expected)?;
+            } else {
+                self.sessions
+                    .encrypt_file_transactional_at_epoch(
+                        &self.scope,
+                        guard.request.epoch,
+                        source,
+                        &ciphertext_path,
+                        plaintext_size,
+                        guard.maximum_plaintext_len,
+                    )
+                    .map_err(vault_error)?;
+            }
             guard.check(self)?;
         } else {
             self.sessions
@@ -6132,9 +6160,15 @@ impl VaultBackend {
                 deadline: Instant::now() + total_timeout,
                 token_generation,
             });
+        let mutation_url = match guarded {
+            Some(guard) if guard.expected_plaintext_sha256.is_some() => {
+                self.streamed_overwrite_resource_url(&fresh_state, guard)?
+            }
+            _ => url,
+        };
         let (mut request, token) =
             self.client
-                .request_async_with_context(Method::PUT, &url, request_context)?;
+                .request_async_with_context(Method::PUT, &mutation_url, request_context)?;
         request = request
             .header(CONTENT_LENGTH, ciphertext_size)
             .header(CONTENT_TYPE, "application/octet-stream");
@@ -6495,7 +6529,12 @@ impl VaultBackend {
                 cache.preflight_ciphertext_space(ciphertext_len)?;
             }
         }
-        let url = self.target_url(state, virtual_path)?;
+        let url = match guarded {
+            Some(guard) if guard.expected_plaintext_sha256.is_some() => {
+                self.streamed_overwrite_resource_url(state, guard)?
+            }
+            _ => self.target_url(state, virtual_path)?,
+        };
         let destination_parent = destination
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -6595,7 +6634,7 @@ impl VaultBackend {
                         guard.request.epoch,
                         &mut input,
                         output,
-                        MAX_GUARDED_VAULT_OVERWRITE_BYTES,
+                        guard.maximum_plaintext_len,
                         before.size,
                     )
                     .map_err(vault_error)?

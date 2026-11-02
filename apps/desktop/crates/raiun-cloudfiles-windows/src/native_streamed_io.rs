@@ -105,9 +105,17 @@ mod windows {
             expected_len: u64,
             cancellation: Option<&CancellationToken>,
         ) -> Result<String, Error> {
+            self.digest_complete_with_stop(expected_len, cancellation, &|| false)
+        }
+        pub(in super::super) fn digest_complete_with_stop(
+            &self,
+            expected_len: u64,
+            cancellation: Option<&CancellationToken>,
+            stop: &dyn Fn() -> bool,
+        ) -> Result<String, Error> {
             digest_bounded(
                 expected_len,
-                || cancelled(cancellation),
+                || cancelled(cancellation) || stop(),
                 |offset, buffer, eof_probe| {
                     let mut read = PendingRead {
                         file: &self.raw,
@@ -115,7 +123,7 @@ mod windows {
                         buffer,
                         pending: false,
                     };
-                    read.read_at(offset, eof_probe, cancellation)
+                    read.read_at_with_stop(offset, eof_probe, cancellation, stop)
                 },
             )
         }
@@ -137,6 +145,24 @@ mod windows {
         .read_at(offset, eof, cancellation)
     }
 
+    /// Original large-vault handle opened explicitly OVERLAPPED by the native
+    /// close owner; never a legacy synchronous handle or a reopened pathname.
+    /// Existing PendingRead owns cancellation+actual drain before returning.
+    pub(in super::super) fn read_vault_capture_at(
+        source: &super::super::RawOwnedHandle,
+        offset: u64,
+        buffer: &mut [u8],
+        eof: bool,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<usize, Error> {
+        PendingRead {
+            file: &source.0,
+            io: CompletionIo::new()?,
+            buffer,
+            pending: false,
+        }
+        .read_at(offset, eof, cancellation)
+    }
     /// Borrows the Cf owner and caller buffer through actual I/O completion.
     /// This guard is never moved after submission; methods only borrow it.
     /// Its Drop also drains on unwind before either borrow can be released.
@@ -154,7 +180,16 @@ mod windows {
             eof_probe: bool,
             cancellation: Option<&CancellationToken>,
         ) -> Result<usize, Error> {
-            if cancelled(cancellation) {
+            self.read_at_with_stop(offset, eof_probe, cancellation, &|| false)
+        }
+        fn read_at_with_stop(
+            &mut self,
+            offset: u64,
+            eof_probe: bool,
+            cancellation: Option<&CancellationToken>,
+            stop: &dyn Fn() -> bool,
+        ) -> Result<usize, Error> {
+            if cancelled(cancellation) || stop() {
                 return Err(Error::EditRecoveryUnavailable);
             }
             let length =
@@ -188,7 +223,7 @@ mod windows {
             }
             self.pending = true;
             loop {
-                if cancelled(cancellation) {
+                if cancelled(cancellation) || stop() {
                     self.cancel_and_drain();
                     return Err(Error::EditRecoveryUnavailable);
                 }
@@ -252,7 +287,7 @@ mod windows {
 }
 
 #[cfg(windows)]
-pub(super) use windows::read_create_at;
+pub(super) use windows::{read_create_at, read_vault_capture_at};
 
 #[cfg(test)]
 mod tests {

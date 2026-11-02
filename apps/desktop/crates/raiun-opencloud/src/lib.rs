@@ -588,6 +588,7 @@ impl OpenCloudClient {
         let async_builder = proxy
             .apply_to_async_client_builder(reqwest::Client::builder())?
             .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
             .connect_timeout(connect_timeout)
             .read_timeout(async_body::BODY_IDLE_TIMEOUT)
             .timeout(request_timeout);

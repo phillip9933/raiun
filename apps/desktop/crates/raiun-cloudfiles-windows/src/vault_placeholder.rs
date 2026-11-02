@@ -187,7 +187,7 @@ fn eligible_existing_file(entry: &RemoteEntry) -> bool {
         && !entry.writable
         && !entry.id.is_empty()
         && entry.id.len() <= 4096
-        && entry.size <= crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64
+        && entry.size <= crate::vault_custody::MAX_STREAMED_VAULT_EDIT_BYTES
         && entry.path != "/"
         && entry.path.len() <= 4096
         && raiun_core::validate_remote_path(&entry.path).is_ok()
@@ -405,6 +405,70 @@ mod runtime {
             match result {
                 Ok(VaultExistingOverwriteOutcome::Verified(_))
                     if self.private.verify_path().is_err() || cancellation.is_cancelled() =>
+                {
+                    Ok(VaultExistingOverwriteOutcome::NeedsReconciliation {
+                        reason: raiun_core::backend::ErrorKind::Forbidden,
+                    })
+                }
+                other => other,
+            }
+        }
+
+        pub(crate) fn upload_existing_streamed_capture<R: std::io::Read>(
+            &self,
+            target: &crate::ExistingVaultUploadTarget,
+            source: &mut R,
+            edited_len: u64,
+            expected_sha: [u8; 32],
+            cancellation: &crate::vault_custody::VaultUploadCancellation<'_>,
+        ) -> Result<raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome, CloudError>
+        {
+            use raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome;
+            if cancellation.is_cancelled()
+                || edited_len > crate::vault_custody::MAX_STREAMED_VAULT_EDIT_BYTES
+            {
+                return Err(refused());
+            }
+            self.check_existing_saves().map_err(|_| refused())?;
+            if target.dispatch().is_none() {
+                return Err(refused());
+            }
+            let saved = self.saved(target.identity()).map_err(|_| refused())?;
+            self.binding.with_publication(|| {
+                // Local protected validation only; no source body reads, HTTP,
+                // auth/coordinator reentry or authority escaping this callback.
+                self.binding.validate_upload_target(target)?;
+                self.binding
+                    .verify_custody_context(self.custody.as_ref())
+                    .map_err(|_| refused())?;
+                if self.custody.root_identity() != target.root() || !target.matches_original(&saved)
+                {
+                    return Err(refused());
+                }
+                let catalogue = self.custody.catalogue_snapshot().map_err(|_| refused())?;
+                let mut matching = catalogue
+                    .iter()
+                    .filter(|row| &row.identity == target.identity());
+                let original = matching.next().ok_or_else(refused)?;
+                if matching.next().is_some() || !target.matches_original(&original.metadata) {
+                    return Err(refused());
+                }
+                Ok(())
+            })?; // Every route/token/epoch/custody/catalogue guard is dropped.
+            self.private.verify_path().map_err(|_| refused())?;
+            let result = self.binding.upload_existing_streamed_capture(
+                target,
+                source,
+                edited_len,
+                expected_sha,
+                &self.private,
+                cancellation,
+            );
+            match result {
+                Ok(VaultExistingOverwriteOutcome::Verified(_))
+                    if self.private.verify_path().is_err()
+                        || cancellation.is_cancelled()
+                        || self.check_existing_saves().is_err() =>
                 {
                     Ok(VaultExistingOverwriteOutcome::NeedsReconciliation {
                         reason: raiun_core::backend::ErrorKind::Forbidden,
@@ -813,11 +877,55 @@ mod runtime {
     }
     struct LocalExistingCapture<'a> {
         baseline: crate::vault_custody::ExistingVaultEditBaseline,
-        binding: &'a WindowsVaultReadBinding,
+        binding: &'a Arc<WindowsVaultReadBinding>,
+        stream_gate: Option<ExistingFileSaveGate>,
         custody: &'a dyn crate::vault_custody::VaultPublicationCustody,
         acknowledgement: crate::backend::ExistingCaptureAcknowledgement,
     }
     impl crate::ExistingVaultEditCapture for LocalExistingCapture<'_> {
+        fn stream_revocation(&self) -> Option<Arc<dyn Fn() -> bool + Send + Sync>> {
+            let binding = Arc::downgrade(self.binding);
+            let gate = self.stream_gate.clone()?;
+            Some(Arc::new(move || {
+                !gate.current() || binding.upgrade().is_none_or(|b| b.is_revoked())
+            }))
+        }
+        fn retain_streamed(
+            &self,
+            payload: crate::vault_custody::ExistingVaultStreamedEditPayload,
+            source: &mut dyn std::io::Read,
+            verify_source: &mut dyn FnMut() -> Result<(), BackendError>,
+            cancelled: &dyn Fn() -> bool,
+        ) -> Result<Option<Box<dyn crate::DeferredVaultCaptureNotification>>, BackendError>
+        {
+            self.acknowledgement.begin_attempt()?;
+            if payload.length <= crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64
+                || payload.length > crate::vault_custody::MAX_STREAMED_VAULT_EDIT_BYTES
+                || payload.root != self.baseline.root()
+                || payload.file.volume_serial != payload.root.volume_serial
+                || payload.file.file_index == 0
+                || payload.components.is_empty()
+                || payload.components.len() > 256
+                || payload.components.iter().map(String::len).sum::<usize>() > 32000
+                || self.stream_gate.as_ref().is_none_or(|gate| !gate.current())
+                || cancelled()
+            {
+                return Err(BackendError::Unavailable);
+            }
+            let result = self.custody.retain_existing_streamed_edit(
+                &self.baseline,
+                payload,
+                self.binding.capture_dispatch_stamp(),
+                source,
+                verify_source,
+                cancelled,
+            )?;
+            if cancelled() {
+                return Err(BackendError::Unavailable);
+            }
+            self.acknowledgement.acknowledge_retained();
+            Ok(result)
+        }
         fn baseline(&self) -> &crate::vault_custody::ExistingVaultEditBaseline {
             &self.baseline
         }
@@ -880,6 +988,7 @@ mod runtime {
                     let context = LocalExistingCapture {
                         baseline,
                         binding: &self.binding,
+                        stream_gate: self.existing_saves.clone(),
                         custody: self.custody.as_ref(),
                         acknowledgement: crate::backend::ExistingCaptureAcknowledgement::default(),
                     };

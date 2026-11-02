@@ -1900,6 +1900,160 @@ impl OpenCloudPlaceholderBackend {
         }
     }
 
+    /// Broker-only hot-route upload seam. Caller authenticates the exact retained
+    /// frame/index and holds its real registered-root pin and admitted attempt.
+    /// No HTTP runs under the account/root lease or a native publication fence.
+    /// Cancellation must use local pins/atomics only, never HTTP or backend reentry.
+    /// The portable result is historical remote evidence, never native ack.
+    #[cfg(windows)]
+    pub fn upload_existing_vault_streamed_capture<R: std::io::Read>(
+        &self,
+        target: &crate::ExistingVaultUploadTarget,
+        source: &mut R,
+        edited_len: u64,
+        expected_sha: [u8; 32],
+        provider_generation: Arc<AtomicU64>,
+        expected_provider_generation: u64,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<
+        raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome,
+        raiun_core::backend::CloudError,
+    > {
+        use raiun_core::backend::CloudError;
+        use raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome;
+        let refused =
+            || CloudError::new(ErrorKind::Forbidden, "live vault upload route unavailable");
+        let route = {
+            let _lease = self.lease_gate.read().map_err(|_| refused())?;
+            self.ensure_active().map_err(|_| refused())?;
+            if target.dispatch().is_none()
+                || target.owner() != &self.scope
+                || self.local_root_identity != Some(target.root())
+                || expected_provider_generation == 0
+                || provider_generation.load(Ordering::Acquire) != expected_provider_generation
+                || cancelled()
+            {
+                return Err(refused());
+            }
+            let route = self
+                .vault_for_identity(target.identity())
+                .map_err(|_| refused())?
+                .ok_or_else(refused)?;
+            if route.local_root() != target.root()
+                || route.space_id() != target.vault().space_id()
+                || route.root_resource_id() != target.vault().resource_id()
+                || route.root_path() != target.remote_root()
+            {
+                return Err(refused());
+            }
+            route
+        }; // The exact Arc is retained; the account/root lease is DROPPED here.
+        // SDK invokes this under an epoch crypto fence: pure atomics only.
+        let stop = || self.is_revoked() || route.backend().binding().is_revoked() || cancelled();
+        let cancellation = crate::vault_custody::VaultUploadCancellation {
+            generation: provider_generation,
+            expected: expected_provider_generation,
+            cancelled: &stop,
+        };
+        let result = route.backend().upload_existing_streamed_capture(
+            target,
+            source,
+            edited_len,
+            expected_sha,
+            &cancellation,
+        );
+        match result {
+            Ok(VaultExistingOverwriteOutcome::Verified(_)) if cancellation.is_cancelled() => {
+                Ok(VaultExistingOverwriteOutcome::NeedsReconciliation {
+                    reason: ErrorKind::Forbidden,
+                })
+            }
+            other => other,
+        }
+    }
+
+    /// Alternative owned live continuation; preserves the remote-only API.
+    #[cfg(windows)]
+    pub fn upload_existing_vault_streamed_capture_live<R: std::io::Read>(
+        self: &Arc<Self>,
+        target: crate::ExistingVaultUploadTarget,
+        source: &mut R,
+        edited_len: u64,
+        expected_sha: [u8; 32],
+        control: crate::VaultUploadControl,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<crate::VaultLiveUploadOutcome, raiun_core::backend::CloudError> {
+        use raiun_core::backend::CloudError;
+        use raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome;
+        let refused =
+            || CloudError::new(ErrorKind::Forbidden, "live upload continuation unavailable");
+        let route = {
+            let _lease = self.lease_gate.read().map_err(|_| refused())?;
+            self.ensure_active().map_err(|_| refused())?;
+            if target.dispatch().is_none()
+                || target.owner() != &self.scope
+                || self.local_root_identity != Some(target.root())
+                || control.is_cancelled()
+                || cancelled()
+            {
+                return Err(refused());
+            }
+            let route = self
+                .vault_for_identity(target.identity())
+                .map_err(|_| refused())?
+                .ok_or_else(refused)?;
+            if route.local_root() != target.root()
+                || route.space_id() != target.vault().space_id()
+                || route.root_resource_id() != target.vault().resource_id()
+                || route.root_path() != target.remote_root()
+            {
+                return Err(refused());
+            }
+            route
+        }; // No lease survives the HTTP delegation.
+        // Never add publication/token/session/registry acquisition here.
+        // Control and supplied cancellation must retain the original pure
+        // closed/job/generation/active predicates, not with_current callbacks.
+        let stop = || {
+            self.is_revoked()
+                || route.backend().binding().is_revoked()
+                || control.is_cancelled()
+                || cancelled()
+        };
+        let cancellation = crate::vault_custody::VaultUploadCancellation {
+            generation: control.generation(),
+            expected: control.expected(),
+            cancelled: &stop,
+        };
+        match route.backend().upload_existing_streamed_capture(
+            &target,
+            source,
+            edited_len,
+            expected_sha,
+            &cancellation,
+        )? {
+            VaultExistingOverwriteOutcome::Verified(verified) => {
+                if stop() {
+                    return Ok(crate::VaultLiveUploadOutcome::NeedsReconciliation {
+                        reason: ErrorKind::Forbidden,
+                    });
+                }
+                Ok(crate::VaultLiveUploadOutcome::Verified(
+                    crate::FreshVaultUpload {
+                        composite: Arc::clone(self),
+                        route,
+                        target: Box::new(target),
+                        verified: Box::new(verified),
+                        control,
+                    },
+                ))
+            }
+            VaultExistingOverwriteOutcome::NeedsReconciliation { reason } => {
+                Ok(crate::VaultLiveUploadOutcome::NeedsReconciliation { reason })
+            }
+        }
+    }
+
     #[cfg(windows)]
     pub(crate) fn with_vault_completion<T>(
         &self,

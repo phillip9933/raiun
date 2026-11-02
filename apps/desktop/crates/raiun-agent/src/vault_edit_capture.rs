@@ -63,6 +63,14 @@ pub struct Baseline {
     native_file: u64,
 }
 impl Baseline {
+    #[cfg(windows)]
+    pub(crate) fn unlock_epoch(&self) -> u64 {
+        self.unlock_epoch
+    }
+    #[cfg(windows)]
+    pub(crate) fn token_generation(&self) -> u64 {
+        self.token_generation
+    }
     pub fn new(
         opaque_file: [u8; 16],
         strong_etag: &str,
@@ -337,6 +345,15 @@ pub(crate) struct EncodedFrameRef {
     sha256: [u8; 32],
 }
 impl EncodedFrameRef {
+    #[cfg(windows)]
+    pub(crate) fn for_streamed_descriptor(raw: &[u8]) -> Result<Self> {
+        let reference = Self {
+            length: raw.len(),
+            sha256: Sha256::digest(raw).into(),
+        };
+        reference.validate()?;
+        Ok(reference)
+    }
     pub(crate) fn sha256(&self) -> [u8; 32] {
         self.sha256
     }

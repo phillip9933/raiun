@@ -899,7 +899,7 @@ impl WritableCleanupReceipt {
     }
 }
 fn hydration_full_on_disk(handle: Handle, length: u64) -> Result<bool, Error> {
-    if length > crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64 {
+    if length > crate::vault_custody::MAX_STREAMED_VAULT_EDIT_BYTES {
         return Err(Error::EditRecoveryUnavailable);
     }
     let mut ranges = [CfFileRange {
@@ -2051,7 +2051,7 @@ impl ConfiguredRootConnection {
                     return Err(Error::EditRecoveryUnavailable);
                 }
             } else {
-                if receipt.length > crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64
+                if receipt.length > crate::vault_custody::MAX_STREAMED_VAULT_EDIT_BYTES
                     || opened.placeholder_state & CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK != 0
                 {
                     return Err(Error::EditRecoveryUnavailable);
@@ -2062,9 +2062,23 @@ impl ConfiguredRootConnection {
                 if receipt.clean_hydration && !hydration_full_on_disk(file.raw, receipt.length)? {
                     return Err(Error::EditRecoveryUnavailable);
                 }
-                let mut bytes = Zeroizing::new(vec![0u8; receipt.length as usize]);
-                file.read_complete(&mut bytes)?;
-                if <[u8; 32]>::from(Sha256::digest(&bytes)) != receipt.sha256 {
+                let sha = if receipt.length > crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64 {
+                    {
+                        let cleanup_job = CancellationToken::for_recovery_job(
+                            crate::StreamedRecoveryPolicy::default(),
+                        );
+                        vault_stream_digest(&file.digest_complete_with_stop(
+                            receipt.length,
+                            Some(cleanup_job.cancellation()),
+                            &|| self.state.readiness.load(Ordering::Acquire) != CALLBACK_READY,
+                        )?)?
+                    }
+                } else {
+                    let mut bytes = Zeroizing::new(vec![0u8; receipt.length as usize]);
+                    file.read_complete(&mut bytes)?;
+                    <[u8; 32]>::from(Sha256::digest(&bytes))
+                };
+                if sha != receipt.sha256 {
                     return Err(Error::EditRecoveryUnavailable);
                 }
             }
@@ -2714,7 +2728,8 @@ impl ConfiguredRootConnection {
         if upload.root().volume_serial != root.identity.volume_serial
             || upload.root().file_index != root.identity.file_index
             || target.local_file().volume_serial != root.identity.volume_serial
-            || upload.remote_evidence().entry().size > crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64
+            || upload.remote_evidence().entry().size
+                > crate::vault_custody::MAX_STREAMED_VAULT_EDIT_BYTES
         {
             return Err(Error::ConfiguredRootChanged);
         }
@@ -2767,9 +2782,31 @@ impl ConfiguredRootConnection {
                 }
                 verify_completion_identity(file.raw, &upload.identity())?;
                 let saved_usn = completion_usn(file.raw, target.local_file().file_index)?;
-                let mut bytes = Zeroizing::new(vec![0u8; length as usize]);
-                file.read_complete(&mut bytes)?;
-                let sha: [u8; 32] = Sha256::digest(&bytes).into();
+                let mut legacy_bytes = if length <= crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64 {
+                    Some(Zeroizing::new(vec![0u8; length as usize]))
+                } else {
+                    None
+                };
+                let mut body_sha = || -> Result<[u8; 32], Error> {
+                    if let Some(bytes) = legacy_bytes.as_mut() {
+                        file.read_complete(bytes)?;
+                        Ok(<[u8; 32]>::from(Sha256::digest(&*bytes)))
+                    } else {
+                        if !hydration_full_on_disk(file.raw, length)? {
+                            return Err(Error::EditRecoveryUnavailable);
+                        }
+                        vault_stream_digest(&file.digest_complete_with_stop(
+                            length,
+                            Some(upload.control.read_cancellation()),
+                            &|| {
+                                upload.control.is_cancelled()
+                                    || upload.composite.is_revoked()
+                                    || upload.route.backend().binding().is_revoked()
+                            },
+                        )?)
+                    }
+                };
+                let sha = body_sha()?;
                 if sha != upload.remote_evidence().plaintext_sha256()
                     || !same_edit_snapshot(opened, root_snapshot(file.raw)?)
                     || completion_usn(file.raw, target.local_file().file_index)? != saved_usn
@@ -2923,8 +2960,7 @@ impl ConfiguredRootConnection {
                     return Err(Error::ConfiguredRootChanged);
                 }
                 verify_completion_identity(file.raw, &upload.identity())?;
-                file.read_complete(&mut bytes)?;
-                if <[u8; 32]>::from(Sha256::digest(&bytes)) != sha
+                if body_sha()? != sha
                     || !same_edit_snapshot(marked, root_snapshot(file.raw)?)
                     || completion_basic_info(file.raw)? != marked_basic
                     || completion_usn(file.raw, target.local_file().file_index)? != marked_usn
@@ -3026,8 +3062,7 @@ impl ConfiguredRootConnection {
                     return Err(Error::ConfiguredRootChanged);
                 }
                 verify_completion_identity(file.raw, &upload.identity())?;
-                file.read_complete(&mut bytes)?;
-                if <[u8; 32]>::from(Sha256::digest(&bytes)) != sha
+                if body_sha()? != sha
                     || !same_edit_snapshot(completed, root_snapshot(file.raw)?)
                     || completion_basic_info(file.raw)? != expected_basic
                     || completion_usn(file.raw, target.local_file().file_index)? != completed_usn
@@ -6275,12 +6310,21 @@ impl CallbackState {
             .recovery
             .as_ref()
             .is_some_and(|recovery| recovery.supports_streamed_capture());
-        let capture_kind = native_streamed_io::select_capture_kind(
-            snapshot.file_size,
-            streamed_requested,
-            vault_capture,
-        )
-        .map_err(|_| (9, 0, true))?;
+        let large_vault_stream =
+            vault_capture && snapshot.file_size > crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64;
+        let capture_kind = if large_vault_stream {
+            if snapshot.file_size > crate::vault_custody::MAX_STREAMED_VAULT_EDIT_BYTES {
+                return Err((61, 0, true));
+            }
+            native_streamed_io::CaptureKind::Vault
+        } else {
+            native_streamed_io::select_capture_kind(
+                snapshot.file_size,
+                streamed_requested,
+                vault_capture,
+            )
+            .map_err(|_| (9, 0, true))?
+        };
         let streamed_job = if capture_kind == native_streamed_io::CaptureKind::Streamed {
             // Snapshot the original epoch before capturing this job's clock.
             let epoch = self.backend.recovery_transfer_cancellation();
@@ -6317,7 +6361,7 @@ impl CallbackState {
                 FILE_SHARE_READ,
                 null(),
                 OPEN_EXISTING,
-                0,
+                if large_vault_stream { 0x4000_0000 } else { 0 }, // FILE_FLAG_OVERLAPPED
                 null_mut(),
             )
         };
@@ -6353,9 +6397,215 @@ impl CallbackState {
         if current_vault_capture != vault_capture {
             return Err((60, 0, true));
         }
+        if current_vault_capture && large_vault_stream {
+            let mut stream = Some(content_handle);
+            let mut failure = (62, 0, true);
+            let mut retained = false;
+            let mut notification = None;
+            let callback_result = self
+                .backend
+                .with_vault_edit_capture(identity, &mut |capture| {
+                    let result = (|| {
+                        let baseline = capture.baseline();
+                        if baseline.identity().as_slice() != identity
+                            || baseline.root().volume_serial != root_identity.volume_serial
+                            || baseline.root().file_index != root_identity.file_index
+                            || baseline.metadata().directory
+                            || baseline.token_generation() == 0
+                            || baseline.unlock_epoch() == 0
+                        {
+                            return Err((63, 0, true));
+                        }
+                        let handle = stream.take().ok_or((64, 0, true))?;
+                        let route_cancelled = capture.stream_revocation().ok_or((63, 0, true))?;
+                        let readiness = Arc::downgrade(&self.readiness);
+                        let backend = Arc::downgrade(&self.backend);
+                        let epoch = self.backend.recovery_transfer_cancellation();
+                        let job = CancellationToken::for_recovery_job(
+                            crate::StreamedRecoveryPolicy::default(),
+                        )
+                        .with_revocation_check(Arc::new(move || {
+                            route_cancelled()
+                                || readiness.upgrade().is_none_or(|ready| {
+                                    ready.load(Ordering::Acquire) != CALLBACK_READY
+                                })
+                                || backend
+                                    .upgrade()
+                                    .is_none_or(|backend| backend.recovery_job_revoked())
+                                || epoch.as_ref().is_some_and(|cancelled| cancelled())
+                        }));
+                        let cancelled = || job.is_stopped();
+                        let original_usn = completion_usn(handle.0, snapshot.identity.file_index)
+                            .map_err(|_| (63, 0, true))?;
+                        let original_basic =
+                            completion_basic_info(handle.0).map_err(|_| (63, 0, true))?;
+                        if original_usn <= 0
+                            || !hydration_full_on_disk(handle.0, snapshot.file_size)
+                                .map_err(|_| (63, 0, true))?
+                        {
+                            return Err((63, 0, true));
+                        }
+                        let mut source = VaultStreamCaptureReader {
+                            handle: &handle,
+                            offset: 0,
+                            length: snapshot.file_size,
+                            eof: false,
+                            sha: Sha256::new(),
+                            cancellation: job.cancellation(),
+                        };
+                        let mut chunk = Zeroizing::new([0u8; 64 * 1024]);
+                        loop {
+                            let count = source.read(&mut *chunk).map_err(|_| (64, 0, true))?;
+                            if count == 0 {
+                                break;
+                            }
+                        }
+                        if !source.eof || source.offset != snapshot.file_size {
+                            return Err((64, 0, true));
+                        }
+                        let sha256: [u8; 32] = source.sha.clone().finalize().into();
+                        // Explicit-offset seek-back on the SAME original overlapped
+                        // owner, never reopen/transfer a native pointer or source.
+                        source.offset = 0;
+                        source.eof = false;
+                        source.sha = Sha256::new();
+                        let components = pinned_entry_final
+                            .strip_prefix(&callback_guard.root_final_path)
+                            .ok()
+                            .and_then(|path| {
+                                path.components()
+                                    .map(|part| match part {
+                                        std::path::Component::Normal(value) => {
+                                            value.to_str().map(str::to_owned)
+                                        }
+                                        _ => None,
+                                    })
+                                    .collect::<Option<Vec<_>>>()
+                            })
+                            .filter(|parts| !parts.is_empty())
+                            .ok_or((65, 0, true))?;
+                        let file = LocalFileIdentity {
+                            volume_serial: snapshot.identity.volume_serial,
+                            file_index: snapshot.identity.file_index,
+                        };
+                        let post_proof = || -> Result<(), BackendError> {
+                            if cancelled()
+                                || !same_edit_snapshot(
+                                    root_snapshot(handle.0)
+                                        .map_err(|_| BackendError::Unavailable)?,
+                                    snapshot,
+                                )
+                                || completion_usn(handle.0, file.file_index)
+                                    .map_err(|_| BackendError::Unavailable)?
+                                    != original_usn
+                                || completion_basic_info(handle.0)
+                                    .map_err(|_| BackendError::Unavailable)?
+                                    != original_basic
+                                || !modified_ranges_for_handle(handle.0)
+                                    .map_err(|_| BackendError::Unavailable)?
+                                || !hydration_full_on_disk(handle.0, snapshot.file_size)
+                                    .map_err(|_| BackendError::Unavailable)?
+                                || native_namespace_directory::opaque_directory_identity(handle.0)
+                                    .map_err(|_| BackendError::Unavailable)?
+                                    != baseline.identity()
+                            {
+                                return Err(BackendError::Unavailable);
+                            }
+                            let post = callback_path(
+                                root_path,
+                                info.volume_dos_name,
+                                info.normalized_path,
+                                root_identity,
+                                info.file_id as u64,
+                                CallbackSizePolicy::Exact(snapshot.file_size),
+                                &self.last_close_path_common_prefix_bytes,
+                            )
+                            .map_err(|_| BackendError::Unavailable)?;
+                            if !same_edit_snapshot(post.snapshot, snapshot)
+                                || !windows_paths_equal(
+                                    &post.root_final_path,
+                                    &callback_guard.root_final_path,
+                                )
+                                || !windows_paths_equal(
+                                    &final_path_for_handle(handle.0)
+                                        .map_err(|_| BackendError::Unavailable)?,
+                                    &pinned_entry_final,
+                                )
+                            {
+                                return Err(BackendError::Unavailable);
+                            }
+                            Ok(())
+                        };
+                        post_proof().map_err(|_| (66, 0, true))?;
+                        let checks = std::cell::Cell::new(0usize);
+                        let mut verify_source = || {
+                            post_proof()?;
+                            checks.set(checks.get() + 1);
+                            Ok(())
+                        };
+                        notification = capture
+                            .retain_streamed(
+                                crate::vault_custody::ExistingVaultStreamedEditPayload {
+                                    root: crate::ConfiguredRootIdentity {
+                                        volume_serial: root_identity.volume_serial,
+                                        file_index: root_identity.file_index,
+                                    },
+                                    file,
+                                    components: components.clone(),
+                                    length: snapshot.file_size,
+                                    sha256,
+                                },
+                                &mut source,
+                                &mut verify_source,
+                                &cancelled,
+                            )
+                            .map_err(|_| (66, 0, true))?;
+                        if checks.get() != 1
+                            || !source.eof
+                            || source.offset != snapshot.file_size
+                            || <[u8; 32]>::from(source.sha.clone().finalize()) != sha256
+                        {
+                            return Err((66, 0, true));
+                        }
+                        post_proof().map_err(|_| (66, 0, true))?;
+                        let mut dirty = self.vault_dirty.lock().map_err(|_| (68, 0, true))?;
+                        self.writable_cleanup
+                            .lock()
+                            .map_err(|_| (68, 0, true))?
+                            .invalidate(&baseline.identity());
+                        dirty
+                            .record(
+                                baseline.identity(),
+                                file,
+                                snapshot.file_size,
+                                sha256,
+                                components,
+                            )
+                            .map_err(|_| (68, 0, true))?;
+                        retained = true;
+                        Ok(())
+                    })();
+                    result.map_err(|error| {
+                        retained = false;
+                        notification = None;
+                        failure = error;
+                        BackendError::Unavailable
+                    })
+                });
+            if callback_result.is_ok() && !retained {
+                failure = (67, 0, true);
+            }
+            let notification = crate::backend::finish_vault_capture_notification(
+                callback_result,
+                retained,
+                notification,
+            )
+            .map_err(|_| failure)?;
+            return Ok(ModifiedCloseCapture::VaultRetained(notification));
+        }
         if current_vault_capture {
-            // The legacy global cap still applies to every vault capture.
-            // Large ordinary opt-in above never raises this policy.
+            // The legacy body API retains its original cap. Larger vault
+            // captures use the preceding protected streamed branch.
             if snapshot.file_size > MAX_REQUEST_BYTES {
                 return Err((61, 0, true));
             }
@@ -9840,6 +10090,67 @@ fn decode_file_usn_record(bytes: &[u8], expected_file_id: u64) -> Option<i64> {
         return None;
     }
     Some(usn)
+}
+
+// Native-only original OVERLAPPED encrypted-source owner. Reader borrows are
+// lexical; PendingRead drains before any buffer or handle can be released.
+struct VaultStreamCaptureReader<'a> {
+    handle: &'a RawOwnedHandle,
+    offset: u64,
+    length: u64,
+    eof: bool,
+    sha: Sha256,
+    cancellation: &'a CancellationToken,
+}
+impl std::io::Read for VaultStreamCaptureReader<'_> {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        if self.cancellation.is_cancelled() || self.cancellation.is_expired() {
+            return Err(std::io::Error::other("vault stream capture cancelled"));
+        }
+        let eof = self.offset == self.length;
+        let bound = if eof {
+            1
+        } else {
+            output
+                .len()
+                .min(64 * 1024)
+                .min((self.length - self.offset) as usize)
+        };
+        let count = native_streamed_io::read_vault_capture_at(
+            self.handle,
+            self.offset,
+            &mut output[..bound],
+            eof,
+            Some(self.cancellation),
+        )
+        .map_err(|_| std::io::Error::other("vault source read refused"))?;
+        if (eof && count != 0) || (!eof && count == 0) {
+            return Err(std::io::Error::other("vault source length changed"));
+        }
+        self.eof |= eof;
+        self.offset += count as u64;
+        self.sha.update(&output[..count]);
+        Ok(count)
+    }
+}
+fn vault_stream_digest(value: &str) -> Result<[u8; 32], Error> {
+    if value.len() != 64 {
+        return Err(Error::EditRecoveryUnavailable);
+    }
+    let mut digest = [0u8; 32];
+    for (i, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = (pair[0] as char)
+            .to_digit(16)
+            .ok_or(Error::EditRecoveryUnavailable)?;
+        let low = (pair[1] as char)
+            .to_digit(16)
+            .ok_or(Error::EditRecoveryUnavailable)?;
+        digest[i] = ((high << 4) | low) as u8;
+    }
+    Ok(digest)
 }
 
 type PlaceholderRecoveryRead = Result<(Zeroizing<Vec<u8>>, RootSnapshot), (usize, i32)>;

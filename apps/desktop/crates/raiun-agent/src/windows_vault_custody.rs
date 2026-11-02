@@ -8,6 +8,7 @@ use super::{
     vault_edit_capture as capture, vault_edit_disposition as disposition, vault_edit_retention,
     vault_edit_upload as upload,
     windows_vault_close_worker::{FreshVaultCloseJob, VaultClosePublisher},
+    windows_vault_streamed_edit::{self as streamed, RetainedBody},
 };
 use raiun_cloudfiles_windows::vault_custody::{
     ExistingVaultEditBaseline, ExistingVaultEditPayload, VaultCatalogueEntry, VaultHydrationIntent,
@@ -126,6 +127,53 @@ impl capture::Store for CaptureStore {
     }
 }
 
+fn read_capture_body(
+    store: &ProtectedStore,
+    scope: &Scope,
+    reference: &vault_custody::CaptureRef,
+) -> Result<RetainedBody> {
+    read_capture_body_with_cancel(store, scope, reference, &|| false)
+}
+fn read_capture_body_with_cancel(
+    store: &ProtectedStore,
+    scope: &Scope,
+    reference: &vault_custody::CaptureRef,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<RetainedBody> {
+    if cancelled() {
+        return Err(refused());
+    }
+    if reference.is_streamed() {
+        let binding = streamed::metadata_binding(scope, reference.id())?;
+        let raw = store.0.load_capture(&binding)?.ok_or_else(refused)?;
+        Ok(RetainedBody::Streamed(streamed::reopen_with_cancel(
+            &raw, scope, reference, cancelled,
+        )?))
+    } else {
+        let id = capture::CaptureId::new(reference.id()).map_err(|_| refused())?;
+        let retained = capture::reopen_for_recovery(&CaptureStore(store.0.clone()), scope, &id)
+            .map_err(|_| refused())?;
+        if retained.encoded_frame_ref() != reference.frame() {
+            return Err(refused());
+        }
+        Ok(RetainedBody::Legacy(retained))
+    }
+}
+fn body_descriptor(
+    scope: &Scope,
+    reference: &vault_custody::CaptureRef,
+    hydration: &vault_custody::Hydration,
+    retained: &RetainedBody,
+) -> disposition::Result<disposition::DispositionDescriptor> {
+    match retained {
+        RetainedBody::Legacy(v) => {
+            disposition::DispositionDescriptor::from_capture(scope, reference, hydration, v)
+        }
+        RetainedBody::Streamed(v) => disposition::DispositionDescriptor::from_streamed_capture(
+            scope, reference, hydration, v,
+        ),
+    }
+}
 impl super::root_manifest::Store for ProtectedStore {
     fn load(
         &self,
@@ -214,14 +262,9 @@ impl vault_custody::Store for ProtectedStore {
         scope: &Scope,
         row: &vault_custody::completed_history::CompletedRow,
     ) -> std::result::Result<(), vault_custody::Error> {
-        let id =
-            capture::CaptureId::new(row.capture.id()).map_err(|_| vault_custody::Error::Invalid)?;
-        let retained = capture::reopen_for_recovery(&CaptureStore(Arc::clone(&self.0)), scope, &id)
+        let retained = read_capture_body(self, scope, &row.capture)
             .map_err(|_| vault_custody::Error::Persistence)?;
-        if retained.encoded_frame_ref() != row.capture.frame() {
-            return Err(vault_custody::Error::Foreign);
-        }
-        let descriptor = disposition::DispositionDescriptor::from_capture(
+        let descriptor = body_descriptor(
             scope,
             &row.capture,
             row.disposition.descriptor().hydration(),
@@ -510,17 +553,11 @@ impl WindowsVaultCustody {
                 has_more = true;
                 break;
             }
-            let id = capture::CaptureId::new(reference.id()).map_err(|_| refused())?;
-            let retained =
-                capture::reopen_for_recovery(&CaptureStore(Arc::clone(&self.store.0)), &scope, &id)
-                    .map_err(|_| refused())?;
-            if retained.encoded_frame_ref() != reference.frame() {
-                return Err(refused());
-            }
+            let retained = read_capture_body(&self.store, &scope, reference)?;
             page.push(RecoveryCaptureMetadata {
                 capture_id: reference.id().to_owned(),
                 remote_path: reference.entry().root_relative_path().to_owned(),
-                body_len: retained.bytes_for_recovery().len(),
+                body_len: usize::try_from(retained.len()).map_err(|_| refused())?,
             });
         }
         self.recovery_references(owner, &scope)?;
@@ -539,7 +576,8 @@ impl WindowsVaultCustody {
         root_resource_id: &str,
         remote_root: &str,
         capture_id: &str,
-    ) -> Result<capture::RetainedEdit> {
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<RetainedBody> {
         if *owner != self.owner {
             return Err(refused());
         }
@@ -567,13 +605,7 @@ impl WindowsVaultCustody {
         if matching.next().is_some() {
             return Err(refused());
         }
-        let id = capture::CaptureId::new(capture_id).map_err(|_| refused())?;
-        let retained =
-            capture::reopen_for_recovery(&CaptureStore(Arc::clone(&self.store.0)), &scope, &id)
-                .map_err(|_| refused())?;
-        if retained.encoded_frame_ref() != reference.frame() {
-            return Err(refused());
-        }
+        let retained = read_capture_body_with_cancel(&self.store, &scope, reference, cancelled)?;
         self.recovery_references(owner, &scope)?;
         Ok(retained)
     }
@@ -879,16 +911,16 @@ impl VaultPublishedHistorySource for WindowsVaultCustody {
                 // Authenticate each full frame sequentially before returning
                 // reconstructed intents. Missing/corrupt history is never healed.
                 for reference in child.all_captures_for_reconciliation() {
-                    let id = capture::CaptureId::new(reference.id()).map_err(|_| refused())?;
-                    let retained = capture::reopen_for_recovery(
-                        &CaptureStore(Arc::clone(&self.store.0)),
-                        scope,
-                        &id,
-                    )
+                    let retained = read_capture_body(&self.store, scope, &reference)?;
+                    match retained {
+                        RetainedBody::Legacy(v) => {
+                            child.validate_reconstructed_disposition(&reference, &v)
+                        }
+                        RetainedBody::Streamed(v) => {
+                            child.validate_reconstructed_streamed_disposition(&reference, &v)
+                        }
+                    }
                     .map_err(|_| refused())?;
-                    child
-                        .validate_reconstructed_disposition(&reference, &retained)
-                        .map_err(|_| refused())?;
                 }
                 for row in history {
                     if intents.len() == 100_000
@@ -1010,9 +1042,19 @@ impl UploadLedger {
     pub(super) fn reference(&self) -> &vault_custody::CaptureRef {
         &self.reference
     }
-    pub(super) fn initialize_attempt(
+    pub(super) fn initialize_attempt_from_body(
         &self,
+        body: &RetainedBody,
     ) -> std::result::Result<upload::UploadAttempt, upload::Error> {
+        if self.reference.is_streamed() {
+            return upload::UploadAttempt::initialize_streamed(
+                self,
+                &self.scope,
+                &self.reference,
+                self.reference.entry(),
+                body.streamed().ok_or(upload::Error::Foreign)?,
+            );
+        }
         upload::UploadAttempt::initialize(
             self,
             &CaptureStore(Arc::clone(&self.store.0)),
@@ -1021,9 +1063,26 @@ impl UploadLedger {
             self.reference.entry(),
         )
     }
+    #[cfg(test)]
     pub(super) fn reopen_attempt(
         &self,
     ) -> std::result::Result<upload::UploadAttempt, upload::Error> {
+        let body = self.read_body()?;
+        self.reopen_attempt_from_body(&body)
+    }
+    pub(super) fn reopen_attempt_from_body(
+        &self,
+        body: &RetainedBody,
+    ) -> std::result::Result<upload::UploadAttempt, upload::Error> {
+        if self.reference.is_streamed() {
+            return upload::UploadAttempt::reopen_streamed(
+                self,
+                &self.scope,
+                &self.reference,
+                self.reference.entry(),
+                body.streamed().ok_or(upload::Error::Foreign)?,
+            );
+        }
         upload::UploadAttempt::reopen(
             self,
             &CaptureStore(Arc::clone(&self.store.0)),
@@ -1032,12 +1091,10 @@ impl UploadLedger {
             self.reference.entry(),
         )
     }
-    pub(super) fn disposition_descriptor(
+    fn disposition_descriptor_from_body(
         &self,
+        retained: &RetainedBody,
     ) -> disposition::Result<disposition::DispositionDescriptor> {
-        let retained = self
-            .read_body()
-            .map_err(|_| disposition::Error::Persistence)?;
         self.with_ledger(|_| {
             let child = Custody::reopen(&self.store, &self.scope)
                 .map_err(|_| upload::Error::Persistence)?;
@@ -1047,9 +1104,13 @@ impl UploadLedger {
                 .ok_or(upload::Error::Missing)?;
             upload::bound_readback_evidence(&raw, &self.scope, &self.reference)?
                 .ok_or(upload::Error::Missing)?;
-            child
-                .disposition_descriptor(&self.reference, &retained)
-                .map_err(|_| upload::Error::Persistence)
+            match retained {
+                RetainedBody::Legacy(v) => child.disposition_descriptor(&self.reference, v),
+                RetainedBody::Streamed(v) => {
+                    child.streamed_disposition_descriptor(&self.reference, v)
+                }
+            }
+            .map_err(|_| upload::Error::Persistence)
         })
         .map_err(|_| disposition::Error::Persistence)
     }
@@ -1100,8 +1161,11 @@ impl UploadLedger {
     }
     /// Structural target only. Parent must first compare the complete current
     /// canonical account. Native prepare/complete proofs provide live authority.
-    pub(super) fn local_completion_store(self) -> disposition::Result<LocalDisposition> {
-        let descriptor = self.disposition_descriptor()?;
+    pub(super) fn local_completion_store_from_body(
+        self,
+        retained: &RetainedBody,
+    ) -> disposition::Result<LocalDisposition> {
+        let descriptor = self.disposition_descriptor_from_body(retained)?;
         let target = raiun_cloudfiles_windows::VaultLocalCompletionTarget::new(
             descriptor.scope_binding()?,
             descriptor.reference().id().into(),
@@ -1121,21 +1185,20 @@ impl UploadLedger {
             prepared: None,
         })
     }
-    pub(super) fn read_body(&self) -> std::result::Result<capture::RetainedEdit, upload::Error> {
+    #[cfg(test)]
+    pub(super) fn read_body(&self) -> std::result::Result<RetainedBody, upload::Error> {
+        self.read_body_cancelled(&|| false)
+    }
+    pub(super) fn read_body_cancelled(
+        &self,
+        cancelled: &dyn Fn() -> bool,
+    ) -> std::result::Result<RetainedBody, upload::Error> {
         self.with_ledger(|ledger| {
             let key = upload::locator(&self.scope, &self.reference)?;
             upload::Store::load(ledger, &key)?;
-            let id =
-                capture::CaptureId::new(self.reference.id()).map_err(|_| upload::Error::Invalid)?;
-            let retained = capture::reopen_for_recovery(
-                &CaptureStore(Arc::clone(&self.store.0)),
-                &self.scope,
-                &id,
-            )
-            .map_err(|_| upload::Error::Persistence)?;
-            if retained.encoded_frame_ref() != self.reference.frame() {
-                return Err(upload::Error::Foreign);
-            }
+            let retained =
+                read_capture_body_with_cancel(&self.store, &self.scope, &self.reference, cancelled)
+                    .map_err(|_| upload::Error::Persistence)?;
             upload::Store::load(ledger, &key)?;
             Ok(retained)
         })
@@ -1338,6 +1401,213 @@ impl VaultPublicationCustody for View {
         if result.is_err() {
             // Includes uncertainty after publication. Retain every protected
             // row/body and native dirty file; never acknowledge or roll back.
+            self.child
+                .failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
+    }
+    fn retain_existing_streamed_edit(
+        &self,
+        baseline: &ExistingVaultEditBaseline,
+        payload: raiun_cloudfiles_windows::vault_custody::ExistingVaultStreamedEditPayload,
+        dispatch: FreshVaultCaptureDispatch,
+        source: &mut dyn std::io::Read,
+        verify_source: &mut dyn FnMut() -> std::result::Result<(), BackendError>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> std::result::Result<Option<Box<dyn DeferredVaultCaptureNotification>>, BackendError> {
+        let result = (|| {
+            self.verify_context(baseline.owner(), baseline.vault(), baseline.remote_root())?;
+            if cancelled()
+                || baseline.root() != self.root
+                || payload.root != self.root
+                || payload.file.volume_serial != self.root.volume_serial
+                || payload.file.file_index == 0
+                || payload.length > streamed::MAX_BODY_BYTES
+                || payload.components.is_empty()
+                || payload.components.len() > 256
+                || payload.components.iter().map(String::len).sum::<usize>() > 32000
+                || baseline.metadata().writable
+            {
+                return Err(BackendError::Unavailable);
+            }
+            let root = RootBinding::new(
+                &self.account,
+                self.root.volume_serial,
+                self.root.file_index,
+                &self.registration,
+            )
+            .map_err(unavailable)?;
+            let mut manifest = RootManifest::reopen(&self.store, &root).map_err(unavailable)?;
+            if !manifest
+                .scopes_for_reconciliation()
+                .map_err(unavailable)?
+                .contains(&self.scope)
+            {
+                return Err(BackendError::Unavailable);
+            }
+            manifest.verify_current(&self.store).map_err(unavailable)?;
+            let mut cached = self.child.custody.lock().map_err(unavailable)?;
+            if cancelled() {
+                return Err(BackendError::Unavailable);
+            }
+            self.verify_context(baseline.owner(), baseline.vault(), baseline.remote_root())?;
+            let mut child = Custody::reopen(&self.store, &self.scope).map_err(unavailable)?;
+            let metadata = baseline.metadata();
+            let expected = Entry::new(
+                baseline.identity(),
+                &metadata.id,
+                &metadata.path,
+                &metadata.etag,
+                metadata.directory,
+                metadata.size,
+            )
+            .map_err(unavailable)?;
+            if !child.entries_for_reconciliation().contains(&expected) {
+                return Err(BackendError::Unavailable);
+            }
+            let original = capture::Baseline::new(
+                baseline.identity(),
+                &metadata.etag,
+                baseline.unlock_epoch(),
+                baseline.token_generation(),
+                payload.file.volume_serial,
+                payload.file.file_index,
+            )
+            .map_err(unavailable)?;
+            let capture_id = streamed::capture_id(
+                &self.scope,
+                &original,
+                &payload.components,
+                &metadata.id,
+                metadata.size,
+                payload.length,
+                payload.sha256,
+            )
+            .map_err(unavailable)?;
+            if let Some(reference) = child
+                .all_captures_for_reconciliation()
+                .into_iter()
+                .find(|r| r.id() == capture_id)
+            {
+                // Reopen only; a missing/incomplete body is never healed or queued.
+                let retained =
+                    read_capture_body_with_cancel(&self.store, &self.scope, &reference, cancelled)
+                        .map_err(unavailable)?;
+                if !reference.is_streamed()
+                    || reference.entry() != &expected
+                    || retained.len() != payload.length
+                    || retained.sha256() != payload.sha256
+                {
+                    return Err(BackendError::Unavailable);
+                }
+                verify_source()?;
+                manifest.verify_current(&self.store).map_err(unavailable)?;
+                self.verify_context(baseline.owner(), baseline.vault(), baseline.remote_root())?;
+                return Ok(None);
+            }
+            let prepared = streamed::PreparedStreamedCapture::new(
+                &self.scope,
+                original,
+                &payload.components,
+                &metadata.id,
+                metadata.size,
+                payload.length,
+                payload.sha256,
+            )
+            .map_err(unavailable)?;
+            if prepared.descriptor().id() != capture_id {
+                return Err(BackendError::Unavailable);
+            }
+            let frame = prepared.frame();
+            let ticket = match child
+                .enroll_streamed_capture(&self.store, &prepared, &payload.components)
+                .map_err(unavailable)?
+            {
+                vault_custody::CaptureEnrollment::New(ticket) => ticket,
+                vault_custody::CaptureEnrollment::Existing(_) => {
+                    return Err(BackendError::Unavailable);
+                }
+            };
+            let reference = child
+                .capture_references_for_lookup()
+                .map_err(unavailable)?
+                .into_iter()
+                .find(|r| r.id() == capture_id)
+                .ok_or(BackendError::Unavailable)?;
+            ticket
+                .consume_streamed(&self.scope, &capture_id, frame)
+                .map_err(unavailable)?;
+            let key = prepared.descriptor().binding().map_err(unavailable)?;
+            if self
+                .store
+                .0
+                .load_capture(&key)
+                .map_err(unavailable)?
+                .is_some()
+            {
+                return Err(BackendError::Unavailable);
+            }
+            self.store
+                .0
+                .put_new_capture(&key, prepared.raw())
+                .map_err(unavailable)?;
+            let raw = self
+                .store
+                .0
+                .load_capture(&key)
+                .map_err(unavailable)?
+                .ok_or(BackendError::Unavailable)?;
+            if raw.as_slice() != prepared.raw() {
+                return Err(BackendError::Unavailable);
+            }
+            streamed::validate_descriptor(&raw, &self.scope, &reference).map_err(unavailable)?;
+            manifest.verify_current(&self.store).map_err(unavailable)?;
+            *cached = child;
+            // Serialize local captures within this exact vault through the
+            // existing child guard; no HTTP or backend/session re-entry occurs.
+            // Metadata/index ACK is retention only. Original native postproof
+            // precedes the existing snapshot's durable manifest/readback commit.
+            prepared
+                .commit(source, verify_source, cancelled)
+                .map_err(unavailable)?;
+            if cancelled() {
+                return Err(BackendError::Unavailable);
+            }
+            manifest.verify_current(&self.store).map_err(unavailable)?;
+            self.verify_context(baseline.owner(), baseline.vault(), baseline.remote_root())?;
+            let fresh = Custody::reopen(&self.store, &self.scope).map_err(unavailable)?;
+            if !fresh
+                .capture_references_for_lookup()
+                .map_err(unavailable)?
+                .contains(&reference)
+            {
+                return Err(BackendError::Unavailable);
+            }
+            *cached = fresh;
+            drop(cached);
+            let Some(publisher) = self.fresh_close_publisher.as_ref() else {
+                return Ok(None);
+            };
+            let job = FreshVaultCloseJob {
+                origin: FreshCaptureOrigin {
+                    owner: self.owner.clone(),
+                    root: self.root,
+                    broker: Arc::downgrade(&self.root_failed),
+                },
+                vault: baseline.vault().clone(),
+                remote_root: baseline.remote_root().to_owned(),
+                capture_id,
+                dispatch,
+                expected_generation: publisher.generation(),
+            };
+            Ok(Some(Box::new(FreshCloseNotification {
+                publisher: publisher.clone(),
+                job,
+            })
+                as Box<dyn DeferredVaultCaptureNotification>))
+        })();
+        if result.is_err() {
             self.child
                 .failed
                 .store(true, std::sync::atomic::Ordering::Release);

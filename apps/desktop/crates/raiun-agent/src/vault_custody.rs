@@ -118,6 +118,23 @@ impl Scope {
             registration: registration.into(),
         })
     }
+    #[cfg(windows)]
+    pub(crate) fn streamed_storage_scope(
+        &self,
+    ) -> Result<raiun_cloudfiles_windows::EditJournalScope> {
+        self.validate()?;
+        let account: AccountFields =
+            serde_json::from_slice(&self.account).map_err(|_| Error::Invalid)?;
+        Ok(raiun_cloudfiles_windows::EditJournalScope {
+            profile_id: self.profile.clone(),
+            server_origin: self.origin.clone(),
+            account_subject: account.subject,
+            space_id: self.space.clone(),
+            root_resource_id: self.resource.clone(),
+            root_volume_serial: self.volume,
+            root_file_index: self.root_file,
+        })
+    }
     /// Canonical full-scope bytes for the parent's separate custody DPAPI AAD.
     /// Caller must pass the same bytes to load and CAS; not a credential key.
     pub fn authenticated_store_binding(&self) -> Result<Zeroizing<Vec<u8>>> {
@@ -327,14 +344,38 @@ impl Hydration {
     }
 }
 /// Historical discovery reference, not a session, upload or cleanup permit.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CaptureBodyFormat {
+    #[default]
+    Legacy,
+    StreamedV1,
+}
+impl CaptureBodyFormat {
+    fn is_legacy(&self) -> bool {
+        *self == Self::Legacy
+    }
+}
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CaptureRef {
     capture_id: String,
     entry: Entry,
     frame: EncodedFrameRef,
+    #[serde(default, skip_serializing_if = "CaptureBodyFormat::is_legacy")]
+    body_format: CaptureBodyFormat,
 }
 impl CaptureRef {
+    pub(crate) fn is_streamed(&self) -> bool {
+        self.body_format == CaptureBodyFormat::StreamedV1
+    }
+    pub(crate) fn body_limit(&self) -> u64 {
+        if self.is_streamed() {
+            1 << 30
+        } else {
+            super::vault_edit_capture::MAX_BODY_BYTES as u64
+        }
+    }
     pub(crate) fn id(&self) -> &str {
         &self.capture_id
     }
@@ -346,7 +387,8 @@ impl CaptureRef {
     }
     fn matches(&self, prepared: &PreparedCapture) -> bool {
         let (opaque, etag, _, _) = prepared.existing_file_binding();
-        self.capture_id == prepared.id()
+        !self.is_streamed()
+            && self.capture_id == prepared.id()
             && self.entry.opaque == opaque
             && self.entry.etag == etag
             && self.frame == prepared.encoded_frame_ref()
@@ -359,6 +401,22 @@ pub(crate) struct FreshEnrollmentTicket {
     reference: CaptureRef,
 }
 impl FreshEnrollmentTicket {
+    #[cfg(windows)]
+    pub(crate) fn consume_streamed(
+        self,
+        scope: &Scope,
+        id: &str,
+        frame: EncodedFrameRef,
+    ) -> Result<()> {
+        if self.scope != *scope
+            || !self.reference.is_streamed()
+            || self.reference.id() != id
+            || self.reference.frame() != frame
+        {
+            return Err(Error::Foreign);
+        }
+        Ok(())
+    }
     pub(crate) fn consume(self, prepared: &PreparedCapture) -> Result<()> {
         if self.scope != *prepared.scope() || !self.reference.matches(prepared) {
             return Err(Error::Foreign);
@@ -1231,13 +1289,61 @@ impl Custody {
         prepared: &PreparedCapture,
         native_components: &[String],
     ) -> Result<CaptureEnrollment> {
+        let (opaque, etag, volume, file) = prepared.existing_file_binding();
+        self.enroll_capture_metadata(
+            store,
+            prepared.scope(),
+            prepared.id(),
+            opaque,
+            etag,
+            volume,
+            file,
+            prepared.encoded_frame_ref(),
+            CaptureBodyFormat::Legacy,
+            native_components,
+        )
+    }
+    #[cfg(windows)]
+    pub(crate) fn enroll_streamed_capture(
+        &mut self,
+        store: &impl Store,
+        prepared: &super::windows_vault_streamed_edit::PreparedStreamedCapture,
+        native_components: &[String],
+    ) -> Result<CaptureEnrollment> {
+        let baseline = prepared.descriptor().baseline();
+        self.enroll_capture_metadata(
+            store,
+            prepared.descriptor().scope(),
+            prepared.descriptor().id(),
+            baseline.opaque_file(),
+            baseline.strong_etag(),
+            baseline.native_volume(),
+            baseline.native_file(),
+            prepared.frame(),
+            CaptureBodyFormat::StreamedV1,
+            native_components,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn enroll_capture_metadata(
+        &mut self,
+        store: &impl Store,
+        scope: &Scope,
+        id: &str,
+        opaque: [u8; 16],
+        etag: &str,
+        volume: u32,
+        file: u64,
+        frame: EncodedFrameRef,
+        body_format: CaptureBodyFormat,
+        native_components: &[String],
+    ) -> Result<CaptureEnrollment> {
         if self.failed || self.document.incomplete {
             return Err(Error::Incomplete);
         }
-        if prepared.scope() != &self.document.scope {
+        if scope != &self.document.scope {
             return Err(Error::Foreign);
         }
-        let (opaque, etag, volume, file) = prepared.existing_file_binding();
         let entry = self
             .document
             .catalogue
@@ -1260,9 +1366,10 @@ impl Custody {
             return Err(Error::Foreign);
         }
         let reference = CaptureRef {
-            capture_id: prepared.id().into(),
+            capture_id: id.into(),
             entry: entry.clone(),
-            frame: prepared.encoded_frame_ref(),
+            frame,
+            body_format,
         };
         if let Some(existing) = self
             .all_captures_for_reconciliation()
@@ -1419,6 +1526,16 @@ impl Custody {
         reference: &CaptureRef,
         retained: &super::vault_edit_capture::RetainedEdit,
     ) -> Result<super::vault_edit_disposition::DispositionDescriptor> {
+        let hydration = self.capture_disposition_hydration(reference)?;
+        super::vault_edit_disposition::DispositionDescriptor::from_capture(
+            &self.document.scope,
+            reference,
+            &hydration,
+            retained,
+        )
+        .map_err(|_| Error::Invalid)
+    }
+    fn capture_disposition_hydration(&self, reference: &CaptureRef) -> Result<Hydration> {
         self.require_capture(reference)?;
         let hydration =
             if let Some(archived) = self.completed.iter().find(|row| row.capture == *reference) {
@@ -1441,13 +1558,47 @@ impl Custody {
                 })
             }
             .ok_or(Error::Foreign)?;
-        super::vault_edit_disposition::DispositionDescriptor::from_capture(
+        Ok(hydration)
+    }
+    #[cfg(windows)]
+    pub(crate) fn streamed_disposition_descriptor(
+        &self,
+        reference: &CaptureRef,
+        retained: &super::windows_vault_streamed_edit::AuthenticatedStreamedCapture,
+    ) -> Result<super::vault_edit_disposition::DispositionDescriptor> {
+        let hydration = self.capture_disposition_hydration(reference)?;
+        super::vault_edit_disposition::DispositionDescriptor::from_streamed_capture(
             &self.document.scope,
             reference,
             &hydration,
             retained,
         )
         .map_err(|_| Error::Invalid)
+    }
+    #[cfg(windows)]
+    pub(crate) fn validate_reconstructed_streamed_disposition(
+        &self,
+        reference: &CaptureRef,
+        retained: &super::windows_vault_streamed_edit::AuthenticatedStreamedCapture,
+    ) -> Result<()> {
+        let descriptor = self.streamed_disposition_descriptor(reference, retained)?;
+        let row = self
+            .document
+            .dispositions
+            .iter()
+            .flatten()
+            .find(|row| row.reference() == reference)
+            .or_else(|| {
+                self.completed
+                    .iter()
+                    .find(|row| row.capture == *reference)
+                    .map(|row| &row.disposition)
+            })
+            .ok_or(Error::Foreign)?;
+        if !row.is_native_completed() || row.descriptor() != &descriptor {
+            return Err(Error::Foreign);
+        }
+        Ok(())
     }
     /// Rebuild from the already authenticated immutable body and historical
     /// hydration, rather than trusting an internally consistent stored tuple.

@@ -222,12 +222,40 @@ pub struct ExistingVaultEditPayload {
     pub bytes: Zeroizing<Vec<u8>>,
 }
 
+/// Additive streaming ceiling. Legacy vector payloads and records retain512KiB.
+pub const MAX_STREAMED_VAULT_EDIT_BYTES: u64 = 1 << 30;
+/// Metadata from the SAME original native source, never whole plaintext bytes.
+/// The borrowed reader/post-source proof remain lexical and cannot escape.
+pub struct ExistingVaultStreamedEditPayload {
+    pub root: ConfiguredRootIdentity,
+    pub file: LocalFileIdentity,
+    pub components: Vec<String>,
+    pub length: u64,
+    pub sha256: [u8; 32],
+}
+
 /// The trusted broker supplies a full-account/vault/root-bound implementation.
 /// Store calls must never reenter the backend, token/session coordinator, or
 /// route publication locks: the caller already holds its publication permit.
 /// Ok means durable protected write-through/readback, never permission to read
 /// or clear native incomplete history. Failure denies the pending publication.
 pub trait VaultPublicationCustody: Send + Sync {
+    /// Stage under the original lexical route/token/unlock fences. Never
+    /// reacquire those fences or perform HTTP here. Invoke verify_source AFTER
+    /// body staging and BEFORE manifest commit; check cancelled every chunk and
+    /// during authenticated readback. Only durable committed verified retention
+    /// may produce acknowledgement/notification; no reader or callback escapes.
+    fn retain_existing_streamed_edit(
+        &self,
+        _baseline: &ExistingVaultEditBaseline,
+        _payload: ExistingVaultStreamedEditPayload,
+        _dispatch: crate::FreshVaultCaptureDispatch,
+        _source: &mut dyn std::io::Read,
+        _verify_source: &mut dyn FnMut() -> Result<(), BackendError>,
+        _cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<Box<dyn crate::DeferredVaultCaptureNotification>>, BackendError> {
+        Err(BackendError::Unavailable)
+    }
     fn root_identity(&self) -> ConfiguredRootIdentity;
     /// Local protected index-first retention only. The exact live lexical
     /// fences are already held: do not acquire account/route/token/session locks

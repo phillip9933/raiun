@@ -282,8 +282,14 @@ pub(super) fn save_copy(
     scope: &RecoveryScope,
     capture_id: &str,
     destination: SaveCopyDestination<'_>,
-    still_current: impl Fn() -> bool,
+    still_current: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
 ) -> Result<CopyReceipt> {
+    // One fixed operation clock includes authentication, source shutdown and
+    // both destination readbacks; chunk callbacks cannot renew this deadline.
+    let job = raiun_cloudfiles_windows::CancellationToken::for_recovery_job(
+        raiun_cloudfiles_windows::StreamedRecoveryPolicy::default(),
+    );
+    let still_current = std::sync::Arc::new(move || still_current() && !job.is_stopped());
     if !still_current() {
         return Err("The account or Windows drive changed".into());
     }
@@ -295,36 +301,64 @@ pub(super) fn save_copy(
         .verify_path()
         .map_err(|_| "The Save Copy destination folder changed")?;
     validate_parent_outside_root(parent_path, &parent, root.identity())?;
-    let retained = custody
+    let mut retained = custody
         .recovery_capture_body(
             owner,
             &scope.space_id,
             &scope.root_resource_id,
             &scope.remote_root,
             capture_id,
+            &|| !still_current(),
         )
         .map_err(|_| "The selected saved vault edit could not be authenticated")?;
     if !still_current() {
         return Err("The account or Windows drive changed".into());
     }
-    let body = retained.bytes_for_recovery();
-    if body.len() > raiun_cloudfiles_windows::MAX_VAULT_EDIT_CAPTURE_BYTES {
+    let body_length = retained.len();
+    let streamed = retained.is_streamed();
+    let limit = if streamed {
+        super::windows_vault_streamed_edit::MAX_BODY_BYTES
+    } else {
+        raiun_cloudfiles_windows::MAX_VAULT_EDIT_CAPTURE_BYTES as u64
+    };
+    if body_length > limit {
         return Err("The selected saved vault edit has an unsupported size".into());
     }
-    let body_sha256: [u8; 32] = Sha256::digest(body).into();
+    let body_sha256 = retained.sha256();
+    let mut streamed_reader = if streamed {
+        Some(retained.streamed_reader({
+            let current = still_current.clone();
+            std::sync::Arc::new(move || !current())
+        })?)
+    } else {
+        None
+    };
+    let legacy_body = retained.legacy().map(|v| v.bytes_for_recovery());
     let (stage_name, mut stage, stage_identity) = create_stage(&parent)?;
     let staged = (|| {
-        stage
-            .write_all(body)
-            .map_err(|_| "Could not write the Save Copy staging file")?;
+        if let Some(reader) = streamed_reader.as_mut() {
+            copy_streamed_verified(reader, &mut stage, body_length, body_sha256, &|| {
+                still_current()
+            })?;
+        } else {
+            stage
+                .write_all(legacy_body.ok_or("The saved legacy body changed")?)
+                .map_err(|_| "Could not write the Save Copy staging file")?;
+        }
         stage
             .sync_all()
             .map_err(|_| "Could not flush the Save Copy staging file")?;
         stage
             .seek(SeekFrom::Start(0))
             .map_err(|_| "Could not verify the Save Copy staging file")?;
-        let actual = read_bounded(&mut stage, body.len())?;
-        verify_bytes(&actual, body.len(), &body_sha256)?;
+        if streamed {
+            verify_streamed_file(&mut stage, body_length, body_sha256, &|| still_current())?;
+        } else {
+            let length =
+                usize::try_from(body_length).map_err(|_| "The saved edit length changed")?;
+            let actual = read_bounded(&mut stage, length)?;
+            verify_bytes(&actual, length, &body_sha256)?;
+        }
         parent
             .verify_path()
             .map_err(|_| "The Save Copy destination folder changed")?;
@@ -388,10 +422,18 @@ pub(super) fn save_copy(
     if final_identity != published_identity {
         return Err("Save Copy was published but final file identity changed".into());
     }
-    let actual = read_bounded(&mut published, body.len())
+    if streamed {
+        verify_streamed_file(&mut published, body_length, body_sha256, &|| {
+            still_current()
+        })
         .map_err(|_| "Save Copy was published but final contents could not be verified")?;
-    verify_bytes(&actual, body.len(), &body_sha256)
-        .map_err(|_| "Save Copy was published but final contents did not match")?;
+    } else {
+        let length = usize::try_from(body_length).map_err(|_| "The saved edit length changed")?;
+        let actual = read_bounded(&mut published, length)
+            .map_err(|_| "Save Copy was published but final contents could not be verified")?;
+        verify_bytes(&actual, length, &body_sha256)
+            .map_err(|_| "Save Copy was published but final contents did not match")?;
+    }
     parent
         .verify_path()
         .map_err(|_| "Save Copy was published but the destination folder changed")?;
@@ -404,9 +446,55 @@ pub(super) fn save_copy(
     }
     Ok(CopyReceipt {
         schema_version: 1,
-        body_length: body.len(),
+        body_length: usize::try_from(body_length).map_err(|_| "The saved edit length changed")?,
         read_only: true,
     })
+}
+
+fn copy_streamed_verified(
+    reader: &mut dyn Read,
+    output: &mut dyn Write,
+    length: u64,
+    expected: [u8; 32],
+    current: &dyn Fn() -> bool,
+) -> Result<()> {
+    let mut buffer = Zeroizing::new([0u8; 64 * 1024]);
+    let mut remaining = length;
+    let mut hash = Sha256::new();
+    while remaining != 0 {
+        if !current() {
+            return Err("The account or Windows drive changed".into());
+        }
+        let count = usize::try_from(remaining.min(buffer.len() as u64))
+            .map_err(|_| "The saved edit length changed")?;
+        reader
+            .read_exact(&mut buffer[..count])
+            .map_err(|_| "The saved vault body could not be authenticated")?;
+        hash.update(&buffer[..count]);
+        output
+            .write_all(&buffer[..count])
+            .map_err(|_| "Could not write Save Copy")?;
+        remaining -= count as u64;
+    }
+    let mut extra = Zeroizing::new([0u8; 1]);
+    if reader
+        .read(&mut *extra)
+        .map_err(|_| "The saved vault body could not be authenticated")?
+        != 0
+        || <[u8; 32]>::from(hash.finalize()) != expected
+        || !current()
+    {
+        return Err("The saved vault body did not match".into());
+    }
+    Ok(())
+}
+fn verify_streamed_file(
+    reader: &mut dyn Read,
+    length: u64,
+    expected: [u8; 32],
+    current: &dyn Fn() -> bool,
+) -> Result<()> {
+    copy_streamed_verified(reader, &mut std::io::sink(), length, expected, current)
 }
 
 fn validate_destination(destination: &Path) -> Result<(&Path, &OsStr)> {

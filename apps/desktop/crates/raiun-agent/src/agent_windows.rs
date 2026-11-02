@@ -124,6 +124,8 @@ include!("windows_vault_session_control.rs");
 include!("windows_vault_create.rs");
 include!("windows_vault_copy.rs");
 include!("windows_vault_edit_upload.rs");
+#[path = "windows_vault_streamed_edit.rs"]
+mod windows_vault_streamed_edit;
 
 use clap::{Parser, Subcommand};
 use raiun_cloudfiles_windows::{
@@ -1327,12 +1329,18 @@ impl ProviderManager {
                                         root_identity: binding.identity,
                                         destination: &destination,
                                     },
-                                    || {
-                                        vault_worker_binding_current(
-                                            worker_generation.load(Ordering::Acquire),
-                                            &binding,
-                                            active_binding.as_ref(),
-                                        ) && connection.is_some()
+                                    {
+                                        let generation = Arc::clone(&worker_generation);
+                                        let requested = binding.clone();
+                                        let active = active_binding.clone();
+                                        let connected = connection.is_some();
+                                        Arc::new(move || {
+                                            vault_worker_binding_current(
+                                                generation.load(Ordering::Acquire),
+                                                &requested,
+                                                active.as_ref(),
+                                            ) && connected
+                                        })
                                     },
                                 )?;
                                 if !vault_worker_binding_current(

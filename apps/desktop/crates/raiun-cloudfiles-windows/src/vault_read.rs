@@ -233,6 +233,67 @@ impl WindowsVaultReadBinding {
         }
     }
 
+    #[cfg(windows)]
+    pub(crate) fn upload_existing_streamed_capture<R: Read>(
+        &self,
+        target: &crate::ExistingVaultUploadTarget,
+        source: &mut R,
+        edited_len: u64,
+        expected_sha: [u8; 32],
+        private: &raiun_control_windows::PrivateDirectory,
+        cancellation: &crate::vault_custody::VaultUploadCancellation<'_>,
+    ) -> Result<raiun_opencloud::vault_backend::VaultExistingOverwriteOutcome, CloudError> {
+        use raiun_core::backend::WriteCondition;
+        use raiun_opencloud::vault_backend::{
+            VaultExistingOverwriteOutcome, VaultExistingOverwriteRequest,
+        };
+        self.validate_upload_target(target)?;
+        self.check_current()?;
+        if cancellation.is_cancelled() {
+            return Err(refused());
+        }
+        private.verify_path().map_err(|_| refused())?;
+        // No registry/auth/publication lease is retained over either HTTP call.
+        // This is a fresh-admission ciphertext locator, never a captured one.
+        let original = target.original();
+        let encoded = self.backend.prepare_write_target(
+            &original.path,
+            &WriteCondition::Match(original.etag.clone()),
+        )?;
+        self.check_current()?;
+        let stop = || self.revoked.load(Ordering::Acquire) || cancellation.is_cancelled();
+        let request = VaultExistingOverwriteRequest {
+            scope: &self.scope,
+            epoch: &self.epoch,
+            vault_root_path: &self.root_path,
+            logical_path: &original.path,
+            original_resource_id: &original.id,
+            original_etag: &original.etag,
+            encoded_target: &encoded,
+            expected_token_generation: self.trusted.token_generation(),
+            provider_generation: Arc::clone(&cancellation.generation),
+            expected_provider_generation: cancellation.expected,
+            cancelled: &stop,
+        };
+        let result = self.backend.overwrite_existing_streamed_reader_guarded(
+            &request,
+            source,
+            edited_len,
+            expected_sha,
+            private.path(),
+        );
+        match result {
+            Ok(VaultExistingOverwriteOutcome::Verified(_))
+                if stop() || self.check_current().is_err() || private.verify_path().is_err() =>
+            {
+                Ok(VaultExistingOverwriteOutcome::NeedsReconciliation {
+                    reason: ErrorKind::Forbidden,
+                })
+            }
+            other => other,
+        }
+    }
+
     /// Complete a verified online read into an admitted private immutable file.
     /// The result stays opaque/unpublished until parent integration obtains the
     /// required provider/root/session publication lease and lock lifecycle.
@@ -298,7 +359,7 @@ impl WindowsVaultReadBinding {
                 )
             })
         })?;
-        let full_sha256 = if expected.size <= crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64 {
+        let full_sha256 = if expected.size <= crate::vault_custody::MAX_STREAMED_VAULT_EDIT_BYTES {
             reader.verify().map_err(|_| refused())?;
             if reader.metadata().map_err(|_| refused())?.len() != expected.size {
                 return Err(refused());

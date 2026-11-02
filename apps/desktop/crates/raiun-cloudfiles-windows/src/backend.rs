@@ -88,6 +88,22 @@ pub struct PlaceholderEditBinding {
 /// until native dirty accounting and every capture/callback guard have finished.
 #[cfg(windows)]
 pub trait ExistingVaultEditCapture {
+    /// Pure original-route/save-owner cancellation only; no key/lease/authority
+    /// escapes this callback. None keeps older adapters fail closed for streams.
+    fn stream_revocation(&self) -> Option<Arc<dyn Fn() -> bool + Send + Sync>> {
+        None
+    }
+    /// Additive >512KiB capture. The reader and original source verifier remain
+    /// borrowed until protected staged-body commit/readback has completed.
+    fn retain_streamed(
+        &self,
+        _payload: crate::vault_custody::ExistingVaultStreamedEditPayload,
+        _source: &mut dyn std::io::Read,
+        _verify_source: &mut dyn FnMut() -> Result<(), BackendError>,
+        _cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<Box<dyn DeferredVaultCaptureNotification>>, BackendError> {
+        Err(BackendError::Unavailable)
+    }
     fn baseline(&self) -> &crate::vault_custody::ExistingVaultEditBaseline;
     fn retain(
         &self,
@@ -689,7 +705,9 @@ impl StreamedRecoveryJob {
     pub fn is_stopped(&self) -> bool {
         self.cancellation.is_cancelled() || self.cancellation.is_expired()
     }
-    pub(crate) fn cancellation(&self) -> &CancellationToken {
+    /// Borrow this job's original deadline and cancellation identity. This
+    /// grants no upload, native completion or restored session authority.
+    pub fn cancellation(&self) -> &CancellationToken {
         &self.cancellation
     }
     pub(crate) fn check(&self) -> Result<(), BackendError> {
