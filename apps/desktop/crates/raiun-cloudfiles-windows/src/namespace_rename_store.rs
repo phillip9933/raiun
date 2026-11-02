@@ -1,4 +1,4 @@
-//! Durable metadata for one same-parent Personal file rename.
+//! Durable metadata for one same-parent Personal or writable Space file rename.
 //!
 //! This typed store is intentionally separate from `namespace-v1`, whose
 //! writer, lease and validator are directory-create-only. It shares the
@@ -1031,12 +1031,17 @@ fn supported_intent(intent: &NamespaceIntent) -> bool {
     source.local.object_kind == NamespaceObjectKind::File
         && destination.object_kind == NamespaceObjectKind::File
         && source.local.parent == destination.parent
-        && source
+        && match source
             .local
             .parent
             .local_components
             .first()
-            .is_some_and(|part| part.eq_ignore_ascii_case("Personal"))
+            .map(String::as_str)
+        {
+            Some("Personal") => true,
+            Some("Spaces") => source.local.parent.local_components.len() >= 2,
+            _ => false,
+        }
         && source.local.local_file == destination.local_file
         && !source.local.name.eq_ignore_ascii_case(&destination.name)
         && !source

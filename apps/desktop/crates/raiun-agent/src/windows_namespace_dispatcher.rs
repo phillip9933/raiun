@@ -50,6 +50,14 @@ fn observation_namespace(parts: &[String]) -> bool {
             Some("Personal" | "Spaces")
         )
 }
+fn rename_file_path(parts: &[String]) -> bool {
+    parts.len() <= 256
+        && match parts.first().map(String::as_str) {
+            Some("Personal") => parts.len() >= 2,
+            Some("Spaces") => parts.len() >= 3,
+            _ => false,
+        }
+}
 fn create_personal(parts: &[String]) -> bool {
     (2..=256).contains(&parts.len()) && parts.first().map(String::as_str) == Some("Personal")
 }
@@ -146,7 +154,10 @@ fn route(hints: &[Hint<'_>], directories: bool, creates: bool) -> Result<Vec<Wor
                     .get(index + 1)
                     .filter(|h| h.action == Action::New)
                     .ok_or("Unpaired namespace notification")?;
-                if pair == MAX_PAIRS || !personal(hint.components) || !personal(next.components) {
+                if pair == MAX_PAIRS
+                    || !rename_file_path(hint.components)
+                    || !rename_file_path(next.components)
+                {
                     return Err("Unsupported namespace rename");
                 }
                 names.push(hint.components);

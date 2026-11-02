@@ -51,6 +51,14 @@ impl FileRenameBindingCandidate<'_> {
         self.parent_identity
     }
 
+    pub fn space_id(&self) -> &str {
+        &self.source.space_id
+    }
+
+    pub fn root_resource_id(&self) -> &str {
+        &self.source.root_resource_id
+    }
+
     pub fn source_path(&self) -> &str {
         &self.source.path
     }
@@ -151,12 +159,7 @@ fn supported(intent: &NamespaceIntent) -> bool {
         && source.local.local_file == destination.local_file
         && source.local.parent.classification
             == crate::namespace_intent::StorageClassification::Ordinary
-        && source
-            .local
-            .parent
-            .local_components
-            .first()
-            .is_some_and(|p| p == "Personal")
+        && local_prefix(&source.local.parent.local_components).is_some()
         && source.local.name != destination.name
         && !source.local.name.eq_ignore_ascii_case(&destination.name)
         && strong(&source.remote.etag)
@@ -182,15 +185,89 @@ fn relative_to_root(root: &str, path: &str) -> Option<String> {
 }
 
 fn parent_path_matches_components(path: &str, components: &[String]) -> bool {
-    let Some((_, tail)) = components.split_first() else {
+    let Some(prefix) = local_prefix(components) else {
         return false;
     };
+    let tail = &components[prefix..];
     let remote_parts: Vec<_> = path.split('/').filter(|part| !part.is_empty()).collect();
     remote_parts.len() == tail.len()
         && remote_parts
             .iter()
             .zip(tail)
             .all(|(remote, local)| *remote == local)
+}
+
+fn local_prefix(components: &[String]) -> Option<usize> {
+    match components.first().map(String::as_str) {
+        Some("Personal") => Some(1),
+        Some("Spaces") if components.len() >= 2 => Some(2),
+        _ => None,
+    }
+}
+/// Personal remains the account anchor; the target is selected only by its
+/// captured Space ID. A displayed Spaces label never becomes a remote ID.
+fn verified_target_root(
+    backend: &OpenCloudPlaceholderBackend,
+    scope: &crate::EditJournalScope,
+    components: &[String],
+    context: RangeReadContext,
+) -> Result<raiun_core::backend::RemoteEntry, CloudError> {
+    let catalog = backend
+        .catalog_scope_snapshot()
+        .map_err(|_| refusal(ErrorKind::Conflict))?
+        .ok_or_else(|| refusal(ErrorKind::Conflict))?;
+    let spaces = backend
+        .client
+        .spaces_with_context_limited(context, MAX_PROVIDER_SPACES)?;
+    if spaces.iter().any(|space| {
+        space.id.is_empty() || space.id.len() > 512 || space.id.chars().any(char::is_control)
+    }) {
+        return Err(refusal(ErrorKind::Conflict));
+    }
+    let personal = verified_personal(&spaces).map_err(|_| refusal(ErrorKind::Conflict))?;
+    if personal.id != catalog.personal_space_id
+        || derive_account_id(&backend.client.configured_server_url(), &personal.id)
+            != backend.scope.account_id
+    {
+        return Err(refusal(ErrorKind::Conflict));
+    }
+    let anchor = backend
+        .client
+        .stat_discovered_space_root_with_context(personal, context)?;
+    if !anchor.directory || anchor.encrypted || anchor.id != catalog.personal_root_resource_id {
+        return Err(refusal(ErrorKind::Conflict));
+    }
+    let mut candidates = spaces.iter().filter(|space| space.id == scope.space_id);
+    let target = candidates
+        .next()
+        .ok_or_else(|| refusal(ErrorKind::Conflict))?;
+    if candidates.next().is_some()
+        || !target.writable
+        || target.encrypted
+        || match local_prefix(components) {
+            Some(1) => !target.personal || target.id != personal.id,
+            Some(2) => target.personal || target.id == personal.id,
+            _ => true,
+        }
+    {
+        return Err(refusal(ErrorKind::Conflict));
+    }
+    let root = if target.id == personal.id {
+        anchor
+    } else {
+        backend
+            .client
+            .stat_discovered_space_root_with_context(target, context)?
+    };
+    if !root.directory
+        || root.encrypted
+        || !root.writable
+        || root.id != scope.root_resource_id
+        || !valid_remote_path(&scope.space_id, &scope.root_resource_id, &root.path, true)
+    {
+        return Err(refusal(ErrorKind::Conflict));
+    }
+    Ok(root)
 }
 
 impl OpenCloudPlaceholderBackend {
@@ -220,7 +297,7 @@ impl OpenCloudPlaceholderBackend {
             || authorization.token_generation != self.token_generation
             || old.len() < 2
             || old.len() != new.len()
-            || old.first().map(String::as_str) != Some("Personal")
+            || local_prefix(&old[..old.len() - 1]).is_none()
             || old[..old.len() - 1] != new[..new.len() - 1]
             || !self.file_rename_token_is_current()
             || !owner_current(authorization)
@@ -286,8 +363,8 @@ impl OpenCloudPlaceholderBackend {
             || captured.scope.profile_id != catalog_scope.profile_id
             || captured.scope.account_subject != catalog_scope.account_id
             || captured.scope.server_origin != catalog_scope.server_origin
-            || captured.scope.space_id != catalog_scope.personal_space_id
-            || captured.scope.root_resource_id != catalog_scope.personal_root_resource_id
+            || captured.scope.space_id != candidate.parent.space_id
+            || captured.scope.root_resource_id != candidate.parent.root_resource_id
             || captured.scope.root_volume_serial != catalog_scope.root_volume_serial
             || captured.scope.root_file_index != catalog_scope.root_file_index
             || captured.route.len() != components.len()
@@ -311,6 +388,60 @@ impl OpenCloudPlaceholderBackend {
         Ok(result)
     }
 
+    /// Resolve a notification through the fresh managed namespace before
+    /// looking up the ORIGINAL source binding. Labels supply no target IDs.
+    #[cfg(windows)]
+    pub fn file_rename_binding_candidate_from_hint<'hint>(
+        &self,
+        hints: RenameHintPair<'hint>,
+        authorization: CapturedAuthorization,
+        local_file_hint: crate::LocalFileIdentity,
+        owner_current: &dyn Fn(CapturedAuthorization) -> bool,
+    ) -> Result<FileRenameBindingCandidate<'hint>, BackendError> {
+        let old = hints.old_components();
+        let new = hints.new_components();
+        if old.len() < 2
+            || old.len() > 256
+            || old.len() != new.len()
+            || local_prefix(&old[..old.len() - 1]).is_none()
+            || old[..old.len() - 1] != new[..new.len() - 1]
+            || !owner_current(authorization)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let parts = old[..old.len() - 1]
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let captured = self.capture_namespace_parent(
+            &parts,
+            self.local_root_identity.ok_or(BackendError::Unavailable)?,
+            authorization,
+        )?;
+        let source_path = joined(&captured.path, old.last().ok_or(BackendError::Unavailable)?);
+        let source_identity = {
+            let state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
+            let mut matches = state.files.iter().filter(|(_, binding)| {
+                binding.space_id == captured.scope.space_id
+                    && binding.root_resource_id == captured.scope.root_resource_id
+                    && binding.path == source_path
+            });
+            let identity = *matches.next().ok_or(BackendError::Unavailable)?.0;
+            if matches.next().is_some() {
+                return Err(BackendError::Unavailable);
+            }
+            identity
+        };
+        self.file_rename_binding_candidate(
+            source_identity,
+            captured.identity,
+            hints,
+            authorization,
+            local_file_hint,
+            owner_current,
+        )
+    }
+
     /// Bind one complete notification-batch pair to the exact existing
     /// durable source and parent identities. The result remains partial
     /// evidence; a later caller must capture and validate the parent locally
@@ -329,7 +460,7 @@ impl OpenCloudPlaceholderBackend {
         let new = hints.new_components();
         if old.len() < 2
             || old.len() != new.len()
-            || old.first().map(String::as_str) != Some("Personal")
+            || local_prefix(&old[..old.len() - 1]).is_none()
             || old[..old.len() - 1] != new[..new.len() - 1]
             || old
                 .iter()
@@ -391,10 +522,8 @@ impl OpenCloudPlaceholderBackend {
         let expected_source_path =
             joined(&parent.path, old.last().ok_or(BackendError::Unavailable)?);
         let destination_path = joined(&parent.path, new.last().ok_or(BackendError::Unavailable)?);
-        if parent.space_id != catalog_scope.personal_space_id()
-            || parent.root_resource_id != catalog_scope.personal_root_resource_id()
-            || source.space_id != catalog_scope.personal_space_id()
-            || source.root_resource_id != catalog_scope.personal_root_resource_id()
+        if source.space_id != parent.space_id
+            || source.root_resource_id != parent.root_resource_id
             || source.path != expected_source_path
             || !parent_path_matches_components(&parent.path, parent_components)
             || !super::valid_remote_path(
@@ -489,8 +618,6 @@ impl OpenCloudPlaceholderBackend {
             .ok_or(BackendError::Unavailable)?;
         if scope.root_volume_serial != catalog.root_volume_serial
             || scope.root_file_index != catalog.root_file_index
-            || scope.space_id != catalog.personal_space_id
-            || scope.root_resource_id != catalog.personal_root_resource_id
             || scope.profile_id != catalog.profile_id
             || scope.account_subject != catalog.account_id
             || scope.server_origin != catalog.server_origin
@@ -523,38 +650,9 @@ impl OpenCloudPlaceholderBackend {
         // admission failures. A cached backend must remain fenced after an
         // authoritative loss of its account/root, even while this read lease
         // is held; the existing helper takes only the publication gate.
-        let spaces = self
-            .client
-            .spaces_with_context_limited(context, MAX_PROVIDER_SPACES)
-            .map_err(|error| self.reject_cached_cloud_error(error))?;
-        if spaces.iter().any(|space| {
-            space.id.is_empty() || space.id.len() > 512 || space.id.chars().any(char::is_control)
-        }) {
-            return Err(BackendError::Unavailable);
-        }
-        let space = verified_personal(&spaces)
-            .map_err(|_| self.reject_cached_cloud_error(refusal(ErrorKind::Conflict)))?;
-        if space.id != catalog.personal_space_id()
-            || space.id != scope.space_id
-            || derive_account_id(&self.client.configured_server_url(), &space.id)
-                != self.scope.account_id()
-            || !space.writable
-            || space.encrypted
-        {
-            return Err(self.reject_cached_cloud_error(refusal(ErrorKind::Conflict)));
-        }
-        let root = self
-            .client
-            .stat_discovered_space_root_with_context(space, context)
-            .map_err(|error| self.reject_cached_cloud_error(error))?;
-        if !root.directory
-            || root.encrypted
-            || !root.writable
-            || root.id != scope.root_resource_id
-            || !valid_remote_path(&scope.space_id, &scope.root_resource_id, &root.path, true)
-        {
-            return Err(self.reject_cached_cloud_error(refusal(ErrorKind::Conflict)));
-        }
+        let root =
+            verified_target_root(self, scope, &source.local.parent.local_components, context)
+                .map_err(|error| self.reject_cached_cloud_error(error))?;
         let source_path = joined(&parent.path, &source.local.name);
         let destination_path = joined(&parent.path, &destination.name);
         if !valid_remote_path(
@@ -706,11 +804,13 @@ impl LiveFileRename<'_> {
     fn check_parent(&self, captured_etag: bool) -> Result<(), CloudError> {
         self.ensure_authorized(&self.intent)?;
         let scope = &self.source().local.parent.scope;
-        let root = self
-            .backend
-            .client
-            .stat_with_context(&scope.space_id, &self.root_path, self.context)
-            .map_err(|error| self.authoritative(error))?;
+        let root = verified_target_root(
+            self.backend,
+            scope,
+            &self.source().local.parent.local_components,
+            self.context,
+        )
+        .map_err(|error| self.authoritative(error))?;
         if !root.directory
             || root.encrypted
             || !root.writable
@@ -825,9 +925,13 @@ impl FileRenameRemote for LiveFileRename<'_> {
                     context: self.context,
                 },
                 || {
-                    // SDK proofs may outlive owner/cancel/location authority
-                    // without changing its token context. This check is local.
-                    let result = self.ensure_authorized(intent).and_then(|()| before_send());
+                    // SDK metadata proofs may outlive Space role/root or owner
+                    // authority. Recheck the target and original parent before
+                    // the native admission hook permits this one send.
+                    let result = self
+                        .check_parent(true)
+                        .and_then(|()| self.ensure_authorized(intent))
+                        .and_then(|()| before_send());
                     if result.is_err() {
                         local_hook_refused.set(true);
                     }

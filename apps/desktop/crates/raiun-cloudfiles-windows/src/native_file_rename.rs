@@ -56,12 +56,17 @@ fn move_parts(
         || source.local.local_file != destination.local_file
         || source.local.name.eq_ignore_ascii_case(&destination.name)
         || source.local.parent.classification != StorageClassification::Ordinary
-        || !source
+        || !match source
             .local
             .parent
             .local_components
             .first()
-            .is_some_and(|part| part.eq_ignore_ascii_case("Personal"))
+            .map(String::as_str)
+        {
+            Some("Personal") => true,
+            Some("Spaces") => source.local.parent.local_components.len() >= 2,
+            _ => false,
+        }
     {
         return Err(Error::EditRecoveryUnavailable);
     }
@@ -305,8 +310,8 @@ impl ConfiguredRootConnection {
             || captured.scope.profile_id != scope.profile_id
             || captured.scope.account_subject != scope.account_id
             || captured.scope.server_origin != scope.server_origin
-            || captured.scope.space_id != scope.personal_space_id
-            || captured.scope.root_resource_id != scope.personal_root_resource_id
+            || captured.scope.space_id != candidate.space_id()
+            || captured.scope.root_resource_id != candidate.root_resource_id()
             || captured.scope.root_volume_serial != root_identity.volume_serial
             || captured.scope.root_file_index != root_identity.file_index
         {
@@ -318,7 +323,11 @@ impl ConfiguredRootConnection {
         let new = pair.new_components();
         if old.len() < 2
             || old.len() != new.len()
-            || old.first().map(String::as_str) != Some("Personal")
+            || !match old.first().map(String::as_str) {
+                Some("Personal") => old.len() >= 2,
+                Some("Spaces") => old.len() >= 3,
+                _ => false,
+            }
             || old[..old.len() - 1] != new[..new.len() - 1]
             || old
                 .iter()

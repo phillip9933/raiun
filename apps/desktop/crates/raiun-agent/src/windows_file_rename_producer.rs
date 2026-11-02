@@ -1,4 +1,4 @@
-//! Single-owner, fresh same-batch Personal file rename dispatch. Hints and the
+//! Single-owner, fresh same-batch Personal or writable Space file rename dispatch. Hints and the
 //! catalog join are partial evidence; only the live guarded CF entry admits IO.
 
 /// Generation-bound notice only, never an activation or admission capability.
@@ -17,45 +17,15 @@ impl Notice {
     }
 }
 
-struct CatalogHint<'a, T> {
-    file: bool,
-    space: &'a str,
-    root: &'a str,
-    path: &'a str,
-    identity: T,
-}
-fn catalog_pair<'a, T: Copy>(
-    entries: impl IntoIterator<Item = CatalogHint<'a, T>>,
-    space: &str,
-    root: &str,
-    source_path: &str,
-    parent_path: &str,
-) -> Option<(T, T)> {
-    let mut source = None;
-    let mut parent = None;
-    for entry in entries {
-        if entry.space != space || entry.root != root {
-            continue;
-        }
-        if entry.file && entry.path == source_path {
-            if source.replace(entry.identity).is_some() {
-                return None;
-            }
-        } else if !entry.file
-            && entry.path == parent_path
-            && parent.replace(entry.identity).is_some()
-        {
-            return None;
-        }
-    }
-    Some((source?, parent?))
-}
-
 fn eligible(old: &[String], new: &[String]) -> bool {
     old.len() >= 2
         && old.len() <= 256
         && old.len() == new.len()
-        && old[0] == "Personal"
+        && match old[0].as_str() {
+            "Personal" => true,
+            "Spaces" => old.len() >= 3,
+            _ => false,
+        }
         && old[..old.len() - 1] == new[..new.len() - 1]
         && !old
             .last()
@@ -238,60 +208,17 @@ mod connected {
             if !eligible(old, new) {
                 return Err(HOLD);
             }
-            let old_path = format!("/{}", old[1..].join("/"));
-            let parent_path = if old.len() == 2 {
-                "/".to_owned()
-            } else {
-                format!("/{}", old[1..old.len() - 1].join("/"))
-            };
-            let entries = self.catalog.load(&self.scope).map_err(|_| HOLD)?;
-            let hints = entries.iter().filter_map(|entry| {
-                let identity = entry.identity();
-                match entry {
-                    ProviderIdentityBinding::File {
-                        space_id,
-                        root_resource_id,
-                        path,
-                        ..
-                    } => Some(CatalogHint {
-                        file: true,
-                        space: space_id,
-                        root: root_resource_id,
-                        path,
-                        identity,
-                    }),
-                    ProviderIdentityBinding::Directory {
-                        space_id,
-                        root_resource_id,
-                        path,
-                        ..
-                    } => Some(CatalogHint {
-                        file: false,
-                        space: space_id,
-                        root: root_resource_id,
-                        path,
-                        identity,
-                    }),
-                    _ => None,
-                }
-            });
-            let (source, parent) = catalog_pair(
-                hints,
-                &self.scope.personal_space_id,
-                &self.scope.personal_root_resource_id,
-                &old_path,
-                &parent_path,
-            )
-            .ok_or(HOLD)?;
+            // Keep the original admitted catalog available. Target IDs are
+            // resolved through fresh authenticated namespace traversal below;
+            // a displayed Space label is never used as a remote identifier.
+            self.catalog.load(&self.scope).map_err(|_| HOLD)?;
             let parts = new.iter().map(String::as_str).collect::<Vec<_>>();
             let observed = connection
                 .observe_namespace_file(&parts)
                 .map_err(|_| HOLD)?;
             let current = |auth| self.current(auth, backend, root);
             let candidate = backend
-                .file_rename_binding_candidate(
-                    source,
-                    parent,
+                .file_rename_binding_candidate_from_hint(
                     pair,
                     self.auth,
                     observed.local_file,
@@ -326,7 +253,7 @@ mod tests {
         path.split('/').map(str::to_owned).collect()
     }
     #[test]
-    fn pair_scope_excludes_cross_parent_case_only_and_spaces() {
+    fn pair_scope_excludes_cross_parent_case_only_and_namespace_roots() {
         assert!(eligible(&parts("Personal/a"), &parts("Personal/b")));
         for (a, b) in [
             ("Personal/a", "Personal/A"),
@@ -336,57 +263,6 @@ mod tests {
         ] {
             assert!(!eligible(&parts(a), &parts(b)));
         }
-    }
-    #[test]
-    fn catalog_join_requires_unique_exact_original_root_and_real_parent() {
-        let entry = |file, space, root, path, id| CatalogHint {
-            file,
-            space,
-            root,
-            path,
-            identity: [id; 16],
-        };
-        assert_eq!(
-            catalog_pair(
-                [
-                    entry(true, "s", "r", "/a", 1),
-                    entry(false, "s", "r", "/", 2)
-                ],
-                "s",
-                "r",
-                "/a",
-                "/"
-            ),
-            Some(([1; 16], [2; 16]))
-        );
-        assert!(
-            catalog_pair(
-                [
-                    entry(true, "s", "other", "/a", 1),
-                    entry(false, "s", "r", "/", 2)
-                ],
-                "s",
-                "r",
-                "/a",
-                "/"
-            )
-            .is_none()
-        );
-        assert!(
-            catalog_pair(
-                [
-                    entry(true, "s", "r", "/a", 1),
-                    entry(true, "s", "r", "/a", 3),
-                    entry(false, "s", "r", "/", 2)
-                ],
-                "s",
-                "r",
-                "/a",
-                "/"
-            )
-            .is_none()
-        );
-        assert!(catalog_pair([entry(true, "s", "r", "/a", 1)], "s", "r", "/a", "/").is_none());
     }
     #[test]
     fn retired_owner_cannot_publish_or_clear_new_generation_notice() {

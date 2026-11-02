@@ -181,10 +181,11 @@ fn supported(intent: &NamespaceIntent) -> bool {
     source.local.object_kind == NamespaceObjectKind::File
         && destination.object_kind == NamespaceObjectKind::File
         && source.local.parent == destination.parent
-        && parent
-            .local_components
-            .first()
-            .is_some_and(|component| component.eq_ignore_ascii_case("Personal"))
+        && match parent.local_components.first().map(String::as_str) {
+            Some("Personal") => true,
+            Some("Spaces") => parent.local_components.len() >= 2,
+            _ => false,
+        }
         && source.local.local_file == destination.local_file
         && !source.local.name.eq_ignore_ascii_case(&destination.name)
         && source.remote.etag.starts_with('"')
@@ -192,7 +193,7 @@ fn supported(intent: &NamespaceIntent) -> bool {
         && !looks_like_url_resource_id(&source.remote.resource_id)
 }
 
-/// Attempt exactly one same-parent ordinary Personal file rename.
+/// Attempt exactly one same-parent ordinary Personal or writable Space file rename.
 ///
 /// The only accepted entry state is the exact authenticated intent at sequence
 /// zero with Pending remote/source-removal phases, no attention, and no local
