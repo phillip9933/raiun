@@ -527,6 +527,8 @@ impl ConfiguredRootConnection {
             }
             let activity = state.activity.try_lock().ok()?;
             Some(crate::RenamePublicEntryFixtureActivity {
+                dirty_close_entries: state.fixture_dirty_close_entries.load(Ordering::Acquire),
+                close_admission_unknown: state.close_capture_admission.fixture_admission_unknown(),
                 active_callbacks: activity.active_callbacks,
                 active_fetches: activity.active_fetches,
                 staged_fetches: activity.staged_fetches,

@@ -1362,59 +1362,79 @@ fn run(case: Case) {
         assert_eq!(pending.local_file, before.local_file);
         assert_eq!(pending.placeholder_state, 1);
         wait_callbacks_idle(&connection);
-        let _completion_barrier = if case == Case::Late {
-            fs::write(barrier_dir.join("armed"), b"r58").unwrap();
-            let fixture = fixture.clone();
-            let barrier = barrier_dir.clone();
-            let retained_store = Arc::clone(&store);
-            let activity = Arc::clone(&activity);
-            Some(
-                cf::synthetic_agent_integration::arm_file_rename_completion_fixture(
-                    intent.clone(),
-                    move |published| {
-                        let histories = retained_store.discover_account_root().unwrap();
-                        assert_eq!(histories.len(), 1);
-                        assert_eq!(histories[0].intent, *published);
-                        assert_eq!(histories[0].progress.sequence, 2);
-                        assert_eq!(
-                            histories[0].progress.remote,
-                            cf::namespace_intent::NamespacePhase::Verified
-                        );
-                        assert!(!histories[0].progress.local_completed);
-                        // Native identity update and RemoteVerified already occurred.
-                        // A different ordinary file on the SAME real callback tracker
-                        // now closes dirty; no tracker permit or synthetic epoch exists.
-                        let mut child = edit_child(Case::Late, &fixture, "capture.bin", root);
-                        wait_fact(
-                            || barrier.join("guard-pinned").exists(),
-                            "late actual dirty close pinned",
-                        );
-                        fs::write(barrier.join("release"), b"r58").unwrap();
-                        join_child(&mut child);
-                        wait_fact(
-                            || {
-                                activity().is_some_and(|state| {
-                                    state.active_callbacks == 0
-                                        && state.active_fetches == 0
-                                        && state.staged_fetches == 0
-                                        && state.modified_closes == capture_before.0 + 1
-                                        && state.journaled_closes == capture_before.7 + 1
-                                })
-                            },
-                            "real late dirty callback finished before original completion claim",
-                        );
-                        assert_eq!(
-                            activity().unwrap().unverifiable_closes,
-                            capture_before.1,
-                            "no sticky unknown simulates dirty-epoch refusal"
-                        );
-                    },
-                )
-                .unwrap(),
-            )
+        // Retain the actual child OUTSIDE the catalog-locked callback, even on
+        // unwind. FixtureChild's Drop kills a live process; ManuallyDrop prevents
+        // that cleanup from running under the publication lock or on uncertainty.
+        let late_child = std::rc::Rc::new(std::cell::RefCell::new(
+            None::<std::mem::ManuallyDrop<FixtureChild>>,
+        ));
+        let expected_late_entry = if case == Case::Late {
+            let baseline = activity().expect("actual fixture activity available");
+            assert_eq!(baseline.active_callbacks, 0);
+            assert_eq!(baseline.active_fetches, 0);
+            assert_eq!(baseline.staged_fetches, 0);
+            assert!(!baseline.close_admission_unknown);
+            baseline
+                .dirty_close_entries
+                .checked_add(1)
+                .filter(|value| *value != u64::MAX)
+                .expect("bounded actual dirty-entry observation")
         } else {
-            None
+            0
         };
+        let _completion_barrier =
+            if case == Case::Late {
+                fs::write(barrier_dir.join("armed"), b"r58").unwrap();
+                let fixture = fixture.clone();
+                let barrier = barrier_dir.clone();
+                let retained_store = Arc::clone(&store);
+                let activity = Arc::clone(&activity);
+                let child_slot = std::rc::Rc::clone(&late_child);
+                Some(
+                    cf::synthetic_agent_integration::arm_file_rename_completion_fixture(
+                        intent.clone(),
+                        move |published| {
+                            let histories = retained_store.discover_account_root().unwrap();
+                            assert_eq!(histories.len(), 1);
+                            assert_eq!(histories[0].intent, *published);
+                            assert_eq!(histories[0].progress.sequence, 2);
+                            assert_eq!(
+                                histories[0].progress.remote,
+                                cf::namespace_intent::NamespacePhase::Verified
+                            );
+                            assert!(!histories[0].progress.local_completed);
+                            // Native identity update and RemoteVerified already occurred.
+                            // A different ordinary file on the SAME real callback tracker
+                            // now closes dirty; no tracker permit or synthetic epoch exists.
+                            assert!(child_slot.borrow().is_none());
+                            *child_slot.borrow_mut() = Some(std::mem::ManuallyDrop::new(
+                                edit_child(Case::Late, &fixture, "capture.bin", root),
+                            ));
+                            // The callback has passed REAL dirty bookkeeping, but
+                            // binding/body capture needs the catalog lock held here.
+                            // Observe only the lock-free entry fact, never wait for
+                            // its downstream pin/journal while retaining that lock.
+                            wait_fact(
+                                || {
+                                    activity().is_some_and(|state| {
+                                        state.dirty_close_entries == expected_late_entry
+                                            && state.active_callbacks > 0
+                                            && state.active_fetches == 0
+                                            && state.staged_fetches == 0
+                                            && !state.close_admission_unknown
+                                            && state.unverifiable_closes == capture_before.1
+                                    })
+                                },
+                                "actual late dirty callback entered before completion claim",
+                            );
+                            fs::write(barrier.join("release"), b"r58").unwrap();
+                        },
+                    )
+                    .unwrap(),
+                )
+            } else {
+                None
+            };
         let outcome=if case==Case::Candidate {
             let observation=connection.poll_namespace_observer(Duration::from_millis(250)).unwrap();
             let pairs=match observation.poll(){raiun_control_windows::directory_notifications::ObserverPoll::Batch(batch)=>raiun_control_windows::directory_notifications::directory_rename_hints::pair_rename_hints(batch),_=>panic!("complete native rename batch required")};
@@ -1424,6 +1444,33 @@ fn run(case: Case) {
         } else {
             connection.reconcile_fresh_file_rename(&backend,&store,intent,parent_identity,&current)
         }.unwrap();
+        if case == Case::Late {
+            assert_eq!(
+                outcome,
+                cf::namespace_file_rename::FileRenameOutcome::RemoteVerifiedLocalPending
+            );
+            let mut child = late_child
+                .borrow_mut()
+                .take()
+                .expect("same actual late child retained");
+            join_child(&mut child);
+            // Drop the kill-on-drop wrapper only after positively observed exit.
+            drop(std::mem::ManuallyDrop::into_inner(child));
+            assert_capture_transition(&connection, capture_before);
+            assert!(
+                barrier_dir.join("guard-pinned").exists(),
+                "actual path pins observed after catalog unlock"
+            );
+            let after_capture = activity().expect("actual capture activity available");
+            assert_eq!(after_capture.active_callbacks, 0);
+            assert_eq!(after_capture.active_fetches, 0);
+            assert_eq!(after_capture.staged_fetches, 0);
+            assert_eq!(after_capture.modified_closes, capture_before.0 + 1);
+            assert_eq!(after_capture.journaled_closes, capture_before.7 + 1);
+            assert_eq!(after_capture.dirty_close_entries, expected_late_entry);
+            assert!(!after_capture.close_admission_unknown);
+            assert_eq!(after_capture.unverifiable_closes, capture_before.1);
+        }
         let expected = if case == Case::Late {
             cf::namespace_file_rename::FileRenameOutcome::RemoteVerifiedLocalPending
         } else {

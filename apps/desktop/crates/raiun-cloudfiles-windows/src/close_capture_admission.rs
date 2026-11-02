@@ -160,6 +160,11 @@ impl CloseCaptureAdmission {
         true
     }
 
+    #[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
+    pub(crate) fn fixture_admission_unknown(&self) -> bool {
+        self.unknown.load(Ordering::Acquire)
+    }
+
     fn mark_unknown(&self) {
         self.unknown.store(true, Ordering::Release);
     }

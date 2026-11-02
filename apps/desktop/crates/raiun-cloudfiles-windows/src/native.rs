@@ -5662,6 +5662,8 @@ struct CallbackState {
     initial_edits: crate::initial_edit_queue::InitialEditQueue,
     root_path: Option<PathBuf>,
     root_identity: Option<RootIdentity>,
+    #[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
+    fixture_dirty_close_entries: AtomicU64,
     modified_placeholder_closes: AtomicUsize,
     non_vault_modified_closes: AtomicUsize,
     vault_dirty: Mutex<crate::vault_dirty::VaultDirtyFiles>,
@@ -5778,6 +5780,8 @@ impl CallbackState {
             initial_edits: crate::initial_edit_queue::InitialEditQueue::default(),
             root_path,
             root_identity,
+            #[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
+            fixture_dirty_close_entries: AtomicU64::new(0),
             modified_placeholder_closes: AtomicUsize::new(0),
             non_vault_modified_closes: AtomicUsize::new(0),
             vault_dirty: Mutex::new(crate::vault_dirty::VaultDirtyFiles::default()),
@@ -6164,6 +6168,23 @@ impl CallbackState {
         // before opening or staging its body, while retaining the permit until
         // durable commit and initial-handoff handling have completed.
         close_permit.mark_dirty_before_capture();
+        // Read-only diagnostic event after REAL dirty bookkeeping released its
+        // mutex. Never borrow/mutate admission state from the fixture observer.
+        #[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
+        {
+            let mut value = self.fixture_dirty_close_entries.load(Ordering::Acquire);
+            loop {
+                match self.fixture_dirty_close_entries.compare_exchange_weak(
+                    value,
+                    value.saturating_add(1),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => value = actual,
+                }
+            }
+        }
         // Known MODIFIED bytes invalidate this connection's exact opaque receipt
         // immediately, before any data open, revoked route lookup or retention
         // can block. Other clean files keep their own receipts. This establishes

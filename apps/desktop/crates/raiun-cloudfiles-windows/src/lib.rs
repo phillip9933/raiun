@@ -571,6 +571,8 @@ pub struct PreparedNamespaceDirectory<'connection> {
 #[cfg(all(windows, debug_assertions, feature = "synthetic-agent-integration"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RenamePublicEntryFixtureActivity {
+    pub dirty_close_entries: u64,
+    pub close_admission_unknown: bool,
     pub active_callbacks: usize,
     pub active_fetches: usize,
     pub staged_fetches: usize,
