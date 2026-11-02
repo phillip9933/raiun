@@ -11,6 +11,20 @@ platform acceptance, and verification of the actual packaged application.
 Linux evidence does not establish Windows acceptance. A build or unit-test pass
 alone does not complete an item. Preserve evidence of failures and limitations.
 
+Owner delivery direction, 2 November 2026: finish the current Linux and Windows
+candidates before broader testing. The release checks for this phase are limited
+to builds and relevant compilation/formatting, basic install/upgrade and
+startup/sign-in, one normal file workflow, and essential data preservation on
+the finished candidates. The seven-case R58/R59 gate, repeated full-suite runs,
+expanded fault/recovery matrices and further test-harness preparation are not
+release requirements. Reuse completed evidence and retain existing regressions
+and failure records; do not infer native success from compilation.
+
+This changes the current validation workload, not the intended features or data
+safety requirements. Preserve conditional mutations, exact account/vault/root
+binding, dirty edits and recovery, and safe shutdown. Whole-category boxes may
+remain unchecked for broader acceptance without creating another beta gate.
+
 Owner update, 29 October 2026: the **next release** must include full ordinary
 Windows file/folder operations and Linux/Windows GUI feature parity, together
 with the practical headless CLI MVP. Existing-placeholder-only saves, missing

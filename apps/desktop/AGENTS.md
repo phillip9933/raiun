@@ -24,3 +24,18 @@ Preserve explicit mode-specific state/credential/registration policies when
 sharing code. Use the verified source handoff and ownership plan in the project's
 `outputs/desktop-consolidation-20261031/`; run combined checks after composition.
 Do not confuse source consolidation with native acceptance or release approval.
+
+## Current release validation scope — owner update, 2 November 2026
+
+The owner explicitly requested removing unnecessary tests from the release
+critical path, not merely stopping test expansion. For this release-preparation
+phase, use basic build/affected compilation and formatting checks, install/upgrade
+and startup/sign-in smoke, one normal file workflow, and essential data-preservation
+checks on finished candidates. Do not rerun full workspace suites, the seven-case
+R58/R59 acceptance gate, expanded failure matrices or test-protocol preparation as
+release requirements. This phase-specific instruction supersedes the earlier
+blanket full-workspace rerun instruction. Reuse completed evidence and preserve
+existing regression tests and failures. Fix implementation and build the candidates
+first. Retain fail-closed encryption, exact account/vault/root binding, conditional
+mutations, dirty recovery and safe shutdown; compiled artifacts are not native
+acceptance. See docs/COMPLETION-CHECKLIST.md for the same current release boundary.
