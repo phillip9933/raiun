@@ -141,6 +141,259 @@ impl WindowsVaultReadBinding {
         binding.check_current()?;
         Ok(binding)
     }
+    #[cfg(windows)]
+    pub(crate) fn prepare_child_directory_create(
+        &self,
+        path: &str,
+        parent: &RemoteEntry,
+        cancellation: &crate::vault_custody::VaultUploadCancellation<'_>,
+        context: raiun_opencloud::RangeReadContext,
+    ) -> Result<raiun_opencloud::vault_backend::VaultChildDirectoryCreateTarget, CloudError> {
+        self.check_current()?;
+        if !parent.directory
+            || path
+                .rsplit_once('/')
+                .map(|(p, _)| if p.is_empty() { "/" } else { p })
+                != Some(parent.path.as_str())
+        {
+            return Err(refused());
+        }
+        let stop = || self.is_revoked() || cancellation.is_cancelled();
+        let request = raiun_opencloud::vault_backend::VaultChildDirectoryCreateRequest {
+            scope: &self.scope,
+            epoch: &self.epoch,
+            vault_root_path: &self.root_path,
+            logical_path: path,
+            parent_resource_id: &parent.id,
+            parent_etag: &parent.etag,
+            expected_token_generation: self.trusted.token_generation(),
+            provider_generation: cancellation.generation.clone(),
+            expected_provider_generation: cancellation.expected,
+            context,
+            cancelled: &stop,
+        };
+        let target = self
+            .backend
+            .prepare_child_directory_create_guarded(&request)?;
+        self.check_current()?;
+        if stop() {
+            return Err(refused());
+        }
+        Ok(target)
+    }
+    #[cfg(windows)]
+    pub(crate) fn send_child_directory_create(
+        &self,
+        path: &str,
+        parent: &RemoteEntry,
+        target: raiun_opencloud::vault_backend::VaultChildDirectoryCreateTarget,
+        cancellation: &crate::vault_custody::VaultUploadCancellation<'_>,
+        before_send: &mut dyn FnMut() -> Result<(), CloudError>,
+        context: raiun_opencloud::RangeReadContext,
+    ) -> Result<raiun_opencloud::vault_backend::VaultChildDirectoryCreateOutcome, CloudError> {
+        use raiun_opencloud::vault_backend::{
+            VaultChildDirectoryCreateOutcome, VaultChildDirectoryCreateRequest,
+        };
+        self.check_current()?;
+        if !parent.directory
+            || path
+                .rsplit_once('/')
+                .map(|(p, _)| if p.is_empty() { "/" } else { p })
+                != Some(parent.path.as_str())
+        {
+            return Err(refused());
+        }
+        let stop = || self.is_revoked() || cancellation.is_cancelled();
+        let request = VaultChildDirectoryCreateRequest {
+            scope: &self.scope,
+            epoch: &self.epoch,
+            vault_root_path: &self.root_path,
+            logical_path: path,
+            parent_resource_id: &parent.id,
+            parent_etag: &parent.etag,
+            expected_token_generation: self.trusted.token_generation(),
+            provider_generation: cancellation.generation.clone(),
+            expected_provider_generation: cancellation.expected,
+            context,
+            cancelled: &stop,
+        };
+        match self
+            .backend
+            .create_child_directory_guarded(&request, target, before_send)?
+        {
+            VaultChildDirectoryCreateOutcome::Verified(_)
+                if stop() || self.check_current().is_err() =>
+            {
+                Ok(VaultChildDirectoryCreateOutcome::NeedsReconciliation {
+                    reason: ErrorKind::Forbidden,
+                })
+            }
+            other => Ok(other),
+        }
+    }
+    /// Pure immutable comparison only; original exclusive route/auth/epoch
+    /// fences are held by the child publication owner. Never acquire them here.
+    #[cfg(windows)]
+    pub(crate) fn child_directory_proof_matches(
+        &self,
+        proof: &raiun_opencloud::vault_backend::VaultVerifiedChildDirectory,
+    ) -> bool {
+        proof.scope() == &self.scope
+            && proof.matches_epoch(&self.epoch)
+            && proof.root_path() == self.root_path
+            && proof.token_generation() == self.trusted.token_generation()
+    }
+    #[cfg(windows)]
+    pub(crate) fn fresh_child_create_parent(
+        &self,
+        parent: &RemoteEntry,
+        cancellation: &crate::CancellationToken,
+    ) -> Result<RemoteEntry, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancellation.is_cancelled() || cancellation.is_expired();
+        if stop() {
+            return Err(refused());
+        }
+        let entry = self.backend.child_create_parent_at_epoch_with_context(
+            &self.scope,
+            &self.epoch,
+            parent,
+            raiun_opencloud::RangeReadContext {
+                deadline: cancellation.deadline(),
+                token_generation: self.trusted.token_generation(),
+            },
+            &stop,
+        )?;
+        self.check_current()?;
+        if stop() {
+            return Err(refused());
+        }
+        Ok(entry)
+    }
+    #[cfg(windows)]
+    pub(crate) fn child_create_descriptor(
+        &self,
+        root: crate::ConfiguredRootIdentity,
+        parent_opaque: &[u8; 16],
+        parent: &RemoteEntry,
+        source: crate::VaultChildCreateSource,
+        encoded: &str,
+        integrity: &str,
+    ) -> Result<crate::VaultChildCreateDescriptor, BackendError> {
+        self.with_publication(|| {
+            let leaf = source.components.last().ok_or_else(refused)?;
+            let descriptor = crate::VaultChildCreateDescriptor {
+                owner: self.trusted.clone(),
+                vault: self.scope.clone(),
+                remote_root: self.root_path.clone(),
+                root,
+                parent_identity: *parent_opaque,
+                parent: parent.clone(),
+                logical_path: format!("{}/{}", parent.path.trim_end_matches('/'), leaf),
+                encoded_target: encoded.into(),
+                integrity_token: integrity.into(),
+                historical_unlock_epoch: self.epoch.historical_generation(),
+                source,
+            };
+            descriptor.validate().map_err(|_| refused())?;
+            Ok(descriptor)
+        })
+        .map_err(|_| BackendError::Unavailable)
+    }
+    #[cfg(windows)]
+    pub(crate) fn prepare_child_file_create(
+        &self,
+        path: &str,
+        parent: &RemoteEntry,
+        len: u64,
+        sha: [u8; 32],
+        deadline: std::time::Instant,
+        cancellation: &crate::vault_custody::VaultUploadCancellation<'_>,
+    ) -> Result<raiun_opencloud::vault_backend::VaultChildFileCreateTarget, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancellation.is_cancelled();
+        let request = raiun_opencloud::vault_backend::VaultChildFileCreateRequest {
+            scope: &self.scope,
+            epoch: &self.epoch,
+            vault_root_path: &self.root_path,
+            logical_path: path,
+            parent_resource_id: &parent.id,
+            parent_etag: &parent.etag,
+            expected_token_generation: self.trusted.token_generation(),
+            provider_generation: cancellation.generation.clone(),
+            expected_provider_generation: cancellation.expected,
+            deadline,
+            cancelled: &stop,
+        };
+        let target = self
+            .backend
+            .prepare_child_file_create_guarded(&request, len, sha)?;
+        self.check_current()?;
+        if stop() {
+            return Err(refused());
+        }
+        Ok(target)
+    }
+    #[cfg(windows)]
+    pub(crate) fn send_child_file_create<R: Read>(
+        &self,
+        path: &str,
+        parent: &RemoteEntry,
+        target: raiun_opencloud::vault_backend::VaultChildFileCreateTarget,
+        source: &mut R,
+        private: &raiun_control_windows::PrivateDirectory,
+        deadline: std::time::Instant,
+        cancellation: &crate::vault_custody::VaultUploadCancellation<'_>,
+        before: &mut dyn FnMut() -> Result<(), CloudError>,
+    ) -> Result<raiun_opencloud::vault_backend::VaultChildFileCreateOutcome, CloudError> {
+        use raiun_opencloud::vault_backend::{
+            VaultChildFileCreateOutcome, VaultChildFileCreateRequest,
+        };
+        self.check_current()?;
+        private.verify_path().map_err(|_| refused())?;
+        // Pure atomics/job only: this predicate also runs UNDER local crypto.
+        let stop = || self.is_revoked() || cancellation.is_cancelled();
+        let request = VaultChildFileCreateRequest {
+            scope: &self.scope,
+            epoch: &self.epoch,
+            vault_root_path: &self.root_path,
+            logical_path: path,
+            parent_resource_id: &parent.id,
+            parent_etag: &parent.etag,
+            expected_token_generation: self.trusted.token_generation(),
+            provider_generation: cancellation.generation.clone(),
+            expected_provider_generation: cancellation.expected,
+            deadline,
+            cancelled: &stop,
+        };
+        let result = self.backend.create_child_file_guarded(
+            &request,
+            target,
+            source,
+            private.path(),
+            before,
+        )?;
+        match result {
+            VaultChildFileCreateOutcome::Verified(_)
+                if stop() || self.check_current().is_err() || private.verify_path().is_err() =>
+            {
+                Ok(VaultChildFileCreateOutcome::NeedsReconciliation {
+                    reason: ErrorKind::Forbidden,
+                })
+            }
+            other => Ok(other),
+        }
+    }
+    #[cfg(windows)]
+    pub(crate) fn child_file_proof_matches(
+        &self,
+        proof: &raiun_opencloud::vault_backend::VaultVerifiedChildFile,
+    ) -> bool {
+        proof.scope() == &self.scope
+            && proof.matches_epoch(&self.epoch)
+            && proof.root_path() == self.root_path
+            && proof.token_generation() == self.trusted.token_generation()
+    }
     /// Pure immutable comparison; caller already holds publication fences.
     pub(crate) fn validate_upload_target(
         &self,
@@ -415,6 +668,21 @@ impl WindowsVaultReadBinding {
             root,
             self.epoch.historical_generation(),
         )
+    }
+
+    /// Pure join to this immutable original owner. Works after revocation/key
+    /// clear and grants no live route, bearer, unlock or mutation capability.
+    pub(crate) fn matches_cleanup_route(
+        &self,
+        owner: &ProviderScope,
+        space: &str,
+        root_id: &str,
+        path: &str,
+    ) -> bool {
+        owner == &self.trusted
+            && self.scope.space_id() == space
+            && self.scope.resource_id() == root_id
+            && self.root_path == path
     }
 
     pub(crate) fn route_location(

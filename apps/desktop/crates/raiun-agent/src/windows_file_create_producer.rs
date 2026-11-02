@@ -13,22 +13,33 @@ use std::sync::{
 };
 pub(crate) enum Task {
     File(Box<FileCreateTask>),
+    Vault(Box<raiun_cloudfiles_windows::VaultChildCreateTask>),
     Directory(Box<DirectoryCreateTask>),
 }
 pub(crate) enum Reply {
     File(Box<FileCreateReply>),
+    Vault(Box<raiun_cloudfiles_windows::VaultChildCreateReply>),
     Directory(Box<DirectoryCreateReply>),
 }
 impl Task {
     fn kind(&self) -> CreateKind {
         match self {
             Self::File(_) => CreateKind::File,
+            Self::Vault(task) => match task.kind() {
+                raiun_cloudfiles_windows::namespace_intent::NamespaceObjectKind::File => {
+                    CreateKind::File
+                }
+                raiun_cloudfiles_windows::namespace_intent::NamespaceObjectKind::Directory => {
+                    CreateKind::Directory
+                }
+            },
             Self::Directory(_) => CreateKind::Directory,
         }
     }
     pub(crate) fn execute(self) -> Reply {
         match self {
             Self::File(task) => Reply::File(Box::new((*task).execute())),
+            Self::Vault(task) => Reply::Vault(Box::new((*task).execute())),
             Self::Directory(task) => Reply::Directory(Box::new((*task).execute())),
         }
     }
@@ -37,6 +48,14 @@ impl Reply {
     fn kind(&self) -> CreateKind {
         match self {
             Self::File(_) => CreateKind::File,
+            Self::Vault(task) => match task.kind() {
+                raiun_cloudfiles_windows::namespace_intent::NamespaceObjectKind::File => {
+                    CreateKind::File
+                }
+                raiun_cloudfiles_windows::namespace_intent::NamespaceObjectKind::Directory => {
+                    CreateKind::Directory
+                }
+            },
             Self::Directory(_) => CreateKind::Directory,
         }
     }
@@ -45,6 +64,8 @@ pub(crate) type Workers = Executor<Task, Reply>;
 enum Step {
     Task(Task),
     BusyFile,
+    BusyVaultTask(Task),
+    Ordinary,
     Completed,
     Held,
 }
@@ -64,6 +85,17 @@ fn directory_step(step: DirectoryCreateStep) -> Step {
         ) => Step::Completed,
         // Deferred conflates pre-intent busy with post-intent refusal. Never retry.
         DirectoryCreateStep::Finished(_) => Step::Held,
+    }
+}
+fn vault_step(step: raiun_cloudfiles_windows::VaultChildCreateStep) -> Step {
+    use raiun_cloudfiles_windows::VaultChildCreateStep as V;
+    match step {
+        V::Task(t) => Step::Task(Task::Vault(Box::new(t))),
+        V::Ordinary => Step::Ordinary,
+        V::Busy => Step::BusyFile,
+        V::BusyBeforeCapture(task) => Step::BusyVaultTask(Task::Vault(Box::new(task))),
+        V::Completed => Step::Completed,
+        V::Held => Step::Held,
     }
 }
 pub(crate) const PRODUCTION_ENABLED: bool = true;
@@ -88,6 +120,7 @@ pub(crate) struct Producer {
     held: bool,
     allow_file: bool,
     allow_directory: bool,
+    ordinary_candidate: bool,
 }
 impl Producer {
     pub(crate) fn new(
@@ -110,6 +143,7 @@ impl Producer {
             held: false,
             allow_file,
             allow_directory,
+            ordinary_candidate: false,
         }
     }
     pub(crate) fn is_current(
@@ -147,6 +181,7 @@ impl Producer {
         // Cancel before dropping an unexecuted task. CF flight tracks its disposal.
         let _ = connection.close_fresh_personal_file_create();
         let _ = connection.close_fresh_personal_directory_create();
+        let _ = connection.close_fresh_vault_child_create();
         self.deferred.take();
     }
     /// Poll even on HOLD so completed/late replies cannot consume a slot forever.
@@ -159,6 +194,7 @@ impl Producer {
             while workers.poll().is_some() {}
             let _ = connection.close_fresh_personal_file_create();
             let _ = connection.close_fresh_personal_directory_create();
+            let _ = connection.close_fresh_vault_child_create();
         }
     }
     #[allow(clippy::too_many_arguments)]
@@ -254,6 +290,11 @@ impl Producer {
                 }
             };
             Some(match reply {
+                Reply::Vault(reply) => vault_step(
+                    connection
+                        .advance_fresh_vault_child_create(*reply)
+                        .map_err(|_| HOLD)?,
+                ),
                 Reply::File(reply) => file_step(
                     connection
                         .advance_fresh_personal_file_create(*reply)
@@ -275,44 +316,57 @@ impl Producer {
                 .map(String::as_str)
                 .collect();
             let name = candidate.components.last().ok_or(HOLD)?;
-            Some(match candidate.kind {
-                CreateKind::File => file_step(
-                    connection
-                        .begin_fresh_personal_file_create_in_parent(
-                            backend,
-                            &parents,
-                            name,
-                            auth,
-                            record_generation,
-                            &candidate.job,
-                            candidate.current.clone(),
-                        )
-                        .map_err(|_| HOLD)?,
-                ),
-                CreateKind::Directory => directory_step(
-                    connection
-                        .begin_fresh_personal_directory_create(
-                            backend,
-                            &parents,
-                            name,
-                            auth,
-                            record_generation,
-                            &candidate.job,
-                            candidate.current.clone(),
-                        )
-                        .map_err(|_| HOLD)?,
-                ),
-            })
+            if !self.ordinary_candidate {
+                Some(vault_step(connection.begin_fresh_vault_child_create(backend,&parents,name,match candidate.kind {CreateKind::File=>raiun_cloudfiles_windows::namespace_intent::NamespaceObjectKind::File,CreateKind::Directory=>raiun_cloudfiles_windows::namespace_intent::NamespaceObjectKind::Directory},auth,record_generation,&candidate.job,candidate.current.clone(),self.generation.clone()).map_err(|_|HOLD)?))
+            } else {
+                Some(match candidate.kind {
+                    CreateKind::File => file_step(
+                        connection
+                            .begin_fresh_personal_file_create_in_parent(
+                                backend,
+                                &parents,
+                                name,
+                                auth,
+                                record_generation,
+                                &candidate.job,
+                                candidate.current.clone(),
+                            )
+                            .map_err(|_| HOLD)?,
+                    ),
+                    CreateKind::Directory => directory_step(
+                        connection
+                            .begin_fresh_personal_directory_create(
+                                backend,
+                                &parents,
+                                name,
+                                auth,
+                                record_generation,
+                                &candidate.job,
+                                candidate.current.clone(),
+                            )
+                            .map_err(|_| HOLD)?,
+                    ),
+                })
+            }
         } else {
             None
         };
         if let Some(step) = step {
             match step {
                 Step::Task(task) => self.deferred = Some(task),
+                Step::BusyVaultTask(task) => {
+                    self.deferred = Some(task);
+                    return Ok(false);
+                }
                 Step::BusyFile => {
                     return Ok(false);
                 }
+                Step::Ordinary => {
+                    self.ordinary_candidate = true;
+                    return Ok(false);
+                }
                 Step::Completed => {
+                    self.ordinary_candidate = false;
                     self.candidate = None;
                     self.cancel_on_drop.take();
                     return Ok(true);

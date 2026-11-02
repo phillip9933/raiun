@@ -70,6 +70,19 @@ impl VaultRouteRegistry {
         }
     }
 
+    /// Dispatch preference only. Ordinary mutation admission must independently
+    /// revalidate encryption/root/parent evidence, including known exclusions.
+    pub(crate) fn has_active_routes(&self) -> Result<bool, BackendError> {
+        if self.revoked.load(Ordering::Acquire) {
+            return Err(BackendError::Unavailable);
+        }
+        Ok(!self
+            .routes
+            .lock()
+            .map_err(|_| BackendError::Unavailable)?
+            .is_empty())
+    }
+
     /// Restore historical exclusions only. No session, active route, or key is
     /// created. The trusted broker supplies every saved path for this profile,
     /// including paths recorded under earlier account credentials/root folders.

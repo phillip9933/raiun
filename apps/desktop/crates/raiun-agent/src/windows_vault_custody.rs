@@ -37,7 +37,7 @@ fn unavailable<T>(_: T) -> BackendError {
     BackendError::Unavailable
 }
 
-trait Storage: Send + Sync {
+pub(super) trait Storage: Send + Sync {
     fn load(&self, key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>>;
     fn cas(&self, key: &[u8], old: Option<&[u8]>, next: &[u8]) -> Result<()>;
     fn load_capture(&self, _key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>> {
@@ -905,6 +905,11 @@ impl VaultPublishedHistorySource for WindowsVaultCustody {
                 .scopes_for_reconciliation()
                 .map_err(|_| refused())?
             {
+                super::windows_vault_child_create_custody::verify_no_unresolved(
+                    &self.store.0,
+                    scope,
+                )
+                .map_err(|_| refused())?;
                 let child = Custody::reopen(&self.store, scope).map_err(|_| refused())?;
                 let history = child.publication_history().map_err(|_| refused())?;
                 // Promoted v4 history still retains every immutable capture.
@@ -1292,6 +1297,86 @@ fn deterministic_capture_id(
 }
 
 impl VaultPublicationCustody for View {
+    fn prepare_child_create(
+        &self,
+        descriptor: &raiun_cloudfiles_windows::VaultChildCreateDescriptor,
+        source: Option<&mut dyn std::io::Read>,
+        verify: &mut dyn FnMut() -> std::result::Result<(), BackendError>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> std::result::Result<Arc<dyn raiun_cloudfiles_windows::VaultChildCreateRecord>, BackendError>
+    {
+        let result = (|| {
+            self.verify_context(
+                &descriptor.owner,
+                &descriptor.vault,
+                &descriptor.remote_root,
+            )?;
+            if descriptor.root != self.root || cancelled() {
+                return Err(BackendError::Unavailable);
+            }
+            let root = RootBinding::new(
+                &self.account,
+                self.root.volume_serial,
+                self.root.file_index,
+                &self.registration,
+            )
+            .map_err(unavailable)?;
+            let mut manifest = RootManifest::reopen(&self.store, &root).map_err(unavailable)?;
+            if !manifest
+                .scopes_for_reconciliation()
+                .map_err(unavailable)?
+                .contains(&self.scope)
+            {
+                return Err(BackendError::Unavailable);
+            }
+            manifest.verify_current(&self.store).map_err(unavailable)?;
+            let mut cached = self.child.custody.lock().map_err(unavailable)?;
+            self.verify_context(
+                &descriptor.owner,
+                &descriptor.vault,
+                &descriptor.remote_root,
+            )?;
+            let fresh = Custody::reopen(&self.store, &self.scope).map_err(unavailable)?;
+            let mut parents = fresh
+                .entries_for_reconciliation()
+                .iter()
+                .filter(|e| e.opaque() == descriptor.parent_identity);
+            let parent = parents.next().ok_or(BackendError::Unavailable)?;
+            if parents.next().is_some()
+                || !parent.is_directory()
+                || parent.remote_id() != descriptor.parent.id
+                || parent.root_relative_path() != descriptor.parent.path
+            {
+                return Err(BackendError::Unavailable);
+            }
+            manifest.verify_current(&self.store).map_err(unavailable)?;
+            let record = super::windows_vault_child_create_custody::prepare(
+                self.store.0.clone(),
+                &self.scope,
+                descriptor,
+                source,
+                verify,
+                cancelled,
+            )?;
+            if cancelled() {
+                return Err(BackendError::Unavailable);
+            }
+            manifest.verify_current(&self.store).map_err(unavailable)?;
+            self.verify_context(
+                &descriptor.owner,
+                &descriptor.vault,
+                &descriptor.remote_root,
+            )?;
+            *cached = Custody::reopen(&self.store, &self.scope).map_err(unavailable)?;
+            Ok(record)
+        })();
+        if result.is_err() {
+            self.child
+                .failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
+    }
     fn retain_existing_edit(
         &self,
         baseline: &ExistingVaultEditBaseline,

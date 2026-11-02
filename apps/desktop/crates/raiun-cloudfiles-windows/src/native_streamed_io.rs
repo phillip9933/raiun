@@ -155,13 +155,23 @@ mod windows {
         eof: bool,
         cancellation: Option<&CancellationToken>,
     ) -> Result<usize, Error> {
+        read_vault_capture_at_with_stop(source, offset, buffer, eof, cancellation, &|| false)
+    }
+    pub(in super::super) fn read_vault_capture_at_with_stop(
+        source: &super::super::RawOwnedHandle,
+        offset: u64,
+        buffer: &mut [u8],
+        eof: bool,
+        cancellation: Option<&CancellationToken>,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<usize, Error> {
         PendingRead {
             file: &source.0,
             io: CompletionIo::new()?,
             buffer,
             pending: false,
         }
-        .read_at(offset, eof, cancellation)
+        .read_at_with_stop(offset, eof, cancellation, stop)
     }
     /// Borrows the Cf owner and caller buffer through actual I/O completion.
     /// This guard is never moved after submission; methods only borrow it.
@@ -287,7 +297,7 @@ mod windows {
 }
 
 #[cfg(windows)]
-pub(super) use windows::{read_create_at, read_vault_capture_at};
+pub(super) use windows::{read_create_at, read_vault_capture_at, read_vault_capture_at_with_stop};
 
 #[cfg(test)]
 mod tests {

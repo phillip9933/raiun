@@ -50,6 +50,16 @@ use crate::{
 };
 
 mod copy;
+mod directory_create;
+mod file_create;
+pub use directory_create::{
+    VaultChildDirectoryCreateOutcome, VaultChildDirectoryCreateRequest,
+    VaultChildDirectoryCreateTarget, VaultVerifiedChildDirectory,
+};
+pub use file_create::{
+    VaultChildFileCreateOutcome, VaultChildFileCreateRequest, VaultChildFileCreateTarget,
+    VaultVerifiedChildFile,
+};
 mod streamed_overwrite;
 pub use copy::{
     VaultCopyOutcome, VaultCopyReconciliationReason, VaultCopyRequest, VaultCopyResolutionOutcome,

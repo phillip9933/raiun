@@ -157,6 +157,14 @@ pub struct VaultSessionEpoch {
 }
 
 impl VaultSessionEpoch {
+    /// Compare the complete original opaque identity without registry entry.
+    /// Identity equality alone grants no current unlock or mutation authority;
+    /// callers must separately retain the original live epoch lease.
+    pub fn same_identity(&self, other: &Self) -> bool {
+        self.scope == other.scope
+            && self.generation == other.generation
+            && Weak::ptr_eq(&self.registry_identity, &other.registry_identity)
+    }
     /// Historical numeric label only. This cannot authenticate a session,
     /// reconstruct an epoch or replace the coordinator's opaque epoch lease.
     pub fn historical_generation(&self) -> u64 {

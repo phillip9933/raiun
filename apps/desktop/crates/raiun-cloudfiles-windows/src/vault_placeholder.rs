@@ -519,6 +519,246 @@ mod runtime {
             Ok(())
         }
 
+        /// Original exact route owns publication. Caller closure may only
+        /// verify/convert the retained native directory and persist its factual
+        /// completion; no registry/token/publication reentry or HTTP.
+        pub(crate) fn publish_created_directory<T>(
+            &self,
+            proof: &raiun_opencloud::vault_backend::VaultVerifiedChildDirectory,
+            parent_identity: [u8; 16],
+            cancellation: &crate::vault_custody::VaultUploadCancellation<'_>,
+            publish: impl FnOnce([u8; 16]) -> Result<T, crate::Error>,
+        ) -> Result<T, crate::Error> {
+            self.binding.with_exclusive_completion(|| {
+                let unavailable = || crate::Error::EditRecoveryUnavailable;
+                if cancellation.is_cancelled()
+                    || !self.binding.child_directory_proof_matches(proof)
+                    || !proof.provider_current(&cancellation.generation, cancellation.expected)
+                    || !proof.entry().directory
+                    || proof.entry().size != 0
+                {
+                    return Err(unavailable());
+                }
+                let identity = {
+                    let mut catalogue = self.catalogue.lock().map_err(|_| unavailable())?;
+                    let parent = catalogue
+                        .entries
+                        .get(&parent_identity)
+                        .ok_or_else(unavailable)?;
+                    if !parent.directory
+                        || parent.id != proof.parent_resource_id()
+                        || direct_child_name(&parent.path, &proof.entry().path)
+                            .is_none_or(|name| !valid_windows_component(name))
+                        || catalogue.entries.values().any(|entry| {
+                            entry.path == proof.entry().path && entry.id != proof.entry().id
+                        })
+                    {
+                        return Err(unavailable());
+                    }
+                    let mut next = catalogue.clone();
+                    let mut entry = proof.entry().clone();
+                    entry.writable = false;
+                    let identity = next.insert(entry).map_err(|_| unavailable())?;
+                    persist_catalogue(self.custody.as_ref(), &next).map_err(|_| unavailable())?;
+                    *catalogue = next;
+                    identity
+                };
+                if cancellation.is_cancelled() {
+                    return Err(unavailable());
+                }
+                let result = publish(identity)?;
+                if cancellation.is_cancelled() {
+                    return Err(unavailable());
+                }
+                Ok(result)
+            })
+        }
+
+        pub(crate) fn child_create_parent_metadata(
+            &self,
+            identity: &[u8; 16],
+            cancellation: &crate::CancellationToken,
+        ) -> Result<RemoteEntry, BackendError> {
+            check(cancellation)?;
+            let original = self.saved(identity)?;
+            if !original.directory {
+                return Err(BackendError::Unavailable);
+            }
+            let mut fresh = self
+                .binding
+                .fresh_child_create_parent(&original, cancellation)
+                .map_err(|_| BackendError::Unavailable)?;
+            check(cancellation)?;
+            if !fresh.directory || fresh.id != original.id || fresh.path != original.path {
+                return Err(BackendError::Unavailable);
+            }
+            fresh.writable = false;
+            Ok(fresh)
+        }
+        pub(crate) fn check_child_create_parent(
+            &self,
+            identity: &[u8; 16],
+            parent: &RemoteEntry,
+            root: crate::ConfiguredRootIdentity,
+        ) -> Result<(), BackendError> {
+            self.binding
+                .with_publication(|| {
+                    if root != self.custody.root_identity() || !parent.directory {
+                        return Err(refused());
+                    }
+                    self.binding
+                        .verify_custody_context(self.custody.as_ref())
+                        .map_err(|_| refused())?;
+                    let saved = self.saved(identity).map_err(|_| refused())?;
+                    // Directory catalogue keys retain original ETags. The fresh
+                    // SDK-bound parent ETag is checked at send, never replaced by
+                    // stale presentation metadata from the catalogue.
+                    if !saved.directory || saved.id != parent.id || saved.path != parent.path {
+                        return Err(refused());
+                    }
+                    Ok(())
+                })
+                .map_err(|_| BackendError::Unavailable)
+        }
+        pub(crate) fn prepare_child_create_record(
+            &self,
+            descriptor: &crate::VaultChildCreateDescriptor,
+            source: Option<&mut dyn std::io::Read>,
+            verify_native: &mut dyn FnMut() -> Result<(), BackendError>,
+            cancelled: &dyn Fn() -> bool,
+        ) -> Result<Arc<dyn crate::VaultChildCreateRecord>, BackendError> {
+            descriptor.validate()?;
+            self.check_child_create_parent(
+                &descriptor.parent_identity,
+                &descriptor.parent,
+                descriptor.root,
+            )?;
+            let current = self.binding.child_create_descriptor(
+                descriptor.root,
+                &descriptor.parent_identity,
+                &descriptor.parent,
+                descriptor.source.clone(),
+                &descriptor.encoded_target,
+                &descriptor.integrity_token,
+            )?;
+            if current.owner != descriptor.owner
+                || current.vault != descriptor.vault
+                || current.remote_root != descriptor.remote_root
+                || current.logical_path != descriptor.logical_path
+                || current.historical_unlock_epoch != descriptor.historical_unlock_epoch
+            {
+                return Err(BackendError::Unavailable);
+            }
+            if cancelled() {
+                return Err(BackendError::Cancelled);
+            }
+            // No route/token/epoch/catalogue lock spans body staging. The
+            // original binding is reacquired only for the short native
+            // postproof before the protected manifest/descriptor commit.
+            let mut verify = || {
+                self.binding
+                    .with_publication(|| {
+                        if cancelled() {
+                            return Err(refused());
+                        }
+                        self.binding
+                            .verify_custody_context(self.custody.as_ref())
+                            .map_err(|_| refused())?;
+                        verify_native().map_err(|_| refused())
+                    })
+                    .map_err(|_| BackendError::Unavailable)
+            };
+            self.custody
+                .prepare_child_create(descriptor, source, &mut verify, cancelled)
+        }
+
+        pub(crate) fn send_child_file_create<R: std::io::Read>(
+            &self,
+            parent_identity: [u8; 16],
+            path: &str,
+            parent: &RemoteEntry,
+            target: raiun_opencloud::vault_backend::VaultChildFileCreateTarget,
+            source: &mut R,
+            deadline: std::time::Instant,
+            cancel: &crate::vault_custody::VaultUploadCancellation<'_>,
+            before: &mut dyn FnMut() -> Result<(), CloudError>,
+        ) -> Result<raiun_opencloud::vault_backend::VaultChildFileCreateOutcome, CloudError>
+        {
+            self.check_child_create_parent(&parent_identity, parent, self.custody.root_identity())
+                .map_err(|_| refused())?;
+            self.binding.send_child_file_create(
+                path,
+                parent,
+                target,
+                source,
+                &self.private,
+                deadline,
+                cancel,
+                before,
+            )
+        }
+        /// Original route/epoch catalogue publication, never ordinary identity.
+        pub(crate) fn publish_created_file<T>(
+            &self,
+            proof: &raiun_opencloud::vault_backend::VaultVerifiedChildFile,
+            parent_identity: [u8; 16],
+            cancellation: &crate::vault_custody::VaultUploadCancellation<'_>,
+            publish: impl FnOnce([u8; 16]) -> Result<T, crate::Error>,
+        ) -> Result<T, crate::Error> {
+            self.binding.with_exclusive_completion(|| {
+                let unavailable = || crate::Error::EditRecoveryUnavailable;
+                if cancellation.is_cancelled()
+                    || !self.binding.child_file_proof_matches(proof)
+                    || !proof.provider_current(&cancellation.generation, cancellation.expected)
+                    || proof.entry().directory
+                {
+                    return Err(unavailable());
+                }
+                let identity = {
+                    let mut catalogue = self.catalogue.lock().map_err(|_| unavailable())?;
+                    let parent = catalogue
+                        .entries
+                        .get(&parent_identity)
+                        .ok_or_else(unavailable)?;
+                    if !parent.directory
+                        || parent.id != proof.parent_resource_id()
+                        || direct_child_name(&parent.path, &proof.entry().path)
+                            .is_none_or(|n| !valid_windows_component(n))
+                        || catalogue
+                            .entries
+                            .values()
+                            .any(|e| e.path == proof.entry().path && e.id != proof.entry().id)
+                    {
+                        return Err(unavailable());
+                    }
+                    let mut next = catalogue.clone();
+                    let mut entry = proof.entry().clone();
+                    entry.writable = false;
+                    let identity = next.insert(entry).map_err(|_| unavailable())?;
+                    persist_catalogue(self.custody.as_ref(), &next).map_err(|_| unavailable())?;
+                    *catalogue = next;
+                    identity
+                };
+                if cancellation.is_cancelled() {
+                    return Err(unavailable());
+                }
+                let value = publish(identity)?;
+                if cancellation.is_cancelled() {
+                    return Err(unavailable());
+                }
+                Ok(value)
+            })
+        }
+        /// Publication fence already held. Only durable native inventory IO.
+        pub(crate) fn persist_child_create_hydration(
+            &self,
+            intent: &crate::vault_custody::VaultHydrationIntent,
+        ) -> Result<(), BackendError> {
+            if intent.root != self.custody.root_identity() {
+                return Err(BackendError::Unavailable);
+            }
+            self.custody.persist_hydration(intent)
+        }
         pub(crate) fn custody_root_identity(&self) -> crate::ConfiguredRootIdentity {
             self.custody.root_identity()
         }

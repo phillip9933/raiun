@@ -2910,7 +2910,7 @@ function vaultOfflinePinPanel(flow: VaultDialogState) {
 }
 
 function nativeExistingFileSaveMessage() {
-  return 'Supported files up to 1 GiB can be saved in place through the Windows drive while connected. Use an app that writes directly into the existing file. Editors that replace files, new files, rename/move/delete and offline edits are not supported here. Existing read-only files remain read-only.';
+  return 'While connected, you can add files up to 1 GiB and folders through the Windows drive. Supported files up to 1 GiB can also be saved in place using an app that writes directly into the existing file. Editors that replace files, rename/move/delete and offline edits are not supported here. Existing read-only files remain read-only.';
 }
 
 function nativeVaultDrivePanel(flow: VaultDialogState, busy: boolean) {

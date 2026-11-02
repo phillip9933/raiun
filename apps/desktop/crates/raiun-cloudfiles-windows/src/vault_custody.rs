@@ -240,6 +240,19 @@ pub struct ExistingVaultStreamedEditPayload {
 /// Ok means durable protected write-through/readback, never permission to read
 /// or clear native incomplete history. Failure denies the pending publication.
 pub trait VaultPublicationCustody: Send + Sync {
+    /// Vault-specific intent/body retention only; no ordinary journal admission.
+    /// All native pins and live account/epoch authority remain with the caller.
+    #[cfg(windows)]
+    fn prepare_child_create(
+        &self,
+        _descriptor: &crate::VaultChildCreateDescriptor,
+        _source: Option<&mut dyn std::io::Read>,
+        _verify_source: &mut dyn FnMut() -> Result<(), BackendError>,
+        _cancelled: &dyn Fn() -> bool,
+    ) -> Result<std::sync::Arc<dyn crate::VaultChildCreateRecord>, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
     /// Stage under the original lexical route/token/unlock fences. Never
     /// reacquire those fences or perform HTTP here. Invoke verify_source AFTER
     /// body staging and BEFORE manifest commit; check cancelled every chunk and

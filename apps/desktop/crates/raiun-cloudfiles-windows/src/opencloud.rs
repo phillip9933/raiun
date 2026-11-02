@@ -10,6 +10,8 @@
 pub(crate) mod file_create;
 #[cfg(any(windows, test))]
 mod file_delete;
+#[cfg(windows)]
+pub(crate) mod vault_child_create;
 #[cfg(any(windows, test))]
 pub use file_delete::FileDeleteSession;
 #[cfg(windows)]
@@ -1562,143 +1564,316 @@ impl OpenCloudPlaceholderBackend {
                 if self.revoked.load(Ordering::Acquire) {
                     return Err(BackendError::Unavailable);
                 }
-                let mut roots =
+                self.vault_parent_population_descriptor_from_state(&state, space_id, path)
+            })
+            .map_err(|error| self.reject_cached_cloud_error(error))?
+    }
+
+    // Pure existing-catalogue projection, shared by active population and
+    // retired-route cleanup. The caller supplies its own live/read-only guards.
+    #[cfg(windows)]
+    fn vault_parent_population_descriptor_from_state(
+        &self,
+        state: &State,
+        space_id: &str,
+        path: &str,
+    ) -> Result<(PlaceholderChild, Vec<String>), BackendError> {
+        let mut roots = state
+            .namespace_directories
+            .values()
+            .filter_map(|entry| match entry {
+                NamespaceDirectory::Root {
+                    account_id,
+                    personal_space_id,
+                    personal_root_id,
+                } if account_id == self.scope.account_id() => {
+                    Some((personal_space_id, personal_root_id))
+                }
+                _ => None,
+            });
+        let (personal_space, personal_root) = roots.next().ok_or(BackendError::Unavailable)?;
+        if roots.next().is_some()
+            || state
+                .location_labels
+                .get(&(personal_space.clone(), personal_root.clone()))
+                .map(String::as_str)
+                != Some("Personal")
+        {
+            // Restored catalogue entries alone do not prove a current label.
+            return Err(BackendError::Unavailable);
+        }
+        let (identity, name, components) = if path == "/" {
+            // An entire Personal location is directly beneath the native
+            // sync root, which this child-directory API cannot refresh.
+            if space_id == personal_space {
+                return Err(BackendError::Unavailable);
+            }
+            let mut matches = state
+                .namespace_directories
+                .iter()
+                .filter_map(|(id, entry)| match entry {
+                    NamespaceDirectory::Spaces {
+                        account_id,
+                        personal_space_id,
+                        personal_root_id,
+                    } if account_id == self.scope.account_id()
+                        && personal_space_id == personal_space
+                        && personal_root_id == personal_root =>
+                    {
+                        Some(*id)
+                    }
+                    _ => None,
+                });
+            let id = matches.next().ok_or(BackendError::Unavailable)?;
+            if matches.next().is_some() {
+                return Err(BackendError::Unavailable);
+            }
+            (id, "Spaces".to_owned(), vec!["Spaces".to_owned()])
+        } else {
+            // No normalization/trimming: the exact verified route must
+            // already use canonical remote components representable on Windows.
+            let remote = path.strip_prefix('/').ok_or(BackendError::Unavailable)?;
+            let segments = remote.split('/').collect::<Vec<_>>();
+            if path.len() > 32_000
+                || segments.len() > 256
+                || segments.iter().any(|part| !valid_windows_component(part))
+            {
+                return Err(BackendError::Unavailable);
+            }
+            let (prefix, _) = path.rsplit_once('/').ok_or(BackendError::Unavailable)?;
+            let parent_path = if prefix.is_empty() { "/" } else { prefix };
+            let mut matches = state.directories.iter().filter(|(_, entry)| {
+                entry.space_id == space_id
+                    && entry.path == parent_path
+                    && valid_remote_id(&entry.root_resource_id)
+                    && valid_remote_id(&entry.remote_id)
+                    && (parent_path != "/" || entry.remote_id == entry.root_resource_id)
+            });
+            let (id, directory) = matches.next().ok_or(BackendError::Unavailable)?;
+            if matches.next().is_some() {
+                return Err(BackendError::Unavailable);
+            }
+            let label = state
+                .location_labels
+                .get(&(
+                    directory.space_id.clone(),
+                    directory.root_resource_id.clone(),
+                ))
+                .ok_or(BackendError::Unavailable)?;
+            let mut components = if space_id == personal_space
+                && directory.root_resource_id == *personal_root
+                && label == "Personal"
+            {
+                vec!["Personal".to_owned()]
+            } else {
+                let name = label
+                    .strip_prefix("Spaces / ")
+                    .ok_or(BackendError::Unavailable)?;
+                if !valid_windows_component(name) {
+                    return Err(BackendError::Unavailable);
+                }
+                vec!["Spaces".to_owned(), name.to_owned()]
+            };
+            // Existing directory bindings can be restored. They locate an
+            // exact opaque parent, not fresh remote metadata or read authority.
+            // Native pins that identity; later enumeration revalidates the server.
+            if parent_path != "/" {
+                components.extend(parent_path[1..].split('/').map(str::to_owned));
+            }
+            if components.len() > 256
+                || components
+                    .iter()
+                    .map(String::len)
+                    .sum::<usize>()
+                    .saturating_add(components.len())
+                    > 32_000
+            {
+                return Err(BackendError::Unavailable);
+            }
+            let name = components
+                .last()
+                .cloned()
+                .ok_or(BackendError::Unavailable)?;
+            (*id, name, components)
+        };
+        if components.iter().any(|part| !valid_windows_component(part)) {
+            return Err(BackendError::Unavailable);
+        }
+        Ok((
+            PlaceholderChild {
+                name,
+                identity: identity.as_bytes().to_vec(),
+                metadata: PlaceholderMetadata {
+                    is_directory: true,
+                    length: 0,
+                },
+                last_write_time: 0,
+            },
+            components,
+        ))
+    }
+
+    #[cfg(windows)]
+    fn retained_vault_cleanup_locator(
+        &self,
+        route: &crate::vault_routes::VerifiedVaultRoute,
+    ) -> Result<crate::VaultCleanupRootLocator, BackendError> {
+        if self.local_root_identity != Some(route.local_root())
+            || route.backend().custody_root_identity() != route.local_root()
+            || self.token_generation != self.scope.token_generation()
+            || !route.backend().binding().matches_cleanup_route(
+                &self.scope,
+                route.space_id(),
+                route.root_resource_id(),
+                route.root_path(),
+            )
+            || route.backend().root_identity() == [0; 16]
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let state = self.state.lock().map_err(|_| BackendError::Unavailable)?;
+        let mut anchors = state
+            .namespace_directories
+            .values()
+            .filter_map(|v| match v {
+                NamespaceDirectory::Root {
+                    account_id,
+                    personal_space_id,
+                    personal_root_id,
+                } if account_id == self.scope.account_id() => {
+                    Some((personal_space_id, personal_root_id))
+                }
+                _ => None,
+            });
+        let (personal_space, personal_root) = anchors.next().ok_or(BackendError::Unavailable)?;
+        if anchors.next().is_some()
+            || state
+                .location_labels
+                .get(&(personal_space.clone(), personal_root.clone()))
+                .map(String::as_str)
+                != Some("Personal")
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let (components, storage_root) =
+            if route.root_path() == "/" && route.space_id() == personal_space {
+                if route.root_resource_id() != personal_root {
+                    return Err(BackendError::Unavailable);
+                }
+                (vec!["Personal".to_owned()], personal_root.clone())
+            } else {
+                let (parent, mut components) = self.vault_parent_population_descriptor_from_state(
+                    &state,
+                    route.space_id(),
+                    route.root_path(),
+                )?;
+                let storage_root = if route.root_path() == "/" {
+                    route.root_resource_id().to_owned()
+                } else {
+                    let id = OpaqueIdentity(
+                        parent
+                            .identity
+                            .as_slice()
+                            .try_into()
+                            .map_err(|_| BackendError::Unavailable)?,
+                    );
+                    state
+                        .directories
+                        .get(&id)
+                        .ok_or(BackendError::Unavailable)?
+                        .root_resource_id
+                        .clone()
+                };
+                let name = if route.root_path() == "/" {
+                    state
+                        .location_labels
+                        .get(&(route.space_id().to_owned(), storage_root.clone()))
+                        .and_then(|label| label.strip_prefix("Spaces / "))
+                        .ok_or(BackendError::Unavailable)?
+                } else {
+                    route
+                        .root_path()
+                        .rsplit('/')
+                        .next()
+                        .ok_or(BackendError::Unavailable)?
+                };
+                if !valid_windows_component(name) {
+                    return Err(BackendError::Unavailable);
+                }
+                components.push(name.to_owned());
+                (components, storage_root)
+            };
+        if components.is_empty()
+            || components.len() > 256
+            || components.iter().any(|p| !valid_windows_component(p))
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let mut path_route = Vec::with_capacity(components.len());
+        for index in 0..components.len() {
+            let identity = if index + 1 == components.len() {
+                route.backend().root_identity()
+            } else if index == 0 && components[index] == "Spaces" {
+                let mut matches =
                     state
                         .namespace_directories
-                        .values()
-                        .filter_map(|entry| match entry {
-                            NamespaceDirectory::Root {
+                        .iter()
+                        .filter_map(|(id, v)| match v {
+                            NamespaceDirectory::Spaces {
                                 account_id,
                                 personal_space_id,
                                 personal_root_id,
-                            } if account_id == self.scope.account_id() => {
-                                Some((personal_space_id, personal_root_id))
+                            } if account_id == self.scope.account_id()
+                                && personal_space_id == personal_space
+                                && personal_root_id == personal_root =>
+                            {
+                                Some(*id)
                             }
                             _ => None,
                         });
-                let (personal_space, personal_root) =
-                    roots.next().ok_or(BackendError::Unavailable)?;
-                if roots.next().is_some()
-                    || state
-                        .location_labels
-                        .get(&(personal_space.clone(), personal_root.clone()))
-                        .map(String::as_str)
-                        != Some("Personal")
-                {
-                    // Restored catalogue entries alone do not prove a current label.
+                let id = matches.next().ok_or(BackendError::Unavailable)?;
+                if matches.next().is_some() {
                     return Err(BackendError::Unavailable);
                 }
-                let (identity, name, components) =
-                    if path == "/" {
-                        // An entire Personal location is directly beneath the native
-                        // sync root, which this child-directory API cannot refresh.
-                        if space_id == personal_space {
-                            return Err(BackendError::Unavailable);
-                        }
-                        let mut matches = state.namespace_directories.iter().filter_map(
-                            |(id, entry)| match entry {
-                                NamespaceDirectory::Spaces {
-                                    account_id,
-                                    personal_space_id,
-                                    personal_root_id,
-                                } if account_id == self.scope.account_id()
-                                    && personal_space_id == personal_space
-                                    && personal_root_id == personal_root =>
-                                {
-                                    Some(*id)
-                                }
-                                _ => None,
-                            },
-                        );
-                        let id = matches.next().ok_or(BackendError::Unavailable)?;
-                        if matches.next().is_some() {
-                            return Err(BackendError::Unavailable);
-                        }
-                        (id, "Spaces".to_owned(), vec!["Spaces".to_owned()])
-                    } else {
-                        // No normalization/trimming: the exact verified route must
-                        // already use canonical remote components representable on Windows.
-                        let remote = path.strip_prefix('/').ok_or(BackendError::Unavailable)?;
-                        let segments = remote.split('/').collect::<Vec<_>>();
-                        if path.len() > 32_000
-                            || segments.len() > 256
-                            || segments.iter().any(|part| !valid_windows_component(part))
-                        {
-                            return Err(BackendError::Unavailable);
-                        }
-                        let (prefix, _) = path.rsplit_once('/').ok_or(BackendError::Unavailable)?;
-                        let parent_path = if prefix.is_empty() { "/" } else { prefix };
-                        let mut matches = state.directories.iter().filter(|(_, entry)| {
-                            entry.space_id == space_id
-                                && entry.path == parent_path
-                                && valid_remote_id(&entry.root_resource_id)
-                                && valid_remote_id(&entry.remote_id)
-                                && (parent_path != "/" || entry.remote_id == entry.root_resource_id)
-                        });
-                        let (id, directory) = matches.next().ok_or(BackendError::Unavailable)?;
-                        if matches.next().is_some() {
-                            return Err(BackendError::Unavailable);
-                        }
-                        let label = state
-                            .location_labels
-                            .get(&(
-                                directory.space_id.clone(),
-                                directory.root_resource_id.clone(),
-                            ))
-                            .ok_or(BackendError::Unavailable)?;
-                        let mut components = if space_id == personal_space
-                            && directory.root_resource_id == *personal_root
-                            && label == "Personal"
-                        {
-                            vec!["Personal".to_owned()]
-                        } else {
-                            let name = label
-                                .strip_prefix("Spaces / ")
-                                .ok_or(BackendError::Unavailable)?;
-                            if !valid_windows_component(name) {
-                                return Err(BackendError::Unavailable);
-                            }
-                            vec!["Spaces".to_owned(), name.to_owned()]
-                        };
-                        // Existing directory bindings can be restored. They locate an
-                        // exact opaque parent, not fresh remote metadata or read authority.
-                        // Native pins that identity; later enumeration revalidates the server.
-                        if parent_path != "/" {
-                            components.extend(parent_path[1..].split('/').map(str::to_owned));
-                        }
-                        if components.len() > 256
-                            || components
-                                .iter()
-                                .map(String::len)
-                                .sum::<usize>()
-                                .saturating_add(components.len())
-                                > 32_000
-                        {
-                            return Err(BackendError::Unavailable);
-                        }
-                        let name = components
-                            .last()
-                            .cloned()
-                            .ok_or(BackendError::Unavailable)?;
-                        (*id, name, components)
-                    };
-                if components.iter().any(|part| !valid_windows_component(part)) {
+                *id.as_bytes()
+            } else {
+                let base = if components[0] == "Personal" { 1 } else { 2 };
+                if index + 1 < base {
                     return Err(BackendError::Unavailable);
                 }
-                Ok((
-                    PlaceholderChild {
-                        name,
-                        identity: identity.as_bytes().to_vec(),
-                        metadata: PlaceholderMetadata {
-                            is_directory: true,
-                            length: 0,
-                        },
-                        last_write_time: 0,
-                    },
-                    components,
-                ))
-            })
-            .map_err(|error| self.reject_cached_cloud_error(error))?
+                let remote = if index + 1 == base {
+                    "/".to_owned()
+                } else {
+                    format!("/{}", components[base..=index].join("/"))
+                };
+                let mut matches = state.directories.iter().filter(|(_, d)| {
+                    d.space_id == route.space_id()
+                        && d.root_resource_id == storage_root
+                        && d.path == remote
+                        && valid_remote_id(&d.remote_id)
+                        && (remote != "/" || d.remote_id == storage_root)
+                });
+                let (id, _) = matches.next().ok_or(BackendError::Unavailable)?;
+                if matches.next().is_some() {
+                    return Err(BackendError::Unavailable);
+                }
+                *id.as_bytes()
+            };
+            path_route.push(PlaceholderChild {
+                name: components[index].clone(),
+                identity: identity.to_vec(),
+                metadata: PlaceholderMetadata {
+                    is_directory: true,
+                    length: 0,
+                },
+                last_write_time: 0,
+            });
+        }
+        Ok(crate::VaultCleanupRootLocator {
+            identity: OpaqueIdentity(route.backend().root_identity()),
+            components,
+            route: path_route,
+        })
     }
 
     /// Admit a verified vault beneath this exact retained native root. This
@@ -2923,6 +3098,13 @@ impl OpenCloudPlaceholderBackend {
 }
 
 impl PlaceholderBackend for OpenCloudPlaceholderBackend {
+    #[cfg(windows)]
+    fn vault_cleanup_root_locator(
+        &self,
+        route: &crate::vault_routes::VerifiedVaultRoute,
+    ) -> Result<crate::VaultCleanupRootLocator, BackendError> {
+        self.retained_vault_cleanup_locator(route)
+    }
     fn recovery_job_revoked(&self) -> bool {
         self.revoked.load(Ordering::Acquire)
             || self.client.token_generation() != self.token_generation

@@ -46,6 +46,12 @@ pub(super) mod native_file_delete;
 
 #[path = "native_file_create.rs"]
 pub(super) mod native_file_create;
+#[path = "native_vault_child_create.rs"]
+pub(super) mod native_vault_child_create;
+#[path = "native_vault_directory_create.rs"]
+pub(super) mod native_vault_directory_create;
+#[path = "native_vault_file_create.rs"]
+pub(super) mod native_vault_file_create;
 pub(crate) use native_file_create::NativeFileCreateCompletion;
 #[path = "native_file_rename.rs"]
 pub(super) mod native_file_rename;
@@ -59,6 +65,8 @@ pub(super) mod native_namespace_scan;
 pub(super) mod native_plain_file_capture;
 #[path = "native_streamed_io.rs"]
 mod native_streamed_io;
+#[path = "native_vault_cleanup_inventory.rs"]
+mod native_vault_cleanup_inventory;
 
 const CF_REGISTER_FLAG_DISABLE_ON_DEMAND_POPULATION_ON_ROOT: u32 = 0x2;
 const CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH: u32 = 0x4;
@@ -866,6 +874,7 @@ pub(super) struct VaultCleanupFence {
     rows: Vec<hydration_inventory::HydratedFileRow>,
     owned: std::collections::BTreeSet<[u8; 16]>,
     held: Vec<HeldWritableEviction>,
+    local_inventory: native_vault_cleanup_inventory::InventoryFence,
 }
 struct HeldWritableEviction {
     file: ProtectedCompletionFile,
@@ -975,6 +984,7 @@ pub(super) struct ConfiguredRootConnection {
     namespace_binding: native_namespace_observer::NamespaceObserverBinding,
     namespace_observation_closed: bool,
     create_owner: std::cell::RefCell<native_file_create::CreateOwner>,
+    vault_child_owner: std::cell::RefCell<native_vault_child_create::Owner>,
     directory_owner: std::cell::RefCell<native_namespace_directory::DirectoryOwner>,
     delete_owner: Option<native_file_delete::Owner>,
 }
@@ -1927,6 +1937,11 @@ impl ConfiguredRootConnection {
             || route.local_root().volume_serial != root.identity.volume_serial
             || route.local_root().file_index != root.identity.file_index
             || self.state.has_unresolved_placeholder_data()
+            || self
+                .vault_child_owner
+                .try_borrow()
+                .map(|owner| owner.active())
+                .unwrap_or(true)
         {
             return Err(Error::EditRecoveryUnavailable);
         }
@@ -1941,6 +1956,19 @@ impl ConfiguredRootConnection {
             }
             inventory.snapshot(route_owned)
         };
+        // Discover every physical local descendant before any dehydration.
+        // Unknown bytes remain untouched and deny cleanup completion.
+        let locator = self
+            .state
+            .backend
+            .vault_cleanup_root_locator(route)
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
+        let local_inventory = native_vault_cleanup_inventory::InventoryFence::begin(
+            root,
+            locator,
+            route_owned,
+            &rows,
+        )?;
         let mut fence = VaultCleanupFence {
             state: Arc::clone(&self.state),
             binding: Arc::downgrade(route.backend().binding()),
@@ -1948,6 +1976,7 @@ impl ConfiguredRootConnection {
             rows: rows.clone(),
             owned: route_owned.clone(),
             held: Vec::new(),
+            local_inventory,
         };
         for row in rows {
             let components = row
@@ -2272,6 +2301,7 @@ impl ConfiguredRootConnection {
                 return Err(Error::EditRecoveryUnavailable);
             }
         }
+        fence.local_inventory.verify(root, &fence.rows)?;
         if self.state.has_unresolved_placeholder_data() {
             return Err(Error::UnresolvedPlaceholderEdits);
         }
@@ -3637,6 +3667,7 @@ impl ConfiguredRootConnection {
                 namespace_binding,
                 namespace_observation_closed: false,
                 create_owner: Default::default(),
+                vault_child_owner: Default::default(),
                 directory_owner: Default::default(),
                 delete_owner: delete_owner.take(),
             };
@@ -3656,6 +3687,7 @@ impl ConfiguredRootConnection {
             namespace_binding,
             namespace_observation_closed: false,
             create_owner: Default::default(),
+            vault_child_owner: Default::default(),
             directory_owner: Default::default(),
             delete_owner,
         };
@@ -3811,7 +3843,9 @@ impl ConfiguredRootConnection {
 
     fn finish(&mut self, unregister: bool) -> Result<(), Error> {
         self.cancel_file_delete()?;
-        if !self.close_fresh_personal_directory_create() || !self.close_fresh_personal_file_create()
+        if !self.close_fresh_personal_directory_create()
+            || !self.close_fresh_personal_file_create()
+            || !self.close_vault_child_create()
         {
             // Cancelled but actual SDK/body ownership is still in flight.
             // Caller must drain/join; keep this same root/attempt connected.
@@ -3888,6 +3922,7 @@ impl ConfiguredRootConnection {
             self.connection_key,
             self.connected,
             std::mem::take(self.create_owner.get_mut()),
+            std::mem::take(self.vault_child_owner.get_mut()),
             std::mem::take(self.directory_owner.get_mut()),
             self.delete_owner.take(),
         )));

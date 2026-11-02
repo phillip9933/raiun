@@ -79,8 +79,6 @@ pub mod vault_read;
 #[cfg(windows)]
 pub mod vault_routes;
 #[cfg(windows)]
-pub use backend::ExistingVaultEditCapture;
-#[cfg(windows)]
 pub(crate) use backend::placeholder_population_completed;
 pub use backend::{
     BackendError, BoundedPermit, BoundedPermitPool, CancellationToken, DEFAULT_FETCH_TIMEOUT,
@@ -93,6 +91,8 @@ pub use backend::{
     RequestPublicationPermit, StreamedRecoveryJob, StreamedRecoveryPolicy, checked_fetch_range,
     next_chunk_len,
 };
+#[cfg(windows)]
+pub use backend::{ExistingVaultEditCapture, VaultCleanupRootLocator};
 #[cfg(windows)]
 pub use edit_journal::DpapiEditRecordProtector;
 pub use edit_journal::{
@@ -3427,5 +3427,55 @@ mod tests {
             );
         }
         panic!("unexpected request to synthetic DAV fixture: {request}");
+    }
+}
+
+#[cfg(windows)]
+pub use opencloud::vault_child_create::{
+    VaultChildCreateDescriptor, VaultChildCreateRecord, VaultChildCreateRemoteProof,
+    VaultChildCreateSource,
+};
+
+#[cfg(windows)]
+pub use native::native_vault_child_create::{
+    VaultChildCreateReply, VaultChildCreateStep, VaultChildCreateTask,
+};
+#[cfg(windows)]
+impl ConfiguredRootConnection {
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_fresh_vault_child_create(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        parents: &[&str],
+        name: &str,
+        kind: namespace_intent::NamespaceObjectKind,
+        auth: namespace_intent::CapturedAuthorization,
+        generation: u64,
+        job: &StreamedRecoveryJob,
+        current: std::sync::Arc<
+            dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync,
+        >,
+        owner_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ) -> Result<VaultChildCreateStep, Error> {
+        self.inner.begin_vault_child_create(
+            backend,
+            parents,
+            name,
+            kind,
+            auth,
+            generation,
+            job,
+            current,
+            owner_generation,
+        )
+    }
+    pub fn advance_fresh_vault_child_create(
+        &self,
+        reply: VaultChildCreateReply,
+    ) -> Result<VaultChildCreateStep, Error> {
+        self.inner.advance_vault_child_create(reply)
+    }
+    pub fn close_fresh_vault_child_create(&self) -> bool {
+        self.inner.close_vault_child_create()
     }
 }

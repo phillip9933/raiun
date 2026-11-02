@@ -63,6 +63,14 @@ pub struct PlaceholderChild {
     pub last_write_time: i64,
 }
 
+/// Read-only original route locator, never mutation or cleanup authority.
+#[cfg(windows)]
+pub struct VaultCleanupRootLocator {
+    pub(crate) identity: crate::OpaqueIdentity,
+    pub(crate) components: Vec<String>,
+    pub(crate) route: Vec<PlaceholderChild>,
+}
+
 /// Exact authenticated remote baseline needed to preserve one local edit for
 /// later conditional recovery. Paths here are virtual namespace paths, never
 /// host filesystem paths. A missing or weak ETag remains retainable but is
@@ -982,6 +990,16 @@ pub trait PreparedFetchSession {
 /// expensive work. The callback bridge caps each staging window at
 /// [`MAX_REQUEST_BYTES`] and transfers data in [`MAX_RANGE_BYTES`] slices.
 pub trait PlaceholderBackend: Send + Sync + 'static {
+    /// Historical retained-route metadata only; no active session or bearer is
+    /// restored. Native code must independently pin every original identity.
+    #[cfg(windows)]
+    fn vault_cleanup_root_locator(
+        &self,
+        _route: &crate::vault_routes::VerifiedVaultRoute,
+    ) -> Result<crate::VaultCleanupRootLocator, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
     /// Atomic-only, nonblocking owner fence for an ephemeral recovery job.
     fn recovery_job_revoked(&self) -> bool {
         true
