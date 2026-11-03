@@ -125,6 +125,7 @@ include!("windows_vault_create.rs");
 include!("windows_vault_copy.rs");
 include!("windows_vault_offline.rs");
 include!("windows_vault_cached.rs");
+include!("windows_vault_offline_edits.rs");
 include!("windows_vault_edit_upload.rs");
 #[path = "windows_vault_child_create_custody.rs"]
 mod windows_vault_child_create_custody;
@@ -2253,7 +2254,7 @@ impl ProviderManager {
             .lock()
             .map_err(|_| "Fresh vault close publication is unavailable")?
             .as_ref()
-            .filter(|_| !backend.is_cached_only())
+            .filter(|_| !backend.is_cached_only() || WINDOWS_VAULT_OFFLINE_WRITES_ENABLED)
             .and_then(|source| source.publisher(generation));
         let (response, result) = std::sync::mpsc::sync_channel(1);
         self.commands
@@ -3099,6 +3100,14 @@ impl WindowsAgent {
         &self,
         binding: &ActiveProviderBinding,
     ) -> Result<(), String> {
+        let cached = self
+            .state
+            .lock()
+            .map_err(|_| "Account state unavailable")?
+            .offline_cached;
+        if cached {
+            return self.check_cached_save_worker_account(binding);
+        }
         let state = self.state.lock().map_err(|_| "Account state unavailable")?;
         let configuration = state
             .root_configuration
@@ -3621,6 +3630,13 @@ impl WindowsAgent {
             "vault_offline_reconnect" => {
                 Ok((self.reconnect_windows_cached_provider(request)?, false))
             }
+            "vault_operations"
+            | "vault_reconcile_edits_start"
+            | "vault_reconcile_edits_status"
+            | "vault_reconcile_edits_cancel"
+            | "vault_reconcile_edits_latest" => {
+                Ok((self.windows_vault_pending_request(request)?, false))
+            }
             "vault_cached_roots"
             | "vault_pins"
             | "vault_pin_start"
@@ -3989,6 +4005,7 @@ impl WindowsAgent {
             "offline": state.offline_cached || (session.is_some() && !state.online_authenticated),
             "offline_namespace": state.offline_cached,
             "vault_offline_supported": !mount_only(),
+            "vault_offline_write_supported": !mount_only() && WINDOWS_VAULT_OFFLINE_WRITES_ENABLED,
             "server": session.map(|value| value.server.as_str()),
             "client_id": session.map(|value| value.client_id.as_str()),
             "paused": pause.as_ref().map(|snapshot| snapshot.paused),

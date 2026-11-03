@@ -75,6 +75,16 @@ impl WindowsAgent {
             .map_err(|_| "Protected cached namespace is unavailable")?,
         );
         self.check_windows_vault_offline_account(context)?;
+        let mut save_admission = if WINDOWS_VAULT_OFFLINE_WRITES_ENABLED {
+            self.provider.prepare_existing_file_save_worker(
+                &active,
+                &self.state,
+                &self.session_store,
+                false,
+            )?
+        } else {
+            None
+        };
         self.provider.connect(
             active.path.clone(),
             context.generation,
@@ -88,6 +98,10 @@ impl WindowsAgent {
             self.session_store.clone(),
         )?;
         self.check_windows_vault_offline_account(context)?;
+        if let Some(admission) = save_admission.as_mut() {
+            admission.owner.check_cached_save_worker_account(&active)?;
+            admission.committed = true;
+        }
         self.provider.verified_vault_backend(active)
     }
     fn inspect_windows_cached_vault(&self, request: &Value) -> Result<Value, String> {
@@ -328,15 +342,36 @@ impl WindowsAgent {
                 )
                 .map_err(|_| "Private staging changed")?,
             );
-            let adapter = Arc::new(
-                raiun_cloudfiles_windows::vault_placeholder::WindowsVaultPlaceholderBackend::new(
-                    binding,
-                    private,
-                    raiun_cloudfiles_windows::MAX_REQUEST_BYTES,
-                    custody,
-                )
-                .map_err(|_| "Could not prepare cached adapter")?,
-            );
+            let saved_owner = context
+                .configuration
+                .registration_ownership
+                .as_ref()
+                .ok_or("Offline owner changed")?;
+            let worker_binding = ActiveProviderBinding {
+                generation,
+                path: PathBuf::from(&context.configuration.path),
+                identity: context._root.identity(),
+                personal_space_id: saved_owner.personal_drive_id.clone(),
+                personal_root_resource_id: saved_owner
+                    .personal_root_resource_id
+                    .clone()
+                    .ok_or("Missing saved root")?,
+            };
+            let marker = if WINDOWS_VAULT_OFFLINE_WRITES_ENABLED {
+                self.provider
+                    .existing_vault_save_worker_marker(&worker_binding)?
+            } else {
+                None
+            };
+            let adapter = Arc::new(match marker {
+                Some(marker) => raiun_cloudfiles_windows::vault_placeholder::WindowsVaultPlaceholderBackend::new_with_existing_file_saves(
+                    binding, private, raiun_cloudfiles_windows::MAX_REQUEST_BYTES, custody,
+                    marker, self.provider.authorized_generation.clone(), generation,
+                ),
+                None => raiun_cloudfiles_windows::vault_placeholder::WindowsVaultPlaceholderBackend::new(
+                    binding, private, raiun_cloudfiles_windows::MAX_REQUEST_BYTES, custody,
+                ),
+            }.map_err(|_| "Could not prepare cached adapter")?);
             self.check_windows_vault_offline_account(&context)?;
             verified
                 .backend

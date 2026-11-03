@@ -36,6 +36,8 @@ pub mod namespace_reconcile;
 
 mod opencloud;
 #[cfg(windows)]
+pub use opencloud::VaultCachedQueuedEdit;
+#[cfg(windows)]
 pub(crate) mod recovery_admission;
 mod recovery_provider;
 mod recovery_reconcile;

@@ -1,6 +1,7 @@
 //! Account-scoped vault control. Passwords are never saved in settings or history;
 //! optional remembered passwords are kept only in the OS credential store.
 use super::*;
+use crate::vault_operation_wire::{vault_pending_operation_name, vault_pending_operation_state_name, vault_pending_operation_attention_reason};
 use crate::vault_edit_jobs::{CopyVerifyReviewReason, VaultEditFailureClass};
 use crate::vault_secrets::{
     RememberedStatus, SecretServiceVaultCredentialStore, VaultCredentialStore,
@@ -2900,33 +2901,6 @@ fn copy_verify_job_status(
     value
 }
 
-fn vault_pending_operation_name(operation: VaultPendingOperationKind) -> &'static str {
-    match operation {
-        VaultPendingOperationKind::Overwrite => "overwrite",
-        VaultPendingOperationKind::CreateFile => "create_file",
-        VaultPendingOperationKind::RenameFile => "rename_file",
-        VaultPendingOperationKind::DeleteFile => "delete_file",
-        VaultPendingOperationKind::CreateDirectory => "create_directory",
-        VaultPendingOperationKind::CopyFile => "copy_file",
-    }
-}
-
-fn vault_pending_operation_state_name(state: raiun_cache::CiphertextWriteState) -> &'static str {
-    match state {
-        raiun_cache::CiphertextWriteState::Building => "building",
-        raiun_cache::CiphertextWriteState::Pending => "pending",
-        raiun_cache::CiphertextWriteState::NeverAttempted => "queued",
-        raiun_cache::CiphertextWriteState::Attempting => "uncertain",
-        raiun_cache::CiphertextWriteState::RecoveryAttempting
-        | raiun_cache::CiphertextWriteState::RecoveryRetrying => "uncertain",
-        raiun_cache::CiphertextWriteState::Uncertain => "uncertain",
-        raiun_cache::CiphertextWriteState::Conflict => "conflict",
-        raiun_cache::CiphertextWriteState::CommittedReceipt
-        | raiun_cache::CiphertextWriteState::CancelledReceipt
-        | raiun_cache::CiphertextWriteState::AcknowledgedReceipt => "internal",
-    }
-}
-
 fn vault_retry_state_from_name(value: &str) -> Option<raiun_cache::CiphertextWriteState> {
     match value {
         "attempting" => Some(raiun_cache::CiphertextWriteState::Attempting),
@@ -2942,38 +2916,6 @@ fn vault_retry_state_name(state: raiun_cache::CiphertextWriteState) -> &'static 
         raiun_cache::CiphertextWriteState::RecoveryAttempting => "recovery_attempting",
         raiun_cache::CiphertextWriteState::RecoveryRetrying => "recovery_retrying",
         _ => "",
-    }
-}
-
-fn vault_pending_operation_attention_reason(
-    operation: VaultPendingOperationKind,
-    state: raiun_cache::CiphertextWriteState,
-) -> Option<&'static str> {
-    match (operation, state) {
-        (
-            VaultPendingOperationKind::CopyFile,
-            raiun_cache::CiphertextWriteState::Building
-            | raiun_cache::CiphertextWriteState::Pending
-            | raiun_cache::CiphertextWriteState::NeverAttempted
-            | raiun_cache::CiphertextWriteState::Attempting
-            | raiun_cache::CiphertextWriteState::RecoveryAttempting
-            | raiun_cache::CiphertextWriteState::RecoveryRetrying
-            | raiun_cache::CiphertextWriteState::Uncertain
-            | raiun_cache::CiphertextWriteState::Conflict,
-        ) => Some("copy_file_requires_review"),
-        (
-            VaultPendingOperationKind::CreateDirectory,
-            raiun_cache::CiphertextWriteState::Attempting,
-        ) => Some("directory_create_attempt_interrupted"),
-        (VaultPendingOperationKind::CreateFile, raiun_cache::CiphertextWriteState::Attempting) => {
-            Some("file_create_attempt_interrupted")
-        }
-        (
-            VaultPendingOperationKind::CreateFile,
-            raiun_cache::CiphertextWriteState::RecoveryAttempting
-            | raiun_cache::CiphertextWriteState::RecoveryRetrying,
-        ) => Some("file_create_recovery_interrupted"),
-        _ => None,
     }
 }
 

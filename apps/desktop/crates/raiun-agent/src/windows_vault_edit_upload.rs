@@ -21,6 +21,14 @@ impl WindowsAgent {
         active: Arc<AtomicBool>,
         policy: windows_vault_close_worker::FreshCloseCompletionPolicy,
     ) -> Result<Value, String> {
+        if self
+            .state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?
+            .offline_cached
+        {
+            return self.queue_windows_vault_fresh_capture(job, active, policy);
+        }
         // Only the originating consumer supplies this cancellation identity.
         // Never consult a current/replacement worker or hold its ownership lock.
         let writable_bytes = policy.writable_bytes();
@@ -358,7 +366,9 @@ impl WindowsAgent {
         let cancellation = if streamed_body {
             CancellationToken::for_recovery_job(
                 raiun_cloudfiles_windows::StreamedRecoveryPolicy::default(),
-            ).cancellation().clone()
+            )
+            .cancellation()
+            .clone()
         } else {
             CancellationToken::for_offline_job()
         };

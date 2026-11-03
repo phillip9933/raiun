@@ -219,6 +219,7 @@ impl VaultBackend {
                         caller_cancelled: Some(&cancelled),
                     },
                     guarded: Some(&guard),
+                    pending_epoch: None,
                 },
             )?;
             self.readback_streamed_overwrite(&guard, &uploaded, expected_plaintext_sha256)

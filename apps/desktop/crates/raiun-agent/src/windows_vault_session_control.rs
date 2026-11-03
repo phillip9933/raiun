@@ -233,8 +233,20 @@ impl WindowsAgent {
         inspected["vault_mount_writable"] = json!(false);
         inspected["vault_mount_existing_file_in_place"] = json!(existing_file_in_place);
         inspected["vault_native_operations"] = if existing_file_in_place {
-            json!(["create_file", "create_folder", "save_in_place", "replace_file", "rename_file", "move_file", "delete_file"])
-        } else { json!([]) };
+            json!([
+                "create_file",
+                "create_folder",
+                "save_in_place",
+                "replace_file",
+                "rename_file",
+                "move_file",
+                "rename_folder",
+                "move_folder",
+                "delete_file"
+            ])
+        } else {
+            json!([])
+        };
 
         inspected["vault_access_mode"] = json!(if existing_file_in_place {
             "native_existing_file_in_place"
@@ -1039,7 +1051,7 @@ impl WindowsAgent {
             "root_resource_id":prepared.scope.resource_id(),"vault_mount_ready":true,
             "vault_mount_writable":false,"vault_mount_existing_file_overwrite":false,
             "vault_mount_existing_file_in_place":existing_file_in_place,
-            "vault_native_operations":if existing_file_in_place {json!(["create_file","create_folder","save_in_place","replace_file","rename_file","move_file","delete_file"])}else{json!([])},
+            "vault_native_operations":if existing_file_in_place {json!(["create_file","create_folder","save_in_place","replace_file","rename_file","move_file","rename_folder","move_folder","delete_file"])}else{json!([])},
             "vault_access_mode":if existing_file_in_place {"native_existing_file_in_place"} else {"native_read_only"},
             "vault_mount_write_unavailable_reason":"route_read_only",
             "remembered":remembered,"remembered_status":remembered_status}))

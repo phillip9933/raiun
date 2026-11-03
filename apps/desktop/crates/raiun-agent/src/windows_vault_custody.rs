@@ -1115,6 +1115,90 @@ pub(super) struct UploadLedger {
     child: Arc<Child>,
 }
 impl UploadLedger {
+    /// Local journal evidence only. The original capture remains retained and
+    /// dirty; this cannot satisfy any remote-upload or native-completion phase.
+    pub(super) fn record_cached_queue(
+        &self,
+        receipt: &raiun_cloudfiles_windows::VaultCachedQueuedEdit,
+        length: u64,
+        sha256: [u8; 32],
+    ) -> Result<()> {
+        #[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+        #[serde(deny_unknown_fields)]
+        struct Queued {
+            version: u32,
+            scope: Scope,
+            capture: vault_custody::CaptureRef,
+            write_id: String,
+            revision: u64,
+            plaintext_len: u64,
+            plaintext_sha256: [u8; 32],
+        }
+        let original = self.reference.entry();
+        if receipt.original().id != original.remote_id()
+            || receipt.original().path != original.root_relative_path()
+            || receipt.original().etag != original.etag()
+            || receipt.original().size != original.length()
+            || receipt.original().directory
+            || receipt.entry().id != original.remote_id()
+            || receipt.entry().path != original.root_relative_path()
+            || receipt.entry().directory
+            || receipt.entry().size != length
+            || receipt.plaintext_len() != length
+            || receipt.source_sha256() != sha256
+            || receipt.revision() == 0
+            || receipt.write_id().len() != 32
+            || !receipt.write_id().bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(refused());
+        }
+        self.verify_current().map_err(|_| refused())?;
+        let mut key = b"raiun-vault-local-queued-capture-v1\0".to_vec();
+        let locator = Zeroizing::new(
+            serde_json::to_vec(&(&self.scope, &self.reference)).map_err(|_| refused())?,
+        );
+        key.extend_from_slice(&Sha256::digest(&*locator));
+        let next = Queued {
+            version: 1,
+            scope: self.scope.clone(),
+            capture: self.reference.clone(),
+            write_id: receipt.write_id().into(),
+            revision: receipt.revision(),
+            plaintext_len: length,
+            plaintext_sha256: sha256,
+        };
+        let old = self.store.0.load(&key)?;
+        if let Some(raw) = &old {
+            if raw.len() > 128 * 1024 {
+                return Err(refused());
+            }
+            let previous: Queued = serde_json::from_slice(raw).map_err(|_| refused())?;
+            if previous == next {
+                return self.verify_current().map_err(|_| refused());
+            }
+            if previous.version != 1
+                || previous.scope != next.scope
+                || previous.capture != next.capture
+                || previous.write_id != next.write_id
+                || previous.revision >= next.revision
+                || previous.plaintext_len != length
+                || previous.plaintext_sha256 != sha256
+            {
+                return Err(refused());
+            }
+        }
+        let bytes = Zeroizing::new(serde_json::to_vec(&next).map_err(|_| refused())?);
+        if bytes.len() > 128 * 1024 {
+            return Err(refused());
+        }
+        self.store
+            .0
+            .cas(&key, old.as_deref().map(Vec::as_slice), &bytes)?;
+        if self.store.0.load(&key)?.as_deref().map(Vec::as_slice) != Some(bytes.as_slice()) {
+            return Err(refused());
+        }
+        self.verify_current().map_err(|_| refused())
+    }
     fn check(&self) -> std::result::Result<(), upload::Error> {
         if self.root_failed.load(std::sync::atomic::Ordering::Acquire)
             || self.child.failed.load(std::sync::atomic::Ordering::Acquire)

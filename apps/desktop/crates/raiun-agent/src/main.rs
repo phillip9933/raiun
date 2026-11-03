@@ -6,6 +6,8 @@ mod account_avatar_wire;
 mod guest_sharing_wire;
 #[cfg(any(unix, windows))]
 mod sharing_wire;
+#[cfg(any(unix, windows))]
+mod vault_operation_wire;
 
 #[cfg(any(unix, windows))]
 mod runtime_mode;
