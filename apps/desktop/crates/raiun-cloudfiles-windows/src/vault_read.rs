@@ -1015,6 +1015,9 @@ impl WindowsVaultReadBinding {
         Ok(entries)
     }
 }
+#[cfg(windows)]
+include!("vault_read_delete.rs");
+
 #[cfg(test)]
 mod tests {
     use super::*;

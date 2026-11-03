@@ -206,6 +206,26 @@ impl<T> Receipts<T> {
         }
         Ok(())
     }
+    /// Factual native deletion + verified conditional cloud absence only.
+    /// Never consume a pending/unknown receipt or any protected body/history.
+    pub(crate) fn retire_deleted(
+        &mut self,
+        identity: &[u8; 16],
+        matches: impl FnOnce(&T) -> bool,
+    ) -> Result<(), ()> {
+        if self.poisoned {
+            return Err(());
+        }
+        if let Some(row) = self.rows.get(identity) {
+            if !matches!(row.phase, Phase::Ready | Phase::Evicted)
+                || row.value.as_ref().is_none_or(|v| !matches(v.as_ref()))
+            {
+                return Err(());
+            }
+            self.rows.remove(identity);
+        }
+        Ok(())
+    }
     pub fn invalidate(&mut self, identity: &[u8; 16]) {
         if let Some(row) = self.rows.get_mut(identity) {
             row.phase = Phase::Invalidated;

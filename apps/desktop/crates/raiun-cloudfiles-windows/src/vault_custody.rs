@@ -241,6 +241,23 @@ pub struct ExistingVaultStreamedEditPayload {
 /// or clear native incomplete history. Failure denies the pending publication.
 pub trait VaultPublicationCustody: Send + Sync {
     #[cfg(windows)]
+    fn begin_file_delete(
+        &self,
+        _descriptor: &crate::vault_file_delete::VaultFileDeleteDescriptor,
+    ) -> Result<std::sync::Arc<dyn crate::vault_file_delete::VaultFileDeleteRecord>, BackendError>
+    {
+        Err(BackendError::Unavailable)
+    }
+
+    #[cfg(windows)]
+    fn begin_file_replace(
+        &self,
+        _descriptor: &crate::vault_file_replace::VaultFileReplaceDescriptor,
+    ) -> Result<Box<dyn crate::vault_file_replace::VaultFileReplaceCapture>, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
+    #[cfg(windows)]
     fn prepare_file_rename(
         &self,
         _descriptor: &crate::VaultFileRenameDescriptor,

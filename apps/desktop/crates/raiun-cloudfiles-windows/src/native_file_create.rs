@@ -189,6 +189,23 @@ impl ReplacementBody {
         stopped: &dyn Fn() -> bool,
         capture: impl FnOnce(&mut dyn Read, RootSnapshot) -> Result<T, Error>,
     ) -> Result<(Self, T), Error> {
+        Self::capture_with_usn(
+            path,
+            volume,
+            original_file,
+            job,
+            stopped,
+            |reader, snapshot, _| capture(reader, snapshot),
+        )
+    }
+    pub(super) fn capture_with_usn<T>(
+        path: &Path,
+        volume: u32,
+        original_file: u64,
+        job: &crate::StreamedRecoveryJob,
+        stopped: &dyn Fn() -> bool,
+        capture: impl FnOnce(&mut dyn Read, RootSnapshot, i64) -> Result<T, Error>,
+    ) -> Result<(Self, T), Error> {
         use sha2::Digest;
         if stopped() || job.is_stopped() {
             return Err(Error::EditRecoveryUnavailable);
@@ -215,7 +232,7 @@ impl ReplacementBody {
             job,
             stopped,
         };
-        let value = capture(&mut reader, snapshot)?;
+        let value = capture(&mut reader, snapshot, usn)?;
         if !reader.eof || reader.offset != snapshot.file_size {
             return Err(Error::EditRecoveryUnavailable);
         }
@@ -234,6 +251,20 @@ impl ReplacementBody {
         };
         body.check(job, stopped)?;
         Ok((body, value))
+    }
+    pub(super) fn len(&self) -> u64 {
+        self.snapshot.file_size
+    }
+    pub(super) fn sha256(&self) -> [u8; 32] {
+        self.digest
+    }
+    pub(super) fn usn(&self) -> i64 {
+        self.usn
+    }
+    pub(super) fn completed_usn(&self, identity: &[u8; 16]) -> Result<i64, Error> {
+        let reference = self.source.reference()?;
+        validate_converted(&reference, self.snapshot, &self.path, identity, true)?;
+        completion_usn(reference.raw, self.snapshot.identity.file_index)
     }
     pub(super) fn local_file(&self) -> LocalFileIdentity {
         LocalFileIdentity {

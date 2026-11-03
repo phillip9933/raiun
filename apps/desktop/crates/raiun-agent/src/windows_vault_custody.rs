@@ -220,11 +220,26 @@ fn completed_segment_key(
     Ok(key)
 }
 impl vault_custody::Store for ProtectedStore {
+    fn completed_deleted_hydration(
+        &self,
+        scope: &Scope,
+        row: &vault_custody::Hydration,
+    ) -> std::result::Result<bool, vault_custody::Error> {
+        let current = self.project_rename_hydration(scope, row)?;
+        super::windows_vault_file_delete_custody::hydration_deleted(&self.0, scope, &current)
+            .map_err(|_| vault_custody::Error::Persistence)
+    }
     fn verify_location_history(
         &self,
         scope: &Scope,
     ) -> std::result::Result<(), vault_custody::Error> {
         super::windows_vault_file_rename_custody::verify_no_unresolved(&self.0, scope)
+            .and_then(|()| {
+                super::windows_vault_file_replace_custody::verify_no_unresolved(&self.0, scope)
+            })
+            .and_then(|()| {
+                super::windows_vault_file_delete_custody::verify_no_unresolved(&self.0, scope)
+            })
             .map_err(|_| vault_custody::Error::Persistence)
     }
     fn project_rename_entry(
@@ -232,16 +247,38 @@ impl vault_custody::Store for ProtectedStore {
         scope: &Scope,
         e: &Entry,
     ) -> std::result::Result<Entry, vault_custody::Error> {
-        super::windows_vault_file_rename_custody::entry(&self.0, scope, e)
-            .map_err(|_| vault_custody::Error::Persistence)
+        let mut current = e.clone();
+        for _ in 0..=2048 {
+            let renamed = super::windows_vault_file_rename_custody::entry(&self.0, scope, &current)
+                .map_err(|_| vault_custody::Error::Persistence)?;
+            let next = super::windows_vault_file_replace_custody::entry(&self.0, scope, &renamed)
+                .map_err(|_| vault_custody::Error::Persistence)?;
+            if next == current {
+                return Ok(next);
+            }
+            current = next;
+        }
+        Err(vault_custody::Error::Capacity)
     }
     fn project_rename_hydration(
         &self,
         scope: &Scope,
         h: &vault_custody::Hydration,
     ) -> std::result::Result<vault_custody::Hydration, vault_custody::Error> {
-        super::windows_vault_file_rename_custody::hydration(&self.0, scope, h)
-            .map_err(|_| vault_custody::Error::Persistence)
+        let mut current = h.clone();
+        for _ in 0..=2048 {
+            let renamed =
+                super::windows_vault_file_rename_custody::hydration(&self.0, scope, &current)
+                    .map_err(|_| vault_custody::Error::Persistence)?;
+            let next =
+                super::windows_vault_file_replace_custody::hydration(&self.0, scope, &renamed)
+                    .map_err(|_| vault_custody::Error::Persistence)?;
+            if next == current {
+                return Ok(next);
+            }
+            current = next;
+        }
+        Err(vault_custody::Error::Capacity)
     }
 
     fn load(
@@ -934,6 +971,11 @@ impl VaultPublishedHistorySource for WindowsVaultCustody {
                     scope,
                 )
                 .map_err(|_| refused())?;
+                super::windows_vault_file_replace_custody::verify_retained_bodies(
+                    &self.store.0,
+                    scope,
+                )
+                .map_err(|_| refused())?;
                 let child = Custody::reopen(&self.store, scope).map_err(|_| refused())?;
                 let history = child.publication_history().map_err(|_| refused())?;
                 // Promoted v4 history still retains every immutable capture.
@@ -963,6 +1005,18 @@ impl VaultPublishedHistorySource for WindowsVaultCustody {
                     .collect::<Vec<_>>();
 
                 for row in scope_intents {
+                    if super::windows_vault_file_delete_custody::intent_deleted(
+                        &self.store.0,
+                        scope,
+                        row.identity,
+                        row.file_index,
+                        row.length,
+                        &row.components,
+                    )
+                    .map_err(|_| refused())?
+                    {
+                        continue;
+                    }
                     if intents.len() == 100_000
                         || !identities.insert(row.identity)
                         || !files.insert(row.file_index)
@@ -1332,6 +1386,166 @@ fn deterministic_capture_id(
 }
 
 impl VaultPublicationCustody for View {
+    fn begin_file_delete(
+        &self,
+        d: &raiun_cloudfiles_windows::vault_file_delete::VaultFileDeleteDescriptor,
+    ) -> std::result::Result<
+        Arc<dyn raiun_cloudfiles_windows::vault_file_delete::VaultFileDeleteRecord>,
+        BackendError,
+    > {
+        d.validate()?;
+        self.verify_context(&d.owner, &d.vault, &d.remote_root)?;
+        if d.root != self.root {
+            return Err(BackendError::Unavailable);
+        }
+        let root = RootBinding::new(
+            &self.account,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(unavailable)?;
+        let mut manifest = RootManifest::reopen(&self.store, &root).map_err(unavailable)?;
+        if !manifest
+            .scopes_for_reconciliation()
+            .map_err(unavailable)?
+            .contains(&self.scope)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        manifest.verify_current(&self.store).map_err(unavailable)?;
+        let mut cached = self.child.custody.lock().map_err(unavailable)?;
+        let fresh = Custody::reopen(&self.store, &self.scope).map_err(unavailable)?;
+        let original = fresh
+            .entries_for_reconciliation()
+            .iter()
+            .find(|e| e.opaque() == d.original_identity)
+            .ok_or(BackendError::Unavailable)?;
+        let parent = fresh
+            .entries_for_reconciliation()
+            .iter()
+            .find(|e| e.opaque() == d.parent_identity)
+            .ok_or(BackendError::Unavailable)?;
+        if original.remote_id() != d.original.id
+            || original.root_relative_path() != d.original.path
+            || original.etag() != d.original.etag
+            || original.length() != d.original.size
+            || original.is_directory()
+            || parent.remote_id() != d.parent.id
+            || parent.root_relative_path() != d.parent.path
+            || !parent.is_directory()
+        {
+            return Err(BackendError::Unavailable);
+        }
+        for h in fresh
+            .publication_history()
+            .map_err(unavailable)?
+            .iter()
+            .filter(|h| h.opaque() == d.original_identity)
+        {
+            if h.file_index() != d.original_file.file_index
+                || h.length() != d.original.size
+                || h.components() != d.components
+            {
+                return Err(BackendError::Unavailable);
+            }
+        }
+        let record =
+            super::windows_vault_file_delete_custody::begin(self.store.0.clone(), &self.scope, d)?;
+        manifest.verify_current(&self.store).map_err(unavailable)?;
+        self.verify_context(&d.owner, &d.vault, &d.remote_root)?;
+        *cached = fresh;
+        Ok(record)
+    }
+
+    fn begin_file_replace(
+        &self,
+        d: &raiun_cloudfiles_windows::vault_file_replace::VaultFileReplaceDescriptor,
+    ) -> std::result::Result<
+        Box<dyn raiun_cloudfiles_windows::vault_file_replace::VaultFileReplaceCapture>,
+        BackendError,
+    > {
+        d.validate()?;
+        self.verify_context(&d.owner, &d.vault, &d.remote_root)?;
+        if d.root != self.root {
+            return Err(BackendError::Unavailable);
+        }
+        let root = RootBinding::new(
+            &self.account,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(unavailable)?;
+        let mut manifest = RootManifest::reopen(&self.store, &root).map_err(unavailable)?;
+        if !manifest
+            .scopes_for_reconciliation()
+            .map_err(unavailable)?
+            .contains(&self.scope)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        manifest.verify_current(&self.store).map_err(unavailable)?;
+        let mut cached = self.child.custody.lock().map_err(unavailable)?;
+        let fresh = Custody::reopen(&self.store, &self.scope).map_err(unavailable)?;
+        let original = fresh
+            .entries_for_reconciliation()
+            .iter()
+            .find(|e| e.opaque() == d.original_identity)
+            .ok_or(BackendError::Unavailable)?;
+        let parent = fresh
+            .entries_for_reconciliation()
+            .iter()
+            .find(|e| e.opaque() == d.parent_identity)
+            .ok_or(BackendError::Unavailable)?;
+        if original.remote_id() != d.original.id
+            || original.root_relative_path() != d.original.path
+            || original.etag() != d.original.etag
+            || original.length() != d.original.size
+            || original.is_directory()
+            || parent.remote_id() != d.parent.id
+            || parent.root_relative_path() != d.parent.path
+            || !parent.is_directory()
+        {
+            return Err(BackendError::Unavailable);
+        }
+        // This first replacement path uses an actual previously hydrated source.
+        // Fresh native original FI/USN proof remains with the delete owner.
+        if !fresh
+            .publication_history()
+            .map_err(unavailable)?
+            .iter()
+            .any(|h| {
+                h.opaque() == d.original_identity
+                    && h.file_index() == d.original_file.file_index
+                    && h.length() == d.original.size
+                    && h.components() == d.components
+            })
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let child = self.child.clone();
+        let store = self.store.0.clone();
+        let refresh = Arc::new(move || {
+            child
+                .custody
+                .lock()
+                .map_err(unavailable)?
+                .refresh_completed_location(&ProtectedStore(store.clone()))
+                .map_err(unavailable)
+        });
+        let capture = super::windows_vault_file_replace_custody::begin(
+            self.store.0.clone(),
+            &self.scope,
+            d,
+            refresh,
+        )?;
+        manifest.verify_current(&self.store).map_err(unavailable)?;
+        self.verify_context(&d.owner, &d.vault, &d.remote_root)?;
+        *cached = fresh;
+        Ok(capture)
+    }
+
     fn prepare_file_rename(
         &self,
         d: &raiun_cloudfiles_windows::VaultFileRenameDescriptor,
@@ -1885,9 +2099,18 @@ impl VaultPublicationCustody for View {
         {
             return Err(BackendError::Unavailable);
         }
-        let rows = child
-            .entries_for_reconciliation()
-            .iter()
+        let mut current = Vec::new();
+        for entry in child.entries_for_reconciliation() {
+            if !super::windows_vault_file_delete_custody::entry_deleted(
+                &self.store.0,
+                &self.scope,
+                entry,
+            )? {
+                current.push(entry);
+            }
+        }
+        let rows = current
+            .into_iter()
             .map(|entry| VaultCatalogueEntry {
                 identity: entry.opaque(),
                 metadata: RemoteEntry {

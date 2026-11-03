@@ -1019,6 +1019,9 @@ mod runtime {
             })
         }
     }
+    include!("vault_placeholder_replace.rs");
+    include!("vault_placeholder_delete.rs");
+
     fn persist_catalogue(
         custody: &dyn crate::vault_custody::VaultPublicationCustody,
         catalogue: &Catalogue,

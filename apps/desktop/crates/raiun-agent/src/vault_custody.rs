@@ -68,6 +68,10 @@ impl Scope {
     pub(crate) fn native_root(&self) -> (u32, u64) {
         (self.volume, self.root_file)
     }
+    #[cfg(windows)]
+    pub(crate) fn remote_root(&self) -> &str {
+        &self.remote_root
+    }
     /// Account bytes must be serialized ONCE from the authenticated canonical
     /// AccountScope, not rebuilt from raw session issuer spelling or request JSON.
     /// Root/registration arguments must come from retained native root proofs.
@@ -329,6 +333,13 @@ impl Hydration {
     pub(super) fn with_rename_components(&self, components: Vec<String>) -> Self {
         let mut next = self.clone();
         next.components = components;
+        next
+    }
+    #[cfg(windows)]
+    pub(super) fn with_replacement(&self, file_index: u64, length: u64) -> Self {
+        let mut next = self.clone();
+        next.file_index = file_index;
+        next.length = length;
         next
     }
     pub(crate) fn with_verified_length(&self, length: u64) -> Self {
@@ -715,7 +726,7 @@ impl Document {
                 || h.file_index == 0
                 || h.length != e.length
                 || !components(&h.components)
-                || !files.insert(h.file_index)
+                || (!store.completed_deleted_hydration(scope, h)? && !files.insert(h.file_index))
                 || !hydrated_ids.insert(h.opaque)
             {
                 return Err(Error::Conflict);
@@ -949,6 +960,11 @@ fn validate_history(
 /// load(None) must not create storage. Expected is full plaintext byte equality.
 /// This trait performs no DPAPI or filesystem work itself.
 pub trait Store {
+    /// Current native uniqueness only. Original historical bindings must still
+    /// validate even when a later, authenticated deletion removed that object.
+    fn completed_deleted_hydration(&self, _scope: &Scope, _row: &Hydration) -> Result<bool> {
+        Ok(false)
+    }
     fn verify_location_history(&self, _scope: &Scope) -> Result<()> {
         Ok(())
     }

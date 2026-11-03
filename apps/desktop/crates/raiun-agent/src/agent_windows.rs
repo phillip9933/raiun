@@ -126,8 +126,12 @@ include!("windows_vault_copy.rs");
 include!("windows_vault_edit_upload.rs");
 #[path = "windows_vault_child_create_custody.rs"]
 mod windows_vault_child_create_custody;
+#[path = "windows_vault_file_delete_custody.rs"]
+mod windows_vault_file_delete_custody;
 #[path = "windows_vault_file_rename_custody.rs"]
 mod windows_vault_file_rename_custody;
+#[path = "windows_vault_file_replace_custody.rs"]
+mod windows_vault_file_replace_custody;
 #[path = "windows_vault_streamed_edit.rs"]
 mod windows_vault_streamed_edit;
 
@@ -1603,6 +1607,7 @@ impl ProviderManager {
                                     raiun_cloudfiles_windows::connect_configured_root_with_file_delete(
                                         prepared, authorization,
                                         Arc::new(move |captured| captured == authorization && delete_generation.load(Ordering::Acquire) == generation),
+                                        Arc::clone(&worker_generation),
                                     ).map(|active| (active, custody, composite_root_identity))
                                         .map_err(|_| "Could not connect the Windows Cloud Files drive".to_owned())
                                 });

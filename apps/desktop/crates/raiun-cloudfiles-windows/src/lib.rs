@@ -71,7 +71,11 @@ pub use vault_completion::{
     VaultUploadControl,
 };
 #[cfg(windows)]
+pub mod vault_file_delete;
+#[cfg(windows)]
 mod vault_file_rename;
+#[cfg(windows)]
+pub mod vault_file_replace;
 #[cfg(windows)]
 pub use vault_file_rename::{
     VaultFileRenameDescriptor, VaultFileRenameDestination, VaultFileRenameFacts,
@@ -515,12 +519,14 @@ pub fn connect_configured_root_with_file_delete(
     runtime: PreparedConfiguredRootRuntime,
     authorization: namespace_intent::CapturedAuthorization,
     current: std::sync::Arc<dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync>,
+    generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> Result<ConfiguredRootConnection, Error> {
     native::ConfiguredRootConnection::connect_owned_delete(
         runtime,
         native::native_file_delete::Config {
             authorization,
             current,
+            generation: Some(generation),
         },
     )
     .map(|inner| ConfiguredRootConnection { inner })
@@ -1404,6 +1410,7 @@ pub mod synthetic_agent_integration {
             crate::native::native_file_delete::Config {
                 authorization,
                 current,
+                generation: None,
             },
         )
         .map(|inner| Connection(ConfiguredRootConnection { inner }))

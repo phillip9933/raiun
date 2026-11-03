@@ -33,6 +33,10 @@ const ACK_DELETE: i32 = 6;
 const DELETE_REFUSED: i32 = 0xC000_CF12_u32 as i32;
 #[path = "native_file_replacement.rs"]
 mod replacement;
+#[path = "native_vault_file_delete.rs"]
+mod vault_delete;
+#[path = "native_vault_file_replace.rs"]
+mod vault_replacement;
 
 const LIMIT: Duration = Duration::from_secs(45);
 const DRAIN_LIMIT: Duration = Duration::from_secs(2);
@@ -53,6 +57,7 @@ const _: () = {
 };
 
 pub(crate) struct Config {
+    pub generation: Option<Arc<AtomicU64>>,
     pub authorization: CapturedAuthorization,
     pub current: Arc<dyn Fn(CapturedAuthorization) -> bool + Send + Sync>,
 }
@@ -482,6 +487,11 @@ fn execute(shared: &Arc<Shared>, ticket: &Ticket) -> FileDeleteOutcome {
         }
         let name = components.pop().ok_or(Error::ConfiguredRootChanged)?;
         let refs = components.iter().map(String::as_str).collect::<Vec<_>>();
+        if let Some(outcome) =
+            vault_replacement::try_execute(shared, ticket, &state, &admission, &components, &name)?
+        {
+            return Ok(outcome);
+        }
         let captured = shared
             .backend
             .capture_namespace_parent(&refs, shared.root, shared.config.authorization)

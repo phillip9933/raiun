@@ -51,7 +51,13 @@ use crate::{
 
 mod copy;
 mod directory_create;
+#[cfg(windows)]
+mod file_delete;
 mod file_rename;
+#[cfg(windows)]
+pub use file_delete::{
+    VaultFileDeleteOutcome, VaultFileDeleteRequest, VaultFileDeleteTarget, VaultVerifiedFileDelete,
+};
 pub use file_rename::{
     VaultFileRenameOutcome, VaultFileRenameRequest, VaultFileRenameTarget, VaultVerifiedFileRename,
 };

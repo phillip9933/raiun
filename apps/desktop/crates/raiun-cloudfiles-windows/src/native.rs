@@ -5437,6 +5437,73 @@ mod hydration_inventory {
             row.length = new_length;
             Ok(())
         }
+        /// Actual original-owner replacement completion only. The immutable
+        /// durable history remains original; remove its now-deleted native FI
+        /// only after the newly converted FI/body and remote bytes were proved.
+        pub(super) fn replace_verified(
+            &mut self,
+            identity: [u8; 16],
+            old_file: u64,
+            new_file: u64,
+            old_length: u64,
+            new_length: u64,
+            components: &[String],
+        ) -> Result<(), InventoryError> {
+            if !self.is_complete()
+                || old_file == 0
+                || new_file == 0
+                || old_file == new_file
+                || self.rows.contains_key(&(identity, new_file))
+                || self.rows.values().any(|r| {
+                    (r.identity == identity && r.file_index != old_file)
+                        || (r.components == components
+                            && (r.identity != identity || r.file_index != old_file))
+                })
+            {
+                return Err(InventoryError::Conflict);
+            }
+            let old = self
+                .rows
+                .get(&(identity, old_file))
+                .ok_or(InventoryError::Conflict)?;
+            if old.length != old_length || old.components != components {
+                return Err(InventoryError::Conflict);
+            }
+            let mut next = old.clone();
+            next.file_index = new_file;
+            next.length = new_length;
+            // Allocate/insert first; a panic cannot discard the original row.
+            self.rows.insert((identity, new_file), next);
+            self.rows.remove(&(identity, old_file));
+            Ok(())
+        }
+        /// Only after conditional cloud deletion and factual native absence.
+        /// Cloud-only clean placeholders may have no published plaintext row.
+        pub(super) fn retire_deleted(
+            &mut self,
+            identity: [u8; 16],
+            file: u64,
+            length: u64,
+            components: &[String],
+        ) -> Result<(), InventoryError> {
+            if !self.is_complete()
+                || file == 0
+                || self.rows.values().any(|r| {
+                    (r.identity == identity && r.file_index != file)
+                        || (r.components == components
+                            && (r.identity != identity || r.file_index != file))
+                })
+            {
+                return Err(InventoryError::Conflict);
+            }
+            if let Some(row) = self.rows.get(&(identity, file)) {
+                if row.length != length || row.components != components {
+                    return Err(InventoryError::Conflict);
+                }
+                self.rows.remove(&(identity, file));
+            }
+            Ok(())
+        }
         #[cfg(feature = "synthetic-agent-integration")]
         pub(super) fn file_for_components(
             &self,
