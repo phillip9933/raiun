@@ -56,16 +56,16 @@
       "sha256": "b5c80bb30797d3a2eeb0dbd85ce481bacfa1b9401c6e74c5fbb4134de26dd690"
     },
     {
-      "bytes": 56133,
+      "bytes": 56206,
       "path": "legal/windows/THIRD-PARTY-NOTICES.md",
-      "sha256": "0797e49713365f2f32ce2cd89840982b3b28ae26ac3d2a8bf12ac27fe9464f89"
+      "sha256": "2e2d562e880e59657a78a18b80c7d704f1397d3038f89aacfd496bbea89e7363"
     }
   ],
   "gaps": [],
   "lock_sha256": {
     "Cargo.lock": "f36510a206ea6fb2559695994162e9f1146538f73876dba36e6adc625547fb93",
     "desktop-shell/package-lock.json": "d0965d09c758ed7e5f3d1dcc1b1d869d5113f836fdf30c0915ddc850d3387932",
-    "desktop-shell/src-tauri/Cargo.lock": "35a639be4853ce1fdf6fbcd5cdcd860e4dd34e24062b3b4bbeaf891cd93aa9cd",
+    "desktop-shell/src-tauri/Cargo.lock": "515e726034b491d4b4f98ee2aa13fb193b4bd733bd1a5e09294c07d1141774ef",
     "package-lock.json": "fc694dd4b238d9f55909d1a8229f1cfb8f063f042f2bb0256c20c73495dad64d"
   },
   "production_ui_packages": [
@@ -6814,10 +6814,16 @@
           "bytes": 1112,
           "path": "legal/windows/rust/tauri-plugin-single-instance-2.4.5/LICENSE_MIT",
           "sha256": "b7f455413bfe5f9d7da501a4468d4c5f866a432c325947e98cc9535e8b26cd6d"
+        },
+        {
+          "bytes": 1200,
+          "path": "legal/windows/rust/tauri-plugin-single-instance-2.4.5/RAIUN-VENDOR.md",
+          "sha256": "465beae049c25a05bd666a9a77e112d7180437143906684ce675508d32f0b471"
         }
       ],
       "repository": "https://github.com/tauri-apps/plugins-workspace",
-      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "source": "vendored:tauri-plugin-single-instance-2.4.5",
+      "vendored_path": "desktop-shell/src-tauri/vendor/tauri-plugin-single-instance-2.4.5",
       "version": "2.4.5"
     },
     {
