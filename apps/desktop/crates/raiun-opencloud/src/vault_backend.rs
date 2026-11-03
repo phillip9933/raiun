@@ -257,6 +257,16 @@ pub struct VaultReconciledPending {
     cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 impl VaultReconciledPending {
+    pub fn matches_provider(&self, provider: &Arc<AtomicU64>, generation: u64) -> bool {
+        Arc::ptr_eq(&self.provider, provider)
+            && self.provider_generation == generation
+            && self.provider_current()
+    }
+    pub fn matches_client(&self, client: &OpenCloudClient) -> bool {
+        Arc::ptr_eq(&self.token, &client.token_generation)
+            && client.token_generation() == self.token_generation
+            && self.provider_current()
+    }
     pub fn metadata(&self) -> &VaultPendingEditMetadata {
         &self.metadata
     }
@@ -312,8 +322,10 @@ impl PendingReconcileGuard<'_> {
         }
         self.backend
             .sessions
-            .with_session_epoch(&self.backend.scope, self.epoch, || ())
-            .map_err(vault_error)
+            .try_lock_session_epoch(&self.backend.scope, self.epoch)
+            .map_err(vault_error)?
+            .ok_or_else(|| conflict("original reconciliation epoch is unavailable"))?;
+        Ok(())
     }
     fn record(&self, entry: Option<&RemoteEntry>) -> Result<(), CloudError> {
         self.check()?;
