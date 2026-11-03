@@ -1188,11 +1188,21 @@ impl WindowsVaultReadBinding {
         provider: &Arc<AtomicU64>,
         generation: u64,
     ) -> bool {
+        self.matches_cached_reconciliation_held(proof, provider, generation)
+            && self.check_current().is_ok()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn matches_cached_reconciliation_held(
+        &self,
+        proof: &raiun_opencloud::vault_backend::VaultReconciledPending,
+        provider: &Arc<AtomicU64>,
+        generation: u64,
+    ) -> bool {
         proof.scope() == &self.scope
             && proof.matches_epoch(&self.epoch)
             && proof.matches_client(&self.client)
             && proof.matches_provider(provider, generation)
-            && self.check_current().is_ok()
     }
 
     #[cfg(windows)]
