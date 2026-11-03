@@ -17,7 +17,7 @@ pub use vault_cached_namespace::{
 #[cfg(windows)]
 mod vault_cached_write;
 #[cfg(windows)]
-pub use vault_cached_write::VaultCachedQueuedEdit;
+pub use vault_cached_write::{VaultCachedQueuedCapture, VaultCachedQueuedEdit};
 #[cfg(windows)]
 pub(crate) mod file_create;
 #[cfg(any(windows, test))]
@@ -3172,6 +3172,42 @@ impl PlaceholderBackend for OpenCloudPlaceholderBackend {
             .vault_for_identity(identity)?
             .ok_or(BackendError::Unavailable)?;
         route.backend().with_vault_edit_capture(identity, callback)
+    }
+
+    #[cfg(windows)]
+    fn cached_vault_edit_mode(&self, identity: &[u8]) -> Result<bool, BackendError> {
+        self.ensure_active()?;
+        Ok(self
+            .vault_for_identity(identity)?
+            .is_some_and(|route| route.backend().binding().is_cached_only()))
+    }
+    #[cfg(windows)]
+    fn with_vault_edit_capture_context(
+        &self,
+        identity: &[u8],
+        callback: &mut dyn FnMut(
+            crate::vault_cached_edit::VaultEditCaptureContext<'_>,
+        ) -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        let _lease = self
+            .lease_gate
+            .read()
+            .map_err(|_| BackendError::Unavailable)?;
+        self.ensure_active()?;
+        let route = self
+            .vault_for_identity(identity)?
+            .ok_or(BackendError::Unavailable)?;
+        if route.backend().binding().is_cached_only() {
+            route.backend().with_cached_edit_capture(identity, callback)
+        } else {
+            route
+                .backend()
+                .with_vault_edit_capture(identity, &mut |capture| {
+                    callback(crate::vault_cached_edit::VaultEditCaptureContext::Online(
+                        capture,
+                    ))
+                })
+        }
     }
 
     #[cfg(windows)]

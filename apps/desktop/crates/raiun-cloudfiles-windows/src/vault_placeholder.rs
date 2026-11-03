@@ -322,6 +322,51 @@ mod runtime {
                 existing_saves,
             })
         }
+        pub(crate) fn with_cached_edit_capture(
+            &self,
+            identity: &[u8],
+            callback: &mut dyn FnMut(
+                crate::vault_cached_edit::VaultEditCaptureContext<'_>,
+            ) -> Result<(), BackendError>,
+        ) -> Result<(), BackendError> {
+            let identity: [u8; 16] = identity.try_into().map_err(|_| BackendError::Unavailable)?;
+            let gate = self
+                .existing_saves
+                .clone()
+                .ok_or(BackendError::Unavailable)?;
+            if !gate.current() || !self.binding.is_cached_only() {
+                return Err(BackendError::Unavailable);
+            }
+            let current = self.saved(&identity)?;
+            let facts = self
+                .binding
+                .cached_edit_facts(identity, self.custody.root_identity(), &current)
+                .map_err(|_| BackendError::Unavailable)?;
+            self.binding
+                .with_publication(|| {
+                    if !gate.current()
+                        || key(&self.saved(&identity).map_err(|_| refused())?) != key(&current)
+                    {
+                        return Err(refused());
+                    }
+                    self.binding
+                        .verify_custody_context(self.custody.as_ref())
+                        .map_err(|_| refused())?;
+                    let context = LocalCachedCapture {
+                        facts,
+                        binding: &self.binding,
+                        custody: self.custody.as_ref(),
+                        gate,
+                        acknowledgement: crate::backend::ExistingCaptureAcknowledgement::default(),
+                    };
+                    let result = callback(
+                        crate::vault_cached_edit::VaultEditCaptureContext::Cached(&context),
+                    );
+                    Ok(context.acknowledgement.finish(result))
+                })
+                .map_err(|_| BackendError::Unavailable)?
+        }
+
         /// Current mode only; exact authenticated route/epoch checks remain
         /// the caller's responsibility. Never reacquires auth locks.
         pub fn existing_file_saves_active(&self) -> bool {
@@ -920,6 +965,60 @@ mod runtime {
                 before,
             )
         }
+        /// Local pending metadata publication only. The receipt cannot be
+        /// passed to online completion; native bytes stay explicitly out-of-sync.
+        pub(crate) fn publish_cached_child<T>(
+            &self,
+            receipt: &crate::opencloud::VaultCachedNamespaceQueued,
+            cancellation: &crate::vault_custody::VaultUploadCancellation<'_>,
+            publish: impl FnOnce([u8; 16]) -> Result<T, crate::Error>,
+        ) -> Result<T, crate::Error> {
+            self.binding.with_exclusive_completion(|| {
+                let no = || crate::Error::EditRecoveryUnavailable;
+                if cancellation.is_cancelled() || !self.binding.is_cached_only() {
+                    return Err(no());
+                }
+                let crate::opencloud::VaultCachedNamespaceDescriptor::ChildCreate(d) =
+                    receipt.descriptor()
+                else {
+                    return Err(no());
+                };
+                self.binding
+                    .validate_cached_child_descriptor(d)
+                    .map_err(|_| no())?;
+                let mut entry = receipt.entry().cloned().ok_or_else(no)?;
+                entry.writable = false;
+                let (mut next, identity) = {
+                    let catalogue = self.catalogue.lock().map_err(|_| no())?;
+                    let parent = catalogue.entries.get(&d.parent_identity).ok_or_else(no)?;
+                    if !parent.directory
+                        || parent.id != d.parent.id
+                        || parent.path != d.parent.path
+                        || catalogue.entries.values().any(|e| e.path == entry.path)
+                    {
+                        return Err(no());
+                    }
+                    let mut next = catalogue.clone();
+                    let identity = next.insert(entry).map_err(|_| no())?;
+                    (next, identity)
+                };
+                let result = publish(identity)?;
+                if cancellation.is_cancelled() {
+                    return Err(no());
+                }
+                // Parent persistence projects ONLY exact LocalQueued/native facts.
+                // Raw protected frames/catalogue remain immutable history.
+                let restored =
+                    Catalogue::restore(self.custody.catalogue_snapshot().map_err(|_| no())?)
+                        .map_err(|_| no())?;
+                if restored.entries != next.entries || restored.versions != next.versions {
+                    return Err(no());
+                }
+                std::mem::swap(&mut *self.catalogue.lock().map_err(|_| no())?, &mut next);
+                Ok(result)
+            })
+        }
+
         /// Original route/epoch catalogue publication, never ordinary identity.
         pub(crate) fn publish_created_file<T>(
             &self,
@@ -1339,6 +1438,73 @@ mod runtime {
             cancellation: &CancellationToken,
         ) -> Result<Box<dyn PreparedFetch + 'a>, BackendError> {
             Ok(Box::new(self.window(range, cancellation)?))
+        }
+    }
+    struct LocalCachedCapture<'a> {
+        facts: crate::vault_cached_edit::CachedVaultEditBaselineFacts,
+        binding: &'a Arc<WindowsVaultReadBinding>,
+        custody: &'a dyn crate::vault_custody::VaultPublicationCustody,
+        gate: ExistingFileSaveGate,
+        acknowledgement: crate::backend::ExistingCaptureAcknowledgement,
+    }
+    impl crate::vault_cached_edit::CachedVaultEditCapture for LocalCachedCapture<'_> {
+        fn catalogue_facts(&self) -> &crate::vault_cached_edit::CachedVaultEditBaselineFacts {
+            &self.facts
+        }
+        fn stream_revocation(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
+            let binding = Arc::downgrade(self.binding);
+            let gate = self.gate.clone();
+            Arc::new(move || binding.upgrade().is_none_or(|b| b.is_revoked()) || !gate.current())
+        }
+        fn baseline_facts(
+            &self,
+            file: crate::LocalFileIdentity,
+            usn: i64,
+            components: Vec<String>,
+            length: u64,
+            sha: [u8; 32],
+        ) -> Result<crate::vault_cached_edit::CachedVaultEditBaselineFacts, BackendError> {
+            let mut facts = self.facts.clone();
+            facts.file = file;
+            facts.usn = usn;
+            facts.components = components;
+            facts.plaintext_len = length;
+            facts.plaintext_sha256 = sha;
+            facts.validate(self.custody.root_identity())?;
+            Ok(facts)
+        }
+        fn retain_streamed(
+            &self,
+            facts: crate::vault_cached_edit::CachedVaultEditBaselineFacts,
+            source: &mut dyn std::io::Read,
+            verify: &mut dyn FnMut() -> Result<(), BackendError>,
+            cancelled: &dyn Fn() -> bool,
+        ) -> Result<Option<Box<dyn crate::DeferredVaultCaptureNotification>>, BackendError>
+        {
+            self.acknowledgement.begin_attempt()?;
+            let expected = self.baseline_facts(
+                facts.file,
+                facts.usn,
+                facts.components.clone(),
+                facts.plaintext_len,
+                facts.plaintext_sha256,
+            )?;
+            if expected != facts || !self.gate.current() || self.binding.is_revoked() || cancelled()
+            {
+                return Err(BackendError::Unavailable);
+            }
+            let result = self.custody.retain_cached_streamed_edit(
+                &facts,
+                self.binding.capture_dispatch_stamp(),
+                source,
+                verify,
+                cancelled,
+            )?;
+            if !self.gate.current() || self.binding.is_revoked() || cancelled() {
+                return Err(BackendError::Unavailable);
+            }
+            self.acknowledgement.acknowledge_retained();
+            Ok(result)
         }
     }
     struct LocalExistingCapture<'a> {

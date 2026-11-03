@@ -35,6 +35,7 @@ pub(super) struct VaultFilePins {
     digest: Cell<Option<[u8; 32]>>,
     captured: Cell<bool>,
     converted: Option<[u8; 16]>,
+    synchronized: bool,
     attempted: bool,
     _thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
@@ -176,6 +177,7 @@ impl VaultFilePins {
             digest: Cell::new(None),
             captured: Cell::new(false),
             converted: None,
+            synchronized: false,
             attempted: false,
             _thread: std::marker::PhantomData,
         };
@@ -304,7 +306,7 @@ impl VaultFilePins {
                 .converted
                 .as_ref()
                 .ok_or(Error::ConfiguredRootChanged)?;
-            self.verify_source(Some(identity), true, self.usn)
+            self.verify_source(Some(identity), self.synchronized, self.usn)
         } else {
             if self.attempted {
                 return Err(Error::EditRecoveryUnavailable);
@@ -405,6 +407,27 @@ impl VaultFilePins {
         claim: impl FnOnce() -> bool,
         readonly: bool,
     ) -> Result<(), Error> {
+        self.convert_mode(connection, identity, claim, readonly, true)
+    }
+
+    pub(super) fn convert_queued(
+        &mut self,
+        connection: &ConfiguredRootConnection,
+        identity: [u8; 16],
+        claim: impl FnOnce() -> bool,
+        readonly: bool,
+    ) -> Result<(), Error> {
+        self.convert_mode(connection, identity, claim, readonly, false)
+    }
+
+    fn convert_mode(
+        &mut self,
+        connection: &ConfiguredRootConnection,
+        identity: [u8; 16],
+        claim: impl FnOnce() -> bool,
+        readonly: bool,
+        synchronized: bool,
+    ) -> Result<(), Error> {
         if identity == [0; 16] || !self.captured.get() || self.digest.get().is_none() {
             return Err(Error::EditRecoveryUnavailable);
         }
@@ -428,11 +451,11 @@ impl VaultFilePins {
         if !claim() {
             return Err(Error::EditRecoveryUnavailable);
         }
-        let hr = unsafe { CfSetInSyncState(self.source.0, 1, 0, &mut usn) };
+        let hr = unsafe { CfSetInSyncState(self.source.0, u32::from(synchronized), 0, &mut usn) };
         if hr < 0 {
             return Err(native_error("complete encrypted child file", hr));
         }
-        self.verify_source(Some(&identity), true, usn)?;
+        self.verify_source(Some(&identity), synchronized, usn)?;
         let basic = completion_basic_info(self.source.0)?;
         if (basic.file_attributes & FILE_ATTRIBUTE_READONLY != 0) != readonly {
             let attributes = if readonly {
@@ -463,14 +486,20 @@ impl VaultFilePins {
             if hr < 0 {
                 return Err(native_error("publish encrypted child file attributes", hr));
             }
-            self.verify_source(Some(&identity), true, usn)?;
+            self.verify_source(Some(&identity), synchronized, usn)?;
         }
         if (completion_basic_info(self.source.0)?.file_attributes & FILE_ATTRIBUTE_READONLY != 0)
             != readonly
         {
             return Err(Error::ConfiguredRootChanged);
         }
+        if !synchronized
+            && root_snapshot(self.source.0)?.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC != 0
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
         self.usn = usn;
+        self.synchronized = synchronized;
         self.converted = Some(identity);
         self.verify(connection, true)
     }

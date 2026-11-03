@@ -305,6 +305,21 @@ impl WindowsVaultReadBinding {
         if stop() {
             return Err(refused());
         }
+        if self.client.is_offline() {
+            let actual = self.backend.stat(self.scope.space_id(), &parent.path)?;
+            self.backend
+                .parent_ref_for_directory(&parent.path, &parent.id, &parent.etag)?;
+            self.check_current()?;
+            if stop()
+                || !actual.directory
+                || actual.id != parent.id
+                || actual.path != parent.path
+                || actual.etag != parent.etag
+            {
+                return Err(refused());
+            }
+            return Ok(actual);
+        }
         let entry = self.backend.child_create_parent_at_epoch_with_context(
             &self.scope,
             &self.epoch,
@@ -762,6 +777,182 @@ impl WindowsVaultReadBinding {
             }
             other => other,
         }
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn cached_edit_facts(
+        &self,
+        identity: [u8; 16],
+        root: crate::ConfiguredRootIdentity,
+        current: &RemoteEntry,
+    ) -> Result<crate::vault_cached_edit::CachedVaultEditBaselineFacts, CloudError> {
+        use crate::vault_cached_edit::*;
+        self.check_current()?;
+        let target = self
+            .backend
+            .prepare_cached_edit_capture(current, &self.epoch, &|| self.is_revoked())?;
+        let pending = target
+            .pending()
+            .map(|p| {
+                let operation = match p.operation {
+                    raiun_opencloud::vault_cache::VaultPendingOperationKind::Overwrite => {
+                        Ok(CachedVaultEditOperation::Overwrite)
+                    }
+                    raiun_opencloud::vault_cache::VaultPendingOperationKind::CreateFile => {
+                        Ok(CachedVaultEditOperation::CreateFile)
+                    }
+                    _ => Err(refused()),
+                }?;
+                Ok(CachedVaultEditPending {
+                    write_id: p.id.clone(),
+                    revision: p.revision,
+                    operation,
+                })
+            })
+            .transpose()?;
+        let mut original = target.original_base().cloned();
+        if let Some(base) = &mut original {
+            base.writable = false;
+        }
+        self.check_current()?;
+        Ok(CachedVaultEditBaselineFacts {
+            profile_id: self.trusted.profile_id().into(),
+            account_id: self.trusted.account_id().into(),
+            server_origin: self.trusted.server_origin().into(),
+            space_id: self.scope.space_id().into(),
+            root_resource_id: self.scope.resource_id().into(),
+            remote_root: self.root_path.clone(),
+            root: crate::LocalFileIdentity {
+                volume_serial: root.volume_serial,
+                file_index: root.file_index,
+            },
+            token_generation: self.trusted.token_generation(),
+            historical_unlock_epoch: self.epoch.historical_generation(),
+            identity,
+            current: current.clone(),
+            original_base: original,
+            pending,
+            file: crate::LocalFileIdentity {
+                volume_serial: 0,
+                file_index: 0,
+            },
+            usn: 0,
+            components: Vec::new(),
+            plaintext_len: 0,
+            plaintext_sha256: [0; 32],
+        })
+    }
+    #[cfg(windows)]
+    pub(crate) fn validate_cached_capture(
+        &self,
+        facts: &crate::vault_cached_edit::CachedVaultEditBaselineFacts,
+        dispatch: &crate::FreshVaultCaptureDispatch,
+    ) -> Result<(), CloudError> {
+        let root = crate::ConfiguredRootIdentity {
+            volume_serial: facts.root.volume_serial,
+            file_index: facts.root.file_index,
+        };
+        facts.validate(root).map_err(|_| refused())?;
+        if !self.matches_cleanup_dispatch(dispatch) {
+            return Err(refused());
+        }
+        let template = self.cached_edit_facts(facts.identity, root, &facts.current)?;
+        let mut expected = facts.clone();
+        expected.file = template.file;
+        expected.usn = 0;
+        expected.components.clear();
+        expected.plaintext_len = 0;
+        expected.plaintext_sha256 = [0; 32];
+        if template != expected {
+            return Err(refused());
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    pub(crate) fn queue_cached_capture<R: Read>(
+        &self,
+        facts: &crate::vault_cached_edit::CachedVaultEditBaselineFacts,
+        dispatch: &crate::FreshVaultCaptureDispatch,
+        source: &mut R,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_backend::VaultUploadOutcome, CloudError> {
+        self.validate_cached_capture(facts, dispatch)?;
+        let target =
+            self.backend
+                .prepare_cached_edit_capture(&facts.current, &self.epoch, cancelled)?;
+        let result = self.backend.queue_cached_capture_reader(
+            target,
+            source,
+            facts.plaintext_len,
+            facts.plaintext_sha256,
+            &self.epoch,
+            cancelled,
+        )?;
+        self.check_current()?;
+        if cancelled() {
+            return Err(refused());
+        }
+        Ok(result)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn validate_cached_child_descriptor(
+        &self,
+        d: &crate::VaultChildCreateDescriptor,
+    ) -> Result<(), CloudError> {
+        d.validate().map_err(|_| refused())?;
+        if !self.client.is_offline()
+            || d.owner != self.trusted
+            || d.vault != self.scope
+            || d.remote_root != self.root_path
+            || d.historical_unlock_epoch != self.epoch.historical_generation()
+        {
+            return Err(refused());
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn is_cached_only(&self) -> bool {
+        self.client.is_offline()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn prepare_cached_child_create(
+        &self,
+        path: &str,
+        parent: &RemoteEntry,
+        directory: bool,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_backend::VaultCachedChildTarget, CloudError> {
+        self.check_current()?;
+        self.backend
+            .prepare_cached_child_create(path, parent, directory, &self.epoch, cancelled)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn queue_cached_child_create<R: Read>(
+        &self,
+        target: raiun_opencloud::vault_backend::VaultCachedChildTarget,
+        source: &mut R,
+        length: u64,
+        sha: [u8; 32],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_backend::VaultUploadOutcome, CloudError> {
+        self.check_current()?;
+        let result = self.backend.queue_cached_child_create(
+            target,
+            source,
+            length,
+            sha,
+            &self.epoch,
+            cancelled,
+        )?;
+        self.check_current()?;
+        if cancelled() {
+            return Err(refused());
+        }
+        Ok(result)
     }
 
     #[cfg(windows)]

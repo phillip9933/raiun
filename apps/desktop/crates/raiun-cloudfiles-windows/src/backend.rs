@@ -1036,6 +1036,25 @@ pub trait PlaceholderBackend: Send + Sync + 'static {
         Err(BackendError::Unavailable)
     }
 
+    #[cfg(windows)]
+    fn cached_vault_edit_mode(&self, _identity: &[u8]) -> Result<bool, BackendError> {
+        Ok(false)
+    }
+    #[cfg(windows)]
+    fn with_vault_edit_capture_context(
+        &self,
+        identity: &[u8],
+        callback: &mut dyn FnMut(
+            crate::vault_cached_edit::VaultEditCaptureContext<'_>,
+        ) -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
+        self.with_vault_edit_capture(identity, &mut |capture| {
+            callback(crate::vault_cached_edit::VaultEditCaptureContext::Online(
+                capture,
+            ))
+        })
+    }
+
     /// Prepare an exact account-bound baseline for a user-edited placeholder.
     /// Backends that cannot prove the callback identity return an error; native
     /// code must then retain the dirty placeholder as unresolved.

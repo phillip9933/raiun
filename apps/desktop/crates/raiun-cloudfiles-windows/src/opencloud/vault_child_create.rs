@@ -110,6 +110,21 @@ pub trait VaultChildCreateRecord: Send + Sync {
         &self,
         cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> Result<Box<dyn Read + Send>, BackendError>;
+    fn record_local_queued(
+        &self,
+        _receipt: &super::VaultCachedNamespaceQueued,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unavailable)
+    }
+    fn record_local_queued_native(
+        &self,
+        _receipt: &super::VaultCachedNamespaceQueued,
+        _identity: [u8; 16],
+        _file: u64,
+        _usn: i64,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unavailable)
+    }
     fn claim_send(&self) -> Result<(), BackendError>;
     fn record_remote(&self, proof: &VaultChildCreateRemoteProof) -> Result<(), BackendError>;
     fn record_native_completed(&self, identity: [u8; 16]) -> Result<(), BackendError>;

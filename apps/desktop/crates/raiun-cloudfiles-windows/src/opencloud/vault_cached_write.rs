@@ -125,3 +125,143 @@ impl OpenCloudPlaceholderBackend {
         })
     }
 }
+
+pub struct VaultCachedQueuedCapture {
+    facts: crate::vault_cached_edit::CachedVaultEditBaselineFacts,
+    entry: RemoteEntry,
+    write_id: String,
+    revision: u64,
+    _route: Arc<crate::vault_routes::VerifiedVaultRoute>,
+}
+impl VaultCachedQueuedCapture {
+    pub fn facts(&self) -> &crate::vault_cached_edit::CachedVaultEditBaselineFacts {
+        &self.facts
+    }
+    pub fn entry(&self) -> &RemoteEntry {
+        &self.entry
+    }
+    pub fn write_id(&self) -> &str {
+        &self.write_id
+    }
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub fn plaintext_len(&self) -> u64 {
+        self.facts.plaintext_len
+    }
+    pub fn source_sha256(&self) -> [u8; 32] {
+        self.facts.plaintext_sha256
+    }
+}
+impl OpenCloudPlaceholderBackend {
+    fn cached_capture_route(
+        &self,
+        facts: &crate::vault_cached_edit::CachedVaultEditBaselineFacts,
+        dispatch: &crate::FreshVaultCaptureDispatch,
+    ) -> Result<Arc<crate::vault_routes::VerifiedVaultRoute>, CloudError> {
+        let no = || CloudError::new(ErrorKind::Forbidden, "cached vault capture changed");
+        self.ensure_active().map_err(|_| no())?;
+        let root = self.local_root_identity.ok_or_else(no)?;
+        facts.validate(root).map_err(|_| no())?;
+        if !self.client.is_offline()
+            || facts.profile_id != self.scope.profile_id()
+            || facts.account_id != self.scope.account_id()
+            || facts.server_origin != self.scope.server_origin()
+            || facts.token_generation != self.scope.token_generation()
+            || facts.root.volume_serial != root.volume_serial
+            || facts.root.file_index != root.file_index
+        {
+            return Err(no());
+        }
+        let route = self
+            .vault_for_identity(&facts.identity)
+            .map_err(|_| no())?
+            .ok_or_else(no)?;
+        if route.local_root() != root
+            || route.space_id() != facts.space_id
+            || route.root_resource_id() != facts.root_resource_id
+            || route.root_path() != facts.remote_root
+        {
+            return Err(no());
+        }
+        route
+            .backend()
+            .binding()
+            .validate_cached_capture(facts, dispatch)?;
+        Ok(route)
+    }
+    pub fn validate_fresh_cached_vault_capture(
+        &self,
+        facts: &crate::vault_cached_edit::CachedVaultEditBaselineFacts,
+        dispatch: &crate::FreshVaultCaptureDispatch,
+    ) -> Result<(), CloudError> {
+        let _lease = self
+            .lease_gate
+            .read()
+            .map_err(|_| CloudError::new(ErrorKind::Forbidden, "cached vault capture changed"))?;
+        self.cached_capture_route(facts, dispatch).map(|_| ())
+    }
+    pub fn queue_cached_vault_capture<R: std::io::Read>(
+        &self,
+        facts: &crate::vault_cached_edit::CachedVaultEditBaselineFacts,
+        dispatch: crate::FreshVaultCaptureDispatch,
+        source: &mut R,
+        provider_generation: Arc<AtomicU64>,
+        expected: u64,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<VaultCachedQueuedCapture, CloudError> {
+        let no = || CloudError::new(ErrorKind::Forbidden, "cached vault capture changed");
+        let route = {
+            let _lease = self.lease_gate.read().map_err(|_| no())?;
+            if expected == 0
+                || provider_generation.load(Ordering::Acquire) != expected
+                || cancelled()
+            {
+                return Err(no());
+            }
+            self.cached_capture_route(facts, &dispatch)?
+        };
+        let stop = || {
+            self.is_revoked()
+                || route.backend().binding().is_revoked()
+                || provider_generation.load(Ordering::Acquire) != expected
+                || cancelled()
+        };
+        let result = route
+            .backend()
+            .binding()
+            .queue_cached_capture(facts, &dispatch, source, &stop)?;
+        if stop() {
+            return Err(no());
+        }
+        let raiun_opencloud::vault_backend::VaultUploadOutcome::Queued {
+            entry,
+            write_id,
+            revision,
+            uncertain: false,
+        } = result
+        else {
+            return Err(no());
+        };
+        if entry.directory
+            || entry.path != facts.current.path
+            || entry.id != facts.current.id
+            || entry.size != facts.plaintext_len
+            || write_id.is_empty()
+            || write_id.len() > 512
+            || revision == 0
+            || facts.pending.as_ref().is_some_and(|p| {
+                p.write_id != write_id || p.revision.checked_add(1) != Some(revision)
+            })
+        {
+            return Err(no());
+        }
+        Ok(VaultCachedQueuedCapture {
+            facts: facts.clone(),
+            entry,
+            write_id,
+            revision,
+            _route: route,
+        })
+    }
+}

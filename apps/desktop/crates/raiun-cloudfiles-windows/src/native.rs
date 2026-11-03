@@ -6446,8 +6446,14 @@ impl CallbackState {
             .recovery
             .as_ref()
             .is_some_and(|recovery| recovery.supports_streamed_capture());
-        let large_vault_stream =
-            vault_capture && snapshot.file_size > crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64;
+        let cached_vault_capture = vault_capture
+            && self
+                .backend
+                .cached_vault_edit_mode(identity)
+                .map_err(|_| (60, 0, true))?;
+        let large_vault_stream = vault_capture
+            && (cached_vault_capture
+                || snapshot.file_size > crate::MAX_VAULT_EDIT_CAPTURE_BYTES as u64);
         let capture_kind = if large_vault_stream {
             if snapshot.file_size > crate::vault_custody::MAX_STREAMED_VAULT_EDIT_BYTES {
                 return Err((61, 0, true));
@@ -6538,196 +6544,203 @@ impl CallbackState {
             let mut failure = (62, 0, true);
             let mut retained = false;
             let mut notification = None;
-            let callback_result = self
-                .backend
-                .with_vault_edit_capture(identity, &mut |capture| {
-                    let result = (|| {
-                        let baseline = capture.baseline();
-                        if baseline.identity().as_slice() != identity
-                            || baseline.root().volume_serial != root_identity.volume_serial
-                            || baseline.root().file_index != root_identity.file_index
-                            || baseline.metadata().directory
-                            || baseline.token_generation() == 0
-                            || baseline.unlock_epoch() == 0
-                        {
-                            return Err((63, 0, true));
-                        }
-                        let handle = stream.take().ok_or((64, 0, true))?;
-                        let route_cancelled = capture.stream_revocation().ok_or((63, 0, true))?;
-                        let readiness = Arc::downgrade(&self.readiness);
-                        let backend = Arc::downgrade(&self.backend);
-                        let epoch = self.backend.recovery_transfer_cancellation();
-                        let job = CancellationToken::for_recovery_job(
-                            crate::StreamedRecoveryPolicy::default(),
-                        )
-                        .with_revocation_check(Arc::new(move || {
-                            route_cancelled()
-                                || readiness.upgrade().is_none_or(|ready| {
-                                    ready.load(Ordering::Acquire) != CALLBACK_READY
-                                })
-                                || backend
-                                    .upgrade()
-                                    .is_none_or(|backend| backend.recovery_job_revoked())
-                                || epoch.as_ref().is_some_and(|cancelled| cancelled())
-                        }));
-                        let cancelled = || job.is_stopped();
-                        let original_usn = completion_usn(handle.0, snapshot.identity.file_index)
-                            .map_err(|_| (63, 0, true))?;
-                        let original_basic =
-                            completion_basic_info(handle.0).map_err(|_| (63, 0, true))?;
-                        if original_usn <= 0
-                            || !hydration_full_on_disk(handle.0, snapshot.file_size)
-                                .map_err(|_| (63, 0, true))?
-                        {
-                            return Err((63, 0, true));
-                        }
-                        let mut source = VaultStreamCaptureReader {
-                            handle: &handle,
-                            offset: 0,
-                            length: snapshot.file_size,
-                            eof: false,
-                            sha: Sha256::new(),
-                            cancellation: job.cancellation(),
-                        };
-                        let mut chunk = Zeroizing::new([0u8; 64 * 1024]);
-                        loop {
-                            let count = source.read(&mut *chunk).map_err(|_| (64, 0, true))?;
-                            if count == 0 {
-                                break;
-                            }
-                        }
-                        if !source.eof || source.offset != snapshot.file_size {
-                            return Err((64, 0, true));
-                        }
-                        let sha256: [u8; 32] = source.sha.clone().finalize().into();
-                        // Explicit-offset seek-back on the SAME original overlapped
-                        // owner, never reopen/transfer a native pointer or source.
-                        source.offset = 0;
-                        source.eof = false;
-                        source.sha = Sha256::new();
-                        let components = pinned_entry_final
-                            .strip_prefix(&callback_guard.root_final_path)
-                            .ok()
-                            .and_then(|path| {
-                                path.components()
-                                    .map(|part| match part {
-                                        std::path::Component::Normal(value) => {
-                                            value.to_str().map(str::to_owned)
-                                        }
-                                        _ => None,
-                                    })
-                                    .collect::<Option<Vec<_>>>()
-                            })
-                            .filter(|parts| !parts.is_empty())
-                            .ok_or((65, 0, true))?;
-                        let file = LocalFileIdentity {
-                            volume_serial: snapshot.identity.volume_serial,
-                            file_index: snapshot.identity.file_index,
-                        };
-                        let post_proof = || -> Result<(), BackendError> {
-                            if cancelled()
-                                || !same_edit_snapshot(
-                                    root_snapshot(handle.0)
-                                        .map_err(|_| BackendError::Unavailable)?,
-                                    snapshot,
-                                )
-                                || completion_usn(handle.0, file.file_index)
-                                    .map_err(|_| BackendError::Unavailable)?
-                                    != original_usn
-                                || completion_basic_info(handle.0)
-                                    .map_err(|_| BackendError::Unavailable)?
-                                    != original_basic
-                                || !modified_ranges_for_handle(handle.0)
-                                    .map_err(|_| BackendError::Unavailable)?
-                                || !hydration_full_on_disk(handle.0, snapshot.file_size)
-                                    .map_err(|_| BackendError::Unavailable)?
-                                || native_namespace_directory::opaque_directory_identity(handle.0)
-                                    .map_err(|_| BackendError::Unavailable)?
-                                    != baseline.identity()
+            let callback_result =
+                self.backend
+                    .with_vault_edit_capture_context(identity, &mut |capture| {
+                        let result = (|| {
+                            let baseline = capture.baseline();
+                            if baseline.identity().as_slice() != identity
+                                || baseline.root().volume_serial != root_identity.volume_serial
+                                || baseline.root().file_index != root_identity.file_index
+                                || baseline.metadata().directory
+                                || baseline.token_generation() == 0
+                                || baseline.unlock_epoch() == 0
                             {
-                                return Err(BackendError::Unavailable);
+                                return Err((63, 0, true));
                             }
-                            let post = callback_path(
-                                root_path,
-                                info.volume_dos_name,
-                                info.normalized_path,
-                                root_identity,
-                                info.file_id as u64,
-                                CallbackSizePolicy::Exact(snapshot.file_size),
-                                &self.last_close_path_common_prefix_bytes,
+                            let handle = stream.take().ok_or((64, 0, true))?;
+                            let route_cancelled =
+                                capture.stream_revocation().ok_or((63, 0, true))?;
+                            let readiness = Arc::downgrade(&self.readiness);
+                            let backend = Arc::downgrade(&self.backend);
+                            let epoch = self.backend.recovery_transfer_cancellation();
+                            let job = CancellationToken::for_recovery_job(
+                                crate::StreamedRecoveryPolicy::default(),
                             )
-                            .map_err(|_| BackendError::Unavailable)?;
-                            if !same_edit_snapshot(post.snapshot, snapshot)
-                                || !windows_paths_equal(
-                                    &post.root_final_path,
-                                    &callback_guard.root_final_path,
-                                )
-                                || !windows_paths_equal(
-                                    &final_path_for_handle(handle.0)
-                                        .map_err(|_| BackendError::Unavailable)?,
-                                    &pinned_entry_final,
-                                )
-                            {
-                                return Err(BackendError::Unavailable);
-                            }
-                            Ok(())
-                        };
-                        post_proof().map_err(|_| (66, 0, true))?;
-                        let checks = std::cell::Cell::new(0usize);
-                        let mut verify_source = || {
-                            post_proof()?;
-                            checks.set(checks.get() + 1);
-                            Ok(())
-                        };
-                        notification = capture
-                            .retain_streamed(
-                                crate::vault_custody::ExistingVaultStreamedEditPayload {
-                                    root: crate::ConfiguredRootIdentity {
-                                        volume_serial: root_identity.volume_serial,
-                                        file_index: root_identity.file_index,
-                                    },
-                                    file,
-                                    components: components.clone(),
-                                    length: snapshot.file_size,
-                                    sha256,
+                            .with_revocation_check(Arc::new(
+                                move || {
+                                    route_cancelled()
+                                        || readiness.upgrade().is_none_or(|ready| {
+                                            ready.load(Ordering::Acquire) != CALLBACK_READY
+                                        })
+                                        || backend
+                                            .upgrade()
+                                            .is_none_or(|backend| backend.recovery_job_revoked())
+                                        || epoch.as_ref().is_some_and(|cancelled| cancelled())
                                 },
-                                &mut source,
-                                &mut verify_source,
-                                &cancelled,
-                            )
-                            .map_err(|_| (66, 0, true))?;
-                        if checks.get() != 1
-                            || !source.eof
-                            || source.offset != snapshot.file_size
-                            || <[u8; 32]>::from(source.sha.clone().finalize()) != sha256
-                        {
-                            return Err((66, 0, true));
-                        }
-                        post_proof().map_err(|_| (66, 0, true))?;
-                        let mut dirty = self.vault_dirty.lock().map_err(|_| (68, 0, true))?;
-                        self.writable_cleanup
-                            .lock()
-                            .map_err(|_| (68, 0, true))?
-                            .invalidate(&baseline.identity());
-                        dirty
-                            .record(
-                                baseline.identity(),
-                                file,
-                                snapshot.file_size,
-                                sha256,
-                                components,
-                            )
-                            .map_err(|_| (68, 0, true))?;
-                        retained = true;
-                        Ok(())
-                    })();
-                    result.map_err(|error| {
-                        retained = false;
-                        notification = None;
-                        failure = error;
-                        BackendError::Unavailable
-                    })
-                });
+                            ));
+                            let cancelled = || job.is_stopped();
+                            let original_usn =
+                                completion_usn(handle.0, snapshot.identity.file_index)
+                                    .map_err(|_| (63, 0, true))?;
+                            let original_basic =
+                                completion_basic_info(handle.0).map_err(|_| (63, 0, true))?;
+                            if original_usn <= 0
+                                || !hydration_full_on_disk(handle.0, snapshot.file_size)
+                                    .map_err(|_| (63, 0, true))?
+                            {
+                                return Err((63, 0, true));
+                            }
+                            let mut source = VaultStreamCaptureReader {
+                                handle: &handle,
+                                offset: 0,
+                                length: snapshot.file_size,
+                                eof: false,
+                                sha: Sha256::new(),
+                                cancellation: job.cancellation(),
+                            };
+                            let mut chunk = Zeroizing::new([0u8; 64 * 1024]);
+                            loop {
+                                let count = source.read(&mut *chunk).map_err(|_| (64, 0, true))?;
+                                if count == 0 {
+                                    break;
+                                }
+                            }
+                            if !source.eof || source.offset != snapshot.file_size {
+                                return Err((64, 0, true));
+                            }
+                            let sha256: [u8; 32] = source.sha.clone().finalize().into();
+                            // Explicit-offset seek-back on the SAME original overlapped
+                            // owner, never reopen/transfer a native pointer or source.
+                            source.offset = 0;
+                            source.eof = false;
+                            source.sha = Sha256::new();
+                            let components = pinned_entry_final
+                                .strip_prefix(&callback_guard.root_final_path)
+                                .ok()
+                                .and_then(|path| {
+                                    path.components()
+                                        .map(|part| match part {
+                                            std::path::Component::Normal(value) => {
+                                                value.to_str().map(str::to_owned)
+                                            }
+                                            _ => None,
+                                        })
+                                        .collect::<Option<Vec<_>>>()
+                                })
+                                .filter(|parts| !parts.is_empty())
+                                .ok_or((65, 0, true))?;
+                            let file = LocalFileIdentity {
+                                volume_serial: snapshot.identity.volume_serial,
+                                file_index: snapshot.identity.file_index,
+                            };
+                            let post_proof = || -> Result<(), BackendError> {
+                                if cancelled()
+                                    || !same_edit_snapshot(
+                                        root_snapshot(handle.0)
+                                            .map_err(|_| BackendError::Unavailable)?,
+                                        snapshot,
+                                    )
+                                    || completion_usn(handle.0, file.file_index)
+                                        .map_err(|_| BackendError::Unavailable)?
+                                        != original_usn
+                                    || completion_basic_info(handle.0)
+                                        .map_err(|_| BackendError::Unavailable)?
+                                        != original_basic
+                                    || !modified_ranges_for_handle(handle.0)
+                                        .map_err(|_| BackendError::Unavailable)?
+                                    || !hydration_full_on_disk(handle.0, snapshot.file_size)
+                                        .map_err(|_| BackendError::Unavailable)?
+                                    || native_namespace_directory::opaque_directory_identity(
+                                        handle.0,
+                                    )
+                                    .map_err(|_| BackendError::Unavailable)?
+                                        != baseline.identity()
+                                {
+                                    return Err(BackendError::Unavailable);
+                                }
+                                let post = callback_path(
+                                    root_path,
+                                    info.volume_dos_name,
+                                    info.normalized_path,
+                                    root_identity,
+                                    info.file_id as u64,
+                                    CallbackSizePolicy::Exact(snapshot.file_size),
+                                    &self.last_close_path_common_prefix_bytes,
+                                )
+                                .map_err(|_| BackendError::Unavailable)?;
+                                if !same_edit_snapshot(post.snapshot, snapshot)
+                                    || !windows_paths_equal(
+                                        &post.root_final_path,
+                                        &callback_guard.root_final_path,
+                                    )
+                                    || !windows_paths_equal(
+                                        &final_path_for_handle(handle.0)
+                                            .map_err(|_| BackendError::Unavailable)?,
+                                        &pinned_entry_final,
+                                    )
+                                {
+                                    return Err(BackendError::Unavailable);
+                                }
+                                Ok(())
+                            };
+                            post_proof().map_err(|_| (66, 0, true))?;
+                            let checks = std::cell::Cell::new(0usize);
+                            let mut verify_source = || {
+                                post_proof()?;
+                                checks.set(checks.get() + 1);
+                                Ok(())
+                            };
+                            notification = capture
+                                .retain_streamed_with_usn(
+                                    crate::vault_custody::ExistingVaultStreamedEditPayload {
+                                        root: crate::ConfiguredRootIdentity {
+                                            volume_serial: root_identity.volume_serial,
+                                            file_index: root_identity.file_index,
+                                        },
+                                        file,
+                                        components: components.clone(),
+                                        length: snapshot.file_size,
+                                        sha256,
+                                    },
+                                    original_usn,
+                                    &mut source,
+                                    &mut verify_source,
+                                    &cancelled,
+                                )
+                                .map_err(|_| (66, 0, true))?;
+                            if checks.get() != 1
+                                || !source.eof
+                                || source.offset != snapshot.file_size
+                                || <[u8; 32]>::from(source.sha.clone().finalize()) != sha256
+                            {
+                                return Err((66, 0, true));
+                            }
+                            post_proof().map_err(|_| (66, 0, true))?;
+                            let mut dirty = self.vault_dirty.lock().map_err(|_| (68, 0, true))?;
+                            self.writable_cleanup
+                                .lock()
+                                .map_err(|_| (68, 0, true))?
+                                .invalidate(&baseline.identity());
+                            dirty
+                                .record(
+                                    baseline.identity(),
+                                    file,
+                                    snapshot.file_size,
+                                    sha256,
+                                    components,
+                                )
+                                .map_err(|_| (68, 0, true))?;
+                            retained = true;
+                            Ok(())
+                        })();
+                        result.map_err(|error| {
+                            retained = false;
+                            notification = None;
+                            failure = error;
+                            BackendError::Unavailable
+                        })
+                    });
             if callback_result.is_ok() && !retained {
                 failure = (67, 0, true);
             }

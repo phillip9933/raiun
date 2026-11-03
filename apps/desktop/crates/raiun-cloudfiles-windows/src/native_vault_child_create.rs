@@ -11,6 +11,7 @@ use raiun_opencloud::vault_backend::{
     VaultChildDirectoryCreateOutcome, VaultChildDirectoryCreateTarget, VaultChildFileCreateOutcome,
     VaultChildFileCreateTarget, VaultVerifiedChildDirectory, VaultVerifiedChildFile,
 };
+use sha2::Digest;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -84,32 +85,37 @@ impl Pins {
     }
 }
 enum Target {
+    Cached(raiun_opencloud::vault_backend::VaultCachedChildTarget),
     File(VaultChildFileCreateTarget),
     Directory(VaultChildDirectoryCreateTarget),
 }
 impl Target {
     fn encoded(&self) -> &str {
         match self {
+            Self::Cached(t) => t.encoded_target(),
             Self::File(t) => t.encoded_target(),
             Self::Directory(t) => t.encoded_target(),
         }
     }
     fn integrity(&self) -> &str {
         match self {
+            Self::Cached(t) => t.integrity_token(),
             Self::File(t) => t.integrity_token(),
             Self::Directory(t) => t.integrity_token(),
         }
     }
 }
 enum Verified {
+    Cached(crate::opencloud::VaultCachedNamespaceQueued),
     File(VaultVerifiedChildFile),
     Directory(VaultVerifiedChildDirectory),
 }
 impl Verified {
-    fn entry(&self) -> &raiun_core::backend::RemoteEntry {
+    fn entry(&self) -> Option<&raiun_core::backend::RemoteEntry> {
         match self {
-            Self::File(p) => p.entry(),
-            Self::Directory(p) => p.entry(),
+            Self::Cached(_) => None,
+            Self::File(p) => Some(p.entry()),
+            Self::Directory(p) => Some(p.entry()),
         }
     }
 }
@@ -219,29 +225,42 @@ impl VaultChildCreateTask {
                         token_generation: parent.authorization().token_generation,
                     };
                     let binding = parent.vault().backend().binding();
-                    let target = match source.kind {
-                        NamespaceObjectKind::File => Target::File(
+                    let target = if binding.is_cached_only() {
+                        Target::Cached(
                             binding
-                                .prepare_child_file_create(
+                                .prepare_cached_child_create(
                                     &path,
                                     parent.metadata(),
-                                    source.plaintext_len,
-                                    source.plaintext_sha256.ok_or(BackendError::Unavailable)?,
-                                    parent.job().deadline(),
-                                    &cancellation,
+                                    source.kind == NamespaceObjectKind::Directory,
+                                    &stop,
                                 )
                                 .map_err(|_| BackendError::Unavailable)?,
-                        ),
-                        NamespaceObjectKind::Directory => Target::Directory(
-                            binding
-                                .prepare_child_directory_create(
-                                    &path,
-                                    parent.metadata(),
-                                    &cancellation,
-                                    context,
-                                )
-                                .map_err(|_| BackendError::Unavailable)?,
-                        ),
+                        )
+                    } else {
+                        match source.kind {
+                            NamespaceObjectKind::File => Target::File(
+                                binding
+                                    .prepare_child_file_create(
+                                        &path,
+                                        parent.metadata(),
+                                        source.plaintext_len,
+                                        source.plaintext_sha256.ok_or(BackendError::Unavailable)?,
+                                        parent.job().deadline(),
+                                        &cancellation,
+                                    )
+                                    .map_err(|_| BackendError::Unavailable)?,
+                            ),
+                            NamespaceObjectKind::Directory => Target::Directory(
+                                binding
+                                    .prepare_child_directory_create(
+                                        &path,
+                                        parent.metadata(),
+                                        &cancellation,
+                                        context,
+                                    )
+                                    .map_err(|_| BackendError::Unavailable)?,
+                            ),
+                        }
                     };
                     parent.check()?;
                     Ok(Prepared {
@@ -291,6 +310,44 @@ impl VaultChildCreateTask {
                     let binding = parent.vault().backend().binding();
                     let descriptor = record.descriptor();
                     let verified = match target {
+                        Target::Cached(target) => {
+                            if !dispatch() {
+                                return Err(BackendError::Unavailable);
+                            }
+                            proof.check().map_err(|_| BackendError::Unavailable)?;
+                            let result = if descriptor.source.kind == NamespaceObjectKind::File {
+                                let original = parent.clone();
+                                let mut reader =
+                                    record.open_reader(Arc::new(move || original.is_stopped()))?;
+                                binding.queue_cached_child_create(
+                                    target,
+                                    &mut reader,
+                                    descriptor.source.plaintext_len,
+                                    descriptor
+                                        .source
+                                        .plaintext_sha256
+                                        .ok_or(BackendError::Unavailable)?,
+                                    &stop,
+                                )
+                            } else {
+                                let sha: [u8; 32] = sha2::Sha256::digest([]).into();
+                                binding.queue_cached_child_create(
+                                    target,
+                                    &mut std::io::empty(),
+                                    0,
+                                    sha,
+                                    &stop,
+                                )
+                            }
+                            .map_err(|_| BackendError::Unavailable)?;
+                            parent.check()?;
+                            proof.check().map_err(|_| BackendError::Unavailable)?;
+                            let receipt = crate::opencloud::VaultCachedNamespaceQueued::child(
+                                descriptor, result,
+                            )?;
+                            record.record_local_queued(&receipt)?;
+                            Verified::Cached(receipt)
+                        }
                         Target::File(target) => {
                             let original = parent.clone();
                             let cancel: Arc<dyn Fn() -> bool + Send + Sync> =
@@ -347,11 +404,13 @@ impl VaultChildCreateTask {
                     };
                     parent.check()?;
                     proof.check().map_err(|_| BackendError::Unavailable)?;
-                    let remote = crate::VaultChildCreateRemoteProof::new(
-                        record.descriptor(),
-                        verified.entry(),
-                    )?;
-                    record.record_remote(&remote)?;
+                    if !matches!(&verified, Verified::Cached(_)) {
+                        let remote = crate::VaultChildCreateRemoteProof::new(
+                            record.descriptor(),
+                            verified.entry().ok_or(BackendError::Unavailable)?,
+                        )?;
+                        record.record_remote(&remote)?;
+                    }
                     Ok(Sent {
                         parent,
                         record,
@@ -701,6 +760,94 @@ impl ConfiguredRootConnection {
                         cancelled: &stop,
                     };
                     match (&sent.proof, local) {
+                        (Verified::Cached(receipt), Pins::File(pins)) => {
+                            let vault = sent.parent.vault().backend();
+                            vault.publish_cached_child(receipt, &cancel, |identity| {
+                                if stop() {
+                                    return Err(Error::EditRecoveryUnavailable);
+                                }
+                                let cleanup = self
+                                    .state
+                                    .writable_cleanup
+                                    .lock()
+                                    .map_err(|_| Error::EditRecoveryUnavailable)?
+                                    .reserve(identity)
+                                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                                pins.convert_queued(
+                                    self,
+                                    identity,
+                                    || !stop() && attempt.ticket.claim_completion(),
+                                    false,
+                                )?;
+                                pins.verify(self, true)?;
+                                if stop() {
+                                    return Err(Error::EditRecoveryUnavailable);
+                                }
+                                let sha = receipt
+                                    .source_sha256()
+                                    .ok_or(Error::EditRecoveryUnavailable)?;
+                                sent.record
+                                    .record_local_queued_native(
+                                        receipt,
+                                        identity,
+                                        pins.file().file_index,
+                                        pins.usn(),
+                                    )
+                                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                                self.state
+                                    .writable_cleanup
+                                    .lock()
+                                    .map_err(|_| Error::EditRecoveryUnavailable)?
+                                    .publish(
+                                        cleanup,
+                                        WritableCleanupReceipt {
+                                            dispatch: vault.binding().capture_dispatch_stamp(),
+                                            root: descriptor.root,
+                                            identity,
+                                            file: pins.file(),
+                                            components: descriptor.source.components.clone(),
+                                            length: descriptor.source.plaintext_len,
+                                            sha256: sha,
+                                            clean_hydration: false,
+                                            original: receipt.entry().cloned(),
+                                        },
+                                    )
+                                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                                self.state
+                                    .hydrated_files
+                                    .lock()
+                                    .map_err(|_| Error::EditRecoveryUnavailable)?
+                                    .record(
+                                        identity,
+                                        pins.file().file_index,
+                                        descriptor.source.plaintext_len,
+                                        descriptor.source.components.clone(),
+                                    )
+                                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                                Ok(())
+                            })?;
+                        }
+                        (Verified::Cached(receipt), Pins::Directory(pins)) => {
+                            sent.parent.vault().backend().publish_cached_child(
+                                receipt,
+                                &cancel,
+                                |identity| {
+                                    if stop() || !attempt.ticket.claim_completion() {
+                                        return Err(Error::EditRecoveryUnavailable);
+                                    }
+                                    pins.convert(self, identity)?;
+                                    pins.verify(self, true)?;
+                                    sent.record
+                                        .record_local_queued_native(
+                                            receipt,
+                                            identity,
+                                            pins.file().file_index,
+                                            pins.usn(),
+                                        )
+                                        .map_err(|_| Error::EditRecoveryUnavailable)
+                                },
+                            )?;
+                        }
                         (Verified::File(proof), Pins::File(pins)) => {
                             if Some(proof.plaintext_sha256()) != descriptor.source.plaintext_sha256
                             {
