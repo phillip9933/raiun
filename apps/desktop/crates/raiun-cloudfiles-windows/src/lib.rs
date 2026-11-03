@@ -235,6 +235,32 @@ pub enum FileCreateContinuationOutcome {
     HistoricalLinkCompleted,
 }
 
+/// Fixed, data-free phase of an explicitly selected file-create recovery.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileCreateContinuationStage {
+    Context,
+    History,
+    Capture,
+    Remote,
+    NativeCompletion,
+    Custody,
+}
+
+#[cfg(windows)]
+impl fmt::Display for FileCreateContinuationStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Context => "account and drive verification",
+            Self::History => "saved file verification",
+            Self::Capture => "local file capture",
+            Self::Remote => "cloud verification",
+            Self::NativeCompletion => "local file completion",
+            Self::Custody => "recovery history completion",
+        })
+    }
+}
+
 /// Cloud Files API platform version. This reports API capability only; it is
 /// not evidence that Raiun has connected a provider or mounted a drive.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -291,6 +317,9 @@ pub enum Error {
     /// A protected edit-recovery capability could not be prepared for this
     /// account/root, so the native provider connection was not started.
     EditRecoveryUnavailable,
+    /// A selected file-create continuation stopped at a fixed safe phase.
+    #[cfg(windows)]
+    FileCreateContinuation { stage: FileCreateContinuationStage },
     /// A configured sync root is not a safe ordinary local directory.
     InvalidConfiguredRoot,
     /// A configured sync root must be empty before Raiun adopts it.
@@ -333,6 +362,10 @@ impl fmt::Display for Error {
             }
             Self::EditRecoveryUnavailable => formatter
                 .write_str("durable edit recovery is unavailable for this account and root"),
+            #[cfg(windows)]
+            Self::FileCreateContinuation { stage } => {
+                write!(formatter, "saved file recovery could not finish during {stage}")
+            }
             Self::InvalidConfiguredRoot => {
                 formatter.write_str("configured root is not a safe local directory")
             }
