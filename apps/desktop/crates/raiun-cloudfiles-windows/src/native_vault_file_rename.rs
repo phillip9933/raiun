@@ -3,9 +3,71 @@
 use super::*;
 use raiun_core::backend::{CloudError, ErrorKind};
 
+struct SourceParentPins {
+    handle: RawOwnedHandle,
+    ancestors: Vec<(RawOwnedHandle, RootSnapshot)>,
+    proof: SourceParentProof,
+}
+#[derive(Clone)]
+struct SourceParentProof {
+    components: Vec<String>,
+    route: Vec<crate::PlaceholderChild>,
+    identity: crate::OpaqueIdentity,
+    snapshot: RootSnapshot,
+    usn: i64,
+}
+impl SourceParentPins {
+    fn check(&self, root: &Path) -> Result<(), Error> {
+        let p = &self.proof;
+        if !same_edit_snapshot(root_snapshot(self.handle.0)?, p.snapshot)
+            || completion_usn(self.handle.0, p.snapshot.identity.file_index)? != p.usn
+            || native_namespace_directory::opaque_directory_identity(self.handle.0)?
+                != *p.identity.as_bytes()
+            || !windows_paths_equal(
+                &final_path_for_handle(self.handle.0).map_err(|_| Error::ConfiguredRootChanged)?,
+                &path(root, &p.components),
+            )
+            || p.route.len() != self.ancestors.len() + 1
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        for ((h, s), e) in self.ancestors.iter().zip(&p.route) {
+            if !same_edit_snapshot(root_snapshot(h.0)?, *s)
+                || native_namespace_directory::opaque_directory_identity(h.0)?.as_slice()
+                    != e.identity
+            {
+                return Err(Error::ConfiguredRootChanged);
+            }
+        }
+        Ok(())
+    }
+}
+impl SourceParentProof {
+    fn check(&self, lease: &RootInspectionLease, root: &Path) -> Result<(), Error> {
+        let refs = self
+            .components
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let (h, s, _) = native_namespace_directory::pin_reinspected_namespace_parent(
+            lease,
+            root,
+            &self.route,
+            self.identity,
+            &refs,
+        )?;
+        if !same_edit_snapshot(s, self.snapshot)
+            || completion_usn(h.0, s.identity.file_index)? != self.usn
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        Ok(())
+    }
+}
 pub(super) struct VaultFileRenamePins {
     root_path: PathBuf,
     root: RootIdentity,
+    source_parent: Option<SourceParentPins>,
     parent: RawOwnedHandle,
     parent_snapshot: RootSnapshot,
     parent_usn: i64,
@@ -28,6 +90,7 @@ pub(super) struct VaultFileRenamePins {
 pub(super) struct VaultFileRenameSendProof {
     root_path: PathBuf,
     root: RootIdentity,
+    source_parent: Option<SourceParentProof>,
     parent: RootSnapshot,
     parent_usn: i64,
     route: Vec<crate::PlaceholderChild>,
@@ -137,6 +200,9 @@ impl VaultFileRenamePins {
         parent_components: &[String],
         route: &[crate::PlaceholderChild],
         parent_identity: crate::OpaqueIdentity,
+        source_parent_components: &[String],
+        source_route: &[crate::PlaceholderChild],
+        source_parent_identity: crate::OpaqueIdentity,
         old_name: &str,
         new_name: &str,
         original_identity: crate::OpaqueIdentity,
@@ -148,6 +214,9 @@ impl VaultFileRenamePins {
             || !Arc::ptr_eq(&erased, &connection.state.backend)
             || connection.state.readiness.load(Ordering::Acquire) != CALLBACK_READY
             || backend.is_revoked()
+            || source_parent_components.is_empty()
+            || source_parent_components.len() > 255
+            || source_parent_components.iter().any(|s| !valid_component(s))
             || parent_components.is_empty()
             || parent_components.len() > 255
             || parent_components.iter().any(|s| !valid_component(s))
@@ -183,11 +252,44 @@ impl VaultFileRenamePins {
             .cloned()
             .chain(std::iter::once(new_name.to_owned()))
             .collect();
-        let old_components: Vec<_> = parent_components
+        let old_components: Vec<_> = source_parent_components
             .iter()
             .cloned()
             .chain(std::iter::once(old_name.to_owned()))
             .collect();
+        let source_parent = if source_parent_components == parent_components {
+            if source_parent_identity != parent_identity {
+                return Err(Error::ConfiguredRootChanged);
+            }
+            None
+        } else {
+            let refs = source_parent_components
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let (h, s, a) = native_namespace_directory::pin_namespace_parent(
+                root,
+                source_route,
+                source_parent_identity,
+                &refs,
+                FILE_READ_ATTRIBUTES,
+            )?;
+            let usn = completion_usn(h.0, s.identity.file_index)?;
+            if usn <= 0 {
+                return Err(Error::ConfiguredRootChanged);
+            }
+            Some(SourceParentPins {
+                handle: h,
+                ancestors: a,
+                proof: SourceParentProof {
+                    components: source_parent_components.to_vec(),
+                    route: source_route.to_vec(),
+                    identity: source_parent_identity,
+                    snapshot: s,
+                    usn,
+                },
+            })
+        };
         let destination = path(&root.path, &components);
         let old = path(&root.path, &old_components);
         if parent_usn <= 0 || windows_paths_equal(&old, &destination) || !absent(&old)? {
@@ -220,6 +322,7 @@ impl VaultFileRenamePins {
         let pins = Self {
             root_path: root.path.clone(),
             root: root.identity,
+            source_parent,
             parent,
             parent_snapshot,
             parent_usn,
@@ -251,12 +354,29 @@ impl VaultFileRenamePins {
         self.usn
     }
     pub(super) fn parent_file(&self) -> LocalFileIdentity {
+        let s = self
+            .source_parent
+            .as_ref()
+            .map(|p| p.proof.snapshot)
+            .unwrap_or(self.parent_snapshot);
+        LocalFileIdentity {
+            volume_serial: s.identity.volume_serial,
+            file_index: s.identity.file_index,
+        }
+    }
+    pub(super) fn parent_usn(&self) -> i64 {
+        self.source_parent
+            .as_ref()
+            .map(|p| p.proof.usn)
+            .unwrap_or(self.parent_usn)
+    }
+    pub(super) fn destination_parent_file(&self) -> LocalFileIdentity {
         LocalFileIdentity {
             volume_serial: self.parent_snapshot.identity.volume_serial,
             file_index: self.parent_snapshot.identity.file_index,
         }
     }
-    pub(super) fn parent_usn(&self) -> i64 {
+    pub(super) fn destination_parent_usn(&self) -> i64 {
         self.parent_usn
     }
     pub(super) fn components(&self) -> &[String] {
@@ -269,6 +389,9 @@ impl VaultFileRenamePins {
         self.original_identity
     }
     fn verify_handles(&self, identity: crate::OpaqueIdentity) -> Result<(), Error> {
+        if let Some(p) = &self.source_parent {
+            p.check(&self.root_path)?;
+        }
         if !same_edit_snapshot(root_snapshot(self.parent.0)?, self.parent_snapshot)
             || completion_usn(self.parent.0, self.parent_snapshot.identity.file_index)?
                 != self.parent_usn
@@ -337,6 +460,7 @@ impl VaultFileRenamePins {
         Ok(VaultFileRenameSendProof {
             root_path: self.root_path.clone(),
             root: self.root,
+            source_parent: self.source_parent.as_ref().map(|p| p.proof.clone()),
             parent: self.parent_snapshot,
             parent_usn: self.parent_usn,
             route: self.route.clone(),
@@ -418,6 +542,9 @@ impl VaultFileRenameSendProof {
             file_index: self.root.file_index,
         };
         let lease = pin_registered_configured_root(&self.root_path, identity)?;
+        if let Some(p) = &self.source_parent {
+            p.check(&lease, &self.root_path)?;
+        }
         let (_, parts) = self
             .components
             .split_last()

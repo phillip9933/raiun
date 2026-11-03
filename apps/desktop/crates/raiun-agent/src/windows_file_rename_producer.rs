@@ -237,22 +237,6 @@ mod connected {
             if observed.kind != raiun_cloudfiles_windows::NamespaceEntryKind::CloudFile {
                 return Err(HOLD);
             }
-            if old[..old.len() - 1] != new[..new.len() - 1] {
-                let outcome = connection
-                    .reconcile_fresh_file_move(
-                        backend,
-                        pair,
-                        observed.local_file,
-                        self.auth,
-                        record_generation,
-                        &current,
-                    )
-                    .map_err(|_| HOLD)?;
-                if !current(self.auth) || outcome!=raiun_cloudfiles_windows::namespace_file_rename::FileRenameOutcome::Completed {
-                    return Err(HOLD);
-                }
-                return Ok(());
-            }
             let weak = self.backend.clone();
             let generation = self.generation.clone();
             let expected = self.auth;
@@ -281,6 +265,22 @@ mod connected {
                 )
                 .map_err(|_| HOLD)?
             {
+                return Ok(());
+            }
+            if old[..old.len() - 1] != new[..new.len() - 1] {
+                let outcome = connection
+                    .reconcile_fresh_file_move(
+                        backend,
+                        pair,
+                        observed.local_file,
+                        self.auth,
+                        record_generation,
+                        &current,
+                    )
+                    .map_err(|_| HOLD)?;
+                if !current(self.auth) || outcome!=raiun_cloudfiles_windows::namespace_file_rename::FileRenameOutcome::Completed {
+                    return Err(HOLD);
+                }
                 return Ok(());
             }
             let candidate = backend

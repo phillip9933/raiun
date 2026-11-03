@@ -7,6 +7,7 @@ pub struct VaultFileRenameRequest<'a> {
     pub source: &'a RemoteEntry,
     pub destination: &'a str,
     pub parent: &'a RemoteEntry,
+    pub destination_parent: Option<&'a RemoteEntry>,
     pub context: RangeReadContext,
     pub provider_generation: Arc<AtomicU64>,
     pub expected_provider_generation: u64,
@@ -19,6 +20,7 @@ pub struct VaultFileRenameTarget {
     source: RemoteEntry,
     destination: String,
     parent: RemoteEntry,
+    destination_parent: RemoteEntry,
     encoded_source: String,
     encoded_destination: String,
     integrity: String,
@@ -50,6 +52,9 @@ impl VaultVerifiedFileRename {
     }
     pub fn parent(&self) -> &RemoteEntry {
         &self.target.parent
+    }
+    pub fn destination_parent(&self) -> &RemoteEntry {
+        &self.target.destination_parent
     }
     pub fn scope(&self) -> &VaultSessionScope {
         &self.target.scope
@@ -94,6 +99,8 @@ fn check(b: &VaultBackend, r: &VaultFileRenameRequest<'_>) -> Result<(), CloudEr
     validate_virtual_path(r.destination)?;
     validate_existing_overwrite_etag(&r.source.etag)?;
     validate_existing_overwrite_etag(&r.parent.etag)?;
+    let destination_parent = r.destination_parent.unwrap_or(r.parent);
+    validate_existing_overwrite_etag(&destination_parent.etag)?;
     fn parent(p: &str) -> &str {
         p.rsplit_once('/')
             .map(|(p, _)| if p.is_empty() { "/" } else { p })
@@ -101,17 +108,21 @@ fn check(b: &VaultBackend, r: &VaultFileRenameRequest<'_>) -> Result<(), CloudEr
     }
     if r.source.directory
         || !r.parent.directory
+        || !destination_parent.directory
         || r.source.id.is_empty()
         || r.source.id == r.scope.resource_id()
         || r.source.id == r.parent.id
+        || r.source.id == destination_parent.id
         || r.source.path == "/"
         || r.destination == "/"
         || r.source.path.eq_ignore_ascii_case(r.destination)
         || parent(&r.source.path) != r.parent.path
-        || parent(r.destination) != r.parent.path
+        || parent(r.destination) != destination_parent.path
         || normalize_virtual_path(r.destination)? != r.destination
     {
-        return Err(conflict("encrypted rename is not one same-parent file"));
+        return Err(conflict(
+            "encrypted MOVE is not one file within the original vault",
+        ));
     }
     Ok(())
 }
@@ -123,6 +134,7 @@ impl VaultBackend {
         let _context = crate::RangeContextGuard::enter(r.context);
         check(self, r)?;
         let state = self.revalidate_root()?;
+        let destination_parent = r.destination_parent.unwrap_or(r.parent);
         if !state.space.writable
             || self.current_parent_binding(&r.source.path)?
                 != (r.parent.id.clone(), r.parent.etag.clone())
@@ -149,7 +161,10 @@ impl VaultBackend {
         check(self, r)?;
         if fresh.integrity_token != state.integrity_token
             || self.current_parent_binding(r.destination)?
-                != (r.parent.id.clone(), r.parent.etag.clone())
+                != (
+                    destination_parent.id.clone(),
+                    destination_parent.etag.clone(),
+                )
         {
             return Err(conflict("encrypted rename preparation changed"));
         }
@@ -160,6 +175,7 @@ impl VaultBackend {
             source: r.source.clone(),
             destination: r.destination.into(),
             parent: r.parent.clone(),
+            destination_parent: destination_parent.clone(),
             encoded_source,
             encoded_destination,
             integrity: state.integrity_token,
@@ -188,6 +204,9 @@ impl VaultBackend {
             || target.destination != r.destination
             || target.parent.id != r.parent.id
             || target.parent.etag != r.parent.etag
+            || target.destination_parent.id != r.destination_parent.unwrap_or(r.parent).id
+            || target.destination_parent.path != r.destination_parent.unwrap_or(r.parent).path
+            || target.destination_parent.etag != r.destination_parent.unwrap_or(r.parent).etag
             || target.token != r.context.token_generation
             || !Arc::ptr_eq(&target.generation, &r.provider_generation)
             || target.expected != r.expected_provider_generation
@@ -220,6 +239,18 @@ impl VaultBackend {
         )?;
         let destination = self.target_url(&state, &target.destination)?;
         let parent = self.target_url(&state, &target.parent.path)?;
+        let destination_parent = self.target_url(&state, &target.destination_parent.path)?;
+        let mut parent_if = format!("<{}> ([{}])", parent, target.parent.etag);
+        if target.parent.id != target.destination_parent.id {
+            parent_if.push_str(&format!(
+                " <{}> ([{}])",
+                destination_parent, target.destination_parent.etag
+            ));
+        } else if target.parent.path != target.destination_parent.path
+            || target.parent.etag != target.destination_parent.etag
+        {
+            return Err(conflict("same parent has conflicting bindings"));
+        }
         let (request, token) = self.client.request_with_context(
             Method::from_bytes(b"MOVE").expect("static method"),
             &source,
@@ -229,7 +260,7 @@ impl VaultBackend {
             .header(IF_MATCH, &target.source.etag)
             .header("Destination", destination.as_str())
             .header("Overwrite", "F")
-            .header("If", format!("<{}> ([{}])", parent, target.parent.etag))
+            .header("If", parent_if)
             .build()
             .map_err(network)?;
         check(self, r)?;
@@ -266,7 +297,9 @@ impl VaultBackend {
                 Err(e) if e.kind == ErrorKind::NotFound => (),
                 _ => return Err(conflict("encrypted rename source absence is unqualified")),
             }
-            if self.current_parent_binding(&target.destination)?.0 != target.parent.id {
+            if self.current_parent_binding(&target.destination)?.0 != target.destination_parent.id
+                || self.current_parent_binding(&target.source.path)?.0 != target.parent.id
+            {
                 return Err(conflict("encrypted rename parent changed after MOVE"));
             }
             check(self, r)?;

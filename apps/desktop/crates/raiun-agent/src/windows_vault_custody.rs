@@ -1400,6 +1400,18 @@ impl VaultPublicationCustody for View {
             {
                 return Err(BackendError::Unavailable);
             }
+            if let Some(dp) = &f.destination_parent {
+                let target = entries
+                    .iter()
+                    .find(|e| e.identity == dp.identity)
+                    .ok_or(BackendError::Unavailable)?;
+                if !target.metadata.directory
+                    || target.metadata.id != dp.parent.id
+                    || target.metadata.path != dp.parent.path
+                {
+                    return Err(BackendError::Unavailable);
+                }
+            }
             let child = self.child.clone();
             let store = self.store.0.clone();
             let refresh = Arc::new(move || {

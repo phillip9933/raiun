@@ -24,12 +24,11 @@ impl ConfiguredRootConnection {
     ) -> Result<bool, Error> {
         let no = || Error::EditRecoveryUnavailable;
         if old.len() < 2
-            || old.len() != new.len()
-            || old[..old.len() - 1] != new[..new.len() - 1]
+            || new.len() < 2
             || old
-                .last()
-                .unwrap()
-                .eq_ignore_ascii_case(new.last().unwrap())
+                .iter()
+                .map(|s| s.to_lowercase())
+                .eq(new.iter().map(|s| s.to_lowercase()))
         {
             return Err(no());
         }
@@ -58,6 +57,28 @@ impl ConfiguredRootConnection {
         let Some(parent) = parent else {
             return Ok(false);
         };
+        let destination_parent = if old[..old.len() - 1] == new[..new.len() - 1] {
+            parent.clone()
+        } else {
+            joined(|| {
+                backend
+                    .capture_vault_child_create_parent(
+                        &new[..new.len() - 1],
+                        root_id,
+                        auth,
+                        &job,
+                        current.clone(),
+                        generation.clone(),
+                    )
+                    .map_err(|_| no())
+            })?
+            .ok_or_else(no)?
+        };
+        if !Arc::ptr_eq(parent.vault(), destination_parent.vault()) {
+            return Err(no());
+        }
+        destination_parent.check().map_err(|_| no())?;
+
         let (tracker, recovery) = self.file_rename_guard_context(backend)?;
         if recovery.has_unresolved().map_err(|_| no())?
             || recovery
@@ -68,8 +89,9 @@ impl ConfiguredRootConnection {
         }
         let mut admission = tracker.try_begin_create().ok_or_else(no)?;
         let observation = admission.observation_probe();
-        let stop = || parent.is_stopped() || !observation();
+        let stop = || parent.is_stopped() || destination_parent.is_stopped() || !observation();
         parent.check().map_err(|_| no())?;
+        destination_parent.check().map_err(|_| no())?;
         let route = parent.vault().backend();
         let (identity, original) = route
             .file_rename_source(*parent.opaque().as_bytes(), old.last().unwrap())
@@ -78,6 +100,9 @@ impl ConfiguredRootConnection {
         let mut pins = std::mem::ManuallyDrop::new(VaultFileRenamePins::pin(
             self,
             backend,
+            destination_parent.components(),
+            destination_parent.route(),
+            destination_parent.opaque(),
             parent.components(),
             parent.route(),
             parent.opaque(),
@@ -97,7 +122,7 @@ impl ConfiguredRootConnection {
             }
             let destination = format!(
                 "{}/{}",
-                parent.metadata().path.trim_end_matches('/'),
+                destination_parent.metadata().path.trim_end_matches('/'),
                 new.last().unwrap()
             );
             let budget = job.cancellation().bounded_request();
@@ -122,6 +147,7 @@ impl ConfiguredRootConnection {
                         &original,
                         &destination,
                         parent.metadata(),
+                        destination_parent.metadata(),
                         &cancel,
                         context,
                     )
@@ -129,6 +155,7 @@ impl ConfiguredRootConnection {
             })?;
             pins.verify(self, false)?;
             parent.check().map_err(|_| no())?;
+            destination_parent.check().map_err(|_| no())?;
             let facts = crate::VaultFileRenameFacts {
                 volume: pins.file().volume_serial,
                 file: pins.file().file_index,
@@ -141,6 +168,16 @@ impl ConfiguredRootConnection {
                 new_components: pins.components().to_vec(),
                 original: original.clone(),
                 parent: parent.metadata().clone(),
+                destination_parent: if Arc::ptr_eq(&parent, &destination_parent) {
+                    None
+                } else {
+                    Some(crate::VaultFileRenameDestination {
+                        identity: *destination_parent.opaque().as_bytes(),
+                        parent: destination_parent.metadata().clone(),
+                        file: pins.destination_parent_file().file_index,
+                        usn: pins.destination_parent_usn(),
+                    })
+                },
                 destination: destination.clone(),
                 encoded_source: target.encoded_source().into(),
                 encoded_destination: target.encoded_destination().into(),
@@ -159,6 +196,7 @@ impl ConfiguredRootConnection {
                 .map_err(|_| no())?;
             pins.verify(self, false)?;
             parent.check().map_err(|_| no())?;
+            destination_parent.check().map_err(|_| no())?;
             if stop() || !admission.claim_dispatch() {
                 return Err(no());
             }
@@ -191,6 +229,7 @@ impl ConfiguredRootConnection {
                         &original,
                         &destination,
                         parent.metadata(),
+                        destination_parent.metadata(),
                         target,
                         &cancel,
                         context,
@@ -209,6 +248,7 @@ impl ConfiguredRootConnection {
             record.record_remote(&verified).map_err(|_| no())?;
             pins.verify(self, false)?;
             parent.check().map_err(|_| no())?;
+            destination_parent.check().map_err(|_| no())?;
             let admission = RefCell::new(admission);
             route.publish_file_rename(&verified, identity, &cancel, || {
                 pins.complete(self, opaque, &|| {

@@ -95,9 +95,24 @@ fn load(
                 if previous.original.id != f.original.id
                     || previous.file != f.file
                     || previous.volume != f.volume
-                    || previous.parent_file != f.parent_file
-                    || previous.parent_identity != f.parent_identity
-                    || previous.parent.id != f.parent.id
+                    || previous
+                        .destination_parent
+                        .as_ref()
+                        .map(|p| p.file)
+                        .unwrap_or(previous.parent_file)
+                        != f.parent_file
+                    || previous
+                        .destination_parent
+                        .as_ref()
+                        .map(|p| p.identity)
+                        .unwrap_or(previous.parent_identity)
+                        != f.parent_identity
+                    || previous
+                        .destination_parent
+                        .as_ref()
+                        .map(|p| p.parent.id.as_str())
+                        .unwrap_or(&previous.parent.id)
+                        != f.parent.id
                     || previous.destination != f.original.path
                     || previous.new_components != f.old_components
                 {
@@ -190,6 +205,11 @@ impl VaultFileRenameRecord for Record {
             || p.entry().path != f.destination
             || p.entry().directory
             || p.parent().id != f.parent.id
+            || p.destination_parent().id
+                != f.destination_parent
+                    .as_ref()
+                    .map(|p| p.parent.id.as_str())
+                    .unwrap_or(&f.parent.id)
         {
             return Err(no());
         }

@@ -5,6 +5,14 @@ use raiun_vault::session::VaultSessionScope;
 use serde::{Deserialize, Serialize};
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct VaultFileRenameDestination {
+    pub identity: [u8; 16],
+    pub parent: RemoteEntry,
+    pub file: u64,
+    pub usn: i64,
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VaultFileRenameFacts {
     pub volume: u32,
     pub file: u64,
@@ -17,6 +25,8 @@ pub struct VaultFileRenameFacts {
     pub new_components: Vec<String>,
     pub original: RemoteEntry,
     pub parent: RemoteEntry,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_parent: Option<VaultFileRenameDestination>,
     pub destination: String,
     pub encoded_source: String,
     pub encoded_destination: String,
@@ -54,14 +64,11 @@ impl VaultFileRenameFacts {
             || self.identity == self.parent_identity
             || !valid(&self.old_components)
             || !valid(&self.new_components)
-            || self.old_components.len() != self.new_components.len()
-            || self.old_components[..self.old_components.len() - 1]
-                != self.new_components[..self.new_components.len() - 1]
             || self
                 .old_components
-                .last()
-                .unwrap()
-                .eq_ignore_ascii_case(self.new_components.last().unwrap())
+                .iter()
+                .map(|s| s.to_lowercase())
+                .eq(self.new_components.iter().map(|s| s.to_lowercase()))
             || self.original.directory
             || !self.parent.directory
             || !bound(&self.original.id)
@@ -71,10 +78,34 @@ impl VaultFileRenameFacts {
         {
             return Err(BackendError::Unavailable);
         }
+        let dp = self
+            .destination_parent
+            .as_ref()
+            .map(|p| &p.parent)
+            .unwrap_or(&self.parent);
+        if let Some(p) = &self.destination_parent {
+            if p.identity == [0; 16]
+                || p.identity == self.identity
+                || p.file == 0
+                || p.file == self.file
+                || p.usn <= 0
+                || !p.parent.directory
+                || !bound(&p.parent.id)
+                || p.parent.id == self.original.id
+                || !strong(&p.parent.etag)
+                || raiun_core::validate_remote_path(&p.parent.path).is_err()
+            {
+                return Err(BackendError::Unavailable);
+            }
+        } else if self.old_components[..self.old_components.len() - 1]
+            != self.new_components[..self.new_components.len() - 1]
+        {
+            return Err(BackendError::Unavailable);
+        }
         if raiun_core::validate_remote_path(&self.original.path).is_err()
             || raiun_core::validate_remote_path(&self.destination).is_err()
             || parent(&self.original.path) != self.parent.path
-            || parent(&self.destination) != self.parent.path
+            || parent(&self.destination) != dp.path
             || self.original.path
                 != format!(
                     "{}/{}",
@@ -85,7 +116,7 @@ impl VaultFileRenameFacts {
             || self.destination
                 != format!(
                     "{}/{}",
-                    self.parent.path.trim_end_matches('/'),
+                    dp.path.trim_end_matches('/'),
                     self.new_components.last().unwrap()
                 )
             || !crate::vault_file_rename::strong(&self.original.etag)

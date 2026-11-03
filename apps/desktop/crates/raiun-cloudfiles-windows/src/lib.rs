@@ -74,7 +74,8 @@ pub use vault_completion::{
 mod vault_file_rename;
 #[cfg(windows)]
 pub use vault_file_rename::{
-    VaultFileRenameDescriptor, VaultFileRenameFacts, VaultFileRenameRecord,
+    VaultFileRenameDescriptor, VaultFileRenameDestination, VaultFileRenameFacts,
+    VaultFileRenameRecord,
 };
 #[cfg(windows)]
 pub mod vault_custody;
