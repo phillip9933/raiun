@@ -115,6 +115,17 @@ impl Queued {
                         return Err(no());
                     }
                 }
+                Operation::RetargetNeverAttemptedFile => {
+                    if e.directory
+                        || !e.id.starts_with("raiun-pending-create:")
+                        || self
+                            .original
+                            .as_ref()
+                            .is_none_or(|o| o.directory || o.id != e.id || o.size != e.size)
+                    {
+                        return Err(no());
+                    }
+                }
                 Operation::RetargetNeverAttemptedDirectory => {
                     if !e.directory
                         || !e.id.starts_with("raiun-pending-directory:")
@@ -194,4 +205,836 @@ impl Queued {
             source_sha256: self.source_sha256,
         })
     }
+}
+
+use super::{vault_custody::Scope, windows_vault_custody::Storage};
+use raiun_cloudfiles_windows::{VaultCachedNamespaceDescriptor, VaultCachedRetargetDescriptor};
+use raiun_control_windows::{DpapiSessionStore, PinnedDirectory, PrivateDirectory};
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
+use zeroize::Zeroizing;
+const RETARGET_DOMAIN: &[u8] = b"raiun/windows-vault-cached-retarget/v1\0";
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Retarget {
+    scope: Scope,
+    generation: u64,
+    historical_epoch: u64,
+    identity: [u8; 16],
+    original: RemoteEntry,
+    parent_identity: [u8; 16],
+    parent: RemoteEntry,
+    destination_parent_identity: [u8; 16],
+    destination_parent: RemoteEntry,
+    file: u64,
+    usn: i64,
+    parent_file: u64,
+    parent_usn: i64,
+    destination_parent_file: u64,
+    destination_parent_usn: i64,
+    old_components: Vec<String>,
+    new_components: Vec<String>,
+}
+impl Retarget {
+    fn from(scope: &Scope, d: &VaultCachedRetargetDescriptor) -> Result<Self, BackendError> {
+        d.validate()?;
+        let s = scope.streamed_storage_scope().map_err(|_| no())?;
+        if scope.native_root() != (d.root.volume_serial, d.root.file_index)
+            || d.remote_root != scope.remote_root()
+            || d.owner.profile_id() != s.profile_id
+            || d.owner.server_origin() != s.server_origin
+            || d.owner.account_id() != s.account_subject
+            || d.vault.space_id() != s.space_id
+            || d.vault.resource_id() != s.root_resource_id
+        {
+            return Err(no());
+        }
+        let f = Self {
+            scope: scope.clone(),
+            generation: d.owner.token_generation(),
+            historical_epoch: d.historical_unlock_epoch,
+            identity: d.identity,
+            original: d.original.clone(),
+            parent_identity: d.parent_identity,
+            parent: d.parent.clone(),
+            destination_parent_identity: d.destination_parent_identity,
+            destination_parent: d.destination_parent.clone(),
+            file: d.original_file.file_index,
+            usn: d.original_usn,
+            parent_file: d.parent_file.file_index,
+            parent_usn: d.parent_usn,
+            destination_parent_file: d.destination_parent_file.file_index,
+            destination_parent_usn: d.destination_parent_usn,
+            old_components: d.old_components.clone(),
+            new_components: d.new_components.clone(),
+        };
+        f.validate(scope)?;
+        Ok(f)
+    }
+    fn validate(&self, scope: &Scope) -> Result<(), BackendError> {
+        let components = |c: &Vec<String>| {
+            c.len() >= 2
+                && c.len() <= 256
+                && c.iter().map(String::len).sum::<usize>() <= 32000
+                && c.iter().all(|s| {
+                    !s.is_empty()
+                        && s.len() <= 255
+                        && !s.chars().any(|c| {
+                            c.is_control()
+                                || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+                        })
+                        && s != "."
+                        && s != ".."
+                })
+        };
+        let entry = |e: &RemoteEntry| {
+            !e.id.is_empty()
+                && e.id.len() <= 4096
+                && !e.etag.is_empty()
+                && e.etag.len() <= 4096
+                && e.path.len() <= 32000
+                && raiun_core::validate_remote_path(&e.path).is_ok()
+                && (!e.directory || e.size == 0)
+        };
+        if self.scope != *scope
+            || self.generation == 0
+            || self.historical_epoch == 0
+            || self.identity == [0; 16]
+            || self.parent_identity == [0; 16]
+            || self.destination_parent_identity == [0; 16]
+            || self.file == 0
+            || self.parent_file == 0
+            || self.destination_parent_file == 0
+            || self.file == self.parent_file
+            || self.file == self.destination_parent_file
+            || self.usn <= 0
+            || self.parent_usn <= 0
+            || self.destination_parent_usn <= 0
+            || !components(&self.old_components)
+            || !components(&self.new_components)
+            || self.old_components == self.new_components
+            || !entry(&self.original)
+            || !entry(&self.parent)
+            || !entry(&self.destination_parent)
+            || !self.parent.directory
+            || !self.destination_parent.directory
+            || self.original.path
+                != format!(
+                    "{}/{}",
+                    self.parent.path.trim_end_matches('/'),
+                    self.old_components.last().ok_or_else(no)?
+                )
+            || self.original.path == self.destination_parent.path
+        {
+            return Err(no());
+        }
+        let prefix = if self.original.directory {
+            "raiun-pending-directory:"
+        } else {
+            "raiun-pending-create:"
+        };
+        let id = self.original.id.strip_prefix(prefix).ok_or_else(no)?;
+        if id.is_empty()
+            || !self
+                .original
+                .etag
+                .starts_with(&format!("raiun-pending-v1:{id}:"))
+        {
+            return Err(no());
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+enum ParentRef {
+    Stable { resource_id: String },
+    PendingCreate { write_id: String, revision: u64 },
+}
+impl ParentRef {
+    fn from(p: &raiun_opencloud::vault_cache::VaultPendingParentRef) -> Self {
+        match p {
+            raiun_opencloud::vault_cache::VaultPendingParentRef::Stable { resource_id } => {
+                Self::Stable {
+                    resource_id: resource_id.clone(),
+                }
+            }
+            raiun_opencloud::vault_cache::VaultPendingParentRef::PendingCreate {
+                write_id,
+                revision,
+            } => Self::PendingCreate {
+                write_id: write_id.clone(),
+                revision: *revision,
+            },
+        }
+    }
+    fn validate(&self) -> Result<(), BackendError> {
+        let bounded =
+            |s: &str| !s.is_empty() && s.len() <= 4096 && !s.chars().any(char::is_control);
+        if match self {
+            Self::Stable { resource_id } => !bounded(resource_id),
+            Self::PendingCreate { write_id, revision } => !bounded(write_id) || *revision == 0,
+        } {
+            return Err(no());
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JournalRow {
+    write_id: String,
+    previous_revision: u64,
+    revision: u64,
+    directory: bool,
+    old_path: String,
+    path: String,
+    old_encoded_target: String,
+    encoded_target: String,
+    old_parent_ref: ParentRef,
+    parent_ref: ParentRef,
+    plaintext_len: u64,
+    plaintext_sha256: String,
+}
+impl JournalRow {
+    fn from(r: &raiun_opencloud::vault_cache::VaultPendingDirectorySubtreeRetargetRow) -> Self {
+        Self {
+            write_id: r.write_id.clone(),
+            previous_revision: r.previous_revision,
+            revision: r.revision,
+            directory: r.operation
+                == raiun_opencloud::vault_cache::VaultPendingOperationKind::CreateDirectory,
+            old_path: r.old_path.clone(),
+            path: r.path.clone(),
+            old_encoded_target: r.old_encoded_target.clone(),
+            encoded_target: r.encoded_target.clone(),
+            old_parent_ref: ParentRef::from(&r.old_parent_ref),
+            parent_ref: ParentRef::from(&r.parent_ref),
+            plaintext_len: r.plaintext_len,
+            plaintext_sha256: r.plaintext_sha256.clone(),
+        }
+    }
+    fn validate(&self, n: &RetargetNode) -> Result<(), BackendError> {
+        self.old_parent_ref.validate()?;
+        self.parent_ref.validate()?;
+        // Encrypted DAV targets are relative paths. The plaintext remote-path
+        // validator requires a leading slash and would reject every target.
+        let target = |p: &str| {
+            !p.is_empty()
+                && p.len() <= 32000
+                && !p.starts_with('/')
+                && !p.contains('\\')
+                && !p.chars().any(char::is_control)
+                && p.split('/').all(|s| !s.is_empty() && s != "." && s != "..")
+        };
+        if self.write_id != n.write_id
+            || self.previous_revision != n.previous_revision
+            || self.revision != n.revision
+            || self.directory != n.original.directory
+            || self.old_path != n.original.path
+            || self.path != n.entry.path
+            || self.plaintext_len != n.original.size
+            || !target(&self.old_encoded_target)
+            || !target(&self.encoded_target)
+            || (!self.directory
+                && n.source_sha256
+                    .map(|h| h.iter().map(|b| format!("{b:02x}")).collect::<String>())
+                    .as_deref()
+                    != Some(self.plaintext_sha256.as_str()))
+        {
+            return Err(no());
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetargetNode {
+    identity: [u8; 16],
+    file: u64,
+    usn: i64,
+    old_components: Vec<String>,
+    new_components: Vec<String>,
+    original: RemoteEntry,
+    entry: RemoteEntry,
+    write_id: String,
+    previous_revision: u64,
+    revision: u64,
+    source_sha256: Option<[u8; 32]>,
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetargetRow {
+    descriptor: Retarget,
+    queued: Queued,
+    nodes: Vec<RetargetNode>,
+    native: Option<Vec<Native>>,
+    destination_parent_ref: ParentRef,
+    journal: Vec<JournalRow>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetargetIndex {
+    version: u32,
+    scope: Scope,
+    rows: Vec<RetargetRow>,
+}
+fn retarget_key(scope: &Scope) -> Result<Zeroizing<Vec<u8>>, BackendError> {
+    let s = scope.authenticated_store_binding().map_err(|_| no())?;
+    let mut k = Zeroizing::new(RETARGET_DOMAIN.to_vec());
+    k.extend_from_slice(&(s.len() as u64).to_le_bytes());
+    k.extend_from_slice(&s);
+    Ok(k)
+}
+fn retarget_directory(scope: &Scope) -> Result<std::path::PathBuf, BackendError> {
+    Ok(DpapiSessionStore::current_user()
+        .map_err(|_| no())?
+        .local_edit_state_directory()
+        .join(format!(
+            "vault-cached-retarget-v1-{:x}",
+            Sha256::digest(&*retarget_key(scope)?)
+        )))
+}
+fn load_retargets(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+) -> Result<(Option<Zeroizing<Vec<u8>>>, RetargetIndex), BackendError> {
+    let raw = store.load(&retarget_key(scope)?).map_err(|_| no())?;
+    let i = if let Some(raw) = &raw {
+        if !std::fs::symlink_metadata(retarget_directory(scope)?)
+            .map(|m| m.is_dir() && !m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(no());
+        }
+        if raw.is_empty() || raw.len() > 16 << 20 {
+            return Err(no());
+        }
+        let i: RetargetIndex = serde_json::from_slice(raw).map_err(|_| no())?;
+        if i.version != 1 || i.scope != *scope || i.rows.is_empty() || i.rows.len() > 1024 {
+            return Err(no());
+        }
+        let mut receipts = std::collections::BTreeSet::new();
+        for r in &i.rows {
+            r.descriptor.validate(scope)?;
+            r.destination_parent_ref.validate()?;
+            if r.descriptor.original.directory {
+                if r.journal.len() != r.nodes.len() {
+                    return Err(no());
+                }
+                let root_journal = r
+                    .journal
+                    .iter()
+                    .find(|j| j.write_id == r.queued.write_id)
+                    .ok_or_else(no)?;
+                if root_journal.parent_ref != r.destination_parent_ref {
+                    return Err(no());
+                }
+                for n in &r.nodes {
+                    let mut v = r.journal.iter().filter(|j| j.write_id == n.write_id);
+                    let j = v.next().ok_or_else(no)?;
+                    if v.next().is_some() {
+                        return Err(no());
+                    }
+                    j.validate(n)?;
+                }
+            } else if !r.journal.is_empty() {
+                return Err(no());
+            }
+            r.queued.validate()?;
+            if !receipts.insert((r.queued.write_id.clone(), r.queued.revision))
+                || r.queued.native.is_some()
+                || r.queued.original.as_ref() != Some(&r.descriptor.original)
+                || r.queued.parent != r.descriptor.destination_parent
+                || r.nodes.is_empty()
+                || r.nodes.len() > 64
+                || r.nodes
+                    .iter()
+                    .map(|n| n.entry.size)
+                    .try_fold(0u64, u64::checked_add)
+                    .is_none_or(|s| s > 64 << 20)
+            {
+                return Err(no());
+            }
+            let mut ids = std::collections::BTreeSet::new();
+            let mut files = std::collections::BTreeSet::new();
+            for n in &r.nodes {
+                if n.identity == [0; 16]
+                    || n.file == 0
+                    || n.usn <= 0
+                    || !ids.insert(n.identity)
+                    || !files.insert(n.file)
+                    || n.old_components.len() < r.descriptor.old_components.len()
+                    || !n.old_components.starts_with(&r.descriptor.old_components)
+                    || n.new_components
+                        != r.descriptor
+                            .new_components
+                            .iter()
+                            .chain(&n.old_components[r.descriptor.old_components.len()..])
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    || n.original.id != n.entry.id
+                    || n.original.directory != n.entry.directory
+                    || n.original.size != n.entry.size
+                    || n.entry.path
+                        != format!(
+                            "{}{}",
+                            r.queued.entry.as_ref().ok_or_else(no)?.path,
+                            n.original
+                                .path
+                                .strip_prefix(&r.descriptor.original.path)
+                                .ok_or_else(no)?
+                        )
+                    || n.previous_revision == 0
+                    || n.revision <= n.previous_revision
+                    || n.original.etag
+                        != format!("raiun-pending-v1:{}:{}", n.write_id, n.previous_revision)
+                    || n.entry.etag != format!("raiun-pending-v1:{}:{}", n.write_id, n.revision)
+                    || raiun_core::validate_remote_path(&n.entry.path).is_err()
+                {
+                    return Err(no());
+                }
+            }
+            let root = r
+                .nodes
+                .iter()
+                .find(|n| n.identity == r.descriptor.identity)
+                .ok_or_else(no)?;
+            if root.file != r.descriptor.file
+                || root.usn != r.descriptor.usn
+                || root.original != r.descriptor.original
+                || Some(&root.entry) != r.queued.entry.as_ref()
+                || root.write_id != r.queued.write_id
+                || root.revision != r.queued.revision
+                || r.native.as_ref().is_some_and(|v| {
+                    v.len() != r.nodes.len()
+                        || v.iter().zip(&r.nodes).any(|(a, n)| {
+                            a.identity != n.identity || a.file != n.file || a.usn <= 0
+                        })
+                })
+            {
+                return Err(no());
+            }
+        }
+        i
+    } else {
+        match std::fs::symlink_metadata(retarget_directory(scope)?) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            _ => return Err(no()),
+        }
+        RetargetIndex {
+            version: 1,
+            scope: scope.clone(),
+            rows: vec![],
+        }
+    };
+    Ok((raw, i))
+}
+fn commit_retargets(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+    old: Option<&[u8]>,
+    i: &RetargetIndex,
+) -> Result<(), BackendError> {
+    let raw = Zeroizing::new(serde_json::to_vec(i).map_err(|_| no())?);
+    if raw.len() > 16 << 20 || i.rows.len() > 1024 {
+        return Err(no());
+    }
+    store
+        .cas(&retarget_key(scope)?, old, &raw)
+        .map_err(|_| no())?;
+    if store
+        .load(&retarget_key(scope)?)
+        .map_err(|_| no())?
+        .is_none_or(|v| v.as_slice() != raw.as_slice())
+    {
+        return Err(no());
+    }
+    Ok(())
+}
+
+fn initial_pending(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+) -> Result<Vec<PendingFacts>, BackendError> {
+    let rows = super::windows_vault_child_create_custody::pending_native_facts(store, scope)?;
+    let mut ids = std::collections::BTreeSet::new();
+    let mut files = std::collections::BTreeSet::new();
+    if rows
+        .iter()
+        .any(|r| !ids.insert(r.identity) || !files.insert(r.file))
+    {
+        return Err(no());
+    }
+    Ok(rows)
+}
+fn apply_retargets(rows: &mut [PendingFacts], index: &RetargetIndex) -> Result<(), BackendError> {
+    for row in &index.rows {
+        let proof = row.native.as_ref().ok_or_else(no)?;
+        for (node, native) in row.nodes.iter().zip(proof) {
+            let p = rows
+                .iter_mut()
+                .find(|p| p.identity == node.identity)
+                .ok_or_else(no)?;
+            if p.file != node.file
+                || p.usn != node.usn
+                || p.entry.as_ref() != Some(&node.original)
+                || p.components != node.old_components
+                || p.write_id != node.write_id
+                || p.revision != node.previous_revision
+                || p.source_sha256 != node.source_sha256
+                || (node.identity == row.descriptor.identity && p.parent != row.descriptor.parent)
+            {
+                return Err(no());
+            }
+            p.original = Some(node.original.clone());
+            p.entry = Some(node.entry.clone());
+            p.components = node.new_components.clone();
+            p.revision = node.revision;
+            p.usn = native.usn;
+            p.operation = if node.entry.directory {
+                Operation::RetargetNeverAttemptedDirectory
+            } else {
+                Operation::RetargetNeverAttemptedFile
+            };
+            if node.identity == row.descriptor.identity {
+                p.parent = row.descriptor.destination_parent.clone();
+            }
+        }
+        for p in rows.iter_mut() {
+            if let Some(n) = row
+                .nodes
+                .iter()
+                .find(|n| n.entry.directory && n.entry.id == p.parent.id)
+            {
+                p.parent = n.entry.clone();
+            }
+        }
+        let mut paths = std::collections::BTreeSet::new();
+        if rows.iter().any(|p| {
+            p.entry
+                .as_ref()
+                .is_none_or(|e| !paths.insert(e.path.clone()))
+        }) {
+            return Err(no());
+        }
+    }
+    Ok(())
+}
+fn current_pending(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+    index: &RetargetIndex,
+) -> Result<Vec<PendingFacts>, BackendError> {
+    let mut rows = initial_pending(store, scope)?;
+    apply_retargets(&mut rows, index)?;
+    Ok(rows)
+}
+fn parent_ref_matches(
+    reference: &ParentRef,
+    parent: &RemoteEntry,
+    current: &[PendingFacts],
+) -> bool {
+    if let Some(row) = current.iter().find(|row| {
+        row.entry
+            .as_ref()
+            .is_some_and(|entry| entry.id == parent.id)
+    }) {
+        return row.entry.as_ref() == Some(parent)
+            && row.operation != Operation::DeleteFile
+            && matches!(reference, ParentRef::PendingCreate { write_id, revision }
+                if write_id == &row.write_id && *revision == row.revision);
+    }
+    matches!(reference, ParentRef::Stable { resource_id } if resource_id == &parent.id)
+}
+fn receipt_nodes(
+    d: &Retarget,
+    q: &Queued,
+    receipt: &VaultCachedNamespaceQueued,
+    current: &[PendingFacts],
+) -> Result<Vec<RetargetNode>, BackendError> {
+    let prefix = &d.original.path;
+    let candidates: Vec<_> = current
+        .iter()
+        .filter(|p| {
+            p.entry.as_ref().is_some_and(|e| {
+                e.path == *prefix
+                    || e.path
+                        .strip_prefix(prefix)
+                        .is_some_and(|s| s.starts_with('/'))
+            })
+        })
+        .collect();
+    if candidates.is_empty()
+        || candidates.len() > 64
+        || (!d.original.directory && candidates.len() != 1)
+    {
+        return Err(no());
+    }
+    let root = current
+        .iter()
+        .find(|p| p.identity == d.identity)
+        .ok_or_else(no)?;
+    if root.file != d.file
+        || root.usn != d.usn
+        || root.components != d.old_components
+        || root.entry.as_ref() != Some(&d.original)
+        || root.parent != d.parent
+    {
+        return Err(no());
+    }
+    let mut out = Vec::new();
+    for p in candidates {
+        let original = p.entry.as_ref().ok_or_else(no)?;
+        if !p.components.starts_with(&d.old_components) {
+            return Err(no());
+        }
+        let (write_id, previous_revision, revision, path) = if d.original.directory {
+            let all = receipt.retarget_rows().ok_or_else(no)?;
+            if all.len()
+                != current
+                    .iter()
+                    .filter(|p| {
+                        p.entry.as_ref().is_some_and(|e| {
+                            e.path == *prefix
+                                || e.path
+                                    .strip_prefix(prefix)
+                                    .is_some_and(|s| s.starts_with('/'))
+                        })
+                    })
+                    .count()
+            {
+                return Err(no());
+            }
+            let mut r = all.iter().filter(|r| r.write_id == p.write_id);
+            let r1 = r.next().ok_or_else(no)?;
+            if r.next().is_some()
+                || r1.old_path != original.path
+                || r1.previous_revision != p.revision
+                || !parent_ref_matches(&ParentRef::from(&r1.old_parent_ref), &p.parent, current)
+                || r1.plaintext_len != p.plaintext_len
+                || r1.revision <= r1.previous_revision
+                || r1.state != raiun_cache::CiphertextWriteState::NeverAttempted
+                || r1.operation
+                    != if original.directory {
+                        raiun_opencloud::vault_cache::VaultPendingOperationKind::CreateDirectory
+                    } else {
+                        raiun_opencloud::vault_cache::VaultPendingOperationKind::CreateFile
+                    }
+            {
+                return Err(no());
+            }
+            if !original.directory
+                && p.source_sha256
+                    .map(|h| h.iter().map(|b| format!("{b:02x}")).collect::<String>())
+                    .as_deref()
+                    != Some(r1.plaintext_sha256.as_str())
+            {
+                return Err(no());
+            }
+            (
+                r1.write_id.clone(),
+                r1.previous_revision,
+                r1.revision,
+                r1.path.clone(),
+            )
+        } else {
+            if receipt.retarget_rows().is_some() {
+                return Err(no());
+            }
+            (
+                q.write_id.clone(),
+                p.revision,
+                q.revision,
+                q.entry.as_ref().ok_or_else(no)?.path.clone(),
+            )
+        };
+        let entry = RemoteEntry {
+            path,
+            etag: format!("raiun-pending-v1:{write_id}:{revision}"),
+            ..original.clone()
+        };
+        out.push(RetargetNode {
+            identity: p.identity,
+            file: p.file,
+            usn: p.usn,
+            old_components: p.components.clone(),
+            new_components: d
+                .new_components
+                .iter()
+                .chain(&p.components[d.old_components.len()..])
+                .cloned()
+                .collect(),
+            original: original.clone(),
+            entry,
+            write_id,
+            previous_revision,
+            revision,
+            source_sha256: p.source_sha256,
+        });
+    }
+    out.sort_by_key(|n| n.identity);
+    Ok(out)
+}
+/// Durable local-only receipt. The SDK journal already changed, so any later
+/// error retains unresolved custody; this function never dispatches or retries.
+pub(super) fn record_retarget_queued(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+    receipt: &VaultCachedNamespaceQueued,
+) -> Result<(), BackendError> {
+    // The SDK mutation has already happened. Persist a fail-closed marker
+    // before any receipt validation that could reject the new journal state.
+    let (old, mut index) = load_retargets(store, scope)?;
+    let storage = DpapiSessionStore::current_user().map_err(|_| no())?;
+    let parent = PinnedDirectory::open(storage.local_edit_state_directory()).map_err(|_| no())?;
+    let path = retarget_directory(scope)?;
+    let _sentinel =
+        PrivateDirectory::create_or_open_under(&parent, path.file_name().ok_or_else(no)?)
+            .map_err(|_| no())?;
+    let VaultCachedNamespaceDescriptor::PendingRetarget(d) = receipt.descriptor() else {
+        return Err(no());
+    };
+    let destination_parent_ref = ParentRef::from(&d.destination_parent_ref);
+    let d = Retarget::from(scope, d)?;
+    let q = Queued::from(receipt)?;
+    if q.original.as_ref() != Some(&d.original)
+        || q.parent != d.destination_parent
+        || q.operation
+            != if d.original.directory {
+                Operation::RetargetNeverAttemptedDirectory
+            } else {
+                Operation::RetargetNeverAttemptedFile
+            }
+    {
+        return Err(no());
+    }
+    if index.rows.len() >= 1024 {
+        return Err(no());
+    }
+    let current = current_pending(store, scope, &index)?;
+    let parent_ref = destination_parent_ref;
+    if !parent_ref_matches(&parent_ref, &d.destination_parent, &current) {
+        return Err(no());
+    }
+    if let Some(parent) = current.iter().find(|p| p.identity == d.parent_identity) {
+        if parent.file != d.parent_file
+            || parent.usn != d.parent_usn
+            || parent.entry.as_ref() != Some(&d.parent)
+        {
+            return Err(no());
+        }
+    }
+    if let Some(parent) = current
+        .iter()
+        .find(|p| p.identity == d.destination_parent_identity)
+    {
+        if parent.file != d.destination_parent_file
+            || parent.usn != d.destination_parent_usn
+            || parent.entry.as_ref() != Some(&d.destination_parent)
+        {
+            return Err(no());
+        }
+    }
+    let nodes = receipt_nodes(&d, &q, receipt, &current)?;
+    if nodes
+        .iter()
+        .map(|n| n.entry.size)
+        .try_fold(0u64, u64::checked_add)
+        .is_none_or(|n| n > 64 << 20)
+    {
+        return Err(no());
+    }
+    index.rows.push(RetargetRow {
+        descriptor: d,
+        queued: q,
+        nodes,
+        native: None,
+        destination_parent_ref: parent_ref,
+        journal: receipt
+            .retarget_rows()
+            .map(|r| r.iter().map(JournalRow::from).collect())
+            .unwrap_or_default(),
+    });
+    commit_retargets(store, scope, old.as_deref().map(Vec::as_slice), &index)
+}
+/// Every actual native subtree member must match the originally staged node.
+/// Positive mappings are history only and never restore a live route/epoch.
+pub(super) fn record_retarget_native(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+    receipt: &VaultCachedNamespaceQueued,
+    nodes: &[([u8; 16], u64, i64)],
+) -> Result<(), BackendError> {
+    let VaultCachedNamespaceDescriptor::PendingRetarget(d) = receipt.descriptor() else {
+        return Err(no());
+    };
+    let d = Retarget::from(scope, d)?;
+    let (old, mut index) = load_retargets(store, scope)?;
+    let row = index.rows.last_mut().ok_or_else(no)?;
+    if row.descriptor != d
+        || row.native.is_some()
+        || !row.queued.matches_receipt(receipt)?
+        || nodes.len() != row.nodes.len()
+        || nodes.is_empty()
+        || nodes.len() > 64
+    {
+        return Err(no());
+    }
+    let mut supplied = std::collections::BTreeMap::new();
+    for &(id, file, usn) in nodes {
+        if id == [0; 16] || file == 0 || usn <= 0 || supplied.insert(id, (file, usn)).is_some() {
+            return Err(no());
+        }
+    }
+    let mut proof = Vec::new();
+    for n in &row.nodes {
+        let (file, usn) = supplied.remove(&n.identity).ok_or_else(no)?;
+        if file != n.file {
+            return Err(no());
+        }
+        proof.push(Native {
+            identity: n.identity,
+            file,
+            usn,
+        })
+    }
+    if !supplied.is_empty() {
+        return Err(no());
+    }
+    row.native = Some(proof);
+    // Authenticate the complete old→new chain before committing its terminal fact.
+    current_pending(store, scope, &index)?;
+    commit_retargets(store, scope, old.as_deref().map(Vec::as_slice), &index)
+}
+pub(super) fn pending_native_facts(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+) -> Result<Vec<PendingFacts>, BackendError> {
+    let (_, i) = load_retargets(store, scope)?;
+    let rows = current_pending(store, scope, &i)?;
+    let changed: std::collections::BTreeSet<_> = i
+        .rows
+        .iter()
+        .flat_map(|r| r.nodes.iter().map(|n| n.identity))
+        .collect();
+    Ok(rows
+        .into_iter()
+        .filter(|r| changed.contains(&r.identity))
+        .collect())
+}
+pub(super) fn verify_no_unresolved(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+) -> Result<(), BackendError> {
+    let (_, i) = load_retargets(store, scope)?;
+    current_pending(store, scope, &i)?;
+    Ok(())
+}
+pub(super) fn has_local_queued(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+) -> Result<bool, BackendError> {
+    let (_, i) = load_retargets(store, scope)?;
+    Ok(!i.rows.is_empty())
 }
