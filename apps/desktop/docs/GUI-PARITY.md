@@ -1,130 +1,56 @@
-# Linux / Windows GUI parity gate
+# Linux / Windows GUI parity
 
-## Current checkpoint — 3 November 2026
+## Current implementation — 3 November 2026
 
-GUI and CLI share the canonical `worktrees/desktop-followup-ui` source. The
-current Windows runtime checkpoint is `faf96c5`; older dated descriptions below
-retain their historical scope and do not describe the newly activated factories.
+GUI and CLI share the canonical `worktrees/desktop-followup-ui` source and one
+engine. The owner resumed the remaining Windows work after the earlier `d8113b7`
+unsigned packages were delivered. Those packages are preserved; they do not
+contain the additions below. Older sections retain historical evidence rather
+than current capability claims.
 
-Normal Windows GUI and CLI mounts now connect ordinary file and folder creation
-in Personal and writable, unencrypted Spaces through the existing two joined SDK
-workers. Clean-file deletion and same-folder ASCII file rename are also connected
-in those locations. Qualified empty-directory deletion is also connected: native,
-catalogue and remote checks must find no children, and an actual strong directory
-ETag is required. File and directory moves between parents in the same verified
-Space/root are connected. Directory rename/move admits at most 1,024 exact clean
-native/catalog/remote nodes; unknown or dirty descendants refuse. All new catalog
-rows precede native identity updates, and original rows remain until every native
-readback succeeds. Partial publication retains custody and unresolved history;
-ambiguous old/new resource aliases refuse restart authority. No recursive deletion
-is performed. Personal remains the account
-anchor; each target Space/root is separately qualified. These newer changes have
-not been packaged yet.
-Removal notifications are observation hints only: they cannot authorize a cloud
-delete or mark work complete, and conflicting same-batch endpoints still refuse.
-Both entrypoints use streamed ordinary existing-file saves; the CLI no longer
-keeps the legacy whole-body 16-MiB activation limit. Account changes revoke new
-backend work before a fallible worker drain and retain unresolved local custody.
+| Area | Current implementation | Remaining work |
+| --- | --- | --- |
+| GUI accounts, settings, Sharing, ordinary offline files and Sync Folders | Shared frontend and account-scoped services; Windows uses DPAPI and Cloud Files, Linux uses Secret Service and FUSE. | Finished-candidate basic startup/sign-in and normal file workflow. |
+| Ordinary Windows drive operations | File/folder creation, clean file and empty-directory deletion, file/folder rename and same-Space moves, streamed existing saves and recoverable replacement saves are connected for Personal and writable Spaces. Unicode rename hints use Windows ordinal alias checks. | Finished-candidate basic file workflow; existing permission, conflict and dirty-state refusals remain. |
+| Encrypted online Windows files | File/folder creation, streamed existing saves, protected replacement saves, clean file rename, same-vault file moves and clean file deletion are integrated. Remote mutations are conditional and completion requires verified remote and native readback. | Directory rename/move and empty-directory deletion are being integrated separately. |
+| Encrypted Windows offline content | Snapshot pin/list/remove/quota/cancel controls, password-authenticated cached unlock, read-only native browsing and reconnect are integrated. Cache-only clients have no bearer credential and cannot issue network requests. | Secure queued writes and reconnect reconciliation; read-only capability remains until that complete path is connected. |
+| Headless CLI MVP | Both systems support foreground serve, status, Spaces, mount/unmount, configuration and supported sign-in/reconnect operations. Platform credential, registration, service and state-isolation policies remain explicit. | No missing Windows command-layer MVP was found. Headless mount-only mode excludes folder/media sync and vault commands on both systems. |
 
-The local candidate also adds file deletion after positive local completion and
-same-name replacement by a newly observed plain file. Before either cloud action,
-the original clean placeholder, exact account/root and remote revision are pinned.
-A replacement body is durably retained before a conditional write to the original
-remote resource and independent readback; uncertain results preserve recovery and
-native custody. This is source integration, not acceptance of every editor's
-replacement strategy. Foreign placeholder identities and unqualified writers
-still refuse. Duplicate temporary-name hint retirement is an ASCII-only
-optimization and does not grant mutation authority.
+Encrypted creation and supported saves currently accept files up to 1 GiB on
+Windows using bounded streams and protected recovery. Explicit copy between two
+unlocked vaults is limited to 16 MiB on both platforms. Clean directory operations
+use a bounded exact subtree; recursive cloud deletion is not enabled. Unknown,
+foreign, dirty or active-writer state refuses rather than discarding local data.
+The initial encrypted replacement path requires a previously hydrated original;
+unsupported replacement strategies retain local recovery instead of claiming
+successful completion. These bounds are not a claim of unlimited parity.
 
-Clean cloud-only file rename/move has a separate metadata path with no body read
-or hydration. It requires positive native in-sync state, no modified ranges and
-the unchanged original remote ID, strong ETag and size. Changed or unknown state
-refuses clean completion. Resident-file moves retain content verification, with
-one source and one destination full-body read rather than repeated downloads.
+Completed original custody, captures and body history remain additive. Rename,
+replacement and deletion histories project only exact verified current identities;
+old records are not rewritten to manufacture new authority. Lock/reconnect keeps
+account/vault/root binding, and cache eviction remains separate from cloud deletion.
 
-Explicit new encrypted-folder creation now uses the existing Windows secret
-broker, shared bound-parent creation/proof codec and native route publication.
-It neither remembers the creation password nor enables general encrypted writes.
-Partial remote folders are retained on failure. Positive native creation remains
-unverified. Explicit Copy between two already-unlocked online vaults is also
-integrated for one regular file up to 16 MiB. Windows stages its copy envelope in
-bounded zeroizing memory and persists ciphertext only. Source/destination proofs,
-cancel/join, verified readback and retained uncertain records remain separate from
-general encrypted writes and offline support.
+Current source passed the affected Linux Agent/CLI compilation and frontend build.
+Individual Windows changes passed affected cross-compilation; the final composed
+Windows build remains required after the remaining implementation is integrated.
+Compilation does not establish Explorer/editor/native acceptance. No new source
+has been signed or published, and no owner-device installation of this resumed
+parity work has occurred.
 
-Connected encrypted existing-file saves now have an additive streamed path up to
-1 GiB, with protected chunked local recovery, conditional upload and full
-authenticated readback. Legacy small-file recovery records keep their original
-format and 512-KiB bound. Capture, upload, native completion and Lock cleanup use
-bounded reads; Save Copy uses one fixed operation deadline and no-clobber
-publication. Full account/vault/root identity and live unlock authority remain
-required. This source has not yet been packaged or exercised natively.
+Validation stays within the owner's reduced scope: affected build and formatting,
+basic install/upgrade/startup/sign-in, one normal file workflow and essential data
+preservation. No full-suite reruns, expanded matrices or new VM/account/browser
+setup are release requirements. Unchanged earlier evidence is reused only within
+its actual scope.
 
-Source `812d11f` also connects new encrypted files (up to 1 GiB) and folders
-through the normal Windows drive while the exact vault remains unlocked and
-connected. Original native ownership, protected vault-specific body/intent
-custody, conditional create and verified readback precede native completion.
-An active writer waits only before first capture, using the original operation
-deadline. Folder conversion preserves independent local children; it does not
-upload or adopt them. A local metadata inventory refuses complete Lock cleanup
-while unknown, dirty or foreign descendants remain, preserving their bytes.
-Ordinary creates retain their fresh admission checks and avoid redundant vault
-network discovery for locally classified ordinary candidates.
-
-
-The composed source passed affected Windows compilation and formatting. The
-previous unsigned `d8233c1` installer passed its 0.7.4-to-0.7.5 same-user upgrade,
-retained synthetic settings/documents/DPAPI state and normal Agent exit on CI.
-It was also installed and visibly started in the laptop's standard synthetic
-account. That account could not open the normal Windows browser outside Raiun
-either, so current sign-in and file workflow remain unverified there; this does
-not establish an application sign-in regression. No further browser/account setup
-or expanded test matrix is part of this release work.
-
-The owner removed the seven-case R58/R59 gate, full-suite reruns and expanded
-matrices from this phase. Only finished-candidate basic build/upgrade/startup,
-sign-in, one normal file workflow and essential preservation checks remain.
-Prior failures and the exact scope of reused evidence are retained.
-
-Additional replacement strategies and broader encrypted Windows equivalents
-remain implementation gaps. The new ordinary operations and explicit encrypted
-Copy and streamed existing-file saves are source-checked, not native acceptance.
-Encrypted rename/move/delete, replacement editors and encrypted offline parity
-remain separate gaps.
-These are feature work, not missing exhaustive tests. Removing extra testing does
-not claim those capabilities are complete or authorize signing/publication.
-
-Delivery checkpoint, 3 November: package the completed composition now, with
-those limitations stated explicitly. The unfinished encrypted FILE-rename work
-is preserved separately and is excluded from this candidate. This packaging
-checkpoint does not claim full feature parity or authorize publication. The
-Windows laptop's fresh-profile browser issue is not a packaging gate.
-
-The shared OpenCloud conditional-create protocol has the same documented server
-qualification on Linux and Windows; no extra Windows-only global-CAS gate applies.
-
-The unsigned Linux 0.7.5 AppImage from `ee17f62` is built, including the parallel
-ordinary-create workers, pending-directory correction and validated DAV directory
-metadata compatibility fix. Its exact artifact is SHA256
-`e082932ce5285711382c154a8507785836080830e935ee00357fbc5ec4bae873`.
-It passed one isolated basic workflow: synthetic sign-in, one 1-MiB ordinary
-upload with independent body verification, pending-work drain, normal unmount,
-Quit and VM shutdown with originals preserved. It has not been installed on the
-owner laptop or published. The earlier 210-of-211 failure remains preserved; this
-is no large-workload or real-server throughput claim. Missing file ETags still
-refuse; only valid directory metadata may omit its ETag.
-
-A newer unsigned `32bd051` Linux GUI AppImage and headless CLI bundle are also
-built. Basic packaged signed-out GUI startup, Agent status/version, CLI help and
-version, and normal Quit passed; the build VM shut down normally and original
-images were preserved. AppImage SHA256 is
-`556bf710430a2467ace6a94ca4566c0082adbb2b2c767bf75ad5e9ecdc3f30dd`;
-headless archive SHA256 is
-`ea95b4a38163ade60a9e8915d7fcbd89dd1fdcded380e436fbcb072c88dfe757`.
-These previews have not been installed on the owner laptop or published, and
-no new sign-in/file workflow is claimed. They predate the shared encrypted-folder
-parent-condition correction in `a327393`; final delivery must include that fix.
-
+The earlier `d8113b7` Windows installer passed the CI upgrade/data-preservation
+check and was received and hash-verified by the Windows laptop. The previous
+`d8233c1` installation started in a standard synthetic account, whose browser also
+failed to launch outside Raiun. That environment limitation does not establish an
+application sign-in regression and is not authority for account/browser resets.
+Earlier Linux packages passed basic startup and, for the unchanged ordinary
+engine, one synthetic file workflow. New packages must identify their actual
+source and must not inherit unsupported native-acceptance claims.
 
 ## Earlier assessment and feature matrix
 
