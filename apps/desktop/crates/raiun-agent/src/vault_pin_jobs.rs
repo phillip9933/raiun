@@ -133,6 +133,46 @@ impl VaultPinJobs {
         .ok_or_else(|| "Encrypted snapshot refresh was skipped".into())
     }
 
+    /// Existing worker plus a retained local-storage guard. The owned Arc
+    /// keeps private directory custody until the worker actually terminates.
+    pub fn start_guarded(
+        this: &Arc<Self>,
+        scope: &VaultSessionScope,
+        backend: VaultBackend,
+        existing_pin_id: Option<String>,
+        auth_generation: Arc<AtomicU64>,
+        expected_generation: u64,
+        current: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<String, String> {
+        this.start_inner(scope_key(scope), None, move |cancelled, progress| {
+            let valid =
+                || auth_generation.load(Ordering::Acquire) == expected_generation && current();
+            if !valid() {
+                cancelled.store(true, Ordering::Release);
+                return Err(());
+            }
+            let mut checked_progress = |value| {
+                if !valid() {
+                    cancelled.store(true, Ordering::Release);
+                }
+                progress(value);
+            };
+            let result = backend
+                .pin_offline_tree_with_progress(
+                    existing_pin_id.as_deref(),
+                    cancelled,
+                    &mut checked_progress,
+                )
+                .map_err(|_| ());
+            if !valid() {
+                cancelled.store(true, Ordering::Release);
+                return Err(());
+            }
+            result
+        })?
+        .ok_or_else(|| "Encrypted snapshot refresh was skipped".into())
+    }
+
     /// Start a low-priority refresh no more than once per hour for this exact
     /// scope and pin. A user-started job may run more often. The cooldown is
     /// process-local, so restart permits an explicit/currently-due refresh.

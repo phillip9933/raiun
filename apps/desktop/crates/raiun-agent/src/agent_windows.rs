@@ -476,6 +476,8 @@ type SharedSourceAdmissions = Arc<Mutex<Arc<windows_profile_registry::Registry>>
 struct WindowsAgent {
     vault_copy_jobs: Arc<crate::vault_edit_jobs::VaultEditReconcileJobs>,
     vault_copy_serialization: Arc<crate::vault_pin_jobs::VaultPinJobs>,
+    vault_offline_storage:
+        Mutex<std::collections::HashMap<String, Arc<raiun_control_windows::PrivateDirectory>>>,
     source_admissions: Option<SharedSourceAdmissions>,
     vault_sessions: Arc<raiun_vault::session::VaultSessionCoordinator>,
     profile_scope: String,
@@ -3296,6 +3298,7 @@ impl WindowsAgent {
         let agent = Self {
             vault_copy_jobs: Arc::new(crate::vault_edit_jobs::VaultEditReconcileJobs::default()),
             vault_copy_serialization: Arc::new(crate::vault_pin_jobs::VaultPinJobs::default()),
+            vault_offline_storage: Mutex::new(std::collections::HashMap::new()),
             source_admissions,
             vault_sessions,
             profile_scope: profile.into(),
@@ -19040,6 +19043,7 @@ pub(super) mod tests {
         let agent = Arc::new(WindowsAgent {
             vault_copy_jobs: Arc::new(crate::vault_edit_jobs::VaultEditReconcileJobs::default()),
             vault_copy_serialization: Arc::new(crate::vault_pin_jobs::VaultPinJobs::default()),
+            vault_offline_storage: Mutex::new(std::collections::HashMap::new()),
             source_admissions: None,
             vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
             profile_scope: "default".into(),
@@ -19146,6 +19150,7 @@ pub(super) mod tests {
         let agent = Arc::new(WindowsAgent {
             vault_copy_jobs: Arc::new(crate::vault_edit_jobs::VaultEditReconcileJobs::default()),
             vault_copy_serialization: Arc::new(crate::vault_pin_jobs::VaultPinJobs::default()),
+            vault_offline_storage: Mutex::new(std::collections::HashMap::new()),
             source_admissions: None,
             vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
             profile_scope: "default".into(),
@@ -19211,6 +19216,7 @@ pub(super) mod tests {
         let agent = Arc::new(WindowsAgent {
             vault_copy_jobs: Arc::new(crate::vault_edit_jobs::VaultEditReconcileJobs::default()),
             vault_copy_serialization: Arc::new(crate::vault_pin_jobs::VaultPinJobs::default()),
+            vault_offline_storage: Mutex::new(std::collections::HashMap::new()),
             source_admissions: None,
             vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
             profile_scope: "default".into(),
@@ -19946,6 +19952,7 @@ pub(super) mod tests {
         let agent = Arc::new(WindowsAgent {
             vault_copy_jobs: Arc::new(crate::vault_edit_jobs::VaultEditReconcileJobs::default()),
             vault_copy_serialization: Arc::new(crate::vault_pin_jobs::VaultPinJobs::default()),
+            vault_offline_storage: Mutex::new(std::collections::HashMap::new()),
             source_admissions: None,
             vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
             profile_scope: "default".into(),
@@ -20005,6 +20012,7 @@ pub(super) mod tests {
         let agent = Arc::new(WindowsAgent {
             vault_copy_jobs: Arc::new(crate::vault_edit_jobs::VaultEditReconcileJobs::default()),
             vault_copy_serialization: Arc::new(crate::vault_pin_jobs::VaultPinJobs::default()),
+            vault_offline_storage: Mutex::new(std::collections::HashMap::new()),
             source_admissions: None,
             vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
             profile_scope: "default".into(),
@@ -20048,6 +20056,7 @@ pub(super) mod tests {
         let agent = Arc::new(WindowsAgent {
             vault_copy_jobs: Arc::new(crate::vault_edit_jobs::VaultEditReconcileJobs::default()),
             vault_copy_serialization: Arc::new(crate::vault_pin_jobs::VaultPinJobs::default()),
+            vault_offline_storage: Mutex::new(std::collections::HashMap::new()),
             source_admissions: None,
             vault_sessions: Arc::new(raiun_vault::session::VaultSessionCoordinator::new()),
             profile_scope: "default".into(),

@@ -110,6 +110,17 @@ impl WindowsAgent {
         {
             return Err("The encrypted offline account changed".into());
         }
+        drop(state);
+        let current = pin_registered_configured_root(
+            Path::new(&context.configuration.path),
+            context._root.identity(),
+        )
+        .map_err(|_| "The registered offline root changed")?;
+        if current.identity() != context._root.identity()
+            || self.generation.load(Ordering::Acquire) != context.generation
+        {
+            return Err("The encrypted offline root changed".into());
+        }
         Ok(())
     }
     fn open_windows_vault_cache(
@@ -124,15 +135,52 @@ impl WindowsAgent {
             raiun_control_windows::PinnedDirectory::open(storage.local_edit_state_directory())
                 .map_err(|_| "Private Windows storage changed")?;
         let name = format!("vault-offline-{:x}", sha2::Sha256::digest(&context.account));
-        let directory = raiun_control_windows::PrivateDirectory::create_or_open_under(
-            &parent,
-            std::ffi::OsStr::new(&name),
-        )
-        .map_err(|_| "Private encrypted cache is unavailable")?;
+        let directory = {
+            let mut storage = self
+                .vault_offline_storage
+                .lock()
+                .map_err(|_| "Encrypted cache ownership is unavailable")?;
+            if let Some(pin) = storage.get(&name) {
+                pin.clone()
+            } else {
+                let pin = Arc::new(
+                    raiun_control_windows::PrivateDirectory::create_or_open_under(
+                        &parent,
+                        std::ffi::OsStr::new(&name),
+                    )
+                    .map_err(|_| "Private encrypted cache is unavailable")?,
+                );
+                storage.insert(name.clone(), pin.clone());
+                pin
+            }
+        };
+        directory
+            .verify_path()
+            .map_err(|_| "Private encrypted cache changed")?;
         let cache = raiun_cache::Cache::open(directory.path(), 1 << 30)
             .map_err(|_| "Could not open the encrypted offline cache")?;
+        directory
+            .verify_path()
+            .map_err(|_| "Private encrypted cache changed")?;
         self.check_windows_vault_offline_account(context)?;
         Ok(cache)
+    }
+    fn windows_vault_cache_pin(
+        &self,
+        context: &WindowsVaultOfflineAccount,
+    ) -> Result<Arc<raiun_control_windows::PrivateDirectory>, String> {
+        use sha2::Digest;
+        let name = format!("vault-offline-{:x}", sha2::Sha256::digest(&context.account));
+        let pin = self
+            .vault_offline_storage
+            .lock()
+            .map_err(|_| "Encrypted cache ownership is unavailable")?
+            .get(&name)
+            .cloned()
+            .ok_or("Encrypted cache ownership is unavailable")?;
+        pin.verify_path()
+            .map_err(|_| "Private encrypted cache changed")?;
+        Ok(pin)
     }
     fn windows_vault_offline_request(&self, request: &Value) -> Result<Value, String> {
         use raiun_opencloud::{vault_backend::VaultBackend, vault_cache::VaultOfflineCache};
@@ -184,6 +232,7 @@ impl WindowsAgent {
             .map_err(|_| "Vault operations are unavailable")?;
         let context = self.windows_vault_offline_account(expected)?;
         let cache = self.open_windows_vault_cache(&context)?;
+        let cache_pin = self.windows_vault_cache_pin(&context)?;
         if action == "vault_cache_usage" || action == "vault_cache_quota_set" {
             if action == "vault_cache_quota_set" {
                 let quota = fields
@@ -197,6 +246,9 @@ impl WindowsAgent {
             let usage = cache
                 .usage()
                 .map_err(|_| "Encrypted cache usage is unavailable")?;
+            cache_pin
+                .verify_path()
+                .map_err(|_| "Private encrypted cache changed")?;
             self.check_windows_vault_offline_account(&context)?;
             return Ok(
                 json!({"quota_bytes":usage.quota_bytes,"used_bytes":usage.used_bytes,"pinned_bytes":usage.pinned_bytes,"protected_bytes":usage.protected_bytes,"over_quota":usage.over_quota}),
@@ -259,13 +311,17 @@ impl WindowsAgent {
                     .get("pin_id")
                     .map(|_| text("pin_id", 256).map(str::to_owned))
                     .transpose()?;
-                let job = crate::vault_pin_jobs::VaultPinJobs::start(
+                let job = crate::vault_pin_jobs::VaultPinJobs::start_guarded(
                     &self.vault_copy_serialization,
                     &scope,
                     backend,
                     pin,
                     self.generation.clone(),
                     expected,
+                    Arc::new({
+                        let pin = cache_pin.clone();
+                        move || pin.verify_path().is_ok()
+                    }),
                 )?;
                 json!({"accepted":true,"job_id":job})
             }
@@ -308,6 +364,9 @@ impl WindowsAgent {
             }
             _ => return Err("Unsupported encrypted offline action".into()),
         };
+        cache_pin
+            .verify_path()
+            .map_err(|_| "Private encrypted cache changed")?;
         self.check_windows_vault_offline_account(&context)?;
         Ok(result)
     }
