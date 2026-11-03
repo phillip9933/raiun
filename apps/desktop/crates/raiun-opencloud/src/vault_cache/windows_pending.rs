@@ -120,7 +120,8 @@ impl<'a> PendingBodyReadSeek<'a> {
         &mut self,
         cancelled: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
     ) {
-        self.cancelled = cancelled;
+        let original = std::sync::Arc::clone(&self.cancelled);
+        self.cancelled = std::sync::Arc::new(move || original() || cancelled());
     }
 
     fn check_cancelled(&mut self) -> io::Result<()> {
