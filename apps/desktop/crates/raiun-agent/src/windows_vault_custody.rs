@@ -71,6 +71,25 @@ pub(super) trait Storage: Send + Sync {
 }
 struct SessionStorage(Arc<dyn SessionStore>);
 impl Storage for SessionStorage {
+    fn completed_entry_deleted(&self, scope: &Scope, entry: &Entry) -> Result<bool> {
+        let store: Arc<dyn Storage> = Arc::new(SessionStorage(self.0.clone()));
+        super::windows_vault_file_delete_custody::entry_deleted(&store, scope, entry)
+            .map_err(|_| refused())
+    }
+    fn completed_file_lineage(
+        &self,
+        scope: &Scope,
+        identity: [u8; 16],
+        resource: &str,
+        old: u64,
+        new: u64,
+    ) -> Result<bool> {
+        let store: Arc<dyn Storage> = Arc::new(SessionStorage(self.0.clone()));
+        super::windows_vault_file_replace_custody::file_lineage(
+            &store, scope, identity, resource, old, new,
+        )
+        .map_err(|_| refused())
+    }
     fn load_capture(&self, key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>> {
         self.0.load_vault_existing_edit_capture(key)
     }
