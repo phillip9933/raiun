@@ -78,7 +78,11 @@ pub enum VaultFileRenameOutcome {
     Verified(VaultVerifiedFileRename),
     NeedsReconciliation,
 }
-fn check(b: &VaultBackend, r: &VaultFileRenameRequest<'_>) -> Result<(), CloudError> {
+fn check(
+    b: &VaultBackend,
+    r: &VaultFileRenameRequest<'_>,
+    directory: bool,
+) -> Result<(), CloudError> {
     b.client.ensure_context_current(r.context)?;
     if (r.cancelled)()
         || r.expected_provider_generation == 0
@@ -106,7 +110,7 @@ fn check(b: &VaultBackend, r: &VaultFileRenameRequest<'_>) -> Result<(), CloudEr
             .map(|(p, _)| if p.is_empty() { "/" } else { p })
             .unwrap_or("/")
     }
-    if r.source.directory
+    if r.source.directory != directory
         || !r.parent.directory
         || !destination_parent.directory
         || r.source.id.is_empty()
@@ -115,6 +119,8 @@ fn check(b: &VaultBackend, r: &VaultFileRenameRequest<'_>) -> Result<(), CloudEr
         || r.source.id == destination_parent.id
         || r.source.path == "/"
         || r.destination == "/"
+        || (directory
+            && (r.source.size != 0 || r.destination.starts_with(&format!("{}/", r.source.path))))
         || r.source.path.eq_ignore_ascii_case(r.destination)
         || parent(&r.source.path) != r.parent.path
         || parent(r.destination) != destination_parent.path
@@ -131,8 +137,15 @@ impl VaultBackend {
         &self,
         r: &VaultFileRenameRequest<'_>,
     ) -> Result<VaultFileRenameTarget, CloudError> {
+        self.prepare_namespace_rename_guarded(r, false)
+    }
+    fn prepare_namespace_rename_guarded(
+        &self,
+        r: &VaultFileRenameRequest<'_>,
+        directory: bool,
+    ) -> Result<VaultFileRenameTarget, CloudError> {
         let _context = crate::RangeContextGuard::enter(r.context);
-        check(self, r)?;
+        check(self, r, directory)?;
         let state = self.revalidate_root()?;
         let destination_parent = r.destination_parent.unwrap_or(r.parent);
         if !state.space.writable
@@ -142,7 +155,7 @@ impl VaultBackend {
             return Err(conflict("encrypted rename parent changed"));
         }
         let source = self.stat_raw(&state, &r.source.path)?;
-        if source.directory
+        if source.directory != directory
             || !source.writable
             || source.id != r.source.id
             || source.etag != r.source.etag
@@ -150,15 +163,29 @@ impl VaultBackend {
         {
             return Err(conflict("encrypted rename original source changed"));
         }
-        let encoded_source = self.encoded_file_target(
-            &state,
-            &r.source.path,
-            &WriteCondition::Match(r.source.etag.clone()),
-        )?;
-        let encoded_destination =
-            self.encoded_file_target(&state, r.destination, &WriteCondition::Absent)?;
+        let encoded_source = if directory {
+            self.sessions
+                .encrypt_path(&self.scope, relative_virtual_path(&r.source.path)?)
+                .map_err(vault_error)?
+        } else {
+            self.encoded_file_target(
+                &state,
+                &r.source.path,
+                &WriteCondition::Match(r.source.etag.clone()),
+            )?
+        };
+        let encoded_destination = if directory {
+            self.prepare_directory_create_target_for_parent(
+                r.destination,
+                &VaultPendingParentRef::Stable {
+                    resource_id: destination_parent.id.clone(),
+                },
+            )?
+        } else {
+            self.encoded_file_target(&state, r.destination, &WriteCondition::Absent)?
+        };
         let fresh = self.revalidate_root()?;
-        check(self, r)?;
+        check(self, r, directory)?;
         if fresh.integrity_token != state.integrity_token
             || self.current_parent_binding(r.destination)?
                 != (
@@ -192,8 +219,17 @@ impl VaultBackend {
         target: VaultFileRenameTarget,
         before_send: &mut dyn FnMut() -> Result<(), CloudError>,
     ) -> Result<VaultFileRenameOutcome, CloudError> {
+        self.rename_namespace_guarded(r, target, before_send, false)
+    }
+    fn rename_namespace_guarded(
+        &self,
+        r: &VaultFileRenameRequest<'_>,
+        target: VaultFileRenameTarget,
+        before_send: &mut dyn FnMut() -> Result<(), CloudError>,
+        directory: bool,
+    ) -> Result<VaultFileRenameOutcome, CloudError> {
         let _context = crate::RangeContextGuard::enter(r.context);
-        check(self, r)?;
+        check(self, r, directory)?;
         if target.scope != *r.scope
             || !target.epoch.same_identity(r.epoch)
             || target.root != r.vault_root_path
@@ -213,7 +249,7 @@ impl VaultBackend {
         {
             return Err(conflict("encrypted rename target changed"));
         }
-        let fresh = self.prepare_file_rename_guarded(r)?;
+        let fresh = self.prepare_namespace_rename_guarded(r, directory)?;
         if fresh.integrity != target.integrity
             || fresh.encoded_source != target.encoded_source
             || fresh.encoded_destination != target.encoded_destination
@@ -263,9 +299,12 @@ impl VaultBackend {
             .header("If", parent_if)
             .build()
             .map_err(network)?;
-        check(self, r)?;
+        check(self, r, directory)?;
         before_send()?;
         let result = (|| {
+            // The local native/DPAPI claim can block. Refuse expired or retired
+            // custody again here, after claim but BEFORE the one HTTP attempt.
+            check(self, r, directory)?;
             let response = self
                 .client
                 .conditional_http
@@ -276,16 +315,16 @@ impl VaultBackend {
                 &[StatusCode::CREATED, StatusCode::NO_CONTENT],
                 &token,
             )?;
-            check(self, r)?;
+            check(self, r, directory)?;
             let state = self.revalidate_root()?;
             if state.integrity_token != target.integrity {
                 return Err(conflict("encrypted rename root changed after MOVE"));
             }
             let entry = self.stat_raw(&state, &target.destination)?;
             validate_existing_overwrite_etag(&entry.etag)?;
-            if entry.directory
+            if entry.directory != directory
                 || entry.id != target.source.id
-                || entry.etag != target.source.etag
+                || (!directory && entry.etag != target.source.etag)
                 || entry.size != target.source.size
                 || !entry.writable
             {
@@ -302,7 +341,7 @@ impl VaultBackend {
             {
                 return Err(conflict("encrypted rename parent changed after MOVE"));
             }
-            check(self, r)?;
+            check(self, r, directory)?;
             Ok(entry)
         })();
         Ok(match result {
@@ -310,6 +349,161 @@ impl VaultBackend {
                 VaultFileRenameOutcome::Verified(VaultVerifiedFileRename { target, entry })
             }
             Err(_) => VaultFileRenameOutcome::NeedsReconciliation,
+        })
+    }
+}
+
+/// Exact captured subtree, not a recursive path grant. No tree body is rewritten.
+pub struct VaultDirectoryRenameTarget {
+    root: VaultFileRenameTarget,
+    original: Vec<RemoteEntry>,
+}
+impl VaultDirectoryRenameTarget {
+    pub fn encoded_source(&self) -> &str {
+        self.root.encoded_source()
+    }
+    pub fn encoded_destination(&self) -> &str {
+        self.root.encoded_destination()
+    }
+    pub fn integrity_token(&self) -> &str {
+        self.root.integrity_token()
+    }
+    pub fn original_tree(&self) -> &[RemoteEntry] {
+        &self.original
+    }
+}
+pub struct VaultVerifiedDirectoryRename {
+    root: VaultVerifiedFileRename,
+    original: Vec<RemoteEntry>,
+    entries: Vec<RemoteEntry>,
+}
+impl VaultVerifiedDirectoryRename {
+    pub fn root_proof(&self) -> &VaultVerifiedFileRename {
+        &self.root
+    }
+    pub fn original_tree(&self) -> &[RemoteEntry] {
+        &self.original
+    }
+    pub fn entries(&self) -> &[RemoteEntry] {
+        &self.entries
+    }
+}
+pub enum VaultDirectoryRenameOutcome {
+    Verified(VaultVerifiedDirectoryRename),
+    NeedsReconciliation,
+}
+fn same_entry(a: &RemoteEntry, b: &RemoteEntry) -> bool {
+    a.id == b.id
+        && a.path == b.path
+        && ((a.directory && b.directory) || a.etag == b.etag)
+        && a.size == b.size
+        && a.directory == b.directory
+}
+fn exact_tree(a: &[RemoteEntry], b: &[RemoteEntry]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .all(|e| b.iter().filter(|v| same_entry(e, v)).count() == 1)
+}
+impl VaultBackend {
+    fn live_rename_tree(
+        &self,
+        r: &VaultFileRenameRequest<'_>,
+        path: &str,
+    ) -> Result<Vec<RemoteEntry>, CloudError> {
+        check(self, r, true)?;
+        let state = self.revalidate_root()?;
+        let root = self.stat_raw(&state, path)?;
+        if !root.directory || !root.writable {
+            return Err(conflict("encrypted rename tree root changed"));
+        }
+        let mut rows = vec![root];
+        let mut index = 0;
+        let mut ids = std::collections::BTreeSet::new();
+        let mut paths = std::collections::BTreeSet::new();
+        while index < rows.len() {
+            check(self, r, true)?;
+            let e = rows[index].clone();
+            index += 1;
+            if !ids.insert(e.id.clone()) || !paths.insert(e.path.to_lowercase()) || !e.writable {
+                return Err(conflict("encrypted rename subtree aliases or role changed"));
+            }
+            validate_existing_overwrite_etag(&e.etag)?;
+            if e.directory {
+                self.list_raw(&state, &e.path, &mut |child| {
+                    if rows.len() >= 1024 {
+                        return Err(invalid("encrypted rename subtree exceeds bound"));
+                    }
+                    rows.push(child);
+                    Ok(())
+                })?;
+            }
+        }
+        check(self, r, true)?;
+        rows.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(rows)
+    }
+    pub fn prepare_directory_rename_guarded(
+        &self,
+        r: &VaultFileRenameRequest<'_>,
+        expected: &[RemoteEntry],
+    ) -> Result<VaultDirectoryRenameTarget, CloudError> {
+        let _context = crate::RangeContextGuard::enter(r.context);
+        if expected.is_empty() || expected.len() > 1024 {
+            return Err(invalid("encrypted directory rename catalogue bound"));
+        }
+        let root = self.prepare_namespace_rename_guarded(r, true)?;
+        let tree = self.live_rename_tree(r, &r.source.path)?;
+        if !tree
+            .iter()
+            .any(|e| e.path == r.source.path && e.id == r.source.id && e.etag == r.source.etag)
+            || !exact_tree(expected, &tree)
+        {
+            return Err(conflict(
+                "encrypted directory rename catalogue differs from remote tree",
+            ));
+        }
+        Ok(VaultDirectoryRenameTarget {
+            root,
+            original: tree,
+        })
+    }
+    pub fn rename_directory_guarded(
+        &self,
+        r: &VaultFileRenameRequest<'_>,
+        target: VaultDirectoryRenameTarget,
+        before: &mut dyn FnMut() -> Result<(), CloudError>,
+    ) -> Result<VaultDirectoryRenameOutcome, CloudError> {
+        let _context = crate::RangeContextGuard::enter(r.context);
+        let fresh = self.live_rename_tree(r, &r.source.path)?;
+        if !exact_tree(&fresh, &target.original) {
+            return Err(conflict("encrypted directory subtree changed before MOVE"));
+        }
+        let result = self.rename_namespace_guarded(r, target.root, before, true)?;
+        let VaultFileRenameOutcome::Verified(root) = result else {
+            return Ok(VaultDirectoryRenameOutcome::NeedsReconciliation);
+        };
+        let readback = (|| {
+            let tree = self.live_rename_tree(r, r.destination)?;
+            let mut expected = target.original.clone();
+            for e in &mut expected {
+                let suffix = e
+                    .path
+                    .strip_prefix(&r.source.path)
+                    .ok_or_else(|| conflict("encrypted rename subtree outside source"))?;
+                e.path = format!("{}{suffix}", r.destination);
+            }
+            if !exact_tree(&expected, &tree) {
+                return Err(conflict("encrypted directory whole-tree readback changed"));
+            }
+            Ok(tree)
+        })();
+        Ok(match readback {
+            Ok(entries) => VaultDirectoryRenameOutcome::Verified(VaultVerifiedDirectoryRename {
+                root,
+                original: target.original,
+                entries,
+            }),
+            Err(_) => VaultDirectoryRenameOutcome::NeedsReconciliation,
         })
     }
 }

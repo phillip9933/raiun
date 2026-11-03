@@ -38,6 +38,22 @@ fn unavailable<T>(_: T) -> BackendError {
 }
 
 pub(super) trait Storage: Send + Sync {
+    fn completed_entry_deleted(&self, _scope: &Scope, _entry: &Entry) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// A trusted adapter may qualify a completed replacement's exact native
+    /// old->new file lineage; metadata discovery never authorizes a mutation.
+    fn completed_file_lineage(
+        &self,
+        _scope: &Scope,
+        _identity: [u8; 16],
+        _resource: &str,
+        old: u64,
+        new: u64,
+    ) -> Result<bool> {
+        Ok(old == new)
+    }
     fn load(&self, key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>>;
     fn cas(&self, key: &[u8], old: Option<&[u8]>, next: &[u8]) -> Result<()>;
     fn load_capture(&self, _key: &[u8]) -> Result<Option<Zeroizing<Vec<u8>>>> {
@@ -1576,10 +1592,17 @@ impl VaultPublicationCustody for View {
             let mut cached = self.child.custody.lock().map_err(unavailable)?;
             let fresh = Custody::reopen(&self.store, &self.scope).map_err(unavailable)?;
             fresh.publication_history().map_err(unavailable)?;
-            let entries = fresh
-                .entries_for_reconciliation()
-                .iter()
-                .map(|e| VaultCatalogueEntry {
+            let mut entries = Vec::new();
+            for e in fresh.entries_for_reconciliation() {
+                if self
+                    .store
+                    .0
+                    .completed_entry_deleted(&self.scope, e)
+                    .map_err(unavailable)?
+                {
+                    continue;
+                }
+                entries.push(VaultCatalogueEntry {
                     identity: e.opaque(),
                     metadata: RemoteEntry {
                         id: e.remote_id().into(),
@@ -1591,9 +1614,8 @@ impl VaultPublicationCustody for View {
                         writable: false,
                         encrypted: true,
                     },
-                })
-                .collect::<Vec<_>>();
-
+                });
+            }
             let f = &d.facts;
             let source = entries
                 .iter()
@@ -1605,14 +1627,67 @@ impl VaultPublicationCustody for View {
                 .ok_or(BackendError::Unavailable)?;
             if source.metadata.id != f.original.id
                 || source.metadata.path != f.original.path
-                || source.metadata.etag != f.original.etag
+                || (!source.metadata.directory && source.metadata.etag != f.original.etag)
                 || source.metadata.size != f.original.size
-                || source.metadata.directory
+                || source.metadata.directory != f.original.directory
                 || !parent.metadata.directory
                 || parent.metadata.id != f.parent.id
                 || parent.metadata.path != f.parent.path
             {
                 return Err(BackendError::Unavailable);
+            }
+            let history = fresh.publication_history().map_err(unavailable)?;
+            let exact_native =
+                |identity: [u8; 16], file: u64, len: u64, parts: &[String]| -> bool {
+                    history.iter().filter(|h| h.opaque() == identity).all(|h| {
+                        h.file_index() == file && h.length() == len && h.components() == parts
+                    })
+                };
+            if !f.original.directory
+                && !exact_native(f.identity, f.file, f.original.size, &f.old_components)
+            {
+                return Err(BackendError::Unavailable);
+            }
+            if let Some(nodes) = &f.children {
+                if entries
+                    .iter()
+                    .filter(|e| {
+                        e.metadata.path == f.original.path
+                            || e.metadata
+                                .path
+                                .starts_with(&format!("{}/", f.original.path))
+                    })
+                    .count()
+                    != nodes.len() + 1
+                {
+                    return Err(BackendError::Unavailable);
+                }
+                for n in nodes {
+                    let saved = entries
+                        .iter()
+                        .find(|e| e.identity == n.identity)
+                        .ok_or(BackendError::Unavailable)?;
+                    if saved.metadata.id != n.original.id
+                        || saved.metadata.path != n.original.path
+                        || (!saved.metadata.directory && saved.metadata.etag != n.original.etag)
+                        || saved.metadata.size != n.original.size
+                        || saved.metadata.directory != n.original.directory
+                    {
+                        return Err(BackendError::Unavailable);
+                    }
+                    if !n.original.directory {
+                        let suffix = n
+                            .original
+                            .path
+                            .strip_prefix(&format!("{}/", f.original.path))
+                            .ok_or(BackendError::Unavailable)?;
+                        let mut old = f.old_components.clone();
+                        old.extend(suffix.split('/').map(str::to_owned));
+                        if !exact_native(n.identity, n.file, n.original.size, &old) {
+                            return Err(BackendError::Unavailable);
+                        }
+                    }
+                }
             }
             if let Some(dp) = &f.destination_parent {
                 let target = entries

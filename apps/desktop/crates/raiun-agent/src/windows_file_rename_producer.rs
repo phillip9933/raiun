@@ -218,7 +218,37 @@ mod connected {
                 .observe_namespace_entry(&parts)
                 .map_err(|_| HOLD)?;
             let current = |auth| self.current(auth, backend, root);
+            let weak = self.backend.clone();
+            let generation = self.generation.clone();
+            let expected = self.auth;
+            let cancelled = self.cancelled.clone();
+            let original_root = self.root;
+            let vault_current: Arc<dyn Fn(CapturedAuthorization) -> bool + Send + Sync> =
+                Arc::new(move |auth| {
+                    auth == expected
+                        && generation.load(Ordering::Acquire) == auth.agent_generation
+                        && !(cancelled)()
+                        && root == original_root
+                        && weak.upgrade().is_some_and(|b| {
+                            !b.recovery_job_revoked()
+                                && b.scope().token_generation() == auth.token_generation
+                        })
+                });
             if observed.kind == raiun_cloudfiles_windows::NamespaceEntryKind::CloudDirectory {
+                if connection
+                    .try_reconcile_fresh_vault_directory_rename(
+                        backend,
+                        old,
+                        new,
+                        observed.local_file,
+                        self.auth,
+                        self.generation.clone(),
+                        vault_current.clone(),
+                    )
+                    .map_err(|_| HOLD)?
+                {
+                    return Ok(());
+                }
                 let outcome = connection
                     .reconcile_fresh_directory_rename(
                         backend,
@@ -237,22 +267,6 @@ mod connected {
             if observed.kind != raiun_cloudfiles_windows::NamespaceEntryKind::CloudFile {
                 return Err(HOLD);
             }
-            let weak = self.backend.clone();
-            let generation = self.generation.clone();
-            let expected = self.auth;
-            let cancelled = self.cancelled.clone();
-            let original_root = self.root;
-            let vault_current: Arc<dyn Fn(CapturedAuthorization) -> bool + Send + Sync> =
-                Arc::new(move |auth| {
-                    auth == expected
-                        && generation.load(Ordering::Acquire) == auth.agent_generation
-                        && !(cancelled)()
-                        && root == original_root
-                        && weak.upgrade().is_some_and(|b| {
-                            !b.recovery_job_revoked()
-                                && b.scope().token_generation() == auth.token_generation
-                        })
-                });
             if connection
                 .try_reconcile_fresh_vault_file_rename(
                     backend,

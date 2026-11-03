@@ -59,7 +59,9 @@ pub use file_delete::{
     VaultFileDeleteOutcome, VaultFileDeleteRequest, VaultFileDeleteTarget, VaultVerifiedFileDelete,
 };
 pub use file_rename::{
-    VaultFileRenameOutcome, VaultFileRenameRequest, VaultFileRenameTarget, VaultVerifiedFileRename,
+    VaultDirectoryRenameOutcome, VaultDirectoryRenameTarget, VaultFileRenameOutcome,
+    VaultFileRenameRequest, VaultFileRenameTarget, VaultVerifiedDirectoryRename,
+    VaultVerifiedFileRename,
 };
 mod file_create;
 pub use directory_create::{

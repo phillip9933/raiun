@@ -50,6 +50,8 @@ pub(super) mod native_file_create;
 pub(super) mod native_vault_child_create;
 #[path = "native_vault_directory_create.rs"]
 pub(super) mod native_vault_directory_create;
+#[path = "native_vault_directory_rename.rs"]
+mod native_vault_directory_rename;
 #[path = "native_vault_file_create.rs"]
 pub(super) mod native_vault_file_create;
 #[path = "native_vault_file_rename.rs"]

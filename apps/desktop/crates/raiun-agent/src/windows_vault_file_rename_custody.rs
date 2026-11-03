@@ -41,6 +41,8 @@ struct Row {
     facts: VaultFileRenameFacts,
     phase: Phase,
     native_usn: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_children: Option<Vec<(u64, i64)>>,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum Phase {
@@ -88,36 +90,48 @@ fn load(
                 return Err(no());
             }
         }
-        let mut tails = std::collections::BTreeMap::<[u8; 16], &VaultFileRenameFacts>::new();
+        let mut tails = std::collections::BTreeMap::<[u8; 16], Event>::new();
         for row in &i.rows {
-            let f = &row.facts;
-            if let Some(previous) = tails.insert(f.identity, f) {
-                if previous.original.id != f.original.id
-                    || previous.file != f.file
-                    || previous.volume != f.volume
-                    || previous
-                        .destination_parent
-                        .as_ref()
-                        .map(|p| p.file)
-                        .unwrap_or(previous.parent_file)
-                        != f.parent_file
-                    || previous
-                        .destination_parent
-                        .as_ref()
-                        .map(|p| p.identity)
-                        .unwrap_or(previous.parent_identity)
-                        != f.parent_identity
-                    || previous
-                        .destination_parent
-                        .as_ref()
-                        .map(|p| p.parent.id.as_str())
-                        .unwrap_or(&previous.parent.id)
-                        != f.parent.id
-                    || previous.destination != f.original.path
-                    || previous.new_components != f.old_components
+            for event in events(&row.facts)? {
+                if let Some(p) = tails.insert(event.identity, event.clone()) {
+                    if p.id != event.id
+                        || (p.file != event.file
+                            && !store
+                                .completed_file_lineage(
+                                    scope,
+                                    event.identity,
+                                    &event.id,
+                                    p.file,
+                                    event.file,
+                                )
+                                .map_err(|_| no())?)
+                        || p.new_path != event.original.path
+                        || p.new_components != event.old_components
+                        || p.destination_parent != event.source_parent
+                        || p.destination_parent_file != event.source_parent_file
+                        || p.destination_parent_id != event.source_parent_id
+                    {
+                        return Err(no());
+                    }
+                }
+            }
+            let children = row.facts.children.as_ref();
+            if row.phase == Phase::NativeCompleted && children.is_some() {
+                let proof = row.native_children.as_ref().ok_or_else(no)?;
+                if proof.len() != children.unwrap().len()
+                    || children.unwrap().iter().any(|n| {
+                        proof
+                            .iter()
+                            .filter(|(file, usn)| n.file == *file && n.usn == *usn)
+                            .count()
+                            != 1
+                    })
+                    || row.native_usn != Some(row.facts.usn)
                 {
                     return Err(no());
                 }
+            } else if row.native_children.is_some() {
+                return Err(no());
             }
         }
         i
@@ -163,7 +177,13 @@ struct Record {
     refresh: Arc<dyn Fn() -> Result<(), BackendError> + Send + Sync>,
 }
 impl Record {
-    fn transition(&self, from: Phase, to: Phase, usn: Option<i64>) -> Result<(), BackendError> {
+    fn transition(
+        &self,
+        from: Phase,
+        to: Phase,
+        usn: Option<i64>,
+        children: Option<Vec<(u64, i64)>>,
+    ) -> Result<(), BackendError> {
         let _serial = self.serial.lock().map_err(|_| no())?;
         let (old, mut i) = load(&self.store, &self.scope)?;
         let row = i
@@ -176,6 +196,7 @@ impl Record {
         }
         row.phase = to;
         row.native_usn = usn;
+        row.native_children = children;
         commit(
             &self.store,
             &self.scope,
@@ -185,11 +206,92 @@ impl Record {
     }
 }
 impl VaultFileRenameRecord for Record {
+    fn record_directory_remote(
+        &self,
+        p: &raiun_opencloud::vault_backend::VaultVerifiedDirectoryRename,
+    ) -> Result<(), BackendError> {
+        if self.facts.children.is_none() {
+            return Err(no());
+        }
+        let root = p.root_proof();
+        let f = &self.facts;
+        if root.parent().id != f.parent.id
+            || root.parent().path != f.parent.path
+            || root.parent().etag != f.parent.etag
+            || root.destination_parent().id
+                != f.destination_parent
+                    .as_ref()
+                    .map(|p| p.parent.id.as_str())
+                    .unwrap_or(&f.parent.id)
+            || root.destination_parent().etag
+                != f.destination_parent
+                    .as_ref()
+                    .map(|p| p.parent.etag.as_str())
+                    .unwrap_or(&f.parent.etag)
+        {
+            return Err(no());
+        }
+
+        let e = events(&self.facts)?;
+        if e.len() != p.original_tree().len() || e.len() != p.entries().len() {
+            return Err(no());
+        }
+        for n in &e {
+            if !p.original_tree().iter().any(|v| {
+                v.id == n.id
+                    && v.path == n.original.path
+                    && v.etag == n.original.etag
+                    && v.size == n.original.size
+                    && v.directory == n.original.directory
+            }) || !p.entries().iter().any(|v| {
+                v.id == n.id
+                    && v.path == n.new_path
+                    && (v.directory || v.etag == n.original.etag)
+                    && v.size == n.original.size
+                    && v.directory == n.original.directory
+            }) {
+                return Err(no());
+            }
+        }
+        self.transition(Phase::Attempted, Phase::RemoteVerified, None, None)
+    }
+    fn record_directory_native(&self, nodes: &[(u64, i64)]) -> Result<(), BackendError> {
+        let children = self.facts.children.as_ref().ok_or_else(no)?;
+        if nodes.len() != children.len() + 1
+            || nodes
+                .iter()
+                .filter(|(f, u)| *f == self.facts.file && *u == self.facts.usn)
+                .count()
+                != 1
+            || children.iter().any(|n| {
+                nodes
+                    .iter()
+                    .filter(|(f, u)| *f == n.file && *u == n.usn)
+                    .count()
+                    != 1
+            })
+        {
+            return Err(no());
+        }
+        let children = nodes
+            .iter()
+            .copied()
+            .filter(|(f, _)| *f != self.facts.file)
+            .collect();
+        self.transition(
+            Phase::RemoteVerified,
+            Phase::NativeCompleted,
+            Some(self.facts.usn),
+            Some(children),
+        )?;
+        (self.refresh)()
+    }
+
     fn claim_send(&self) -> Result<(), BackendError> {
         if self.claim.swap(true, Ordering::AcqRel) {
             return Err(no());
         }
-        self.transition(Phase::Ready, Phase::Attempted, None)
+        self.transition(Phase::Ready, Phase::Attempted, None, None)
     }
     fn record_remote(
         &self,
@@ -205,6 +307,8 @@ impl VaultFileRenameRecord for Record {
             || p.entry().path != f.destination
             || p.entry().directory
             || p.parent().id != f.parent.id
+            || p.parent().path != f.parent.path
+            || p.parent().etag != f.parent.etag
             || p.destination_parent().id
                 != f.destination_parent
                     .as_ref()
@@ -213,13 +317,18 @@ impl VaultFileRenameRecord for Record {
         {
             return Err(no());
         }
-        self.transition(Phase::Attempted, Phase::RemoteVerified, None)
+        self.transition(Phase::Attempted, Phase::RemoteVerified, None, None)
     }
     fn record_native(&self, file: u64, usn: i64) -> Result<(), BackendError> {
-        if file != self.facts.file || usn <= 0 {
+        if self.facts.children.is_some() || file != self.facts.file || usn <= 0 {
             return Err(no());
         }
-        self.transition(Phase::RemoteVerified, Phase::NativeCompleted, Some(usn))?;
+        self.transition(
+            Phase::RemoteVerified,
+            Phase::NativeCompleted,
+            Some(usn),
+            None,
+        )?;
         (self.refresh)()
     }
 }
@@ -258,6 +367,7 @@ pub(super) fn prepare(
         facts: d.facts.clone(),
         phase: Phase::Ready,
         native_usn: None,
+        native_children: None,
     });
     commit(&store, scope, old.as_ref().map(|v| v.as_slice()), &i)?;
     Ok(Arc::new(Record {
@@ -276,8 +386,89 @@ fn completed(store: &Arc<dyn Storage>, scope: &Scope) -> Result<Vec<Row>, Backen
     }
     Ok(i.rows)
 }
-/// Pure historical location mapping under authenticated scoped completed rows.
-/// Nonmatching revisions remain untouched; a receipt never changes ID/EF/size.
+
+#[derive(Clone)]
+struct Event {
+    identity: [u8; 16],
+    id: String,
+    file: u64,
+    original: raiun_core::backend::RemoteEntry,
+    new_path: String,
+    old_components: Vec<String>,
+    new_components: Vec<String>,
+    source_parent: [u8; 16],
+    source_parent_file: u64,
+    source_parent_id: String,
+    destination_parent: [u8; 16],
+    destination_parent_file: u64,
+    destination_parent_id: String,
+}
+fn events(f: &VaultFileRenameFacts) -> Result<Vec<Event>, BackendError> {
+    let destination_parent = f.destination_parent.as_ref();
+    let mut rows = vec![Event {
+        identity: f.identity,
+        id: f.original.id.clone(),
+        file: f.file,
+        original: f.original.clone(),
+        new_path: f.destination.clone(),
+        old_components: f.old_components.clone(),
+        new_components: f.new_components.clone(),
+        source_parent: f.parent_identity,
+        source_parent_file: f.parent_file,
+        source_parent_id: f.parent.id.clone(),
+        destination_parent: destination_parent
+            .map(|p| p.identity)
+            .unwrap_or(f.parent_identity),
+        destination_parent_file: destination_parent.map(|p| p.file).unwrap_or(f.parent_file),
+        destination_parent_id: destination_parent
+            .map(|p| p.parent.id.clone())
+            .unwrap_or_else(|| f.parent.id.clone()),
+    }];
+    if let Some(children) = &f.children {
+        for n in children {
+            let suffix = n
+                .original
+                .path
+                .strip_prefix(&format!("{}/", f.original.path))
+                .ok_or_else(no)?;
+            let mut old = f.old_components.clone();
+            old.extend(suffix.split('/').map(str::to_owned));
+            let parent_path = n
+                .original
+                .path
+                .rsplit_once('/')
+                .map(|(p, _)| p)
+                .ok_or_else(no)?;
+            let (parent_identity, parent_file, parent_id) = if parent_path == f.original.path {
+                (f.identity, f.file, f.original.id.clone())
+            } else {
+                let p = children
+                    .iter()
+                    .find(|p| p.original.directory && p.original.path == parent_path)
+                    .ok_or_else(no)?;
+                (p.identity, p.file, p.original.id.clone())
+            };
+            rows.push(Event {
+                identity: n.identity,
+                id: n.original.id.clone(),
+                file: n.file,
+                original: n.original.clone(),
+                new_path: format!("{}/{suffix}", f.destination),
+                old_components: old,
+                new_components: n.new_components.clone(),
+                source_parent: parent_identity,
+                source_parent_file: parent_file,
+                source_parent_id: parent_id.clone(),
+                destination_parent: parent_identity,
+                destination_parent_file: parent_file,
+                destination_parent_id: parent_id,
+            });
+        }
+    }
+    Ok(rows)
+}
+/// Only exact independently recorded nodes translate. IDs, revisions, kinds,
+/// lengths and immutable frame/body bindings never change through this mapper.
 pub(super) fn entry(
     store: &Arc<dyn Storage>,
     scope: &Scope,
@@ -285,22 +476,24 @@ pub(super) fn entry(
 ) -> Result<super::vault_custody::Entry, BackendError> {
     let mut next = value.clone();
     for r in completed(store, scope)? {
-        let f = r.facts;
-        if next.opaque() == f.identity
-            && next.remote_id() == f.original.id
-            && next.etag() == f.original.etag
-            && next.length() == f.original.size
-            && next.root_relative_path() == f.original.path
-        {
-            next = super::vault_custody::Entry::new(
-                next.opaque(),
-                next.remote_id(),
-                &f.destination,
-                next.etag(),
-                false,
-                next.length(),
-            )
-            .map_err(|_| no())?;
+        for e in events(&r.facts)? {
+            if next.opaque() == e.identity
+                && next.remote_id() == e.id
+                && (next.is_directory() || next.etag() == e.original.etag)
+                && next.length() == e.original.size
+                && next.is_directory() == e.original.directory
+                && next.root_relative_path() == e.original.path
+            {
+                next = super::vault_custody::Entry::new(
+                    next.opaque(),
+                    next.remote_id(),
+                    &e.new_path,
+                    next.etag(),
+                    next.is_directory(),
+                    next.length(),
+                )
+                .map_err(|_| no())?;
+            }
         }
     }
     Ok(next)
@@ -312,19 +505,22 @@ pub(super) fn hydration(
 ) -> Result<super::vault_custody::Hydration, BackendError> {
     let mut next = value.clone();
     for r in completed(store, scope)? {
-        let f = r.facts;
-        if next.opaque() == f.identity
-            && next.file_index() == f.file
-            && next.length() == f.original.size
-            && next.components() == f.old_components
+        for e in events(&r.facts)?
+            .into_iter()
+            .filter(|e| !e.original.directory)
         {
-            next = next.with_rename_components(f.new_components);
+            if next.opaque() == e.identity
+                && next.file_index() == e.file
+                && next.length() == e.original.size
+                && next.components() == e.old_components
+            {
+                next = next.with_rename_components(e.new_components);
+            }
         }
     }
     Ok(next)
 }
-
-/// Even an empty legacy catalogue must not hide unfinished location evidence.
+/// Even an empty legacy catalogue cannot hide unfinished location evidence.
 pub(super) fn verify_no_unresolved(
     store: &Arc<dyn Storage>,
     scope: &Scope,

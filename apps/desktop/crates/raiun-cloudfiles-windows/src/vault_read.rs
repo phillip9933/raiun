@@ -373,6 +373,76 @@ impl WindowsVaultReadBinding {
         .map_err(|_| BackendError::Unavailable)
     }
     #[cfg(windows)]
+    pub(crate) fn prepare_directory_rename(
+        &self,
+        original: &RemoteEntry,
+        destination: &str,
+        parent: &RemoteEntry,
+        destination_parent: &RemoteEntry,
+        expected: &[RemoteEntry],
+        cancel: &crate::vault_custody::VaultUploadCancellation<'_>,
+        context: raiun_opencloud::RangeReadContext,
+    ) -> Result<raiun_opencloud::vault_backend::VaultDirectoryRenameTarget, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancel.is_cancelled();
+        let r = raiun_opencloud::vault_backend::VaultFileRenameRequest {
+            scope: &self.scope,
+            epoch: &self.epoch,
+            vault_root_path: &self.root_path,
+            source: original,
+            destination,
+            parent,
+            destination_parent: Some(destination_parent),
+            context,
+            provider_generation: cancel.generation.clone(),
+            expected_provider_generation: cancel.expected,
+            cancelled: &stop,
+        };
+        let target = self
+            .backend
+            .prepare_directory_rename_guarded(&r, expected)?;
+        self.check_current()?;
+        if stop() {
+            return Err(refused());
+        }
+        Ok(target)
+    }
+    #[cfg(windows)]
+    pub(crate) fn send_directory_rename(
+        &self,
+        original: &RemoteEntry,
+        destination: &str,
+        parent: &RemoteEntry,
+        destination_parent: &RemoteEntry,
+        target: raiun_opencloud::vault_backend::VaultDirectoryRenameTarget,
+        cancel: &crate::vault_custody::VaultUploadCancellation<'_>,
+        context: raiun_opencloud::RangeReadContext,
+        before: &mut dyn FnMut() -> Result<(), CloudError>,
+    ) -> Result<raiun_opencloud::vault_backend::VaultDirectoryRenameOutcome, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancel.is_cancelled();
+        let r = raiun_opencloud::vault_backend::VaultFileRenameRequest {
+            scope: &self.scope,
+            epoch: &self.epoch,
+            vault_root_path: &self.root_path,
+            source: original,
+            destination,
+            parent,
+            destination_parent: Some(destination_parent),
+            context,
+            provider_generation: cancel.generation.clone(),
+            expected_provider_generation: cancel.expected,
+            cancelled: &stop,
+        };
+        let result = self.backend.rename_directory_guarded(&r, target, before)?;
+        if stop() || self.check_current().is_err() {
+            return Ok(
+                raiun_opencloud::vault_backend::VaultDirectoryRenameOutcome::NeedsReconciliation,
+            );
+        }
+        Ok(result)
+    }
+    #[cfg(windows)]
     pub(crate) fn prepare_file_rename(
         &self,
         original: &RemoteEntry,

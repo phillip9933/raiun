@@ -5,6 +5,15 @@ use raiun_vault::session::VaultSessionScope;
 use serde::{Deserialize, Serialize};
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct VaultDirectoryRenameNode {
+    pub identity: [u8; 16],
+    pub file: u64,
+    pub usn: i64,
+    pub original: RemoteEntry,
+    pub new_components: Vec<String>,
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct VaultFileRenameDestination {
     pub identity: [u8; 16],
     pub parent: RemoteEntry,
@@ -24,6 +33,8 @@ pub struct VaultFileRenameFacts {
     pub old_components: Vec<String>,
     pub new_components: Vec<String>,
     pub original: RemoteEntry,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub children: Option<Vec<VaultDirectoryRenameNode>>,
     pub parent: RemoteEntry,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_parent: Option<VaultFileRenameDestination>,
@@ -69,7 +80,8 @@ impl VaultFileRenameFacts {
                 .iter()
                 .map(|s| s.to_lowercase())
                 .eq(self.new_components.iter().map(|s| s.to_lowercase()))
-            || self.original.directory
+            || self.original.directory != self.children.is_some()
+            || (self.original.directory && self.original.size != 0)
             || !self.parent.directory
             || !bound(&self.original.id)
             || !bound(&self.parent.id)
@@ -130,6 +142,60 @@ impl VaultFileRenameFacts {
         {
             return Err(BackendError::Unavailable);
         }
+        if let Some(children) = &self.children {
+            if children.len() > 1023 {
+                return Err(BackendError::Unavailable);
+            }
+            let mut ids = std::collections::BTreeSet::from([self.identity]);
+            let mut files = std::collections::BTreeSet::from([self.file]);
+            let mut remote = std::collections::BTreeSet::from([self.original.id.clone()]);
+            let mut paths = std::collections::BTreeSet::from([self.original.path.to_lowercase()]);
+            for n in children {
+                let suffix = n
+                    .original
+                    .path
+                    .strip_prefix(&format!("{}/", self.original.path))
+                    .ok_or(BackendError::Unavailable)?;
+                let parts = suffix.split('/').map(str::to_owned).collect::<Vec<_>>();
+                let mut expected = self.new_components.clone();
+                expected.extend(parts.iter().cloned());
+                if n.identity == [0; 16]
+                    || n.identity == self.parent_identity
+                    || n.file == 0
+                    || n.file == root.file_index
+                    || n.file == self.parent_file
+                    || n.usn <= 0
+                    || !ids.insert(n.identity)
+                    || !files.insert(n.file)
+                    || !remote.insert(n.original.id.clone())
+                    || !paths.insert(n.original.path.to_lowercase())
+                    || !bound(&n.original.id)
+                    || !strong(&n.original.etag)
+                    || parts
+                        .iter()
+                        .any(|p| !crate::opencloud::valid_windows_component(p))
+                    || n.new_components != expected
+                    || !valid(&n.new_components)
+                    || (n.original.directory && n.original.size != 0)
+                {
+                    return Err(BackendError::Unavailable);
+                }
+                let parent_path = parent(&n.original.path);
+                if parent_path != self.original.path
+                    && !children
+                        .iter()
+                        .any(|p| p.original.directory && p.original.path == parent_path)
+                {
+                    return Err(BackendError::Unavailable);
+                }
+            }
+            if self
+                .destination
+                .starts_with(&format!("{}/", self.original.path))
+            {
+                return Err(BackendError::Unavailable);
+            }
+        }
         Ok(())
     }
 }
@@ -158,6 +224,10 @@ impl VaultFileRenameDescriptor {
             || self.owner.server_origin() != self.vault.server_origin()
             || self.owner.token_generation() != self.facts.token_generation
             || self.facts.original.id == self.vault.resource_id()
+            || self.facts.children.as_ref().is_some_and(|rows| {
+                rows.iter()
+                    .any(|n| n.original.id == self.vault.resource_id())
+            })
             || raiun_core::validate_remote_path(&self.remote_root).is_err()
         {
             return Err(BackendError::Unavailable);
@@ -166,6 +236,15 @@ impl VaultFileRenameDescriptor {
     }
 }
 pub trait VaultFileRenameRecord: Send + Sync {
+    fn record_directory_remote(
+        &self,
+        _proof: &raiun_opencloud::vault_backend::VaultVerifiedDirectoryRename,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unavailable)
+    }
+    fn record_directory_native(&self, _nodes: &[(u64, i64)]) -> Result<(), BackendError> {
+        Err(BackendError::Unavailable)
+    }
     fn claim_send(&self) -> Result<(), BackendError>;
     fn record_remote(
         &self,

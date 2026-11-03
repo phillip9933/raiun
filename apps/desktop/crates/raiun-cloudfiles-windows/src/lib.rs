@@ -78,8 +78,8 @@ mod vault_file_rename;
 pub mod vault_file_replace;
 #[cfg(windows)]
 pub use vault_file_rename::{
-    VaultFileRenameDescriptor, VaultFileRenameDestination, VaultFileRenameFacts,
-    VaultFileRenameRecord,
+    VaultDirectoryRenameNode, VaultFileRenameDescriptor, VaultFileRenameDestination,
+    VaultFileRenameFacts, VaultFileRenameRecord,
 };
 #[cfg(windows)]
 pub mod vault_custody;
@@ -3470,7 +3470,22 @@ impl ConfiguredRootConnection {
         >,
     ) -> Result<bool, Error> {
         self.inner
-            .try_vault_file_rename(backend, old, new, file, auth, generation, current)
+            .try_vault_file_rename(backend, old, new, file, auth, generation, current, false)
+    }
+    pub fn try_reconcile_fresh_vault_directory_rename(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        old: &[String],
+        new: &[String],
+        file: LocalFileIdentity,
+        auth: namespace_intent::CapturedAuthorization,
+        generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        current: std::sync::Arc<
+            dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync,
+        >,
+    ) -> Result<bool, Error> {
+        self.inner
+            .try_vault_file_rename(backend, old, new, file, auth, generation, current, true)
     }
     pub fn begin_fresh_vault_child_create(
         &self,

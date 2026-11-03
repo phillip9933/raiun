@@ -526,6 +526,7 @@ mod runtime {
             &self,
             parent: [u8; 16],
             name: &str,
+            directory: bool,
         ) -> Result<([u8; 16], RemoteEntry), BackendError> {
             let p = self.saved(&parent)?;
             if !p.directory || !valid_windows_component(name) {
@@ -539,12 +540,144 @@ mod runtime {
             let mut rows = catalogue
                 .entries
                 .iter()
-                .filter(|(_, e)| e.path == path && !e.directory);
+                .filter(|(_, e)| e.path == path && e.directory == directory);
             let (id, e) = rows.next().ok_or(BackendError::Unavailable)?;
             if rows.next().is_some() {
                 return Err(BackendError::Unavailable);
             }
             Ok((*id, e.clone()))
+        }
+        pub(crate) fn fresh_directory_rename_source(
+            &self,
+            source: &RemoteEntry,
+            cancellation: &crate::CancellationToken,
+        ) -> Result<RemoteEntry, BackendError> {
+            if !source.directory || source.path == "/" {
+                return Err(BackendError::Unavailable);
+            }
+            self.binding
+                .fresh_child_create_parent(source, cancellation)
+                .map_err(|_| BackendError::Unavailable)
+        }
+        pub(crate) fn directory_rename_catalogue(
+            &self,
+            source: &RemoteEntry,
+        ) -> Result<Vec<crate::vault_custody::VaultCatalogueEntry>, BackendError> {
+            if !source.directory || source.path == "/" {
+                return Err(BackendError::Unavailable);
+            }
+            let c = self
+                .catalogue
+                .lock()
+                .map_err(|_| BackendError::Unavailable)?;
+            let mut rows = c
+                .entries
+                .iter()
+                .filter(|(_, e)| {
+                    e.path == source.path || e.path.starts_with(&format!("{}/", source.path))
+                })
+                .map(|(id, e)| crate::vault_custody::VaultCatalogueEntry {
+                    identity: *id,
+                    metadata: e.clone(),
+                })
+                .collect::<Vec<_>>();
+            if rows.is_empty() || rows.len() > 1024 {
+                return Err(BackendError::Unavailable);
+            }
+            let mut paths = std::collections::BTreeSet::new();
+            let mut ids = std::collections::BTreeSet::new();
+            for e in &rows {
+                if !paths.insert(e.metadata.path.to_lowercase())
+                    || !ids.insert(e.metadata.id.clone())
+                {
+                    return Err(BackendError::Unavailable);
+                }
+            }
+            rows.sort_by(|a, b| a.metadata.path.cmp(&b.metadata.path));
+            Ok(rows)
+        }
+        pub(crate) fn publish_directory_rename<T>(
+            &self,
+            p: &raiun_opencloud::vault_backend::VaultVerifiedDirectoryRename,
+            rows: &[crate::vault_custody::VaultCatalogueEntry],
+            cancel: &crate::vault_custody::VaultUploadCancellation<'_>,
+            publish: impl FnOnce() -> Result<T, crate::Error>,
+        ) -> Result<T, crate::Error> {
+            self.binding.with_exclusive_completion(|| {
+                let no = || crate::Error::EditRecoveryUnavailable;
+                if cancel.is_cancelled()
+                    || !self.binding.file_rename_proof_matches(p.root_proof())
+                    || !p
+                        .root_proof()
+                        .provider_current(&cancel.generation, cancel.expected)
+                    || p.entries().len() != rows.len()
+                    || p.original_tree().len() != rows.len()
+                {
+                    return Err(no());
+                }
+                {
+                    let c = self.catalogue.lock().map_err(|_| no())?;
+                    let root = p.root_proof().original();
+                    let actual = c
+                        .entries
+                        .values()
+                        .filter(|e| {
+                            e.path == root.path || e.path.starts_with(&format!("{}/", root.path))
+                        })
+                        .count();
+                    if actual != rows.len() {
+                        return Err(no());
+                    }
+                    for row in rows {
+                        let old = c.entries.get(&row.identity).ok_or_else(no)?;
+                        if old.id != row.metadata.id
+                            || old.path != row.metadata.path
+                            || (!old.directory && old.etag != row.metadata.etag)
+                            || old.size != row.metadata.size
+                            || old.directory != row.metadata.directory
+                            || !p.original_tree().iter().any(|v| {
+                                v.id == old.id
+                                    && v.path == old.path
+                                    && (v.directory || v.etag == old.etag)
+                                    && v.size == old.size
+                                    && v.directory == old.directory
+                            })
+                        {
+                            return Err(no());
+                        }
+                    }
+                    if c.entries.iter().any(|(id, e)| {
+                        !rows.iter().any(|r| r.identity == *id)
+                            && p.entries()
+                                .iter()
+                                .any(|n| n.path.eq_ignore_ascii_case(&e.path))
+                    }) {
+                        return Err(no());
+                    }
+                }
+                let value = publish()?;
+                let mut c = self.catalogue.lock().map_err(|_| no())?;
+                for row in rows {
+                    let entry = p
+                        .entries()
+                        .iter()
+                        .find(|e| e.id == row.metadata.id)
+                        .ok_or_else(no)?;
+                    let old = c.entries.get(&row.identity).ok_or_else(no)?.clone();
+                    let mut next = entry.clone();
+                    if next.directory {
+                        next.etag = old.etag.clone();
+                    }
+                    next.writable = false;
+                    c.versions.remove(&key(&old));
+                    c.versions.insert(key(&next), row.identity);
+                    c.entries.insert(row.identity, next);
+                }
+                if cancel.is_cancelled() {
+                    return Err(no());
+                }
+                Ok(value)
+            })
         }
         pub(crate) fn prepare_file_rename_record(
             &self,
