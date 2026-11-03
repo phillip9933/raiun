@@ -35,6 +35,42 @@ use windows_sys::Win32::{
     },
 };
 
+// Explicit UTF-16 lengths and the OS uppercase table avoid locale-dependent
+// folding. This is only alias detection over untrusted notification names; it
+// never establishes filesystem identity or grants a namespace operation.
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn CompareStringOrdinal(
+        left: *const u16,
+        left_len: i32,
+        right: *const u16,
+        right_len: i32,
+        ignore_case: i32,
+    ) -> i32;
+}
+pub(super) fn ordinal_names_equal(left: &str, right: &str) -> Option<bool> {
+    let left: Vec<u16> = left.encode_utf16().collect();
+    let right: Vec<u16> = right.encode_utf16().collect();
+    if left.is_empty() || right.is_empty() || left.len() > 255 || right.len() > 255 {
+        return None;
+    }
+    // SAFETY: both buffers remain live, lengths are positive and bounded, and
+    // TRUE is exactly one as required by CompareStringOrdinal.
+    match unsafe {
+        CompareStringOrdinal(
+            left.as_ptr(),
+            left.len() as i32,
+            right.as_ptr(),
+            right.len() as i32,
+            1,
+        )
+    } {
+        1 | 3 => Some(false),
+        2 => Some(true),
+        _ => None,
+    }
+}
+
 #[repr(C, align(4))]
 struct AlignedBuffer([u8; NOTIFICATION_BUFFER_BYTES]);
 

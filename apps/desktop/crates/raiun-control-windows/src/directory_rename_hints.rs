@@ -59,8 +59,9 @@ pub enum RenameHintBatch<'a> {
 }
 
 /// Pair adjacent `RenamedOldName` then `RenamedNewName` hints from exactly one
-/// already-parsed batch. Only ASCII endpoint components are compared; any
-/// ambiguity, unsupported name, or incomplete pair invalidates the whole set.
+/// already-parsed batch. Windows compares Unicode endpoints with its ordinal
+/// case table. Other hosts retain the ASCII-only fallback. Any ambiguity or
+/// incomplete pair invalidates the whole set.
 pub fn pair_rename_hints(batch: &NotificationBatch) -> RenameHintBatch<'_> {
     pair_hints(batch, false)
 }
@@ -102,6 +103,7 @@ fn pair_hints(batch: &NotificationBatch, cross_parent: bool) -> RenameHintBatch<
                 };
                 let old_components = old.components();
                 let new_components = hint.components();
+                #[cfg(not(windows))]
                 if old_components
                     .iter()
                     .chain(new_components)
@@ -111,21 +113,20 @@ fn pair_hints(batch: &NotificationBatch, cross_parent: bool) -> RenameHintBatch<
                 }
                 if !same_parent(old_components, new_components)
                     && (!cross_parent
-                        || same_parent_ascii_case_insensitive(old_components, new_components))
+                        || same_parent_case_insensitive(old_components, new_components))
                 {
-                    let reason =
-                        if same_parent_ascii_case_insensitive(old_components, new_components) {
-                            RenameHintReason::CaseAmbiguousEndpoint
-                        } else {
-                            RenameHintReason::DifferentParent
-                        };
+                    let reason = if same_parent_case_insensitive(old_components, new_components) {
+                        RenameHintReason::CaseAmbiguousEndpoint
+                    } else {
+                        RenameHintReason::DifferentParent
+                    };
                     return RenameHintBatch::RescanRequired(reason);
                 }
                 if same_parent(old_components, new_components)
                     && old_components
                         .last()
                         .zip(new_components.last())
-                        .is_some_and(|(old_name, new_name)| old_name.eq_ignore_ascii_case(new_name))
+                        .is_some_and(|(old_name, new_name)| names_may_alias(old_name, new_name))
                 {
                     return RenameHintBatch::RescanRequired(RenameHintReason::CaseOnlyRename);
                 }
@@ -194,6 +195,22 @@ fn bounded_batch_size(hints: &[DirectoryHint]) -> bool {
     true
 }
 
+// Pairing remains hint-only. A failed OS comparison is treated as a possible
+// alias, so it can only refuse a pair rather than admit a conflicting endpoint.
+fn names_may_alias(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        super::native::ordinal_names_equal(left, right).unwrap_or(true)
+    }
+    #[cfg(not(windows))]
+    {
+        left.eq_ignore_ascii_case(right)
+    }
+}
+
 fn same_parent(old: &[String], new: &[String]) -> bool {
     if old.is_empty() || new.is_empty() || old.len() != new.len() {
         return false;
@@ -204,14 +221,14 @@ fn same_parent(old: &[String], new: &[String]) -> bool {
         .all(|(old, new)| old == new)
 }
 
-fn same_parent_ascii_case_insensitive(old: &[String], new: &[String]) -> bool {
+fn same_parent_case_insensitive(old: &[String], new: &[String]) -> bool {
     if old.is_empty() || new.is_empty() || old.len() != new.len() {
         return false;
     }
     old[..old.len() - 1]
         .iter()
         .zip(&new[..new.len() - 1])
-        .all(|(old, new)| old.eq_ignore_ascii_case(new))
+        .all(|(old, new)| names_may_alias(old, new))
 }
 
 fn endpoint_relation(left: &[String], right: &[String]) -> EndpointRelation {
@@ -219,7 +236,7 @@ fn endpoint_relation(left: &[String], right: &[String]) -> EndpointRelation {
         || !left
             .iter()
             .zip(right)
-            .all(|(left, right)| left.eq_ignore_ascii_case(right))
+            .all(|(left, right)| names_may_alias(left, right))
     {
         EndpointRelation::Different
     } else if left.iter().zip(right).all(|(left, right)| left == right) {

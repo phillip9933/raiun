@@ -118,7 +118,7 @@ fn orphan_interleaved_and_cross_parent_sequences_require_rescan() {
 }
 
 #[test]
-fn overlapping_duplicate_chain_case_and_unicode_names_require_rescan() {
+fn overlapping_duplicate_chain_and_case_names_require_rescan() {
     for (records, reason) in [
         (
             vec![("d\\a", "d\\b"), ("d\\a", "d\\c")],
@@ -143,10 +143,26 @@ fn overlapping_duplicate_chain_case_and_unicode_names_require_rescan() {
         &pair_batch(&[("d\\same", "d\\SAME")]),
         RenameHintReason::CaseOnlyRename,
     );
+    #[cfg(not(windows))]
     assert_rescan(
         &pair_batch(&[("d\\雪", "d\\star")]),
         RenameHintReason::UnsupportedName,
     );
+    #[cfg(windows)]
+    {
+        let unicode = pair_batch(&[("d\\雪", "d\\star")]);
+        assert!(
+            matches!(pair_rename_hints(&unicode), RenameHintBatch::Pairs(pairs) if pairs.len() == 1)
+        );
+        assert_rescan(
+            &pair_batch(&[("d\\Ä", "d\\ä")]),
+            RenameHintReason::CaseOnlyRename,
+        );
+        assert_rescan(
+            &pair_batch(&[("d\\Ä", "d\\one"), ("d\\ä", "d\\two")]),
+            RenameHintReason::CaseAmbiguousEndpoint,
+        );
+    }
 }
 
 #[test]
