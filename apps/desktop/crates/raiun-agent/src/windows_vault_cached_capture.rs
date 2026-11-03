@@ -96,6 +96,8 @@ pub(super) struct Record {
     id: String,
     phase: Phase,
     pending: Option<(String, u64)>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    queued_entry: Option<raiun_core::backend::RemoteEntry>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -173,6 +175,7 @@ fn load(
                     || row.snapshot.remote.is_some()
                     || row.snapshot.content_len != row.facts.plaintext_len
                     || (row.phase == Phase::LocalQueued) != row.pending.is_some()
+                    || (row.phase == Phase::LocalQueued) != row.queued_entry.is_some()
                     || row.pending.as_ref().is_some_and(|(id, revision)| {
                         id.len() != 32
                             || !id.bytes().all(|b| b.is_ascii_hexdigit())
@@ -180,6 +183,16 @@ fn load(
                     })
                 {
                     return Err(no());
+                }
+                if let (Some((id, revision)), Some(entry)) = (&row.pending, &row.queued_entry) {
+                    if entry.directory
+                        || entry.id != row.facts.current.id
+                        || entry.path != row.facts.current.path
+                        || entry.size != row.facts.plaintext_len
+                        || entry.etag != format!("raiun-pending-v1:{id}:{revision}")
+                    {
+                        return Err(no());
+                    }
                 }
             }
             index
@@ -245,6 +258,7 @@ pub(super) fn retain(
         id: id.clone(),
         phase: Phase::Capturing,
         pending: None,
+        queued_entry: None,
     };
     index.rows.push(row.clone());
     commit(&store, scope, raw.as_deref().map(Vec::as_slice), &index)?;
@@ -326,5 +340,35 @@ pub(super) fn mark_queued(
     }
     current.phase = Phase::LocalQueued;
     current.pending = Some((receipt.write_id().into(), receipt.revision()));
+    current.queued_entry = Some(receipt.entry().clone());
     commit(store, scope, raw.as_deref().map(Vec::as_slice), &index)
+}
+
+pub(super) fn catalogue_updates(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+) -> Result<Vec<super::windows_vault_namespace_queued::CatalogueDelta>, BackendError> {
+    let (_, index) = load(store, scope)?;
+    index
+        .rows
+        .into_iter()
+        .filter(|row| row.phase == Phase::LocalQueued)
+        .map(|row| {
+            let (write_id, revision) = row.pending.ok_or_else(no)?;
+            let entry = row.queued_entry.ok_or_else(no)?;
+            Ok(super::windows_vault_namespace_queued::CatalogueDelta {
+                write_id,
+                revision,
+                identity: row.facts.identity,
+                file: row.facts.file.file_index,
+                usn: row.facts.usn,
+                components: row.facts.components,
+                original: Some(row.facts.current),
+                entry: Some(entry),
+                plaintext_len: row.facts.plaintext_len,
+                source_sha256: Some(row.facts.plaintext_sha256),
+                verified_native: false,
+            })
+        })
+        .collect()
 }

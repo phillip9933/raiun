@@ -241,6 +241,31 @@ pub struct ExistingVaultStreamedEditPayload {
 /// or clear native incomplete history. Failure denies the pending publication.
 pub trait VaultPublicationCustody: Send + Sync {
     #[cfg(windows)]
+    fn prepare_cached_child_create(
+        &self,
+        _descriptor: &crate::VaultCachedChildCreateDescriptor,
+        _source: Option<&mut dyn std::io::Read>,
+        _verify_source: &mut dyn FnMut() -> Result<(), BackendError>,
+        _cancelled: &dyn Fn() -> bool,
+    ) -> Result<std::sync::Arc<dyn crate::VaultCachedChildCreateRecord>, BackendError> {
+        Err(BackendError::Unavailable)
+    }
+    #[cfg(windows)]
+    fn record_cached_retarget_queued(
+        &self,
+        _receipt: &crate::VaultCachedNamespaceQueued,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unavailable)
+    }
+    #[cfg(windows)]
+    fn record_cached_retarget_native(
+        &self,
+        _receipt: &crate::VaultCachedNamespaceQueued,
+        _nodes: &[([u8; 16], u64, i64)],
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unavailable)
+    }
+    #[cfg(windows)]
     fn retain_cached_streamed_edit(
         &self,
         _facts: &crate::CachedVaultEditBaselineFacts,

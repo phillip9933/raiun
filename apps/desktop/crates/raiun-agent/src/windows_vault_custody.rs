@@ -73,8 +73,11 @@ struct SessionStorage(Arc<dyn SessionStore>);
 impl Storage for SessionStorage {
     fn completed_entry_deleted(&self, scope: &Scope, entry: &Entry) -> Result<bool> {
         let store: Arc<dyn Storage> = Arc::new(SessionStorage(self.0.clone()));
-        super::windows_vault_file_delete_custody::entry_deleted(&store, scope, entry)
-            .map_err(|_| refused())
+        let deleted = super::windows_vault_file_delete_custody::entry_deleted(&store, scope, entry)
+            .map_err(|_| refused())?;
+        Ok(deleted
+            || super::windows_vault_reconciled_custody::entry_deleted(&store, scope, entry)
+                .map_err(|_| refused())?)
     }
     fn completed_file_lineage(
         &self,
@@ -261,8 +264,12 @@ impl vault_custody::Store for ProtectedStore {
         row: &vault_custody::Hydration,
     ) -> std::result::Result<bool, vault_custody::Error> {
         let current = self.project_rename_hydration(scope, row)?;
-        super::windows_vault_file_delete_custody::hydration_deleted(&self.0, scope, &current)
-            .map_err(|_| vault_custody::Error::Persistence)
+        let deleted =
+            super::windows_vault_file_delete_custody::hydration_deleted(&self.0, scope, &current)
+                .map_err(|_| vault_custody::Error::Persistence)?;
+        Ok(deleted
+            || super::windows_vault_reconciled_custody::hydration_deleted(&self.0, scope, &current)
+                .map_err(|_| vault_custody::Error::Persistence)?)
     }
     fn verify_location_history(
         &self,
@@ -288,6 +295,9 @@ impl vault_custody::Store for ProtectedStore {
                 .map_err(|_| vault_custody::Error::Persistence)?;
             let next = super::windows_vault_file_replace_custody::entry(&self.0, scope, &renamed)
                 .map_err(|_| vault_custody::Error::Persistence)?;
+            let next =
+                super::windows_vault_reconciled_custody::project_entry(&self.0, scope, &next)
+                    .map_err(|_| vault_custody::Error::Persistence)?;
             if next == current {
                 return Ok(next);
             }
@@ -307,6 +317,9 @@ impl vault_custody::Store for ProtectedStore {
                     .map_err(|_| vault_custody::Error::Persistence)?;
             let next =
                 super::windows_vault_file_replace_custody::hydration(&self.0, scope, &renamed)
+                    .map_err(|_| vault_custody::Error::Persistence)?;
+            let next =
+                super::windows_vault_reconciled_custody::project_hydration(&self.0, scope, &next)
                     .map_err(|_| vault_custody::Error::Persistence)?;
             if next == current {
                 return Ok(next);
@@ -606,6 +619,126 @@ impl WindowsVaultCustody {
             return Err(refused());
         }
         Ok((scope, record, body))
+    }
+    /// Reopens protected local custody under the original admitted account/root.
+    /// This is an expectation for later native verification, never completion.
+    pub(super) fn cached_pending_context(
+        &self,
+        owner: &ProviderScope,
+        vault: &VaultSessionScope,
+        remote_root: &str,
+        write_id: &str,
+        revision: u64,
+        operation: raiun_opencloud::vault_cache::VaultPendingOperationKind,
+    ) -> Result<(
+        Scope,
+        Arc<dyn Storage>,
+        raiun_cloudfiles_windows::VaultCachedNativeExpectation,
+    )> {
+        if owner != &self.owner || self.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(refused());
+        }
+        let scope = Scope::new(
+            &self.account,
+            vault,
+            remote_root,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(|_| refused())?;
+        let binding = RootBinding::new(
+            &self.account,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(|_| refused())?;
+        let mut manifest = RootManifest::reopen(&self.store, &binding).map_err(|_| refused())?;
+        if !manifest
+            .scopes_for_reconciliation()
+            .map_err(|_| refused())?
+            .contains(&scope)
+        {
+            return Err(refused());
+        }
+        let key = scope.authenticated_store_binding().map_err(|_| refused())?;
+        let child = {
+            let state = self.state.lock().map_err(|_| refused())?;
+            if state.failed {
+                return Err(refused());
+            }
+            state
+                .children
+                .get(key.as_slice())
+                .cloned()
+                .ok_or_else(refused)?
+        };
+        if child.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(refused());
+        }
+        let rows = super::windows_vault_namespace_queued::protected_catalogue_deltas(
+            &self.store.0,
+            &scope,
+        )
+        .map_err(|_| refused())?;
+        let row = rows
+            .iter()
+            .find(|d| d.write_id == write_id && d.revision == revision)
+            .ok_or_else(refused)?;
+        if rows
+            .iter()
+            .any(|d| d.write_id == write_id && d.revision > revision)
+            || super::windows_vault_reconciled_custody::is_reconciled(
+                &self.store.0,
+                &scope,
+                write_id,
+                revision,
+                row.identity,
+                row.file,
+            )
+            .map_err(|_| refused())?
+        {
+            return Err(refused());
+        }
+        let first = rows
+            .iter()
+            .filter(|d| d.write_id == write_id)
+            .min_by_key(|d| d.revision)
+            .ok_or_else(refused)?;
+        if first.revision != 1 {
+            return Err(refused());
+        }
+        let original = first.original.clone();
+        if original
+            .as_ref()
+            .is_some_and(|e| !capture::strong_etag(&e.etag))
+        {
+            return Err(refused());
+        }
+        let expected = raiun_cloudfiles_windows::VaultCachedNativeExpectation {
+            root: self.root,
+            operation,
+            write_id: write_id.into(),
+            revision,
+            identity: row.identity,
+            file: row.file,
+            usn: row.usn,
+            components: row.components.clone(),
+            original,
+            entry: row.entry.clone(),
+            plaintext_len: row.plaintext_len,
+            source_sha256: row.source_sha256,
+        };
+        manifest
+            .verify_current(&self.store)
+            .map_err(|_| refused())?;
+        if self.failed.load(std::sync::atomic::Ordering::Acquire)
+            || child.failed.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(refused());
+        }
+        Ok((scope, self.store.0.clone(), expected))
     }
     pub(super) fn record_cached_capture_queued(
         &self,
@@ -1587,7 +1720,102 @@ fn deterministic_capture_id(
     capture::CaptureId::new(&format!("{:x}", hash.finalize())).map_err(unavailable)
 }
 
+fn same_catalogue_metadata(a: &RemoteEntry, b: &RemoteEntry) -> bool {
+    a.id == b.id
+        && a.path == b.path
+        && a.directory == b.directory
+        && a.size == b.size
+        && a.etag == b.etag
+}
+
 impl VaultPublicationCustody for View {
+    fn prepare_cached_child_create(
+        &self,
+        d: &raiun_cloudfiles_windows::VaultCachedChildCreateDescriptor,
+        source: Option<&mut dyn std::io::Read>,
+        verify_source: &mut dyn FnMut() -> std::result::Result<(), BackendError>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> std::result::Result<
+        Arc<dyn raiun_cloudfiles_windows::VaultCachedChildCreateRecord>,
+        BackendError,
+    > {
+        d.validate()?;
+        self.verify_context(&d.owner, &d.vault, &d.remote_root)?;
+        if d.root != self.root {
+            return Err(BackendError::Unavailable);
+        }
+        let binding = RootBinding::new(
+            &self.account,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(unavailable)?;
+        let mut manifest = RootManifest::reopen(&self.store, &binding).map_err(unavailable)?;
+        if !manifest
+            .scopes_for_reconciliation()
+            .map_err(unavailable)?
+            .contains(&self.scope)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let _serial = self.child.custody.lock().map_err(unavailable)?;
+        let record = super::windows_vault_cached_child_custody::prepare(
+            self.store.0.clone(),
+            &self.scope,
+            d,
+            source,
+            verify_source,
+            cancelled,
+        )?;
+        manifest.verify_current(&self.store).map_err(unavailable)?;
+        self.verify_context(&d.owner, &d.vault, &d.remote_root)?;
+        Ok(record)
+    }
+    fn record_cached_retarget_queued(
+        &self,
+        receipt: &raiun_cloudfiles_windows::VaultCachedNamespaceQueued,
+    ) -> std::result::Result<(), BackendError> {
+        let raiun_cloudfiles_windows::VaultCachedNamespaceDescriptor::PendingRetarget(d) =
+            receipt.descriptor()
+        else {
+            return Err(BackendError::Unavailable);
+        };
+        d.validate()?;
+        self.verify_context(&d.owner, &d.vault, &d.remote_root)?;
+        if d.root != self.root {
+            return Err(BackendError::Unavailable);
+        }
+        let _serial = self.child.custody.lock().map_err(unavailable)?;
+        super::windows_vault_namespace_queued::record_retarget_queued(
+            &self.store.0,
+            &self.scope,
+            receipt,
+        )
+    }
+    fn record_cached_retarget_native(
+        &self,
+        receipt: &raiun_cloudfiles_windows::VaultCachedNamespaceQueued,
+        nodes: &[([u8; 16], u64, i64)],
+    ) -> std::result::Result<(), BackendError> {
+        let raiun_cloudfiles_windows::VaultCachedNamespaceDescriptor::PendingRetarget(d) =
+            receipt.descriptor()
+        else {
+            return Err(BackendError::Unavailable);
+        };
+        d.validate()?;
+        self.verify_context(&d.owner, &d.vault, &d.remote_root)?;
+        if d.root != self.root {
+            return Err(BackendError::Unavailable);
+        }
+        let _serial = self.child.custody.lock().map_err(unavailable)?;
+        super::windows_vault_namespace_queued::record_retarget_native(
+            &self.store.0,
+            &self.scope,
+            receipt,
+            nodes,
+        )
+    }
     fn retain_cached_streamed_edit(
         &self,
         facts: &raiun_cloudfiles_windows::CachedVaultEditBaselineFacts,
@@ -2452,6 +2680,10 @@ impl VaultPublicationCustody for View {
                 &self.store.0,
                 &self.scope,
                 entry,
+            )? && !super::windows_vault_reconciled_custody::entry_deleted(
+                &self.store.0,
+                &self.scope,
+                entry,
             )? {
                 current.push(entry);
             }
@@ -2473,7 +2705,14 @@ impl VaultPublicationCustody for View {
             })
             .collect::<Vec<_>>();
 
-        Ok(rows)
+        let extra =
+            super::windows_vault_cached_capture::catalogue_updates(&self.store.0, &self.scope)?;
+        super::windows_vault_namespace_queued::current_catalogue(
+            &self.store.0,
+            &self.scope,
+            &rows,
+            &extra,
+        )
     }
     fn persist_catalogue(
         &self,
@@ -2490,8 +2729,41 @@ impl VaultPublicationCustody for View {
                 .store(true, std::sync::atomic::Ordering::Release);
             return Err(BackendError::Unavailable);
         }
-        let entries = entries
+        // Pending/current presentations are derived from authenticated custody,
+        // never enrolled as a new immutable remote baseline.
+        let deltas = super::windows_vault_namespace_queued::protected_catalogue_deltas(
+            &self.store.0,
+            &self.scope,
+        )?;
+        let terminal =
+            super::windows_vault_reconciled_custody::catalogue_updates(&self.store.0, &self.scope)?;
+        let protected = deltas
             .iter()
+            .chain(terminal.iter())
+            .map(|d| d.identity)
+            .collect::<std::collections::BTreeSet<_>>();
+        let current = self.catalogue_snapshot()?;
+        let mut ordinary = Vec::new();
+        for row in entries {
+            if protected.contains(&row.identity) {
+                let known = current
+                    .iter()
+                    .find(|e| e.identity == row.identity)
+                    .ok_or(BackendError::Unavailable)?;
+                if !same_catalogue_metadata(&known.metadata, &row.metadata) {
+                    return Err(BackendError::Unavailable);
+                }
+            } else {
+                if !capture::strong_etag(&row.metadata.etag)
+                    || row.metadata.id.starts_with("raiun-pending-")
+                {
+                    return Err(BackendError::Unavailable);
+                }
+                ordinary.push(row);
+            }
+        }
+        let entries = ordinary
+            .into_iter()
             .map(|entry| {
                 Entry::new(
                     entry.identity,
@@ -2542,6 +2814,35 @@ impl VaultPublicationCustody for View {
                 .failed
                 .store(true, std::sync::atomic::Ordering::Release);
             return Err(BackendError::Unavailable);
+        }
+        let deltas = super::windows_vault_namespace_queued::protected_catalogue_deltas(
+            &self.store.0,
+            &self.scope,
+        )?;
+        if deltas.iter().any(|d| d.identity == intent.identity) {
+            // Native queued mappings already have their own protected receipt.
+            // A hydration may confirm that exact mapping, never replace it.
+            let current = self.catalogue_snapshot()?;
+            let row = current
+                .iter()
+                .find(|e| e.identity == intent.identity)
+                .ok_or(BackendError::Unavailable)?;
+            if row.metadata.directory || row.metadata.size != intent.length {
+                return Err(BackendError::Unavailable);
+            }
+            let latest = deltas
+                .iter()
+                .filter(|d| d.identity == intent.identity)
+                .find(|d| {
+                    d.entry
+                        .as_ref()
+                        .is_some_and(|e| same_catalogue_metadata(e, &row.metadata))
+                })
+                .ok_or(BackendError::Unavailable)?;
+            if latest.file != intent.file_index || latest.components != intent.components {
+                return Err(BackendError::Unavailable);
+            }
+            return Ok(());
         }
         let mut child = self.child.custody.lock().map_err(unavailable)?;
         if self.root_failed.load(std::sync::atomic::Ordering::Acquire)
