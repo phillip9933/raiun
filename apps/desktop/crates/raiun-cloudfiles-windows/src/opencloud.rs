@@ -9,6 +9,12 @@
 #[cfg(windows)]
 mod cached;
 #[cfg(windows)]
+mod vault_cached_namespace;
+#[cfg(windows)]
+pub use vault_cached_namespace::{
+    VaultCachedNamespaceDescriptor, VaultCachedNamespaceOperation, VaultCachedNamespaceQueued,
+};
+#[cfg(windows)]
 mod vault_cached_write;
 #[cfg(windows)]
 pub use vault_cached_write::VaultCachedQueuedEdit;
