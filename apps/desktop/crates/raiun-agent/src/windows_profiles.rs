@@ -1073,7 +1073,7 @@ impl WindowsProfiles {
                 state.runtimes.insert(id.clone(), runtime);
                 Ok((json!({"id":id}), false))
             }
-            "configure" | "configure_root" | "mount" if action != "mount" || mount_only() => {
+            "configure" | "configure_root" | "mount" => {
                 let _gate = self
                     .mutation_gate
                     .lock()

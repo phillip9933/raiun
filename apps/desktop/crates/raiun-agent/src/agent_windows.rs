@@ -3748,8 +3748,10 @@ impl WindowsAgent {
         match action {
             "status" => Ok((self.status()?, false)),
             "spaces" if mount_only() => Ok((self.headless_spaces()?, false)),
-            "mount" if mount_only() => Ok((self.headless_mount(request)?, false)),
-            "unmount" if mount_only() => Ok((self.headless_unmount()?, false)),
+            // Both entrypoints use the same verified root lifecycle. Runtime
+            // admission still keeps Desktop and headless state separate.
+            "mount" => Ok((self.headless_mount(request)?, false)),
+            "unmount" => Ok((self.headless_unmount()?, false)),
             "account_avatar" => Ok((self.account_avatar(request)?, false)),
             "guest_permissions" | "guest_invite" | "guest_update" | "guest_revoke" => {
                 Ok((self.guest_sharing(request)?, false))
