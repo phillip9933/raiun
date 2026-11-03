@@ -393,6 +393,7 @@ impl SnapshotStore {
                 if !matches!(
                     record.state,
                     StreamedAttemptState::LocallyAcknowledged { .. }
+                        | StreamedAttemptState::Superseded { .. }
                 ) {
                     pending = true;
                 }

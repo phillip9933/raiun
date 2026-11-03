@@ -46,12 +46,35 @@ impl StreamedRecordKey {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StreamedAttemptState {
     NotAttempted,
-    Uncertain { attempt_id: u64 },
-    VerifiedApplied { attempt_id: u64, attempts: u8 },
-    Conflict { attempt_id: u64, attempts: u8 },
-    Ambiguous { attempt_id: u64, attempts: u8 },
-    Deferred { attempt_id: u64, attempts: u8 },
-    LocallyAcknowledged { attempt_id: u64, attempts: u8 },
+    Uncertain {
+        attempt_id: u64,
+    },
+    VerifiedApplied {
+        attempt_id: u64,
+        attempts: u8,
+    },
+    Conflict {
+        attempt_id: u64,
+        attempts: u8,
+    },
+    Ambiguous {
+        attempt_id: u64,
+        attempts: u8,
+    },
+    Deferred {
+        attempt_id: u64,
+        attempts: u8,
+    },
+    LocallyAcknowledged {
+        attempt_id: u64,
+        attempts: u8,
+    },
+    /// Original create body was retained after a separately captured edit
+    /// completed; it was never acknowledged as current file contents.
+    Superseded {
+        attempt_id: u64,
+        attempts: u8,
+    },
 }
 impl StreamedAttemptState {
     pub fn attempt_id(self) -> u64 {
@@ -62,7 +85,8 @@ impl StreamedAttemptState {
             | Self::Conflict { attempt_id, .. }
             | Self::Ambiguous { attempt_id, .. }
             | Self::Deferred { attempt_id, .. }
-            | Self::LocallyAcknowledged { attempt_id, .. } => attempt_id,
+            | Self::LocallyAcknowledged { attempt_id, .. }
+            | Self::Superseded { attempt_id, .. } => attempt_id,
         }
     }
 }
@@ -105,10 +129,15 @@ enum EventAction {
     LocalAcknowledged {
         attempts: u8,
     },
+    Superseded {
+        edit: crate::namespace_intent::ContinuedEditReference,
+    },
 }
 struct History {
     state: StreamedAttemptState,
     sequence: u64,
+    #[cfg(windows)]
+    superseded_edit: Option<crate::namespace_intent::ContinuedEditReference>,
 }
 
 impl SnapshotStore {
@@ -269,6 +298,47 @@ impl SnapshotStore {
                 attempts: 0,
             }))
     }
+    /// Authenticate one continued file-create edit under the caller's existing
+    /// scan budget. This is a metadata/state check, not a native or upload permit.
+    #[cfg(windows)]
+    pub(super) fn continued_edit_metadata(
+        &self,
+        record_id: &str,
+        budget: &mut Budget,
+    ) -> Result<(StreamedRecordKey, SnapshotManifest, StreamedAttemptState), StoreError> {
+        let manifest = self.selected_manifest(record_id, budget)?;
+        let key = StreamedRecordKey::from_manifest(&manifest)?;
+        let directory = self.root.child(&self.key, false)?;
+        let state = self.read_history(&*directory, &key, budget)?.state;
+        Ok((key, manifest, state))
+    }
+    /// The sealed original-stream terminal link, if present. A caller must
+    /// independently authenticate the joined create and linked edit metadata.
+    #[cfg(windows)]
+    pub(super) fn create_superseded_metadata(
+        &self,
+        key: &StreamedRecordKey,
+        budget: &mut Budget,
+    ) -> Result<Option<crate::namespace_intent::ContinuedEditReference>, StoreError> {
+        self.check_key(key)?;
+        let directory = self.root.child(&self.key, false)?;
+        let history = self.read_history(&*directory, key, budget)?;
+        if history.state
+            == (StreamedAttemptState::Superseded {
+                attempt_id: 0,
+                attempts: 0,
+            })
+        {
+            history
+                .superseded_edit
+                .ok_or(StoreError::CorruptEvidence)
+                .map(Some)
+        } else if history.superseded_edit.is_none() {
+            Ok(None)
+        } else {
+            Err(StoreError::CorruptEvidence)
+        }
+    }
     fn read_history(
         &self,
         directory: &dyn Directory,
@@ -311,6 +381,8 @@ impl SnapshotStore {
         }
         event_names.sort_by_key(|(seq, _)| *seq);
         let mut state = StreamedAttemptState::NotAttempted;
+        #[cfg(windows)]
+        let mut superseded_edit = None;
         let mut sequence = 0u64;
         let mut active_dispatch: Option<String> = None;
         let mut ordinal = 0u8;
@@ -340,7 +412,11 @@ impl SnapshotStore {
                 || event.generation != key.generation()
                 || event.sequence != seq
                 || !valid_id(&event.dispatch_id)
-                || matches!(state, StreamedAttemptState::LocallyAcknowledged { .. })
+                || matches!(
+                    state,
+                    StreamedAttemptState::LocallyAcknowledged { .. }
+                        | StreamedAttemptState::Superseded { .. }
+                )
             {
                 return Err(StoreError::CorruptEvidence);
             }
@@ -411,10 +487,40 @@ impl SnapshotStore {
                         attempts,
                     };
                 }
+                EventAction::Superseded { edit } => {
+                    #[cfg(not(windows))]
+                    {
+                        let _ = edit;
+                        return Err(StoreError::CorruptEvidence);
+                    }
+                    #[cfg(windows)]
+                    {
+                        if state != StreamedAttemptState::NotAttempted
+                            || event.attempt_id != 0
+                            || active_dispatch.is_some()
+                            || !valid_id(&edit.record_id)
+                            || edit.record_id == key.record_id()
+                            || edit.generation == 0
+                            || edit.manifest_commitment == [0; 32]
+                        {
+                            return Err(StoreError::CorruptEvidence);
+                        }
+                        superseded_edit = Some(edit);
+                        state = StreamedAttemptState::Superseded {
+                            attempt_id: 0,
+                            attempts: 0,
+                        };
+                    }
+                }
             }
             sequence = seq;
         }
-        Ok(History { state, sequence })
+        Ok(History {
+            state,
+            sequence,
+            #[cfg(windows)]
+            superseded_edit,
+        })
     }
 }
 
@@ -478,6 +584,33 @@ impl StreamedDispatchLease {
             key: key.clone(),
         })
     }
+    /// Terminalize the original create snapshot without claiming it is the
+    /// current file. Only the namespace continuation path may call this after
+    /// live native completion and a separately acknowledged edit are proven.
+    #[cfg(windows)]
+    pub(crate) fn supersede_create(
+        &mut self,
+        edit: &crate::namespace_intent::ContinuedEditReference,
+    ) -> Result<(), StoreError> {
+        if self.finished
+            || self.poisoned
+            || self.current_state()? != StreamedAttemptState::NotAttempted
+            || edit.record_id == self.key.record_id()
+            || !valid_id(&edit.record_id)
+            || edit.generation == 0
+            || edit.manifest_commitment == [0; 32]
+        {
+            return Err(StoreError::Invalid);
+        }
+        let history = self.history()?;
+        self.append(
+            history.sequence,
+            0,
+            EventAction::Superseded { edit: edit.clone() },
+        )?;
+        self.finished = true;
+        Ok(())
+    }
     pub fn begin_attempt(&mut self) -> Result<u64, StoreError> {
         if self.finished || self.poisoned || self.puts >= 2 {
             return Err(StoreError::Invalid);
@@ -495,6 +628,7 @@ impl StreamedDispatchLease {
             history.state,
             StreamedAttemptState::VerifiedApplied { .. }
                 | StreamedAttemptState::LocallyAcknowledged { .. }
+                | StreamedAttemptState::Superseded { .. }
         ) {
             return Err(StoreError::Invalid);
         }
@@ -527,6 +661,7 @@ impl StreamedDispatchLease {
             || matches!(
                 history.state,
                 StreamedAttemptState::LocallyAcknowledged { .. }
+                    | StreamedAttemptState::Superseded { .. }
             )
             || (matches!(history.state, StreamedAttemptState::VerifiedApplied { .. })
                 && outcome != StreamedAttemptOutcome::VerifiedApplied)

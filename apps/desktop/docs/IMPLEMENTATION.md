@@ -12,9 +12,26 @@ Only its actual supported operations are advertised; existing-folder rename/dele
 and replacement-style editors remain online-only. See [current parity status](GUI-PARITY.md)
 for bounds and actual validation scope.
 
-The composed Windows Agent/CLI and affected Linux source compile; formatting and
-the frontend build pass. Final package production and the agreed basic checks are
-next. Interim packages and their startup/upgrade receipts are preserved separately;
+The unsigned Linux GUI/CLI packages are prepared from `777bc3d` and passed
+signed-out startup, normal quit and CLI help/version checks. Later source changes
+are confined to Windows. The Windows `bb972ad` installer was installed in the
+owner's original profile with exact payloads and retained settings/recovery;
+GUI/Agent startup and a new file's initial remote creation passed. The following
+edit arrived before native placeholder completion and remains safely retained.
+The first failed workflow receipt is preserved; file-update acceptance is pending.
+
+An explicit saved-edit retry now connects an interrupted, remote-verified ordinary
+Personal create to a new protected conditional edit of the same physical file.
+It verifies the original resource/version and current account/root/ancestry,
+then verifies the edited cloud bytes before native completion. The original body
+is retained with a distinct linked superseded history, never acknowledged as the
+edited body. A changed file, remote version or binding refuses and keeps recovery.
+A completed historical commit link does not claim a fresh remote/native check.
+The held create producer remains closed for its connection; normal reconnect can
+restore it only after authenticated recovery is resolved. No root reset is used.
+
+Affected compilation and formatting are the source gates. The corrected Windows
+installer and the same retained file workflow still require actual execution;
 no native acceptance is inferred from source checks. No new release is published.
 Older sections below are historical implementation records, not current activation
 or remaining-work claims.

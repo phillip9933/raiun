@@ -854,6 +854,17 @@ enum ProviderCommand {
         response:
             std::sync::mpsc::SyncSender<Result<windows_gui_recovery::RecoveryCompletion, String>>,
     },
+    ContinueFileCreate {
+        agent_generation: u64,
+        recovery: Arc<dyn raiun_cloudfiles_windows::PreparedEditRecovery>,
+        record_id: String,
+        record_generation: u64,
+        parents: Vec<String>,
+        name: String,
+        response: std::sync::mpsc::SyncSender<
+            Result<raiun_cloudfiles_windows::FileCreateContinuationOutcome, String>,
+        >,
+    },
     DispatchRecoveryAndComplete {
         agent_generation: u64,
         recovery: Arc<dyn raiun_cloudfiles_windows::PreparedEditRecovery>,
@@ -1796,6 +1807,41 @@ impl ProviderManager {
                                     remote.as_ref(),
                                 )
                             };
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::ContinueFileCreate {
+                            agent_generation, recovery, record_id, record_generation, parents, name, response,
+                        } => {
+                            let result = (|| {
+                                let connection = connection.as_ref().ok_or("Connect the original Windows drive before continuing this file")?;
+                                let backend = backend.as_ref().ok_or("The connected account is unavailable")?;
+                                let binding = active_binding.as_ref().filter(|binding| binding.generation == agent_generation)
+                                    .ok_or("The connected Windows drive changed")?;
+                                if worker_generation.load(Ordering::Acquire) != agent_generation
+                                    || backend.is_revoked() || recovery.provider_scope() != backend.scope()
+                                    || recovery.root_identity() != binding.identity
+                                {
+                                    return Err("The account or Windows drive changed before file continuation".to_owned());
+                                }
+                                let generation_check = worker_generation.clone();
+                                let backend_check = Arc::downgrade(backend);
+                                let auth = raiun_cloudfiles_windows::namespace_intent::CapturedAuthorization {
+                                    agent_generation, token_generation: backend.scope().token_generation(),
+                                };
+                                let current: Arc<dyn Fn(raiun_cloudfiles_windows::namespace_intent::CapturedAuthorization) -> bool + Send + Sync> = Arc::new(move |expected| {
+                                    expected == auth && generation_check.load(Ordering::Acquire) == expected.agent_generation
+                                        && backend_check.upgrade().is_some_and(|backend| !backend.is_revoked() && backend.scope().token_generation() == expected.token_generation)
+                                });
+                                let job = recovery.begin_streamed_job().ok_or("Protected file continuation is unavailable")?
+                                    .with_revocation_check({let current=current.clone(); Arc::new(move || !current(auth))});
+                                let parents: Vec<_> = parents.iter().map(String::as_str).collect();
+                                let outcome = connection.continue_personal_file_create(backend, &parents, &name, &record_id, record_generation, auth, &job, current)
+                                    .map_err(|error| format!("The interrupted file remains safely retained; {error}"))?;
+                                if worker_generation.load(Ordering::Acquire) != agent_generation {
+                                    return Err("The account changed during file continuation".to_owned());
+                                }
+                                Ok(outcome)
+                            })();
                             let _ = response.send(result);
                         }
                         ProviderCommand::DispatchRecoveryAndComplete {
@@ -2892,6 +2938,33 @@ impl ProviderManager {
         result
             .recv()
             .map_err(|_| "Windows recovery manager stopped unexpectedly")?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn continue_file_create(
+        &self,
+        agent_generation: u64,
+        recovery: Arc<dyn raiun_cloudfiles_windows::PreparedEditRecovery>,
+        record_id: String,
+        record_generation: u64,
+        parents: Vec<String>,
+        name: String,
+    ) -> Result<raiun_cloudfiles_windows::FileCreateContinuationOutcome, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::ContinueFileCreate {
+                agent_generation,
+                recovery,
+                record_id,
+                record_generation,
+                parents,
+                name,
+                response,
+            })
+            .map_err(|_| "Windows recovery manager is unavailable")?;
+        result
+            .recv()
+            .map_err(|_| "Windows recovery manager stopped during file continuation")?
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4813,7 +4886,7 @@ impl WindowsAgent {
         let remote = Arc::new(
             raiun_cloudfiles_windows::OpenCloudRecoveryRemote::new(
                 Arc::clone(&client),
-                metadata.scope,
+                metadata.scope.clone(),
                 remote_root.path,
                 client_generation,
             )
@@ -4844,6 +4917,41 @@ impl WindowsAgent {
             {
                 return Err("The account changed; reopen Transfers and try again".into());
             }
+        }
+        if metadata.remote.is_none() {
+            // Missing baseline cannot authorize ordinary replay. An explicit
+            // selected create may only continue through its authenticated
+            // namespace report and a fresh same-file conditional successor.
+            if !space.personal {
+                return Err("Only a verified Personal file create can be continued here".into());
+            }
+            let mut components = windows_gui_recovery::local_components(&metadata.relative_path)?
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            let name = components
+                .pop()
+                .ok_or("The retained file path is invalid")?;
+            let mut parents = vec!["Personal".to_owned()];
+            parents.extend(components);
+            let outcome = self.provider.continue_file_create(
+                agent_generation,
+                prepared,
+                record_id.to_owned(),
+                record_generation,
+                parents,
+                name,
+            )?;
+            if self.generation.load(Ordering::Acquire) != agent_generation {
+                return Err("The account changed during file continuation".into());
+            }
+            let fresh = outcome
+                == raiun_cloudfiles_windows::FileCreateContinuationOutcome::LocallyCompleted;
+            return Ok(json!({"remote_verified":fresh,
+                "local_completion":if fresh {"completed"} else {"historical_link_completed"},
+                "continued_create":true,"original_snapshot_retained":true,
+                "profile_id":self.profile_scope.as_str(),"auth_generation":agent_generation,
+                "recovery_scope_token":recovery_scope_token}));
         }
         if mount_only() {
             let (outcome, completion) = if let Some(components) = local_components {

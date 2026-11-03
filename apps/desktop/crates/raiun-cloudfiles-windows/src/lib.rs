@@ -226,6 +226,15 @@ pub use native::native_namespace_directory::{
     DirectoryCreateReply, DirectoryCreateStep, DirectoryCreateTask,
 };
 
+/// Fresh native completion is distinct from closing a previously recorded
+/// historical link after an interrupted durable commit.
+#[cfg(windows)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileCreateContinuationOutcome {
+    LocallyCompleted,
+    HistoricalLinkCompleted,
+}
+
 /// Cloud Files API platform version. This reports API capability only; it is
 /// not evidence that Raiun has connected a provider or mounted a drive.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1097,6 +1106,35 @@ impl ConfiguredRootConnection {
             current,
         )
     }
+    /// Explicitly continue one interrupted create selected from protected
+    /// recovery. Its current bytes are a new conditional edit, never a replay
+    /// of the historical create or an acknowledgement of its old body.
+    #[allow(clippy::too_many_arguments)]
+    pub fn continue_personal_file_create(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        parent_components: &[&str],
+        name: &str,
+        record_id: &str,
+        record_generation: u64,
+        authorization: namespace_intent::CapturedAuthorization,
+        job: &StreamedRecoveryJob,
+        current: std::sync::Arc<
+            dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync,
+        >,
+    ) -> Result<FileCreateContinuationOutcome, Error> {
+        self.inner.continue_personal_file_create(
+            backend,
+            parent_components,
+            name,
+            record_id,
+            record_generation,
+            authorization,
+            job,
+            current,
+        )
+    }
+
     /// Start one explicit ordinary Personal directory attempt. Only returned
     /// SDK tasks are Send; native pins/journal admission stay with this owner.
     /// Callers MUST close admission and drain/join actual SDK workers/results

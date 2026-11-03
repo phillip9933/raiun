@@ -36,13 +36,17 @@ account/vault/root binding, and cache eviction remains separate from cloud delet
 
 Current source passed affected Linux Agent/CLI compilation, the composed Windows
 Agent/CLI cross-compilation, formatting and the frontend production build.
-The previous interim Windows installer passed basic upgrade/startup and synthetic
-preservation checks; the Linux interim packages passed signed-out startup and
-normal quit. These interims do not include the final cached-write integration.
-Final packages and their agreed basic checks remain required.
-Compilation does not establish Explorer/editor/native acceptance. No new source
-has been signed or published, and no owner-device installation of this resumed
-parity work has occurred.
+Exact Linux `777bc3d` unsigned GUI/CLI packages passed signed-out startup, normal
+quit and CLI help/version checks; no exact-source sign-in/file workflow is claimed.
+Windows `bb972ad` was installed in the owner's original profile, preserving the
+selected state files, startup configuration and root. GUI/Agent startup and an
+ordinary file's initial remote create passed. An early edit before native create
+completion remains retained; remote update/native completion are not accepted.
+The new explicit continuation preserves the original body and conditionally
+reconciles a separately protected current edit before native completion, keeping
+all old history. Its corrected package and original file workflow remain pending.
+Compilation does not establish Explorer/editor/native acceptance. No candidate
+has been signed or published.
 
 Validation stays within the owner's reduced scope: affected build and formatting,
 basic install/upgrade/startup/sign-in, one normal file workflow and essential data

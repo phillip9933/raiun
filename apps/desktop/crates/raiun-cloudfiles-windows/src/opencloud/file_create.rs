@@ -5,6 +5,9 @@ use crate::namespace_intent::{
 };
 use crate::streamed_store::namespace_file_store::VerifiedFileJoin;
 
+#[path = "file_create_continuation.rs"]
+pub(crate) mod continuation;
+
 pub(crate) type Current = Arc<dyn Fn(CapturedAuthorization) -> bool + Send + Sync>;
 pub(crate) struct Admission {
     pub(crate) parent: namespace::CapturedDirectoryParent,

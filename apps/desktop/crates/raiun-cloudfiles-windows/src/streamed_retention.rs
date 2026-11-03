@@ -39,6 +39,7 @@ pub struct RetainedRecordsInspection {
     pub unresolved: RetainedRecordObservation,
     pub remote_verified_only: RetainedRecordObservation,
     pub historical_local_acknowledged: RetainedRecordObservation,
+    pub historical_superseded: RetainedRecordObservation,
 }
 
 impl SnapshotStore {
@@ -59,6 +60,7 @@ impl SnapshotStore {
                 StreamedAttemptState::VerifiedApplied { .. } => {
                     &mut inspection.remote_verified_only
                 }
+                StreamedAttemptState::Superseded { .. } => &mut inspection.historical_superseded,
                 StreamedAttemptState::LocallyAcknowledged { .. } => {
                     &mut inspection.historical_local_acknowledged
                 }

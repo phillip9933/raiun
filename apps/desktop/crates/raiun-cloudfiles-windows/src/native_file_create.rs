@@ -16,6 +16,10 @@ use crate::streamed_store::namespace_rename_store::FileRenameStore;
 use crate::streamed_store::{SnapshotStore, StreamedRecordKey};
 use std::io::{self, Read};
 
+#[path = "native_file_create_continuation.rs"]
+mod continuation;
+pub(crate) use continuation::NativeFileCreateContinuation;
+
 #[link(name = "CldApi")]
 unsafe extern "system" {
     fn CfConvertToPlaceholder(
@@ -179,6 +183,7 @@ pub(super) struct ReplacementBody {
     usn: i64,
     digest: [u8; 32],
     path: PathBuf,
+    cloud_identity: Option<[u8; 16]>,
 }
 impl ReplacementBody {
     pub(super) fn capture<T>(
@@ -206,15 +211,84 @@ impl ReplacementBody {
         stopped: &dyn Fn() -> bool,
         capture: impl FnOnce(&mut dyn Read, RootSnapshot, i64) -> Result<T, Error>,
     ) -> Result<(Self, T), Error> {
+        Self::capture_with_file_policy(
+            path,
+            volume,
+            original_file,
+            false,
+            None,
+            job,
+            stopped,
+            capture,
+        )
+    }
+
+    pub(super) fn capture_same_file_with_usn<T>(
+        path: &Path,
+        volume: u32,
+        original_file: u64,
+        job: &crate::StreamedRecoveryJob,
+        stopped: &dyn Fn() -> bool,
+        capture: impl FnOnce(&mut dyn Read, RootSnapshot, i64) -> Result<T, Error>,
+    ) -> Result<(Self, T), Error> {
+        Self::capture_with_file_policy(
+            path,
+            volume,
+            original_file,
+            true,
+            None,
+            job,
+            stopped,
+            capture,
+        )
+    }
+
+    pub(super) fn capture_continuation_with_usn<T>(
+        path: &Path,
+        volume: u32,
+        original_file: u64,
+        cloud_identity: [u8; 16],
+        job: &crate::StreamedRecoveryJob,
+        stopped: &dyn Fn() -> bool,
+        capture: impl FnOnce(&mut dyn Read, RootSnapshot, i64) -> Result<T, Error>,
+    ) -> Result<(Self, T), Error> {
+        Self::capture_with_file_policy(
+            path,
+            volume,
+            original_file,
+            true,
+            Some(cloud_identity),
+            job,
+            stopped,
+            capture,
+        )
+    }
+
+    fn capture_with_file_policy<T>(
+        path: &Path,
+        volume: u32,
+        original_file: u64,
+        same_file: bool,
+        accepted_cloud_identity: Option<[u8; 16]>,
+        job: &crate::StreamedRecoveryJob,
+        stopped: &dyn Fn() -> bool,
+        capture: impl FnOnce(&mut dyn Read, RootSnapshot, i64) -> Result<T, Error>,
+    ) -> Result<(Self, T), Error> {
         use sha2::Digest;
         if stopped() || job.is_stopped() {
             return Err(Error::EditRecoveryUnavailable);
         }
         let source = SourceOwner::open(&wide_path(path)?)?;
         let reference = source.reference()?;
-        let (snapshot, usn) = plain(&reference)?;
+        let initial = root_snapshot(reference.raw)?;
+        let cloud_identity = if initial.placeholder_state == 0 {
+            None
+        } else {
+            Some(accepted_cloud_identity.ok_or(Error::ConfiguredRootChanged)?)
+        };
+        let (snapshot, usn) = Self::observe(&reference, initial, path, cloud_identity)?;
         if snapshot.identity.volume_serial != volume
-            || snapshot.identity.file_index == original_file
+            || (snapshot.identity.file_index == original_file) != same_file
             || usn <= 0
             || !windows_paths_equal(
                 &final_path_for_handle(reference.raw).map_err(|_| Error::ConfiguredRootChanged)?,
@@ -237,7 +311,7 @@ impl ReplacementBody {
             return Err(Error::EditRecoveryUnavailable);
         }
         let digest: [u8; 32] = reader.hash.finalize().into();
-        let after = plain(&reference)?;
+        let after = Self::observe(&reference, snapshot, path, cloud_identity)?;
         if !same_edit_snapshot(snapshot, after.0) || after.1 != usn || stopped() {
             return Err(Error::ConfiguredRootChanged);
         }
@@ -248,9 +322,28 @@ impl ReplacementBody {
             usn,
             digest,
             path: path.to_owned(),
+            cloud_identity,
         };
         body.check(job, stopped)?;
         Ok((body, value))
+    }
+    fn observe(
+        reference: &SourceReference<'_>,
+        expected: RootSnapshot,
+        path: &Path,
+        cloud_identity: Option<[u8; 16]>,
+    ) -> Result<(RootSnapshot, i64), Error> {
+        if let Some(identity) = cloud_identity {
+            // validate_converted also requires exactly one hard link and the
+            // full, nonpartial cloud body at this exact file and path.
+            validate_converted(reference, expected, path, &identity, false)?;
+            Ok((
+                root_snapshot(reference.raw)?,
+                completion_usn(reference.raw, expected.identity.file_index)?,
+            ))
+        } else {
+            plain(reference)
+        }
     }
     pub(super) fn len(&self) -> u64 {
         self.snapshot.file_size
@@ -281,7 +374,7 @@ impl ReplacementBody {
             return Err(Error::EditRecoveryUnavailable);
         }
         let reference = self.source.reference()?;
-        let now = plain(&reference)?;
+        let now = Self::observe(&reference, self.snapshot, &self.path, self.cloud_identity)?;
         if !same_edit_snapshot(self.snapshot, now.0)
             || now.1 != self.usn
             || !windows_paths_equal(
@@ -292,7 +385,7 @@ impl ReplacementBody {
             return Err(Error::ConfiguredRootChanged);
         }
         hash_source(&reference, self.snapshot.file_size, job, &self.digest)?;
-        let after = plain(&reference)?;
+        let after = Self::observe(&reference, self.snapshot, &self.path, self.cloud_identity)?;
         if stopped() || !same_edit_snapshot(self.snapshot, after.0) || after.1 != self.usn {
             return Err(Error::ConfiguredRootChanged);
         }
@@ -307,6 +400,29 @@ impl ReplacementBody {
     ) -> Result<(), Error> {
         self.check(job, stopped)?;
         let reference = self.source.reference()?;
+        if let Some(expected) = self.cloud_identity {
+            if expected != *identity || !claim() {
+                return Err(Error::EditRecoveryUnavailable);
+            }
+            validate_converted(&reference, self.snapshot, &self.path, identity, false)?;
+            let mut usn = completion_usn(reference.raw, self.snapshot.identity.file_index)?;
+            if usn != self.usn || usn <= 0 || stopped() {
+                return Err(Error::ConfiguredRootChanged);
+            }
+            if self.snapshot.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC == 0 {
+                let hr = unsafe { CfSetInSyncState(self.source.0, 1, 0, &mut usn) };
+                if hr < 0 {
+                    return Err(native_error("complete held file-create continuation", hr));
+                }
+            }
+            validate_converted(&reference, self.snapshot, &self.path, identity, true)?;
+            hash_source(&reference, self.snapshot.file_size, job, &self.digest)?;
+            if stopped() || completion_usn(reference.raw, self.snapshot.identity.file_index)? != usn
+            {
+                return Err(Error::ConfiguredRootChanged);
+            }
+            return Ok(());
+        }
         let mut converted_usn = 0i64;
         // Same protected WRITE_ACCESS owner and synchronous NONE conversion
         // used by the ordinary create path. No re-open or fallback handle.

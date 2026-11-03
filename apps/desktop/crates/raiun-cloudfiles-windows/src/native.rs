@@ -63,6 +63,7 @@ mod native_vault_pending_history;
 #[path = "native_vault_rename_driver.rs"]
 mod native_vault_rename_driver;
 pub(crate) use native_file_create::NativeFileCreateCompletion;
+pub(crate) use native_file_create::NativeFileCreateContinuation;
 #[path = "native_file_rename.rs"]
 pub(super) mod native_file_rename;
 #[path = "native_namespace_directory.rs"]

@@ -138,7 +138,7 @@ pub(super) fn dispatch_and_complete(
     Ok(result)
 }
 
-fn local_components(path: &str) -> Result<Vec<&str>, String> {
+pub(super) fn local_components(path: &str) -> Result<Vec<&str>, String> {
     if path.is_empty() || path.len() > 32 * 1024 || path.contains('\\') {
         return Err("The retained local edit path is invalid".into());
     }

@@ -2,8 +2,9 @@
 //! existing-resource baseline, adoption, replay or deletion is provided here.
 use super::*;
 use crate::namespace_intent::{
-    NamespaceAttention, NamespaceEvent, NamespaceEventKind, NamespaceIntent,
-    NamespaceIntentProgress, NamespaceOperation, NamespacePhase, NamespaceProgressSnapshot,
+    ContinuedEditReference, NamespaceAttention, NamespaceEvent, NamespaceEventKind,
+    NamespaceIntent, NamespaceIntentProgress, NamespaceOperation, NamespacePhase,
+    NamespaceProgressSnapshot,
 };
 
 pub(super) const ROOT: &str = "namespace-file-v1";
@@ -600,6 +601,8 @@ impl FileCreateStore {
         }
         #[cfg(windows)]
         let mut remote = None;
+        #[cfg(windows)]
+        let mut continued_edit = None;
         let mut checked = NamespaceIntentProgress::new(joined.intent.clone())
             .map_err(|_| StoreError::CorruptEvidence)?;
         let mut commitment = join_hash(&plain);
@@ -635,10 +638,14 @@ impl FileCreateStore {
             if let NamespaceEventKind::RemoteVerified { report } = &event.event {
                 remote = Some(report.clone());
             }
+            #[cfg(windows)]
+            if let NamespaceEventKind::LocalContinued { edit, .. } = &event.event {
+                continued_edit = Some(edit.clone());
+            }
             commitment = event_hash(&commitment, &plain);
         }
         let progress = checked.snapshot();
-        if progress.recorded_complete {
+        if progress.recorded_complete && !progress.continued {
             let (manifest, directory) = self.reference_manifest_metadata(&joined, scope, budget)?;
             if !self
                 .base
@@ -646,6 +653,18 @@ impl FileCreateStore {
             {
                 return Err(StoreError::IncompleteEvidence);
             }
+        }
+        #[cfg(windows)]
+        if progress.continued {
+            let report = remote.as_ref().ok_or(StoreError::IncompleteEvidence)?;
+            let edit = continued_edit
+                .as_ref()
+                .ok_or(StoreError::IncompleteEvidence)?;
+            self.validate_continued_edit(&joined, report, edit, budget, true)?;
+        }
+        #[cfg(not(windows))]
+        if progress.continued {
+            return Err(StoreError::CorruptEvidence);
         }
         Ok(Loaded {
             record: StoredFileJoin {
@@ -658,6 +677,47 @@ impl FileCreateStore {
             #[cfg(windows)]
             remote,
         })
+    }
+    #[cfg(windows)]
+    fn validate_continued_edit(
+        &self,
+        joined: &FileJoin,
+        report: &crate::namespace_intent::NamespaceDestinationReport,
+        edit: &ContinuedEditReference,
+        budget: &mut Budget,
+        require_superseded: bool,
+    ) -> Result<StreamedRecordKey, StoreError> {
+        let original = self
+            .reference_manifest_metadata(joined, &self.base.scope, budget)?
+            .0;
+        let original_key = StreamedRecordKey::from_manifest(&original)?;
+        let (key, manifest, state) = self.base.continued_edit_metadata(&edit.record_id, budget)?;
+        let binding = manifest.binding();
+        let destination = destination(&joined.intent)?;
+        if key.record_id() == original_key.record_id()
+            || key.generation() != edit.generation
+            || key.commitment_sha256() != &edit.manifest_commitment
+            || key.scope() != &self.base.scope
+            || binding.local_file != destination.local_file
+            || binding.relative_path != joined.snapshot.space_relative_path
+            || binding.remote.as_ref() != Some(&report.remote)
+            || !matches!(
+                state,
+                crate::streamed_store::StreamedAttemptState::LocallyAcknowledged { .. }
+            )
+        {
+            return Err(StoreError::CorruptEvidence);
+        }
+        if require_superseded
+            && self
+                .base
+                .create_superseded_metadata(&original_key, budget)?
+                .as_ref()
+                != Some(edit)
+        {
+            return Err(StoreError::IncompleteEvidence);
+        }
+        Ok(key)
     }
     fn seal(
         &self,
@@ -738,8 +798,185 @@ impl FileCreateLease {
             destination: destination(self.loaded.record.intent())?.clone(),
         })
     }
+    /// Continue an already verified create after a distinct conditional edit
+    /// and exact native completion. The original 57-byte snapshot is marked
+    /// superseded, never acknowledged as the current edited file.
+    #[cfg(windows)]
+    pub(crate) fn record_continued(
+        &mut self,
+        proof: &crate::native::NativeFileCreateContinuation<'_>,
+    ) -> Result<(), StoreError> {
+        let report = self.loaded.remote.as_ref().ok_or(StoreError::Invalid)?;
+        let new_key = proof.new_edit_key();
+        if self.loaded.record.progress.remote != NamespacePhase::Verified
+            || self.loaded.record.progress.recorded_complete
+            || self.loaded.record.progress.attention.is_some()
+            || !proof.matches(&self.store.base, &self.loaded.record, report, new_key)
+        {
+            return Err(StoreError::Invalid);
+        }
+        let edit = ContinuedEditReference {
+            record_id: new_key.record_id().to_owned(),
+            generation: new_key.generation(),
+            manifest_commitment: *new_key.commitment_sha256(),
+        };
+        let checked = self.store.validate_continued_edit(
+            &self.loaded.record.joined,
+            report,
+            &edit,
+            &mut Budget::new(self.store.base.policy),
+            false,
+        )?;
+        if &checked != new_key {
+            return Err(StoreError::Invalid);
+        }
+        let snapshot = self.store.base.open_verified_key(new_key, &mut || false)?;
+        snapshot.verify_pin()?;
+        if snapshot.manifest().content_sha256() != &proof.body_sha256() {
+            return Err(StoreError::Invalid);
+        }
+        let original = self
+            .store
+            .reference_manifest_metadata(
+                &self.loaded.record.joined,
+                &self.store.base.scope,
+                &mut Budget::new(self.store.base.policy),
+            )?
+            .0;
+        let old_key = StreamedRecordKey::from_manifest(&original)?;
+        let mut old_dispatch = self.store.base.acquire_dispatch(&old_key)?;
+        if old_dispatch.current_state()?
+            == crate::streamed_store::StreamedAttemptState::NotAttempted
+        {
+            old_dispatch.supersede_create(&edit)?;
+        } else if self
+            .store
+            .base
+            .create_superseded_metadata(&old_key, &mut Budget::new(self.store.base.policy))?
+            .as_ref()
+            != Some(&edit)
+        {
+            return Err(StoreError::Invalid);
+        }
+        drop(old_dispatch);
+        self.finish_superseded_existing()
+    }
+    /// Explicit selected-record closure after a crash between the original
+    /// superseded receipt and the join event. Never called by health scans.
+    #[cfg(windows)]
+    pub(crate) fn finish_superseded_existing(&mut self) -> Result<(), StoreError> {
+        let report = self.loaded.remote.as_ref().ok_or(StoreError::Invalid)?;
+        if self.loaded.record.progress.remote != NamespacePhase::Verified
+            || self.loaded.record.progress.recorded_complete
+            || self.loaded.record.progress.attention.is_some()
+        {
+            return Err(StoreError::Invalid);
+        }
+        let original = self
+            .store
+            .reference_manifest_metadata(
+                &self.loaded.record.joined,
+                &self.store.base.scope,
+                &mut Budget::new(self.store.base.policy),
+            )?
+            .0;
+        let old_key = StreamedRecordKey::from_manifest(&original)?;
+        let edit = self
+            .store
+            .base
+            .create_superseded_metadata(&old_key, &mut Budget::new(self.store.base.policy))?
+            .ok_or(StoreError::IncompleteEvidence)?;
+        self.store.validate_continued_edit(
+            &self.loaded.record.joined,
+            report,
+            &edit,
+            &mut Budget::new(self.store.base.policy),
+            true,
+        )?;
+        self.append_authorized(NamespaceEventKind::LocalContinued {
+            destination: destination(self.loaded.record.intent())?.clone(),
+            edit,
+        })
+    }
     pub fn record(&self) -> &StoredFileJoin {
         &self.loaded.record
+    }
+    /// Authenticated report from the sealed RemoteVerified event. This is
+    /// metadata only and grants neither replay nor native completion authority.
+    #[cfg(windows)]
+    pub(crate) fn remote_verified_report(
+        &self,
+    ) -> Option<&crate::namespace_intent::NamespaceDestinationReport> {
+        (self.loaded.record.progress.remote == NamespacePhase::Verified)
+            .then_some(self.loaded.remote.as_ref())
+            .flatten()
+    }
+    /// Read only: distinguish no crash-gap marker from an authenticated
+    /// superseded original. Corrupt or incomplete evidence remains an error.
+    #[cfg(windows)]
+    pub(crate) fn has_superseded_original(&self) -> Result<bool, StoreError> {
+        let original = self
+            .store
+            .reference_manifest_metadata(
+                &self.loaded.record.joined,
+                &self.store.base.scope,
+                &mut Budget::new(self.store.base.policy),
+            )?
+            .0;
+        let key = StreamedRecordKey::from_manifest(&original)?;
+        Ok(self
+            .store
+            .base
+            .create_superseded_metadata(&key, &mut Budget::new(self.store.base.policy))?
+            .is_some())
+    }
+    /// Read-only selection of one successor captured against the original
+    /// create's remote baseline. Its state grants no dispatch, remote or native
+    /// authority; a selected recovery must authenticate current facts anew.
+    #[cfg(windows)]
+    pub(crate) fn continuation_candidate(
+        &self,
+    ) -> Result<
+        Option<(
+            StreamedRecordKey,
+            crate::streamed_store::StreamedAttemptState,
+        )>,
+        StoreError,
+    > {
+        let report = self.loaded.remote.as_ref().ok_or(StoreError::Invalid)?;
+        if self.loaded.record.progress.remote != NamespacePhase::Verified
+            || self.loaded.record.progress.recorded_complete
+            || self.loaded.record.progress.attention.is_some()
+        {
+            return Err(StoreError::Invalid);
+        }
+        let original = &self.loaded.record.joined;
+        let expected = destination(&original.intent)?;
+        let mut selected = None;
+        for record in self.store.base.discover_records()? {
+            let binding = record.manifest.binding();
+            if record.key.record_id() == original.snapshot.id.as_str()
+                || binding.scope != self.store.base.scope
+                || binding.local_file != expected.local_file
+                || binding.relative_path != original.snapshot.space_relative_path
+                || binding.remote.as_ref() != Some(&report.remote)
+            {
+                continue;
+            }
+            if selected.is_some() {
+                return Err(StoreError::IncompleteEvidence);
+            }
+            selected = Some((record.key, record.state));
+        }
+        if selected.as_ref().is_some_and(|(_, state)| {
+            matches!(
+                state,
+                crate::streamed_store::StreamedAttemptState::Superseded { .. }
+            )
+        }) {
+            return Err(StoreError::IncompleteEvidence);
+        }
+        Ok(selected)
     }
     pub fn progress(&self) -> NamespaceProgressSnapshot {
         if self.submitted_here {
@@ -760,7 +997,10 @@ impl FileCreateLease {
         })
     }
     fn append(&mut self, kind: NamespaceEventKind) -> Result<(), StoreError> {
-        if matches!(kind, NamespaceEventKind::LocalCompleted { .. }) {
+        if matches!(
+            kind,
+            NamespaceEventKind::LocalCompleted { .. } | NamespaceEventKind::LocalContinued { .. }
+        ) {
             return Err(StoreError::Invalid);
         }
         self.append_authorized(kind)
@@ -828,6 +1068,9 @@ fn check_transition(
     }
     match kind {
         NamespaceEventKind::LocalCompleted { .. } if prior.remote == NamespacePhase::Verified => {
+            Ok(())
+        }
+        NamespaceEventKind::LocalContinued { .. } if prior.remote == NamespacePhase::Verified => {
             Ok(())
         }
         NamespaceEventKind::RemoteVerified { .. } if prior.remote == NamespacePhase::Submitted => {

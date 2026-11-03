@@ -2,6 +2,8 @@
 
 ## 0.7.5 Beta — unreleased
 
+- Windows can explicitly continue an interrupted new-file upload as a protected conditional edit, preserving the original recovery body and completing the same local file only after verification.
+
 - Sharing brings Shared with me, Shared by me and Public links into one workspace, with shared items listed automatically.
 - Create password-protected sharing links and supported guest invitations, and edit supported settings on existing outgoing shares. Public-link passwords are not saved locally.
 - Offline files has a simpler layout, storage summaries and a configurable automatic-cache allowance. Options expand below their button without moving it.

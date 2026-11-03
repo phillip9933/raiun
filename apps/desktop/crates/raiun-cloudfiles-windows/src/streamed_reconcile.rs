@@ -159,6 +159,54 @@ pub fn reconcile_recovered_streamed_edit(
     )
 }
 
+/// Reverify an already acknowledged successor without uploading or rewriting
+/// its history. Historical acknowledgement alone grants no fresh authority.
+#[cfg(windows)]
+pub(crate) fn verify_acknowledged_streamed_edit(
+    store: &Arc<SnapshotStore>,
+    key: &StreamedRecordKey,
+    remote: &dyn StreamedRecoveryRemote,
+    cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> Result<VerifiedStreamedReadback, StoreError> {
+    let lease = store.acquire_dispatch(key)?;
+    if !matches!(
+        lease.current_state()?,
+        StreamedAttemptState::LocallyAcknowledged { .. }
+    ) {
+        return Err(StoreError::Invalid);
+    }
+    let snapshot = store.open_verified_key(key, &mut || cancelled())?;
+    let manifest = snapshot.manifest();
+    let baseline = manifest
+        .binding()
+        .remote
+        .as_ref()
+        .filter(|baseline| strong_etag(&baseline.etag))
+        .ok_or(StoreError::Invalid)?;
+    if !authorized(remote, key, &cancelled) {
+        return Err(StoreError::Invalid);
+    }
+    let current = remote
+        .stat(key.scope(), &manifest.binding().relative_path)
+        .map_err(|_| StoreError::Invalid)?;
+    if version_issue(&current, &baseline.resource_id).is_some() {
+        return Err(StoreError::Invalid);
+    }
+    let (outcome, version) = readback(remote, key, manifest, baseline, &current, &cancelled, 0);
+    if !matches!(outcome, ReconciliationOutcome::VerifiedApplied { .. })
+        || !authorized(remote, key, &cancelled)
+    {
+        return Err(StoreError::Invalid);
+    }
+    snapshot.verify_pin()?;
+    Ok(VerifiedStreamedReadback {
+        key: key.clone(),
+        snapshot,
+        version: version.ok_or(StoreError::Invalid)?,
+        _lease: lease,
+    })
+}
+
 pub(crate) fn reconcile_streamed_edit(
     store: &Arc<SnapshotStore>,
     key: &StreamedRecordKey,
@@ -172,9 +220,11 @@ pub(crate) fn reconcile_streamed_edit(
     }
     let mut lease = store.acquire_dispatch(key)?;
     let prior = lease.current_state()?;
-    if matches!(prior, StreamedAttemptState::LocallyAcknowledged { .. })
-        || (matches!(admission, StreamedAdmission::Fresh)
-            && prior != StreamedAttemptState::NotAttempted)
+    if matches!(
+        prior,
+        StreamedAttemptState::LocallyAcknowledged { .. } | StreamedAttemptState::Superseded { .. }
+    ) || (matches!(admission, StreamedAdmission::Fresh)
+        && prior != StreamedAttemptState::NotAttempted)
     {
         return Err(StoreError::Invalid);
     }

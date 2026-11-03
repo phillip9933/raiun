@@ -1101,6 +1101,10 @@ pub struct StagedStreamedEdit {
 }
 
 impl InitialEditReceipt {
+    #[cfg(windows)]
+    pub(crate) fn metadata(&self) -> &LocalEditMetadata {
+        &self.metadata
+    }
     #[cfg(test)]
     pub(crate) fn with_test_job(mut self, job: crate::StreamedRecoveryJob) -> Self {
         self.job = Some(job);
@@ -1295,10 +1299,28 @@ fn streamed_unresolved_metadata(
             context.policy,
         )
         .map_err(crate::edit_journal::admission_error)?;
-        for record in store
+        let records = store
             .discover_records_bounded(&mut budget)
-            .map_err(crate::edit_journal::admission_error)?
-        {
+            .map_err(crate::edit_journal::admission_error)?;
+        // A superseded stream alone leaves the namespace commit gap pending.
+        // Keep that original selectable until its paired join is authenticated.
+        let continued = if records.iter().any(|record| {
+            matches!(
+                record.state,
+                crate::streamed_store::StreamedAttemptState::Superseded { .. }
+            )
+        }) {
+            crate::streamed_store::namespace_file_store::FileCreateStore::new(store.clone())
+                .and_then(|store| store.discover())
+                .map_err(crate::edit_journal::admission_error)?
+                .into_iter()
+                .filter(|join| join.progress().continued && join.progress().recorded_complete)
+                .map(|join| join.snapshot_id().to_owned())
+                .collect::<std::collections::HashSet<_>>()
+        } else {
+            std::collections::HashSet::new()
+        };
+        for record in records {
             scanned_records = scanned_records
                 .checked_add(1)
                 .ok_or(crate::JournalError::ScanLimit)?;
@@ -1307,10 +1329,14 @@ fn streamed_unresolved_metadata(
             {
                 return Err(crate::JournalError::ScanLimit);
             }
-            if !matches!(
+            let resolved = matches!(
                 record.state,
                 crate::streamed_store::StreamedAttemptState::LocallyAcknowledged { .. }
-            ) {
+            ) || (matches!(
+                record.state,
+                crate::streamed_store::StreamedAttemptState::Superseded { .. }
+            ) && continued.contains(record.key.record_id()));
+            if !resolved {
                 output.push(streamed_manifest_metadata(&record.manifest));
             }
         }

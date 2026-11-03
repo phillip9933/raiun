@@ -155,16 +155,41 @@ pub struct NamespaceDestinationReport {
     pub remote: RemoteEditBaseline,
     pub content: Option<NamespaceFileContent>,
 }
+/// Durable link to a separately protected, conditionally reconciled successor.
+/// This metadata is a history report, never native or dispatch authority.
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContinuedEditReference {
+    pub record_id: String,
+    pub generation: u64,
+    pub manifest_commitment: [u8; 32],
+}
 #[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NamespaceEventKind {
     RemoteSubmitted,
-    RemoteVerified { report: NamespaceDestinationReport },
-    RemoteDeleted { source: ExistingNamespaceEntry },
-    LocalCompleted { destination: LocalNamespaceEntry },
-    LocalDeleted { source: ExistingNamespaceEntry },
-    SourceRemovalSubmitted { source: ExistingNamespaceEntry },
-    SourceRemovalVerified { source: ExistingNamespaceEntry },
+    RemoteVerified {
+        report: NamespaceDestinationReport,
+    },
+    RemoteDeleted {
+        source: ExistingNamespaceEntry,
+    },
+    LocalCompleted {
+        destination: LocalNamespaceEntry,
+    },
+    LocalContinued {
+        destination: LocalNamespaceEntry,
+        edit: ContinuedEditReference,
+    },
+    LocalDeleted {
+        source: ExistingNamespaceEntry,
+    },
+    SourceRemovalSubmitted {
+        source: ExistingNamespaceEntry,
+    },
+    SourceRemovalVerified {
+        source: ExistingNamespaceEntry,
+    },
     Conflict,
     Deferred,
     Uncertain,
@@ -191,6 +216,7 @@ pub enum NamespaceAttention {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NamespaceProgressSnapshot {
     pub local_completed: bool,
+    pub continued: bool,
     pub remote: NamespacePhase,
     pub source_removal: Option<NamespacePhase>,
     pub attention: Option<NamespaceAttention>,
@@ -203,6 +229,7 @@ pub struct NamespaceProgressSnapshot {
 pub struct NamespaceIntentProgress {
     intent: NamespaceIntent,
     local_completed: bool,
+    continued: bool,
     remote: NamespacePhase,
     source_removal: Option<NamespacePhase>,
     attention: Option<NamespaceAttention>,
@@ -226,6 +253,7 @@ redacted_debug!(
     NamespaceIntent,
     NamespaceEventContext,
     NamespaceDestinationReport,
+    ContinuedEditReference,
     NamespaceEventKind,
     NamespaceEvent,
     NamespaceIntentProgress
@@ -559,6 +587,7 @@ impl NamespaceIntentProgress {
         Ok(Self {
             intent,
             local_completed: false,
+            continued: false,
             remote: NamespacePhase::Pending,
             source_removal,
             attention: None,
@@ -568,11 +597,12 @@ impl NamespaceIntentProgress {
     pub fn snapshot(&self) -> NamespaceProgressSnapshot {
         NamespaceProgressSnapshot {
             local_completed: self.local_completed,
+            continued: self.continued,
             remote: self.remote,
             source_removal: self.source_removal,
             attention: self.attention,
             recorded_complete: self.attention.is_none()
-                && self.local_completed
+                && (self.local_completed || self.continued)
                 && self.remote == NamespacePhase::Verified
                 && self
                     .source_removal
@@ -617,6 +647,23 @@ impl NamespaceIntentProgress {
             {
                 self.match_source(source)?;
                 self.remote = NamespacePhase::Verified;
+            }
+            E::LocalContinued { destination, edit }
+                if !self.local_completed
+                    && !self.continued
+                    && self.remote == NamespacePhase::Verified
+                    && matches!(self.intent.operation, NamespaceOperation::CreateFile { .. }) =>
+            {
+                destination.validate()?;
+                if self.intent.operation.destination() != Some(destination)
+                    || !valid_hex(&edit.record_id, 32)
+                    || edit.record_id == self.intent.record_id
+                    || edit.generation == 0
+                    || edit.manifest_commitment == [0; 32]
+                {
+                    return Err(NamespaceIntentError::EvidenceMismatch);
+                }
+                self.continued = true;
             }
             E::LocalCompleted { destination } if !self.local_completed => {
                 destination.validate()?;
