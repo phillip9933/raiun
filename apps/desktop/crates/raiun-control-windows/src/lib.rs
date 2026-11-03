@@ -38,6 +38,23 @@ pub use session_store::DpapiSessionStore;
 #[cfg(windows)]
 pub use win32::{NamedPipeListener, PipeStream, connect_current_user};
 
+/// Stable, nonsecret GUI instance scope from this process's Windows TokenUser.
+/// It changes only native singleton names, never application data locations.
+#[cfg(windows)]
+pub fn current_user_instance_scope() -> std::io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let sid = win32::current_user_sid_for_storage()?;
+    if !is_sid_shape(&sid) {
+        return Err(std::io::Error::other(
+            "Windows returned an invalid user identity",
+        ));
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"raiun-desktop-instance-sid-v1\0");
+    hash.update(sid.as_bytes());
+    Ok(format!("{:x}", hash.finalize()))
+}
+
 /// Construct the stable, per-user pipe path from an already-resolved SID.
 ///
 /// The SID must come from the current token, not UI or IPC input.

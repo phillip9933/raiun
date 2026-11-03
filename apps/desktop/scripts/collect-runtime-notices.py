@@ -39,12 +39,20 @@ def main():
    if key in seen:continue
    seen.add(key);package=packages[key]
    pending.extend(dep['pkg'] for dep in nodes[key]['deps'] if any(k['kind']!='dev' for k in dep['dep_kinds']))
-   if package.get('source') is None:continue
-   identity=(package['name'],package['version'],package['source']);record=rows.get(identity)
+   source=package.get('source');vendor_path=None
+   if source is None:
+    try: vendor_path=Path(package['manifest_path']).resolve().parent.relative_to((ROOT/'desktop-shell/src-tauri/vendor').resolve())
+    except ValueError: continue
+    source='vendored:'+vendor_path.as_posix()
+   identity=(package['name'],package['version'],source);record=rows.get(identity)
    if record is None:
     directory=Path(package['manifest_path']).parent;explicit=Path(package['license_file']) if package.get('license_file') else None
     texts=licenses(directory,Path('rust')/(package['name']+'-'+package['version']),explicit)
-    record={'ecosystem':'cargo','name':package['name'],'version':package['version'],'source':package['source'],'declared_license':package.get('license'),'repository':package.get('repository'),'description':package.get('description'),'notice_files':texts,'graphs':[]};rows[identity]=record
+    record={'ecosystem':'cargo','name':package['name'],'version':package['version'],'source':source,'declared_license':package.get('license'),'repository':package.get('repository'),'description':package.get('description'),'notice_files':texts,'graphs':[]};rows[identity]=record
+    if vendor_path is not None:
+     record['vendored_path']=str(directory.relative_to(ROOT))
+     provenance=directory/'RAIUN-VENDOR.md'
+     if provenance.is_file(): record['notice_files'].append(put(provenance,Path('rust')/(package['name']+'-'+package['version'])/'RAIUN-VENDOR.md'))
     if not texts:gaps.append({'package':package['name']+'@'+package['version'],'reason':'no cached license/notice file found; declared expression is not a license text'})
     if not package.get('license') and not explicit:gaps.append({'package':package['name']+'@'+package['version'],'reason':'no declared license expression or license_file'})
    record['graphs'].append(str(manifest.relative_to(ROOT)))

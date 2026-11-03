@@ -1990,18 +1990,33 @@ fn stop_tray_status_poller(app: &AppHandle) {
     }
 }
 
+fn desktop_single_instance_plugin() -> std::io::Result<tauri::plugin::TauriPlugin<tauri::Wry>> {
+    let instance = tauri_plugin_single_instance::Builder::new().callback(|app, args, _cwd| {
+        if args.iter().any(|arg| parse_unlock_intent(arg).is_some()) {
+            queue_unlock_intent(app, &args);
+        } else if !has_background_argument(&args) {
+            show_window(app);
+        }
+    });
+    #[cfg(target_os = "windows")]
+    let instance =
+        instance.windows_instance_key(raiun_control_windows::current_user_instance_scope()?);
+    Ok(instance.build())
+}
+
 fn main() {
     let launch_args = std::env::args().skip(1).collect::<Vec<_>>();
     let background_launch = has_background_argument(&launch_args);
     let initial_unlock_intent = launch_args.iter().find_map(|arg| parse_unlock_intent(arg));
+    let instance = match desktop_single_instance_plugin() {
+        Ok(instance) => instance,
+        Err(_) => {
+            eprintln!("Raiun Desktop could not verify the Windows user for startup");
+            std::process::exit(1);
+        }
+    };
     let builder = tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            if args.iter().any(|arg| parse_unlock_intent(arg).is_some()) {
-                queue_unlock_intent(app, &args);
-            } else if !has_background_argument(&args) {
-                show_window(app);
-            }
-        }))
+        .plugin(instance)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(desktop_updates::updater_plugin())
