@@ -7072,6 +7072,70 @@ fn decode_root_metadata(bytes: &[u8], expected_profile: &str) -> Result<RootConf
     })
 }
 
+// Root verification fails closed, but its reason must survive the account and
+// folder setup layers. Only fixed local messages are exposed: never copy an
+// arbitrary server diagnostic, URL, resource identifier or request ID here.
+fn personal_root_verification_error(error: raiun_core::backend::CloudError) -> String {
+    use raiun_core::backend::ErrorKind;
+    if let Some(status) = error
+        .message
+        .strip_prefix("OpenCloud WebDAV request failed with HTTP ")
+        .or_else(|| {
+            error
+                .message
+                .strip_prefix("OpenCloud WebDAV request returned redirect HTTP ")
+        })
+        .and_then(|value| value.get(..3))
+        .filter(|value| value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|status| (100..=599).contains(status))
+    {
+        return format!(
+            "Could not verify the Personal drive root identity: WebDAV returned HTTP {status}"
+        );
+    }
+    let reason = match error.message.as_str() {
+        reason @ ("Graph drive WebDAV URL is invalid"
+        | "Graph drive WebDAV URL is outside the configured origin"
+        | "Space root inspection returned multiple entries"
+        | "Space root inspection returned a different path"
+        | "Space root identity is invalid"
+        | "DAV response has an invalid root element"
+        | "DAV response element uses an invalid namespace"
+        | "nested DAV response"
+        | "DAV entry nesting exceeds its limit"
+        | "DAV response contains invalid text"
+        | "DAV response contains an invalid reference"
+        | "DAV response contains an invalid character reference"
+        | "DAV response contains an unknown entity"
+        | "DAV response contains an invalid XML character"
+        | "DAV content length is invalid"
+        | "DAV response structure is invalid"
+        | "DAV response exceeds the entry limit"
+        | "DAV response contains a document type declaration"
+        | "DAV response is malformed XML"
+        | "DAV response ended inside an entry"
+        | "DAV response contains an invalid href"
+        | "DAV response href leaves the requested origin"
+        | "DAV response href is outside requested scope"
+        | "DAV depth-one response returned a nested item"
+        | "DAV response omitted an entity tag"
+        | "DAV property exceeds its size limit"
+        | "server response exceeds its size limit") => reason,
+        _ => match error.kind {
+            ErrorKind::Unauthorized => "the server rejected authentication or the session changed",
+            ErrorKind::Forbidden => "the server denied access to the drive root",
+            ErrorKind::NotFound => "the server did not return the drive root",
+            ErrorKind::Conflict => "the drive root changed during verification",
+            ErrorKind::Offline => "the server could not be reached or the request timed out",
+            ErrorKind::InvalidResponse => "the server returned an unexpected drive root response",
+            ErrorKind::Unsupported => "the drive root operation is unsupported",
+            ErrorKind::Io => "the drive root metadata could not be read",
+        },
+    };
+    format!("Could not verify the Personal drive root identity: {reason}")
+}
+
 fn verified_personal_root_identity(
     session: &auth::Session,
 ) -> Result<(String, String, String), String> {
@@ -7094,7 +7158,7 @@ fn verified_personal_root_identity(
         .ok_or("The server did not return the verified Personal drive")?;
     let root = client
         .stat_discovered_space_root_with_context(personal, context)
-        .map_err(|_| "Could not verify the Personal drive root identity")?;
+        .map_err(personal_root_verification_error)?;
     if !root.directory || root.encrypted || root.id.trim().is_empty() || root.id.len() > 16 * 1024 {
         return Err("The Personal drive root identity is not usable".into());
     }
@@ -7120,7 +7184,7 @@ fn verified_account_roots(
         .ok_or("The server did not return the verified Personal drive")?;
     let personal_root = client
         .stat_discovered_space_root_with_context(personal_space, context)
-        .map_err(|_| "Could not verify the Personal drive root identity")?;
+        .map_err(personal_root_verification_error)?;
     if !personal_root.directory
         || personal_root.encrypted
         || personal_root.id.trim().is_empty()
