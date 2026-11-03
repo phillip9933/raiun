@@ -141,7 +141,7 @@ impl CachedVaultEditBaselineFacts {
 pub trait CachedVaultEditCapture {
     /// Metadata-only template. Native proof fields are populated only by
     /// baseline_facts after actual original-handle prehash/FI/USN inspection.
-    fn catalogue_facts(&self)->&CachedVaultEditBaselineFacts;
+    fn catalogue_facts(&self) -> &CachedVaultEditBaselineFacts;
     fn stream_revocation(&self) -> std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
     fn retain_streamed(
         &self,
@@ -165,40 +165,87 @@ pub enum VaultEditCaptureContext<'a> {
     Cached(&'a dyn CachedVaultEditCapture),
 }
 pub struct VaultEditBaselineView<'a> {
-    identity:[u8;16],root:ConfiguredRootIdentity,metadata:&'a RemoteEntry,
-    token_generation:u64,historical_unlock_epoch:u64,
+    identity: [u8; 16],
+    root: ConfiguredRootIdentity,
+    metadata: &'a RemoteEntry,
+    token_generation: u64,
+    historical_unlock_epoch: u64,
 }
 impl VaultEditBaselineView<'_> {
-    pub fn identity(&self)->[u8;16] {self.identity}
-    pub fn root(&self)->ConfiguredRootIdentity {self.root}
-    pub fn metadata(&self)->&RemoteEntry {self.metadata}
-    pub fn token_generation(&self)->u64 {self.token_generation}
-    pub fn unlock_epoch(&self)->u64 {self.historical_unlock_epoch}
+    pub fn identity(&self) -> [u8; 16] {
+        self.identity
+    }
+    pub fn root(&self) -> ConfiguredRootIdentity {
+        self.root
+    }
+    pub fn metadata(&self) -> &RemoteEntry {
+        self.metadata
+    }
+    pub fn token_generation(&self) -> u64 {
+        self.token_generation
+    }
+    pub fn unlock_epoch(&self) -> u64 {
+        self.historical_unlock_epoch
+    }
 }
 impl VaultEditCaptureContext<'_> {
-    pub fn baseline(&self)->VaultEditBaselineView<'_> {
+    pub fn baseline(&self) -> VaultEditBaselineView<'_> {
         match self {
-            Self::Online(c)=> {let b=c.baseline(); VaultEditBaselineView {identity:b.identity(),root:b.root(),
-                metadata:b.metadata(),token_generation:b.token_generation(),historical_unlock_epoch:b.unlock_epoch()}},
-            Self::Cached(c)=> {let b=c.catalogue_facts();VaultEditBaselineView {identity:b.identity,
-                root:ConfiguredRootIdentity{volume_serial:b.root.volume_serial,file_index:b.root.file_index},
-                metadata:&b.current,token_generation:b.token_generation,historical_unlock_epoch:b.historical_unlock_epoch}},
+            Self::Online(c) => {
+                let b = c.baseline();
+                VaultEditBaselineView {
+                    identity: b.identity(),
+                    root: b.root(),
+                    metadata: b.metadata(),
+                    token_generation: b.token_generation(),
+                    historical_unlock_epoch: b.unlock_epoch(),
+                }
+            }
+            Self::Cached(c) => {
+                let b = c.catalogue_facts();
+                VaultEditBaselineView {
+                    identity: b.identity,
+                    root: ConfiguredRootIdentity {
+                        volume_serial: b.root.volume_serial,
+                        file_index: b.root.file_index,
+                    },
+                    metadata: &b.current,
+                    token_generation: b.token_generation,
+                    historical_unlock_epoch: b.historical_unlock_epoch,
+                }
+            }
         }
     }
-    pub fn stream_revocation(&self)->Option<std::sync::Arc<dyn Fn()->bool+Send+Sync>> {
-        match self {Self::Online(c)=>c.stream_revocation(),Self::Cached(c)=>Some(c.stream_revocation())}
-    }
-    pub fn retain_streamed_with_usn(&self,payload:crate::vault_custody::ExistingVaultStreamedEditPayload,usn:i64,
-        source:&mut dyn std::io::Read,verify:&mut dyn FnMut()->Result<(),BackendError>,cancelled:&dyn Fn()->bool,
-    )->Result<Option<Box<dyn crate::DeferredVaultCaptureNotification>>,BackendError> {
+    pub fn stream_revocation(&self) -> Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>> {
         match self {
-            Self::Online(c)=>c.retain_streamed(payload,source,verify,cancelled),
-            Self::Cached(c)=> {
-                let facts=c.baseline_facts(payload.file,usn,payload.components,payload.length,payload.sha256)?;
-                if facts.root.volume_serial!=payload.root.volume_serial || facts.root.file_index!=payload.root.file_index {
+            Self::Online(c) => c.stream_revocation(),
+            Self::Cached(c) => Some(c.stream_revocation()),
+        }
+    }
+    pub fn retain_streamed_with_usn(
+        &self,
+        payload: crate::vault_custody::ExistingVaultStreamedEditPayload,
+        usn: i64,
+        source: &mut dyn std::io::Read,
+        verify: &mut dyn FnMut() -> Result<(), BackendError>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<Box<dyn crate::DeferredVaultCaptureNotification>>, BackendError> {
+        match self {
+            Self::Online(c) => c.retain_streamed(payload, source, verify, cancelled),
+            Self::Cached(c) => {
+                let facts = c.baseline_facts(
+                    payload.file,
+                    usn,
+                    payload.components,
+                    payload.length,
+                    payload.sha256,
+                )?;
+                if facts.root.volume_serial != payload.root.volume_serial
+                    || facts.root.file_index != payload.root.file_index
+                {
                     return Err(BackendError::Unavailable);
                 }
-                c.retain_streamed(facts,source,verify,cancelled)
+                c.retain_streamed(facts, source, verify, cancelled)
             }
         }
     }

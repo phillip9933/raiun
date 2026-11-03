@@ -404,6 +404,68 @@ impl WindowsAgent {
             .backend
             .vault_read_context(context._root.identity())
             .map_err(|_| "The cached drive changed")?;
+        let cancelled: Arc<dyn Fn() -> bool + Send + Sync> = {
+            let generation = self.generation.clone();
+            let provider_generation = self.provider.authorized_generation.clone();
+            let backend = verified.backend.clone();
+            let active = active.clone();
+            let token = CancellationToken::for_recovery_job(
+                raiun_cloudfiles_windows::StreamedRecoveryPolicy::default(),
+            )
+            .cancellation()
+            .clone();
+            Arc::new(move || {
+                token.is_cancelled()
+                    || token.is_expired()
+                    || !active.load(Ordering::Acquire)
+                    || generation.load(Ordering::Acquire) != expected_generation
+                    || provider_generation.load(Ordering::Acquire) != expected_generation
+                    || backend.is_revoked()
+            })
+        };
+        if capture_id.starts_with("cached_") {
+            let (scope, record, body) = verified.custody.cached_capture(
+                &trusted,
+                &vault,
+                &remote_root,
+                &capture_id,
+                &*cancelled,
+            )?;
+            if !scope.matches_canonical_account(&context.account) {
+                return Err("The cached capture belongs to another account".into());
+            }
+            verified
+                .backend
+                .validate_fresh_cached_vault_capture(&record.facts, &dispatch)
+                .map_err(|_| "The original cached capture route changed")?;
+            self.check_windows_vault_offline_account(&context)?;
+            let mut source = body
+                .into_reader(cancelled.clone())
+                .map_err(|_| "The protected cached capture could not be opened")?;
+            let receipt = verified
+                .backend
+                .queue_cached_vault_capture(
+                    &record.facts,
+                    dispatch,
+                    &mut source,
+                    self.provider.authorized_generation.clone(),
+                    expected_generation,
+                    cancelled.clone(),
+                )
+                .map_err(|_| "The edit remains protected, but offline queueing did not finish")?;
+            if cancelled() || !verified.custody.matches_fresh_origin(&origin) {
+                return Err(
+                    "The cached capture connection changed; local copies remain protected".into(),
+                );
+            }
+            self.check_windows_vault_offline_account(&context)?;
+            verified
+                .custody
+                .record_cached_capture_queued(&scope, &record, &receipt)?;
+            self.check_windows_vault_offline_account(&context)?;
+            return Ok(json!({"state":"local_queued","write_id":receipt.write_id(),
+                "revision":receipt.revision(),"native_confirmation":false,"read_only_restored":false}));
+        }
         let ledger = verified
             .custody
             .upload_ledger(&trusted, &vault, &remote_root, &capture_id)?;
@@ -434,25 +496,6 @@ impl WindowsAgent {
             .backend
             .validate_fresh_vault_capture_dispatch(&target)
             .map_err(|_| "The original cached unlock changed")?;
-        let cancelled: Arc<dyn Fn() -> bool + Send + Sync> = {
-            let generation = self.generation.clone();
-            let provider_generation = self.provider.authorized_generation.clone();
-            let backend = verified.backend.clone();
-            let active = active.clone();
-            let token = CancellationToken::for_recovery_job(
-                raiun_cloudfiles_windows::StreamedRecoveryPolicy::default(),
-            )
-            .cancellation()
-            .clone();
-            Arc::new(move || {
-                token.is_cancelled()
-                    || token.is_expired()
-                    || !active.load(Ordering::Acquire)
-                    || generation.load(Ordering::Acquire) != expected_generation
-                    || provider_generation.load(Ordering::Acquire) != expected_generation
-                    || backend.is_revoked()
-            })
-        };
         self.check_windows_vault_offline_account(&context)?;
         let mut retained = ledger
             .read_body_cancelled(&*cancelled)

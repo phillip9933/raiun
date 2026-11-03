@@ -538,6 +538,89 @@ impl WindowsVaultCustody {
                 .upgrade()
                 .is_some_and(|failed| !failed.load(std::sync::atomic::Ordering::Acquire))
     }
+    pub(super) fn cached_capture(
+        &self,
+        owner: &ProviderScope,
+        vault: &VaultSessionScope,
+        remote_root: &str,
+        id: &str,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(
+        Scope,
+        super::windows_vault_cached_capture::Record,
+        raiun_cloudfiles_windows::streamed_store::VerifiedPinnedSnapshot,
+    )> {
+        if owner != &self.owner || self.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(refused());
+        }
+        let scope = Scope::new(
+            &self.account,
+            vault,
+            remote_root,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(|_| refused())?;
+        let binding = RootBinding::new(
+            &self.account,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(|_| refused())?;
+        let mut manifest = RootManifest::reopen(&self.store, &binding).map_err(|_| refused())?;
+        if !manifest
+            .scopes_for_reconciliation()
+            .map_err(|_| refused())?
+            .contains(&scope)
+        {
+            return Err(refused());
+        }
+        let child = self
+            .state
+            .lock()
+            .map_err(|_| refused())?
+            .children
+            .get(
+                scope
+                    .authenticated_store_binding()
+                    .map_err(|_| refused())?
+                    .as_slice(),
+            )
+            .cloned()
+            .ok_or_else(refused)?;
+        if child.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(refused());
+        }
+        let (record, body) =
+            super::windows_vault_cached_capture::reopen(&self.store.0, &scope, id, cancelled)
+                .map_err(|_| refused())?;
+        manifest
+            .verify_current(&self.store)
+            .map_err(|_| refused())?;
+        if cancelled()
+            || self.failed.load(std::sync::atomic::Ordering::Acquire)
+            || child.failed.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(refused());
+        }
+        Ok((scope, record, body))
+    }
+    pub(super) fn record_cached_capture_queued(
+        &self,
+        scope: &Scope,
+        record: &super::windows_vault_cached_capture::Record,
+        receipt: &raiun_cloudfiles_windows::VaultCachedQueuedCapture,
+    ) -> Result<()> {
+        if self.failed.load(std::sync::atomic::Ordering::Acquire)
+            || !scope.matches_canonical_account(&self.account)
+        {
+            return Err(refused());
+        }
+        super::windows_vault_cached_capture::mark_queued(&self.store.0, scope, record, receipt)
+            .map_err(|_| refused())
+    }
     /// Bounded historical IDs only, with no body or live authority creation.
     #[cfg(test)]
     pub(super) fn retained_capture_ids(

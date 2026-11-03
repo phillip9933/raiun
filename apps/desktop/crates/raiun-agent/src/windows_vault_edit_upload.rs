@@ -21,12 +21,13 @@ impl WindowsAgent {
         active: Arc<AtomicBool>,
         policy: windows_vault_close_worker::FreshCloseCompletionPolicy,
     ) -> Result<Value, String> {
-        if self
-            .state
-            .lock()
-            .map_err(|_| "Account state is unavailable")?
-            .offline_cached
-        {
+        let cached = {
+            self.state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?
+                .offline_cached
+        };
+        if cached {
             return self.queue_windows_vault_fresh_capture(job, active, policy);
         }
         // Only the originating consumer supplies this cancellation identity.

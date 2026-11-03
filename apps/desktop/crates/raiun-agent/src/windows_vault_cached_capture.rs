@@ -296,3 +296,35 @@ pub(super) fn reopen(
     }
     Ok((row, body))
 }
+
+pub(super) fn mark_queued(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+    original: &Record,
+    receipt: &raiun_cloudfiles_windows::VaultCachedQueuedCapture,
+) -> Result<(), BackendError> {
+    if receipt.facts() != &original.facts
+        || receipt.plaintext_len() != original.facts.plaintext_len
+        || receipt.source_sha256() != original.facts.plaintext_sha256
+        || receipt.entry().directory
+        || receipt.entry().path != original.facts.current.path
+        || receipt.entry().size != original.facts.plaintext_len
+        || receipt.write_id().len() != 32
+        || !receipt.write_id().bytes().all(|b| b.is_ascii_hexdigit())
+        || receipt.revision() == 0
+    {
+        return Err(no());
+    }
+    let (raw, mut index) = load(store, scope)?;
+    let current = index
+        .rows
+        .iter_mut()
+        .find(|r| r.id == original.id)
+        .ok_or_else(no)?;
+    if current != original {
+        return Err(no());
+    }
+    current.phase = Phase::LocalQueued;
+    current.pending = Some((receipt.write_id().into(), receipt.revision()));
+    commit(store, scope, raw.as_deref().map(Vec::as_slice), &index)
+}

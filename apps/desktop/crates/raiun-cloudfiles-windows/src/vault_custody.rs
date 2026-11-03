@@ -304,18 +304,6 @@ pub trait VaultPublicationCustody: Send + Sync {
     ) -> Result<Option<Box<dyn crate::DeferredVaultCaptureNotification>>, BackendError> {
         Err(BackendError::Unavailable)
     }
-    #[cfg(windows)]
-    fn retain_cached_streamed_edit(
-        &self,
-        _facts: &crate::vault_cached_edit::CachedVaultEditBaselineFacts,
-        _dispatch: crate::FreshVaultCaptureDispatch,
-        _source: &mut dyn std::io::Read,
-        _verify_source: &mut dyn FnMut() -> Result<(), BackendError>,
-        _cancelled: &dyn Fn() -> bool,
-    ) -> Result<Option<Box<dyn crate::DeferredVaultCaptureNotification>>, BackendError> {
-        Err(BackendError::Unavailable)
-    }
-
     fn root_identity(&self) -> ConfiguredRootIdentity;
     /// Local protected index-first retention only. The exact live lexical
     /// fences are already held: do not acquire account/route/token/session locks

@@ -36,11 +36,11 @@ pub mod namespace_reconcile;
 
 mod opencloud;
 #[cfg(windows)]
-pub use opencloud::VaultCachedQueuedEdit;
-#[cfg(windows)]
 pub use opencloud::{
     VaultCachedNamespaceDescriptor, VaultCachedNamespaceOperation, VaultCachedNamespaceQueued,
 };
+#[cfg(windows)]
+pub use opencloud::{VaultCachedQueuedCapture, VaultCachedQueuedEdit};
 #[cfg(windows)]
 mod vault_cached_edit;
 #[cfg(windows)]
