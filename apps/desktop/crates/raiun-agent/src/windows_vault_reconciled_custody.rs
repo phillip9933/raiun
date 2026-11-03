@@ -231,15 +231,16 @@ fn history_matches(
     {
         return false;
     }
-    rows.last().is_some_and(|last| {
-        last.revision == terminal.revision
-            && last.usn == terminal.original_usn
-            && last.components == terminal.components
-            && last.original == terminal.original
-            && last.entry == terminal.pending
-            && last.plaintext_len == terminal.plaintext_len
-            && last.source_sha256 == terminal.source_sha256
-    })
+    rows.first()
+        .is_some_and(|first| first.original == terminal.original)
+        && rows.last().is_some_and(|last| {
+            last.revision == terminal.revision
+                && last.usn == terminal.original_usn
+                && last.components == terminal.components
+                && last.entry == terminal.pending
+                && last.plaintext_len == terminal.plaintext_len
+                && last.source_sha256 == terminal.source_sha256
+        })
 }
 fn commit(
     store: &Arc<dyn Storage>,
@@ -288,10 +289,12 @@ fn protected_chain(
         }
     }
     let last = rows.last().ok_or_else(no)?;
-    if last.revision != e.revision
+    if rows
+        .first()
+        .is_none_or(|first| first.original != e.original)
+        || last.revision != e.revision
         || last.usn != e.usn
         || last.components != e.components
-        || last.original != e.original
         || last.entry != e.entry
         || last.plaintext_len != e.plaintext_len
         || last.source_sha256 != e.source_sha256
