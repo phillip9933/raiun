@@ -1197,7 +1197,7 @@ fn validate_delta(d: &CatalogueDelta) -> Result<(), BackendError> {
                         || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
                 })
         })
-        || d.original.is_none() && d.entry.is_none()
+        || !d.verified_native && d.original.is_none() && d.entry.is_none()
         || d.original.as_ref().is_some_and(|e| !entry(e))
         || d.entry.as_ref().is_some_and(|e| !entry(e))
         || !d.verified_native
@@ -1206,7 +1206,8 @@ fn validate_delta(d: &CatalogueDelta) -> Result<(), BackendError> {
                     || e.size != d.plaintext_len
                     || e.etag != format!("raiun-pending-v1:{}:{}", d.write_id, d.revision)
             })
-        || d.entry.is_none()
+        || !d.verified_native
+            && d.entry.is_none()
             && d.original
                 .as_ref()
                 .is_none_or(|e| e.directory || e.size != d.plaintext_len)
@@ -1249,9 +1250,9 @@ fn validate_delta(d: &CatalogueDelta) -> Result<(), BackendError> {
 pub(super) fn current_catalogue(
     store: &Arc<dyn Storage>,
     scope: &Scope,
-    base: &[raiun_cloudfiles_windows::VaultCatalogueEntry],
+    base: &[raiun_cloudfiles_windows::vault_custody::VaultCatalogueEntry],
     extra: &[CatalogueDelta],
-) -> Result<Vec<raiun_cloudfiles_windows::VaultCatalogueEntry>, BackendError> {
+) -> Result<Vec<raiun_cloudfiles_windows::vault_custody::VaultCatalogueEntry>, BackendError> {
     let mut current = std::collections::BTreeMap::new();
     for row in base {
         let mut metadata = row.metadata.clone();
@@ -1282,16 +1283,65 @@ pub(super) fn current_catalogue(
         }
     }
     let terminal = super::windows_vault_reconciled_custody::catalogue_updates(store, scope)?;
-    if terminal.iter().any(|done| {
-        remaining
+    if terminal.iter().any(|row| {
+        terminal
             .iter()
-            .any(|pending| pending.identity == done.identity)
+            .any(|other| row.identity == other.identity && row.file != other.file)
     }) {
         return Err(no());
     }
+    // A completed earlier write may be the exact strong baseline for a later
+    // local queue on the same opaque. Apply proven terminal facts first.
+    for delta in &terminal {
+        validate_delta(delta)?;
+        if !delta.verified_native {
+            return Err(no());
+        }
+        let already = match (current.get(&delta.identity), delta.entry.as_ref()) {
+            (Some(now), Some(target)) => same_presentation(now, target),
+            (None, None) => true,
+            _ => false,
+        };
+        if already
+            || current.get(&delta.identity).is_some_and(|now| {
+                terminal.iter().any(|later| {
+                    later.identity == delta.identity
+                        && later
+                            .entry
+                            .as_ref()
+                            .is_some_and(|target| same_presentation(now, target))
+                })
+            })
+        {
+            continue;
+        }
+        let source = match (&delta.original, current.get(&delta.identity)) {
+            (None, None) => true,
+            (Some(original), Some(now)) => same_presentation(original, now),
+            _ => false,
+        };
+        if !source {
+            return Err(no());
+        }
+        if let Some(mut entry) = delta.entry.clone() {
+            entry.writable = false;
+            entry.encrypted = true;
+            current.insert(delta.identity, entry);
+        } else {
+            current.remove(&delta.identity);
+        }
+        unique_catalogue_paths(&current)?;
+        if current.len() > super::vault_custody::MAX_CATALOGUE {
+            return Err(no());
+        }
+    }
     let mut files = std::collections::BTreeMap::<[u8; 16], u64>::new();
     let mut seen_revisions = std::collections::BTreeMap::<String, u64>::new();
-    let mut tombstones = std::collections::BTreeSet::new();
+    let mut tombstones = terminal
+        .iter()
+        .filter(|delta| delta.entry.is_none())
+        .map(|delta| delta.identity)
+        .collect::<std::collections::BTreeSet<_>>();
     while !remaining.is_empty() {
         let eligible = remaining
             .iter()
@@ -1342,43 +1392,10 @@ pub(super) fn current_catalogue(
             return Err(no());
         }
     }
-    for delta in terminal {
-        validate_delta(&delta)?;
-        if !delta.verified_native {
-            return Err(no());
-        }
-        let already = match (current.get(&delta.identity), delta.entry.as_ref()) {
-            (Some(now), Some(target)) => same_presentation(now, target),
-            (None, None) => true,
-            _ => false,
-        };
-        if already {
-            continue;
-        }
-        let source = match (&delta.original, current.get(&delta.identity)) {
-            (None, None) => true,
-            (Some(original), Some(now)) => same_presentation(original, now),
-            _ => false,
-        };
-        if !source {
-            return Err(no());
-        }
-        if let Some(mut entry) = delta.entry {
-            entry.writable = false;
-            entry.encrypted = true;
-            current.insert(delta.identity, entry);
-        } else {
-            current.remove(&delta.identity);
-        }
-        unique_catalogue_paths(&current)?;
-        if current.len() > super::vault_custody::MAX_CATALOGUE {
-            return Err(no());
-        }
-    }
     Ok(current
         .into_iter()
         .map(
-            |(identity, metadata)| raiun_cloudfiles_windows::VaultCatalogueEntry {
+            |(identity, metadata)| raiun_cloudfiles_windows::vault_custody::VaultCatalogueEntry {
                 identity,
                 metadata,
             },
@@ -1418,4 +1435,79 @@ pub(super) fn pending_identities(
         }
     }
     Ok(identities)
+}
+
+/// Native facts for the current protected result of each affected opaque.
+/// A terminal result is distinct from a still queued local result, including
+/// when the terminal entry has no original catalogue row (new child).
+pub(super) struct NativeIntent {
+    pub identity: [u8; 16],
+    pub file: u64,
+    pub usn: i64,
+    pub components: Vec<String>,
+    pub entry: Option<RemoteEntry>,
+    pub plaintext_len: u64,
+    pub source_sha256: Option<[u8; 32]>,
+    pub terminal_verified: bool,
+    pub write_id: String,
+    pub revision: u64,
+}
+pub(super) fn current_native_intents(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+) -> Result<Vec<NativeIntent>, BackendError> {
+    let mut rows = Vec::new();
+    for delta in protected_catalogue_deltas(store, scope)? {
+        if !super::windows_vault_reconciled_custody::is_reconciled(
+            store,
+            scope,
+            &delta.write_id,
+            delta.revision,
+            delta.identity,
+            delta.file,
+        )? {
+            rows.push(delta);
+        }
+    }
+    rows.extend(super::windows_vault_reconciled_custody::catalogue_updates(
+        store, scope,
+    )?);
+    let mut result = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let mut superseded = false;
+        for (other_index, next) in rows.iter().enumerate() {
+            if index == other_index || row.identity != next.identity {
+                continue;
+            }
+            if row.file != next.file {
+                return Err(no());
+            }
+            if row.entry.as_ref().is_some_and(|entry| {
+                next.original
+                    .as_ref()
+                    .is_some_and(|original| same_presentation(entry, original))
+            }) {
+                superseded = true;
+            }
+        }
+        if !superseded {
+            result.push(NativeIntent {
+                identity: row.identity,
+                file: row.file,
+                usn: row.usn,
+                components: row.components.clone(),
+                entry: row.entry.clone(),
+                plaintext_len: row.plaintext_len,
+                source_sha256: row.source_sha256,
+                terminal_verified: row.verified_native,
+                write_id: row.write_id.clone(),
+                revision: row.revision,
+            });
+        }
+    }
+    let mut identities = std::collections::BTreeSet::new();
+    if result.iter().any(|row| !identities.insert(row.identity)) {
+        return Err(no());
+    }
+    Ok(result)
 }

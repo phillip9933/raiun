@@ -681,16 +681,18 @@ pub(super) fn pending_native_facts(
 pub(super) fn pending_catalogue(
     store: &Arc<dyn Storage>,
     scope: &Scope,
-) -> Result<Vec<raiun_cloudfiles_windows::VaultCatalogueEntry>, BackendError> {
+) -> Result<Vec<raiun_cloudfiles_windows::vault_custody::VaultCatalogueEntry>, BackendError> {
     pending_native_facts(store, scope)?
         .into_iter()
         .map(|p| {
             let mut entry = p.entry.ok_or_else(unavailable)?;
             entry.writable = false;
-            Ok(raiun_cloudfiles_windows::VaultCatalogueEntry {
-                identity: p.identity,
-                metadata: entry,
-            })
+            Ok(
+                raiun_cloudfiles_windows::vault_custody::VaultCatalogueEntry {
+                    identity: p.identity,
+                    metadata: entry,
+                },
+            )
         })
         .collect()
 }

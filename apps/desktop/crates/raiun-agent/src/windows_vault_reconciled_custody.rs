@@ -39,7 +39,6 @@ impl Operation {
             VaultPendingOperationKind::Overwrite => Self::Overwrite,
             VaultPendingOperationKind::RenameFile => Self::RenameFile,
             VaultPendingOperationKind::DeleteFile => Self::DeleteFile,
-            _ => return Err(no()),
         })
     }
 }
@@ -188,9 +187,11 @@ fn load(
             return Err(no());
         }
         let mut ids = std::collections::BTreeSet::new();
+        let history =
+            super::windows_vault_namespace_queued::protected_catalogue_deltas(store, scope)?;
         for row in &i.rows {
             row.validate(scope)?;
-            if !ids.insert(row.write_id.clone()) {
+            if !ids.insert(row.write_id.clone()) || !history_matches(row, &history) {
                 return Err(no());
             }
         }
@@ -207,6 +208,35 @@ fn load(
         }
     };
     Ok((raw, index))
+}
+fn history_matches(
+    terminal: &Terminal,
+    history: &[super::windows_vault_namespace_queued::CatalogueDelta],
+) -> bool {
+    let mut rows = history
+        .iter()
+        .filter(|row| row.write_id == terminal.write_id)
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.revision);
+    if rows.len() != terminal.covered_revisions.len()
+        || rows.iter().enumerate().any(|(index, row)| {
+            row.revision != terminal.covered_revisions[index]
+                || row.identity != terminal.identity
+                || row.file != terminal.file
+                || index > 0 && rows[index - 1].entry.as_ref() != row.original.as_ref()
+        })
+    {
+        return false;
+    }
+    rows.last().is_some_and(|last| {
+        last.revision == terminal.revision
+            && last.usn == terminal.original_usn
+            && last.components == terminal.components
+            && last.original == terminal.original
+            && last.entry == terminal.pending
+            && last.plaintext_len == terminal.plaintext_len
+            && last.source_sha256 == terminal.source_sha256
+    })
 }
 fn commit(
     store: &Arc<dyn Storage>,
@@ -310,11 +340,11 @@ pub(super) fn record(
         .as_ref()
         .is_some_and(|o| o.path != meta.path || o.id != meta.base_resource_id)
         || expected.entry.as_ref().is_some_and(|e| {
-            e.path
+            e.path.as_str()
                 != if operation == Operation::RenameFile {
-                    &meta.destination_path
+                    meta.destination_path.as_str()
                 } else {
-                    &meta.path
+                    meta.path.as_str()
                 }
         })
         || expected
@@ -386,12 +416,9 @@ pub(super) fn catalogue_updates(
     let (_, i) = load(store, scope)?;
     i.rows
         .into_iter()
-        .filter_map(|r| {
-            if r.result.is_none() && r.strong_original().is_none() {
-                return None;
-            }
+        .map(|r| {
             let original = r.strong_original().cloned();
-            Some(super::windows_vault_namespace_queued::CatalogueDelta {
+            super::windows_vault_namespace_queued::CatalogueDelta {
                 write_id: r.write_id,
                 revision: r.revision,
                 identity: r.identity,
@@ -403,7 +430,7 @@ pub(super) fn catalogue_updates(
                 plaintext_len: r.plaintext_len,
                 source_sha256: r.remote_sha256.or(r.source_sha256),
                 verified_native: true,
-            })
+            }
         })
         .map(Ok)
         .collect()
