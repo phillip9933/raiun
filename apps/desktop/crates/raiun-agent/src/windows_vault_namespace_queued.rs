@@ -657,7 +657,8 @@ fn initial_pending(
     store: &Arc<dyn Storage>,
     scope: &Scope,
 ) -> Result<Vec<PendingFacts>, BackendError> {
-    let rows = super::windows_vault_child_create_custody::pending_native_facts(store, scope)?;
+    let mut rows = super::windows_vault_child_create_custody::pending_native_facts(store, scope)?;
+    rows.extend(super::windows_vault_cached_child_custody::pending_native_facts(store, scope)?);
     let mut ids = std::collections::BTreeSet::new();
     let mut files = std::collections::BTreeSet::new();
     if rows
@@ -729,6 +730,14 @@ fn current_pending(
     let mut rows = initial_pending(store, scope)?;
     apply_retargets(&mut rows, index)?;
     Ok(rows)
+}
+/// Current protected child facts, including exact retargeted descendants.
+pub(super) fn current_created_facts(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+) -> Result<Vec<PendingFacts>, BackendError> {
+    let (_, index) = load_retargets(store, scope)?;
+    current_pending(store, scope, &index)
 }
 fn parent_ref_matches(
     reference: &ParentRef,
@@ -1109,6 +1118,7 @@ fn all_catalogue_deltas(
             .into_iter()
             .map(CatalogueDelta::from),
     );
+    rows.extend(super::windows_vault_cached_child_custody::catalogue_updates(store, scope)?);
     rows.extend(
         super::windows_vault_file_rename_custody::pending_native_facts(store, scope)?
             .into_iter()
