@@ -196,6 +196,7 @@ enum Phase {
     Attempted,
     RemoteVerified,
     NativeCompleted,
+    LocalQueued,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -205,6 +206,8 @@ struct Row {
     phase: Phase,
     remote: Option<RemoteEntry>,
     identity: Option<[u8; 16]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    queued: Option<super::windows_vault_namespace_queued::Queued>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -233,6 +236,13 @@ fn load(
         let mut ids = std::collections::BTreeSet::new();
         for row in &index.rows {
             row.descriptor.validate(scope)?;
+            if (row.phase == Phase::LocalQueued) != row.queued.is_some() {
+                return Err(unavailable());
+            }
+            if let Some(q) = &row.queued {
+                validate_queued(&row.descriptor, q)?;
+            }
+
             let remote_expected =
                 matches!(row.phase, Phase::RemoteVerified | Phase::NativeCompleted);
             if remote_expected != row.remote.is_some()
@@ -322,7 +332,11 @@ pub(super) fn verify_no_unresolved(
     scope: &Scope,
 ) -> Result<(), BackendError> {
     let (_, index) = load(store, scope)?;
-    if index.rows.iter().any(|r| r.phase != Phase::NativeCompleted) {
+    if index.rows.iter().any(|r| {
+        r.phase != Phase::NativeCompleted
+            && !(r.phase == Phase::LocalQueued
+                && r.queued.as_ref().is_some_and(|q| q.native.is_some()))
+    }) {
         return Err(unavailable());
     }
     for row in &index.rows {
@@ -423,6 +437,81 @@ impl VaultChildCreateRecord for Record {
             snapshot.into_reader(cancel).map_err(|_| unavailable())?,
         ))
     }
+    fn record_local_queued(
+        &self,
+        r: &raiun_cloudfiles_windows::VaultCachedNamespaceQueued,
+    ) -> Result<(), BackendError> {
+        let raiun_cloudfiles_windows::VaultCachedNamespaceDescriptor::ChildCreate(d) =
+            r.descriptor()
+        else {
+            return Err(unavailable());
+        };
+        if Descriptor::from(&self.scope, d)? != self.stored {
+            return Err(unavailable());
+        }
+        let q = super::windows_vault_namespace_queued::Queued::from(r)?;
+        validate_queued(&self.stored, &q)?;
+        let (old, mut index) = load(&self.store, &self.scope)?;
+        let row = index
+            .rows
+            .iter_mut()
+            .find(|v| v.descriptor == self.stored)
+            .ok_or_else(unavailable)?;
+        if row.phase != Phase::Ready
+            || row.queued.is_some()
+            || self.send_claimed.load(Ordering::Acquire)
+        {
+            return Err(unavailable());
+        }
+        row.phase = Phase::LocalQueued;
+        row.queued = Some(q);
+        commit(
+            &self.store,
+            &self.scope,
+            old.as_ref().map(|v| v.as_slice()),
+            &index,
+        )
+    }
+    fn record_local_queued_native(
+        &self,
+        r: &raiun_cloudfiles_windows::VaultCachedNamespaceQueued,
+        identity: [u8; 16],
+        file: u64,
+        usn: i64,
+    ) -> Result<(), BackendError> {
+        let raiun_cloudfiles_windows::VaultCachedNamespaceDescriptor::ChildCreate(d) =
+            r.descriptor()
+        else {
+            return Err(unavailable());
+        };
+        if Descriptor::from(&self.scope, d)? != self.stored
+            || file != self.descriptor.source.file
+            || identity == self.descriptor.parent_identity
+        {
+            return Err(unavailable());
+        }
+        let (old, mut index) = load(&self.store, &self.scope)?;
+        let row = index
+            .rows
+            .iter_mut()
+            .find(|v| v.descriptor == self.stored)
+            .ok_or_else(unavailable)?;
+        if row.phase != Phase::LocalQueued {
+            return Err(unavailable());
+        }
+        let q = row.queued.as_mut().ok_or_else(unavailable)?;
+        if !q.matches_receipt(r)? {
+            return Err(unavailable());
+        }
+        q.record_native(identity, file, usn)?;
+        validate_queued(&self.stored, q)?;
+        commit(
+            &self.store,
+            &self.scope,
+            old.as_ref().map(|v| v.as_slice()),
+            &index,
+        )
+    }
     fn claim_send(&self) -> Result<(), BackendError> {
         if self.send_claimed.swap(true, Ordering::AcqRel) {
             return Err(unavailable());
@@ -465,10 +554,10 @@ pub(super) fn prepare(
     let (old, mut index) = load(&store, scope)?;
     if cancel()
         || index.rows.len() >= LIMIT
-        || index.rows.iter().any(|r| {
-            r.phase != Phase::NativeCompleted
-                || r.descriptor.id().ok().as_deref() == Some(id.as_str())
-        })
+        || index
+            .rows
+            .iter()
+            .any(|r| !settled(r) || r.descriptor.id().ok().as_deref() == Some(id.as_str()))
     {
         return Err(unavailable());
     }
@@ -502,6 +591,7 @@ pub(super) fn prepare(
         phase: Phase::Capturing,
         remote: None,
         identity: None,
+        queued: None,
     });
     commit(&store, scope, old.as_ref().map(|v| v.as_slice()), &index)?;
     if let Some(reservation) = reservation.take() {
@@ -540,4 +630,79 @@ pub(super) fn prepare(
     });
     record.update(Phase::Capturing, Phase::Ready, None, None)?;
     Ok(record)
+}
+
+fn validate_queued(
+    d: &Descriptor,
+    q: &super::windows_vault_namespace_queued::Queued,
+) -> Result<(), BackendError> {
+    use raiun_cloudfiles_windows::VaultCachedNamespaceOperation as O;
+    q.validate()?;
+    let directory =
+        d.source.kind == raiun_cloudfiles_windows::namespace_intent::NamespaceObjectKind::Directory;
+    if q.operation
+        != if directory {
+            O::CreateDirectory
+        } else {
+            O::CreateFile
+        }
+        || q.original.is_some()
+        || q.parent != d.parent
+        || q.entry.as_ref().is_none_or(|e| {
+            e.path != d.logical_path || e.directory != directory || e.size != d.source.plaintext_len
+        })
+        || q.plaintext_len != d.source.plaintext_len
+        || q.source_sha256 != d.source.plaintext_sha256
+        || q.native
+            .as_ref()
+            .is_some_and(|n| n.file != d.source.file || n.identity == d.parent_identity)
+    {
+        return Err(unavailable());
+    }
+    Ok(())
+}
+pub(super) fn pending_native_facts(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+) -> Result<Vec<super::windows_vault_namespace_queued::PendingFacts>, BackendError> {
+    verify_no_unresolved(store, scope)?;
+    let (_, i) = load(store, scope)?;
+    i.rows
+        .iter()
+        .filter(|r| r.phase == Phase::LocalQueued)
+        .map(|r| {
+            r.queued
+                .as_ref()
+                .ok_or_else(unavailable)?
+                .pending_facts(r.descriptor.source.components.clone())
+        })
+        .collect()
+}
+pub(super) fn pending_catalogue(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+) -> Result<Vec<raiun_cloudfiles_windows::VaultCatalogueEntry>, BackendError> {
+    pending_native_facts(store, scope)?
+        .into_iter()
+        .map(|p| {
+            let mut entry = p.entry.ok_or_else(unavailable)?;
+            entry.writable = false;
+            Ok(raiun_cloudfiles_windows::VaultCatalogueEntry {
+                identity: p.identity,
+                metadata: entry,
+            })
+        })
+        .collect()
+}
+pub(super) fn has_local_queued(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+) -> Result<bool, BackendError> {
+    let (_, i) = load(store, scope)?;
+    Ok(i.rows.iter().any(|r| r.phase == Phase::LocalQueued))
+}
+
+fn settled(r: &Row) -> bool {
+    r.phase == Phase::NativeCompleted
+        || (r.phase == Phase::LocalQueued && r.queued.as_ref().is_some_and(|q| q.native.is_some()))
 }

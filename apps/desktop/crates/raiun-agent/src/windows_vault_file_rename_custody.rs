@@ -43,6 +43,8 @@ struct Row {
     native_usn: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     native_children: Option<Vec<(u64, i64)>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    queued: Option<super::windows_vault_namespace_queued::Queued>,
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum Phase {
@@ -50,6 +52,7 @@ enum Phase {
     Attempted,
     RemoteVerified,
     NativeCompleted,
+    LocalQueued,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -74,6 +77,12 @@ fn load(
         let (v, f) = scope.native_root();
         let mut ids = std::collections::BTreeSet::new();
         for r in &i.rows {
+            if (r.phase == Phase::LocalQueued) != r.queued.is_some() {
+                return Err(no());
+            }
+            if let Some(q) = &r.queued {
+                validate_queued(&r.facts, q)?;
+            }
             r.facts.validate(ConfiguredRootIdentity {
                 volume_serial: v,
                 file_index: f,
@@ -206,6 +215,98 @@ impl Record {
     }
 }
 impl VaultFileRenameRecord for Record {
+    fn record_local_queued(
+        &self,
+        r: &raiun_cloudfiles_windows::VaultCachedNamespaceQueued,
+    ) -> Result<(), BackendError> {
+        let raiun_cloudfiles_windows::VaultCachedNamespaceDescriptor::FileRename(d) =
+            r.descriptor()
+        else {
+            return Err(no());
+        };
+        d.validate()?;
+        let a = self.scope.streamed_storage_scope().map_err(|_| no())?;
+        if d.facts != self.facts
+            || self.scope.native_root() != (d.root.volume_serial, d.root.file_index)
+            || d.remote_root != self.scope.remote_root()
+            || d.owner.profile_id() != a.profile_id
+            || d.owner.account_id() != a.account_subject
+            || d.owner.server_origin() != a.server_origin
+            || d.vault.space_id() != a.space_id
+            || d.vault.resource_id() != a.root_resource_id
+        {
+            return Err(no());
+        }
+        let q = super::windows_vault_namespace_queued::Queued::from(r)?;
+        validate_queued(&self.facts, &q)?;
+        let _serial = self.serial.lock().map_err(|_| no())?;
+        let (old, mut i) = load(&self.store, &self.scope)?;
+        let row = i
+            .rows
+            .iter_mut()
+            .find(|r| r.facts == self.facts)
+            .ok_or_else(no)?;
+        if row.phase != Phase::Ready || row.queued.is_some() || self.claim.load(Ordering::Acquire) {
+            return Err(no());
+        }
+        row.phase = Phase::LocalQueued;
+        row.queued = Some(q);
+        commit(
+            &self.store,
+            &self.scope,
+            old.as_ref().map(|v| v.as_slice()),
+            &i,
+        )
+    }
+    fn record_local_queued_native(
+        &self,
+        r: &raiun_cloudfiles_windows::VaultCachedNamespaceQueued,
+        identity: [u8; 16],
+        file: u64,
+        usn: i64,
+    ) -> Result<(), BackendError> {
+        let raiun_cloudfiles_windows::VaultCachedNamespaceDescriptor::FileRename(d) =
+            r.descriptor()
+        else {
+            return Err(no());
+        };
+        d.validate()?;
+        let a = self.scope.streamed_storage_scope().map_err(|_| no())?;
+        if d.facts != self.facts
+            || self.scope.native_root() != (d.root.volume_serial, d.root.file_index)
+            || d.remote_root != self.scope.remote_root()
+            || d.owner.profile_id() != a.profile_id
+            || d.owner.account_id() != a.account_subject
+            || d.owner.server_origin() != a.server_origin
+            || d.vault.space_id() != a.space_id
+            || d.vault.resource_id() != a.root_resource_id
+        {
+            return Err(no());
+        }
+        let _serial = self.serial.lock().map_err(|_| no())?;
+        let (old, mut i) = load(&self.store, &self.scope)?;
+        let row = i
+            .rows
+            .iter_mut()
+            .find(|r| r.facts == self.facts)
+            .ok_or_else(no)?;
+        if row.phase != Phase::LocalQueued {
+            return Err(no());
+        }
+        let q = row.queued.as_mut().ok_or_else(no)?;
+        if !q.matches_receipt(r)? {
+            return Err(no());
+        }
+        q.record_native(identity, file, usn)?;
+        validate_queued(&self.facts, q)?;
+        commit(
+            &self.store,
+            &self.scope,
+            old.as_ref().map(|v| v.as_slice()),
+            &i,
+        )
+    }
+
     fn record_directory_remote(
         &self,
         p: &raiun_opencloud::vault_backend::VaultVerifiedDirectoryRename,
@@ -350,10 +451,7 @@ pub(super) fn prepare(
         return Err(no());
     }
     let (old, mut i) = load(&store, scope)?;
-    if i.rows
-        .iter()
-        .any(|r| r.phase != Phase::NativeCompleted || r.facts == d.facts)
-    {
+    if i.rows.iter().any(|r| !settled(r) || r.facts == d.facts) {
         return Err(no());
     }
     // A missing index beside this sentinel is never initialized/adopted later.
@@ -368,6 +466,7 @@ pub(super) fn prepare(
         phase: Phase::Ready,
         native_usn: None,
         native_children: None,
+        queued: None,
     });
     commit(&store, scope, old.as_ref().map(|v| v.as_slice()), &i)?;
     Ok(Arc::new(Record {
@@ -381,10 +480,13 @@ pub(super) fn prepare(
 }
 fn completed(store: &Arc<dyn Storage>, scope: &Scope) -> Result<Vec<Row>, BackendError> {
     let (_, i) = load(store, scope)?;
-    if i.rows.iter().any(|r| r.phase != Phase::NativeCompleted) {
+    if i.rows.iter().any(|r| !settled(r)) {
         return Err(no());
     }
-    Ok(i.rows)
+    Ok(i.rows
+        .into_iter()
+        .filter(|r| r.phase == Phase::NativeCompleted)
+        .collect())
 }
 
 #[derive(Clone)]
@@ -526,4 +628,64 @@ pub(super) fn verify_no_unresolved(
     scope: &Scope,
 ) -> Result<(), BackendError> {
     completed(store, scope).map(|_| ())
+}
+
+fn validate_queued(
+    f: &VaultFileRenameFacts,
+    q: &super::windows_vault_namespace_queued::Queued,
+) -> Result<(), BackendError> {
+    q.validate()?;
+    let parent = f
+        .destination_parent
+        .as_ref()
+        .map(|d| &d.parent)
+        .unwrap_or(&f.parent);
+    if f.original.directory
+        || f.children.is_some()
+        || q.operation != raiun_cloudfiles_windows::VaultCachedNamespaceOperation::RenameFile
+        || q.original.as_ref() != Some(&f.original)
+        || &q.parent != parent
+        || q.entry.as_ref().is_none_or(|e| {
+            e.path != f.destination
+                || e.id != f.original.id
+                || e.directory
+                || e.size != f.original.size
+        })
+        || q.plaintext_len != f.original.size
+        || q.native
+            .as_ref()
+            .is_some_and(|n| n.identity != f.identity || n.file != f.file)
+    {
+        return Err(no());
+    }
+    Ok(())
+}
+
+fn settled(r: &Row) -> bool {
+    r.phase == Phase::NativeCompleted
+        || (r.phase == Phase::LocalQueued && r.queued.as_ref().is_some_and(|q| q.native.is_some()))
+}
+pub(super) fn pending_native_facts(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+) -> Result<Vec<super::windows_vault_namespace_queued::PendingFacts>, BackendError> {
+    verify_no_unresolved(store, scope)?;
+    let (_, i) = load(store, scope)?;
+    i.rows
+        .iter()
+        .filter(|r| r.phase == Phase::LocalQueued)
+        .map(|r| {
+            r.queued
+                .as_ref()
+                .ok_or_else(no)?
+                .pending_facts(r.facts.new_components.clone())
+        })
+        .collect()
+}
+pub(super) fn has_local_queued(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+) -> Result<bool, BackendError> {
+    let (_, i) = load(store, scope)?;
+    Ok(i.rows.iter().any(|r| r.phase == Phase::LocalQueued))
 }

@@ -88,6 +88,7 @@ enum Phase {
     Attempted,
     RemoteVerified,
     NativeCompleted,
+    LocalQueued,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -95,6 +96,8 @@ struct Row {
     descriptor: Descriptor,
     phase: Phase,
     parent_usn_after: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    queued: Option<super::windows_vault_namespace_queued::Queued>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -119,6 +122,12 @@ fn load(
         let mut objects = std::collections::BTreeSet::new();
         for r in &i.rows {
             r.descriptor.validate(scope)?;
+            if (r.phase == Phase::LocalQueued) != r.queued.is_some() {
+                return Err(no());
+            }
+            if let Some(q) = &r.queued {
+                validate_queued(&r.descriptor, q)?;
+            }
             if !objects.insert(r.descriptor.facts.original_identity)
                 || (r.phase == Phase::NativeCompleted) != r.parent_usn_after.is_some()
                 || r.parent_usn_after.is_some_and(|v| v <= 0)
@@ -191,6 +200,79 @@ impl Record {
     }
 }
 impl VaultFileDeleteRecord for Record {
+    fn record_local_queued(
+        &self,
+        r: &raiun_cloudfiles_windows::VaultCachedNamespaceQueued,
+    ) -> Result<(), BackendError> {
+        let raiun_cloudfiles_windows::VaultCachedNamespaceDescriptor::FileDelete(d) =
+            r.descriptor()
+        else {
+            return Err(no());
+        };
+        if Descriptor::from(&self.scope, d)? != self.stored {
+            return Err(no());
+        }
+        let q = super::windows_vault_namespace_queued::Queued::from(r)?;
+        validate_queued(&self.stored, &q)?;
+        let _serial = self.serial.lock().map_err(|_| no())?;
+        let (old, mut i) = load(&self.store, &self.scope)?;
+        let row = i
+            .rows
+            .iter_mut()
+            .find(|r| r.descriptor == self.stored)
+            .ok_or_else(no)?;
+        if row.phase != Phase::Ready || row.queued.is_some() || self.claimed.load(Ordering::Acquire)
+        {
+            return Err(no());
+        }
+        row.phase = Phase::LocalQueued;
+        row.queued = Some(q);
+        commit(
+            &self.store,
+            &self.scope,
+            old.as_ref().map(|v| v.as_slice()),
+            &i,
+        )
+    }
+    fn record_local_queued_native(
+        &self,
+        r: &raiun_cloudfiles_windows::VaultCachedNamespaceQueued,
+        identity: [u8; 16],
+        file: u64,
+        usn: i64,
+    ) -> Result<(), BackendError> {
+        let raiun_cloudfiles_windows::VaultCachedNamespaceDescriptor::FileDelete(d) =
+            r.descriptor()
+        else {
+            return Err(no());
+        };
+        if Descriptor::from(&self.scope, d)? != self.stored {
+            return Err(no());
+        }
+        let _serial = self.serial.lock().map_err(|_| no())?;
+        let (old, mut i) = load(&self.store, &self.scope)?;
+        let row = i
+            .rows
+            .iter_mut()
+            .find(|r| r.descriptor == self.stored)
+            .ok_or_else(no)?;
+        if row.phase != Phase::LocalQueued {
+            return Err(no());
+        }
+        let q = row.queued.as_mut().ok_or_else(no)?;
+        if !q.matches_receipt(r)? {
+            return Err(no());
+        }
+        q.record_native(identity, file, usn)?;
+        validate_queued(&self.stored, q)?;
+        commit(
+            &self.store,
+            &self.scope,
+            old.as_ref().map(|v| v.as_slice()),
+            &i,
+        )
+    }
+
     fn descriptor(&self) -> &VaultFileDeleteDescriptor {
         &self.descriptor
     }
@@ -241,10 +323,9 @@ pub(super) fn begin(
     let stored = Descriptor::from(scope, d)?;
     let (raw, mut i) = load(&store, scope)?;
     if i.rows.len() >= LIMIT
-        || i.rows.iter().any(|r| {
-            r.phase != Phase::NativeCompleted
-                || r.descriptor.facts.original_identity == d.original_identity
-        })
+        || i.rows
+            .iter()
+            .any(|r| !settled(r) || r.descriptor.facts.original_identity == d.original_identity)
     {
         return Err(no());
     }
@@ -258,6 +339,7 @@ pub(super) fn begin(
         descriptor: stored.clone(),
         phase: Phase::Ready,
         parent_usn_after: None,
+        queued: None,
     });
     commit(&store, scope, raw.as_deref().map(Vec::as_slice), &i)?;
     Ok(Arc::new(Record {
@@ -274,7 +356,7 @@ pub(super) fn verify_no_unresolved(
     scope: &Scope,
 ) -> Result<(), BackendError> {
     let (_, i) = load(store, scope)?;
-    if i.rows.iter().any(|r| r.phase != Phase::NativeCompleted) {
+    if i.rows.iter().any(|r| !settled(r)) {
         return Err(no());
     }
     Ok(())
@@ -332,4 +414,54 @@ pub(super) fn intent_deleted(
                 && components == f.components
         }
     }))
+}
+
+fn validate_queued(
+    d: &Descriptor,
+    q: &super::windows_vault_namespace_queued::Queued,
+) -> Result<(), BackendError> {
+    q.validate()?;
+    let f = &d.facts;
+    if f.empty_directory
+        || q.operation != raiun_cloudfiles_windows::VaultCachedNamespaceOperation::DeleteFile
+        || q.original.as_ref() != Some(&f.original)
+        || q.parent != f.parent
+        || q.entry.is_some()
+        || q.plaintext_len != f.original.size
+        || q.native.as_ref().is_some_and(|n| {
+            n.identity != f.original_identity || n.file != f.original_file.file_index
+        })
+    {
+        return Err(no());
+    }
+    Ok(())
+}
+
+fn settled(r: &Row) -> bool {
+    r.phase == Phase::NativeCompleted
+        || (r.phase == Phase::LocalQueued && r.queued.as_ref().is_some_and(|q| q.native.is_some()))
+}
+pub(super) fn pending_native_facts(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+) -> Result<Vec<super::windows_vault_namespace_queued::PendingFacts>, BackendError> {
+    verify_no_unresolved(store, scope)?;
+    let (_, i) = load(store, scope)?;
+    i.rows
+        .iter()
+        .filter(|r| r.phase == Phase::LocalQueued)
+        .map(|r| {
+            r.queued
+                .as_ref()
+                .ok_or_else(no)?
+                .pending_facts(r.descriptor.facts.components.clone())
+        })
+        .collect()
+}
+pub(super) fn has_local_queued(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+) -> Result<bool, BackendError> {
+    let (_, i) = load(store, scope)?;
+    Ok(i.rows.iter().any(|r| r.phase == Phase::LocalQueued))
 }

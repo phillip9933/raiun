@@ -137,6 +137,8 @@ mod windows_vault_file_delete_custody;
 mod windows_vault_file_rename_custody;
 #[path = "windows_vault_file_replace_custody.rs"]
 mod windows_vault_file_replace_custody;
+#[path = "windows_vault_namespace_queued.rs"]
+mod windows_vault_namespace_queued;
 #[path = "windows_vault_streamed_edit.rs"]
 mod windows_vault_streamed_edit;
 

@@ -236,6 +236,22 @@ impl VaultFileRenameDescriptor {
     }
 }
 pub trait VaultFileRenameRecord: Send + Sync {
+    fn record_local_queued(
+        &self,
+        _receipt: &crate::VaultCachedNamespaceQueued,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unavailable)
+    }
+    fn record_local_queued_native(
+        &self,
+        _receipt: &crate::VaultCachedNamespaceQueued,
+        _identity: [u8; 16],
+        _file: u64,
+        _usn: i64,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unavailable)
+    }
+
     fn record_directory_remote(
         &self,
         _proof: &raiun_opencloud::vault_backend::VaultVerifiedDirectoryRename,
