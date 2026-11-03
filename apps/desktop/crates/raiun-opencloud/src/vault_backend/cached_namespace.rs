@@ -21,6 +21,95 @@ impl VaultCachedChildTarget {
     }
 }
 impl VaultBackend {
+    /// Admit a clean cached FILE rename only for the live original unlock.
+    /// The returned queued entry is local journal history, never a MOVE proof.
+    pub fn queue_cached_file_rename(
+        &self,
+        from: &str,
+        to: &str,
+        source_id: &str,
+        source_etag: &str,
+        epoch: &VaultSessionEpoch,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<VaultRenameOutcome, CloudError> {
+        self.cached_namespace_current(epoch, cancelled)?;
+        let result = self.rename_file_with_queue(from, to, source_id, source_etag)?;
+        self.cached_namespace_current(epoch, cancelled)?;
+        match result {
+            VaultRenameOutcome::Queued {
+                uncertain: false, ..
+            } => Ok(result),
+            _ => Err(conflict("cached rename did not remain local")),
+        }
+    }
+
+    /// Admit a clean cached FILE delete with ciphertext-only retained recovery.
+    /// This never grants remote or native completion authority.
+    pub fn queue_cached_file_delete(
+        &self,
+        path: &str,
+        source_id: &str,
+        source_etag: &str,
+        epoch: &VaultSessionEpoch,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<VaultDeleteOutcome, CloudError> {
+        self.cached_namespace_current(epoch, cancelled)?;
+        let result = self.delete_file_with_queue(path, source_id, source_etag)?;
+        self.cached_namespace_current(epoch, cancelled)?;
+        match result {
+            VaultDeleteOutcome::Queued {
+                uncertain: false, ..
+            } => Ok(result),
+            _ => Err(conflict("cached delete did not remain local")),
+        }
+    }
+
+    /// Change only the sealed target of a never-attempted local FILE create.
+    pub fn retarget_cached_file_create(
+        &self,
+        from: &str,
+        to: &str,
+        source_id: &str,
+        source_etag: &str,
+        destination_parent_ref: &VaultPendingParentRef,
+        epoch: &VaultSessionEpoch,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        self.cached_namespace_current(epoch, cancelled)?;
+        let result = self.rename_pending_create_with_queue(
+            from,
+            to,
+            source_id,
+            source_etag,
+            destination_parent_ref,
+        )?;
+        self.cached_namespace_current(epoch, cancelled)?;
+        Ok(result)
+    }
+
+    /// Atomically retarget at most 64 never-attempted rows / 64 MiB.
+    pub fn retarget_cached_directory_subtree(
+        &self,
+        from: &str,
+        to: &str,
+        source_id: &str,
+        source_etag: &str,
+        destination_parent_ref: &VaultPendingParentRef,
+        epoch: &VaultSessionEpoch,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<VaultPendingDirectorySubtreeRetarget, CloudError> {
+        self.cached_namespace_current(epoch, cancelled)?;
+        let result = self.retarget_never_attempted_directory_subtree_with_queue(
+            from,
+            to,
+            source_id,
+            source_etag,
+            destination_parent_ref,
+        )?;
+        self.cached_namespace_current(epoch, cancelled)?;
+        Ok(result)
+    }
+
     pub fn prepare_cached_child_create(
         &self,
         path: &str,

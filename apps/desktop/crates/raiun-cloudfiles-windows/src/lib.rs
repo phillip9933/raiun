@@ -38,6 +38,7 @@ mod opencloud;
 #[cfg(windows)]
 pub use opencloud::{
     VaultCachedNamespaceDescriptor, VaultCachedNamespaceOperation, VaultCachedNamespaceQueued,
+    VaultCachedRetargetDescriptor,
 };
 #[cfg(windows)]
 pub use opencloud::{VaultCachedQueuedCapture, VaultCachedQueuedEdit};
