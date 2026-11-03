@@ -110,6 +110,7 @@ impl ConfiguredRootConnection {
             || backend.is_revoked()
             || !Arc::ptr_eq(&erased, &self.state.backend)
             || !backend.owns_composite_root_identity(self.composite_root_identity)
+            || authorization.agent_generation == 0
             || authorization.token_generation == 0
             || authorization.token_generation != backend.scope().token_generation()
             || job.is_stopped()
@@ -436,6 +437,7 @@ impl ConfiguredRootConnection {
                     .map_err(|_| no())?;
             }
             let old_lease = store.acquire_dispatch(original.key()).map_err(|_| no())?;
+            phase.set(crate::FileCreateContinuationStage::NativeCompletion);
             let seal = NativeFileCreateContinuation::seal(
                 &final_reference,
                 &body,
@@ -448,6 +450,7 @@ impl ConfiguredRootConnection {
                 new_binding,
             )?;
             let mut old_lease = old_lease;
+            phase.set(crate::FileCreateContinuationStage::Custody);
             old_lease.record_continued(&seal).map_err(|_| no())?;
             drop(ancestors);
             drop(parent);

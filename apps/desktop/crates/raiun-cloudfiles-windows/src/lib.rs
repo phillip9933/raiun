@@ -364,7 +364,10 @@ impl fmt::Display for Error {
                 .write_str("durable edit recovery is unavailable for this account and root"),
             #[cfg(windows)]
             Self::FileCreateContinuation { stage } => {
-                write!(formatter, "saved file recovery could not finish during {stage}")
+                write!(
+                    formatter,
+                    "saved file recovery could not finish during {stage}"
+                )
             }
             Self::InvalidConfiguredRoot => {
                 formatter.write_str("configured root is not a safe local directory")
