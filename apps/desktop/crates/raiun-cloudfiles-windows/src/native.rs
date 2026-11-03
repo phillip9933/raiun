@@ -12345,6 +12345,7 @@ fn restore_cached_space_labels(
     let candidates = backend
         .cached_space_roots()
         .map_err(|_| Error::ProviderUnavailable)?;
+    let mut seen_roots = std::collections::HashSet::new();
     for name in native_vault_cleanup_inventory::local_names(&root.path.join("Spaces"))? {
         let mut found = None;
         for candidate in &candidates {
@@ -12363,6 +12364,11 @@ fn restore_cached_space_labels(
             }
         }
         if let Some((identity, _pins)) = found {
+            // A protected opaque copied onto two physical children cannot
+            // establish one cached Space locator. Preserve both and refuse.
+            if !seen_roots.insert(identity.clone()) {
+                return Err(Error::ConfiguredRootChanged);
+            }
             backend
                 .set_cached_space_label(&identity, &name)
                 .map_err(|_| Error::ProviderUnavailable)?;
