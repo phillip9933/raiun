@@ -661,6 +661,65 @@ impl VaultOfflineCache {
         )
     }
 
+    #[cfg(windows)]
+    pub(crate) fn queue_delete_from_cached_source(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        source: &mut PendingBodyReadSeek<'_>,
+        request: VaultPendingDeleteRequest<'_>,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        if request.body_len != request.source_size || source.len() != request.body_len {
+            return Err(invalid("encrypted delete recovery body length is invalid"));
+        }
+        let Some((original, digest)) = &source.cached_source else {
+            return Err(conflict(
+                "encrypted delete source is not an authenticated cached file",
+            ));
+        };
+        if original.id != request.source_resource_id
+            || original.etag != request.source_etag
+            || original.size != request.source_size
+            || digest != request.source_ciphertext_sha256
+        {
+            return Err(conflict("encrypted delete source identity changed"));
+        }
+        self.queue_operation_inner_encoded(
+            sessions,
+            source,
+            VaultPendingOperationRequest {
+                integrity_token: request.integrity_token,
+                encoded_target: request.encoded_target,
+                operation: VaultPendingOperationKind::DeleteFile,
+                base: WriteCondition::Match(request.source_etag.to_owned()),
+                base_resource_id: Some(request.source_resource_id),
+                parent_resource_id: Some(request.parent_resource_id),
+                parent_etag: Some(request.parent_etag),
+                parent_ref: None,
+                destination_target: None,
+                destination_parent_resource_id: None,
+                destination_parent_etag: None,
+                source_size: Some(request.source_size),
+                source_ciphertext_sha256: Some(request.source_ciphertext_sha256),
+                copy_source: None,
+                existing_id: None,
+                body_len: request.body_len,
+                state: CiphertextWriteState::Pending,
+                receipt_resource_id: None,
+                receipt_etag: None,
+                receipt_for_revision: None,
+            },
+            None,
+            |body, metadata, length, path| {
+                let prefix = envelope_prefix(metadata, length)?;
+                body.encrypt_envelope_to_ciphertext(
+                    &prefix,
+                    path,
+                    MAX_EDIT_BYTES + EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64,
+                )
+            },
+        )
+    }
+
     pub(crate) fn queue_delete<R: Read + Seek>(
         &self,
         sessions: &VaultSessionCoordinator,
@@ -3043,6 +3102,9 @@ impl VaultOfflineCache {
         let mut reader =
             PendingBodyReadSeek::new(ciphertext, sessions, &self.scope, row.byte_len, cancelled)?;
         let envelope_len = reader.len();
+        if envelope_len < EDIT_HEADER_BYTES {
+            return Err(invalid("encrypted edit envelope is truncated"));
+        }
         let mut prefix = zeroize::Zeroizing::new(vec![
             0u8;
             envelope_len.min(EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64)
@@ -3889,6 +3951,80 @@ impl VaultOfflineCache {
         }
         self.ensure_epoch(epoch)?;
         Ok(record.sha256)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn open_cached_body_reader<'a>(
+        &'a self,
+        sessions: &'a VaultSessionCoordinator,
+        expected: &RemoteEntry,
+        cancelled: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<PendingBodyReadSeek<'a>, CloudError> {
+        let path = &expected.path;
+        self.ensure_unlocked(sessions)?;
+        let cache_epoch = self.ciphertext_epoch()?;
+        let entry = self.stat(sessions, path)?;
+        if entry.directory {
+            return Err(CloudError::new(
+                ErrorKind::Unsupported,
+                "cannot download a cached vault directory",
+            ));
+        }
+        if expected.id != entry.id
+            || expected.path != entry.path
+            || expected.size != entry.size
+            || expected.etag != entry.etag
+        {
+            return Err(conflict("cached vault file version does not match"));
+        }
+        let raw = self.find_raw_entry(sessions, path)?;
+        let etag = raw
+            .etag
+            .as_deref()
+            .ok_or_else(|| invalid("cached vault file omitted its ETag"))?;
+        let expected_ciphertext = raw.ciphertext_len;
+        let ciphertext = if let Some(pin) = &self.pin {
+            self.cache
+                .open_ciphertext_pin_content(
+                    &self.cache_scope,
+                    &pin.id,
+                    &file_version_for_pin_parts(
+                        &raw.resource_id,
+                        etag,
+                        &pin.id,
+                        pin.generation,
+                        cache_epoch,
+                    ),
+                )
+                .map_err(cache_error)?
+        } else {
+            self.cache
+                .open_content(
+                    &self.cache_scope,
+                    &file_version(&raw.resource_id, etag, cache_epoch),
+                )
+                .map_err(cache_error)?
+        };
+        let actual_len = ciphertext.metadata().map_err(io_error)?.len();
+        if actual_len != expected_ciphertext {
+            return Err(conflict("cached vault ciphertext length changed"));
+        }
+
+        let mut reader = PendingBodyReadSeek::new(
+            ciphertext,
+            sessions,
+            &self.scope,
+            expected_ciphertext,
+            cancelled,
+        )?;
+        if reader.len() != expected.size || reader.len() > MAX_PLAINTEXT_BYTES {
+            return Err(conflict("cached vault plaintext length is invalid"));
+        }
+        reader.set_body(0, expected.size)?;
+        let digest = self.ciphertext_sha256(sessions, path, &expected.id, &expected.etag)?;
+        reader.cached_source = Some((expected.clone(), digest));
+        self.ensure_epoch(cache_epoch)?;
+        Ok(reader)
     }
 
     /// Decrypt an exact cached ciphertext version to a new destination. The

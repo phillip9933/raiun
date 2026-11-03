@@ -22,6 +22,7 @@ pub(crate) struct PendingBodyReadSeek<'a> {
     block_index: Option<u64>,
     block: Zeroizing<Vec<u8>>,
     sha256: String,
+    pub(super) cached_source: Option<(RemoteEntry, String)>,
     cancelled: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
@@ -34,8 +35,7 @@ impl<'a> PendingBodyReadSeek<'a> {
         cancelled: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> Result<Self, CloudError> {
         let envelope_len = plaintext_len_from_ciphertext(expected_cipher_len)?;
-        if envelope_len < EDIT_HEADER_BYTES
-            || envelope_len > MAX_EDIT_BYTES + EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64
+        if envelope_len > MAX_EDIT_BYTES + EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64
             || ciphertext.metadata().map_err(io_error)?.len() != expected_cipher_len
         {
             return Err(invalid("encrypted edit envelope lengths are invalid"));
@@ -55,6 +55,7 @@ impl<'a> PendingBodyReadSeek<'a> {
             block_index: None,
             block: Zeroizing::new(Vec::new()),
             sha256: String::new(),
+            cached_source: None,
             cancelled,
         };
         result
@@ -275,7 +276,7 @@ impl<'a> PendingBodyReadSeek<'a> {
         let sessions = self.sessions;
         let scope = self.scope.clone();
         let epoch = self.epoch.clone();
-        sessions
+        let result = sessions
             .with_verified_session_at_epoch(&scope, &epoch, |session| {
                 let mut direct = DirectReader {
                     body: self,
@@ -284,7 +285,9 @@ impl<'a> PendingBodyReadSeek<'a> {
                 let mut chain = io::Cursor::new(prefix).chain(&mut direct);
                 session.encrypt_file_transactional(&mut chain, destination, length, maximum)
             })
-            .map_err(vault_error)
+            .map_err(vault_error);
+        self.clear();
+        result
     }
 }
 
@@ -315,6 +318,7 @@ impl Seek for PendingBodyReadSeek<'_> {
             SeekFrom::End(n) => i128::from(self.body_len) + i128::from(n),
         };
         if next < 0 || next > i128::from(self.body_len) {
+            self.clear();
             return Err(io::Error::other("pending body seek is outside its bounds"));
         }
         self.position = next as u64;
