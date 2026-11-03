@@ -989,6 +989,19 @@ impl VaultSessionCoordinator {
                 )
             })
     }
+    /// Perform local streaming cryptography under the original unlock. The
+    /// borrowed session cannot escape the callback. Callers must not reenter
+    /// this coordinator or perform network requests while the callback runs.
+    pub fn with_verified_session_at_epoch<T>(
+        &self,
+        scope: &VaultSessionScope,
+        epoch: &VaultSessionEpoch,
+        operation: impl FnOnce(&VerifiedVaultSession) -> Result<T, VaultError>,
+    ) -> Result<T, VaultError> {
+        self.registry
+            .with_exact_epoch_crypto(scope, epoch, operation)
+    }
+
     /// Decode local path metadata under the exact unlock, never a numeric label.
     pub fn decrypt_path_at_epoch(
         &self,
