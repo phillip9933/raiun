@@ -86,6 +86,17 @@ class SettingsRepositoryTest {
             assertNull(settings.activeAccountId)
         }
 
+    @Test fun `removal selection replacement preserves a newer account selection`() =
+        runTest {
+            val repository = SettingsRepository.create(InMemoryDataStore())
+            repository.setActiveAccountId("removed")
+            repository.setActiveAccountId("newer-selection")
+            repository.replaceActiveAccountIfCurrent("removed", "fallback")
+            assertEquals("newer-selection", repository.settings.first().activeAccountId)
+            repository.replaceActiveAccountIfCurrent("newer-selection", "fallback")
+            assertEquals("fallback", repository.settings.first().activeAccountId)
+        }
+
     @Test fun `updates persist validated settings`() =
         runTest {
             val repository = SettingsRepository.create(InMemoryDataStore())

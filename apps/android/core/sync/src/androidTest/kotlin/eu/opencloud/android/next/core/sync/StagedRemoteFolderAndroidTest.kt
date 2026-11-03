@@ -6,10 +6,14 @@ import eu.opencloud.android.next.core.network.RemoteFolderEntry
 import eu.opencloud.android.next.core.network.RemoteResource
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.util.concurrent.Callable
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /** Exercises the actual Android SQLite and crypto implementations across a staging batch boundary. */
 @RunWith(AndroidJUnit4::class)
@@ -57,6 +61,81 @@ class StagedRemoteFolderAndroidTest {
             }
             assertFalse(file.exists())
             assertTrue(File(cache, "discovery-stage").listFiles().isNullOrEmpty())
+        } finally {
+            cache.deleteRecursively()
+        }
+    }
+
+    @Test fun stageSupportsSequentialDispatcherThreadHopsAndRejectsPartialPublication() {
+        val cache =
+            File(InstrumentationRegistry.getInstrumentation().targetContext.cacheDir, "hop-stage-${System.nanoTime()}")
+        val first = Executors.newSingleThreadExecutor()
+        val second = Executors.newSingleThreadExecutor()
+        try {
+            val stage = first.submit(Callable { StagedRemoteFolder.create(cache) }).get(10, TimeUnit.SECONDS)
+            try {
+                repeat(131) { index ->
+                    val worker = if (index % 2 == 0) first else second
+                    worker
+                        .submit(
+                            Callable {
+                                assertTrue(stage.registerCanonicalPath("dav/$index"))
+                                assertFalse(stage.registerCanonicalPath("dav/$index"))
+                                assertTrue(stage.registerCollectionId("collection-$index"))
+                                stage.add(RemoteFolderEntry("id-$index", "/$index", null))
+                                assertFalse(stage.registerCollectionId("id-$index"))
+                            },
+                        ).get(10, TimeUnit.SECONDS)
+                }
+                assertThrows(IllegalStateException::class.java) { stage.page(0) }
+                second.submit(Callable { stage.finish() }).get(10, TimeUnit.SECONDS)
+                val page = first.submit(Callable { stage.page(0) }).get(10, TimeUnit.SECONDS)
+                assertEquals(128, page.size)
+                assertEquals(
+                    3,
+                    second.submit(Callable { stage.page(page.last().sequence).size }).get(10, TimeUnit.SECONDS),
+                )
+                assertThrows(IllegalStateException::class.java) { stage.add(RemoteFolderEntry("late", "/late", null)) }
+            } finally {
+                second.submit(Callable { stage.close() }).get(10, TimeUnit.SECONDS)
+            }
+            assertTrue(File(cache, "discovery-stage").listFiles().isNullOrEmpty())
+        } finally {
+            first.shutdownNow()
+            second.shutdownNow()
+            cache.deleteRecursively()
+        }
+    }
+
+    @Test fun duplicateIdentitiesRejectBothBufferedAndCommittedRows() {
+        val cache =
+            File(
+                InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+                "duplicate-stage-${System.nanoTime()}",
+            )
+        try {
+            listOf(1, 128).forEach { count ->
+                listOf(true, false).forEach { duplicateId ->
+                    StagedRemoteFolder.create(cache).use { stage ->
+                        repeat(count) { index -> stage.add(RemoteFolderEntry("id-$index", "/$index", null)) }
+                        val entry =
+                            if (duplicateId) {
+                                RemoteFolderEntry(
+                                    "id-0",
+                                    "/new",
+                                    null,
+                                )
+                            } else {
+                                RemoteFolderEntry("new", "/0", null)
+                            }
+                        assertThrows(
+                            eu.opencloud.android.next.core.network.OpenCloudException::class.java,
+                        ) { stage.add(entry) }
+                        assertThrows(IllegalStateException::class.java) { stage.finish() }
+                        assertThrows(IllegalStateException::class.java) { stage.page(0) }
+                    }
+                }
+            }
         } finally {
             cache.deleteRecursively()
         }

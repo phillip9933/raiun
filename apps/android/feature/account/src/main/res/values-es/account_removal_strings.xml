@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="account_removal_pending">Limpiezas de cuenta pendientes: %1$d</string>
+    <string name="account_removal_pending_help">Los datos locales de la cuenta no se han eliminado por completo. La limpieza se reintenta automáticamente; el inicio de sesión en estas cuentas está bloqueado hasta que termine.</string>
+    <string name="account_removal_retry">Reintentar limpieza</string>
+</resources>

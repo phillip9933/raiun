@@ -32,7 +32,11 @@ internal class StagedRemoteFolder private constructor(
 ) : Closeable {
     private val random = SecureRandom()
     private val database = SQLiteDatabase.openOrCreateDatabase(file, null)
-    private var pending = 0
+    private val pending = ArrayList<ContentValues>(BATCH_SIZE)
+    private val pendingPaths = HashSet<String>()
+    private val pendingIds = HashSet<String>()
+    private var pendingBytes = 0
+    private var failed = false
     private var finished = false
     private var closed = false
 
@@ -50,7 +54,6 @@ internal class StagedRemoteFolder private constructor(
                 "CREATE TABLE entries (seq INTEGER PRIMARY KEY AUTOINCREMENT, pathDigest TEXT NOT NULL UNIQUE, " +
                     "idDigest TEXT NOT NULL UNIQUE, visible INTEGER NOT NULL, payload BLOB NOT NULL)",
             )
-            database.beginTransaction()
         } catch (failure: Throwable) {
             database.close()
             throw failure
@@ -58,6 +61,7 @@ internal class StagedRemoteFolder private constructor(
     }
 
     fun registerCanonicalPath(path: String): Boolean {
+        checkWritable()
         val values = ContentValues().apply { put("digest", digest("url", path).toHex()) }
         return storageOperation {
             database.insertWithOnConflict("paths", null, values, SQLiteDatabase.CONFLICT_IGNORE) != -1L
@@ -65,7 +69,9 @@ internal class StagedRemoteFolder private constructor(
     }
 
     fun registerCollectionId(id: String): Boolean {
+        checkWritable()
         val hash = digest("id", id).toHex()
+        if (hash in pendingIds) return false
         return storageOperation {
             database.rawQuery("SELECT 1 FROM entries WHERE idDigest = ?", arrayOf(hash)).use {
                 if (it.moveToFirst()) return@storageOperation false
@@ -79,7 +85,18 @@ internal class StagedRemoteFolder private constructor(
         }
     }
 
+    @Suppress("TooGenericExceptionCaught")
     fun add(entry: RemoteFolderEntry) {
+        checkWritable()
+        try {
+            addEntry(entry)
+        } catch (failure: Throwable) {
+            failed = true
+            throw failure
+        }
+    }
+
+    private fun addEntry(entry: RemoteFolderEntry) {
         val resource = entry.resource
         require(resource == null || (resource.id == entry.id && resource.path == entry.path))
         requireNotCollectionId(entry.id)
@@ -96,23 +113,72 @@ internal class StagedRemoteFolder private constructor(
             } finally {
                 plain.fill(0)
             }
-        insertEntry(values)
-        if (++pending == BATCH_SIZE) {
-            storageOperation {
-                database.setTransactionSuccessful()
-                database.endTransaction()
-                database.beginTransaction()
-            }
-            pending = 0
+        val pathHash = values.getAsString("pathDigest")
+        val idHash = values.getAsString("idDigest")
+        if (pathHash in pendingPaths || idHash in pendingIds || containsStoredIdentity(pathHash, idHash)) {
+            failed = true
+            throw OpenCloudException(OpenCloudError.InvalidResponse)
         }
+        val payloadBytes = values.getAsByteArray("payload").size
+        if (pending.isNotEmpty() && pendingBytes + payloadBytes > MAX_PAGE_BYTES) flushPending()
+        pending += values
+        pendingPaths += pathHash
+        pendingIds += idHash
+        pendingBytes += payloadBytes
+        if (pending.size == BATCH_SIZE) flushPending()
     }
 
     fun finish() {
-        storageOperation {
-            database.setTransactionSuccessful()
-            database.endTransaction()
-        }
+        checkWritable()
+        flushPending()
         finished = true
+    }
+
+    private fun checkWritable() {
+        check(!closed && !finished && !failed)
+    }
+
+    private fun containsStoredIdentity(
+        pathHash: String,
+        idHash: String,
+    ): Boolean =
+        storageOperation {
+            database
+                .rawQuery(
+                    "SELECT 1 FROM entries WHERE pathDigest = ? OR idDigest = ?",
+                    arrayOf(pathHash, idHash),
+                ).use { it.moveToFirst() }
+        }
+
+    // Android SQLite transactions belong to a thread. Never leave one open between calls:
+    // discovery callbacks can suspend and resume on another dispatcher thread.
+    @Suppress("TooGenericExceptionCaught")
+    private fun flushPending() {
+        if (pending.isEmpty()) return
+        try {
+            storageOperation {
+                database.beginTransaction()
+                try {
+                    pending.forEach(::insertEntry)
+                    database.setTransactionSuccessful()
+                } finally {
+                    database.endTransaction()
+                }
+            }
+        } catch (failure: Throwable) {
+            failed = true
+            throw failure
+        } finally {
+            clearPending()
+        }
+    }
+
+    private fun clearPending() {
+        pending.forEach { it.getAsByteArray("payload").fill(0) }
+        pending.clear()
+        pendingPaths.clear()
+        pendingIds.clear()
+        pendingBytes = 0
     }
 
     fun reader(
@@ -235,11 +301,8 @@ internal class StagedRemoteFolder private constructor(
         if (closed) return
         closed = true
         try {
-            try {
-                if (database.inTransaction()) database.endTransaction()
-            } finally {
-                database.close()
-            }
+            clearPending()
+            database.close()
         } finally {
             encryptionKey.fill(0)
             indexKey.fill(0)

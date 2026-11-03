@@ -237,6 +237,25 @@ internal class VaultUploadStore(
             }
         }
 
+    /** Unknown ownership is retained for recovery; it must never be guessed from a failed manifest read. */
+    fun forgetAccountForRemoval(accountId: String) =
+        synchronized(lock) {
+            accountRevisions[accountId] = accountRevisions.getOrDefault(accountId, 0L) + 1
+            val entries = accountRemovalInventory(root)
+            val owned =
+                entries.filter { directory ->
+                    val preparing = preparedAccounts[directory.name]
+                    if (preparing != null) {
+                        check(preparing.first != accountId) { "Account upload preparation is still active." }
+                        false
+                    } else {
+                        check(directory.name !in active) { "Upload ownership is not available." }
+                        readManifest(directory.name).location.accountId == accountId
+                    }
+                }
+            owned.forEach { check(deleteVaultJobTree(it)) }
+        }
+
     private fun directory(id: String): File {
         require(UUID.fromString(id).toString() == id)
         return File(root, id)

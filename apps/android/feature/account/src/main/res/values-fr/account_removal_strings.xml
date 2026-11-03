@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="account_removal_pending">Nettoyages de compte en attente : %1$d</string>
+    <string name="account_removal_pending_help">Les données locales du compte ne sont pas entièrement supprimées. Le nettoyage est réessayé automatiquement ; la connexion à ces comptes reste bloquée jusqu’à sa fin.</string>
+    <string name="account_removal_retry">Réessayer</string>
+</resources>

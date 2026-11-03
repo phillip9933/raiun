@@ -50,7 +50,7 @@ class WorkerAuthorizationProvider internal constructor(
                         eu.opencloud.android.next.core.network.OpenCloudError.AuthenticationRequired,
                     )
                 }
-                val api = OpenCloudApi(TlsPolicy(context).applyTo(OkHttpClient.Builder().build(), account.serverUrl))
+                val api = OpenCloudApi(TlsPolicy(context).applyTo(refreshClient, account.serverUrl))
                 api.refresh(
                     OidcConfiguration(
                         binding.issuer,
@@ -64,6 +64,11 @@ class WorkerAuthorizationProvider internal constructor(
                 )
             }
         return usable.bearerAuthorizationHeader()
+    }
+
+    private companion object {
+        // Refresh traffic shares a pool only with refresh traffic, never transfer cancellation dispatchers.
+        val refreshClient: OkHttpClient = OkHttpClient.Builder().build()
     }
 }
 

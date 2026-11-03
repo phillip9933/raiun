@@ -18,6 +18,7 @@ object TransferStartup {
             val manager by lazy { TransferManager(application) }
             val stages =
                 linkedMapOf<StartupRecoveryStep, suspend () -> Unit>(
+                    StartupRecoveryStep.ACCOUNT_REMOVALS to { AccountRemovalCoordinator(application).reconcile() },
                     StartupRecoveryStep.SHARED_CLEANUP to { scheduleSharedDownloadCleanup(application) },
                     StartupRecoveryStep.FILE_OPERATIONS to { FileOperationManager(application).reconcile() },
                     StartupRecoveryStep.PENDING_PINS to { schedulePendingPins(application) },
@@ -32,6 +33,7 @@ object TransferStartup {
 }
 
 internal enum class StartupRecoveryStep {
+    ACCOUNT_REMOVALS,
     SHARED_CLEANUP,
     FILE_OPERATIONS,
     PENDING_PINS,

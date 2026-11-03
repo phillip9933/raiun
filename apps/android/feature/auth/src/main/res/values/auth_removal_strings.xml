@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="auth_account_cleanup_pending">Account cleanup is still pending on this phone. Open Accounts to check cleanup before signing in again.</string>
+</resources>

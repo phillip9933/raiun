@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="account_removal_pending">アカウントの削除処理待ち：%1$d件</string>
+    <string name="account_removal_pending_help">ローカルのアカウントデータはまだ完全には削除されていません。削除処理は自動的に再試行され、完了するまでこれらのアカウントにはサインインできません。</string>
+    <string name="account_removal_retry">削除処理を再試行</string>
+</resources>

@@ -24,7 +24,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -44,6 +43,7 @@ import androidx.compose.ui.window.SecureFlagPolicy
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import eu.opencloud.android.next.R
 import eu.opencloud.android.next.core.datastore.SettingsBrowserLayout
 import eu.opencloud.android.next.core.datastore.SettingsRepository
@@ -72,8 +72,10 @@ internal fun BoundaryDestinationDialog(
     val controller =
         suppliedController
             ?: remember(request) { BoundaryDestinationController(context.applicationContext, request) }
-    val state by controller.state.collectAsState()
-    val settings by remember(context) { SettingsRepository.create(context).settings }.collectAsState(UserSettings())
+    val state by controller.state.collectAsStateWithLifecycle()
+    val settings by remember(context) {
+        SettingsRepository.create(context).settings
+    }.collectAsStateWithLifecycle(UserSettings())
     val currentDismiss by rememberUpdatedState(onDismiss)
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var disclosePlaintext by remember { mutableStateOf(false) }

@@ -1,7 +1,6 @@
 package eu.opencloud.android.next.feature.account
 
 import android.app.Application
-import android.provider.DocumentsContract
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,7 +29,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -43,19 +41,18 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import eu.opencloud.android.next.core.database.AccountEntity
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
-import eu.opencloud.android.next.core.database.vaultOfflineGroups
+import eu.opencloud.android.next.core.database.observePendingAccountRemovalCount
 import eu.opencloud.android.next.core.datastore.SettingsRepository
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
 import eu.opencloud.android.next.core.network.safeMessage
 import eu.opencloud.android.next.core.network.toOpenCloudError
-import eu.opencloud.android.next.core.security.VaultKeyStore
-import eu.opencloud.android.next.core.security.VaultPreferences
-import eu.opencloud.android.next.core.sync.TransferManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -67,6 +64,7 @@ data class AccountUiState(
     val accounts: List<AccountEntity> = emptyList(),
     val activeAccountId: String? = null,
     val busy: Boolean = false,
+    val pendingRemovals: Int = 0,
     val error: String? = null,
 )
 
@@ -75,11 +73,15 @@ class AccountViewModel(
 ) : AndroidViewModel(application) {
     private val store = FileBrowserStore(FileBrowserDatabase.create(application))
     private val settings = SettingsRepository.create(application)
-    private val transfers = TransferManager(application, store)
     private val mutableState = MutableStateFlow(AccountUiState())
     val state = mutableState.asStateFlow()
 
     init {
+        viewModelScope.launch {
+            store.observePendingAccountRemovalCount().collectLatest { count ->
+                mutableState.value = mutableState.value.copy(pendingRemovals = count)
+            }
+        }
         viewModelScope.launch {
             store.observeAccounts().collectLatest { accounts ->
                 mutableState.value =
@@ -112,56 +114,41 @@ class AccountViewModel(
             mutableState.value = mutableState.value.copy(busy = true, error = null)
             runCatching {
                 withContext(Dispatchers.IO) {
-                    val groupOwner = store.vaultOfflineGroups().captureOwner(account.id)
-                    transfers.cancelAccountWork(account.id)
-                    eu.opencloud.android.next.core.security.AccountSessions
-                        .get(getApplication())
-                        .remove(account.id)
                     eu.opencloud.android.next.core.sync
-                        .forgetVaultUploads(getApplication(), account.id)
-                    eu.opencloud.android.next.core.sync
-                        .forgetVaultDownloads(getApplication(), account.id, groupOwner)
-                    VaultKeyStore(getApplication()).forgetAccount(account.id)
-                    VaultPreferences(getApplication()).forgetAccount(account.id)
-                    eu.opencloud.android.next.core.sync
-                        .VaultOfflineStore(getApplication())
-                        .forgetAccount(account.id)
-                    store.removeAccount(account.id)
-                    // Connection identities are explicitly shared by accounts at this server.
-                    // Forget the local grant metadata when the final such account is removed;
-                    // the system-managed certificate itself remains owned by Android.
-                    if (store.activeAccounts().none { it.serverUrl.trimEnd('/') == account.serverUrl.trimEnd('/') }) {
-                        eu.opencloud.android.next.core.security
-                            .ClientCertificatePolicy(
-                                getApplication(),
-                            ).clear(account.serverUrl)
-                        eu.opencloud.android.next.core.security
-                            .WifiServerRouteStore(
-                                getApplication(),
-                            ).remove(account.serverUrl)
-                    }
-                    eu.opencloud.android.next.core.sync
-                        .clearAccountPrivateFiles(getApplication(), account.id)
-                    eu.opencloud.android.next.core.sync.AccountProfiles
-                        .clear(getApplication(), account.id)
-                    val next = store.activeAccounts().firstOrNull()?.id
-                    settings.setActiveAccountId(next)
-                    getApplication<Application>().contentResolver.notifyChange(
-                        DocumentsContract.buildRootsUri("${getApplication<Application>().packageName}.documents"),
-                        null,
-                    )
-                    next
+                        .AccountRemovalCoordinator(getApplication())
+                        .request(account.id)
                 }
             }.onSuccess { next ->
                 mutableState.value = mutableState.value.copy(busy = false)
                 onRemoved(next)
             }.onFailure {
+                if (it is CancellationException) throw it
                 mutableState.value =
                     mutableState.value.copy(
                         busy = false,
                         error = it.toOpenCloudError().safeMessage(getApplication<Application>()),
                     )
             }
+        }
+    }
+
+    fun retryRemoval() {
+        viewModelScope.launch {
+            mutableState.value = mutableState.value.copy(busy = true, error = null)
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    eu.opencloud.android.next.core.sync
+                        .AccountRemovalCoordinator(getApplication())
+                        .reconcile()
+                }
+            }.onFailure {
+                if (it is CancellationException) throw it
+                mutableState.value =
+                    mutableState.value.copy(
+                        error = it.toOpenCloudError().safeMessage(getApplication<Application>()),
+                    )
+            }
+            mutableState.value = mutableState.value.copy(busy = false)
         }
     }
 
@@ -181,7 +168,7 @@ fun AccountRoute(
     modifier: Modifier = Modifier,
     viewModel: AccountViewModel = viewModel(),
 ) {
-    val state by viewModel.state.collectAsState()
+    val state by viewModel.state.collectAsStateWithLifecycle()
     var detailsId by androidx.compose.runtime.saveable
         .rememberSaveable { mutableStateOf<String?>(null) }
     val detailsAccount = state.accounts.firstOrNull { it.id == detailsId }
@@ -197,6 +184,7 @@ fun AccountRoute(
         onRemove = { viewModel.remove(it, onAccountRemove) },
         onAddAccount = onAddAccount,
         onDismissError = viewModel::dismissError,
+        onRetryRemoval = viewModel::retryRemoval,
         onDetails = { detailsId = it },
         modifier = modifier,
     )
@@ -214,6 +202,7 @@ fun AccountScreen(
     onDismissError: () -> Unit,
     modifier: Modifier = Modifier,
     onDetails: (String) -> Unit = {},
+    onRetryRemoval: () -> Unit = {},
 ) {
     var confirmRemove by remember { mutableStateOf<AccountEntity?>(null) }
     Scaffold(
@@ -233,12 +222,29 @@ fun AccountScreen(
             })
         },
     ) { padding ->
-        if (state.accounts.isEmpty()) {
+        if (state.accounts.isEmpty() && state.pendingRemovals == 0) {
             Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
                 Text(stringResource(R.string.account_empty))
             }
         } else {
             LazyColumn(contentPadding = padding) {
+                if (state.pendingRemovals > 0) {
+                    item {
+                        ListItem(
+                            headlineContent = {
+                                Text(stringResource(R.string.account_removal_pending, state.pendingRemovals))
+                            },
+                            supportingContent = {
+                                Text(stringResource(R.string.account_removal_pending_help))
+                            },
+                            trailingContent = {
+                                TextButton(onClick = onRetryRemoval, enabled = !state.busy) {
+                                    Text(stringResource(R.string.account_removal_retry))
+                                }
+                            },
+                        )
+                    }
+                }
                 item {
                     ListItem(
                         headlineContent = { Text(stringResource(R.string.account_add)) },

@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
@@ -106,6 +107,29 @@ class ServerConnectionScreenTest {
             .performScrollTo()
             .performTextInput("https://192.0.2.20")
         compose.onNodeWithText("Cancel").assertIsDisplayed().performClick()
+        assertNull(WifiServerRouteStore(context).find(server))
+    }
+
+    @Test fun unsavedConnectionDraftSurvivesRecreation() {
+        val restoration = StateRestorationTester(compose)
+        val server = "https://restored-draft.example"
+        restoration.setContent { OpenCloudTheme { ServerConnectionScreen(server, {}) } }
+
+        compose.onNodeWithContentDescription("Use local access on Wi-Fi").performClick()
+        compose.onNodeWithText("Local server address (HTTPS)").performScrollTo().performTextInput("https://192.0.2.42")
+        compose.onNodeWithText("Wi-Fi network name").performScrollTo().performTextInput("Test network")
+        compose.onNodeWithText("Configure").performScrollTo().performClick()
+        compose
+            .onNodeWithText("Allowed HTTPS sites (one per line)")
+            .performScrollTo()
+            .performTextInput("https://login.example.org")
+
+        restoration.emulateSavedInstanceStateRestore()
+
+        compose.onNodeWithText("https://192.0.2.42").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Test network").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("https://login.example.org").performScrollTo().assertIsDisplayed()
+        val context = ApplicationProvider.getApplicationContext<Application>()
         assertNull(WifiServerRouteStore(context).find(server))
     }
 }

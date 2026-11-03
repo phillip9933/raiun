@@ -5,8 +5,11 @@ import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import eu.opencloud.android.next.core.database.AccountEntity
+import eu.opencloud.android.next.core.database.AccountRemovalAdmission
 import eu.opencloud.android.next.core.database.FileBrowserDatabase
 import eu.opencloud.android.next.core.database.FileBrowserStore
+import eu.opencloud.android.next.core.database.isAccountRemovalPending
+import eu.opencloud.android.next.core.database.storedAccountForAdmission
 import eu.opencloud.android.next.core.datastore.SettingsRepository
 import eu.opencloud.android.next.core.designsystem.localizedString
 import eu.opencloud.android.next.core.model.auth.AuthTokens
@@ -25,6 +28,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import java.security.cert.CertificateException
@@ -206,6 +210,10 @@ class AuthViewModel(
             credentialStore,
             eu.opencloud.android.next.core.security.AccountSessions
                 .get(getApplication()),
+            canSaveAccount = { id -> runBlocking { !fileStore.isAccountRemovalPending(id) } },
+            savedAccountIdentity = { id ->
+                runBlocking { fileStore.storedAccountForAdmission(id)?.let { it.serverUrl to it.userId } }
+            },
         )
     }
 
@@ -239,7 +247,7 @@ class AuthViewModel(
     private fun launchAuth(block: suspend () -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                block()
+                AccountRemovalAdmission.withLock { block() }
             } catch (exception: CancellationException) {
                 throw exception
             } catch (exception: Exception) {
@@ -284,6 +292,8 @@ internal fun Throwable.toAuthError(
     certificateErrorMessage: String,
 ): String =
     when {
+        this is AccountRemovalPendingException ->
+            context.localizedString(R.string.auth_account_cleanup_pending)
         this is OidcCallbackIssuerException ->
             context.localizedString(R.string.auth_oidc_issuer_unverified)
         toOpenCloudError() == eu.opencloud.android.next.core.network.OpenCloudError.ClientCertificateRequired ->
@@ -296,6 +306,9 @@ internal fun Throwable.toAuthError(
 
 internal fun Throwable.toAuthError(certificateErrorMessage: String): String =
     when {
+        this is AccountRemovalPendingException ->
+            "Account cleanup is still pending on this phone. " +
+                "Open Accounts to check cleanup before signing in again."
         this is OidcCallbackIssuerException -> "The sign-in issuer could not be verified."
         toOpenCloudError() == eu.opencloud.android.next.core.network.OpenCloudError.ClientCertificateRequired ->
             toOpenCloudError().safeMessage()

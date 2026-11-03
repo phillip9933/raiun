@@ -159,7 +159,9 @@ private data class ShareSession(
     val account: eu.opencloud.android.next.core.database.AccountEntity,
     val authorization: String,
     val client: OcsSharingClient,
-)
+) {
+    override fun toString(): String = "ShareSession([REDACTED])"
+}
 
 private fun RemoteShare.toEntity(
     accountId: String,

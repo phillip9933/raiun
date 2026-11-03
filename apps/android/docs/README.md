@@ -4,6 +4,7 @@ Start with [README](../README.md) for installation and current limitations, and 
 
 | Document | Purpose |
 | --- | --- |
+| [Current architecture](CURRENT-ARCHITECTURE.md) | Module ownership, data flow, runtime invariants and unpublished candidate scope |
 | [Product backlog](../../../docs/PRODUCT-BACKLOG.md) | Queued Android and shared product improvements |
 | [OpenCloud 9 compatibility](OPENCLOUD-9.md) | Published-server review and guest invitation creation/management boundaries |
 | [Testing](TESTING.md) | Quality commands, device requirements and validation limits |

@@ -98,14 +98,17 @@ object AccountProfiles {
         accountId: String,
     ) = withContext(Dispatchers.IO) {
         mutex.withLock {
-            file(context, accountId).delete()
-            File(context.cacheDir, "avatar-${cacheIdentity(accountId)}").delete()
-            preferences(context)
-                .edit()
-                .remove(accountId)
-                .remove("name-$accountId")
-                .remove("color-$accountId")
-                .apply()
+            listOf(file(context, accountId), File(context.cacheDir, "avatar-${cacheIdentity(accountId)}")).forEach {
+                check(!it.exists() || it.delete()) { "Account appearance could not be removed." }
+            }
+            check(
+                preferences(context)
+                    .edit()
+                    .remove(accountId)
+                    .remove("name-$accountId")
+                    .remove("color-$accountId")
+                    .commit(),
+            ) { "Account appearance could not be removed." }
             changes.value++
             colorChanges.value++
         }

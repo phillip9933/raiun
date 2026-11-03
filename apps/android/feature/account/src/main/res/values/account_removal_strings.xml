@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="account_removal_pending">Pending account cleanups: %1$d</string>
+    <string name="account_removal_pending_help">Local account data has not been fully removed. Cleanup retries automatically; signing in to these accounts is blocked until it finishes.</string>
+    <string name="account_removal_retry">Retry cleanup</string>
+</resources>

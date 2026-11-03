@@ -1,5 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- Test-only synthetic 127.0.0.1 HTTP fixture; production permissions and network policy are unchanged. -->
     <uses-permission android:name="android.permission.INTERNET" />
-    <application android:usesCleartextTraffic="true" />
+    <application android:usesCleartextTraffic="true">
+        <provider
+            android:name="eu.opencloud.android.next.core.sync.AccountRemovalTestProvider"
+            android:authorities="${applicationId}.documents"
+            android:exported="false" />
+    </application>
 </manifest>

@@ -35,7 +35,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,6 +47,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.SecureFlagPolicy
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import eu.opencloud.android.next.R
 import eu.opencloud.android.next.core.datastore.FileDisplayOptions
 import eu.opencloud.android.next.core.datastore.SettingsBrowserLayout
@@ -75,7 +75,7 @@ internal fun EncryptedBrowserContent(
 ) {
     val context = LocalContext.current
     val settings = remember(context) { SettingsRepository.create(context) }
-    val preferences by settings.settings.collectAsState(UserSettings())
+    val preferences by settings.settings.collectAsStateWithLifecycle(UserSettings())
     val scope = rememberCoroutineScope()
     var action by remember(state.lockRevision) { mutableStateOf<Pair<VaultRouteEntry, VaultEntryAction>?>(null) }
     var destinationAction by remember(state.lockRevision) {

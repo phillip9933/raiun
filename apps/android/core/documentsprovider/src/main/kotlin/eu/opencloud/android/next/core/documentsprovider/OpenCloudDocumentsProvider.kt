@@ -25,6 +25,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -37,9 +38,8 @@ class OpenCloudDocumentsProvider : DocumentsProvider() {
     private val openScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val openSlots = java.util.concurrent.Semaphore(20)
     private val editPreparationSlots = java.util.concurrent.Semaphore(4)
-    private val store by lazy {
-        FileBrowserStore(FileBrowserDatabase.create(requireNotNull(context)))
-    }
+    private val database by lazy { FileBrowserDatabase.create(requireNotNull(context)) }
+    private val store by lazy { FileBrowserStore(database) }
     private val transfers by lazy { TransferManager(requireNotNull(context), store) }
     private val writeAccess by lazy { DocumentWriteAccess(requireNotNull(context), store) }
     private val folders by lazy { ProviderFolderOperations(requireNotNull(context), store) }
@@ -257,9 +257,11 @@ class OpenCloudDocumentsProvider : DocumentsProvider() {
         if (!editPreparationSlots.tryAcquire()) throw FileNotFoundException("Too many documents are currently opening.")
         try {
             return databaseCall {
+                val current = freshness.current(folders.settled(resource, permit), permit)
+                val original = prepareEdit(current, permit, signal)
                 ProviderFolderOperations.namespaceGate.withLock {
-                    val current = freshness.current(folders.settled(resource, permit), permit)
-                    val original = prepareEdit(current, permit, signal)
+                    signal?.throwIfCanceled()
+                    writeAccess.requirePrepared(current, original, permit)
                     DocumentWriteSession(
                         eu.opencloud.android.next.core.sync
                             .DocumentEditStore(requireNotNull(context)),
@@ -295,18 +297,8 @@ class OpenCloudDocumentsProvider : DocumentsProvider() {
         permit: () -> Boolean,
     ) {
         val transferId = transfers.enqueueDownload(resource, offlinePin = false)
-        var completed = false
-        while (!completed) {
-            currentCoroutineContext().ensureActive()
-            check(writeAccess.authorized(resource, permit)) { "Document editing is unavailable or locked." }
-            val transfer = store.transfer(transferId) ?: throw FileNotFoundException("Download unavailable.")
-            completed = transfer.state == "SUCCEEDED"
-            if (!completed) {
-                if (transfer.state !in setOf("QUEUED", "RUNNING", "RETRY")) {
-                    throw FileNotFoundException("The document download did not complete.")
-                }
-                delay(250)
-            }
+        awaitEditDownload(store.observeTransfer(resource.accountId, transferId).map { it?.state }) {
+            writeAccess.authorized(resource, permit)
         }
     }
 
@@ -507,7 +499,11 @@ class OpenCloudDocumentsProvider : DocumentsProvider() {
         columns: Array<String>,
     ): Cursor =
         MatrixCursor(columns).apply {
-            store.spaces(account).filter { it.isPickerSpace() }.forEach { addSpace(it) }
+            store
+                .spaces(account)
+                .filter {
+                    it.isPickerSpace() && !database.vaultExclusionDao().denies(account, it.driveId, "/")
+                }.forEach { addSpace(it) }
             addSharedCollection(account)
         }
 
@@ -560,9 +556,12 @@ class OpenCloudDocumentsProvider : DocumentsProvider() {
         if (spaceId != null) {
             val space = store.space(accountId, spaceId)
             requireVisible(space != null && !space.isDisabled && !space.isDeleted)
+            requireVisible(!database.vaultExclusionDao().denies(accountId, spaceId, "/"))
         }
-        if (id is DocumentId.Resource && store.resource(accountId, id.spaceId, id.resourceId) == null) {
-            requireVisible(false)
+        if (id is DocumentId.Resource) {
+            val resource = store.resource(accountId, id.spaceId, id.resourceId)
+            requireVisible(resource != null)
+            requireVisible(!database.vaultExclusionDao().denies(accountId, id.spaceId, requireNotNull(resource).path))
         }
     }
 

@@ -524,8 +524,8 @@ class TransferManager(
             .mapNotNull { it.workId }
             .mapNotNull { workId ->
                 runCatching { UUID.fromString(workId) }.getOrNull()
-            }.forEach(workManager::cancelWorkById)
-        workManager.cancelAllWorkByTag(accountWorkTag(accountId))
+            }.forEach { workManager.cancelWorkById(it).result.get() }
+        workManager.cancelAllWorkByTag(accountWorkTag(accountId)).result.get()
     }
 
     fun scheduleCleanup() {

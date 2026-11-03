@@ -3,12 +3,12 @@ package eu.opencloud.android.next.feature.files
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import eu.opencloud.android.next.core.database.BackupTransferStats
 import eu.opencloud.android.next.core.database.FolderBackupEntity
 import eu.opencloud.android.next.core.database.TransferEntity
@@ -27,7 +27,7 @@ internal fun BackupSyncInfo(
     val context = LocalContext.current
     val diagnostics = remember(context) { BackupScanDiagnostics(context) }
     val failureFlow = remember(backup, diagnostics) { diagnostics.observe(backup) }
-    val failure by failureFlow.collectAsState(initial = diagnostics.read(backup))
+    val failure by failureFlow.collectAsStateWithLifecycle(initialValue = diagnostics.read(backup))
     val progress = stats ?: legacyBackupTransferStats(backup, transfers)
     androidx.compose.foundation.layout.Column {
         failure?.let { BackupScanFailureInfo(it) }

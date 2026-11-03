@@ -2,7 +2,6 @@ package eu.opencloud.android.next.core.ui
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.produceState
@@ -11,6 +10,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import eu.opencloud.android.next.core.designsystem.theme.AccountAccent
 import eu.opencloud.android.next.core.sync.AccountProfileIdentity
 import eu.opencloud.android.next.core.sync.AccountProfiles
@@ -21,7 +21,7 @@ import java.net.URI
 @Composable
 fun accountAccent(accountId: String): Color {
     val context = LocalContext.current
-    val revision by AccountProfiles.colorRevision.collectAsState()
+    val revision by AccountProfiles.colorRevision.collectAsStateWithLifecycle()
     val choice = remember(accountId, revision) { AccountProfiles.colorChoice(context, accountId) }
     return AccountAccent.indicator(accountId, MaterialTheme.colorScheme.surface.luminance() < 0.5f, choice)
 }
@@ -29,7 +29,7 @@ fun accountAccent(accountId: String): Color {
 @Composable
 fun accountAccentContainer(accountId: String): Color {
     val context = LocalContext.current
-    val revision by AccountProfiles.colorRevision.collectAsState()
+    val revision by AccountProfiles.colorRevision.collectAsStateWithLifecycle()
     val choice = remember(accountId, revision) { AccountProfiles.colorChoice(context, accountId) }
     return AccountAccent.container(
         MaterialTheme.colorScheme.surface,
@@ -43,7 +43,7 @@ fun accountAccentContainer(accountId: String): Color {
 @Composable
 fun accountIdentityDescription(accountId: String): String {
     val context = LocalContext.current
-    val revision by AccountProfiles.revision.collectAsState()
+    val revision by AccountProfiles.revision.collectAsStateWithLifecycle()
     val identity by key(accountId, revision) {
         produceState<AccountProfileIdentity?>(null) {
             value =

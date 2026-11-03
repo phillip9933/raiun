@@ -4,6 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import android.util.Log
 import eu.opencloud.android.next.core.model.auth.AuthTokens
 import eu.opencloud.android.next.core.model.auth.ClientRegistrationSource
 import eu.opencloud.android.next.core.model.auth.OidcClientRegistration
@@ -94,7 +95,7 @@ class KeystoreCredentialStore(
     ): PendingOidcLogin? =
         synchronized(pendingLoginLock) {
             val encoded = preferences.getString("pending.oidc", null) ?: return@synchronized null
-            val pending = PendingOidcLogin.decode(requireNotNull(decrypt(encoded)))
+            val pending = decrypt(encoded)?.let(PendingOidcLogin::decode) ?: return@synchronized null
             if (!pending.validAt(now)) {
                 check(preferences.edit().remove("pending.oidc").commit())
                 return@synchronized null
@@ -275,38 +276,63 @@ class KeystoreCredentialStore(
 
     private fun encrypt(value: String): String {
         val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, secretKey())
+        cipher.init(Cipher.ENCRYPT_MODE, requireNotNull(secretKey(createIfMissing = true)))
         val encrypted = cipher.doFinal(value.toByteArray(StandardCharsets.UTF_8))
         return listOf(cipher.iv, encrypted).joinToString(":") { Base64.encodeToString(it, Base64.NO_WRAP) }
     }
 
-    private fun decrypt(value: String): String? =
-        runCatching {
-            val (iv, encrypted) = value.split(":", limit = 2).map { Base64.decode(it, Base64.NO_WRAP) }
+    // Crypto providers may fail with checked or runtime exceptions. Every failure must stay redacted and closed.
+    @Suppress("TooGenericExceptionCaught")
+    private fun decrypt(value: String): String? {
+        return try {
+            val parts = value.split(":", limit = 2)
+            require(parts.size == 2) { "Invalid credential envelope." }
+            val iv = Base64.decode(parts[0], Base64.NO_WRAP)
+            val encrypted = Base64.decode(parts[1], Base64.NO_WRAP)
+            require(iv.size == 12 && encrypted.size >= GCM_TAG_LENGTH_BITS / 8) {
+                "Invalid credential envelope."
+            }
+            val key =
+                secretKey(createIfMissing = false) ?: run {
+                    Log.w("CredentialStore", "Credential unavailable: missing_key")
+                    return null
+                }
             Cipher.getInstance(TRANSFORMATION).run {
-                init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
+                init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
                 String(doFinal(encrypted), StandardCharsets.UTF_8)
             }
-        }.getOrNull()
-
-    private fun secretKey(): SecretKey {
-        val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
-        return (keyStore.getKey(KEY_ALIAS, null) as? SecretKey) ?: KeyGenerator
-            .getInstance(
-                KeyProperties.KEY_ALGORITHM_AES,
-                ANDROID_KEYSTORE,
-            ).apply {
-                init(
-                    KeyGenParameterSpec
-                        .Builder(
-                            KEY_ALIAS,
-                            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT,
-                        ).setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                        .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                        .build(),
-                )
-            }.generateKey()
+        } catch (error: Exception) {
+            // Never attach the exception: provider messages may contain sensitive input.
+            Log.w("CredentialStore", "Credential unavailable: ${credentialFailureCategory(error)}")
+            null
+        }
     }
+
+    private fun secretKey(createIfMissing: Boolean): SecretKey? =
+        CredentialKeyInitialization.obtain(
+            createIfMissing = createIfMissing,
+            lookup = {
+                val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply { load(null) }
+                if (keyStore.containsAlias(KEY_ALIAS)) {
+                    checkNotNull(keyStore.getKey(KEY_ALIAS, null) as? SecretKey) { "Credential key unavailable." }
+                } else {
+                    null
+                }
+            },
+            create = {
+                KeyGenerator
+                    .getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+                    .apply {
+                        init(
+                            KeyGenParameterSpec
+                                .Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                                .build(),
+                        )
+                    }.generateKey()
+            },
+        )
 
     private companion object {
         val pendingLoginLock = Any()
@@ -337,3 +363,20 @@ internal fun persistBasicCredentials(
             .commit(),
     ) { "Credentials could not be persisted." }
 }
+
+/** One process-wide lock covers lookup and creation across store instances. Reads never create keys. */
+internal object CredentialKeyInitialization {
+    @Synchronized
+    fun <T : Any> obtain(
+        createIfMissing: Boolean,
+        lookup: () -> T?,
+        create: () -> T,
+    ): T? = lookup() ?: if (createIfMissing) create() else null
+}
+
+internal fun credentialFailureCategory(error: Exception): String =
+    when (error) {
+        is javax.crypto.AEADBadTagException -> "authentication_failed"
+        is IllegalArgumentException -> "invalid_envelope"
+        else -> "key_or_crypto_unavailable"
+    }

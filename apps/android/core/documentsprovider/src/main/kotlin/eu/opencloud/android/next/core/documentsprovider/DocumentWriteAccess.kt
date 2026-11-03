@@ -38,6 +38,17 @@ internal class DocumentWriteAccess(
         return original(current) ?: throw java.io.FileNotFoundException("The document download did not complete.")
     }
 
+    /** Call under the namespace gate, then reserve the edit journal before releasing that gate. */
+    suspend fun requirePrepared(
+        expected: ResourceEntity,
+        prepared: File,
+        permit: () -> Boolean,
+    ) {
+        check(authorized(expected, permit)) { "The document changed or access was revoked." }
+        val current = requireNotNull(store.resource(expected.accountId, expected.spaceId, expected.remoteId))
+        check(original(current) == prepared) { "The local copy changed." }
+    }
+
     suspend fun authorized(
         expected: ResourceEntity,
         permit: () -> Boolean,

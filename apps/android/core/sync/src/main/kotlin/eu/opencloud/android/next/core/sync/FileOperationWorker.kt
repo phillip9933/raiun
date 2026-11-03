@@ -258,6 +258,9 @@ internal suspend fun executeFileOperation(
     }
     checkActive()
     if (fingerprint == null) throw OpenCloudException(OpenCloudError.PreconditionFailed)
+    if (operation.state == "SENT" && client.stat(destination, authorization) == null) {
+        recoverMissingDestination(operation, fingerprint, client, authorization, checkActive)
+    }
     awaitVerifiedFingerprint(destination, fingerprint, client, authorization, checkActive)
     if (crossSpaceFileMove && client.stat(source, authorization) != null) {
         checkActive()
@@ -265,6 +268,52 @@ internal suspend fun executeFileOperation(
         client.deleteVerifiedSource(source, operation.sourceETag, authorization)
     }
     if (operation.move) awaitSourceRemoval(source, client, authorization, checkActive)
+}
+
+/**
+ * A journal may precede dispatch. Absence permits only a guarded replay.
+ * Network and validation failures can race an original request. Cancellation always escapes.
+ */
+@Suppress("TooGenericExceptionCaught")
+private fun recoverMissingDestination(
+    operation: FileOperationEntity,
+    fingerprint: String,
+    client: DavOperationClient,
+    authorization: String,
+    checkActive: () -> Unit,
+) {
+    val source = operationUrl(operation.sourceRoot, operation.sourcePath)
+    val destination = operationUrl(operation.destinationRoot, operation.destinationPath)
+    checkActive()
+    try {
+        requireReplaySource(operation, fingerprint, client, authorization, checkActive)
+        checkActive()
+        if (client.stat(destination, authorization) != null) return // A late original request won; verify it below.
+        val directMove =
+            operation.move && (operation.sourceSpaceId == operation.destinationSpaceId || operation.sourceFolder)
+        // Overwrite:F arbitrates with a possibly in-flight original; If-Match rejects a changed source.
+        client.mutate(source, destination, directMove, operation.sourceETag, authorization)
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (failure: Exception) {
+        checkActive()
+        // A late original may complete before source validation or dispatch. Verify its destination below.
+        if (client.stat(destination, authorization) == null) throw failure
+    }
+}
+
+private fun requireReplaySource(
+    operation: FileOperationEntity,
+    fingerprint: String,
+    client: DavOperationClient,
+    authorization: String,
+    checkActive: () -> Unit,
+) {
+    val source = operationUrl(operation.sourceRoot, operation.sourcePath)
+    val before = client.stat(source, authorization) ?: throw OpenCloudException(OpenCloudError.PreconditionFailed)
+    requireOperation(before.eTag == operation.sourceETag && before.folder == operation.sourceFolder)
+    requireOperation(client.matchesFingerprint(source, fingerprint, authorization, checkActive))
+    requireOperation(client.stat(source, authorization)?.eTag == operation.sourceETag)
 }
 
 private suspend fun awaitVerifiedFingerprint(

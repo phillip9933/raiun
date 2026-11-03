@@ -67,10 +67,14 @@ data class AuthTokens(
     val expiresAtEpochSeconds: Long,
     val tokenType: String,
     val scope: String?,
-)
+) {
+    override fun toString(): String = "AuthTokens([REDACTED])"
+}
 
 data class PkceRequest(
     val authorizationUrl: String,
     val state: String,
     val codeVerifier: String,
-)
+) {
+    override fun toString(): String = "PkceRequest([REDACTED])"
+}

@@ -143,6 +143,49 @@ class VaultUploadStoreTest {
         assertEquals(job, store.read(job.id))
     }
 
+    @Test fun strictRemovalRetainsPreparedBytesUntilRevokedHandoffAndPreservesOtherAccount() {
+        val job = prepare()
+        val other =
+            store.prepare(location.copy(accountId = "other"), "public.vault/cipher", null, vaultProofDigest("p")) {
+                it.write(ciphertext)
+            }
+        assertTrue(store.finishPrepared(other.id) { true })
+        assertThrows(IllegalStateException::class.java) { store.forgetAccountForRemoval(location.accountId) }
+        assertTrue(File(root, job.id).exists())
+        assertFalse(store.finishPrepared(job.id) { true })
+        VaultUploadStore(root).forgetAccountForRemoval(location.accountId)
+        assertEquals(other, store.read(other.id))
+    }
+
+    @Test fun strictRemovalPreservesUnattributableInterruptedAndCorruptManifests() {
+        val job = prepare()
+        assertTrue(store.finishPrepared(job.id) { true })
+        val interrupted =
+            File(
+                root,
+                java.util.UUID
+                    .randomUUID()
+                    .toString(),
+            ).apply { mkdir() }
+        File(interrupted, "content").writeText("unknown owner ciphertext")
+        assertThrows(Exception::class.java) { VaultUploadStore(root).forgetAccountForRemoval(location.accountId) }
+        assertTrue(interrupted.exists())
+        assertTrue(File(root, job.id).exists())
+        File(interrupted, "manifest").writeBytes(byteArrayOf(0, 1))
+        assertThrows(Exception::class.java) { store.forgetAccountForRemoval(location.accountId) }
+        assertTrue(interrupted.exists())
+        assertTrue(File(root, job.id).exists())
+    }
+
+    @Test fun strictRemovalRejectsUnreadableInventoryInsteadOfAcknowledgingEmptyRoot() {
+        val unavailable =
+            object : File(root, "unreadable") {
+                override fun listFiles(): Array<File>? = null
+            }
+        assertTrue(unavailable.mkdir())
+        assertThrows(IllegalStateException::class.java) { VaultUploadStore(unavailable).forgetAccountForRemoval("a") }
+    }
+
     private fun prepare(destination: String = "public.vault/enc-name") =
         store.prepare(location, destination, null, vaultProofDigest("public proof")) { it.write(ciphertext) }
 }

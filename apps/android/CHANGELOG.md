@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.3.2
+
+### Bug fixes
+
+- Prevent folder listings from stalling when background work switches threads, and let interrupted copy/move operations safely retry.
+- Keep accounts on case-sensitive server paths separate while retaining existing account data.
+- Let unrelated file operations continue while an external editor downloads a document, and avoid loading an entire folder to look up one name.
+- Preserve unsaved connection settings across rotation and correctly save a replacement client certificate.
+- Resume incomplete account cleanup after interruptions, show its pending status, and preserve other accounts and unattributed recovery files.
+- Preserve cancellation and show safe error descriptions for actions from search results.
+
+### Improvements
+
+- Harden credential-key initialization, redact secret-bearing objects, mark copied sharing links as sensitive, and consistently filter encrypted locations from the Android file picker.
+- Reject Raiun's private providers during incoming sharing and explicitly enforce HTTPS in production.
+- Observe transfers and UI state more efficiently, improve cancellation responsiveness, and document the current architecture.
+
+This release migrates the local Room database from version 27 to 28 to retain pending account-removal records. Existing accounts and data migrate forward. Older builds cannot open the new database.
+
 ## 1.3.1
 
 ### Bug fixes
