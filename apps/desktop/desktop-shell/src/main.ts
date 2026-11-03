@@ -2924,7 +2924,7 @@ function vaultOfflinePinPanel(flow: VaultDialogState) {
     : '';
   const offlineNote = nativeVaultAccess() ? `<small class="vault-pin-note">Saved encrypted snapshots require the vault password. Windows cached access is read-only; reconnect to refresh snapshots.</small>` : flow.offlineUnlockOnly
     ? flow.vaultMountExistingFileOverwrite
-      ? '<small class="vault-pin-note">This saved snapshot is open offline. The mounted drive can queue supported file edits, file creation/rename/deletion, and folder creation; changes stay local until retry. A queued-folder rename is limited to a never-attempted subtree of at most 64 operations and 64 MiB of file data; restart, child creation, and reconciliation passed in the R28 VM gate. Remote folder deletion is unsupported, though an empty never-attempted queued folder can be canceled locally when it has no open handles or dependent operations.</small>'
+      ? '<small class="vault-pin-note">This saved snapshot is open offline. Supported edits and new files or folders stay on this device until you reconnect. Review pending changes before retrying.</small>'
       : '<small class="vault-pin-note">This location is open from its saved snapshot. It is read-only until the mounted drive and private edit storage are ready. Connect to refresh it.</small>'
     : !state.status?.connected
       ? '<small class="vault-pin-note">Connect this account to create or refresh an encrypted offline copy. Supported offline edits require an unlocked location, a mounted drive, and private edit storage.</small>'

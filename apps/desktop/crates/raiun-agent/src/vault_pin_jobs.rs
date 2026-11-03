@@ -135,6 +135,7 @@ impl VaultPinJobs {
 
     /// Existing worker plus a retained local-storage guard. The owned Arc
     /// keeps private directory custody until the worker actually terminates.
+    #[cfg(windows)]
     pub fn start_guarded(
         this: &Arc<Self>,
         scope: &VaultSessionScope,
