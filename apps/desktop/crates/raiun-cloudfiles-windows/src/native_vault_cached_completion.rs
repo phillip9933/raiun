@@ -6,7 +6,7 @@ use raiun_opencloud::vault_cache::VaultPendingOperationKind;
 
 impl ConfiguredRootConnection {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn complete_cached_vault_pending(
+    pub(crate) fn complete_cached_vault_pending(
         &self,
         backend: &Arc<crate::OpenCloudPlaceholderBackend>,
         route: &Arc<crate::vault_routes::VerifiedVaultRoute>,

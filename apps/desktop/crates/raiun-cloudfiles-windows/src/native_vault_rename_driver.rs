@@ -321,11 +321,28 @@ impl ConfiguredRootConnection {
                     let sealed = binding
                         .cached_pending_operation(id, revision, &stop)
                         .map_err(|_| no())?;
+                    let body_hash = if entry.directory {
+                        None
+                    } else {
+                        let retained_parent = parent.clone();
+                        let retained_destination = destination_parent.clone();
+                        let retained_observation = observation.clone();
+                        let cancelled: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
+                            retained_parent.is_stopped()
+                                || retained_destination.is_stopped()
+                                || !retained_observation()
+                        });
+                        Some(
+                            binding
+                                .cached_pending_body_sha256(id, revision, cancelled)
+                                .map_err(|_| no())?,
+                        )
+                    };
                     if sealed.path != entry.path
                         || sealed.plaintext_len != entry.size
                         || digest
                             .as_ref()
-                            .is_some_and(|hash| sealed.plaintext_sha256.as_str() != hash.as_str())
+                            .is_some_and(|hash| body_hash.as_deref() != Some(hash.as_str()))
                         || sealed.state != raiun_cache::CiphertextWriteState::NeverAttempted
                     {
                         return Err(no());

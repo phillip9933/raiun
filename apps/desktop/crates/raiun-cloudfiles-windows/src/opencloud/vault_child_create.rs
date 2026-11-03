@@ -129,6 +129,26 @@ pub trait VaultChildCreateRecord: Send + Sync {
     fn record_remote(&self, proof: &VaultChildCreateRemoteProof) -> Result<(), BackendError>;
     fn record_native_completed(&self, identity: [u8; 16]) -> Result<(), BackendError>;
 }
+/// Separate local-only custody for a child of a queued directory. This trait
+/// cannot provide a remote send or online completion method.
+pub trait VaultCachedChildCreateRecord: Send + Sync {
+    fn descriptor(&self) -> &super::VaultCachedChildCreateDescriptor;
+    fn open_reader(
+        &self,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<Box<dyn Read + Send>, BackendError>;
+    fn record_local_queued(
+        &self,
+        receipt: &super::VaultCachedNamespaceQueued,
+    ) -> Result<(), BackendError>;
+    fn record_local_queued_native(
+        &self,
+        receipt: &super::VaultCachedNamespaceQueued,
+        identity: [u8; 16],
+        file: u64,
+        usn: i64,
+    ) -> Result<(), BackendError>;
+}
 pub struct VaultChildCreateRemoteProof {
     descriptor: VaultChildCreateDescriptor,
     entry: RemoteEntry,
@@ -244,6 +264,38 @@ impl VaultChildCreateParent {
             encoded,
             integrity,
         )
+    }
+    pub(crate) fn cached_descriptor(
+        &self,
+        source: VaultChildCreateSource,
+        encoded: &str,
+        integrity: &str,
+    ) -> Result<super::VaultCachedChildCreateDescriptor, BackendError> {
+        self.check()?;
+        self.route
+            .backend()
+            .binding()
+            .cached_child_create_descriptor(
+                self.root,
+                self.identity.as_bytes(),
+                &self.metadata,
+                source,
+                encoded,
+                integrity,
+            )
+    }
+    pub(crate) fn prepare_cached_record(
+        &self,
+        descriptor: &super::VaultCachedChildCreateDescriptor,
+        source: Option<&mut dyn Read>,
+        verify: &mut dyn FnMut() -> Result<(), BackendError>,
+    ) -> Result<Arc<dyn VaultCachedChildCreateRecord>, BackendError> {
+        self.check()?;
+        self.route
+            .backend()
+            .prepare_cached_child_create_record(descriptor, source, verify, &|| {
+                self.job.is_stopped()
+            })
     }
     pub(crate) fn prepare_record(
         &self,

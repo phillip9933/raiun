@@ -145,6 +145,61 @@ impl WindowsVaultReadBinding {
         binding.check_current()?;
         Ok(binding)
     }
+    /// Online route with the same exact-scope sealed journal used by cached
+    /// sessions. Reconnection can reconcile the original queued revision only
+    /// through this constructor; the browse-only constructor stays cache-free.
+    #[cfg(windows)]
+    pub fn new_online_with_offline_cache(
+        trusted: ProviderScope,
+        client: Arc<OpenCloudClient>,
+        sessions: Arc<VaultSessionCoordinator>,
+        scope: VaultSessionScope,
+        root_path: String,
+        cache: raiun_opencloud::vault_cache::VaultOfflineCache,
+    ) -> Result<Self, CloudError> {
+        check_context(&trusted, &client, &scope)?;
+        if root_path.len() > 4096 || validate_remote_path(&root_path).is_err() {
+            return Err(refused());
+        }
+        let root_path = normalized_inspected_path(&root_path).to_owned();
+        let epoch = sessions
+            .capture_session_epoch(&scope)
+            .map_err(|_| refused())?;
+        let listing =
+            VaultMetadataClient::new(&client).inspect_vault(scope.space_id(), &root_path)?;
+        check_context(&trusted, &client, &scope)?;
+        if listing.space_id != scope.space_id()
+            || !listing.root.directory
+            || listing.root.id != scope.resource_id()
+            || normalized_inspected_path(&listing.root_path) != root_path
+            || normalized_inspected_path(&listing.root.path) != root_path
+        {
+            return Err(refused());
+        }
+        let backend = VaultBackend::new_with_offline_cache(
+            (*client).clone(),
+            sessions.clone(),
+            scope.clone(),
+            root_path.clone(),
+            cache,
+        )?;
+        let binding = Self {
+            cache_pin: None,
+            trusted,
+            client,
+            sessions,
+            scope,
+            backend,
+            root_path,
+            epoch,
+            identity: Arc::new(()),
+            revoked: AtomicBool::new(false),
+            publication_gate: RwLock::new(()),
+            publication_revision: AtomicU64::new(1),
+        };
+        binding.check_current()?;
+        Ok(binding)
+    }
     /// Credential-free cached reads retain both the authenticated sealed root
     /// and the exact private cache directory for the entire route lifetime.
     #[cfg(windows)]
@@ -365,6 +420,39 @@ impl WindowsVaultReadBinding {
             Ok(descriptor)
         })
         .map_err(|_| BackendError::Unavailable)
+    }
+    #[cfg(windows)]
+    pub(crate) fn cached_child_create_descriptor(
+        &self,
+        root: crate::ConfiguredRootIdentity,
+        parent_opaque: &[u8; 16],
+        parent: &RemoteEntry,
+        source: crate::VaultChildCreateSource,
+        encoded: &str,
+        integrity: &str,
+    ) -> Result<crate::VaultCachedChildCreateDescriptor, BackendError> {
+        self.check_current()
+            .map_err(|_| BackendError::Unavailable)?;
+        let parent_ref = self
+            .cached_parent_ref(parent, &|| false)
+            .map_err(|_| BackendError::Unavailable)?;
+        let leaf = source.components.last().ok_or(BackendError::Unavailable)?;
+        let d = crate::VaultCachedChildCreateDescriptor {
+            owner: self.trusted.clone(),
+            vault: self.scope.clone(),
+            remote_root: self.root_path.clone(),
+            root,
+            parent_identity: *parent_opaque,
+            parent: parent.clone(),
+            parent_ref,
+            logical_path: format!("{}/{}", parent.path.trim_end_matches('/'), leaf),
+            encoded_target: encoded.into(),
+            integrity_token: integrity.into(),
+            historical_unlock_epoch: self.epoch.historical_generation(),
+            source,
+        };
+        d.validate()?;
+        Ok(d)
     }
     #[cfg(windows)]
     pub(crate) fn rename_descriptor(
@@ -1014,6 +1102,19 @@ impl WindowsVaultReadBinding {
         self.backend
             .cached_pending_operation(id, revision, &self.epoch, &stop)
     }
+    #[cfg(windows)]
+    pub(crate) fn cached_pending_body_sha256(
+        &self,
+        id: &str,
+        revision: u64,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<String, CloudError> {
+        self.check_current()?;
+        let original = cancelled.clone();
+        let stop: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || original());
+        self.backend
+            .cached_pending_body_sha256(id, revision, &self.epoch, stop)
+    }
 
     #[cfg(windows)]
     pub(crate) fn cached_parent_ref(
@@ -1034,12 +1135,23 @@ impl WindowsVaultReadBinding {
         remote_root: &str,
         historical_epoch: u64,
     ) -> bool {
+        self.cached_namespace_descriptor_matches(owner, vault, remote_root, historical_epoch)
+            && self.check_current().is_ok()
+    }
+    #[cfg(windows)]
+    pub(crate) fn cached_namespace_descriptor_matches(
+        &self,
+        owner: &ProviderScope,
+        vault: &VaultSessionScope,
+        remote_root: &str,
+        historical_epoch: u64,
+    ) -> bool {
         owner == &self.trusted
             && vault == &self.scope
             && remote_root == self.root_path
             && historical_epoch == self.epoch.historical_generation()
-            && self.check_current().is_ok()
             && self.client.is_offline()
+            && !self.is_revoked()
     }
     #[cfg(windows)]
     pub(crate) fn cached_vault_scope(&self) -> VaultSessionScope {

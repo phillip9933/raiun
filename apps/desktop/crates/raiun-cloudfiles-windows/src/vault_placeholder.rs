@@ -940,6 +940,44 @@ mod runtime {
                 .prepare_child_create(descriptor, source, &mut verify, cancelled)
         }
 
+        pub(crate) fn prepare_cached_child_create_record(
+            &self,
+            descriptor: &crate::VaultCachedChildCreateDescriptor,
+            source: Option<&mut dyn std::io::Read>,
+            verify_native: &mut dyn FnMut() -> Result<(), BackendError>,
+            cancelled: &dyn Fn() -> bool,
+        ) -> Result<Arc<dyn crate::VaultCachedChildCreateRecord>, BackendError> {
+            descriptor.validate()?;
+            self.check_child_create_parent(
+                &descriptor.parent_identity,
+                &descriptor.parent,
+                descriptor.root,
+            )?;
+            if !self.binding.cached_namespace_descriptor_current(
+                &descriptor.owner,
+                &descriptor.vault,
+                &descriptor.remote_root,
+                descriptor.historical_unlock_epoch,
+            ) {
+                return Err(BackendError::Unavailable);
+            }
+            let mut verify = || {
+                self.binding
+                    .with_publication(|| {
+                        if cancelled() {
+                            return Err(refused());
+                        }
+                        self.binding
+                            .verify_custody_context(self.custody.as_ref())
+                            .map_err(|_| refused())?;
+                        verify_native().map_err(|_| refused())
+                    })
+                    .map_err(|_| BackendError::Unavailable)
+            };
+            self.custody
+                .prepare_cached_child_create(descriptor, source, &mut verify, cancelled)
+        }
+
         pub(crate) fn send_child_file_create<R: std::io::Read>(
             &self,
             parent_identity: [u8; 16],
@@ -978,22 +1016,35 @@ mod runtime {
                 if cancellation.is_cancelled() || !self.binding.is_cached_only() {
                     return Err(no());
                 }
-                let crate::opencloud::VaultCachedNamespaceDescriptor::ChildCreate(d) =
-                    receipt.descriptor()
-                else {
-                    return Err(no());
+                let (parent_identity, parent) = match receipt.descriptor() {
+                    crate::opencloud::VaultCachedNamespaceDescriptor::ChildCreate(d) => {
+                        self.binding
+                            .validate_cached_child_descriptor(d)
+                            .map_err(|_| no())?;
+                        (d.parent_identity, &d.parent)
+                    }
+                    crate::opencloud::VaultCachedNamespaceDescriptor::CachedChildCreate(d) => {
+                        d.validate().map_err(|_| no())?;
+                        if !self.binding.cached_namespace_descriptor_matches(
+                            &d.owner,
+                            &d.vault,
+                            &d.remote_root,
+                            d.historical_unlock_epoch,
+                        ) {
+                            return Err(no());
+                        }
+                        (d.parent_identity, &d.parent)
+                    }
+                    _ => return Err(no()),
                 };
-                self.binding
-                    .validate_cached_child_descriptor(d)
-                    .map_err(|_| no())?;
                 let mut entry = receipt.entry().cloned().ok_or_else(no)?;
                 entry.writable = false;
                 let (mut next, identity) = {
                     let catalogue = self.catalogue.lock().map_err(|_| no())?;
-                    let parent = catalogue.entries.get(&d.parent_identity).ok_or_else(no)?;
-                    if !parent.directory
-                        || parent.id != d.parent.id
-                        || parent.path != d.parent.path
+                    let current_parent = catalogue.entries.get(&parent_identity).ok_or_else(no)?;
+                    if !current_parent.directory
+                        || current_parent.id != parent.id
+                        || current_parent.path != parent.path
                         || catalogue.entries.values().any(|e| e.path == entry.path)
                     {
                         return Err(no());
@@ -1036,7 +1087,7 @@ mod runtime {
                 let (identity, original, entry) = match receipt.descriptor() {
                     crate::opencloud::VaultCachedNamespaceDescriptor::FileRename(d) => {
                         d.validate().map_err(|_| no())?;
-                        if !self.binding.cached_namespace_descriptor_current(
+                        if !self.binding.cached_namespace_descriptor_matches(
                             &d.owner,
                             &d.vault,
                             &d.remote_root,
@@ -1052,7 +1103,7 @@ mod runtime {
                     }
                     crate::opencloud::VaultCachedNamespaceDescriptor::FileDelete(d) => {
                         d.validate().map_err(|_| no())?;
-                        if !self.binding.cached_namespace_descriptor_current(
+                        if !self.binding.cached_namespace_descriptor_matches(
                             &d.owner,
                             &d.vault,
                             &d.remote_root,
@@ -1122,7 +1173,7 @@ mod runtime {
                 d.validate().map_err(|_| no())?;
                 if cancellation.is_cancelled()
                     || !self.binding.is_cached_only()
-                    || !self.binding.cached_namespace_descriptor_current(
+                    || !self.binding.cached_namespace_descriptor_matches(
                         &d.owner,
                         &d.vault,
                         &d.remote_root,
@@ -1250,7 +1301,7 @@ mod runtime {
                 return Err(BackendError::Unavailable);
             };
             d.validate()?;
-            if !self.binding.cached_namespace_descriptor_current(
+            if !self.binding.cached_namespace_descriptor_matches(
                 &d.owner,
                 &d.vault,
                 &d.remote_root,

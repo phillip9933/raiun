@@ -6,7 +6,7 @@ use crate::close_capture_admission::OwnedCreateAdmission;
 use crate::file_create_phase::TaskFlight;
 use crate::namespace_intent::{CapturedAuthorization, NamespaceObjectKind};
 use crate::opencloud::vault_child_create::VaultChildCreateParent;
-use crate::{VaultChildCreateRecord, VaultChildCreateSource};
+use crate::{VaultCachedChildCreateRecord, VaultChildCreateRecord, VaultChildCreateSource};
 use raiun_opencloud::vault_backend::{
     VaultChildDirectoryCreateOutcome, VaultChildDirectoryCreateTarget, VaultChildFileCreateOutcome,
     VaultChildFileCreateTarget, VaultVerifiedChildDirectory, VaultVerifiedChildFile,
@@ -126,8 +126,96 @@ struct Prepared {
 }
 struct Sent {
     parent: Arc<VaultChildCreateParent>,
-    record: Arc<dyn VaultChildCreateRecord>,
+    record: Record,
     proof: Verified,
+}
+enum Record {
+    Online(Arc<dyn VaultChildCreateRecord>),
+    Cached(Arc<dyn VaultCachedChildCreateRecord>),
+}
+impl Record {
+    fn root(&self) -> crate::ConfiguredRootIdentity {
+        match self {
+            Self::Online(r) => r.descriptor().root,
+            Self::Cached(r) => r.descriptor().root,
+        }
+    }
+    fn parent_identity(&self) -> [u8; 16] {
+        match self {
+            Self::Online(r) => r.descriptor().parent_identity,
+            Self::Cached(r) => r.descriptor().parent_identity,
+        }
+    }
+    fn logical_path(&self) -> &str {
+        match self {
+            Self::Online(r) => &r.descriptor().logical_path,
+            Self::Cached(r) => &r.descriptor().logical_path,
+        }
+    }
+    fn online_descriptor(&self) -> Result<&crate::VaultChildCreateDescriptor, BackendError> {
+        match self {
+            Self::Online(r) => Ok(r.descriptor()),
+            Self::Cached(_) => Err(BackendError::Unavailable),
+        }
+    }
+    fn claim_send(&self) -> Result<(), BackendError> {
+        self.online_descriptor()?;
+        match self {
+            Self::Online(r) => r.claim_send(),
+            Self::Cached(_) => Err(BackendError::Unavailable),
+        }
+    }
+    fn record_remote(
+        &self,
+        proof: &crate::VaultChildCreateRemoteProof,
+    ) -> Result<(), BackendError> {
+        match self {
+            Self::Online(r) => r.record_remote(proof),
+            Self::Cached(_) => Err(BackendError::Unavailable),
+        }
+    }
+    fn record_native_completed(&self, identity: [u8; 16]) -> Result<(), BackendError> {
+        match self {
+            Self::Online(r) => r.record_native_completed(identity),
+            Self::Cached(_) => Err(BackendError::Unavailable),
+        }
+    }
+    fn source(&self) -> &VaultChildCreateSource {
+        match self {
+            Self::Online(r) => &r.descriptor().source,
+            Self::Cached(r) => &r.descriptor().source,
+        }
+    }
+    fn open_reader(
+        &self,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<Box<dyn std::io::Read + Send>, BackendError> {
+        match self {
+            Self::Online(r) => r.open_reader(cancelled),
+            Self::Cached(r) => r.open_reader(cancelled),
+        }
+    }
+    fn record_local_queued(
+        &self,
+        receipt: &crate::VaultCachedNamespaceQueued,
+    ) -> Result<(), BackendError> {
+        match self {
+            Self::Online(r) => r.record_local_queued(receipt),
+            Self::Cached(r) => r.record_local_queued(receipt),
+        }
+    }
+    fn record_local_queued_native(
+        &self,
+        receipt: &crate::VaultCachedNamespaceQueued,
+        identity: [u8; 16],
+        file: u64,
+        usn: i64,
+    ) -> Result<(), BackendError> {
+        match self {
+            Self::Online(r) => r.record_local_queued_native(receipt, identity, file, usn),
+            Self::Cached(r) => r.record_local_queued_native(receipt, identity, file, usn),
+        }
+    }
 }
 enum Operation {
     // Volatile pre-capture polling only: retains the same original parent,
@@ -148,7 +236,7 @@ enum Operation {
     },
     Send {
         parent: Arc<VaultChildCreateParent>,
-        record: Arc<dyn VaultChildCreateRecord>,
+        record: Record,
         proof: Proof,
         target: Target,
         dispatch: Arc<dyn Fn() -> bool + Send + Sync>,
@@ -308,25 +396,22 @@ impl VaultChildCreateTask {
                         })
                     };
                     let binding = parent.vault().backend().binding();
-                    let descriptor = record.descriptor();
+                    let source = record.source();
                     let verified = match target {
                         Target::Cached(target) => {
                             if !dispatch() {
                                 return Err(BackendError::Unavailable);
                             }
                             proof.check().map_err(|_| BackendError::Unavailable)?;
-                            let result = if descriptor.source.kind == NamespaceObjectKind::File {
+                            let result = if source.kind == NamespaceObjectKind::File {
                                 let original = parent.clone();
                                 let mut reader =
                                     record.open_reader(Arc::new(move || original.is_stopped()))?;
                                 binding.queue_cached_child_create(
                                     target,
                                     &mut reader,
-                                    descriptor.source.plaintext_len,
-                                    descriptor
-                                        .source
-                                        .plaintext_sha256
-                                        .ok_or(BackendError::Unavailable)?,
+                                    source.plaintext_len,
+                                    source.plaintext_sha256.ok_or(BackendError::Unavailable)?,
                                     &stop,
                                 )
                             } else {
@@ -342,9 +427,14 @@ impl VaultChildCreateTask {
                             .map_err(|_| BackendError::Unavailable)?;
                             parent.check()?;
                             proof.check().map_err(|_| BackendError::Unavailable)?;
-                            let receipt = crate::opencloud::VaultCachedNamespaceQueued::child(
-                                descriptor, result,
-                            )?;
+                            let receipt = match &record {
+                                Record::Online(r) => crate::opencloud::VaultCachedNamespaceQueued::child(
+                                    r.descriptor(), result,
+                                )?,
+                                Record::Cached(r) => crate::opencloud::VaultCachedNamespaceQueued::child_pending_parent(
+                                    r.descriptor(), result,
+                                )?,
+                            };
                             record.record_local_queued(&receipt)?;
                             Verified::Cached(receipt)
                         }
@@ -357,8 +447,8 @@ impl VaultChildCreateTask {
                                 .vault()
                                 .backend()
                                 .send_child_file_create(
-                                    descriptor.parent_identity,
-                                    &descriptor.logical_path,
+                                    record.parent_identity(),
+                                    record.logical_path(),
                                     parent.metadata(),
                                     target,
                                     &mut reader,
@@ -384,7 +474,7 @@ impl VaultChildCreateTask {
                             };
                             match binding
                                 .send_child_directory_create(
-                                    &descriptor.logical_path,
+                                    record.logical_path(),
                                     parent.metadata(),
                                     target,
                                     &cancellation,
@@ -406,7 +496,7 @@ impl VaultChildCreateTask {
                     proof.check().map_err(|_| BackendError::Unavailable)?;
                     if !matches!(&verified, Verified::Cached(_)) {
                         let remote = crate::VaultChildCreateRemoteProof::new(
-                            record.descriptor(),
+                            record.online_descriptor()?,
                             verified.entry().ok_or(BackendError::Unavailable)?,
                         )?;
                         record.record_remote(&remote)?;
@@ -684,14 +774,12 @@ impl ConfiguredRootConnection {
                     if pins.source(prepared.source.plaintext_sha256) != prepared.source {
                         return Err(Error::ConfiguredRootChanged);
                     }
-                    let descriptor = prepared
-                        .parent
-                        .descriptor(
-                            prepared.source,
-                            prepared.target.encoded(),
-                            prepared.target.integrity(),
-                        )
-                        .map_err(|_| Error::EditRecoveryUnavailable)?;
+                    let pending_parent = matches!(&prepared.target, Target::Cached(_))
+                        && prepared
+                            .parent
+                            .metadata()
+                            .id
+                            .starts_with("raiun-pending-directory:");
                     // Publication may have happened even if any following local
                     // capture/CAS fails. Never drop original custody on error.
                     attempt.published = true;
@@ -699,21 +787,60 @@ impl ConfiguredRootConnection {
                         pins.verify(self, false)
                             .map_err(|_| BackendError::Unavailable)
                     };
-                    let record = match pins {
-                        Pins::File(p) => p.with_reader(
-                            &attempt.job,
-                            &|| prepared.parent.is_stopped(),
-                            |reader| {
-                                prepared
-                                    .parent
-                                    .prepare_record(&descriptor, Some(reader), &mut verify)
-                                    .map_err(|_| Error::EditRecoveryUnavailable)
-                            },
-                        )?,
-                        Pins::Directory(_) => prepared
+                    let record = if pending_parent {
+                        let descriptor = prepared
                             .parent
-                            .prepare_record(&descriptor, None, &mut verify)
-                            .map_err(|_| Error::EditRecoveryUnavailable)?,
+                            .cached_descriptor(
+                                prepared.source,
+                                prepared.target.encoded(),
+                                prepared.target.integrity(),
+                            )
+                            .map_err(|_| Error::EditRecoveryUnavailable)?;
+                        Record::Cached(match pins {
+                            Pins::File(p) => p.with_reader(
+                                &attempt.job,
+                                &|| prepared.parent.is_stopped(),
+                                |reader| {
+                                    prepared
+                                        .parent
+                                        .prepare_cached_record(
+                                            &descriptor,
+                                            Some(reader),
+                                            &mut verify,
+                                        )
+                                        .map_err(|_| Error::EditRecoveryUnavailable)
+                                },
+                            )?,
+                            Pins::Directory(_) => prepared
+                                .parent
+                                .prepare_cached_record(&descriptor, None, &mut verify)
+                                .map_err(|_| Error::EditRecoveryUnavailable)?,
+                        })
+                    } else {
+                        let descriptor = prepared
+                            .parent
+                            .descriptor(
+                                prepared.source,
+                                prepared.target.encoded(),
+                                prepared.target.integrity(),
+                            )
+                            .map_err(|_| Error::EditRecoveryUnavailable)?;
+                        Record::Online(match pins {
+                            Pins::File(p) => p.with_reader(
+                                &attempt.job,
+                                &|| prepared.parent.is_stopped(),
+                                |reader| {
+                                    prepared
+                                        .parent
+                                        .prepare_record(&descriptor, Some(reader), &mut verify)
+                                        .map_err(|_| Error::EditRecoveryUnavailable)
+                                },
+                            )?,
+                            Pins::Directory(_) => prepared
+                                .parent
+                                .prepare_record(&descriptor, None, &mut verify)
+                                .map_err(|_| Error::EditRecoveryUnavailable)?,
+                        })
                     };
                     let proof = pins.proof()?;
                     attempt.check(self)?;
@@ -749,8 +876,10 @@ impl ConfiguredRootConnection {
                         .as_mut()
                         .ok_or(Error::ConnectionStateInvalid)?;
                     local.verify(self, false)?;
-                    let descriptor = sent.record.descriptor();
-                    if local.source(descriptor.source.plaintext_sha256) != descriptor.source {
+                    let source = sent.record.source();
+                    let root = sent.record.root();
+                    let parent_identity = sent.record.parent_identity();
+                    if local.source(source.plaintext_sha256) != *source {
                         return Err(Error::ConfiguredRootChanged);
                     }
                     let stop = || sent.parent.is_stopped();
@@ -802,11 +931,11 @@ impl ConfiguredRootConnection {
                                         cleanup,
                                         WritableCleanupReceipt {
                                             dispatch: vault.binding().capture_dispatch_stamp(),
-                                            root: descriptor.root,
+                                            root,
                                             identity,
                                             file: pins.file(),
-                                            components: descriptor.source.components.clone(),
-                                            length: descriptor.source.plaintext_len,
+                                            components: source.components.clone(),
+                                            length: source.plaintext_len,
                                             sha256: sha,
                                             clean_hydration: false,
                                             original: receipt.entry().cloned(),
@@ -820,8 +949,8 @@ impl ConfiguredRootConnection {
                                     .record(
                                         identity,
                                         pins.file().file_index,
-                                        descriptor.source.plaintext_len,
-                                        descriptor.source.components.clone(),
+                                        source.plaintext_len,
+                                        source.components.clone(),
                                     )
                                     .map_err(|_| Error::EditRecoveryUnavailable)?;
                                 Ok(())
@@ -849,26 +978,25 @@ impl ConfiguredRootConnection {
                             )?;
                         }
                         (Verified::File(proof), Pins::File(pins)) => {
-                            if Some(proof.plaintext_sha256()) != descriptor.source.plaintext_sha256
-                            {
+                            if Some(proof.plaintext_sha256()) != source.plaintext_sha256 {
                                 return Err(Error::EditRecoveryUnavailable);
                             }
                             let vault = sent.parent.vault().backend();
                             let readonly = !vault.existing_file_saves_active();
                             vault.publish_created_file(
                                 proof,
-                                descriptor.parent_identity,
+                                parent_identity,
                                 &cancel,
                                 |identity| {
                                     if stop() {
                                         return Err(Error::EditRecoveryUnavailable);
                                     }
                                     let intent = crate::vault_custody::VaultHydrationIntent {
-                                        root: descriptor.root,
+                                        root,
                                         identity,
-                                        file_index: descriptor.source.file,
-                                        length: descriptor.source.plaintext_len,
-                                        components: descriptor.source.components.clone(),
+                                        file_index: source.file,
+                                        length: source.plaintext_len,
+                                        components: source.components.clone(),
                                     };
                                     vault
                                         .persist_child_create_hydration(&intent)
@@ -911,11 +1039,11 @@ impl ConfiguredRootConnection {
                                             cleanup,
                                             WritableCleanupReceipt {
                                                 dispatch: vault.binding().capture_dispatch_stamp(),
-                                                root: descriptor.root,
+                                                root,
                                                 identity,
                                                 file: pins.file(),
-                                                components: descriptor.source.components.clone(),
-                                                length: descriptor.source.plaintext_len,
+                                                components: source.components.clone(),
+                                                length: source.plaintext_len,
                                                 sha256: proof.plaintext_sha256(),
                                                 clean_hydration: false,
                                                 original: Some(original),
@@ -931,7 +1059,7 @@ impl ConfiguredRootConnection {
                         (Verified::Directory(proof), Pins::Directory(pins)) => {
                             sent.parent.vault().backend().publish_created_directory(
                                 proof,
-                                descriptor.parent_identity,
+                                parent_identity,
                                 &cancel,
                                 |identity| {
                                     if stop() || !attempt.ticket.claim_completion() {

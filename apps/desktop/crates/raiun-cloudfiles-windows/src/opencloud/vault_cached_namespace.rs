@@ -3,7 +3,7 @@
 use crate::vault_file_delete::VaultFileDeleteDescriptor;
 use crate::{
     ConfiguredRootIdentity, LocalFileIdentity, ProviderScope, VaultChildCreateDescriptor,
-    VaultFileRenameDescriptor,
+    VaultChildCreateSource, VaultFileRenameDescriptor,
 };
 use raiun_cache::CiphertextWriteState;
 use raiun_core::backend::RemoteEntry;
@@ -29,9 +29,67 @@ pub enum VaultCachedNamespaceOperation {
 #[derive(Clone)]
 pub enum VaultCachedNamespaceDescriptor {
     ChildCreate(VaultChildCreateDescriptor),
+    CachedChildCreate(VaultCachedChildCreateDescriptor),
     FileRename(VaultFileRenameDescriptor),
     FileDelete(VaultFileDeleteDescriptor),
     PendingRetarget(VaultCachedRetargetDescriptor),
+}
+
+/// A child whose parent is itself a never-attempted queued directory. The
+/// synthetic parent ETag is kept out of every online descriptor validator.
+#[derive(Clone)]
+pub struct VaultCachedChildCreateDescriptor {
+    pub owner: ProviderScope,
+    pub vault: VaultSessionScope,
+    pub remote_root: String,
+    pub root: ConfiguredRootIdentity,
+    pub parent_identity: [u8; 16],
+    pub parent: RemoteEntry,
+    pub parent_ref: VaultPendingParentRef,
+    pub logical_path: String,
+    pub encoded_target: String,
+    pub integrity_token: String,
+    pub historical_unlock_epoch: u64,
+    pub source: VaultChildCreateSource,
+}
+impl VaultCachedChildCreateDescriptor {
+    pub fn validate(&self) -> Result<(), crate::BackendError> {
+        let bad = || crate::BackendError::Unavailable;
+        self.source.validate(self.root)?;
+        let VaultPendingParentRef::PendingCreate { write_id, revision } = &self.parent_ref else {
+            return Err(bad());
+        };
+        if self.owner.profile_id() != self.vault.account_id()
+            || self.owner.server_origin() != self.vault.server_origin()
+            || self.owner.token_generation() == 0
+            || self.historical_unlock_epoch == 0
+            || self.parent_identity == [0; 16]
+            || !self.parent.directory
+            || self.parent.size != 0
+            || self.parent.id != format!("raiun-pending-directory:{write_id}")
+            || self.parent.etag != pending_etag(write_id, *revision)
+            || !valid_journal_id(write_id, *revision)
+            || self.source.components.len() < 2
+            || self.source.components.len() > 256
+            || self
+                .source
+                .components
+                .iter()
+                .any(|p| !super::valid_windows_component(p))
+            || self.logical_path
+                != format!(
+                    "{}/{}",
+                    self.parent.path.trim_end_matches('/'),
+                    self.source.components.last().ok_or_else(bad)?
+                )
+            || self.encoded_target.is_empty()
+            || self.integrity_token.is_empty()
+            || raiun_core::validate_remote_path(&self.remote_root).is_err()
+        {
+            return Err(bad());
+        }
+        Ok(())
+    }
 }
 
 /// Original native owner facts for a queued create retarget. The synthetic
@@ -136,6 +194,53 @@ pub struct VaultCachedNamespaceQueued {
     pub(super) retarget_rows: Option<Vec<VaultPendingDirectorySubtreeRetargetRow>>,
 }
 impl VaultCachedNamespaceQueued {
+    pub(crate) fn child_pending_parent(
+        descriptor: &VaultCachedChildCreateDescriptor,
+        result: raiun_opencloud::vault_backend::VaultUploadOutcome,
+    ) -> Result<Self, crate::BackendError> {
+        descriptor.validate()?;
+        let raiun_opencloud::vault_backend::VaultUploadOutcome::QueuedCreate {
+            entry,
+            write_id,
+            revision,
+            uncertain: false,
+        } = result
+        else {
+            return Err(crate::BackendError::Unavailable);
+        };
+        let directory =
+            descriptor.source.kind == crate::namespace_intent::NamespaceObjectKind::Directory;
+        if !valid_journal_id(&write_id, revision)
+            || entry.id
+                != format!(
+                    "raiun-pending-{}:{write_id}",
+                    if directory { "directory" } else { "create" }
+                )
+            || entry.path != descriptor.logical_path
+            || entry.directory != directory
+            || entry.size != descriptor.source.plaintext_len
+            || entry.etag != pending_etag(&write_id, revision)
+        {
+            return Err(crate::BackendError::Unavailable);
+        }
+        Ok(Self {
+            descriptor: VaultCachedNamespaceDescriptor::CachedChildCreate(descriptor.clone()),
+            operation: if directory {
+                VaultCachedNamespaceOperation::CreateDirectory
+            } else {
+                VaultCachedNamespaceOperation::CreateFile
+            },
+            write_id,
+            revision,
+            original: None,
+            parent: descriptor.parent.clone(),
+            entry: Some(entry),
+            source_sha256: descriptor.source.plaintext_sha256,
+            plaintext_len: descriptor.source.plaintext_len,
+            retarget_rows: None,
+        })
+    }
+
     pub(crate) fn pending_file_retarget(
         descriptor: &VaultCachedRetargetDescriptor,
         result: VaultPendingEditMetadata,

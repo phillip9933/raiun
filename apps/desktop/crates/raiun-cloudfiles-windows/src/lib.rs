@@ -37,8 +37,8 @@ pub mod namespace_reconcile;
 mod opencloud;
 #[cfg(windows)]
 pub use opencloud::{
-    VaultCachedNamespaceDescriptor, VaultCachedNamespaceOperation, VaultCachedNamespaceQueued,
-    VaultCachedRetargetDescriptor,
+    VaultCachedChildCreateDescriptor, VaultCachedNamespaceDescriptor,
+    VaultCachedNamespaceOperation, VaultCachedNamespaceQueued, VaultCachedRetargetDescriptor,
 };
 
 /// Expected current local presentation, supplied by authenticated custody.
@@ -3534,8 +3534,8 @@ mod tests {
 
 #[cfg(windows)]
 pub use opencloud::vault_child_create::{
-    VaultChildCreateDescriptor, VaultChildCreateRecord, VaultChildCreateRemoteProof,
-    VaultChildCreateSource,
+    VaultCachedChildCreateRecord, VaultChildCreateDescriptor, VaultChildCreateRecord,
+    VaultChildCreateRemoteProof, VaultChildCreateSource,
 };
 
 #[cfg(windows)]

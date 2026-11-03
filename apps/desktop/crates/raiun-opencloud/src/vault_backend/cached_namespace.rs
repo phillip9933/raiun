@@ -37,6 +37,32 @@ impl VaultBackend {
         self.cached_namespace_current(epoch, cancelled)?;
         Ok(result)
     }
+    pub fn cached_pending_body_sha256(
+        &self,
+        id: &str,
+        revision: u64,
+        epoch: &VaultSessionEpoch,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<String, CloudError> {
+        self.cached_namespace_current(epoch, cancelled.as_ref())?;
+        let cache = self
+            .offline_cache
+            .as_ref()
+            .ok_or_else(|| conflict("encrypted journal is unavailable"))?;
+        let expected = cache.pending_operation(&self.sessions, id, revision)?;
+        let (actual, mut reader) = cache.open_pending_body_reader_cancellable(
+            &self.sessions,
+            id,
+            revision,
+            cancelled.clone(),
+        )?;
+        if actual != expected || reader.len() != expected.plaintext_len {
+            return Err(conflict("cached journal body changed"));
+        }
+        reader.check_current()?;
+        self.cached_namespace_current(epoch, cancelled.as_ref())?;
+        Ok(reader.sha256().to_owned())
+    }
 
     pub fn cached_parent_ref(
         &self,

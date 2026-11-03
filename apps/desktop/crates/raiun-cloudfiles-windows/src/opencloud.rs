@@ -12,8 +12,8 @@ mod cached;
 mod vault_cached_namespace;
 #[cfg(windows)]
 pub use vault_cached_namespace::{
-    VaultCachedNamespaceDescriptor, VaultCachedNamespaceOperation, VaultCachedNamespaceQueued,
-    VaultCachedRetargetDescriptor,
+    VaultCachedChildCreateDescriptor, VaultCachedNamespaceDescriptor,
+    VaultCachedNamespaceOperation, VaultCachedNamespaceQueued, VaultCachedRetargetDescriptor,
 };
 #[cfg(windows)]
 mod vault_cached_write;
