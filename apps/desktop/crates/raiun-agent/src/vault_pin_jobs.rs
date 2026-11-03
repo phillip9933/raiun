@@ -329,6 +329,29 @@ impl VaultPinJobs {
         operation()
     }
 
+    /// Run bounded metadata work only when no remote maintenance operation is
+    /// active. RPC readers must not wait behind a network transfer: callers
+    /// can return an explicit busy result and retain the existing job handle.
+    pub fn try_run_serialized<T>(
+        &self,
+        cancelled: &AtomicBool,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _remote = match self.remote_gate.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err("Encrypted remote operation is busy".into());
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err("Encrypted remote-operation gate is poisoned".into());
+            }
+        };
+        if cancelled.load(Ordering::Acquire) {
+            return Err("Encrypted maintenance operation was cancelled".into());
+        }
+        operation()
+    }
+
     pub fn status(
         &self,
         scope: &VaultSessionScope,

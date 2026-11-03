@@ -464,7 +464,10 @@ fn cached_vault_native_operations(ready: bool) -> Value {
             "save_in_place",
             "rename_file",
             "move_file",
-            "delete_file"
+            "delete_file",
+            "rename_queued_folder",
+            "move_queued_folder",
+            "delete_queued_empty_folder"
         ])
     } else {
         json!([])

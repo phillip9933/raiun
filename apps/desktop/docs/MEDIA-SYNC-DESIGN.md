@@ -1,5 +1,7 @@
 # Desktop photo and video import design
 
+Current implementation amendment, 4 November 2026: Windows explicit and recurring media workers and shared GUI controls are integrated. References below to pending Windows worker integration are historical design notes. Media remains upload-only with original-source preservation; encrypted media destinations are unsupported on both platforms. Validation follows the reduced scope in `COMPLETION-CHECKLIST.md`.
+
 Updated 13 October 2026. This document describes the bounded desktop media
 import design and the current implementation boundary. It does not change the
 Android implementation.

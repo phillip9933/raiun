@@ -76,6 +76,7 @@ pub(super) struct Local<'a, 'b> {
     pub(super) original_snapshot: RootSnapshot,
     pub(super) original_usn: i64,
     pub(super) original: Original,
+    pub(super) queued_directory: bool,
     pub(super) components: Vec<String>,
     pub(super) job: crate::StreamedRecoveryJob,
     pub(super) acknowledged: bool,
@@ -261,7 +262,8 @@ impl Local<'_, '_> {
                 != (self.ticket.kind == NamespaceObjectKind::Directory)
             || (self.ticket.kind == NamespaceObjectKind::File && now.file_attributes & 1 != 0)
             || now.placeholder_state & CF_PLACEHOLDER_STATE_PLACEHOLDER == 0
-            || now.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC == 0
+            || (self.queued_directory && now.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC != 0)
+            || (!self.queued_directory && now.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC == 0)
             || native_namespace_directory::opaque_directory_identity(leaf.0)?
                 != self.ticket.key.identity
             || (self.ticket.kind == NamespaceObjectKind::File
@@ -509,6 +511,7 @@ pub(super) fn try_execute<'a, 'b>(
         original_snapshot,
         original_usn,
         original,
+        queued_directory: false,
         components,
         job,
         acknowledged: false,

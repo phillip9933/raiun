@@ -1,6 +1,6 @@
 # Linux / Windows GUI parity
 
-## Current implementation — 3 November 2026
+## Current implementation — 4 November 2026
 
 GUI and CLI share the canonical `worktrees/desktop-followup-ui` source and one
 engine. The owner resumed the remaining Windows work after the earlier `d8113b7`
@@ -10,14 +10,15 @@ than current capability claims.
 
 | Area | Current implementation | Remaining work |
 | --- | --- | --- |
-| GUI accounts, settings, Sharing, ordinary offline files and Sync Folders | Shared frontend and account-scoped services; Windows uses DPAPI and Cloud Files, Linux uses Secret Service and FUSE. | Finished-candidate basic startup/sign-in and normal file workflow. |
+| GUI accounts, settings, Sharing, ordinary offline files and Sync Folders | Shared frontend and account-scoped services; Windows uses DPAPI and Cloud Files, Linux uses Secret Service and FUSE. Windows encrypted folder pairs now use the exact unlocked vault backend, and saved local-only folder settings remain editable offline after the old worker drains. | New integrated candidate packaging and basic workflow; encrypted local folder copies remain plaintext by design. |
 | Ordinary Windows drive operations | File/folder creation, clean file and empty-directory deletion, file/folder rename and same-Space moves, streamed existing saves and recoverable replacement saves are connected for Personal and writable Spaces. Unicode rename hints use Windows ordinal alias checks. | Finished-candidate basic file workflow; existing permission, conflict and dirty-state refusals remain. |
 | Encrypted online Windows files | File/folder creation, streamed existing saves, protected replacement saves, clean file/folder rename and same-vault moves, file deletion and empty-directory deletion are integrated. Remote mutations are conditional and completion requires verified remote and native readback. | Final-package basic workflow; compilation is not native acceptance. |
-| Encrypted Windows offline content | Snapshot controls, password-authenticated cached unlock, native browsing, queued in-place file saves, file/folder creation, file rename/move/delete and queued subtree retarget are connected. Reconnect retains exact protected pending edits; explicit retry joins fresh SDK verification, native completion and durable custody. Cache-only clients have no bearer credential or network authority. | Final candidate packaging and basic native workflow. Stable existing-folder rename/delete stay online-only; replacement-style editors are not advertised for cached access. |
+| Encrypted Windows offline content | Snapshot controls, password-authenticated cached unlock, native browsing, queued in-place file saves, file/folder creation, file rename/move/delete and queued subtree retarget are connected. Empty never-attempted queued directory cancellation retains a protected intent, native absence proof and sealed terminal receipt. Reconnect retains exact protected pending edits; explicit retry joins fresh SDK verification, native completion and durable custody. Cache-only clients have no bearer credential or network authority. | Final candidate packaging and basic native workflow. Stable existing-folder rename/delete stay online-only; replacement-style editors are not advertised for cached access. |
+| Cross-vault file transfers | Shared explicit Copy and Move re-encrypt into the destination and verify readback. Move removes only the unchanged source after destination verification. Any unresolved source removal retains a protected, non-replayable review row; no generic delete retry can dispatch it. Both systems provide read-only interrupted-Copy verification, with protected pending rows visible for the exact unlocked scope. | Finished-candidate basic workflow. File-only, online, 16 MiB limit; no recursive cross-vault Move. |
 | Headless CLI MVP | Both systems support foreground serve, status, Spaces, mount/unmount, configuration and supported sign-in/reconnect operations. Platform credential, registration, service and state-isolation policies remain explicit. | No missing Windows command-layer MVP was found. Headless mount-only mode excludes folder/media sync and vault commands on both systems. |
 
 Encrypted creation and supported saves currently accept files up to 1 GiB on
-Windows using bounded streams and protected recovery. Explicit copy between two
+Windows using bounded streams and protected recovery. Explicit Copy and Move between two
 unlocked vaults is limited to 16 MiB on both platforms. Clean directory operations
 use a bounded exact subtree; recursive cloud deletion is not enabled. Unknown,
 foreign, dirty or active-writer state refuses rather than discarding local data.
@@ -34,19 +35,23 @@ replacement and deletion histories project only exact verified current identitie
 old records are not rewritten to manufacture new authority. Lock/reconnect keeps
 account/vault/root binding, and cache eviction remains separate from cloud deletion.
 
-Current source passed affected Linux Agent/CLI compilation, the composed Windows
-Agent/CLI cross-compilation, formatting and the frontend production build.
-Exact Linux `777bc3d` unsigned GUI/CLI packages passed signed-out startup, normal
-quit and CLI help/version checks; no exact-source sign-in/file workflow is claimed.
-Windows `bb972ad` was installed in the owner's original profile, preserving the
-selected state files, startup configuration and root. GUI/Agent startup and an
-ordinary file's initial remote create passed. An early edit before native create
-completion remains retained; remote update/native completion are not accepted.
-The new explicit continuation preserves the original body and conditionally
-reconciles a separately protected current edit before native completion, keeping
-all old history. Its corrected package and original file workflow remain pending.
-Compilation does not establish Explorer/editor/native acceptance. No candidate
-has been signed or published.
+The 4 November additions are source changes, not installed/native acceptance.
+Affected Linux Agent/CLI compilation, Windows Agent/CLI cross-compilation,
+formatting and the frontend build are checked during integration; package and
+laptop results must identify the final source independently.
+
+Preserved Linux `777bc3d` unsigned GUI/CLI packages passed signed-out startup,
+normal quit and CLI help/version; no exact-source sign-in/file workflow is claimed.
+Windows `56f1077` was installed in the owner's original profile with exact
+payloads and selected settings/root/startup preservation. Its original ordinary
+file create succeeded, and an early edit was finalized through explicit protected
+recovery. The same local and remote 70-byte body was verified, followed by normal
+shutdown/restart with no pending saved edits. The first post-conversion completion
+refusal remains undiagnosed; narrow static native error classification now
+preserves the specific failing boundary and native read error without weakening
+any identity, USN, hash or cancellation checks. Compilation and successful recovery
+do not establish an unqualified first-pass native workflow or exhaustive parity
+acceptance. No candidate has been signed or published.
 
 Validation stays within the owner's reduced scope: affected build and formatting,
 basic install/upgrade/startup/sign-in, one normal file workflow and essential data

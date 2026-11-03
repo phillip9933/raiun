@@ -1910,6 +1910,40 @@ fn same_catalogue_metadata(a: &RemoteEntry, b: &RemoteEntry) -> bool {
 }
 
 impl VaultPublicationCustody for View {
+    fn record_cached_directory_cancel_queued(
+        &self,
+        receipt: &raiun_opencloud::vault_backend::VaultCancelledPendingDirectory,
+        identity: [u8; 16],
+        file: u64,
+        source_usn: i64,
+    ) -> std::result::Result<(), BackendError> {
+        self.verify_context(&self.owner, receipt.scope(), self.scope.remote_root())?;
+        let _serial = self.child.custody.lock().map_err(unavailable)?;
+        super::windows_vault_namespace_queued::record_directory_cancel_queued(
+            &self.store.0,
+            &self.scope,
+            receipt,
+            identity,
+            file,
+            source_usn,
+        )
+    }
+    fn record_cached_directory_cancel_native(
+        &self,
+        proof: &raiun_cloudfiles_windows::vault_custody::VaultNativeDirectoryCancellation<'_>,
+    ) -> std::result::Result<(), BackendError> {
+        let receipt = proof.receipt();
+        self.verify_context(&self.owner, receipt.scope(), self.scope.remote_root())?;
+        if proof.root() != self.root {
+            return Err(BackendError::Unavailable);
+        }
+        let _serial = self.child.custody.lock().map_err(unavailable)?;
+        super::windows_vault_namespace_queued::record_directory_cancel_native(
+            &self.store.0,
+            &self.scope,
+            proof,
+        )
+    }
     fn prepare_cached_child_create(
         &self,
         d: &raiun_cloudfiles_windows::VaultCachedChildCreateDescriptor,

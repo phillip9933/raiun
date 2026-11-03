@@ -255,7 +255,67 @@ pub struct ExistingVaultStreamedEditPayload {
 /// route publication locks: the caller already holds its publication permit.
 /// Ok means durable protected write-through/readback, never permission to read
 /// or clear native incomplete history. Failure denies the pending publication.
+#[cfg(windows)]
+pub struct VaultNativeDirectoryCancellation<'a> {
+    receipt: &'a raiun_opencloud::vault_backend::VaultCancelledPendingDirectory,
+    root: crate::ConfiguredRootIdentity,
+    identity: [u8; 16],
+    file: u64,
+    source_usn: i64,
+}
+#[cfg(windows)]
+impl<'a> VaultNativeDirectoryCancellation<'a> {
+    /// Only the original native publication path invokes this after its
+    /// completion callback has checked fresh absence under retained pins.
+    pub(crate) fn after_native_absence(
+        receipt: &'a raiun_opencloud::vault_backend::VaultCancelledPendingDirectory,
+        root: crate::ConfiguredRootIdentity,
+        identity: [u8; 16],
+        file: u64,
+        source_usn: i64,
+    ) -> Self {
+        Self {
+            receipt,
+            root,
+            identity,
+            file,
+            source_usn,
+        }
+    }
+    pub fn receipt(&self) -> &raiun_opencloud::vault_backend::VaultCancelledPendingDirectory {
+        self.receipt
+    }
+    pub fn root(&self) -> crate::ConfiguredRootIdentity {
+        self.root
+    }
+    pub fn identity(&self) -> [u8; 16] {
+        self.identity
+    }
+    pub fn file(&self) -> u64 {
+        self.file
+    }
+    pub fn source_usn(&self) -> i64 {
+        self.source_usn
+    }
+}
 pub trait VaultPublicationCustody: Send + Sync {
+    #[cfg(windows)]
+    fn record_cached_directory_cancel_queued(
+        &self,
+        _receipt: &raiun_opencloud::vault_backend::VaultCancelledPendingDirectory,
+        _identity: [u8; 16],
+        _file: u64,
+        _source_usn: i64,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unavailable)
+    }
+    #[cfg(windows)]
+    fn record_cached_directory_cancel_native(
+        &self,
+        _proof: &VaultNativeDirectoryCancellation<'_>,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unavailable)
+    }
     #[cfg(windows)]
     fn prepare_cached_child_create(
         &self,

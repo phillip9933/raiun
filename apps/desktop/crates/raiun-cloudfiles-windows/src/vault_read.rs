@@ -1102,6 +1102,69 @@ impl WindowsVaultReadBinding {
         self.backend
             .cached_pending_operation(id, revision, &self.epoch, &stop)
     }
+
+    #[cfg(windows)]
+    pub(crate) fn cancel_cached_directory_create(
+        &self,
+        original: &raiun_core::backend::RemoteEntry,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_backend::VaultCancelledPendingDirectory, CloudError> {
+        self.check_current()?;
+        let id = original
+            .id
+            .strip_prefix("raiun-pending-directory:")
+            .ok_or_else(|| refused())?;
+        let revision = original
+            .etag
+            .strip_prefix(&format!("raiun-pending-v1:{id}:"))
+            .and_then(|text| text.parse::<u64>().ok())
+            .filter(|revision| *revision != 0)
+            .ok_or_else(|| refused())?;
+        let stop = || self.is_revoked() || cancelled();
+        self.backend
+            .cancel_never_attempted_directory_create_retained(
+                &original.path,
+                id,
+                revision,
+                &original.id,
+                &original.etag,
+                &self.epoch,
+                &stop,
+            )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn acknowledge_cancelled_cached_directory(
+        &self,
+        receipt: &raiun_opencloud::vault_backend::VaultCancelledPendingDirectory,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancelled();
+        self.backend
+            .acknowledge_cancelled_directory_create_retained(receipt, &stop)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn matches_cached_directory_cancel(
+        &self,
+        receipt: &raiun_opencloud::vault_backend::VaultCancelledPendingDirectory,
+    ) -> bool {
+        self.is_cached_only()
+            && receipt.matches_scope(&self.scope)
+            && receipt.matches_epoch(&self.epoch)
+            && self.check_current().is_ok()
+    }
+    #[cfg(windows)]
+    pub(crate) fn matches_cached_directory_cancel_held(
+        &self,
+        receipt: &raiun_opencloud::vault_backend::VaultCancelledPendingDirectory,
+    ) -> bool {
+        self.client.is_offline()
+            && !self.is_revoked()
+            && receipt.matches_scope(&self.scope)
+            && receipt.matches_epoch(&self.epoch)
+    }
     #[cfg(windows)]
     pub(crate) fn cached_pending_body_sha256(
         &self,
@@ -1156,6 +1219,14 @@ impl WindowsVaultReadBinding {
     #[cfg(windows)]
     pub(crate) fn cached_vault_scope(&self) -> VaultSessionScope {
         self.scope.clone()
+    }
+    #[cfg(windows)]
+    pub(crate) fn cached_provider_scope(&self) -> ProviderScope {
+        self.trusted.clone()
+    }
+    #[cfg(windows)]
+    pub(crate) fn cached_remote_root(&self) -> String {
+        self.root_path.clone()
     }
 
     #[cfg(windows)]

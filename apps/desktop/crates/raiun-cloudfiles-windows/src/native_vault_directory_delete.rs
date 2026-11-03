@@ -29,10 +29,16 @@ pub(super) fn execute<'a, 'b>(
     if id != ticket.key.identity {
         return Err(no());
     }
-    let metadata = job.cancellation().bounded_request();
-    let original = route
-        .fresh_directory_rename_source(&saved, &metadata)
-        .map_err(|_| no())?;
+    let queued_directory =
+        route.binding().is_cached_only() && saved.id.starts_with("raiun-pending-directory:");
+    let original = if queued_directory {
+        saved
+    } else {
+        let metadata = job.cancellation().bounded_request();
+        route
+            .fresh_directory_rename_source(&saved, &metadata)
+            .map_err(|_| no())?
+    };
     let path = state
         .root_path
         .as_ref()
@@ -71,24 +77,47 @@ pub(super) fn execute<'a, 'b>(
     };
     let mut components = parents.to_vec();
     components.push(name.to_owned());
-    let descriptor = route
-        .binding()
-        .directory_delete_descriptor(
-            shared.root,
-            ticket.key.identity,
-            original,
-            *parent.opaque().as_bytes(),
-            parent.metadata().clone(),
-            LocalFileIdentity {
-                volume_serial: ticket.key.volume,
-                file_index: ticket.key.file,
-            },
-            usn,
-            parent_file,
-            metadata_usn(parent_pin.0, parent_file.file_index)?,
-            components.clone(),
+    let descriptor = if queued_directory {
+        None
+    } else {
+        Some(
+            route
+                .binding()
+                .directory_delete_descriptor(
+                    shared.root,
+                    ticket.key.identity,
+                    original.clone(),
+                    *parent.opaque().as_bytes(),
+                    parent.metadata().clone(),
+                    LocalFileIdentity {
+                        volume_serial: ticket.key.volume,
+                        file_index: ticket.key.file,
+                    },
+                    usn,
+                    parent_file,
+                    metadata_usn(parent_pin.0, parent_file.file_index)?,
+                    components.clone(),
+                )
+                .map_err(|_| no())?,
         )
-        .map_err(|_| no())?;
+    };
+    let original_context = if let Some(descriptor) = &descriptor {
+        Original {
+            owner: descriptor.owner.clone(),
+            vault: descriptor.vault.clone(),
+            remote_root: descriptor.remote_root.clone(),
+            metadata: descriptor.original.clone(),
+            epoch: descriptor.historical_unlock_epoch,
+        }
+    } else {
+        Original {
+            owner: route.binding().cached_provider_scope(),
+            vault: route.binding().cached_vault_scope(),
+            remote_root: route.binding().cached_remote_root(),
+            metadata: original.clone(),
+            epoch: route.binding().historical_unlock_epoch(),
+        }
+    };
     let mut local = Custody(Some(Local {
         shared,
         ticket,
@@ -102,13 +131,8 @@ pub(super) fn execute<'a, 'b>(
         leaf: Some(leaf),
         original_snapshot: snapshot,
         original_usn: usn,
-        original: Original {
-            owner: descriptor.owner.clone(),
-            vault: descriptor.vault.clone(),
-            remote_root: descriptor.remote_root.clone(),
-            metadata: descriptor.original.clone(),
-            epoch: descriptor.historical_unlock_epoch,
-        },
+        original: original_context,
+        queued_directory,
         components,
         job,
         acknowledged: false,
@@ -117,6 +141,55 @@ pub(super) fn execute<'a, 'b>(
         published: false,
     }));
     local.original_current()?;
+    if queued_directory {
+        let stop = || local.stopped();
+        let receipt = route
+            .binding()
+            .cancel_cached_directory_create(&original, &stop)
+            .map_err(|_| no())?;
+        // The SDK receipt is a durable cancellation intent from this point.
+        // Every later failure retains the original native owner and pins.
+        local.published = true;
+        route
+            .record_cached_directory_cancel_queued(
+                &receipt,
+                ticket.key.identity,
+                ticket.key.file,
+                usn,
+            )
+            .map_err(|_| no())?;
+        local.allow_and_wait()?;
+        let choice = VaultDeleteChoice::from_local(local.0.take().ok_or_else(no)?);
+        choice.confirm_absence()?;
+        let (probe, lifetime) = admission
+            .borrow()
+            .dispatch_probe(state.close_capture_admission.clone())
+            .ok_or_else(no)?;
+        if !admission.borrow_mut().claim_dispatch() || !lifetime.arm_after_dispatch() || !probe() {
+            return Err(no());
+        }
+        route.publish_cached_directory_cancel(
+            &receipt,
+            ticket.key.identity,
+            ticket.key.file,
+            usn,
+            || {
+                choice.confirm_absence()?;
+                if !admission.borrow_mut().claim_completion() {
+                    return Err(no());
+                }
+                choice.confirm_absence()
+            },
+        )?;
+        choice.confirm_absence()?;
+        route
+            .binding()
+            .acknowledge_cancelled_cached_directory(&receipt, &|| choice.stopped())
+            .map_err(|_| no())?;
+        choice.release_completed()?;
+        return Ok(FileDeleteOutcome::Completed);
+    }
+    let descriptor = descriptor.ok_or_else(no)?;
     let generation = shared.config.generation.as_ref().ok_or_else(no)?.clone();
     let context = raiun_opencloud::RangeReadContext {
         deadline: local.job.cancellation().bounded_request().deadline(),

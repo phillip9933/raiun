@@ -163,7 +163,7 @@ impl Read for Reader<'_, '_> {
             eof,
             Some(self.job.cancellation()),
         )
-        .map_err(|_| io::Error::other("file-create source unavailable"))?;
+        .map_err(io::Error::other)?;
         if (self.stopped)() || (eof && count != 0) || (!eof && count == 0) {
             return Err(io::Error::other("file-create source changed"));
         }
@@ -398,6 +398,16 @@ impl ReplacementBody {
         stopped: &dyn Fn() -> bool,
         claim: impl FnOnce() -> bool,
     ) -> Result<(), Error> {
+        self.convert_with_phase(identity, job, stopped, claim, || {})
+    }
+    pub(super) fn convert_with_phase(
+        &self,
+        identity: &[u8; 16],
+        job: &crate::StreamedRecoveryJob,
+        stopped: &dyn Fn() -> bool,
+        claim: impl FnOnce() -> bool,
+        after_sync: impl FnOnce(),
+    ) -> Result<(), Error> {
         self.check(job, stopped)?;
         let reference = self.source.reference()?;
         if let Some(expected) = self.cloud_identity {
@@ -415,6 +425,7 @@ impl ReplacementBody {
                     return Err(native_error("complete held file-create continuation", hr));
                 }
             }
+            after_sync();
             validate_converted(&reference, self.snapshot, &self.path, identity, true)?;
             hash_source(&reference, self.snapshot.file_size, job, &self.digest)?;
             if stopped() || completion_usn(reference.raw, self.snapshot.identity.file_index)? != usn
@@ -456,6 +467,7 @@ impl ReplacementBody {
         if hr < 0 {
             return Err(native_error("complete admitted replacement", hr));
         }
+        after_sync();
         validate_converted(&reference, self.snapshot, &self.path, identity, true)?;
         hash_source(&reference, self.snapshot.file_size, job, &self.digest)?;
         if stopped() || completion_usn(reference.raw, self.snapshot.identity.file_index)? != usn {
@@ -1426,7 +1438,13 @@ fn hash_source(
         job,
         stopped: &stopped,
     };
-    io::copy(&mut reader, &mut io::sink()).map_err(|_| Error::EditRecoveryUnavailable)?;
+    io::copy(&mut reader, &mut io::sink()).map_err(|error| {
+        error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<Error>())
+            .copied()
+            .unwrap_or(Error::EditRecoveryUnavailable)
+    })?;
     if !reader.eof
         || reader.offset != length
         || <[u8; 32]>::from(reader.hash.finalize()) != *expected

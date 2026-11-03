@@ -1342,6 +1342,39 @@ impl Cache {
         expected_revision: u64,
         encrypted_target: &str,
     ) -> Result<CiphertextWriteBuild, CacheError> {
+        self.begin_ciphertext_cancel_ack_compaction_for(
+            scope,
+            id,
+            expected_revision,
+            encrypted_target,
+            CiphertextWriteOperation::CreateFile,
+        )
+    }
+
+    pub fn begin_ciphertext_directory_cancel_ack_compaction(
+        &self,
+        scope: &CacheScope,
+        id: &str,
+        expected_revision: u64,
+        encrypted_target: &str,
+    ) -> Result<CiphertextWriteBuild, CacheError> {
+        self.begin_ciphertext_cancel_ack_compaction_for(
+            scope,
+            id,
+            expected_revision,
+            encrypted_target,
+            CiphertextWriteOperation::CreateDirectory,
+        )
+    }
+
+    fn begin_ciphertext_cancel_ack_compaction_for(
+        &self,
+        scope: &CacheScope,
+        id: &str,
+        expected_revision: u64,
+        encrypted_target: &str,
+        selected_operation: CiphertextWriteOperation,
+    ) -> Result<CiphertextWriteBuild, CacheError> {
         require_ciphertext_scope(scope)?;
         validate_ciphertext_write_id(id)?;
         if expected_revision == 0 || expected_revision >= i64::MAX as u64 {
@@ -1372,7 +1405,7 @@ impl Cache {
         };
         if revision != i64_from_u64(expected_revision)?
             || current_target != target_key
-            || decode_ciphertext_write_operation(operation)? != CiphertextWriteOperation::CreateFile
+            || decode_ciphertext_write_operation(operation)? != selected_operation
             || decode_ciphertext_write_state(state)? != CiphertextWriteState::CancelledReceipt
         {
             return Err(CacheError::Conflict);
@@ -1388,7 +1421,7 @@ impl Cache {
             expected_revision: Some(expected_revision),
             target_key: current_target.clone(),
             plaintext_len: 0,
-            operation: CiphertextWriteOperation::CreateFile,
+            operation: selected_operation,
             publish_state: CiphertextWriteState::AcknowledgedReceipt,
             parent_key,
             parent_operation_key,
@@ -2796,6 +2829,78 @@ impl Cache {
         drop(db);
         let _ = self.evict_to_quota();
         Ok(())
+    }
+
+    /// Retain the exact queued directory as a cancellation receipt instead of
+    /// deleting its only restart witness. The same transaction excludes a
+    /// concurrent dispatch or child registration. The receipt is not clean or
+    /// acknowledged until native absence and separate custody are durable.
+    pub fn begin_ciphertext_directory_cancel_receipt(
+        &self,
+        scope: &CacheScope,
+        id: &str,
+        revision: u64,
+        encrypted_target: &str,
+    ) -> Result<(), CacheError> {
+        require_ciphertext_scope(scope)?;
+        validate_ciphertext_write_id(id)?;
+        if revision == 0 {
+            return Err(CacheError::Conflict);
+        }
+        let target_key = ciphertext_target_key(encrypted_target)?;
+        // A queued directory retains its original dependency identity across
+        // local subtree retarget revisions. Children bind to that identity.
+        let dependency_key = ciphertext_operation_key(id, 1)?;
+        let mut db = self.lock_db()?;
+        validate_registered_scope(&db, scope)?;
+        let tx = db.transaction().map_err(db_error)?;
+        let state: Option<i64> = tx
+            .query_row(
+                "SELECT state FROM ciphertext_writes WHERE scope_key=?1 AND write_id=?2 AND revision=?3 AND operation=?4 AND target_key=?5 AND plaintext_len=0 AND dependency_key=?6",
+                params![scope.key, id, i64_from_u64(revision)?, CiphertextWriteOperation::CreateDirectory as i64, target_key, dependency_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let state = state.ok_or(CacheError::Conflict)?;
+        if !matches!(
+            decode_ciphertext_write_state(state)?,
+            CiphertextWriteState::NeverAttempted | CiphertextWriteState::CancelledReceipt
+        ) {
+            return Err(CacheError::Conflict);
+        }
+        let dependents: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM ciphertext_writes WHERE scope_key=?1 AND parent_operation_key=?2)",
+                params![scope.key, dependency_key],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if dependents {
+            return Err(CacheError::Conflict);
+        }
+        if state == CiphertextWriteState::NeverAttempted as i64 {
+            let receipts: i64 = tx
+                .query_row(
+                    "SELECT COUNT(*) FROM ciphertext_writes WHERE scope_key=?1 AND state IN (?2,?3)",
+                    params![scope.key, CiphertextWriteState::CancelledReceipt as i64, CiphertextWriteState::AcknowledgedReceipt as i64],
+                    |row| row.get(0),
+                )
+                .map_err(db_error)?;
+            if receipts < 0 || receipts as usize >= MAX_CANCEL_ACK_RECEIPTS_PER_SCOPE {
+                return Err(CacheError::LimitExceeded);
+            }
+            let changed = tx
+                .execute(
+                    "UPDATE ciphertext_writes SET state=?7 WHERE scope_key=?1 AND write_id=?2 AND revision=?3 AND operation=?4 AND state=?5 AND target_key=?6",
+                    params![scope.key, id, i64_from_u64(revision)?, CiphertextWriteOperation::CreateDirectory as i64, CiphertextWriteState::NeverAttempted as i64, target_key, CiphertextWriteState::CancelledReceipt as i64],
+                )
+                .map_err(db_error)?;
+            if changed != 1 {
+                return Err(CacheError::Conflict);
+            }
+        }
+        tx.commit().map_err(db_error)
     }
 
     /// Atomically claim one explicit retry of a crash-left file create. The

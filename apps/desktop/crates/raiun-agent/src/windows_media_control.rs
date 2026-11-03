@@ -13,7 +13,11 @@ impl Runtime {
     ) -> Result<raiun_core::backend::RemoteEntry, String> {
         self.check(authorized)?;
         let space = self.space(space_id)?;
-        if !space.writable || path == "/" || raiun_core::validate_remote_path(path).is_err() {
+        if space.encrypted
+            || !space.writable
+            || path == "/"
+            || raiun_core::validate_remote_path(path).is_err()
+        {
             return Err("Choose a writable ordinary media destination folder".into());
         }
         let entry = self

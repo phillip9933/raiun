@@ -54,6 +54,8 @@ mod cached_namespace;
 #[cfg(windows)]
 pub use cached_namespace::{VaultCachedChildTarget, VaultCachedEditTarget};
 mod copy;
+mod r#move;
+pub use r#move::{VaultMoveOutcome, VaultMoveReviewReason};
 mod directory_create;
 #[cfg(windows)]
 mod file_delete;
@@ -711,6 +713,34 @@ pub struct VaultCancelledCreateReceipt {
     pub current_revision: u64,
     pub plaintext_len: u64,
     pub plaintext_sha256: String,
+}
+
+/// Local-only cancellation of an exact never-attempted directory reservation.
+/// The SDK retains its journal row as a cancellation receipt. This value is
+/// minted only after the same cache transaction excludes dispatch and children;
+/// native absence and durable custody remain separate requirements.
+pub struct VaultCancelledPendingDirectory {
+    scope: VaultSessionScope,
+    epoch: VaultSessionEpoch,
+    original: VaultPendingEditMetadata,
+    receipt: VaultPendingEditMetadata,
+}
+impl VaultCancelledPendingDirectory {
+    pub fn scope(&self) -> &VaultSessionScope {
+        &self.scope
+    }
+    pub fn matches_epoch(&self, epoch: &VaultSessionEpoch) -> bool {
+        self.epoch.same_identity(epoch)
+    }
+    pub fn original(&self) -> &VaultPendingEditMetadata {
+        &self.original
+    }
+    pub fn receipt(&self) -> &VaultPendingEditMetadata {
+        &self.receipt
+    }
+    pub fn matches_scope(&self, scope: &VaultSessionScope) -> bool {
+        &self.scope == scope
+    }
 }
 
 impl std::fmt::Debug for VaultCancelledCreateReceipt {
@@ -1510,6 +1540,134 @@ impl VaultBackend {
             ));
         }
         cache.cancel_never_attempted_directory_create(&self.sessions, write_id, revision, &path)
+    }
+
+    /// Retained Windows-native cancellation. Unlike the legacy FUSE call,
+    /// this keeps an authenticated CancelledReceipt until exact native absence
+    /// and custody are recorded; it never performs a DAV mutation.
+    #[cfg(windows)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn cancel_never_attempted_directory_create_retained(
+        &self,
+        virtual_path: &str,
+        write_id: &str,
+        revision: u64,
+        expected_entry_id: &str,
+        expected_entry_etag: &str,
+        epoch: &VaultSessionEpoch,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<VaultCancelledPendingDirectory, CloudError> {
+        if cancelled() || !self.offline_only {
+            return Err(conflict("queued directory cancellation context changed"));
+        }
+        self.sessions
+            .try_lock_session_epoch(&self.scope, epoch)
+            .map_err(vault_error)?
+            .ok_or_else(|| conflict("queued directory unlock changed"))?;
+        let path = normalize_virtual_path(virtual_path)?;
+        validate_virtual_path(&path)?;
+        if path == "/" {
+            return Err(conflict("vault root cannot be cancelled"));
+        }
+        let cache = self
+            .offline_cache
+            .as_ref()
+            .ok_or_else(|| conflict("directory journal unavailable"))?;
+        let original = cache.pending_operation(&self.sessions, write_id, revision)?;
+        let expected = pending_directory_entry(&original);
+        if original.operation != VaultPendingOperationKind::CreateDirectory
+            || !matches!(
+                original.state,
+                CiphertextWriteState::NeverAttempted | CiphertextWriteState::CancelledReceipt
+            )
+            || original.base != WriteCondition::Absent
+            || original.path != path
+            || original.plaintext_len != 0
+            || expected.id != expected_entry_id
+            || expected.etag != expected_entry_etag
+            || self.decode_target_path(&original.encoded_target)? != path
+            || cancelled()
+        {
+            return Err(conflict("queued directory cancellation identity changed"));
+        }
+        cache.begin_cancelled_directory_receipt(
+            &self.sessions,
+            write_id,
+            revision,
+            &original.encoded_target,
+        )?;
+        let receipt = cache.pending_operation(&self.sessions, write_id, revision)?;
+        if receipt.id != original.id
+            || receipt.revision != original.revision
+            || receipt.path != original.path
+            || receipt.operation != original.operation
+            || receipt.state != CiphertextWriteState::CancelledReceipt
+            || receipt.root_integrity_token != original.root_integrity_token
+        {
+            return Err(conflict("queued directory cancellation receipt changed"));
+        }
+        self.sessions
+            .try_lock_session_epoch(&self.scope, epoch)
+            .map_err(vault_error)?
+            .ok_or_else(|| conflict("queued directory unlock changed"))?;
+        if cancelled() {
+            return Err(conflict("queued directory cancellation owner changed"));
+        }
+        Ok(VaultCancelledPendingDirectory {
+            scope: self.scope.clone(),
+            epoch: epoch.clone(),
+            original,
+            receipt,
+        })
+    }
+
+    /// Compact the retained cancellation only after exact native absence and
+    /// durable terminal custody. The compact sealed receipt remains available
+    /// across a crash until the caller safely retires its custody record.
+    #[cfg(windows)]
+    pub fn acknowledge_cancelled_directory_create_retained(
+        &self,
+        receipt: &VaultCancelledPendingDirectory,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<(), CloudError> {
+        if cancelled() || !self.offline_only || !receipt.matches_scope(&self.scope) {
+            return Err(conflict("queued directory cancellation owner changed"));
+        }
+        self.sessions
+            .try_lock_session_epoch(&self.scope, &receipt.epoch)
+            .map_err(vault_error)?
+            .ok_or_else(|| conflict("queued directory unlock changed"))?;
+        let current = self
+            .offline_cache
+            .as_ref()
+            .ok_or_else(|| conflict("directory journal unavailable"))?
+            .pending_operation_current(&self.sessions, &receipt.original.id)?
+            .ok_or_else(|| conflict("directory cancellation receipt disappeared"))?;
+        if current.operation != VaultPendingOperationKind::CreateDirectory
+            || current.path != receipt.original.path
+            || current.encoded_target != receipt.original.encoded_target
+            || current.root_integrity_token != receipt.original.root_integrity_token
+            || !matches!(
+                current.state,
+                CiphertextWriteState::CancelledReceipt | CiphertextWriteState::AcknowledgedReceipt
+            )
+            || (current.state == CiphertextWriteState::CancelledReceipt
+                && current.revision != receipt.original.revision)
+            || (current.state == CiphertextWriteState::AcknowledgedReceipt
+                && (current.revision != receipt.original.revision + 1
+                    || current.cancelled_revision != receipt.original.revision))
+        {
+            return Err(conflict("directory cancellation receipt changed"));
+        }
+        self.offline_cache
+            .as_ref()
+            .expect("checked above")
+            .acknowledge_cancelled_directory_create(
+                &self.sessions,
+                &receipt.original.id,
+                receipt.original.revision,
+                &receipt.original.encoded_target,
+            )
     }
 
     /// Move an empty queued directory reservation to a different encrypted
@@ -3377,6 +3535,29 @@ impl VaultBackend {
         expected_source_id: &str,
         expected_source_etag: &str,
     ) -> Result<VaultDeleteOutcome, CloudError> {
+        self.delete_file_with_queue_inner(path, expected_source_id, expected_source_etag, false)
+    }
+
+    /// One-shot source removal for a verified cross-vault Move. Its recovery
+    /// row is born in Conflict so generic delete reconciliation can never
+    /// replay it without revalidating the destination. The current call may
+    /// make one guarded conditional attempt; unresolved rows remain fenced.
+    pub(crate) fn delete_file_for_move_with_queue(
+        &self,
+        path: &str,
+        expected_source_id: &str,
+        expected_source_etag: &str,
+    ) -> Result<VaultDeleteOutcome, CloudError> {
+        self.delete_file_with_queue_inner(path, expected_source_id, expected_source_etag, true)
+    }
+
+    fn delete_file_with_queue_inner(
+        &self,
+        path: &str,
+        expected_source_id: &str,
+        expected_source_etag: &str,
+        move_fenced: bool,
+    ) -> Result<VaultDeleteOutcome, CloudError> {
         let path = normalize_virtual_path(path)?;
         validate_virtual_path(&path)?;
         if path == "/" {
@@ -3463,21 +3644,26 @@ impl VaultBackend {
                 &source,
                 self.pending_body_cancelled(),
             )?;
-            cache.queue_delete_from_cached_source(
-                &self.sessions,
-                &mut reader,
-                VaultPendingDeleteRequest {
-                    integrity_token: &root_token,
-                    encoded_target: &encoded_target,
-                    source_resource_id: expected_source_id,
-                    source_etag: expected_source_etag,
-                    parent_resource_id: &parent_binding.0,
-                    parent_etag: &parent_binding.1,
-                    source_size: source.size,
-                    source_ciphertext_sha256: &source_ciphertext_sha256,
-                    body_len: source.size,
-                },
-            )?
+            let request = VaultPendingDeleteRequest {
+                integrity_token: &root_token,
+                encoded_target: &encoded_target,
+                source_resource_id: expected_source_id,
+                source_etag: expected_source_etag,
+                parent_resource_id: &parent_binding.0,
+                parent_etag: &parent_binding.1,
+                source_size: source.size,
+                source_ciphertext_sha256: &source_ciphertext_sha256,
+                body_len: source.size,
+            };
+            if move_fenced {
+                cache.queue_move_source_delete_from_cached_source(
+                    &self.sessions,
+                    &mut reader,
+                    request,
+                )?
+            } else {
+                cache.queue_delete_from_cached_source(&self.sessions, &mut reader, request)?
+            }
         };
         #[cfg(not(windows))]
         let mut metadata = {
@@ -3507,30 +3693,36 @@ impl VaultBackend {
                 cache.ciphertext_sha256(&self.sessions, &path, &source.id, &source.etag)?
             };
             let mut plaintext = File::open(&plaintext_path).map_err(io_error)?;
-            cache.queue_delete(
-                &self.sessions,
-                &mut plaintext,
-                VaultPendingDeleteRequest {
-                    integrity_token: &root_token,
-                    encoded_target: &encoded_target,
-                    source_resource_id: expected_source_id,
-                    source_etag: expected_source_etag,
-                    parent_resource_id: &parent_binding.0,
-                    parent_etag: &parent_binding.1,
-                    source_size: source.size,
-                    source_ciphertext_sha256: &source_ciphertext_sha256,
-                    body_len: source.size,
-                },
-            )?
+            let request = VaultPendingDeleteRequest {
+                integrity_token: &root_token,
+                encoded_target: &encoded_target,
+                source_resource_id: expected_source_id,
+                source_etag: expected_source_etag,
+                parent_resource_id: &parent_binding.0,
+                parent_etag: &parent_binding.1,
+                source_size: source.size,
+                source_ciphertext_sha256: &source_ciphertext_sha256,
+                body_len: source.size,
+            };
+            if move_fenced {
+                cache.queue_move_source_delete(&self.sessions, &mut plaintext, request)?
+            } else {
+                cache.queue_delete(&self.sessions, &mut plaintext, request)?
+            }
         };
         let Some(_state) = state else {
             return Ok(VaultDeleteOutcome::Queued {
                 write_id: metadata.id,
                 revision: metadata.revision,
-                uncertain: false,
+                uncertain: move_fenced,
             });
         };
-        match self.reconcile_pending_delete(&metadata.id, metadata.revision) {
+        let attempt = if move_fenced {
+            self.reconcile_pending_delete_move_once(&metadata.id, metadata.revision)
+        } else {
+            self.reconcile_pending_delete(&metadata.id, metadata.revision)
+        };
+        match attempt {
             Ok(()) => Ok(VaultDeleteOutcome::Committed),
             Err(error) if matches!(error.kind, ErrorKind::Offline | ErrorKind::Io) => {
                 if let Ok(current) =
@@ -3541,7 +3733,23 @@ impl VaultBackend {
                 Ok(VaultDeleteOutcome::Queued {
                     write_id: metadata.id,
                     revision: metadata.revision,
-                    uncertain: metadata.state == CiphertextWriteState::Uncertain,
+                    uncertain: move_fenced || metadata.state == CiphertextWriteState::Uncertain,
+                })
+            }
+            Err(_error) if move_fenced => {
+                let current =
+                    cache.pending_operation(&self.sessions, &metadata.id, metadata.revision)?;
+                if current.state != CiphertextWriteState::Conflict {
+                    cache.set_pending_edit_state(
+                        &metadata.id,
+                        metadata.revision,
+                        CiphertextWriteState::Conflict,
+                    )?;
+                }
+                Ok(VaultDeleteOutcome::Queued {
+                    write_id: metadata.id,
+                    revision: metadata.revision,
+                    uncertain: true,
                 })
             }
             Err(error) => Err(error),
@@ -4508,11 +4716,27 @@ impl VaultBackend {
     pub fn reconcile_pending_delete(&self, id: &str, revision: u64) -> Result<(), CloudError> {
         self.reconcile_pending_delete_inner(id, revision, None)
     }
+    fn reconcile_pending_delete_move_once(
+        &self,
+        id: &str,
+        revision: u64,
+    ) -> Result<(), CloudError> {
+        self.reconcile_pending_delete_inner_with_mode(id, revision, None, true)
+    }
     fn reconcile_pending_delete_inner(
         &self,
         id: &str,
         revision: u64,
         guard: Option<&PendingReconcileGuard<'_>>,
+    ) -> Result<(), CloudError> {
+        self.reconcile_pending_delete_inner_with_mode(id, revision, guard, false)
+    }
+    fn reconcile_pending_delete_inner_with_mode(
+        &self,
+        id: &str,
+        revision: u64,
+        guard: Option<&PendingReconcileGuard<'_>>,
+        move_fenced: bool,
     ) -> Result<(), CloudError> {
         check_pending_reconcile(guard)?;
         let cache = self.offline_cache.as_ref().ok_or_else(|| {
@@ -4524,9 +4748,17 @@ impl VaultBackend {
         {
             return Err(conflict("encrypted delete is not retryable"));
         }
-        if operation.state == CiphertextWriteState::Conflict {
+        if operation.state == CiphertextWriteState::Conflict && !move_fenced {
             return Err(conflict("encrypted delete requires conflict resolution"));
         }
+        if move_fenced && operation.state != CiphertextWriteState::Conflict {
+            return Err(conflict("move source delete is missing its replay fence"));
+        }
+        let unresolved_state = if move_fenced {
+            CiphertextWriteState::Conflict
+        } else {
+            CiphertextWriteState::Uncertain
+        };
         let state = match self.revalidate_root() {
             Ok(state) => state,
             Err(error) if error.kind == ErrorKind::Conflict => {
@@ -4534,7 +4766,7 @@ impl VaultBackend {
                 return Err(error);
             }
             Err(error) if error.kind == ErrorKind::Offline => {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
                 return Err(error);
             }
             Err(error) => return Err(error),
@@ -4550,7 +4782,7 @@ impl VaultBackend {
                 return Ok(());
             }
             Err(error) if error.kind == ErrorKind::Offline => {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
                 return Err(error);
             }
             Err(error) => return Err(error),
@@ -4575,7 +4807,7 @@ impl VaultBackend {
         let parent = match self.current_parent_binding(&operation.path) {
             Ok(parent) => parent,
             Err(error) if error.kind == ErrorKind::Offline => {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
                 return Err(error);
             }
             Err(error) if matches!(error.kind, ErrorKind::Conflict | ErrorKind::NotFound) => {
@@ -4605,7 +4837,7 @@ impl VaultBackend {
         let current_state = match self.revalidate_root() {
             Ok(state) => state,
             Err(error) if error.kind == ErrorKind::Offline => {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
                 return Err(error);
             }
             Err(error) => return Err(error),
@@ -4628,7 +4860,7 @@ impl VaultBackend {
                 return Ok(());
             }
             Err(error) if error.kind == ErrorKind::Offline => {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
                 return Err(error);
             }
             Err(error) => return Err(error),
@@ -4636,7 +4868,7 @@ impl VaultBackend {
         let current_parent = match self.current_parent_binding(&operation.path) {
             Ok(parent) => parent,
             Err(error) if error.kind == ErrorKind::Offline => {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
                 return Err(error);
             }
             Err(error) if matches!(error.kind, ErrorKind::Conflict | ErrorKind::NotFound) => {
@@ -4660,7 +4892,7 @@ impl VaultBackend {
         let response = match request.header(IF_MATCH, &operation.base_etag).send() {
             Ok(response) => response,
             Err(error) => {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
                 return Err(network(error));
             }
         };
@@ -4668,14 +4900,14 @@ impl VaultBackend {
             if error.kind == ErrorKind::Conflict {
                 cache.set_pending_edit_state(id, revision, CiphertextWriteState::Conflict)?;
             } else if matches!(error.kind, ErrorKind::Offline | ErrorKind::Io) {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
             }
             return Err(error);
         }
         let fresh_state = match self.revalidate_root() {
             Ok(state) => state,
             Err(error) => {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
                 return Err(error);
             }
         };
@@ -4686,7 +4918,7 @@ impl VaultBackend {
                 Ok(())
             }
             Ok(current) if current.id == operation.base_resource_id => {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
                 Err(CloudError::new(
                     ErrorKind::Offline,
                     "encrypted delete was accepted but source readback is unresolved",
@@ -4699,7 +4931,7 @@ impl VaultBackend {
                 ))
             }
             Err(error) if error.kind == ErrorKind::Offline => {
-                cache.set_pending_edit_state(id, revision, CiphertextWriteState::Uncertain)?;
+                cache.set_pending_edit_state(id, revision, unresolved_state)?;
                 Err(error)
             }
             Err(error) => Err(error),

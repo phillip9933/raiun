@@ -345,7 +345,29 @@ impl WindowsProfiles {
             }
             return self.dispatch_vault_create(request);
         }
-        if request.value().get("action").and_then(Value::as_str) == Some("vault_copy_start") {
+        if request.value().get("action").and_then(Value::as_str) == Some("vault_copy_verify_start")
+        {
+            reject_control_secret_request(request.value())?;
+            if !WINDOWS_VAULT_SESSIONS_ENABLED {
+                return Err("Windows vault sessions are unavailable".into());
+            }
+            let gate = self
+                .mutation_gate
+                .lock()
+                .map_err(|_| "Vault changes are unavailable")?;
+            let (_, runtime) = self.resolve(request.value())?;
+            let (result, release) =
+                runtime.prepare_windows_vault_copy_verification(request.value())?;
+            drop(gate);
+            if let Some(release) = release {
+                let _ = release.send(());
+            }
+            return Ok((result, false));
+        }
+        if matches!(
+            request.value().get("action").and_then(Value::as_str),
+            Some("vault_copy_start" | "vault_move_start")
+        ) {
             reject_control_secret_request(request.value())?;
             if !WINDOWS_VAULT_SESSIONS_ENABLED {
                 return Err("Windows vault sessions are unavailable".into());

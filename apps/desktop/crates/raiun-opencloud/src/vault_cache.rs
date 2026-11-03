@@ -866,6 +866,40 @@ impl VaultOfflineCache {
         source: &mut PendingBodyReadSeek<'_>,
         request: VaultPendingDeleteRequest<'_>,
     ) -> Result<VaultPendingEditMetadata, CloudError> {
+        self.queue_delete_from_cached_source_with_state(
+            sessions,
+            source,
+            request,
+            CiphertextWriteState::Pending,
+        )
+    }
+
+    /// Move source removal is born fenced from generic delete replay. The
+    /// current move call may make one guarded conditional attempt; any
+    /// unresolved result remains Conflict for explicit destination review.
+    #[cfg(windows)]
+    pub(crate) fn queue_move_source_delete_from_cached_source(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        source: &mut PendingBodyReadSeek<'_>,
+        request: VaultPendingDeleteRequest<'_>,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        self.queue_delete_from_cached_source_with_state(
+            sessions,
+            source,
+            request,
+            CiphertextWriteState::Conflict,
+        )
+    }
+
+    #[cfg(windows)]
+    fn queue_delete_from_cached_source_with_state(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        source: &mut PendingBodyReadSeek<'_>,
+        request: VaultPendingDeleteRequest<'_>,
+        state: CiphertextWriteState,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
         if request.body_len != request.source_size || source.len() != request.body_len {
             return Err(invalid("encrypted delete recovery body length is invalid"));
         }
@@ -901,7 +935,7 @@ impl VaultOfflineCache {
                 copy_source: None,
                 existing_id: None,
                 body_len: request.body_len,
-                state: CiphertextWriteState::Pending,
+                state,
                 receipt_resource_id: None,
                 receipt_etag: None,
                 receipt_for_revision: None,
@@ -923,6 +957,26 @@ impl VaultOfflineCache {
         sessions: &VaultSessionCoordinator,
         source: &mut R,
         request: VaultPendingDeleteRequest<'_>,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        self.queue_delete_with_state(sessions, source, request, CiphertextWriteState::Pending)
+    }
+
+    #[cfg(not(windows))]
+    pub(crate) fn queue_move_source_delete<R: Read + Seek>(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        source: &mut R,
+        request: VaultPendingDeleteRequest<'_>,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        self.queue_delete_with_state(sessions, source, request, CiphertextWriteState::Conflict)
+    }
+
+    fn queue_delete_with_state<R: Read + Seek>(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        source: &mut R,
+        request: VaultPendingDeleteRequest<'_>,
+        state: CiphertextWriteState,
     ) -> Result<VaultPendingEditMetadata, CloudError> {
         if request.body_len != request.source_size {
             return Err(invalid("encrypted delete recovery body length is invalid"));
@@ -947,7 +1001,7 @@ impl VaultOfflineCache {
                 copy_source: None,
                 existing_id: None,
                 body_len: request.body_len,
-                state: CiphertextWriteState::Pending,
+                state,
                 receipt_resource_id: None,
                 receipt_etag: None,
                 receipt_for_revision: None,
@@ -2597,7 +2651,9 @@ impl VaultOfflineCache {
                 }
                 if matches!(
                     metadata.state,
-                    CiphertextWriteState::Pending | CiphertextWriteState::Uncertain
+                    CiphertextWriteState::Pending
+                        | CiphertextWriteState::Uncertain
+                        | CiphertextWriteState::Conflict
                 ) {
                     deletes.push(metadata);
                 }
@@ -2965,6 +3021,36 @@ impl VaultOfflineCache {
             .map_err(cache_error)
     }
 
+    #[cfg(windows)]
+    pub(crate) fn begin_cancelled_directory_receipt(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        id: &str,
+        revision: u64,
+        expected_target: &str,
+    ) -> Result<(), CloudError> {
+        let operation = self.pending_operation(sessions, id, revision)?;
+        if operation.operation != VaultPendingOperationKind::CreateDirectory
+            || !matches!(
+                operation.state,
+                CiphertextWriteState::NeverAttempted | CiphertextWriteState::CancelledReceipt
+            )
+            || operation.base != WriteCondition::Absent
+            || operation.encoded_target != expected_target
+            || operation.plaintext_len != 0
+        {
+            return Err(conflict("queued directory cancellation changed"));
+        }
+        self.cache
+            .begin_ciphertext_directory_cancel_receipt(
+                &self.cache_scope,
+                id,
+                revision,
+                expected_target,
+            )
+            .map_err(cache_error)
+    }
+
     pub(crate) fn cancel_never_attempted_file_create(
         &self,
         sessions: &VaultSessionCoordinator,
@@ -3007,13 +3093,59 @@ impl VaultOfflineCache {
         plaintext_len: u64,
         plaintext_sha256: &str,
     ) -> Result<(), CloudError> {
+        self.acknowledge_cancelled_create_for(
+            sessions,
+            id,
+            revision,
+            expected_target,
+            plaintext_len,
+            plaintext_sha256,
+            false,
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn acknowledge_cancelled_directory_create(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        id: &str,
+        revision: u64,
+        expected_target: &str,
+    ) -> Result<(), CloudError> {
+        self.acknowledge_cancelled_create_for(
+            sessions,
+            id,
+            revision,
+            expected_target,
+            0,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn acknowledge_cancelled_create_for(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        id: &str,
+        revision: u64,
+        expected_target: &str,
+        plaintext_len: u64,
+        plaintext_sha256: &str,
+        directory: bool,
+    ) -> Result<(), CloudError> {
         if !is_sha256_digest(plaintext_sha256) || plaintext_len > MAX_EDIT_BYTES {
             return Err(invalid("encrypted cancellation digest is invalid"));
         }
         let current = self
             .pending_operation_current(sessions, id)?
             .ok_or_else(|| conflict("encrypted create cancellation receipt is missing"))?;
-        if current.operation != VaultPendingOperationKind::CreateFile
+        if current.operation
+            != (if directory {
+                VaultPendingOperationKind::CreateDirectory
+            } else {
+                VaultPendingOperationKind::CreateFile
+            })
             || current.base != WriteCondition::Absent
             || current.encoded_target != expected_target
         {
@@ -3042,15 +3174,22 @@ impl VaultOfflineCache {
             return Err(conflict("encrypted create cancellation receipt is stale"));
         }
 
-        let build = self
-            .cache
-            .begin_ciphertext_cancel_ack_compaction(
+        let build = if directory {
+            self.cache.begin_ciphertext_directory_cancel_ack_compaction(
                 &self.cache_scope,
                 id,
                 revision,
                 expected_target,
             )
-            .map_err(cache_error)?;
+        } else {
+            self.cache.begin_ciphertext_cancel_ack_compaction(
+                &self.cache_scope,
+                id,
+                revision,
+                expected_target,
+            )
+        }
+        .map_err(cache_error)?;
         let parent_ref = current.parent_ref.as_ref().map(|parent| match parent {
             VaultPendingParentRef::Stable { resource_id } => serde_json::json!({
                 "kind": "stable",
@@ -3064,7 +3203,7 @@ impl VaultOfflineCache {
         });
         let compact = serde_json::json!({
             "version": 10,
-            "operation": "create_file",
+            "operation": if directory { "create_directory" } else { "create_file" },
             "id": id,
             "revision": build.revision(),
             "account_id": self.scope.account_id(),
@@ -4985,13 +5124,20 @@ fn parse_pending_metadata(
     };
     if state == CiphertextWriteState::AcknowledgedReceipt {
         if version < 10
-            || operation != VaultPendingOperationKind::CreateFile
+            || !matches!(
+                operation,
+                VaultPendingOperationKind::CreateFile | VaultPendingOperationKind::CreateDirectory
+            )
             || base != WriteCondition::Absent
             || plaintext_len != 0
             || cancelled_revision == 0
             || cancelled_revision >= revision
             || cancelled_plaintext_len > MAX_EDIT_BYTES
             || !is_sha256_digest(&cancelled_plaintext_sha256)
+            || (operation == VaultPendingOperationKind::CreateDirectory
+                && (cancelled_plaintext_len != 0
+                    || cancelled_plaintext_sha256
+                        != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"))
         {
             return Err(invalid(
                 "encrypted cancellation acknowledgement is incomplete",

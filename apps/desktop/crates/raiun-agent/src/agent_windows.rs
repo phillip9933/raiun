@@ -711,6 +711,12 @@ enum ProviderCommand {
         request: windows_folder_requests::FolderRequest,
         response: std::sync::mpsc::SyncSender<Result<Value, String>>,
     },
+    OfflineFolderSettings {
+        setup: Box<windows_folder_sync::OfflineSetup>,
+        request: windows_folder_requests::FolderRequest,
+        authorization: Arc<AtomicU64>,
+        response: std::sync::mpsc::SyncSender<Result<Value, String>>,
+    },
     PrepareOfflineFolder {
         binding: ActiveProviderBinding,
         response: std::sync::mpsc::SyncSender<Result<Value, String>>,
@@ -1080,6 +1086,23 @@ impl ProviderManager {
                                 }
                                 let _ = response.send(result);
                             }
+                        }
+                        ProviderCommand::OfflineFolderSettings { setup, request, authorization, response } => {
+                            let result = (|| {
+                                if headless || setup.generation == 0 || authorization.load(Ordering::Acquire) != setup.generation {
+                                    return Err("The account changed before saved folder settings".into());
+                                }
+                                // The command thread serializes this local database owner after
+                                // any earlier sync. The caller already revoked its live handle.
+                                if let Ok(mut handle) = worker_folder_revocation.lock() {
+                                    if let Some(handle) = handle.take() { handle.revoke(); }
+                                }
+                                drop(folders.take());
+                                worker_folder_generation.store(0, Ordering::Release);
+                                if let Ok(mut snapshot) = worker_folder_pause.lock() { *snapshot = None; }
+                                windows_folder_sync::offline_settings(*setup, request, &authorization)
+                            })();
+                            let _ = response.send(result);
                         }
                         ProviderCommand::ListOfflineFolders { binding, cursor, cancellation, response } => {
                             let mut result = windows_cache_status::inspect_worker_folder_page(
@@ -2885,6 +2908,24 @@ impl ProviderManager {
         result.recv().map_err(|_| "Windows folder worker stopped")?
     }
 
+    fn offline_folder_settings(
+        &self,
+        setup: windows_folder_sync::OfflineSetup,
+        request: windows_folder_requests::FolderRequest,
+        authorization: Arc<AtomicU64>,
+    ) -> Result<Value, String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::OfflineFolderSettings {
+                setup: Box::new(setup),
+                request,
+                authorization,
+                response,
+            })
+            .map_err(|_| "Windows folder worker is unavailable")?;
+        result.recv().map_err(|_| "Windows folder worker stopped")?
+    }
+
     fn disconnect(&self) -> Result<(), String> {
         #[cfg(all(test, debug_assertions))]
         self.disconnect_test_calls.fetch_add(1, Ordering::SeqCst);
@@ -3879,8 +3920,13 @@ impl WindowsAgent {
             "vault_offline_reconnect" => {
                 Ok((self.reconnect_windows_cached_provider(request)?, false))
             }
-            "vault_operations"
-            | "vault_reconcile_edits_start"
+            "vault_operations" => Ok((self.windows_vault_operations_with_copy(request)?, false)),
+            "vault_copy_verify_status" | "vault_copy_verify_cancel"
+                if WINDOWS_VAULT_SESSIONS_ENABLED =>
+            {
+                Ok((self.windows_vault_copy_verification_status(request)?, false))
+            }
+            "vault_reconcile_edits_start"
             | "vault_reconcile_edits_status"
             | "vault_reconcile_edits_cancel"
             | "vault_reconcile_edits_latest" => {
@@ -4297,6 +4343,8 @@ impl WindowsAgent {
             "account_removing": state.retiring,
         });
         windows_headless::annotate_status(&mut status, runtime_mode()?);
+        status["vault_move_supported"] = json!(WINDOWS_VAULT_SESSIONS_ENABLED);
+        status["vault_copy_verify_supported"] = json!(WINDOWS_VAULT_SESSIONS_ENABLED);
         if mount_only() {
             status["ordinary_edits"] = windows_headless_edits::status(self, &state);
         }
@@ -5174,6 +5222,106 @@ impl WindowsAgent {
             return Err("The selected account is unavailable".into());
         }
         let decoded = windows_folder_requests::decode(request)?;
+        let offline = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            !state.online_authenticated
+        };
+        if offline {
+            let (session, generation, configuration) = {
+                let state = self
+                    .state
+                    .lock()
+                    .map_err(|_| "Account state is unavailable")?;
+                if state.logout_pending
+                    || state.authenticating
+                    || state.refreshing
+                    || state.retiring
+                    || state.session_cleanup_uncertain
+                    || !state.offline_cached && !state.needs_refresh
+                {
+                    return Err("Connect this account before using folder sync".into());
+                }
+                (
+                    state
+                        .session
+                        .clone()
+                        .ok_or("Sign in before using saved folder settings")?,
+                    state.active_generation,
+                    state
+                        .root_configuration
+                        .clone()
+                        .ok_or("Saved account ownership is unavailable")?,
+                )
+            };
+            let owner = configuration
+                .registration_ownership
+                .as_ref()
+                .ok_or("Saved account ownership is unavailable")?;
+            if configuration.server != session.server
+                || configuration.client_id != session.client_id
+                || configuration.issuer != session.expected_issuer
+            {
+                return Err("Saved folder account does not match this session".into());
+            }
+            validate_registration_ownership(
+                owner,
+                &session.server,
+                configuration.volume_serial,
+                configuration.file_index,
+            )?;
+            let server = url::Url::parse(&session.server)
+                .map_err(|_| "The saved account server is invalid")?;
+            let issuer = session
+                .expected_issuer
+                .as_ref()
+                .map(|issuer| url::Url::parse(issuer).map(|value| value.to_string()))
+                .transpose()
+                .map_err(|_| "The saved account issuer is invalid")?;
+            let scope = AccountScope::new(
+                self.profile_scope.clone(),
+                server.to_string(),
+                session.client_id.clone(),
+                issuer,
+                owner.account_id.clone(),
+            )
+            .map_err(|_| "The saved folder account is invalid")?;
+            let identity =
+                serde_json::to_vec(&scope).map_err(|_| "The saved folder account is invalid")?;
+            let name = format!("folder-sync-{:x}", sha2::Sha256::digest(&identity));
+            let store = DpapiSessionStore::current_user()
+                .map_err(|_| "Private Windows storage is unavailable")?;
+            let parent = PinnedDirectory::open(store.local_edit_state_directory())
+                .map_err(|_| "Private Windows storage is unavailable")?;
+            let directory =
+                PrivateDirectory::create_or_open_under(&parent, std::ffi::OsStr::new(&name))
+                    .map_err(|_| "Private account storage could not be admitted")?;
+            // Cancel first; the command thread drains an active sync before
+            // opening a second Engine owner on the same private database.
+            self.provider.revoke_folders();
+            let result = self.provider.offline_folder_settings(
+                windows_folder_sync::OfflineSetup {
+                    source_admissions: self
+                        .source_admissions
+                        .clone()
+                        .ok_or("Broker source admission is unavailable")?,
+                    profile: self.profile_scope.clone(),
+                    generation,
+                    scope,
+                    account_id: owner.account_id.clone(),
+                    origin: server.origin().ascii_serialization(),
+                    directory,
+                },
+                decoded,
+                Arc::clone(&self.generation),
+            )?;
+            if self.generation.load(Ordering::Acquire) != generation {
+                return Err("The account changed during folder work".into());
+            }
+            return Ok(result);
+        }
         let (session, generation, cloud_root) = {
             let state = self
                 .state
@@ -5277,6 +5425,8 @@ impl WindowsAgent {
                 spaces,
                 directory,
                 cloud_root,
+                vault_sessions: Arc::clone(&self.vault_sessions),
+                profile: self.profile_scope.clone(),
             })?;
             self.provider
                 .bandwidth

@@ -219,6 +219,7 @@ impl VaultBackend {
                         &source_binding.etag,
                         source_generation,
                         &cancelled,
+                        false,
                     )
                     .map_err(|error| {
                         let reason = if self.client.token_generation() != source_generation {
@@ -286,6 +287,7 @@ impl VaultBackend {
                         &destination_entry.etag,
                         destination_generation,
                         &cancelled,
+                        false,
                     )
                     .map_err(|error| {
                         let reason =
@@ -461,6 +463,39 @@ impl VaultBackend {
         cancelled: &dyn Fn() -> bool,
         publish_binding: impl FnOnce(&str, u64),
     ) -> Result<VaultCopyOutcome, CloudError> {
+        self.copy_file_to_cancellable_with_binding_inner(
+            destination,
+            request,
+            cancelled,
+            publish_binding,
+            false,
+        )
+    }
+
+    pub(super) fn copy_file_to_cancellable_with_binding_for_move(
+        &self,
+        destination: &VaultBackend,
+        request: &VaultCopyRequest,
+        cancelled: &dyn Fn() -> bool,
+        publish_binding: impl FnOnce(&str, u64),
+    ) -> Result<VaultCopyOutcome, CloudError> {
+        self.copy_file_to_cancellable_with_binding_inner(
+            destination,
+            request,
+            cancelled,
+            publish_binding,
+            true,
+        )
+    }
+
+    fn copy_file_to_cancellable_with_binding_inner(
+        &self,
+        destination: &VaultBackend,
+        request: &VaultCopyRequest,
+        cancelled: &dyn Fn() -> bool,
+        publish_binding: impl FnOnce(&str, u64),
+        retain_source_ciphertext: bool,
+    ) -> Result<VaultCopyOutcome, CloudError> {
         if cancelled() {
             return Err(CloudError::new(
                 ErrorKind::Forbidden,
@@ -509,6 +544,7 @@ impl VaultBackend {
             &request.source_etag,
             request.source_auth_generation,
             cancelled,
+            retain_source_ciphertext,
         )?;
         let plaintext_len = u64::try_from(plaintext.len())
             .map_err(|_| invalid("cross-vault copy length is invalid"))?;
@@ -741,6 +777,7 @@ impl VaultBackend {
             &uploaded.etag,
             request.destination_auth_generation,
             cancelled,
+            false,
         );
         let (readback, readback_reason) = match readback {
             Ok((entry, bytes)) => {
@@ -863,6 +900,7 @@ impl VaultBackend {
         expected_etag: &str,
         expected_generation: u64,
         cancelled: &dyn Fn() -> bool,
+        retain_verified_ciphertext: bool,
     ) -> Result<(RemoteEntry, zeroize::Zeroizing<Vec<u8>>), CloudError> {
         if cancelled() || self.client.token_generation() != expected_generation {
             return Err(conflict(
@@ -870,11 +908,37 @@ impl VaultBackend {
             ));
         }
         let state = self.revalidate_root()?;
+        let source_cache_epoch = if retain_verified_ciphertext {
+            Some(
+                self.offline_cache
+                    .as_ref()
+                    .ok_or_else(|| {
+                        CloudError::new(
+                            ErrorKind::Unsupported,
+                            "cross-vault move requires a source ciphertext cache",
+                        )
+                    })?
+                    .ciphertext_epoch()?,
+            )
+        } else {
+            None
+        };
         let before = self.stat_raw(&state, path)?;
         if before.directory || before.id != expected_id || before.etag != expected_etag {
             return Err(conflict("cross-vault copy source identity changed"));
         }
         validate_strong_etag(&before.etag)?;
+        if retain_verified_ciphertext
+            && (!before.writable
+                || self.pending_edit_for_path(path)?.is_some()
+                || self.pending_delete_for_source(path)?.is_some()
+                || self.pending_rename_for_source(path)?.is_some()
+                || self.pending_rename_for_destination(path)?.is_some())
+        {
+            return Err(conflict(
+                "cross-vault move source is read only or has pending changes",
+            ));
+        }
         if before.size > MAX_CROSS_VAULT_COPY_BYTES {
             return Err(CloudError::new(
                 ErrorKind::Unsupported,
@@ -988,6 +1052,90 @@ impl VaultBackend {
                 ErrorKind::Forbidden,
                 "cross-vault copy session was locked",
             ));
+        }
+        if let Some(cache_epoch) = source_cache_epoch {
+            if cancelled() || self.client.token_generation() != expected_generation {
+                return Err(conflict(
+                    "cross-vault move source authorization changed before cache publication",
+                ));
+            }
+            let cache = self.offline_cache.as_ref().ok_or_else(|| {
+                CloudError::new(
+                    ErrorKind::Unsupported,
+                    "cross-vault move source cache is unavailable",
+                )
+            })?;
+
+            // Refresh the exact source parent listing into this scope before
+            // publishing its ciphertext. The cache-backed delete path needs
+            // both pieces; a body without a sealed namespace row cannot be
+            // used as durable delete recovery.
+            let components = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+            if components.is_empty() || components.len() > 128 {
+                return Err(invalid("cross-vault move source path is too deep"));
+            }
+            let mut parent_path = String::from("/");
+            for (index, component) in components.iter().enumerate() {
+                if cancelled() || self.client.token_generation() != expected_generation {
+                    return Err(conflict(
+                        "cross-vault move source authorization changed during cache listing",
+                    ));
+                }
+                let child_path = if parent_path == "/" {
+                    format!("/{component}")
+                } else {
+                    format!("{parent_path}/{component}")
+                };
+                let leaf = index + 1 == components.len();
+                let mut listed = 0usize;
+                self.list_raw(&after_state, &parent_path, &mut |entry| {
+                    if entry.path == child_path {
+                        listed = listed.saturating_add(1);
+                        if leaf {
+                            if entry.directory
+                                || entry.id != after.id
+                                || entry.etag != after.etag
+                                || entry.size != after.size
+                            {
+                                return Err(conflict("cross-vault move source listing changed"));
+                            }
+                        } else if !entry.directory || entry.id.is_empty() {
+                            return Err(conflict("cross-vault move source parent listing changed"));
+                        }
+                    }
+                    Ok(())
+                })?;
+                if listed != 1 {
+                    return Err(conflict("cross-vault move source listing is ambiguous"));
+                }
+                parent_path = child_path;
+            }
+            cache.publish_verified_ciphertext(
+                &after.id,
+                &after.etag,
+                ciphertext.path(),
+                ciphertext_len,
+                cache_epoch,
+            )?;
+            let cached = cache.stat(&self.sessions, path)?;
+            if cached.directory
+                || cached.path != after.path
+                || cached.id != after.id
+                || cached.etag != after.etag
+                || cached.size != after.size
+            {
+                return Err(conflict("cross-vault move source cache binding changed"));
+            }
+            // This opens and verifies the complete cached ciphertext object,
+            // and fails if quota eviction removed it before deletion can queue
+            // a protected copy in the durable journal.
+            cache.ciphertext_sha256(&self.sessions, path, &after.id, &after.etag)?;
+            if cache.ciphertext_epoch()? != cache_epoch
+                || self.client.token_generation() != expected_generation
+                || cancelled()
+            {
+                return Err(conflict("cross-vault move source cache generation changed"));
+            }
         }
         Ok((after, plaintext))
     }
@@ -1111,7 +1259,7 @@ fn needs_reconciliation(
     }
 }
 
-fn validate_strong_etag(etag: &str) -> Result<(), CloudError> {
+pub(super) fn validate_strong_etag(etag: &str) -> Result<(), CloudError> {
     if etag.len() < 2
         || etag.len() > 4_096
         || !etag.starts_with('"')

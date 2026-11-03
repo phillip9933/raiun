@@ -6,7 +6,7 @@ export type CopyProducerError =
   | 'busy'
   | 'unavailable';
 
-export type CopyProducerState = 'queued' | 'running' | 'copied' | 'cancelled' | 'failed' | 'needs_review';
+export type CopyProducerState = 'queued' | 'running' | 'copied' | 'moved' | 'cancelled' | 'failed' | 'needs_review';
 
 export type CopyProducerStart = { accepted: true; job_id: string } | { accepted: false; error: CopyProducerError };
 
@@ -37,6 +37,7 @@ export type CopyProducerDestinationExpectation = {
 
 /** Everything whose change makes a producer reply stale, including both sides of the copy. */
 export type CopyProducerContext = {
+  operation?: 'copy' | 'move';
   profileId: string;
   accountEpoch: number;
   authGeneration: number;
@@ -48,7 +49,7 @@ export type CopyProducerContext = {
 const errors = new Set<CopyProducerError>([
   'stale_generation', 'offline', 'scope_changed', 'locked', 'busy', 'unavailable'
 ]);
-const states = new Set<CopyProducerState>(['queued', 'running', 'copied', 'cancelled', 'failed', 'needs_review']);
+const states = new Set<CopyProducerState>(['queued', 'running', 'copied', 'moved', 'cancelled', 'failed', 'needs_review']);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -73,7 +74,7 @@ function validContext(context: CopyProducerContext): boolean {
     context.destination.parentVersion,
     context.destination.targetPath
   ];
-  return Number.isSafeInteger(context.accountEpoch) && context.accountEpoch >= 0 &&
+  return (context.operation === undefined || context.operation === 'copy' || context.operation === 'move') && Number.isSafeInteger(context.accountEpoch) && context.accountEpoch >= 0 &&
     Number.isSafeInteger(context.authGeneration) && context.authGeneration >= 0 &&
     Number.isSafeInteger(context.flowGeneration) && context.flowGeneration >= 0 &&
     strings.every((value) => typeof value === 'string' && value.length > 0);
@@ -82,6 +83,7 @@ function validContext(context: CopyProducerContext): boolean {
 export function copyProducerContextKey(context: CopyProducerContext): string {
   if (!validContext(context)) throw new Error('The copy context is invalid.');
   return JSON.stringify([
+    context.operation ?? 'copy',
     context.profileId,
     context.accountEpoch,
     context.authGeneration,
@@ -119,7 +121,8 @@ export function validateCopyProducerStart(value: unknown): CopyProducerStart {
 export function validateCopyProducerStatus(
   value: unknown,
   expectedJobId: string,
-  expectedGeneration: number
+  expectedGeneration: number,
+  operation: 'copy' | 'move' = 'copy'
 ): CopyProducerStatus {
   if (!isRecord(value)) throw new Error('The agent returned an invalid copy status.');
   const baseKeys = 'auth_generation,cancel_requested,job_id,state';
@@ -135,7 +138,8 @@ export function validateCopyProducerStatus(
       typeof value.cancel_requested !== 'boolean') {
     throw new Error('The agent returned an invalid copy status.');
   }
-  if (value.state === 'copied' && !hasBinding) throw new Error('The agent returned an invalid copy status.');
+  if ((value.state === 'copied' && operation !== 'copy') || (value.state === 'moved' && operation !== 'move')) throw new Error('The file operation returned a mismatched result.');
+  if ((value.state === 'copied' || value.state === 'moved') && !hasBinding) throw new Error('The agent returned an invalid copy status.');
   if (hasBinding && (typeof value.write_id !== 'string' || !/^[0-9a-f]{32}$/.test(value.write_id) ||
       !Number.isSafeInteger(value.revision) || (value.revision as number) <= 0)) {
     throw new Error('The agent returned an invalid copy status.');
@@ -154,10 +158,20 @@ export function copyProducerStartErrorMessage(error: CopyProducerError): string 
   }
 }
 
-export function copyProducerStatusMessage(status: CopyProducerStatus): string {
+export function copyProducerStatusMessage(status: CopyProducerStatus, operation: 'copy' | 'move' = 'copy'): string {
+  if (operation === 'move') {
+    switch (status.state) {
+      case 'queued': return status.cancel_requested ? 'Stopping the move…' : 'Preparing the move…';
+      case 'running': return status.cancel_requested ? 'Stopping the move…' : 'Verifying the copy before removing the original…';
+      case 'moved': return 'Move complete. The verified destination is ready and the original was removed.';
+      case 'cancelled': return 'Move stopped before a saved operation was admitted.';
+      default: return 'The move needs review. Check both locations and saved edits before trying again. Raiun keeps the destination when source removal is uncertain.';
+    }
+  }
   switch (status.state) {
     case 'queued': return status.cancel_requested ? 'Stopping the copy…' : 'Preparing the copy…';
     case 'running': return status.cancel_requested ? 'Stopping the copy…' : 'Copying the file…';
+    case 'moved': return 'Move complete.';
     case 'copied': return 'Copy complete. The original file remains in place.';
     case 'cancelled': return 'Copy stopped. The original file remains in place.';
     case 'failed': return 'The copy could not finish. The original file remains in place.';

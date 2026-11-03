@@ -214,6 +214,306 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use zeroize::Zeroizing;
 const RETARGET_DOMAIN: &[u8] = b"raiun/windows-vault-cached-retarget/v1\0";
+const DIRECTORY_CANCEL_DOMAIN: &[u8] = b"raiun/windows-vault-directory-cancel/v1\0";
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectoryCancelRow {
+    write_id: String,
+    revision: u64,
+    path: String,
+    encoded_target: String,
+    root_integrity_token: String,
+    identity: [u8; 16],
+    file: u64,
+    source_usn: i64,
+    components: Vec<String>,
+    original: RemoteEntry,
+    native_absent: bool,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectoryCancelIndex {
+    version: u32,
+    scope: Scope,
+    rows: Vec<DirectoryCancelRow>,
+}
+fn directory_cancel_key(scope: &Scope) -> Result<Zeroizing<Vec<u8>>, BackendError> {
+    let s = scope.authenticated_store_binding().map_err(|_| no())?;
+    let mut key = Zeroizing::new(DIRECTORY_CANCEL_DOMAIN.to_vec());
+    key.extend_from_slice(&(s.len() as u64).to_le_bytes());
+    key.extend_from_slice(&s);
+    Ok(key)
+}
+fn directory_cancel_path(scope: &Scope) -> Result<std::path::PathBuf, BackendError> {
+    Ok(DpapiSessionStore::current_user()
+        .map_err(|_| no())?
+        .local_edit_state_directory()
+        .join(format!(
+            "vault-directory-cancel-v1-{:x}",
+            Sha256::digest(&*directory_cancel_key(scope)?)
+        )))
+}
+fn validate_directory_cancel_row(row: &DirectoryCancelRow) -> Result<(), BackendError> {
+    if row.write_id.len() != 32
+        || !row.write_id.bytes().all(|b| b.is_ascii_hexdigit())
+        || row.revision == 0
+        || row.revision >= i64::MAX as u64
+        || row.identity == [0; 16]
+        || row.file == 0
+        || row.source_usn <= 0
+        || row.path != row.original.path
+        || row.path == "/"
+        || raiun_core::validate_remote_path(&row.path).is_err()
+        || row.original.id != format!("raiun-pending-directory:{}", row.write_id)
+        || row.original.etag != format!("raiun-pending-v1:{}:{}", row.write_id, row.revision)
+        || !row.original.directory
+        || row.original.size != 0
+        || row.encoded_target.is_empty()
+        || row.encoded_target.len() > 32000
+        || row.root_integrity_token.is_empty()
+        || row.root_integrity_token.len() > 4096
+        || row.components.len() < 2
+        || row.components.len() > 256
+        || row.components.iter().any(|c| {
+            c.is_empty()
+                || c.len() > 255
+                || c == "."
+                || c == ".."
+                || c.chars().any(|v| {
+                    v.is_control()
+                        || matches!(v, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+                })
+        })
+    {
+        return Err(no());
+    }
+    Ok(())
+}
+fn load_directory_cancels(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+) -> Result<(Option<Zeroizing<Vec<u8>>>, DirectoryCancelIndex), BackendError> {
+    let raw = store
+        .load(&directory_cancel_key(scope)?)
+        .map_err(|_| no())?;
+    let index = if let Some(raw) = &raw {
+        if raw.is_empty()
+            || raw.len() > 4 << 20
+            || !std::fs::symlink_metadata(directory_cancel_path(scope)?)
+                .map(|m| m.is_dir() && !m.file_type().is_symlink())
+                .unwrap_or(false)
+        {
+            return Err(no());
+        }
+        let index: DirectoryCancelIndex = serde_json::from_slice(raw).map_err(|_| no())?;
+        if index.version != 1
+            || index.scope != *scope
+            || index.rows.is_empty()
+            || index.rows.len() > 1024
+        {
+            return Err(no());
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for row in &index.rows {
+            validate_directory_cancel_row(row)?;
+            if !ids.insert(&row.write_id) {
+                return Err(no());
+            }
+        }
+        index
+    } else {
+        match std::fs::symlink_metadata(directory_cancel_path(scope)?) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            _ => return Err(no()),
+        }
+        DirectoryCancelIndex {
+            version: 1,
+            scope: scope.clone(),
+            rows: Vec::new(),
+        }
+    };
+    Ok((raw, index))
+}
+fn commit_directory_cancels(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+    old: Option<&[u8]>,
+    index: &DirectoryCancelIndex,
+) -> Result<(), BackendError> {
+    if index.rows.is_empty() || index.rows.len() > 1024 {
+        return Err(no());
+    }
+    let storage = DpapiSessionStore::current_user().map_err(|_| no())?;
+    let parent = PinnedDirectory::open(storage.local_edit_state_directory()).map_err(|_| no())?;
+    let path = directory_cancel_path(scope)?;
+    let _sentinel =
+        PrivateDirectory::create_or_open_under(&parent, path.file_name().ok_or_else(no)?)
+            .map_err(|_| no())?;
+    let raw = Zeroizing::new(serde_json::to_vec(index).map_err(|_| no())?);
+    if raw.len() > 4 << 20 {
+        return Err(no());
+    }
+    store
+        .cas(&directory_cancel_key(scope)?, old, &raw)
+        .map_err(|_| no())?;
+    if store
+        .load(&directory_cancel_key(scope)?)
+        .map_err(|_| no())?
+        .is_none_or(|v| v.as_slice() != raw.as_slice())
+    {
+        return Err(no());
+    }
+    Ok(())
+}
+fn cancel_row_from_receipt(
+    receipt: &raiun_opencloud::vault_backend::VaultCancelledPendingDirectory,
+    pending: &PendingFacts,
+    identity: [u8; 16],
+    file: u64,
+    source_usn: i64,
+) -> Result<DirectoryCancelRow, BackendError> {
+    let original = receipt.original();
+    let cancelled = receipt.receipt();
+    if original.operation
+        != raiun_opencloud::vault_cache::VaultPendingOperationKind::CreateDirectory
+        || !matches!(
+            original.state,
+            raiun_cache::CiphertextWriteState::NeverAttempted
+                | raiun_cache::CiphertextWriteState::CancelledReceipt
+        )
+        || cancelled.state != raiun_cache::CiphertextWriteState::CancelledReceipt
+        || cancelled.id != original.id
+        || cancelled.revision != original.revision
+        || cancelled.path != original.path
+        || cancelled.encoded_target != original.encoded_target
+        || cancelled.root_integrity_token != original.root_integrity_token
+        || original.plaintext_len != 0
+        || cancelled.plaintext_len != 0
+        || pending.identity != identity
+        || pending.file != file
+        || pending.usn != source_usn
+        || !matches!(
+            pending.operation,
+            Operation::CreateDirectory | Operation::RetargetNeverAttemptedDirectory
+        )
+        || pending.write_id != original.id
+        || pending.revision != original.revision
+        || pending
+            .entry
+            .as_ref()
+            .is_none_or(|e| e.path != original.path)
+    {
+        return Err(no());
+    }
+    let row = DirectoryCancelRow {
+        write_id: original.id.clone(),
+        revision: original.revision,
+        path: original.path.clone(),
+        encoded_target: original.encoded_target.clone(),
+        root_integrity_token: original.root_integrity_token.clone(),
+        identity,
+        file,
+        source_usn,
+        components: pending.components.clone(),
+        original: pending.entry.clone().ok_or_else(no)?,
+        native_absent: false,
+    };
+    validate_directory_cancel_row(&row)?;
+    Ok(row)
+}
+pub(super) fn record_directory_cancel_queued(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+    receipt: &raiun_opencloud::vault_backend::VaultCancelledPendingDirectory,
+    identity: [u8; 16],
+    file: u64,
+    source_usn: i64,
+) -> Result<(), BackendError> {
+    let (old, mut index) = load_directory_cancels(store, scope)?;
+    let pending = current_created_facts(store, scope)?;
+    let row = pending
+        .iter()
+        .find(|p| p.identity == identity)
+        .ok_or_else(no)?;
+    let proposed = cancel_row_from_receipt(receipt, row, identity, file, source_usn)?;
+    if let Some(existing) = index.rows.iter().find(|r| r.write_id == proposed.write_id) {
+        return if existing == &proposed
+            || (existing.native_absent
+                && existing.clone()
+                    == DirectoryCancelRow {
+                        native_absent: true,
+                        ..proposed
+                    })
+        {
+            Ok(())
+        } else {
+            Err(no())
+        };
+    }
+    if index.rows.len() >= 1024 {
+        return Err(no());
+    }
+    index.rows.push(proposed);
+    commit_directory_cancels(store, scope, old.as_deref().map(Vec::as_slice), &index)
+}
+pub(super) fn record_directory_cancel_native(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+    proof: &raiun_cloudfiles_windows::vault_custody::VaultNativeDirectoryCancellation<'_>,
+) -> Result<(), BackendError> {
+    if proof.root().volume_serial != scope.native_root().0
+        || proof.root().file_index != scope.native_root().1
+    {
+        return Err(no());
+    }
+    let receipt = proof.receipt();
+    let identity = proof.identity();
+    let file = proof.file();
+    let source_usn = proof.source_usn();
+    let (old, mut index) = load_directory_cancels(store, scope)?;
+    let pending = current_created_facts(store, scope)?;
+    let row = pending
+        .iter()
+        .find(|p| p.identity == identity)
+        .ok_or_else(no)?;
+    let proposed = cancel_row_from_receipt(receipt, row, identity, file, source_usn)?;
+    let current = index
+        .rows
+        .iter_mut()
+        .find(|r| r.write_id == proposed.write_id)
+        .ok_or_else(no)?;
+    if *current != proposed || current.native_absent {
+        return Err(no());
+    }
+    current.native_absent = true;
+    commit_directory_cancels(store, scope, old.as_deref().map(Vec::as_slice), &index)
+}
+fn directory_cancel_catalogue_deltas(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+) -> Result<Vec<CatalogueDelta>, BackendError> {
+    let (_, index) = load_directory_cancels(store, scope)?;
+    let mut result = Vec::new();
+    for row in &index.rows {
+        if !row.native_absent {
+            continue;
+        }
+        result.push(CatalogueDelta {
+            write_id: row.write_id.clone(),
+            revision: row.revision + 1,
+            identity: row.identity,
+            file: row.file,
+            usn: row.source_usn,
+            components: row.components.clone(),
+            original: Some(row.original.clone()),
+            entry: None,
+            plaintext_len: 0,
+            source_sha256: None,
+            verified_native: true,
+        });
+    }
+    Ok(result)
+}
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Retarget {
@@ -1134,6 +1434,7 @@ fn all_catalogue_deltas(
             .map(CatalogueDelta::from),
     );
     rows.extend(retarget_catalogue_deltas(store, scope)?);
+    rows.extend(directory_cancel_catalogue_deltas(store, scope)?);
     if extra.iter().any(|row| row.verified_native) {
         return Err(no());
     }

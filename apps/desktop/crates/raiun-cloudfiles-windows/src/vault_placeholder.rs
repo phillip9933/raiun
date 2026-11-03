@@ -29,6 +29,21 @@ fn metadata(entry: &RemoteEntry) -> PlaceholderMetadata {
         length: if entry.directory { 0 } else { entry.size },
     }
 }
+#[cfg(windows)]
+fn cached_cancel_directory_entry(
+    original: &raiun_opencloud::vault_cache::VaultPendingEditMetadata,
+) -> RemoteEntry {
+    RemoteEntry {
+        id: format!("raiun-pending-directory:{}", original.id),
+        path: original.path.clone(),
+        directory: true,
+        size: 0,
+        etag: format!("raiun-pending-v1:{}:{}", original.id, original.revision),
+        modified_unix: 0,
+        writable: false,
+        encrypted: false,
+    }
+}
 #[derive(Clone, Default)]
 struct Catalogue {
     entries: HashMap<[u8; 16], RemoteEntry>,
@@ -1289,6 +1304,86 @@ mod runtime {
                         .map_err(|_| refused())
                 })
                 .map_err(|_| BackendError::Unavailable)
+        }
+
+        pub(crate) fn record_cached_directory_cancel_queued(
+            &self,
+            receipt: &raiun_opencloud::vault_backend::VaultCancelledPendingDirectory,
+            identity: [u8; 16],
+            file: u64,
+            source_usn: i64,
+        ) -> Result<(), BackendError> {
+            if !self.binding.matches_cached_directory_cancel(receipt)
+                || identity == [0; 16]
+                || file == 0
+                || source_usn <= 0
+            {
+                return Err(BackendError::Unavailable);
+            }
+            self.binding
+                .with_publication(|| {
+                    self.binding
+                        .verify_custody_context(self.custody.as_ref())
+                        .map_err(|_| refused())?;
+                    let expected = cached_cancel_directory_entry(receipt.original());
+                    if self
+                        .catalogue
+                        .lock()
+                        .map_err(|_| refused())?
+                        .entries
+                        .get(&identity)
+                        != Some(&expected)
+                    {
+                        return Err(refused());
+                    }
+                    self.custody
+                        .record_cached_directory_cancel_queued(receipt, identity, file, source_usn)
+                        .map_err(|_| refused())
+                })
+                .map_err(|_| BackendError::Unavailable)
+        }
+
+        pub(crate) fn publish_cached_directory_cancel<T>(
+            &self,
+            receipt: &raiun_opencloud::vault_backend::VaultCancelledPendingDirectory,
+            identity: [u8; 16],
+            file: u64,
+            source_usn: i64,
+            publish: impl FnOnce() -> Result<T, crate::Error>,
+        ) -> Result<T, crate::Error> {
+            self.binding.with_exclusive_completion(|| {
+                let no = || crate::Error::EditRecoveryUnavailable;
+                if !self.binding.matches_cached_directory_cancel_held(receipt) {
+                    return Err(no());
+                }
+                let expected = cached_cancel_directory_entry(receipt.original());
+                let mut next = self.catalogue.lock().map_err(|_| no())?.clone();
+                if next.entries.get(&identity) != Some(&expected) {
+                    return Err(no());
+                }
+                next.versions.remove(&key(&expected));
+                next.entries.remove(&identity);
+                let result = publish()?;
+                let proof =
+                    crate::vault_custody::VaultNativeDirectoryCancellation::after_native_absence(
+                        receipt,
+                        self.custody.root_identity(),
+                        identity,
+                        file,
+                        source_usn,
+                    );
+                self.custody
+                    .record_cached_directory_cancel_native(&proof)
+                    .map_err(|_| no())?;
+                let restored =
+                    Catalogue::restore(self.custody.catalogue_snapshot().map_err(|_| no())?)
+                        .map_err(|_| no())?;
+                if restored.entries != next.entries || restored.versions != next.versions {
+                    return Err(no());
+                }
+                std::mem::swap(&mut *self.catalogue.lock().map_err(|_| no())?, &mut next);
+                Ok(result)
+            })
         }
 
         pub(crate) fn record_cached_retarget_native(

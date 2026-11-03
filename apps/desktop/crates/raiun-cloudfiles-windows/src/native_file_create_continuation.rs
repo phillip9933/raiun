@@ -382,7 +382,7 @@ impl ConfiguredRootConnection {
                         .map_err(|_| no())?;
                     (body, key, new_binding, proof, false)
                 };
-            phase.set(crate::FileCreateContinuationStage::NativeCompletion);
+            phase.set(crate::FileCreateContinuationStage::NativePreflight);
             body.check(job, &stopped)?;
             root.verify_identity(true)?;
             root.verify_registered()?;
@@ -405,9 +405,20 @@ impl ConfiguredRootConnection {
                 return Err(no());
             }
             let final_reference = body.source.reference()?;
+            phase.set(crate::FileCreateContinuationStage::NativePublication);
             let (published_identity, completed) =
                 continuation.publish_and_complete(backend, &proof, |identity| {
-                    body.convert(identity, job, &stopped, || !stopped())?;
+                    phase.set(crate::FileCreateContinuationStage::NativeCompletion);
+                    body.convert_with_phase(
+                        identity,
+                        job,
+                        &stopped,
+                        || !stopped(),
+                        || {
+                            phase.set(crate::FileCreateContinuationStage::NativeVerify);
+                        },
+                    )?;
+                    phase.set(crate::FileCreateContinuationStage::NativePublication);
                     let completed =
                         crate::CompletedLocalEdit::from_verified_native_completion_for_generation(
                             &proof,
@@ -416,6 +427,7 @@ impl ConfiguredRootConnection {
                         .map_err(|_| no())?;
                     Ok((*identity, completed))
                 })?;
+            phase.set(crate::FileCreateContinuationStage::NativePostPublish);
             continuation.check(backend).map_err(|_| no())?;
             root.verify_identity(true)?;
             root.verify_registered()?;
@@ -437,7 +449,7 @@ impl ConfiguredRootConnection {
                     .map_err(|_| no())?;
             }
             let old_lease = store.acquire_dispatch(original.key()).map_err(|_| no())?;
-            phase.set(crate::FileCreateContinuationStage::NativeCompletion);
+            phase.set(crate::FileCreateContinuationStage::NativeSeal);
             let seal = NativeFileCreateContinuation::seal(
                 &final_reference,
                 &body,

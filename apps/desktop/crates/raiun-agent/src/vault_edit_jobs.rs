@@ -441,9 +441,25 @@ impl VaultEditReconcileJobs {
     /// Start a copy producer whose durable journal identity is published only
     /// after the backend has created the real row. The caller admits under its
     /// runtime gate, then releases the required start gate after dropping it.
+    #[cfg(test)]
     pub fn start_copy_producer(
         this: &Arc<Self>,
         spec: CopyProducerJobSpec<'_>,
+        operation: impl FnOnce(
+            &AtomicBool,
+            &mut dyn FnMut(u64, u64, u64, u64),
+            &mut dyn FnMut(&str, u64) -> Result<(), VaultEditJobFailure>,
+        ) -> Result<VaultEditReconcileReport, VaultEditJobFailure>
+        + Send
+        + 'static,
+    ) -> Result<VaultEditReconcileStatus, String> {
+        Self::start_file_transfer_producer(this, spec, false, operation)
+    }
+
+    pub fn start_file_transfer_producer(
+        this: &Arc<Self>,
+        spec: CopyProducerJobSpec<'_>,
+        moving: bool,
         operation: impl FnOnce(
             &AtomicBool,
             &mut dyn FnMut(u64, u64, u64, u64),
@@ -470,7 +486,7 @@ impl VaultEditReconcileJobs {
             spec.pin_jobs,
             false,
             None,
-            Some("copy_file".into()),
+            Some(if moving { "move_file" } else { "copy_file" }.into()),
             failure_class,
             vec![scope_key(spec.source)],
             vec![spec.source.space_id().to_owned()],
@@ -680,8 +696,10 @@ impl VaultEditReconcileJobs {
                                         "Encrypted edit job state is poisoned",
                                     )
                                 })?;
-                                if status.operation.as_deref() != Some("copy_file")
-                                    || status.write_id.is_some()
+                                if !matches!(
+                                    status.operation.as_deref(),
+                                    Some("copy_file" | "move_file")
+                                ) || status.write_id.is_some()
                                     || status.operation_revision.is_some()
                                     || !active(&status.state)
                                 {
@@ -713,9 +731,11 @@ impl VaultEditReconcileJobs {
                             status.uploaded = report.uploaded;
                             status.conflicts = report.conflicts;
                             status.remaining = report.remaining;
-                            if status.operation.as_deref() == Some("copy_file")
-                                && (status.write_id.is_none()
-                                    || status.operation_revision.is_none())
+                            if matches!(
+                                status.operation.as_deref(),
+                                Some("copy_file" | "move_file")
+                            ) && (status.write_id.is_none()
+                                || status.operation_revision.is_none())
                             {
                                 status.state = "failed".into();
                                 status.error = Some(
@@ -731,7 +751,7 @@ impl VaultEditReconcileJobs {
                                 // either admitted result as cancelled.
                                 status.state = if matches!(
                                     status.operation.as_deref(),
-                                    Some("copy_verify" | "copy_file")
+                                    Some("copy_verify" | "copy_file" | "move_file")
                                 ) || !worker.cancelled.load(Ordering::Acquire)
                                 {
                                     "complete"

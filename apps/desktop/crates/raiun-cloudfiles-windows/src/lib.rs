@@ -243,7 +243,12 @@ pub enum FileCreateContinuationStage {
     History,
     Capture,
     Remote,
+    NativePreflight,
     NativeCompletion,
+    NativeVerify,
+    NativePublication,
+    NativePostPublish,
+    NativeSeal,
     Custody,
 }
 
@@ -255,7 +260,12 @@ impl fmt::Display for FileCreateContinuationStage {
             Self::History => "saved file verification",
             Self::Capture => "local file capture",
             Self::Remote => "cloud verification",
+            Self::NativePreflight => "local completion preflight",
             Self::NativeCompletion => "local file completion",
+            Self::NativeVerify => "converted file verification",
+            Self::NativePublication => "completed identity publication",
+            Self::NativePostPublish => "postpublication local verification",
+            Self::NativeSeal => "local completion seal",
             Self::Custody => "recovery history completion",
         })
     }
