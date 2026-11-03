@@ -25,6 +25,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import java.security.cert.CertificateException
@@ -206,6 +207,9 @@ class AuthViewModel(
             credentialStore,
             eu.opencloud.android.next.core.security.AccountSessions
                 .get(getApplication()),
+            savedAccountIdentity = { id ->
+                runBlocking { fileStore.account(id)?.let { it.serverUrl to it.userId } }
+            },
         )
     }
 

@@ -21,6 +21,7 @@ class AuthRepository(
     private val api: OpenCloudApi,
     private val credentialStore: CredentialStore,
     private val sessions: AccountSessions = AccountSessions(credentialStore),
+    private val savedAccountIdentity: (String) -> Pair<String, String>? = { null },
 ) {
     private val registrations = ClientRegistrationResolver(api, credentialStore)
 
@@ -139,7 +140,7 @@ class AuthRepository(
     private fun accountId(
         serverUrl: String,
         userId: String,
-    ): String = "${serverUrl.lowercase()}#$userId"
+    ): String = resolveAccountId(serverUrl, userId, savedAccountIdentity)
 
     private fun randomUrlSafeValue(): String =
         ByteArray(32).also(SecureRandom()::nextBytes).let {

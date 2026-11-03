@@ -206,6 +206,103 @@ class FileOperationTest {
             }
         }
 
+    @Test fun `journal before dispatch recovers missing destination with guarded copy and move`() =
+        runTest {
+            for (move in listOf(false, true)) {
+                MockWebServer().use { server ->
+                    val backend = Backend()
+                    server.dispatcher = backend
+                    val client = DavOperationClient(OkHttpClient())
+                    val operation = operation(server).copy(move = move, destinationSpaceId = "s")
+                    var fingerprint: String? = null
+                    try {
+                        executeFileOperation(operation, client, "Bearer test", {}) {
+                            fingerprint = it
+                            throw CancellationException()
+                        }
+                    } catch (_: CancellationException) {
+                        assertTrue(backend.mutations.isEmpty())
+                    }
+                    executeFileOperation(
+                        operation.copy(state = "SENT", fingerprint = fingerprint),
+                        client,
+                        "Bearer test",
+                        {},
+                    ) {
+                        org.junit.Assert.fail("An existing journal must remain intact")
+                    }
+                    assertEquals("hello", backend.files["/target"])
+                    assertEquals(listOf(if (move) "MOVE" else "COPY"), backend.mutations)
+                    assertEquals(!move, backend.files.containsKey("/source"))
+                }
+            }
+        }
+
+    @Test fun `missing destination recovery rejects changed source even with reused etag`() =
+        runTest {
+            MockWebServer().use { server ->
+                val backend = Backend()
+                server.dispatcher = backend
+                val client = DavOperationClient(OkHttpClient())
+                val fingerprint = client.verificationFingerprint(server.url("/source").toString(), "Bearer test") {}
+                backend.files["/source"] = "other"
+                try {
+                    executeFileOperation(
+                        operation(server).copy(state = "SENT", fingerprint = fingerprint),
+                        client,
+                        "Bearer test",
+                        {},
+                    ) {}
+                    org.junit.Assert.fail("Changed source must not be replayed")
+                } catch (failure: OpenCloudException) {
+                    assertEquals(OpenCloudError.PreconditionFailed, failure.error)
+                    assertTrue(backend.mutations.isEmpty())
+                    assertFalse(backend.files.containsKey("/target"))
+                }
+            }
+        }
+
+    @Test fun `late original wins guarded replay without overwrite or duplicate mutation`() =
+        runTest {
+            MockWebServer().use { server ->
+                val backend = Backend(lateOriginal = true)
+                server.dispatcher = backend
+                val client = DavOperationClient(OkHttpClient())
+                val fingerprint = client.verificationFingerprint(server.url("/source").toString(), "Bearer test") {}
+                executeFileOperation(
+                    operation(server).copy(state = "SENT", fingerprint = fingerprint),
+                    client,
+                    "Bearer test",
+                    {},
+                ) {}
+                assertEquals("hello", backend.files["/target"])
+                assertEquals(emptyList<String>(), backend.mutations)
+            }
+        }
+
+    @Test fun `late original before replay source validation verifies destination without resending`() =
+        runTest {
+            for (move in listOf(false, true)) {
+                MockWebServer().use { server ->
+                    val backend = Backend(lateOriginalOnMissingProbe = move)
+                    server.dispatcher = backend
+                    val client = DavOperationClient(OkHttpClient())
+                    val fingerprint = client.verificationFingerprint(server.url("/source").toString(), "Bearer test") {}
+                    executeFileOperation(
+                        operation(
+                            server,
+                        ).copy(move = move, destinationSpaceId = "s", state = "SENT", fingerprint = fingerprint),
+                        client,
+                        "Bearer test",
+                        {},
+                    ) {}
+                    assertEquals("hello", backend.files["/target"])
+                    assertTrue(backend.mutations.isEmpty())
+                    assertEquals(if (move) null else "other", backend.files["/source"])
+                }
+            }
+        }
+
     private fun operation(server: MockWebServer) =
         FileOperationEntity(
             "op",
@@ -225,6 +322,8 @@ class FileOperationTest {
 
     private class Backend(
         private val disconnect: Boolean = false,
+        private val lateOriginal: Boolean = false,
+        private val lateOriginalOnMissingProbe: Boolean? = null,
         private val checksums: Boolean = false,
         private val corruptTarget: Boolean = false,
         private var staleTargetPropfinds: Int = 0,
@@ -241,51 +340,12 @@ class FileOperationTest {
             val path = requireNotNull(request.path)
             val content = files[path]
             return when (request.method) {
-                "PROPFIND" ->
-                    if (content ==
-                        null
-                    ) {
-                        MockResponse().setResponseCode(404)
-                    } else if (path == "/target" && staleTargetPropfinds > 0) {
-                        staleTargetPropfinds--
-                        staleTargetResponses++
-                        MockResponse().setResponseCode(404)
-                    } else {
-                        MockResponse().setResponseCode(207).setBody(
-                            "<d:multistatus xmlns:d=\"DAV:\" xmlns:oc=\"http://owncloud.org/ns\">" +
-                                "<d:response><d:href>$path</d:href><d:propstat><d:prop>" +
-                                "<d:resourcetype/><d:getcontentlength>${content.length}</d:getcontentlength>" +
-                                "<d:getetag>\"v1\"</d:getetag>" +
-                                (
-                                    if (checksums) {
-                                        "<oc:checksums><oc:checksum>SHA256:${sha256(
-                                            content,
-                                        )}</oc:checksum></oc:checksums>"
-                                    } else {
-                                        ""
-                                    }
-                                ) +
-                                "</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>",
-                        )
-                    }
+                "PROPFIND" -> properties(path, content)
                 "GET" -> {
                     downloads++
                     MockResponse().setHeader("ETag", "\"v1\"").setBody(requireNotNull(content))
                 }
-                "MOVE", "COPY" -> {
-                    assertEquals("F", request.getHeader("Overwrite"))
-                    assertEquals("\"v1\"", request.getHeader("If-Match"))
-                    mutations.add(requireNotNull(request.method))
-                    files["/target"] = if (corruptTarget) "other" else requireNotNull(content)
-                    if (request.method == "MOVE") files.remove(path)
-                    if (disconnect) {
-                        MockResponse().setSocketPolicy(
-                            SocketPolicy.DISCONNECT_AFTER_REQUEST,
-                        )
-                    } else {
-                        MockResponse().setResponseCode(201)
-                    }
-                }
+                "MOVE", "COPY" -> mutate(request, path, content)
                 "DELETE" -> {
                     assertEquals("\"v1\"", request.getHeader("If-Match"))
                     mutations.add("DELETE")
@@ -293,6 +353,60 @@ class FileOperationTest {
                     MockResponse().setResponseCode(204)
                 }
                 else -> MockResponse().setResponseCode(405)
+            }
+        }
+
+        private fun properties(
+            path: String,
+            content: String?,
+        ): MockResponse =
+            if (content == null) {
+                if (path == "/target" && lateOriginalOnMissingProbe != null) {
+                    files["/target"] = requireNotNull(files["/source"])
+                    if (lateOriginalOnMissingProbe) files.remove("/source") else files["/source"] = "other"
+                }
+                MockResponse().setResponseCode(404)
+            } else if (path == "/target" && staleTargetPropfinds > 0) {
+                staleTargetPropfinds--
+                staleTargetResponses++
+                MockResponse().setResponseCode(404)
+            } else {
+                MockResponse().setResponseCode(207).setBody(
+                    "<d:multistatus xmlns:d=\"DAV:\" xmlns:oc=\"http://owncloud.org/ns\">" +
+                        "<d:response><d:href>$path</d:href><d:propstat><d:prop>" +
+                        "<d:resourcetype/><d:getcontentlength>${content.length}</d:getcontentlength>" +
+                        "<d:getetag>\"v1\"</d:getetag>" +
+                        (
+                            if (checksums) {
+                                "<oc:checksums><oc:checksum>SHA256:${sha256(
+                                    content,
+                                )}</oc:checksum></oc:checksums>"
+                            } else {
+                                ""
+                            }
+                        ) +
+                        "</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>",
+                )
+            }
+
+        private fun mutate(
+            request: RecordedRequest,
+            path: String,
+            content: String?,
+        ): MockResponse {
+            assertEquals("F", request.getHeader("Overwrite"))
+            assertEquals("\"v1\"", request.getHeader("If-Match"))
+            if (lateOriginal) files["/target"] = requireNotNull(content)
+            if (files.containsKey("/target")) return MockResponse().setResponseCode(412)
+            mutations.add(requireNotNull(request.method))
+            files["/target"] = if (corruptTarget) "other" else requireNotNull(content)
+            if (request.method == "MOVE") files.remove(path)
+            return if (disconnect) {
+                MockResponse().setSocketPolicy(
+                    SocketPolicy.DISCONNECT_AFTER_REQUEST,
+                )
+            } else {
+                MockResponse().setResponseCode(201)
             }
         }
 

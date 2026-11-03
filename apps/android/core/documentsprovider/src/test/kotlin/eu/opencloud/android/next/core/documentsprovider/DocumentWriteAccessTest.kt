@@ -115,6 +115,27 @@ class DocumentWriteAccessTest {
             }
         }
 
+    @Test fun `admission rejects changes after preparation before journal reservation`() =
+        runBlocking<Unit> {
+            val prepared = access.prepare(resource, { true }) {}
+            access.requirePrepared(resource, prepared) { true }
+            for (changed in listOf(resource.copy(eTag = "\"v2\""), resource.copy(path = "/renamed"))) {
+                database.resourceDao().update(changed)
+                assertThrows(IllegalStateException::class.java) {
+                    runBlocking { access.requirePrepared(resource, prepared) { true } }
+                }
+            }
+            database.resourceDao().update(resource)
+            assertThrows(IllegalStateException::class.java) {
+                runBlocking { access.requirePrepared(resource, prepared) { false } }
+            }
+            val replacement = File(cached.parentFile, "replacement").apply { writeText("other") }
+            database.resourceDao().update(resource.copy(localPath = replacement.absolutePath))
+            assertThrows(IllegalStateException::class.java) {
+                runBlocking { access.requirePrepared(resource, prepared) { true } }
+            }
+        }
+
     @Test fun `cancelled or incomplete preparation never returns an editable source`() =
         runBlocking<Unit> {
             val cloud = resource.copy(hasLocalCopy = false, localPath = null)

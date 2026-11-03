@@ -14,6 +14,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
@@ -54,14 +55,15 @@ fun ServerConnectionScreen(
     val routeStore = remember(context) { WifiServerRouteStore(context) }
     val connectionRoute = remember(context) { ServerConnectionRoute(context) }
     val certificatePolicy = remember(context) { ClientCertificatePolicy(context) }
-    var enabled by remember(canonicalServerUrl) { mutableStateOf(false) }
-    var localAddress by remember(canonicalServerUrl) { mutableStateOf("") }
-    var ssid by remember(canonicalServerUrl) { mutableStateOf("") }
-    var mode by remember(canonicalServerUrl) { mutableStateOf(ConnectionMode.AUTOMATIC) }
-    var origins by remember(canonicalServerUrl) { mutableStateOf("") }
-    var selectedAlias by remember(canonicalServerUrl) { mutableStateOf<String?>(null) }
+    var enabled by rememberSaveable(canonicalServerUrl) { mutableStateOf(false) }
+    var localAddress by rememberSaveable(canonicalServerUrl) { mutableStateOf("") }
+    var ssid by rememberSaveable(canonicalServerUrl) { mutableStateOf("") }
+    var mode by rememberSaveable(canonicalServerUrl) { mutableStateOf(ConnectionMode.AUTOMATIC) }
+    var origins by rememberSaveable(canonicalServerUrl) { mutableStateOf("") }
+    var selectedAlias by rememberSaveable(canonicalServerUrl) { mutableStateOf<String?>(null) }
     var hasSavedCertificate by remember(canonicalServerUrl) { mutableStateOf(false) }
-    var removeCertificate by remember(canonicalServerUrl) { mutableStateOf(false) }
+    var removeCertificate by rememberSaveable(canonicalServerUrl) { mutableStateOf(false) }
+    var draftLoaded by rememberSaveable(canonicalServerUrl) { mutableStateOf(false) }
     var status by remember(canonicalServerUrl) { mutableStateOf<WifiRouteStatus?>(null) }
     var busy by remember(canonicalServerUrl) { mutableStateOf(false) }
     var testing by remember(canonicalServerUrl) { mutableStateOf(false) }
@@ -103,17 +105,20 @@ fun ServerConnectionScreen(
         }
         try {
             val loaded = withContext(Dispatchers.IO) { routeStore.find(canonical) }
-            if (loaded != null) {
-                enabled = loaded.enabled
-                localAddress = loaded.localServerUrl
-                ssid = loaded.ssid
-                mode = loaded.mode.toConnectionMode()
+            if (!draftLoaded) {
+                if (loaded != null) {
+                    enabled = loaded.enabled
+                    localAddress = loaded.localServerUrl
+                    ssid = loaded.ssid
+                    mode = loaded.mode.toConnectionMode()
+                }
             }
             val binding = withContext(Dispatchers.IO) { certificatePolicy.load(canonical) }
             hasSavedCertificate = binding != null
             savedAlias = binding?.alias
             savedOrigins = binding?.origins.orEmpty()
-            origins = savedOrigins.sorted().joinToString("\n")
+            if (!draftLoaded) origins = savedOrigins.sorted().joinToString("\n")
+            draftLoaded = true
             status = withContext(Dispatchers.IO) { readRouteStatus(connectionRoute, canonical) }
             loadFailed = false
         } catch (cancelled: CancellationException) {
@@ -179,7 +184,10 @@ fun ServerConnectionScreen(
                         certificatePolicy,
                         origins,
                         canonicalServerUrl,
-                    ) { selectedAlias = it }
+                    ) {
+                        selectedAlias = it
+                        if (it != null) removeCertificate = false
+                    }
                 ) {
                     scope.launch { snackbar.showSnackbar(context.getString(R.string.connection_invalid)) }
                 }

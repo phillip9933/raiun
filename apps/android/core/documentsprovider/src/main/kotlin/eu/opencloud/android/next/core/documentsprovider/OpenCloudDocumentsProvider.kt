@@ -257,9 +257,11 @@ class OpenCloudDocumentsProvider : DocumentsProvider() {
         if (!editPreparationSlots.tryAcquire()) throw FileNotFoundException("Too many documents are currently opening.")
         try {
             return databaseCall {
+                val current = freshness.current(folders.settled(resource, permit), permit)
+                val original = prepareEdit(current, permit, signal)
                 ProviderFolderOperations.namespaceGate.withLock {
-                    val current = freshness.current(folders.settled(resource, permit), permit)
-                    val original = prepareEdit(current, permit, signal)
+                    signal?.throwIfCanceled()
+                    writeAccess.requirePrepared(current, original, permit)
                     DocumentWriteSession(
                         eu.opencloud.android.next.core.sync
                             .DocumentEditStore(requireNotNull(context)),
