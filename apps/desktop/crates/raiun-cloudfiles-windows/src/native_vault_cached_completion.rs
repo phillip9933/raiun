@@ -48,6 +48,62 @@ impl ConfiguredRootConnection {
         if !Arc::ptr_eq(&current, route) {
             return Err(no());
         }
+        // Hash large local bodies while retaining the same protected native
+        // handle, before taking the short route/token/unlock publication fence.
+        // The fence below rechecks this exact FI, USN, size and opaque identity
+        // on that retained handle before it can change the in-sync bit.
+        let root = self.root.as_ref().ok_or_else(no)?;
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        let _prehash_root = pin_registered_configured_root(&root.path, expected.root)?;
+        let mut prehash_path = root.path.clone();
+        for part in &expected.components {
+            prehash_path.push(part);
+        }
+        let (prehashed_file, prehashed_digest) =
+            if expected.entry.as_ref().is_some_and(|e| !e.directory) {
+                let file = ProtectedCompletionFile::open_for_cleanup(&wide_path(&prehash_path)?)?;
+                let before = root_snapshot(file.raw)?;
+                if before.identity.volume_serial != expected.root.volume_serial
+                    || before.identity.file_index != expected.file
+                    || before.file_size != expected.plaintext_len
+                    || before.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+                    || before.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC != 0
+                    || completion_usn(file.raw, expected.file)? != expected.usn
+                    || native_namespace_directory::opaque_directory_identity(file.raw)?
+                        != expected.identity
+                    || !windows_paths_equal(
+                        &final_path_for_handle(file.raw).map_err(|_| no())?,
+                        &prehash_path,
+                    )
+                {
+                    return Err(no());
+                }
+                let mut hash = Sha256::new();
+                let mut offset = 0u64;
+                let mut bytes = Zeroizing::new(vec![0u8; 64 * 1024]);
+                while offset < expected.plaintext_len {
+                    if !proof.provider_current() || backend.vault_copy_route_cancelled(route) {
+                        return Err(no());
+                    }
+                    let len =
+                        usize::try_from((expected.plaintext_len - offset).min(bytes.len() as u64))
+                            .map_err(|_| no())?;
+                    file.read_complete_at(offset, &mut bytes[..len])?;
+                    hash.update(&bytes[..len]);
+                    offset += len as u64;
+                }
+                if !same_edit_snapshot(root_snapshot(file.raw)?, before)
+                    || completion_usn(file.raw, expected.file)? != expected.usn
+                    || native_namespace_directory::opaque_directory_identity(file.raw)?
+                        != expected.identity
+                {
+                    return Err(no());
+                }
+                (Some(file), Some(<[u8; 32]>::from(hash.finalize())))
+            } else {
+                (None, None)
+            };
         let binding = route.backend().binding();
         binding.with_exclusive_completion(|| {
             if backend.vault_copy_route_cancelled(route)
@@ -56,10 +112,18 @@ impl ConfiguredRootConnection {
                 return Err(no());
             }
             let m = proof.metadata();
+            let logical_len = if matches!(
+                m.operation,
+                VaultPendingOperationKind::RenameFile | VaultPendingOperationKind::DeleteFile
+            ) {
+                m.source_size
+            } else {
+                m.plaintext_len
+            };
             if m.id != expected.write_id
                 || m.revision != expected.revision
-                || m.plaintext_len != expected.plaintext_len
-                || proof.plaintext_len() != expected.plaintext_len
+                || logical_len != expected.plaintext_len
+                || proof.plaintext_len() != logical_len
                 || expected.operation != m.operation
                 || proof.entry().is_none() != expected.entry.is_none()
                 || expected.original.as_ref().is_some_and(|original| {
@@ -84,7 +148,8 @@ impl ConfiguredRootConnection {
                 let verified = proof.entry().ok_or_else(no)?;
                 if pending.path != verified.path
                     || pending.directory != verified.directory
-                    || pending.size != verified.size
+                    || (pending.directory && (pending.size != 0 || expected.plaintext_len != 0))
+                    || (!pending.directory && pending.size != verified.size)
                     || !verified.etag.starts_with('"')
                     || !verified.etag.ends_with('"')
                     || (m.operation == VaultPendingOperationKind::RenameFile
@@ -116,7 +181,10 @@ impl ConfiguredRootConnection {
                 });
             }
             let pending = expected.entry.as_ref().ok_or_else(no)?;
-            let protected = ProtectedCompletionFile::open_for_cleanup(&wide_path(&target)?)?;
+            let protected = match prehashed_file {
+                Some(file) => file,
+                None => ProtectedCompletionFile::open_for_cleanup(&wide_path(&target)?)?,
+            };
             let snapshot = root_snapshot(protected.raw)?;
             if snapshot.identity.volume_serial != expected.root.volume_serial
                 || snapshot.identity.file_index != expected.file
@@ -142,18 +210,7 @@ impl ConfiguredRootConnection {
                     .plaintext_sha256()
                     .or(expected.source_sha256)
                     .ok_or_else(no)?;
-                let mut hash = Sha256::new();
-                let mut offset = 0u64;
-                let mut bytes = Zeroizing::new(vec![0u8; 64 * 1024]);
-                while offset < expected.plaintext_len {
-                    let len =
-                        usize::try_from((expected.plaintext_len - offset).min(bytes.len() as u64))
-                            .map_err(|_| no())?;
-                    protected.read_complete_at(offset, &mut bytes[..len])?;
-                    hash.update(&bytes[..len]);
-                    offset += len as u64;
-                }
-                let actual: [u8; 32] = hash.finalize().into();
+                let actual = prehashed_digest.ok_or_else(no)?;
                 if actual != digest
                     || proof.plaintext_sha256().is_some_and(|remote| {
                         expected.source_sha256.is_some_and(|local| local != remote)
