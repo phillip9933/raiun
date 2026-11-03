@@ -1,7 +1,7 @@
 // Cached close notifications retain their original protected capture. A local
 // journal receipt never grants remote or native clean-completion authority.
-// Activation waits for the native queued namespace and reconciliation adapters.
-const WINDOWS_VAULT_OFFLINE_WRITES_ENABLED: bool = false;
+// Native queued namespace, protected custody and guarded reconciliation are connected.
+const WINDOWS_VAULT_OFFLINE_WRITES_ENABLED: bool = true;
 impl WindowsAgent {
     fn check_cached_save_worker_account(
         &self,

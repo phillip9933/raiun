@@ -4,7 +4,7 @@ export function nativeVaultOperations(value: unknown): NativeVaultOperation[] {
   if (!Array.isArray(value) || value.length > known.length || value.some(item => typeof item !== 'string' || !known.includes(item as NativeVaultOperation)) || new Set(value).size !== value.length) return [];
   return known.filter(operation => value.includes(operation));
 }
-export function nativeVaultOperationMessage(operations: readonly NativeVaultOperation[]): string {
+export function nativeVaultOperationMessage(operations: readonly NativeVaultOperation[], offline = false): string {
   const has = (operation: NativeVaultOperation) => operations.includes(operation);
   const actions: string[] = [];
   if (has('create_file')) actions.push('add files');
@@ -19,5 +19,5 @@ export function nativeVaultOperationMessage(operations: readonly NativeVaultOper
   if (has('delete_empty_folder')) actions.push('delete empty folders');
   if (!actions.length) return 'This encrypted location is currently read-only in the Windows drive.';
   const list = actions.length === 1 ? actions[0] : `${actions.slice(0, -1).join(', ')} and ${actions[actions.length - 1]}`;
-  return `While connected, you can ${list} through the Windows drive. File creation and supported saves accept files up to 1 GiB. Existing read-only files remain read-only.`;
+  return `${offline ? 'While offline' : 'While connected'}, you can ${list} through the Windows drive. File creation and supported saves accept files up to 1 GiB.${offline ? ' Changes stay on this device until you reconnect and retry pending changes.' : ''} Existing read-only files remain read-only.`;
 }

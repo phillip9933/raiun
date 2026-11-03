@@ -2860,7 +2860,7 @@ function encryptedAccessModal(workspace = false) {
     : '<div class="vault-hint" role="status">Connect this account to browse cloud locations. Saved encrypted locations may still be available below.</div>';
   const savedLocations = copyProducerUi.source || (nativeVaultAccess() && !nativeVaultOfflineAvailable()) ? '' : `<section class="cached-vault-section"><div class="encrypted-access-divider">Saved encrypted locations</div>${cachedVaultRootsUi.error ? `<div class="vault-error" role="alert">${esc(cachedVaultRootsUi.error)} <button class="text-button" data-action="refresh-cached-vault-roots">Try again</button></div>` : ''}${cachedContent}<div class="cached-vault-actions"><button class="button subtle" data-action="refresh-cached-vault-roots" ${cachedVaultRootsUi.loading ? 'disabled' : ''}>Refresh saved locations</button></div></section>`;
   const sections = `${copyProducerUi.source ? '<button class="button subtle" data-action="cancel-vault-copy">Cancel copy</button>' : ''}${savedLocations}${onlineContent}`;
-  const passwordHelp = `<details class="workspace-help"><summary>How remembered passwords work</summary><p>Your vault password is not saved unless you choose “Remember on this device.” When you opt in and the unlock succeeds, Raiun stores the password in the operating system’s protected credential store for this account and vault.</p><p>Locking a vault does not remove a saved password. Use “Forget saved key” in the unlock window to remove it. Saved encrypted snapshots are read-only while offline; other operations depend on the connected drive and supported features.</p></details>`;
+  const passwordHelp = `<details class="workspace-help"><summary>How remembered passwords work</summary><p>Your vault password is not saved unless you choose “Remember on this device.” When you opt in and the unlock succeeds, Raiun stores the password in the operating system’s protected credential store for this account and vault.</p><p>Locking a vault does not remove a saved password. Use “Forget saved key” in the unlock window to remove it. Offline editing depends on the supported operations shown for the unlocked location. Changes stay on this device until you reconnect and retry them.</p></details>`;
   if (workspace) return `<div class="page-title-row"><div><div class="eyebrow">END-TO-END ENCRYPTION</div><h1>Encrypted files</h1><p class="lede">Unlock an encrypted Space or folder. This does not add a sync folder.</p></div></div><div class="settings-stack encrypted-workspace"><section class="settings-card">${sections}</section>${passwordHelp}</div>`;
   return `<div class="modal-backdrop" data-backdrop="encrypted-access"><section class="modal encrypted-access-modal" role="dialog" aria-modal="true" aria-labelledby="encrypted-access-title"><div class="modal-top"><div><div class="eyebrow">END-TO-END ENCRYPTION</div><h2 id="encrypted-access-title">${copyProducerUi.source ? 'Choose copy destination' : 'Unlock encrypted files'}</h2></div><button class="icon-button" data-action="close-encrypted-access" aria-label="Close">${svg('close')}</button></div><p class="modal-lede">${copyProducerUi.source ? `Choose another online encrypted location for ${esc(copyProducerUi.source.displayName)}. Raiun keeps the original file in place.` : 'Unlock this location to open its files from your OpenCloud drive. You do not need to set up a synced folder.'}</p>${sections}</section></div>`;
 }
@@ -2943,7 +2943,7 @@ function vaultOfflinePinPanel(flow: VaultDialogState) {
     ? `<button class="button subtle" data-vault-pin-start ${!canStart ? 'disabled' : ''}>${flow.pinBusy ? 'Starting…' : 'Keep available offline'}</button>`
     : '';
   const offlineNote = nativeVaultAccess() ? `<small class="vault-pin-note">Saved encrypted snapshots require the vault password. ${nativeVaultOfflineWriteAvailable() ? 'Supported offline changes stay saved until you reconnect and retry.' : 'Windows cached access is read-only.'} Reconnect to refresh snapshots.</small>` : flow.offlineUnlockOnly
-    ? flow.vaultMountExistingFileOverwrite
+    ? (flow.vaultMountExistingFileOverwrite || flow.vaultMountExistingFileInPlace)
       ? '<small class="vault-pin-note">This saved snapshot is open offline. Supported edits and new files or folders stay on this device until you reconnect. Review pending changes before retrying.</small>'
       : '<small class="vault-pin-note">This location is open from its saved snapshot. It is read-only until the mounted drive and private edit storage are ready. Connect to refresh it.</small>'
     : !state.status?.connected
@@ -2953,14 +2953,14 @@ function vaultOfflinePinPanel(flow: VaultDialogState) {
 }
 
 function nativeExistingFileSaveMessage(flow = state.vaultDialog) {
-  if (flow?.vaultNativeOperations?.length) return nativeVaultOperationMessage(flow.vaultNativeOperations);
+  if (flow?.vaultNativeOperations?.length) return nativeVaultOperationMessage(flow.vaultNativeOperations, flow.offlineUnlockOnly);
   return 'While connected, you can add files up to 1 GiB and folders through the Windows drive. Supported files up to 1 GiB can also be saved in place using an app that writes directly into the existing file. This agent has not confirmed other encrypted file operations. Existing read-only files remain read-only.';
 }
 
 function nativeVaultDrivePanel(flow: VaultDialogState, busy: boolean) {
   const ready = !flow.statusUnknown && flow.unlocked && !nativeVaultLockIncomplete(flow) && flow.vaultMountReady && state.status?.mounted === true && (state.status?.connected === true || (flow.offlineUnlockOnly && state.status?.offline_namespace === true));
   const existingFileSaves = ready && flow.vaultMountExistingFileInPlace;
-  return `<section class="vault-native-read-only"><b>${existingFileSaves ? 'Windows drive access' : 'Read-only Windows drive access'}</b><p>${nativeVaultLockIncomplete(flow) ? esc(nativeVaultLockMessage(flow.lockCleanupStatus, flow.unlocked)) : existingFileSaves ? nativeExistingFileSaveMessage() : ready ? 'Open the OpenCloud drive and navigate to this encrypted location to read its files. Files cannot be edited here.' : 'The encrypted location is unlocked, but native drive access has not been confirmed. Close and reopen this dialog to check drive access.'}</p><button class="button primary" data-vault-action="open-native" ${busy || !ready ? 'disabled' : ''}>Open OpenCloud drive</button><small>${flow.offlineUnlockOnly ? 'Verified cached content is read-only. Missing cached files cannot be downloaded until you reconnect.' : 'In-app browsing is read-only. Use Keep available offline to save an encrypted snapshot.'} Locking denies new reads; it cannot retract copies already read by other apps.</small></section>`;
+  return `<section class="vault-native-read-only"><b>${existingFileSaves ? 'Windows drive access' : 'Read-only Windows drive access'}</b><p>${nativeVaultLockIncomplete(flow) ? esc(nativeVaultLockMessage(flow.lockCleanupStatus, flow.unlocked)) : existingFileSaves ? nativeExistingFileSaveMessage() : ready ? 'Open the OpenCloud drive and navigate to this encrypted location to read its files. Files cannot be edited here.' : 'The encrypted location is unlocked, but native drive access has not been confirmed. Close and reopen this dialog to check drive access.'}</p><button class="button primary" data-vault-action="open-native" ${busy || !ready ? 'disabled' : ''}>Open OpenCloud drive</button><small>${flow.offlineUnlockOnly ? existingFileSaves ? 'Supported edits stay on this device until you reconnect and retry pending changes. Missing cached files cannot be downloaded offline.' : 'Verified cached content is read-only. Missing cached files cannot be downloaded until you reconnect.' : 'In-app browsing is read-only. Use Keep available offline to save an encrypted snapshot.'} Locking denies new reads; it cannot retract copies already read by other apps.</small></section>`;
 }
 async function openNativeVaultDrive() {
   const flow = state.vaultDialog;
@@ -3043,7 +3043,7 @@ function vaultDialog() {
     : nativeVaultAccess() && !flow.unlocked
       ? nativeVaultLockMessage(flow.lockCleanupStatus, false)
     : flow.unlocked
-      ? flow.offlineUnlockOnly ? flow.offlinePinId ? flow.vaultMountExistingFileOverwrite ? 'Unlocked from verified snapshot · supported offline edits are enabled' : 'Unlocked from a verified encrypted snapshot · read-only' : 'Unlocked from saved encrypted location; complete offline copy not confirmed · limited offline access' : 'Unlocked for this account'
+      ? flow.offlineUnlockOnly ? flow.offlinePinId ? (flow.vaultMountExistingFileOverwrite || flow.vaultMountExistingFileInPlace) ? 'Unlocked from verified snapshot · supported offline edits are enabled' : 'Unlocked from a verified encrypted snapshot · read-only' : 'Unlocked from saved encrypted location; complete offline copy not confirmed · limited offline access' : 'Unlocked for this account'
       : flow.initialized
         ? flow.offlineUnlockOnly ? flow.offlinePinId ? 'Verified encrypted offline copy · unlock to browse names' : 'Saved encrypted location · offline snapshot availability not confirmed' : flow.intent === 'browse' ? 'Locked · unlock to browse encrypted names' : 'Locked · unlock to resume sync and browse names'
         : 'No usable integrity token was found. This folder cannot be unlocked.';
@@ -4433,7 +4433,7 @@ async function openVaultFlow(intent: VaultDialogState['intent'], spaceId: string
     rememberNativePendingRoot(flow,inspectedAuthGeneration);
     flow.vaultMountWritable = typeof inspected.vault_mount_writable === 'boolean' ? inspected.vault_mount_writable : null;
     flow.vaultMountExistingFileOverwrite = inspected.vault_mount_existing_file_overwrite === true;
-    flow.vaultMountExistingFileInPlace = nativeVaultAccess() && !flow.offlineUnlockOnly && flow.unlocked && flow.vaultMountReady && inspected.vault_mount_existing_file_in_place === true;
+    flow.vaultMountExistingFileInPlace = nativeVaultAccess() && flow.unlocked && flow.vaultMountReady && inspected.vault_mount_existing_file_in_place === true;
     flow.vaultNativeOperations = flow.vaultMountExistingFileInPlace ? nativeVaultOperations(inspected.vault_native_operations) : [];
     flow.vaultMountExistingFileOverwriteReason = safeVaultExistingOverwriteReason(inspected.vault_mount_existing_file_overwrite_reason);
     flow.vaultMountWriteUnavailableReason = safeVaultMountWriteReason(inspected.vault_mount_write_unavailable_reason);
@@ -5207,7 +5207,7 @@ async function unlockVault(useSaved = false) {
     updateNativeVaultLockCleanup(flow, undefined, 'unlock');
     flow.vaultMountWritable = typeof unlocked.vault_mount_writable === 'boolean' ? unlocked.vault_mount_writable : null;
     flow.vaultMountExistingFileOverwrite = unlocked.vault_mount_existing_file_overwrite === true;
-    flow.vaultMountExistingFileInPlace = nativeVaultAccess() && !flow.offlineUnlockOnly && flow.unlocked && flow.vaultMountReady && unlocked.vault_mount_existing_file_in_place === true;
+    flow.vaultMountExistingFileInPlace = nativeVaultAccess() && flow.unlocked && flow.vaultMountReady && unlocked.vault_mount_existing_file_in_place === true;
     flow.vaultNativeOperations = flow.vaultMountExistingFileInPlace ? nativeVaultOperations(unlocked.vault_native_operations) : [];
     flow.vaultMountExistingFileOverwriteReason = safeVaultExistingOverwriteReason(unlocked.vault_mount_existing_file_overwrite_reason);
     flow.vaultMountWriteUnavailableReason = safeVaultMountWriteReason(unlocked.vault_mount_write_unavailable_reason);
@@ -5363,7 +5363,7 @@ async function lockVault() {
     flow.vaultMountReady = locked.vault_mount_ready === true;
     flow.vaultMountWritable = typeof locked.vault_mount_writable === 'boolean' ? locked.vault_mount_writable : null;
     flow.vaultMountExistingFileOverwrite = locked.vault_mount_existing_file_overwrite === true;
-    flow.vaultMountExistingFileInPlace = nativeVaultAccess() && !flow.offlineUnlockOnly && flow.unlocked && flow.vaultMountReady && locked.vault_mount_existing_file_in_place === true;
+    flow.vaultMountExistingFileInPlace = nativeVaultAccess() && flow.unlocked && flow.vaultMountReady && locked.vault_mount_existing_file_in_place === true;
     flow.vaultNativeOperations = flow.vaultMountExistingFileInPlace ? nativeVaultOperations(locked.vault_native_operations) : [];
     flow.vaultMountExistingFileOverwriteReason = safeVaultExistingOverwriteReason(locked.vault_mount_existing_file_overwrite_reason);
     flow.vaultMountWriteUnavailableReason = safeVaultMountWriteReason(locked.vault_mount_write_unavailable_reason);
@@ -5412,7 +5412,7 @@ async function reconcileVaultLockStatus(flow: VaultDialogState, accountEpoch: nu
     rememberNativePendingRoot(flow,inspectedAuthGeneration);
     flow.vaultMountWritable = typeof inspected.vault_mount_writable === 'boolean' ? inspected.vault_mount_writable : null;
     flow.vaultMountExistingFileOverwrite = inspected.vault_mount_existing_file_overwrite === true;
-    flow.vaultMountExistingFileInPlace = nativeVaultAccess() && !flow.offlineUnlockOnly && flow.unlocked && flow.vaultMountReady && inspected.vault_mount_existing_file_in_place === true;
+    flow.vaultMountExistingFileInPlace = nativeVaultAccess() && flow.unlocked && flow.vaultMountReady && inspected.vault_mount_existing_file_in_place === true;
     flow.vaultNativeOperations = flow.vaultMountExistingFileInPlace ? nativeVaultOperations(inspected.vault_native_operations) : [];
     flow.vaultMountExistingFileOverwriteReason = safeVaultExistingOverwriteReason(inspected.vault_mount_existing_file_overwrite_reason);
     flow.vaultMountWriteUnavailableReason = safeVaultMountWriteReason(inspected.vault_mount_write_unavailable_reason);

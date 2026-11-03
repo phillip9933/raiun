@@ -148,6 +148,21 @@ impl WindowsAgent {
                 .backend
                 .list_cached_vault(&request.space_id, &request.root_path, &resource, "/")
                 .is_ok();
+        let saves_ready = WINDOWS_VAULT_OFFLINE_WRITES_ENABLED
+            && ready
+            && self
+                .provider
+                .existing_vault_save_worker_marker(&active)?
+                .is_some_and(|m| m.load(Ordering::Acquire))
+            && verified
+                .backend
+                .vault_existing_file_saves_active(
+                    active.identity,
+                    &request.space_id,
+                    &resource,
+                    &request.root_path,
+                )
+                .unwrap_or(false);
         let incomplete = self
             .provider
             .vault_lock_cleanup_status(
@@ -159,7 +174,7 @@ impl WindowsAgent {
             .ok();
         self.check_windows_vault_offline_account(&context)?;
         Ok(
-            json!({"initialized":true,"unlocked":unlocked,"root_path":request.root_path,"root_resource_id":resource,"vault_mount_ready":ready,"vault_mount_writable":false,"vault_mount_existing_file_in_place":false,"vault_mount_existing_file_overwrite":false,"vault_native_operations":[],"vault_mount_write_unavailable_reason":"offline_read_only","vault_lock_cleanup_status":if incomplete==Some(true){"incomplete"}else if incomplete==Some(false){"complete"}else{"unknown"}}),
+            json!({"initialized":true,"unlocked":unlocked,"root_path":request.root_path,"root_resource_id":resource,"vault_mount_ready":ready,"vault_mount_writable":false,"vault_mount_existing_file_in_place":saves_ready,"vault_mount_existing_file_overwrite":false,"vault_native_operations":cached_vault_native_operations(saves_ready),"vault_mount_write_unavailable_reason":if saves_ready {None}else{Some("offline_read_only")},"vault_lock_cleanup_status":if incomplete==Some(true){"incomplete"}else if incomplete==Some(false){"complete"}else{"unknown"}}),
         )
     }
     fn reconnect_windows_cached_provider(&self, request: &Value) -> Result<Value, String> {
@@ -419,8 +434,18 @@ impl WindowsAgent {
                 root_path.clone(),
             )?;
             self.check_windows_vault_offline_account(&context)?;
+            let saves_ready = WINDOWS_VAULT_OFFLINE_WRITES_ENABLED
+                && verified
+                    .backend
+                    .vault_existing_file_saves_active(
+                        context._root.identity(),
+                        scope.space_id(),
+                        scope.resource_id(),
+                        &root_path,
+                    )
+                    .unwrap_or(false);
             Ok(
-                json!({"unlocked":true,"offline":true,"root_path":root_path,"root_resource_id":scope.resource_id(),"auth_generation":generation,"vault_mount_ready":true,"vault_mount_writable":false,"vault_mount_existing_file_in_place":false,"vault_mount_existing_file_overwrite":false,"vault_mount_write_unavailable_reason":"offline_read_only","vault_native_operations":[],"pin_id":pin.map(|p|p.0.as_str()),"generation":pin.map(|p|p.1)}),
+                json!({"unlocked":true,"offline":true,"root_path":root_path,"root_resource_id":scope.resource_id(),"auth_generation":generation,"vault_mount_ready":true,"vault_mount_writable":false,"vault_mount_existing_file_in_place":saves_ready,"vault_mount_existing_file_overwrite":false,"vault_mount_write_unavailable_reason":if saves_ready {None}else{Some("offline_read_only")},"vault_native_operations":cached_vault_native_operations(saves_ready),"pin_id":pin.map(|p|p.0.as_str()),"generation":pin.map(|p|p.1)}),
             )
         })();
         if result.is_err() {
@@ -428,5 +453,20 @@ impl WindowsAgent {
             let _ = self.vault_sessions.lock(&scope);
         }
         result
+    }
+}
+
+fn cached_vault_native_operations(ready: bool) -> Value {
+    if ready {
+        json!([
+            "create_file",
+            "create_folder",
+            "save_in_place",
+            "rename_file",
+            "move_file",
+            "delete_file"
+        ])
+    } else {
+        json!([])
     }
 }

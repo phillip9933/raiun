@@ -12,8 +12,8 @@ than current capability claims.
 | --- | --- | --- |
 | GUI accounts, settings, Sharing, ordinary offline files and Sync Folders | Shared frontend and account-scoped services; Windows uses DPAPI and Cloud Files, Linux uses Secret Service and FUSE. | Finished-candidate basic startup/sign-in and normal file workflow. |
 | Ordinary Windows drive operations | File/folder creation, clean file and empty-directory deletion, file/folder rename and same-Space moves, streamed existing saves and recoverable replacement saves are connected for Personal and writable Spaces. Unicode rename hints use Windows ordinal alias checks. | Finished-candidate basic file workflow; existing permission, conflict and dirty-state refusals remain. |
-| Encrypted online Windows files | File/folder creation, streamed existing saves, protected replacement saves, clean file rename, same-vault file moves and clean file deletion are integrated. Remote mutations are conditional and completion requires verified remote and native readback. | Directory rename/move and empty-directory deletion are being integrated separately. |
-| Encrypted Windows offline content | Snapshot pin/list/remove/quota/cancel controls, password-authenticated cached unlock, read-only native browsing and reconnect are integrated. Cache-only clients have no bearer credential and cannot issue network requests. | Secure queued writes and reconnect reconciliation; read-only capability remains until that complete path is connected. |
+| Encrypted online Windows files | File/folder creation, streamed existing saves, protected replacement saves, clean file/folder rename and same-vault moves, file deletion and empty-directory deletion are integrated. Remote mutations are conditional and completion requires verified remote and native readback. | Final-package basic workflow; compilation is not native acceptance. |
+| Encrypted Windows offline content | Snapshot controls, password-authenticated cached unlock, native browsing, queued in-place file saves, file/folder creation, file rename/move/delete and queued subtree retarget are connected. Reconnect retains exact protected pending edits; explicit retry joins fresh SDK verification, native completion and durable custody. Cache-only clients have no bearer credential or network authority. | Final candidate packaging and basic native workflow. Stable existing-folder rename/delete stay online-only; replacement-style editors are not advertised for cached access. |
 | Headless CLI MVP | Both systems support foreground serve, status, Spaces, mount/unmount, configuration and supported sign-in/reconnect operations. Platform credential, registration, service and state-isolation policies remain explicit. | No missing Windows command-layer MVP was found. Headless mount-only mode excludes folder/media sync and vault commands on both systems. |
 
 Encrypted creation and supported saves currently accept files up to 1 GiB on
@@ -21,6 +21,10 @@ Windows using bounded streams and protected recovery. Explicit copy between two
 unlocked vaults is limited to 16 MiB on both platforms. Clean directory operations
 use a bounded exact subtree; recursive cloud deletion is not enabled. Unknown,
 foreign, dirty or active-writer state refuses rather than discarding local data.
+Queued file/directory retarget is bounded to 64 operations and 64 MiB.
+Cached access advertises only supported operations; stable directory rename/delete
+and replacement-style editors require an online route. Guarded cached retry does
+not admit copy operations without their source-specific proof.
 The initial encrypted replacement path requires a previously hydrated original;
 unsupported replacement strategies retain local recovery instead of claiming
 successful completion. These bounds are not a claim of unlimited parity.
@@ -30,9 +34,12 @@ replacement and deletion histories project only exact verified current identitie
 old records are not rewritten to manufacture new authority. Lock/reconnect keeps
 account/vault/root binding, and cache eviction remains separate from cloud deletion.
 
-Current source passed the affected Linux Agent/CLI compilation and frontend build.
-Individual Windows changes passed affected cross-compilation; the final composed
-Windows build remains required after the remaining implementation is integrated.
+Current source passed affected Linux Agent/CLI compilation, the composed Windows
+Agent/CLI cross-compilation, formatting and the frontend production build.
+The previous interim Windows installer passed basic upgrade/startup and synthetic
+preservation checks; the Linux interim packages passed signed-out startup and
+normal quit. These interims do not include the final cached-write integration.
+Final packages and their agreed basic checks remain required.
 Compilation does not establish Explorer/editor/native acceptance. No new source
 has been signed or published, and no owner-device installation of this resumed
 parity work has occurred.

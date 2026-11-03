@@ -1,5 +1,24 @@
 # Desktop implementation status
 
+## Current candidate — 3 November 2026
+
+The canonical Linux/Windows GUI and headless CLI source is consolidated in the
+Desktop coordinator's worktree. Ordinary Windows file operations and online
+encrypted file/folder create, save, replacement, rename/move, file deletion and
+empty-directory deletion are connected. Cached encrypted access now connects
+protected queued file saves, creation, file rename/delete, bounded queued subtree
+retarget and explicit online reconciliation through SDK and native verification.
+Only its actual supported operations are advertised; existing-folder rename/delete
+and replacement-style editors remain online-only. See [current parity status](GUI-PARITY.md)
+for bounds and actual validation scope.
+
+The composed Windows Agent/CLI and affected Linux source compile; formatting and
+the frontend build pass. Final package production and the agreed basic checks are
+next. Interim packages and their startup/upgrade receipts are preserved separately;
+no native acceptance is inferred from source checks. No new release is published.
+Older sections below are historical implementation records, not current activation
+or remaining-work claims.
+
 ## Current baseline and urgent patch — 27 October 2026
 
 Linux and Windows Desktop 0.7.0-beta.2 were published together. The owner requested
