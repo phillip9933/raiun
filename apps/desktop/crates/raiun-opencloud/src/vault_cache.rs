@@ -505,6 +505,65 @@ impl VaultOfflineCache {
     /// framed and encrypted with the verified vault session before the generic
     /// cache sees it; only the random ID, revision, size, and lifecycle state
     /// are stored outside the ciphertext.
+    #[cfg(windows)]
+    pub(crate) fn queue_edit_reader<R: Read>(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        epoch: &raiun_vault::session::VaultSessionEpoch,
+        source: &mut R,
+        request: VaultPendingEditRequest<'_>,
+        expected_sha: [u8; 32],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        self.queue_operation_inner_encoded(
+            sessions,
+            source,
+            VaultPendingOperationRequest {
+                integrity_token: request.integrity_token,
+                encoded_target: request.encoded_target,
+                operation: VaultPendingOperationKind::Overwrite,
+                base: WriteCondition::Match(request.base_etag.to_owned()),
+                base_resource_id: Some(request.base_resource_id),
+                parent_resource_id: None,
+                parent_etag: None,
+                parent_ref: None,
+                destination_target: None,
+                destination_parent_resource_id: None,
+                destination_parent_etag: None,
+                source_size: None,
+                source_ciphertext_sha256: None,
+                copy_source: None,
+                existing_id: request.existing_id,
+                body_len: request.body_len,
+                state: CiphertextWriteState::Pending,
+                receipt_resource_id: None,
+                receipt_etag: None,
+                receipt_for_revision: None,
+            },
+            None,
+            |source, metadata, length, path| {
+                let prefix = envelope_prefix(metadata, length)?;
+                let mut body = windows_pending::ExactDigestReader::new(
+                    source,
+                    length,
+                    expected_sha,
+                    cancelled,
+                );
+                let mut chain = io::Cursor::new(&*prefix).chain(&mut body);
+                sessions
+                    .encrypt_file_transactional_at_epoch(
+                        &self.scope,
+                        epoch,
+                        &mut chain,
+                        path,
+                        prefix.len() as u64 + length,
+                        MAX_EDIT_BYTES + EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64,
+                    )
+                    .map_err(vault_error)
+            },
+        )
+    }
+
     pub(crate) fn queue_edit<R: Read + Seek>(
         &self,
         sessions: &VaultSessionCoordinator,
@@ -1398,7 +1457,7 @@ impl VaultOfflineCache {
         )
     }
 
-    fn queue_operation_inner_encoded<R: Read + Seek>(
+    fn queue_operation_inner_encoded<R: Read>(
         &self,
         sessions: &VaultSessionCoordinator,
         source: &mut R,

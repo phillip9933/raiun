@@ -325,3 +325,65 @@ impl Seek for PendingBodyReadSeek<'_> {
         Ok(self.position)
     }
 }
+
+/// Final EOF is part of the encoder transaction: reject wrong protected-body
+/// bytes before ciphertext can be published into the journal.
+pub(super) struct ExactDigestReader<'a, R: Read> {
+    source: &'a mut R,
+    remaining: u64,
+    digest: Sha256,
+    expected: [u8; 32],
+    checked: bool,
+    cancelled: &'a dyn Fn() -> bool,
+}
+impl<'a, R: Read> ExactDigestReader<'a, R> {
+    pub(super) fn new(
+        source: &'a mut R,
+        length: u64,
+        expected: [u8; 32],
+        cancelled: &'a dyn Fn() -> bool,
+    ) -> Self {
+        Self {
+            source,
+            remaining: length,
+            digest: Sha256::new(),
+            expected,
+            checked: false,
+            cancelled,
+        }
+    }
+}
+impl<R: Read> Read for ExactDigestReader<'_, R> {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if (self.cancelled)() {
+            return Err(io::Error::other("encrypted edit operation was cancelled"));
+        }
+        if output.is_empty() {
+            return Ok(0);
+        }
+        if self.remaining > 0 {
+            let maximum = output
+                .len()
+                .min(self.remaining.min(usize::MAX as u64) as usize);
+            let count = self.source.read(&mut output[..maximum])?;
+            if count == 0 {
+                return Err(io::Error::other("protected edit source is truncated"));
+            }
+            self.digest.update(&output[..count]);
+            self.remaining -= count as u64;
+            return Ok(count);
+        }
+        if !self.checked {
+            let mut extra = Zeroizing::new([0u8; 1]);
+            if self.source.read(&mut *extra)? != 0
+                || self.digest.clone().finalize().as_slice() != self.expected
+            {
+                return Err(io::Error::other(
+                    "protected edit source digest or length changed",
+                ));
+            }
+            self.checked = true;
+        }
+        Ok(0)
+    }
+}
