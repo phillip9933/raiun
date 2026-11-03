@@ -58,6 +58,7 @@ impl OpenCloudPlaceholderBackend {
             }
 
             let mut entries = Vec::new();
+            let mut listed_entries = 0;
             let mut names = std::collections::HashSet::new();
             let mut ids = std::collections::HashSet::new();
             self.client.list_with_context(
@@ -65,12 +66,13 @@ impl OpenCloudPlaceholderBackend {
                 &directory.path,
                 context,
                 &mut |entry| {
-                    if entries.len() >= MAX_DIRECTORY_CHILDREN {
+                    if listed_entries >= MAX_DIRECTORY_CHILDREN {
                         return Err(raiun_core::backend::CloudError::new(
                             ErrorKind::InvalidResponse,
                             "directory exceeds its provider entry limit",
                         ));
                     }
+                    listed_entries += 1;
                     let name =
                         direct_child_name(&directory.path, &entry.path).ok_or_else(|| {
                             raiun_core::backend::CloudError::new(
@@ -78,7 +80,36 @@ impl OpenCloudPlaceholderBackend {
                                 "directory listing contains an invalid child path",
                             )
                         })?;
-                    if entry.encrypted {
+                    // Validate the entire listing, including excluded vaults:
+                    // a plaintext alias must never reuse a hidden vault's name
+                    // or resource identity.
+                    if !valid_windows_component(name)
+                        || !valid_remote_id(&entry.id)
+                        || !names.insert(name.to_lowercase())
+                        || !ids.insert(entry.id.clone())
+                        || (!entry.directory && (entry.etag.is_empty() || entry.etag.len() > 4096))
+                    {
+                        return Err(raiun_core::backend::CloudError::new(
+                            ErrorKind::InvalidResponse,
+                            "directory listing contains an unsupported child",
+                        ));
+                    }
+                    if entry.encrypted
+                        || self
+                            .known_vault_root(&directory.space_id, &entry.path)
+                            .map_err(|_| {
+                                raiun_core::backend::CloudError::new(
+                                    ErrorKind::Forbidden,
+                                    "Encrypted root admission could not be verified",
+                                )
+                            })?
+                    {
+                        // An inaccessible encrypted child must not deny its
+                        // ordinary siblings. Exclude it before any plaintext
+                        // identity/cache publication; only an admitted vault
+                        // route may publish that child. Keep the parent listing
+                        // fresh-only even when the encrypted child is excluded.
+                        vault_entry_seen.set(true);
                         if !self
                             .accepted_encrypted_root(&directory.space_id, &entry)
                             .map_err(|_| {
@@ -88,23 +119,8 @@ impl OpenCloudPlaceholderBackend {
                                 )
                             })?
                         {
-                            return Err(raiun_core::backend::CloudError::new(
-                                ErrorKind::Forbidden,
-                                "Encrypted root is not admitted",
-                            ));
+                            return Ok(());
                         }
-                        vault_entry_seen.set(true);
-                    }
-                    if !valid_windows_component(name)
-                        || !valid_remote_id(&entry.id)
-                        || !names.insert(name.to_owned())
-                        || !ids.insert(entry.id.clone())
-                        || (!entry.directory && (entry.etag.is_empty() || entry.etag.len() > 4096))
-                    {
-                        return Err(raiun_core::backend::CloudError::new(
-                            ErrorKind::InvalidResponse,
-                            "directory listing contains an unsupported child",
-                        ));
                     }
                     entries.push((name.to_owned(), entry));
                     Ok(())
