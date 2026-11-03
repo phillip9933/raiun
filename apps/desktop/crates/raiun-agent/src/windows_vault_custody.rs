@@ -740,6 +740,105 @@ impl WindowsVaultCustody {
         }
         Ok((scope, self.store.0.clone(), expected))
     }
+    pub(super) fn audit_cached_pending_for_disconnect(
+        &self,
+        active: &raiun_cloudfiles_windows::ConfiguredRootConnection,
+        owner: &ProviderScope,
+    ) -> Result<bool> {
+        if owner != &self.owner || self.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(refused());
+        }
+        active
+            .audit_cached_pending_for_disconnect(self, owner, &self.registration)
+            .map_err(|_| refused())
+    }
+    pub(super) fn cleanup_clean_history_preserving_cached_pending(
+        &self,
+        active: &raiun_cloudfiles_windows::ConfiguredRootConnection,
+        route: &raiun_cloudfiles_windows::vault_routes::VerifiedVaultRoute,
+        owner: &ProviderScope,
+    ) -> Result<bool> {
+        if owner != &self.owner || self.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(refused());
+        }
+        active
+            .cleanup_retired_vault_route_preserving_cached_pending(
+                route,
+                self,
+                owner,
+                &self.registration,
+            )
+            .map_err(|_| refused())
+    }
+    pub(super) fn record_reconciled_native(
+        &self,
+        scope: &Scope,
+        expected: &raiun_cloudfiles_windows::VaultCachedNativeExpectation,
+        proof: &raiun_opencloud::vault_backend::VaultReconciledPending,
+        completed: &raiun_cloudfiles_windows::VaultCachedNativeCompleted,
+    ) -> Result<()> {
+        if expected.root != self.root
+            || !scope.matches_canonical_account(&self.account)
+            || self.failed.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(refused());
+        }
+        let key = scope.authenticated_store_binding().map_err(|_| refused())?;
+        let child = {
+            let state = self.state.lock().map_err(|_| refused())?;
+            if state.failed {
+                return Err(refused());
+            }
+            state
+                .children
+                .get(key.as_slice())
+                .cloned()
+                .ok_or_else(refused)?
+        };
+        if child.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(refused());
+        }
+        // Durable terminal proof precedes enrolling a genuine new remote entry.
+        // Original captures and pending frames are retained unchanged.
+        super::windows_vault_reconciled_custody::record(
+            &self.store.0,
+            scope,
+            expected,
+            proof,
+            completed,
+        )
+        .map_err(|_| refused())?;
+        let mut guard = child.custody.lock().map_err(|_| refused())?;
+        let mut current = Custody::reopen(&self.store, scope).map_err(|_| refused())?;
+        if let Some(entry) = completed.entry() {
+            let length = if entry.directory { 0 } else { entry.size };
+            let verified = Entry::new(
+                expected.identity,
+                &entry.id,
+                &entry.path,
+                &entry.etag,
+                entry.directory,
+                length,
+            )
+            .map_err(|_| refused())?;
+            current
+                .record_entries(&self.store, &[verified])
+                .map_err(|_| refused())?;
+            if !entry.directory {
+                current
+                    .persist_hydration_intent(
+                        &self.store,
+                        expected.identity,
+                        completed.file(),
+                        length,
+                        expected.components.clone(),
+                    )
+                    .map_err(|_| refused())?;
+            }
+        }
+        *guard = current;
+        Ok(())
+    }
     pub(super) fn record_cached_capture_queued(
         &self,
         scope: &Scope,
@@ -1174,6 +1273,76 @@ impl WindowsVaultCustody {
 /// Reopening every document closes the previous-provider snapshot race. The
 /// resulting retained intents are evidence, not native identity/range authority.
 impl VaultPublishedHistorySource for WindowsVaultCustody {
+    fn current_native_intents(
+        &self,
+        owner: &ProviderScope,
+        root: ConfiguredRootIdentity,
+        registration: &str,
+    ) -> std::result::Result<
+        Vec<raiun_cloudfiles_windows::vault_custody::VaultPendingNativeIntent>,
+        BackendError,
+    > {
+        if owner != &self.owner
+            || root != self.root
+            || registration != self.registration
+            || self.failed.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let binding = RootBinding::new(
+            &self.account,
+            root.volume_serial,
+            root.file_index,
+            registration,
+        )
+        .map_err(unavailable)?;
+        let mut manifest = RootManifest::reopen(&self.store, &binding).map_err(unavailable)?;
+        let scopes = manifest.scopes_for_reconciliation().map_err(unavailable)?;
+        let mut rows = Vec::new();
+        for scope in scopes {
+            let key = scope.authenticated_store_binding().map_err(unavailable)?;
+            let child = {
+                let state = self.state.lock().map_err(unavailable)?;
+                if state.failed {
+                    return Err(BackendError::Unavailable);
+                }
+                state
+                    .children
+                    .get(key.as_slice())
+                    .cloned()
+                    .ok_or(BackendError::Unavailable)?
+            };
+            if child.failed.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(BackendError::Unavailable);
+            }
+            for row in
+                super::windows_vault_namespace_queued::current_native_intents(&self.store.0, scope)?
+            {
+                if rows.len() >= 100_000 {
+                    return Err(BackendError::Unavailable);
+                }
+                rows.push(
+                    raiun_cloudfiles_windows::vault_custody::VaultPendingNativeIntent {
+                        identity: row.identity,
+                        file_index: row.file,
+                        usn: row.usn,
+                        components: row.components,
+                        entry: row.entry,
+                        length: row.plaintext_len,
+                        source_sha256: row.source_sha256,
+                        terminal_verified: row.terminal_verified,
+                        write_id: row.write_id,
+                        revision: row.revision,
+                    },
+                );
+            }
+        }
+        manifest.verify_current(&self.store).map_err(unavailable)?;
+        if self.failed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(BackendError::Unavailable);
+        }
+        Ok(rows)
+    }
     fn snapshot(
         &self,
         owner: &ProviderScope,
@@ -1244,8 +1413,20 @@ impl VaultPublishedHistorySource for WindowsVaultCustody {
                     }
                     .map_err(|_| refused())?;
                 }
+                // Current queued/terminal native facts use a distinct startup
+                // admission path; old immutable captures are still authenticated.
+                let current_native = super::windows_vault_namespace_queued::current_native_intents(
+                    &self.store.0,
+                    scope,
+                )
+                .map_err(|_| refused())?;
+                let current_ids = current_native
+                    .iter()
+                    .map(|row| row.identity)
+                    .collect::<std::collections::BTreeSet<_>>();
                 let scope_intents = history
                     .iter()
+                    .filter(|row| !current_ids.contains(&row.opaque()))
                     .map(|row| VaultHydrationIntent {
                         root,
                         identity: row.opaque(),
@@ -2815,10 +2996,14 @@ impl VaultPublicationCustody for View {
                 .store(true, std::sync::atomic::Ordering::Release);
             return Err(BackendError::Unavailable);
         }
-        let deltas = super::windows_vault_namespace_queued::protected_catalogue_deltas(
+        let mut deltas = super::windows_vault_namespace_queued::protected_catalogue_deltas(
             &self.store.0,
             &self.scope,
         )?;
+        deltas.extend(super::windows_vault_reconciled_custody::catalogue_updates(
+            &self.store.0,
+            &self.scope,
+        )?);
         if deltas.iter().any(|d| d.identity == intent.identity) {
             // Native queued mappings already have their own protected receipt.
             // A hydration may confirm that exact mapping, never replace it.

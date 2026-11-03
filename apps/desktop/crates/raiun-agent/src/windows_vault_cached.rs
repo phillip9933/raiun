@@ -67,7 +67,7 @@ impl WindowsAgent {
                 client,
                 scope,
                 context._root.identity(),
-                catalog,
+                catalog.clone(),
                 &active.personal_space_id,
                 &active.personal_root_resource_id,
                 &locations,
@@ -85,7 +85,7 @@ impl WindowsAgent {
         } else {
             None
         };
-        self.provider.connect(
+        self.provider.connect_with_file_rename(
             active.path.clone(),
             context.generation,
             context._root.identity(),
@@ -94,6 +94,7 @@ impl WindowsAgent {
             active.personal_root_resource_id.clone(),
             backend.clone(),
             recovery,
+            WINDOWS_VAULT_OFFLINE_WRITES_ENABLED.then_some(catalog),
             context.account.clone(),
             self.session_store.clone(),
         )?;
@@ -189,7 +190,26 @@ impl WindowsAgent {
         }
         self.vault_copy_jobs.cancel_all_and_wait()?;
         self.vault_copy_serialization.cancel_all_and_wait()?;
-        self.provider.disconnect()?;
+        let owner = context
+            .configuration
+            .registration_ownership
+            .as_ref()
+            .ok_or("The cached drive owner is unavailable")?;
+        let binding = ActiveProviderBinding {
+            generation: expected,
+            path: PathBuf::from(&context.configuration.path),
+            identity: context._root.identity(),
+            personal_space_id: owner.personal_drive_id.clone(),
+            personal_root_resource_id: owner
+                .personal_root_resource_id
+                .clone()
+                .ok_or("The cached Personal root is unavailable")?,
+        };
+        if self.provider.connection_matches(binding.clone())? {
+            self.provider.disconnect_cached_for_reconnect(binding)?;
+        } else {
+            self.provider.disconnect()?;
+        }
         self.vault_sessions
             .lock_all()
             .map_err(|_| "Could not clear cached vault sessions")?;

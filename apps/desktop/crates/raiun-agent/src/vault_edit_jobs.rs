@@ -141,7 +141,7 @@ struct Job {
     related_scope_keys: Vec<String>,
     related_space_ids: Vec<String>,
     status: Mutex<VaultEditReconcileStatus>,
-    cancelled: AtomicBool,
+    cancelled: Arc<AtomicBool>,
     changed: Condvar,
 }
 
@@ -351,6 +351,50 @@ impl VaultEditReconcileJobs {
         )
     }
 
+    /// The guarded Windows SDK retry retains cancellation after the worker
+    /// callback returns, while its native proof is handed to the owner thread.
+    /// Keep the same job cancellation atom alive through that handoff.
+    #[cfg(windows)]
+    pub fn start_with_failure_class_owned_cancel(
+        this: &Arc<Self>,
+        scope: &VaultSessionScope,
+        auth_generation: Arc<AtomicU64>,
+        expected_generation: u64,
+        pin_jobs: Arc<VaultPinJobs>,
+        automatic: bool,
+        operation: impl FnOnce(
+            Arc<AtomicBool>,
+            &mut dyn FnMut(u64, u64, u64, u64),
+        ) -> Result<VaultEditReconcileReport, VaultEditJobFailure>
+        + Send
+        + 'static,
+    ) -> Result<VaultEditReconcileStatus, String> {
+        let failure_class = Arc::new(Mutex::new(None));
+        let worker_failure_class = Arc::clone(&failure_class);
+        Self::start_inner_with_binding_publisher(
+            this,
+            scope,
+            auth_generation,
+            expected_generation,
+            pin_jobs,
+            automatic,
+            None,
+            None,
+            failure_class,
+            Vec::new(),
+            Vec::new(),
+            None,
+            move |cancelled, progress, _publish_binding| {
+                operation(Arc::clone(cancelled), progress).map_err(|error| {
+                    if let Ok(mut slot) = worker_failure_class.lock() {
+                        *slot = error.failure_class;
+                    }
+                    error.message
+                })
+            },
+        )
+    }
+
     /// Start a verification job invalidated by lock of either exact scope.
     /// The destination remains the caller-visible job scope; source routing
     /// metadata is retained only in this in-memory cancellation registry.
@@ -432,7 +476,7 @@ impl VaultEditReconcileJobs {
             vec![spec.source.space_id().to_owned()],
             Some(spec.start_gate),
             move |cancelled, progress, publish_binding| {
-                operation(cancelled, progress, publish_binding).map_err(|error| {
+                operation(cancelled.as_ref(), progress, publish_binding).map_err(|error| {
                     if let Ok(mut slot) = worker_failure_class.lock() {
                         *slot = error.failure_class;
                     }
@@ -474,7 +518,7 @@ impl VaultEditReconcileJobs {
             related_scope_keys,
             related_space_ids,
             None,
-            move |cancelled, progress, _publish_binding| operation(cancelled, progress),
+            move |cancelled, progress, _publish_binding| operation(cancelled.as_ref(), progress),
         )
     }
 
@@ -493,7 +537,7 @@ impl VaultEditReconcileJobs {
         related_space_ids: Vec<String>,
         start_gate: Option<std::sync::mpsc::Receiver<()>>,
         operation: impl FnOnce(
-            &AtomicBool,
+            &Arc<AtomicBool>,
             &mut dyn FnMut(u64, u64, u64, u64),
             &mut dyn FnMut(&str, u64) -> Result<(), VaultEditJobFailure>,
         ) -> Result<VaultEditReconcileReport, String>
@@ -570,7 +614,7 @@ impl VaultEditReconcileJobs {
                     failure_class: None,
                     cancel_requested: false,
                 }),
-                cancelled: AtomicBool::new(false),
+                cancelled: Arc::new(AtomicBool::new(false)),
                 changed: Condvar::new(),
             });
             store.order.push_back(id.clone());

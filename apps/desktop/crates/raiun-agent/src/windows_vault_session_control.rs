@@ -242,7 +242,8 @@ impl WindowsAgent {
                 "move_file",
                 "rename_folder",
                 "move_folder",
-                "delete_file"
+                "delete_file",
+                "delete_empty_folder"
             ])
         } else {
             json!([])
@@ -861,21 +862,60 @@ impl WindowsAgent {
         // Every failure after verified insertion must clear this new session.
         let result = (|| {
             let custody_view = custody.view(&trusted, &scope, &root_path)?;
+            // The online route must carry the same protected journal as the
+            // cached route. A cache-free read binding cannot mint a guarded
+            // reconciliation proof for its pending revisions.
+            let storage = DpapiSessionStore::current_user()
+                .map_err(|_| "Private Windows storage is unavailable")?;
+            let parent = raiun_control_windows::PinnedDirectory::open(
+                storage.local_edit_state_directory(),
+            )
+            .map_err(|_| "Private Windows storage could not be admitted")?;
+            let cache_name = format!("vault-offline-{digest}");
+            let cache_pin = {
+                let mut pins = self
+                    .vault_offline_storage
+                    .lock()
+                    .map_err(|_| "Encrypted cache ownership is unavailable")?;
+                if let Some(pin) = pins.get(&cache_name) {
+                    pin.clone()
+                } else {
+                    let pin = Arc::new(
+                        raiun_control_windows::PrivateDirectory::create_or_open_under(
+                            &parent,
+                            std::ffi::OsStr::new(&cache_name),
+                        )
+                        .map_err(|_| "Private encrypted cache is unavailable")?,
+                    );
+                    pins.insert(cache_name, pin.clone());
+                    pin
+                }
+            };
+            cache_pin
+                .verify_path()
+                .map_err(|_| "Private encrypted cache changed")?;
+            let cache = raiun_cache::Cache::open(cache_pin.path(), 1 << 30)
+                .map_err(|_| "Could not open the encrypted offline cache")?;
+            cache_pin
+                .verify_path()
+                .map_err(|_| "Private encrypted cache changed")?;
+            let offline = raiun_opencloud::vault_cache::VaultOfflineCache::new(
+                cache,
+                scope.clone(),
+                root_path.clone(),
+            )
+            .map_err(|_| "The encrypted edit journal is unavailable")?;
             let binding = Arc::new(
-                raiun_cloudfiles_windows::vault_read::WindowsVaultReadBinding::new_online(
+                raiun_cloudfiles_windows::vault_read::WindowsVaultReadBinding::new_online_with_offline_cache(
                     trusted,
                     client,
                     self.vault_sessions.clone(),
                     scope.clone(),
                     root_path.clone(),
+                    offline,
                 )
                 .map_err(|_| "Could not bind the verified vault read route")?,
             );
-            let storage = DpapiSessionStore::current_user()
-                .map_err(|_| "Private Windows storage is unavailable")?;
-            let parent =
-                raiun_control_windows::PinnedDirectory::open(storage.local_edit_state_directory())
-                    .map_err(|_| "Private Windows storage could not be admitted")?;
             let staging_scope =
                 serde_json::to_vec(&(digest.as_str(), scope.space_id(), scope.resource_id()))
                     .map_err(|_| "Could not bind private vault staging")?;
@@ -1051,7 +1091,7 @@ impl WindowsAgent {
             "root_resource_id":prepared.scope.resource_id(),"vault_mount_ready":true,
             "vault_mount_writable":false,"vault_mount_existing_file_overwrite":false,
             "vault_mount_existing_file_in_place":existing_file_in_place,
-            "vault_native_operations":if existing_file_in_place {json!(["create_file","create_folder","save_in_place","replace_file","rename_file","move_file","rename_folder","move_folder","delete_file"])}else{json!([])},
+            "vault_native_operations":if existing_file_in_place {json!(["create_file","create_folder","save_in_place","replace_file","rename_file","move_file","rename_folder","move_folder","delete_file","delete_empty_folder"])}else{json!([])},
             "vault_access_mode":if existing_file_in_place {"native_existing_file_in_place"} else {"native_read_only"},
             "vault_mount_write_unavailable_reason":"route_read_only",
             "remembered":remembered,"remembered_status":remembered_status}))

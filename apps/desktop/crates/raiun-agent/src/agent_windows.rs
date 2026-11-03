@@ -129,6 +129,8 @@ include!("windows_vault_offline_edits.rs");
 include!("windows_vault_edit_upload.rs");
 #[path = "windows_vault_cached_capture.rs"]
 mod windows_vault_cached_capture;
+#[path = "windows_vault_cached_child_custody.rs"]
+mod windows_vault_cached_child_custody;
 #[path = "windows_vault_child_create_custody.rs"]
 mod windows_vault_child_create_custody;
 #[path = "windows_vault_file_delete_custody.rs"]
@@ -139,6 +141,8 @@ mod windows_vault_file_rename_custody;
 mod windows_vault_file_replace_custody;
 #[path = "windows_vault_namespace_queued.rs"]
 mod windows_vault_namespace_queued;
+#[path = "windows_vault_reconciled_custody.rs"]
+mod windows_vault_reconciled_custody;
 #[path = "windows_vault_streamed_edit.rs"]
 mod windows_vault_streamed_edit;
 
@@ -666,6 +670,19 @@ struct PendingNativeVaultCleanup {
 type PendingVaultCleanupTicket = windows_vault_cleanup_holds::PendingCleanupTicket;
 
 enum ProviderCommand {
+    DisconnectCachedForReconnect {
+        binding: ActiveProviderBinding,
+        response: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+    CompleteCachedVaultPending {
+        binding: ActiveProviderBinding,
+        expected_backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
+        route: Arc<raiun_cloudfiles_windows::vault_routes::VerifiedVaultRoute>,
+        expected: raiun_cloudfiles_windows::VaultCachedNativeExpectation,
+        proof: raiun_opencloud::vault_backend::VaultReconciledPending,
+        scope: vault_custody::Scope,
+        response: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
     #[cfg(all(test, debug_assertions))]
     MixedNamespaceObservation {
         generation: u64,
@@ -1405,6 +1422,38 @@ impl ProviderManager {
                             })();
                             let _ = response.send(result);
                         }
+                        ProviderCommand::CompleteCachedVaultPending { binding, expected_backend, route, expected, proof, scope, response } => {
+                            // This owner thread alone inspects the original native object.
+                            // Its typed completion is retained until protected terminal CAS.
+                            let result = (|| {
+                                if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref())
+                                    || !retired_vaults.is_empty()
+                                    || backend.as_ref().is_none_or(|current| !Arc::ptr_eq(current, &expected_backend) || current.is_revoked())
+                                    || expected.root != binding.identity
+                                {
+                                    return Err("The original Windows drive changed before saved-edit completion".to_owned());
+                                }
+                                let active = connection.as_ref().ok_or("The original Windows drive is disconnected")?;
+                                let completed = active.complete_cached_vault_pending(
+                                    &expected_backend,
+                                    &route,
+                                    &proof,
+                                    &expected,
+                                    &worker_generation,
+                                    binding.generation,
+                                ).map_err(|_| "Remote save was verified, but original local completion needs recovery review")?;
+                                if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) {
+                                    return Err("The original Windows drive changed during saved-edit completion".to_owned());
+                                }
+                                vault_custody.as_ref()
+                                    .ok_or("The original protected vault custody is unavailable")?
+                                    .record_reconciled_native(&scope, &expected, &proof, &completed)
+                                    .map_err(|_| "Remote save was verified, but protected local completion needs recovery review".to_owned())?;
+                                active.acknowledge_cached_native_durable(&completed)
+                                    .map_err(|_| "Protected completion was retained, but native pending inventory needs recovery review".to_owned())
+                            })();
+                            let _ = response.send(result);
+                        }
                         ProviderCommand::VaultCleanupDiagnostics { binding, response } => {
                             let result = if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref()) {
                                 Err("The Windows drive changed before support inspection".to_owned())
@@ -1614,7 +1663,7 @@ impl ProviderManager {
                                         token_generation: next_backend.scope().token_generation(),
                                     };
                                     let delete_generation = Arc::clone(&worker_generation);
-                                    let connected = if next_backend.is_cached_only() {
+                                    let connected = if next_backend.is_cached_only() && !WINDOWS_VAULT_OFFLINE_WRITES_ENABLED {
                                         raiun_cloudfiles_windows::connect_configured_root(prepared)
                                     } else {
                                         raiun_cloudfiles_windows::connect_configured_root_with_file_delete(
@@ -1912,6 +1961,45 @@ impl ProviderManager {
                                 &mut connection,
                                 &mut backend,
                                 &worker_connected,
+                                None,
+                            );
+                            if connection.is_none() {
+                                active_binding = None;
+                                vault_custody = None;
+                            }
+                            let _ = response.send(result);
+                        }
+                        ProviderCommand::DisconnectCachedForReconnect { binding, response } => {
+                            if !vault_worker_binding_current(worker_generation.load(Ordering::Acquire), &binding, active_binding.as_ref())
+                                || backend.as_ref().is_none_or(|current| !current.is_cached_only() || current.is_revoked())
+                                || vault_custody.is_none()
+                                || connection.is_none()
+                                || !retired_vaults.is_empty()
+                            {
+                                let _ = response.send(Err("The original cached drive changed before reconnect".into()));
+                                continue;
+                            }
+                            if let Err(error) = stop_create_workers(namespace_dispatcher.as_mut(),connection.as_ref(),&mut create_workers) {
+                                if let Ok(mut notice) = worker_rename_error.lock() { notice.record(worker_generation.load(Ordering::Acquire),worker_generation.load(Ordering::Acquire),windows_file_create_producer::HOLD); }
+                                let _ = response.send(Err(error));
+                                continue;
+                            }
+                            namespace_producer = None;
+                            if let Some(dispatcher) = namespace_dispatcher.as_mut() { dispatcher.hold(); }
+                            namespace_dispatcher = None;
+                            cleanup_holds.clear();
+                            if let Ok(mut handle) = worker_folder_revocation.lock() { if let Some(handle) = handle.take() { handle.revoke(); } }
+                            drop(folders.take());
+                            worker_folder_generation.store(0, Ordering::Release);
+                            if let Ok(mut snapshot) = worker_folder_pause.lock() { *snapshot = None; }
+                            if let Ok(mut error) = worker_folder_error.lock() { *error = None; }
+                            worker_jobs.cancel_all();
+                            let result = disconnect_provider_connection(
+                                &mut retired_vaults,
+                                &mut connection,
+                                &mut backend,
+                                &worker_connected,
+                                vault_custody.as_ref(),
                             );
                             if connection.is_none() {
                                 active_binding = None;
@@ -1940,6 +2028,7 @@ impl ProviderManager {
                                 &mut connection,
                                 &mut backend,
                                 &worker_connected,
+                                None,
                             );
                             let stopped = result.is_ok();
                             let _ = response.send(result);
@@ -2038,6 +2127,7 @@ impl ProviderManager {
                     &mut connection,
                     &mut backend,
                     &worker_connected,
+                    None,
                 ).is_err() {
                     // The command owner is gone, so no retry can be serviced.
                     // Preserve native callback/root ownership until process exit
@@ -2216,8 +2306,10 @@ impl ProviderManager {
         let namespace_enabled = namespace_enabled
             || self.namespace_test_activation.load(Ordering::Acquire)
             || mixed_namespace_fixture;
-        let create_enabled = create_enabled && !backend.is_cached_only();
-        let directory_phase_enabled = directory_phase_enabled && !backend.is_cached_only();
+        let vault_edits_available =
+            !backend.is_cached_only() || WINDOWS_VAULT_OFFLINE_WRITES_ENABLED;
+        let create_enabled = create_enabled && vault_edits_available;
+        let directory_phase_enabled = directory_phase_enabled && vault_edits_available;
         let namespace_enabled = namespace_enabled && !backend.is_cached_only();
         if directory_phase_enabled && namespace_enabled {
             return Err("Directory phase and legacy fixture routes are exclusive".to_owned());
@@ -2234,7 +2326,7 @@ impl ProviderManager {
             None
         };
         let file_rename_producer =
-            if !backend.is_cached_only() && (!namespace_enabled || shared_directory_ready) {
+            if vault_edits_available && (!namespace_enabled || shared_directory_ready) {
                 file_rename_catalog
                     .map(|catalog| {
                         windows_file_rename_producer::Producer::capture(
@@ -2488,6 +2580,33 @@ impl ProviderManager {
             .map_err(|_| "Windows Cloud Files connection manager stopped during save completion")?
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn complete_cached_vault_pending(
+        &self,
+        binding: ActiveProviderBinding,
+        expected_backend: Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>,
+        route: Arc<raiun_cloudfiles_windows::vault_routes::VerifiedVaultRoute>,
+        expected: raiun_cloudfiles_windows::VaultCachedNativeExpectation,
+        proof: raiun_opencloud::vault_backend::VaultReconciledPending,
+        scope: vault_custody::Scope,
+    ) -> Result<(), String> {
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::CompleteCachedVaultPending {
+                binding,
+                expected_backend,
+                route,
+                expected,
+                proof,
+                scope,
+                response,
+            })
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result.recv().map_err(
+            |_| "Windows Cloud Files connection manager stopped during saved-edit completion",
+        )?
+    }
+
     #[cfg(test)]
     fn vault_file_pending_for_test(&self, identity: [u8; 16]) -> Result<bool, String> {
         let (response, result) = std::sync::mpsc::sync_channel(1);
@@ -2729,6 +2848,22 @@ impl ProviderManager {
         let (response, result) = std::sync::mpsc::sync_channel(1);
         self.commands
             .send(ProviderCommand::Disconnect(response))
+            .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
+        result
+            .recv()
+            .map_err(|_| "Windows Cloud Files connection manager stopped unexpectedly")?
+    }
+
+    fn disconnect_cached_for_reconnect(
+        &self,
+        binding: ActiveProviderBinding,
+    ) -> Result<(), String> {
+        self.cancel_fresh_close();
+        self.bandwidth.suspend();
+        self.revoke_folders();
+        let (response, result) = std::sync::mpsc::sync_channel(1);
+        self.commands
+            .send(ProviderCommand::DisconnectCachedForReconnect { binding, response })
             .map_err(|_| "Windows Cloud Files connection manager is unavailable")?;
         result
             .recv()
@@ -2990,9 +3125,24 @@ fn disconnect_provider_connection(
     connection: &mut Option<raiun_cloudfiles_windows::ConfiguredRootConnection>,
     backend: &mut Option<Arc<raiun_cloudfiles_windows::OpenCloudPlaceholderBackend>>,
     connected: &AtomicBool,
+    preserve_cached_pending: Option<&Arc<windows_vault_custody::WindowsVaultCustody>>,
 ) -> Result<(), String> {
     // Reject new old-account hydration/publication before any fallible join.
     // This does not drain or discard the vault cleanup catalogue.
+    let preserve_pending = if let Some(custody) = preserve_cached_pending {
+        let original = backend
+            .as_ref()
+            .ok_or("The cached drive backend is unavailable")?;
+        if !original.is_cached_only() || original.is_revoked() || !retired_vaults.is_empty() {
+            return Err("The cached drive changed before protected reconnect".into());
+        }
+        let active = connection
+            .as_ref()
+            .ok_or("The cached drive is disconnected")?;
+        custody.audit_cached_pending_for_disconnect(active, original.scope())?
+    } else {
+        false
+    };
     if let Some(active_backend) = backend.as_ref() {
         active_backend.begin_revocation();
     }
@@ -3012,6 +3162,9 @@ fn disconnect_provider_connection(
         );
         active_backend.revoke();
     }
+    if preserve_pending && retired_vaults.is_empty() {
+        return Err("The retained pending vault route is unavailable".into());
+    }
     if !retired_vaults.is_empty() {
         // Revoke ALL routes before any fallible cleanup. A failure in the first
         // file must not leave another route's prepared objects able to publish.
@@ -3028,8 +3181,25 @@ fn disconnect_provider_connection(
             .as_ref()
             .ok_or("Vault cleanup needs its retained Windows drive")?;
         for route in retired_vaults.iter() {
-            active.cleanup_retired_vault_route(route)
-                .map_err(|_| "Vault hydration was revoked, but local cleanup is incomplete; edits and retry state were preserved")?;
+            if preserve_pending {
+                let custody =
+                    preserve_cached_pending.ok_or("Protected cached custody is unavailable")?;
+                if !custody.cleanup_clean_history_preserving_cached_pending(
+                    active,
+                    route,
+                    backend
+                        .as_ref()
+                        .ok_or("The cached backend changed")?
+                        .scope(),
+                )? {
+                    return Err(
+                        "The original pending vault inventory changed during reconnect".into(),
+                    );
+                }
+            } else {
+                active.cleanup_retired_vault_route(route)
+                    .map_err(|_| "Vault hydration was revoked, but local cleanup is incomplete; edits and retry state were preserved")?;
+            }
         }
         retired_vaults.clear();
     }

@@ -31,7 +31,7 @@ impl WindowsAgent {
         self.check_windows_vault_offline_account(&context)
     }
     fn windows_vault_pending_request(&self, request: &Value) -> Result<Value, String> {
-        use raiun_opencloud::vault_cache::{VaultOfflineCache, VaultPendingOperationKind};
+        use raiun_opencloud::vault_cache::VaultOfflineCache;
         let _operation = self
             .vault_credential_operation
             .lock()
@@ -85,7 +85,7 @@ impl WindowsAgent {
                 .clone()
                 .ok_or("The Personal root is unavailable")?,
         };
-        let verified = self.provider.verified_vault_backend(active)?;
+        let verified = self.provider.verified_vault_backend(active.clone())?;
         let space = text("space_id", 512)?;
         let resource = text("root_resource_id", 512)?;
         let root = text("root_path", 4096)?;
@@ -214,10 +214,11 @@ impl WindowsAgent {
                     self.capture_windows_vault_context(Some(&self.profile_scope), Some(expected))?;
                 if online.verified.backend.is_cached_only()
                     || online.identity != context._root.identity()
+                    || !Arc::ptr_eq(&online.verified.backend, &verified.backend)
                 {
                     return Err("Reconnect the original account before retrying saved edits".into());
                 }
-                let (client, trusted) = online
+                let (_client, trusted) = online
                     .verified
                     .backend
                     .vault_read_context(online.identity)
@@ -227,16 +228,6 @@ impl WindowsAgent {
                 {
                     return Err("The online account differs from the saved edit account".into());
                 }
-                let offline = VaultOfflineCache::new(cache, scope.clone(), root)
-                    .map_err(|_| "The encrypted journal is unavailable")?;
-                let backend = raiun_opencloud::vault_backend::VaultBackend::new_with_offline_cache(
-                    (*client).clone(),
-                    self.vault_sessions.clone(),
-                    scope.clone(),
-                    root.into(),
-                    offline,
-                )
-                .map_err(|_| "The online vault could not be verified")?;
                 self.check_windows_vault_authority(
                     &online.session,
                     expected,
@@ -247,13 +238,18 @@ impl WindowsAgent {
                 let generation = self.generation.clone();
                 let worker_generation = generation.clone();
                 let provider = online.verified.backend.clone();
+                let custody = online.verified.custody.clone();
+                let provider_owner = self.provider.clone();
+                let provider_generation = self.provider.authorized_generation.clone();
+                let active_binding = active.clone();
                 let path = PathBuf::from(&context.configuration.path);
                 let root_identity = context._root.identity();
                 let route = route.clone();
+                let job_scope = scope.clone();
                 let scope = scope.clone();
-                let job = crate::vault_edit_jobs::VaultEditReconcileJobs::start_with_failure_class(
+                let job = crate::vault_edit_jobs::VaultEditReconcileJobs::start_with_failure_class_owned_cancel(
                     &self.vault_copy_jobs,
-                    &scope,
+                    &job_scope,
                     generation,
                     expected,
                     self.vault_copy_serialization.clone(),
@@ -280,7 +276,7 @@ impl WindowsAgent {
                             ));
                         }
                         crate::vault_edit_jobs::reconcile_dependency_batches(
-                            cancelled,
+                            cancelled.as_ref(),
                             &worker_generation,
                             expected,
                             crate::vault_edit_jobs::maximum_batch(),
@@ -299,18 +295,34 @@ impl WindowsAgent {
                                         None,
                                     ));
                                 }
-                                let result = match edit.operation {
-                                    VaultPendingOperationKind::DeleteFile => {
-                                        backend.reconcile_pending_delete(&edit.id, edit.revision)
-                                    }
-                                    VaultPendingOperationKind::CreateDirectory => backend
-                                        .reconcile_pending_directory_create(&edit.id, edit.revision)
-                                        .map(|_| ()),
-                                    _ => backend
-                                        .reconcile_pending_operation(&edit.id, edit.revision)
-                                        .map(|_| ()),
+                                let (custody_scope, _store, expected_native) = custody
+                                    .cached_pending_context(
+                                        provider.scope(),
+                                        &scope,
+                                        route.root_path(),
+                                        &edit.id,
+                                        edit.revision,
+                                        edit.operation,
+                                    )
+                                    .map_err(|_| crate::vault_edit_jobs::ReconcileFailure::Stop(None))?;
+                                let cancelled_guard: Arc<dyn Fn() -> bool + Send + Sync> = {
+                                    let cancelled = cancelled.clone();
+                                    let generation = worker_generation.clone();
+                                    let provider = provider.clone();
+                                    Arc::new(move || {
+                                        cancelled.load(Ordering::Acquire)
+                                            || generation.load(Ordering::Acquire) != expected
+                                            || provider.is_revoked()
+                                    })
                                 };
-                                result.map_err(|e| {
+                                let result = route.backend().reconcile_cached_pending_guarded(
+                                    &edit.id,
+                                    edit.revision,
+                                    provider_generation.clone(),
+                                    expected,
+                                    cancelled_guard,
+                                );
+                                let outcome = result.map_err(|e| {
                                     if e.kind == raiun_core::backend::ErrorKind::Conflict {
                                         crate::vault_edit_jobs::ReconcileFailure::Conflict
                                     } else {
@@ -318,7 +330,27 @@ impl WindowsAgent {
                                             crate::vault_edit_jobs::reconcile_failure_class(e.kind),
                                         )
                                     }
-                                })
+                                })?;
+                                if !current() {
+                                    return Err(crate::vault_edit_jobs::ReconcileFailure::Stop(None));
+                                }
+                                match outcome {
+                                    raiun_opencloud::vault_backend::VaultPendingReconcileOutcome::Verified(proof) => {
+                                        provider_owner.complete_cached_vault_pending(
+                                            active_binding.clone(), provider.clone(), route.clone(),
+                                            expected_native, proof, custody_scope,
+                                        ).map_err(|_| crate::vault_edit_jobs::ReconcileFailure::Stop(None))
+                                    }
+                                    raiun_opencloud::vault_backend::VaultPendingReconcileOutcome::NeedsReconciliation { reason } => {
+                                        Err(if reason == raiun_core::backend::ErrorKind::Conflict {
+                                            crate::vault_edit_jobs::ReconcileFailure::Conflict
+                                        } else {
+                                            crate::vault_edit_jobs::ReconcileFailure::Stop(
+                                                crate::vault_edit_jobs::reconcile_failure_class(reason),
+                                            )
+                                        })
+                                    }
+                                }
                             },
                             || {
                                 journal
