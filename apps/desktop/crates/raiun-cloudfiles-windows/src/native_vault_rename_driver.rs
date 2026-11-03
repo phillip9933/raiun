@@ -277,6 +277,103 @@ impl ConfiguredRootConnection {
                 destination_parent.metadata().path.trim_end_matches('/'),
                 new.last().unwrap()
             );
+            if route.binding().is_cached_only() && !directory {
+                if original.id.starts_with("raiun-pending-") {
+                    return Err(no());
+                }
+                let (native_file, usn, parent_file, parent_usn, _, dest_file, dest_usn) =
+                    pins.facts()?;
+                if !admission.claim_dispatch() || stop() {
+                    return Err(no());
+                }
+                let outcome = joined(|| {
+                    route
+                        .binding()
+                        .queue_cached_file_rename(&original.path, &destination, &original, &stop)
+                        .map_err(|_| no())
+                })?;
+                let (write_id, revision) = match &outcome {
+                    raiun_opencloud::vault_backend::VaultRenameOutcome::Queued {
+                        write_id,
+                        revision,
+                        uncertain: false,
+                        ..
+                    } => (write_id, *revision),
+                    _ => return Err(no()),
+                };
+                published = true;
+                let sealed = route
+                    .binding()
+                    .cached_pending_operation(write_id, revision, &stop)
+                    .map_err(|_| no())?;
+                if sealed.path != original.path
+                    || sealed.destination_path != destination
+                    || sealed.base_resource_id != original.id
+                    || sealed.base_etag != original.etag
+                {
+                    return Err(no());
+                }
+                let facts = crate::VaultFileRenameFacts {
+                    volume: root_id.volume_serial,
+                    file: native_file,
+                    usn,
+                    parent_file,
+                    parent_usn,
+                    identity,
+                    parent_identity: *parent.opaque().as_bytes(),
+                    old_components: old.to_vec(),
+                    new_components: new.to_vec(),
+                    original: original.clone(),
+                    children: None,
+                    parent: parent.metadata().clone(),
+                    destination_parent: if Arc::ptr_eq(&parent, &destination_parent) {
+                        None
+                    } else {
+                        Some(crate::VaultFileRenameDestination {
+                            identity: *destination_parent.opaque().as_bytes(),
+                            parent: destination_parent.metadata().clone(),
+                            file: dest_file,
+                            usn: dest_usn,
+                        })
+                    },
+                    destination: destination.clone(),
+                    encoded_source: sealed.encoded_target,
+                    encoded_destination: sealed.encoded_destination_target,
+                    integrity: sealed.root_integrity_token,
+                    historical_epoch: 0,
+                    token_generation: auth.token_generation,
+                };
+                let descriptor = route
+                    .binding()
+                    .rename_descriptor(root_id, facts)
+                    .map_err(|_| no())?;
+                let receipt =
+                    crate::opencloud::VaultCachedNamespaceQueued::file_rename(&descriptor, outcome)
+                        .map_err(|_| no())?;
+                let record = route
+                    .prepare_file_rename_record(&descriptor)
+                    .map_err(|_| no())?;
+                record.record_local_queued(&receipt).map_err(|_| no())?;
+                pins.verify(self, false)?;
+                let cancel = crate::vault_custody::VaultUploadCancellation {
+                    generation: generation.clone(),
+                    expected: auth.agent_generation,
+                    cancelled: &stop,
+                };
+                route.publish_cached_namespace(&receipt, &cancel, || {
+                    if stop() || !admission.claim_completion() {
+                        return Err(no());
+                    }
+                    let Pins::File(local) = &mut *pins else {
+                        return Err(no());
+                    };
+                    let (file, usn) = local.complete_cached_queued(self, &|| !stop())?;
+                    record
+                        .record_local_queued_native(&receipt, identity, file, usn)
+                        .map_err(|_| no())
+                })?;
+                return Ok(true);
+            }
             let budget = job.cancellation().bounded_request();
             let context = raiun_opencloud::RangeReadContext {
                 deadline: budget.deadline(),

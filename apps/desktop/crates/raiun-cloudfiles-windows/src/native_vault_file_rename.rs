@@ -509,6 +509,37 @@ impl VaultFileRenamePins {
             usn: self.usn,
         })
     }
+    /// Keep the original renamed object locally dirty after a sealed cached
+    /// journal revision. No identity replacement or MARK_IN_SYNC is allowed.
+    pub(super) fn complete_cached_queued(
+        &mut self,
+        connection: &ConfiguredRootConnection,
+        claim: &dyn Fn() -> bool,
+    ) -> Result<(u64, i64), Error> {
+        self.verify(connection, false)?;
+        if !claim() {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        self.attempted = true;
+        let mut usn = self.usn;
+        let hr = unsafe { CfSetInSyncState(self.protected.protected, 0, 0, &mut usn) };
+        if hr < 0 || usn < self.usn {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        let after = root_snapshot(self.protected.raw)?;
+        if after.identity != self.snapshot.identity
+            || after.file_size != self.snapshot.file_size
+            || after.file_attributes != self.snapshot.file_attributes
+            || after.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC != 0
+            || completion_usn(self.protected.raw, self.file().file_index)? != usn
+            || native_namespace_directory::opaque_directory_identity(self.protected.raw)?
+                != *self.original_identity.as_bytes()
+        {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        self.usn = usn;
+        Ok((self.file().file_index, usn))
+    }
     /// Only inside ORIGINAL live publication/epoch fences, after one guarded
     /// remote MOVE proved same resource/strong unchanged ETag. The caller's
     /// claim binds its durable intent; no record/name alone can call this.

@@ -956,6 +956,125 @@ impl WindowsVaultReadBinding {
     }
 
     #[cfg(windows)]
+    pub(crate) fn queue_cached_file_rename(
+        &self,
+        from: &str,
+        to: &str,
+        original: &RemoteEntry,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_backend::VaultRenameOutcome, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancelled();
+        let result = self.backend.queue_cached_file_rename(
+            from,
+            to,
+            &original.id,
+            &original.etag,
+            &self.epoch,
+            &stop,
+        )?;
+        self.check_current()?;
+        if stop() {
+            return Err(refused());
+        }
+        Ok(result)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn queue_cached_file_delete(
+        &self,
+        original: &RemoteEntry,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_backend::VaultDeleteOutcome, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancelled();
+        let result = self.backend.queue_cached_file_delete(
+            &original.path,
+            &original.id,
+            &original.etag,
+            &self.epoch,
+            &stop,
+        )?;
+        self.check_current()?;
+        if stop() {
+            return Err(refused());
+        }
+        Ok(result)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn cached_pending_operation(
+        &self,
+        id: &str,
+        revision: u64,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_cache::VaultPendingEditMetadata, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancelled();
+        self.backend
+            .cached_pending_operation(id, revision, &self.epoch, &stop)
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn cached_namespace_descriptor_current(
+        &self,
+        owner: &ProviderScope,
+        vault: &VaultSessionScope,
+        remote_root: &str,
+        historical_epoch: u64,
+    ) -> bool {
+        owner == &self.trusted
+            && vault == &self.scope
+            && remote_root == self.root_path
+            && historical_epoch == self.epoch.historical_generation()
+            && self.check_current().is_ok()
+            && self.client.is_offline()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn retarget_cached_file_create(
+        &self,
+        original: &RemoteEntry,
+        destination: &str,
+        destination_parent_ref: &raiun_opencloud::vault_cache::VaultPendingParentRef,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_cache::VaultPendingEditMetadata, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancelled();
+        self.backend.retarget_cached_file_create(
+            &original.path,
+            destination,
+            &original.id,
+            &original.etag,
+            destination_parent_ref,
+            &self.epoch,
+            &stop,
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn retarget_cached_directory_subtree(
+        &self,
+        original: &RemoteEntry,
+        destination: &str,
+        destination_parent_ref: &raiun_opencloud::vault_cache::VaultPendingParentRef,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_cache::VaultPendingDirectorySubtreeRetarget, CloudError>
+    {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancelled();
+        self.backend.retarget_cached_directory_subtree(
+            &original.path,
+            destination,
+            &original.id,
+            &original.etag,
+            destination_parent_ref,
+            &self.epoch,
+            &stop,
+        )
+    }
+
+    #[cfg(windows)]
     pub(crate) fn queue_cached_existing_capture<R: Read>(
         &self,
         target: &crate::ExistingVaultUploadTarget,

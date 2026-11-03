@@ -1019,6 +1019,93 @@ mod runtime {
             })
         }
 
+        /// Original cached namespace publication. A queued receipt changes
+        /// only local catalogue state after the original native owner records
+        /// its actual dirty FI/USN; it never stands in for remote completion.
+        pub(crate) fn publish_cached_namespace<T>(
+            &self,
+            receipt: &crate::opencloud::VaultCachedNamespaceQueued,
+            cancellation: &crate::vault_custody::VaultUploadCancellation<'_>,
+            publish: impl FnOnce() -> Result<T, crate::Error>,
+        ) -> Result<T, crate::Error> {
+            self.binding.with_exclusive_completion(|| {
+                let no = || crate::Error::EditRecoveryUnavailable;
+                if cancellation.is_cancelled() || !self.binding.is_cached_only() {
+                    return Err(no());
+                }
+                let (identity, original, entry) = match receipt.descriptor() {
+                    crate::opencloud::VaultCachedNamespaceDescriptor::FileRename(d) => {
+                        d.validate().map_err(|_| no())?;
+                        if !self.binding.cached_namespace_descriptor_current(
+                            &d.owner,
+                            &d.vault,
+                            &d.remote_root,
+                            d.facts.historical_epoch,
+                        ) {
+                            return Err(no());
+                        }
+                        (
+                            d.facts.identity,
+                            &d.facts.original,
+                            receipt.entry().cloned(),
+                        )
+                    }
+                    crate::opencloud::VaultCachedNamespaceDescriptor::FileDelete(d) => {
+                        d.validate().map_err(|_| no())?;
+                        if !self.binding.cached_namespace_descriptor_current(
+                            &d.owner,
+                            &d.vault,
+                            &d.remote_root,
+                            d.historical_unlock_epoch,
+                        ) {
+                            return Err(no());
+                        }
+                        (d.original_identity, &d.original, None)
+                    }
+                    _ => return Err(no()),
+                };
+                let mut next = {
+                    let catalogue = self.catalogue.lock().map_err(|_| no())?;
+                    let current = catalogue.entries.get(&identity).ok_or_else(no)?;
+                    if current != original
+                        || catalogue.entries.iter().any(|(other, e)| {
+                            *other != identity
+                                && entry
+                                    .as_ref()
+                                    .is_some_and(|next| e.path.eq_ignore_ascii_case(&next.path))
+                        })
+                    {
+                        return Err(no());
+                    }
+                    let mut next = catalogue.clone();
+                    next.versions.remove(&key(original));
+                    match entry {
+                        Some(mut entry) => {
+                            entry.writable = false;
+                            next.versions.insert(key(&entry), identity);
+                            next.entries.insert(identity, entry);
+                        }
+                        None => {
+                            next.entries.remove(&identity);
+                        }
+                    }
+                    next
+                };
+                let result = publish()?;
+                if cancellation.is_cancelled() {
+                    return Err(no());
+                }
+                let restored =
+                    Catalogue::restore(self.custody.catalogue_snapshot().map_err(|_| no())?)
+                        .map_err(|_| no())?;
+                if restored.entries != next.entries || restored.versions != next.versions {
+                    return Err(no());
+                }
+                std::mem::swap(&mut *self.catalogue.lock().map_err(|_| no())?, &mut next);
+                Ok(result)
+            })
+        }
+
         /// Original route/epoch catalogue publication, never ordinary identity.
         pub(crate) fn publish_created_file<T>(
             &self,

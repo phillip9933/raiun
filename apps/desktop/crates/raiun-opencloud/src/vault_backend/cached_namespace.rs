@@ -21,6 +21,23 @@ impl VaultCachedChildTarget {
     }
 }
 impl VaultBackend {
+    pub fn cached_pending_operation(
+        &self,
+        id: &str,
+        revision: u64,
+        epoch: &VaultSessionEpoch,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        self.cached_namespace_current(epoch, cancelled)?;
+        let cache = self
+            .offline_cache
+            .as_ref()
+            .ok_or_else(|| conflict("encrypted journal is unavailable"))?;
+        let result = cache.pending_operation(&self.sessions, id, revision)?;
+        self.cached_namespace_current(epoch, cancelled)?;
+        Ok(result)
+    }
+
     /// Admit a clean cached FILE rename only for the live original unlock.
     /// The returned queued entry is local journal history, never a MOVE proof.
     pub fn queue_cached_file_rename(

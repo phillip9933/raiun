@@ -71,6 +71,54 @@ pub(super) fn execute(choice: VaultDeleteChoice<'_, '_>) -> Result<FileDeleteOut
     if record.descriptor().facts() != descriptor.facts() {
         return Err(Error::EditRecoveryUnavailable);
     }
+    if choice.parent.vault().backend().binding().is_cached_only() {
+        choice.confirm_absence()?;
+        if !choice.admission.borrow_mut().claim_dispatch() || !lifetime.arm_after_dispatch() {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        let job = job.with_revocation_check(Arc::new(move || !probe()));
+        let stop = || job.is_stopped() || choice.stopped();
+        let cancel = crate::vault_custody::VaultUploadCancellation {
+            generation,
+            expected: choice.shared.config.authorization.agent_generation,
+            cancelled: &stop,
+        };
+        let result = choice
+            .parent
+            .vault()
+            .backend()
+            .binding()
+            .queue_cached_file_delete(&descriptor.original, &stop)
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
+        let receipt =
+            crate::opencloud::VaultCachedNamespaceQueued::file_delete(&descriptor, result)
+                .map_err(|_| Error::EditRecoveryUnavailable)?;
+        record
+            .record_local_queued(&receipt)
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
+        choice.confirm_absence()?;
+        choice
+            .parent
+            .vault()
+            .backend()
+            .publish_cached_namespace(&receipt, &cancel, || {
+                choice.confirm_absence()?;
+                if !choice.admission.borrow_mut().claim_completion() {
+                    return Err(Error::EditRecoveryUnavailable);
+                }
+                record
+                    .record_local_queued_native(
+                        &receipt,
+                        descriptor.original_identity,
+                        descriptor.original_file.file_index,
+                        descriptor.original_usn,
+                    )
+                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                Ok(())
+            })?;
+        choice.release_completed()?;
+        return Ok(FileDeleteOutcome::Completed);
+    }
     let target = choice
         .parent
         .vault()
