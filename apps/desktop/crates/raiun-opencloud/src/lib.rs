@@ -3164,7 +3164,8 @@ fn validate_logical_path(path: &str) -> Result<(), CloudError> {
 struct DavItem {
     href: String,
     directory: bool,
-    size: u64,
+    size: Option<u64>,
+    invalid_size: bool,
     etag: String,
     modified: i64,
     file_id: Option<String>,
@@ -3323,9 +3324,11 @@ fn parse_multistatus(
                     match field.as_str() {
                         "href" if current.href.is_empty() => current.href = value.to_owned(),
                         "getcontentlength" if in_prop => {
-                            prop_values.size = value
-                                .parse()
-                                .map_err(|_| invalid("DAV content length is invalid"))?
+                            // A property's status follows its value. Defer
+                            // rejection until successful propstats establish
+                            // whether this is a file or a collection.
+                            prop_values.size = value.parse().ok();
+                            prop_values.invalid_size |= prop_values.size.is_none();
                         }
                         "getetag" if in_prop => prop_values.etag = value.to_owned(),
                         "getlastmodified" if in_prop => {
@@ -3360,7 +3363,8 @@ fn parse_multistatus(
                     if let Some(ref mut current) = item {
                         current.directory |= prop_values.directory;
                         current.encrypted |= prop_values.encrypted;
-                        current.size = prop_values.size;
+                        current.invalid_size |= prop_values.invalid_size;
+                        current.size = prop_values.size.or(current.size);
                         if !prop_values.etag.is_empty() {
                             current.etag = std::mem::take(&mut prop_values.etag);
                         }
@@ -3471,6 +3475,18 @@ fn to_remote_entry(
     if etag.is_empty() && !item.directory {
         return Err(invalid("DAV response omitted an entity tag"));
     }
+    // Collections have no transferable body size. Unavailable or malformed
+    // getcontentlength properties therefore cannot deny their root identity.
+    // Files require an explicit valid size from a successful propstat; neither
+    // a failed property nor a later unrelated propstat can fabricate zero.
+    let size = if item.directory {
+        0
+    } else if item.invalid_size {
+        return Err(invalid("DAV content length is invalid"));
+    } else {
+        item.size
+            .ok_or_else(|| invalid("DAV response omitted a content length"))?
+    };
     let encrypted = item.encrypted
         || item
             .content_type
@@ -3484,7 +3500,7 @@ fn to_remote_entry(
             .unwrap_or_else(|| actual.to_string()),
         path,
         directory: item.directory,
-        size: if item.directory { 0 } else { item.size },
+        size,
         etag,
         modified_unix: item.modified,
         writable: item.writable.unwrap_or(true),
