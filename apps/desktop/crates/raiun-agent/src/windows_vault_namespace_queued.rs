@@ -1038,3 +1038,287 @@ pub(super) fn has_local_queued(
     let (_, i) = load_retargets(store, scope)?;
     Ok(!i.rows.is_empty())
 }
+
+/// A protected local journal transition, used only to project the current
+/// catalogue. It grants no remote or native mutation authority.
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct CatalogueDelta {
+    pub write_id: String,
+    pub revision: u64,
+    pub identity: [u8; 16],
+    pub file: u64,
+    pub usn: i64,
+    pub components: Vec<String>,
+    pub original: Option<RemoteEntry>,
+    pub entry: Option<RemoteEntry>,
+    pub plaintext_len: u64,
+    pub source_sha256: Option<[u8; 32]>,
+}
+impl From<PendingFacts> for CatalogueDelta {
+    fn from(f: PendingFacts) -> Self {
+        Self {
+            write_id: f.write_id,
+            revision: f.revision,
+            identity: f.identity,
+            file: f.file,
+            usn: f.usn,
+            components: f.components,
+            original: f.original,
+            entry: f.entry,
+            plaintext_len: f.plaintext_len,
+            source_sha256: f.source_sha256,
+        }
+    }
+}
+fn retarget_catalogue_deltas(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+) -> Result<Vec<CatalogueDelta>, BackendError> {
+    let (_, index) = load_retargets(store, scope)?;
+    // Authenticate every transition against the original child ledger before
+    // exposing any row. The final pending facts alone omit intermediate moves.
+    current_pending(store, scope, &index)?;
+    let mut result = Vec::new();
+    for row in &index.rows {
+        let proof = row.native.as_ref().ok_or_else(no)?;
+        for (node, native) in row.nodes.iter().zip(proof) {
+            result.push(CatalogueDelta {
+                write_id: node.write_id.clone(),
+                revision: node.revision,
+                identity: node.identity,
+                file: native.file,
+                usn: native.usn,
+                components: node.new_components.clone(),
+                original: Some(node.original.clone()),
+                entry: Some(node.entry.clone()),
+                plaintext_len: node.entry.size,
+                source_sha256: node.source_sha256,
+            });
+        }
+    }
+    Ok(result)
+}
+fn all_catalogue_deltas(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+    extra: &[CatalogueDelta],
+) -> Result<Vec<CatalogueDelta>, BackendError> {
+    let mut rows = Vec::new();
+    rows.extend(
+        super::windows_vault_child_create_custody::pending_native_facts(store, scope)?
+            .into_iter()
+            .map(CatalogueDelta::from),
+    );
+    rows.extend(
+        super::windows_vault_file_rename_custody::pending_native_facts(store, scope)?
+            .into_iter()
+            .map(CatalogueDelta::from),
+    );
+    rows.extend(
+        super::windows_vault_file_delete_custody::pending_native_facts(store, scope)?
+            .into_iter()
+            .map(CatalogueDelta::from),
+    );
+    rows.extend(retarget_catalogue_deltas(store, scope)?);
+    rows.extend_from_slice(extra);
+    if rows.len() > 4096 {
+        return Err(no());
+    }
+    let mut unique = std::collections::BTreeMap::new();
+    for row in rows {
+        validate_delta(&row)?;
+        let key = (row.write_id.clone(), row.revision);
+        if let Some(previous) = unique.insert(key, row.clone()) {
+            if previous != row {
+                return Err(no());
+            }
+        }
+    }
+    Ok(unique.into_values().collect())
+}
+fn same_presentation(a: &RemoteEntry, b: &RemoteEntry) -> bool {
+    a.id == b.id
+        && a.path == b.path
+        && a.directory == b.directory
+        && a.size == b.size
+        && a.etag == b.etag
+}
+fn validate_delta(d: &CatalogueDelta) -> Result<(), BackendError> {
+    let entry = |e: &RemoteEntry| {
+        !e.id.is_empty()
+            && e.id.len() <= 4096
+            && !e.etag.is_empty()
+            && e.etag.len() <= 4096
+            && e.path.len() <= 32000
+            && raiun_core::validate_remote_path(&e.path).is_ok()
+            && (!e.directory || e.size == 0)
+    };
+    if d.write_id.is_empty()
+        || d.write_id.len() > 512
+        || d.write_id.chars().any(char::is_control)
+        || d.revision == 0
+        || d.identity == [0; 16]
+        || d.file == 0
+        || d.usn <= 0
+        || d.components.len() < 2
+        || d.components.len() > 256
+        || d.components.iter().map(String::len).sum::<usize>() > 32000
+        || d.components.iter().any(|c| {
+            c.is_empty()
+                || c.len() > 255
+                || c == "."
+                || c == ".."
+                || c.chars().any(|c| {
+                    c.is_control()
+                        || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+                })
+        })
+        || d.original.is_none() && d.entry.is_none()
+        || d.original.as_ref().is_some_and(|e| !entry(e))
+        || d.entry.as_ref().is_some_and(|e| !entry(e))
+        || d.entry.as_ref().is_some_and(|e| {
+            e.path == "/"
+                || e.size != d.plaintext_len
+                || e.etag != format!("raiun-pending-v1:{}:{}", d.write_id, d.revision)
+        })
+        || d.entry.is_none()
+            && d.original
+                .as_ref()
+                .is_none_or(|e| e.directory || e.size != d.plaintext_len)
+        || d.source_sha256 == Some([0; 32])
+    {
+        return Err(no());
+    }
+    if let Some(original) = &d.original {
+        if let Some(entry) = &d.entry {
+            if original.id != entry.id || original.directory != entry.directory {
+                return Err(no());
+            }
+        }
+        let prefix = format!("raiun-pending-v1:{}:", d.write_id);
+        if let Some(previous) = original.etag.strip_prefix(&prefix) {
+            let previous = previous.parse::<u64>().map_err(|_| no())?;
+            if previous.checked_add(1) != Some(d.revision) {
+                return Err(no());
+            }
+        } else if original.etag.starts_with("raiun-pending-v1:") || d.revision != 1 {
+            return Err(no());
+        }
+    } else if d.revision != 1 {
+        return Err(no());
+    }
+    Ok(())
+}
+
+/// Project exact protected journal transitions onto an authenticated base
+/// catalogue. No prefix rewrite or history mutation is performed.
+pub(super) fn current_catalogue(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+    base: &[raiun_cloudfiles_windows::VaultCatalogueEntry],
+    extra: &[CatalogueDelta],
+) -> Result<Vec<raiun_cloudfiles_windows::VaultCatalogueEntry>, BackendError> {
+    let mut current = std::collections::BTreeMap::new();
+    for row in base {
+        let mut metadata = row.metadata.clone();
+        metadata.writable = false;
+        metadata.encrypted = true;
+        if row.identity == [0; 16]
+            || raiun_core::validate_remote_path(&metadata.path).is_err()
+            || current.insert(row.identity, metadata).is_some()
+        {
+            return Err(no());
+        }
+    }
+    if current.len() > super::vault_custody::MAX_CATALOGUE {
+        return Err(no());
+    }
+    unique_catalogue_paths(&current)?;
+    let mut remaining = all_catalogue_deltas(store, scope, extra)?;
+    let mut files = std::collections::BTreeMap::<[u8; 16], u64>::new();
+    let mut seen_revisions = std::collections::BTreeMap::<String, u64>::new();
+    let mut tombstones = std::collections::BTreeSet::new();
+    while !remaining.is_empty() {
+        let eligible = remaining
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| {
+                if tombstones.contains(&d.identity) {
+                    return false;
+                }
+                match (&d.original, current.get(&d.identity)) {
+                    (None, None) => true,
+                    (Some(before), Some(now)) => same_presentation(before, now),
+                    _ => false,
+                }
+            })
+            .map(|(n, _)| n)
+            .collect::<Vec<_>>();
+        if eligible.is_empty() {
+            return Err(no());
+        }
+        // More than one transition from the same presentation is ambiguous.
+        let mut per_identity = std::collections::BTreeSet::new();
+        for &index in &eligible {
+            if !per_identity.insert(remaining[index].identity) {
+                return Err(no());
+            }
+        }
+        let index = eligible[0];
+        let d = remaining.remove(index);
+        if files
+            .insert(d.identity, d.file)
+            .is_some_and(|f| f != d.file)
+            || seen_revisions
+                .insert(d.write_id.clone(), d.revision)
+                .is_some_and(|previous| previous.checked_add(1) != Some(d.revision))
+        {
+            return Err(no());
+        }
+        if let Some(mut entry) = d.entry {
+            entry.writable = false;
+            entry.encrypted = true;
+            current.insert(d.identity, entry);
+        } else {
+            current.remove(&d.identity);
+            tombstones.insert(d.identity);
+        }
+        unique_catalogue_paths(&current)?;
+        if current.len() > super::vault_custody::MAX_CATALOGUE {
+            return Err(no());
+        }
+    }
+    Ok(current
+        .into_iter()
+        .map(
+            |(identity, metadata)| raiun_cloudfiles_windows::VaultCatalogueEntry {
+                identity,
+                metadata,
+            },
+        )
+        .collect())
+}
+fn unique_catalogue_paths(
+    rows: &std::collections::BTreeMap<[u8; 16], RemoteEntry>,
+) -> Result<(), BackendError> {
+    let mut paths = std::collections::BTreeSet::new();
+    let mut ids = std::collections::BTreeSet::new();
+    for row in rows.values() {
+        if !paths.insert(row.path.to_lowercase()) || !ids.insert(row.id.clone()) {
+            return Err(no());
+        }
+    }
+    Ok(())
+}
+/// Includes tombstones so catalogue persistence can identify every protected
+/// pending identity without interpreting a missing entry as remote deletion.
+pub(super) fn pending_identities(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+    extra: &[CatalogueDelta],
+) -> Result<std::collections::BTreeSet<[u8; 16]>, BackendError> {
+    Ok(all_catalogue_deltas(store, scope, extra)?
+        .into_iter()
+        .map(|d| d.identity)
+        .collect())
+}
