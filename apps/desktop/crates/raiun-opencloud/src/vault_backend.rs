@@ -49,6 +49,10 @@ use crate::{
     },
 };
 
+#[cfg(windows)]
+mod cached_namespace;
+#[cfg(windows)]
+pub use cached_namespace::{VaultCachedChildTarget, VaultCachedEditTarget};
 mod copy;
 mod directory_create;
 #[cfg(windows)]

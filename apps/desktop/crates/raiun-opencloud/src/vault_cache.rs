@@ -506,6 +506,112 @@ impl VaultOfflineCache {
     /// cache sees it; only the random ID, revision, size, and lifecycle state
     /// are stored outside the ciphertext.
     #[cfg(windows)]
+    pub(crate) fn queue_create_reader<R: Read>(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        epoch: &raiun_vault::session::VaultSessionEpoch,
+        source: &mut R,
+        request: VaultPendingCreateRequest<'_>,
+        directory: bool,
+        expected_sha: [u8; 32],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        self.queue_create_reader_existing(
+            sessions,
+            epoch,
+            source,
+            request,
+            directory,
+            expected_sha,
+            cancelled,
+            None,
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn queue_create_reader_existing<R: Read>(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        epoch: &raiun_vault::session::VaultSessionEpoch,
+        source: &mut R,
+        request: VaultPendingCreateRequest<'_>,
+        directory: bool,
+        expected_sha: [u8; 32],
+        cancelled: &dyn Fn() -> bool,
+        expected_revision: Option<u64>,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        if (request.existing_id.is_some() != expected_revision.is_some())
+            || (directory && request.existing_id.is_some())
+            || request.state != CiphertextWriteState::NeverAttempted
+            || (directory && request.body_len != 0)
+        {
+            return Err(invalid("encrypted cached create request is invalid"));
+        }
+        self.queue_operation_inner_encoded(
+            sessions,
+            source,
+            VaultPendingOperationRequest {
+                integrity_token: request.integrity_token,
+                encoded_target: request.encoded_target,
+                operation: if directory {
+                    VaultPendingOperationKind::CreateDirectory
+                } else {
+                    VaultPendingOperationKind::CreateFile
+                },
+                base: WriteCondition::Absent,
+                base_resource_id: None,
+                parent_resource_id: request.parent_resource_id,
+                parent_etag: request.parent_etag,
+                parent_ref: Some(request.parent_ref),
+                destination_target: None,
+                destination_parent_resource_id: None,
+                destination_parent_etag: None,
+                source_size: None,
+                source_ciphertext_sha256: None,
+                copy_source: None,
+                existing_id: request.existing_id,
+                body_len: request.body_len,
+                state: request.state,
+                receipt_resource_id: None,
+                receipt_etag: None,
+                receipt_for_revision: None,
+            },
+            None,
+            |source, metadata, length, path| {
+                if let Some(previous) = expected_revision {
+                    let value: serde_json::Value = serde_json::from_slice(metadata)
+                        .map_err(|_| invalid("encrypted edit metadata is invalid"))?;
+                    if previous.checked_add(1)
+                        != value.get("revision").and_then(serde_json::Value::as_u64)
+                    {
+                        return Err(conflict(
+                            "encrypted edit revision changed before encryption",
+                        ));
+                    }
+                }
+                let prefix = envelope_prefix(metadata, length)?;
+                let mut body = windows_pending::ExactDigestReader::new(
+                    source,
+                    length,
+                    expected_sha,
+                    cancelled,
+                );
+                let mut chain = io::Cursor::new(&*prefix).chain(&mut body);
+                sessions
+                    .encrypt_file_transactional_at_epoch(
+                        &self.scope,
+                        epoch,
+                        &mut chain,
+                        path,
+                        prefix.len() as u64 + length,
+                        MAX_EDIT_BYTES + EDIT_HEADER_BYTES + MAX_EDIT_METADATA_BYTES as u64,
+                    )
+                    .map_err(vault_error)
+            },
+        )
+    }
+
+    #[cfg(windows)]
     pub(crate) fn queue_edit_reader<R: Read>(
         &self,
         sessions: &VaultSessionCoordinator,
@@ -514,6 +620,28 @@ impl VaultOfflineCache {
         request: VaultPendingEditRequest<'_>,
         expected_sha: [u8; 32],
         cancelled: &dyn Fn() -> bool,
+    ) -> Result<VaultPendingEditMetadata, CloudError> {
+        self.queue_edit_reader_exact(
+            sessions,
+            epoch,
+            source,
+            request,
+            expected_sha,
+            cancelled,
+            None,
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn queue_edit_reader_exact<R: Read>(
+        &self,
+        sessions: &VaultSessionCoordinator,
+        epoch: &raiun_vault::session::VaultSessionEpoch,
+        source: &mut R,
+        request: VaultPendingEditRequest<'_>,
+        expected_sha: [u8; 32],
+        cancelled: &dyn Fn() -> bool,
+        expected_revision: Option<u64>,
     ) -> Result<VaultPendingEditMetadata, CloudError> {
         self.queue_operation_inner_encoded(
             sessions,
@@ -542,6 +670,17 @@ impl VaultOfflineCache {
             },
             None,
             |source, metadata, length, path| {
+                if let Some(previous) = expected_revision {
+                    let value: serde_json::Value = serde_json::from_slice(metadata)
+                        .map_err(|_| invalid("encrypted edit metadata is invalid"))?;
+                    if previous.checked_add(1)
+                        != value.get("revision").and_then(serde_json::Value::as_u64)
+                    {
+                        return Err(conflict(
+                            "encrypted edit revision changed before encryption",
+                        ));
+                    }
+                }
                 let prefix = envelope_prefix(metadata, length)?;
                 let mut body = windows_pending::ExactDigestReader::new(
                     source,
