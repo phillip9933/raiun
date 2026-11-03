@@ -123,6 +123,7 @@ const WINDOWS_REFRESH_LEAD_SECONDS: u64 = 30;
 include!("windows_vault_session_control.rs");
 include!("windows_vault_create.rs");
 include!("windows_vault_copy.rs");
+include!("windows_vault_offline.rs");
 include!("windows_vault_edit_upload.rs");
 #[path = "windows_vault_child_create_custody.rs"]
 mod windows_vault_child_create_custody;
@@ -3602,6 +3603,13 @@ impl WindowsAgent {
                 Ok((self.inspect_windows_vault_create_parent(request)?, false))
             }
             "vault_list" => Ok((self.browse_windows_vault(request)?, false)),
+            "vault_pins"
+            | "vault_pin_start"
+            | "vault_pin_status"
+            | "vault_pin_cancel"
+            | "vault_pin_remove"
+            | "vault_cache_usage"
+            | "vault_cache_quota_set" => Ok((self.windows_vault_offline_request(request)?, false)),
             "vault_copy_parent" if WINDOWS_VAULT_SESSIONS_ENABLED => {
                 Ok((self.windows_vault_copy_parent(request)?, false))
             }
@@ -6476,6 +6484,7 @@ impl WindowsAgent {
                     // Publish invalidation before joining. Copy workers never
                     // acquire account state, broker or credential-operation locks.
                     self.vault_copy_jobs.cancel_all_and_wait()?;
+                    self.vault_copy_serialization.cancel_all_and_wait()?;
                     return Ok(next);
                 }
                 Err(actual) => current = actual,
@@ -6579,6 +6588,7 @@ impl WindowsAgent {
 impl Drop for WindowsAgent {
     fn drop(&mut self) {
         let _ = self.vault_copy_jobs.cancel_all_and_wait();
+        let _ = self.vault_copy_serialization.cancel_all_and_wait();
         self.provider.cancel_fresh_close();
         let worker = self
             .fresh_close_worker

@@ -605,6 +605,7 @@ impl WindowsAgent {
         // The broker/credential operation gate excludes new admissions. Publish
         // cancellation and join before native/key revocation takes its fences.
         self.vault_copy_jobs.cancel_scope_and_wait(&scope)?;
+        self.vault_copy_serialization.cancel_scope_and_wait(&scope)?;
         let cleanup = self.provider.begin_lock_vault_route(
             binding.clone(),
             target.space_id.clone(),
