@@ -349,7 +349,9 @@ impl PendingReconcileGuard<'_> {
                 if actual.path != *path
                     || actual.id.is_empty()
                     || actual.directory != (operation == VaultPendingOperationKind::CreateDirectory)
-                    || actual.size != body_len
+                    // Directory size may be an aggregate; its journal has no
+                    // file body. Every regular-file proof keeps exact length.
+                    || (!actual.directory && actual.size != body_len)
                     || (matches!(
                         operation,
                         VaultPendingOperationKind::Overwrite
