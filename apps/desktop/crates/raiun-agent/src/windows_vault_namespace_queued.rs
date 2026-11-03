@@ -53,7 +53,6 @@ impl Queued {
                 && bounded(&e.etag, 4096)
                 && e.path.len() <= 32000
                 && raiun_core::validate_remote_path(&e.path).is_ok()
-                && (!e.directory || e.size == 0)
         };
         if !bounded(&self.write_id, 512)
             || self.revision == 0
@@ -132,7 +131,8 @@ impl Queued {
                         || self
                             .original
                             .as_ref()
-                            .is_none_or(|o| !o.directory || o.id != e.id)
+                            .is_none_or(|o| !o.directory || o.id != e.id || o.size != 0)
+                        || e.size != 0
                         || self.plaintext_len != 0
                     {
                         return Err(no());
@@ -294,7 +294,6 @@ impl Retarget {
                 && e.etag.len() <= 4096
                 && e.path.len() <= 32000
                 && raiun_core::validate_remote_path(&e.path).is_ok()
-                && (!e.directory || e.size == 0)
         };
         if self.scope != *scope
             || self.generation == 0
@@ -318,6 +317,7 @@ impl Retarget {
             || !entry(&self.destination_parent)
             || !self.parent.directory
             || !self.destination_parent.directory
+            || (self.original.directory && self.original.size != 0)
             || self.original.path
                 != format!(
                     "{}/{}",
@@ -1175,7 +1175,6 @@ fn validate_delta(d: &CatalogueDelta) -> Result<(), BackendError> {
             && e.etag.len() <= 4096
             && e.path.len() <= 32000
             && raiun_core::validate_remote_path(&e.path).is_ok()
-            && (!e.directory || e.size == 0)
     };
     if d.write_id.is_empty()
         || d.write_id.len() > 512
@@ -1204,6 +1203,7 @@ fn validate_delta(d: &CatalogueDelta) -> Result<(), BackendError> {
             && d.entry.as_ref().is_some_and(|e| {
                 e.path == "/"
                     || e.size != d.plaintext_len
+                    || (e.directory && (e.size != 0 || d.plaintext_len != 0))
                     || e.etag != format!("raiun-pending-v1:{}:{}", d.write_id, d.revision)
             })
         || !d.verified_native

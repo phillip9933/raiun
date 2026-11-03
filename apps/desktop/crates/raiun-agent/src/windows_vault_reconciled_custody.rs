@@ -71,7 +71,6 @@ impl Terminal {
                 && e.etag.len() <= 4096
                 && e.path.len() <= 32000
                 && raiun_core::validate_remote_path(&e.path).is_ok()
-                && (!e.directory || e.size == 0)
         };
         if self.scope != *scope
             || self.write_id.len() != 32
@@ -113,9 +112,13 @@ impl Terminal {
                 e.etag != format!("raiun-pending-v1:{}:{}", self.write_id, self.revision)
             })
             || self
+                .pending
+                .as_ref()
+                .is_some_and(|e| e.directory && (e.size != 0 || self.plaintext_len != 0))
+            || self
                 .result
                 .as_ref()
-                .is_some_and(|e| e.size != self.plaintext_len)
+                .is_some_and(|e| !e.directory && e.size != self.plaintext_len)
             || self.source_sha256 == Some([0; 32])
             || self.remote_sha256 == Some([0; 32])
         {
@@ -320,7 +323,15 @@ pub(super) fn record(
         || expected.write_id != meta.id
         || expected.revision != meta.revision
         || expected.operation != meta.operation
-        || expected.plaintext_len != meta.plaintext_len
+        || expected.plaintext_len
+            != if matches!(
+                expected.operation,
+                VaultPendingOperationKind::RenameFile | VaultPendingOperationKind::DeleteFile
+            ) {
+                meta.source_size
+            } else {
+                meta.plaintext_len
+            }
         || remote.plaintext_len() != expected.plaintext_len
         || native.write_id() != expected.write_id
         || native.revision() != expected.revision
@@ -352,7 +363,10 @@ pub(super) fn record(
             .as_ref()
             .zip(remote.entry())
             .is_some_and(|(p, r)| {
-                p.path != r.path || p.directory != r.directory || p.size != r.size
+                p.path != r.path
+                    || p.directory != r.directory
+                    || (p.directory && (p.size != 0 || expected.plaintext_len != 0))
+                    || (!p.directory && p.size != r.size)
             })
         || remote
             .plaintext_sha256()
@@ -418,6 +432,12 @@ pub(super) fn catalogue_updates(
         .into_iter()
         .map(|r| {
             let original = r.strong_original().cloned();
+            let mut result = r.result;
+            if let Some(entry) = &mut result {
+                if entry.directory {
+                    entry.size = 0; // Native/catalogue logical directory body is empty.
+                }
+            }
             super::windows_vault_namespace_queued::CatalogueDelta {
                 write_id: r.write_id,
                 revision: r.revision,
@@ -426,7 +446,7 @@ pub(super) fn catalogue_updates(
                 usn: r.completed_usn,
                 components: r.components,
                 original,
-                entry: r.result,
+                entry: result,
                 plaintext_len: r.plaintext_len,
                 source_sha256: r.remote_sha256.or(r.source_sha256),
                 verified_native: true,
@@ -475,7 +495,7 @@ pub(super) fn project_entry(
                     &remote.path,
                     &remote.etag,
                     remote.directory,
-                    remote.size,
+                    if remote.directory { 0 } else { remote.size },
                 )
                 .map_err(|_| no())?;
             }
