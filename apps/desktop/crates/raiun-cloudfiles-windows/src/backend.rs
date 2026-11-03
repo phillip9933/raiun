@@ -551,6 +551,11 @@ pub trait PreparedEnumeration {
         self.read_only()
     }
 
+    /// Cached projections are partial and must keep on-demand population enabled.
+    fn completes_population(&self) -> bool {
+        true
+    }
+
     fn children(&self) -> &[PlaceholderChild];
 
     /// Hold the relevant scope/revocation guard through one native publication.

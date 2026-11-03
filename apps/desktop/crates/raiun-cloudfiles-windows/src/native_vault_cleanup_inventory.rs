@@ -39,7 +39,7 @@ impl Drop for FindOwner {
         unsafe { FindClose(self.0) };
     }
 }
-fn local_names(path: &Path) -> Result<Vec<String>, Error> {
+pub(super) fn local_names(path: &Path) -> Result<Vec<String>, Error> {
     let pattern = wide_path(&path.join("*"))?;
     let mut data: FindData = unsafe { zeroed() };
     // FIND_FIRST_EX_ON_DISK_ENTRIES_ONLY(4) excludes provider-virtual entries.

@@ -303,6 +303,7 @@ pub fn validate_captured_server_origin(origin: &str) -> Result<(), CloudError> {
 /// Authentication method is immutable for a client and all of its clones.
 #[derive(Clone)]
 enum Authentication {
+    Offline,
     Bearer,
     AppToken { username: String },
 }
@@ -446,6 +447,18 @@ impl OpenCloudClient {
     /// only for literal IPv4 or IPv6 loopback addresses used by local fixtures.
     pub fn new(server: &str, bearer_token: String) -> Result<Self, CloudError> {
         Self::new_with_proxy(server, bearer_token, &ProxyConfig::System)
+    }
+
+    /// Credential-free, immutable cache-only capability. No request builder
+    /// can be created, including async/conditional paths, and token replacement
+    /// refuses this mode. Online reconnect must construct a fresh client.
+    pub fn new_offline(server: &str) -> Result<Self, CloudError> {
+        let mut client = Self::new_with_proxy(server, String::new(), &ProxyConfig::Direct)?;
+        client.authentication = Authentication::Offline;
+        Ok(client)
+    }
+    pub fn is_offline(&self) -> bool {
+        matches!(self.authentication, Authentication::Offline)
     }
 
     /// Create a client using the caller's immutable account proxy policy.
@@ -779,6 +792,12 @@ impl OpenCloudClient {
 
     fn authorization(&self, token: &str) -> Result<(HeaderValue, String), CloudError> {
         let (value, redactions) = match &self.authentication {
+            Authentication::Offline => {
+                return Err(CloudError::new(
+                    ErrorKind::Offline,
+                    "cache-only client cannot issue network requests",
+                ));
+            }
             Authentication::Bearer => (format!("Bearer {token}"), token.to_owned()),
             Authentication::AppToken { username } => {
                 let pair = Zeroizing::new(format!("{username}:{token}"));
@@ -810,6 +829,12 @@ impl OpenCloudClient {
         url: &Url,
         context: Option<RangeReadContext>,
     ) -> Result<(reqwest::blocking::RequestBuilder, String), CloudError> {
+        if self.is_offline() {
+            return Err(CloudError::new(
+                ErrorKind::Offline,
+                "cache-only client cannot issue network requests",
+            ));
+        }
         let context = context.or_else(|| ACTIVE_RANGE_CONTEXT.with(Cell::get));
         if !same_origin(&self.server, url) {
             return Err(invalid(
@@ -855,6 +880,12 @@ impl OpenCloudClient {
         url: &Url,
         context: Option<RangeReadContext>,
     ) -> Result<(reqwest::RequestBuilder, String), CloudError> {
+        if self.is_offline() {
+            return Err(CloudError::new(
+                ErrorKind::Offline,
+                "cache-only client cannot issue network requests",
+            ));
+        }
         let context = context.or_else(|| ACTIVE_RANGE_CONTEXT.with(Cell::get));
         if !same_origin(&self.server, url) {
             return Err(invalid(

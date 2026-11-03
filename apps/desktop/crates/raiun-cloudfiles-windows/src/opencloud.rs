@@ -7,6 +7,8 @@
 //! as paths or URLs.
 
 #[cfg(windows)]
+mod cached;
+#[cfg(windows)]
 pub(crate) mod file_create;
 #[cfg(any(windows, test))]
 mod file_delete;
@@ -402,6 +404,10 @@ impl PreparedEditBinding for OpenCloudPreparedEdit<'_> {
 }
 
 impl PreparedEnumeration for OpenCloudPreparedEnumeration<'_> {
+    fn completes_population(&self) -> bool {
+        !self.backend.cached_only
+    }
+
     fn children(&self) -> &[PlaceholderChild] {
         &self.children
     }
@@ -510,6 +516,7 @@ pub struct OpenCloudPlaceholderBackend {
     lease_gate: RwLock<()>,
     publish_gate: Mutex<()>,
     state: Mutex<State>,
+    cached_only: bool,
 }
 
 impl OpenCloudPlaceholderBackend {
@@ -593,6 +600,7 @@ impl OpenCloudPlaceholderBackend {
             revoked: AtomicBool::new(false),
             lease_gate: RwLock::new(()),
             publish_gate: Mutex::new(()),
+            cached_only: false,
             state: Mutex::new(State {
                 next_identity: 1,
                 files: HashMap::new(),
@@ -625,6 +633,11 @@ impl OpenCloudPlaceholderBackend {
             || !valid_remote_id(expected_personal_root_id)
         {
             return Err(BackendError::Unavailable);
+        }
+        #[cfg(windows)]
+        if self.cached_only {
+            return self
+                .register_cached_composite(expected_personal_space_id, expected_personal_root_id);
         }
         self.register_composite_root_exact(
             Some(expected_personal_space_id),
@@ -1380,6 +1393,10 @@ impl OpenCloudPlaceholderBackend {
             .map_err(|_| BackendError::Unavailable)
     }
 
+    pub fn is_cached_only(&self) -> bool {
+        self.cached_only
+    }
+
     pub fn scope(&self) -> &ProviderScope {
         &self.scope
     }
@@ -1518,6 +1535,12 @@ impl OpenCloudPlaceholderBackend {
         root_id: &str,
         root_path: &str,
     ) -> Result<(), BackendError> {
+        if self.cached_only {
+            connection
+                .inner
+                .refresh_cached_space_labels(self)
+                .map_err(|_| BackendError::Unavailable)?;
+        }
         let _lease = self
             .lease_gate
             .read()
@@ -2462,6 +2485,10 @@ impl OpenCloudPlaceholderBackend {
         }
         self.ensure_active()?;
         let identity: [u8; 16] = identity.try_into().map_err(|_| BackendError::NotFound)?;
+        #[cfg(windows)]
+        if self.cached_only {
+            return self.enumerate_cached(OpaqueIdentity(identity));
+        }
         let namespace = {
             self.state
                 .lock()
@@ -3146,6 +3173,9 @@ impl PlaceholderBackend for OpenCloudPlaceholderBackend {
         &'a self,
         identity: &[u8],
     ) -> Result<Box<dyn PreparedEditBinding + 'a>, BackendError> {
+        if self.cached_only {
+            return Err(BackendError::Unavailable);
+        }
         #[cfg(windows)]
         if self.vault_for_identity(identity)?.is_some() {
             return Err(BackendError::Unavailable);

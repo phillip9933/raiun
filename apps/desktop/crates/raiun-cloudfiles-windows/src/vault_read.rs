@@ -23,6 +23,8 @@ use std::{
 use zeroize::Zeroizing;
 
 pub struct WindowsVaultReadBinding {
+    #[cfg(windows)]
+    cache_pin: Option<Arc<raiun_control_windows::PrivateDirectory>>,
     trusted: ProviderScope,
     client: Arc<OpenCloudClient>,
     sessions: Arc<VaultSessionCoordinator>,
@@ -126,6 +128,8 @@ impl WindowsVaultReadBinding {
             root_path.clone(),
         )?;
         let binding = Self {
+            #[cfg(windows)]
+            cache_pin: None,
             trusted,
             client,
             sessions,
@@ -141,6 +145,53 @@ impl WindowsVaultReadBinding {
         binding.check_current()?;
         Ok(binding)
     }
+    /// Credential-free cached reads retain both the authenticated sealed root
+    /// and the exact private cache directory for the entire route lifetime.
+    #[cfg(windows)]
+    pub fn new_offline(
+        trusted: ProviderScope,
+        client: Arc<OpenCloudClient>,
+        sessions: Arc<VaultSessionCoordinator>,
+        scope: VaultSessionScope,
+        cache: raiun_opencloud::vault_cache::VaultOfflineCache,
+        snapshot: raiun_vault::sealed_cache::SealedVaultSnapshot,
+        cache_pin: Arc<raiun_control_windows::PrivateDirectory>,
+    ) -> Result<Self, CloudError> {
+        if !client.is_offline() {
+            return Err(refused());
+        }
+        check_context(&trusted, &client, &scope)?;
+        cache_pin.verify_path().map_err(|_| refused())?;
+        let root_path = snapshot.root_path.clone();
+        let epoch = sessions
+            .capture_session_epoch(&scope)
+            .map_err(|_| refused())?;
+        let backend = VaultBackend::new_from_cached_root(
+            (*client).clone(),
+            sessions.clone(),
+            scope.clone(),
+            root_path.clone(),
+            cache,
+            snapshot,
+        )?;
+        let binding = Self {
+            trusted,
+            client,
+            sessions,
+            scope,
+            backend,
+            root_path,
+            epoch,
+            cache_pin: Some(cache_pin),
+            identity: Arc::new(()),
+            revoked: AtomicBool::new(false),
+            publication_gate: RwLock::new(()),
+            publication_revision: AtomicU64::new(1),
+        };
+        binding.check_current()?;
+        Ok(binding)
+    }
+
     #[cfg(windows)]
     pub(crate) fn prepare_child_directory_create(
         &self,
@@ -798,6 +849,10 @@ impl WindowsVaultReadBinding {
     }
 
     fn check_current(&self) -> Result<(), CloudError> {
+        #[cfg(windows)]
+        if let Some(pin) = &self.cache_pin {
+            pin.verify_path().map_err(|_| refused())?;
+        }
         if self.revoked.load(Ordering::Acquire) {
             return Err(refused());
         }

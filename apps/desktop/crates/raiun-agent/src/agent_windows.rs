@@ -124,6 +124,7 @@ include!("windows_vault_session_control.rs");
 include!("windows_vault_create.rs");
 include!("windows_vault_copy.rs");
 include!("windows_vault_offline.rs");
+include!("windows_vault_cached.rs");
 include!("windows_vault_edit_upload.rs");
 #[path = "windows_vault_child_create_custody.rs"]
 mod windows_vault_child_create_custody;
@@ -446,6 +447,7 @@ struct AccountState {
     session: Option<auth::Session>,
     root_configuration: Option<RootConfiguration>,
     online_authenticated: bool,
+    offline_cached: bool,
     logout_pending: bool,
     needs_refresh: bool,
     refreshing: bool,
@@ -1607,11 +1609,16 @@ impl ProviderManager {
                                         token_generation: next_backend.scope().token_generation(),
                                     };
                                     let delete_generation = Arc::clone(&worker_generation);
-                                    raiun_cloudfiles_windows::connect_configured_root_with_file_delete(
-                                        prepared, authorization,
-                                        Arc::new(move |captured| captured == authorization && delete_generation.load(Ordering::Acquire) == generation),
-                                        Arc::clone(&worker_generation),
-                                    ).map(|active| (active, custody, composite_root_identity))
+                                    let connected = if next_backend.is_cached_only() {
+                                        raiun_cloudfiles_windows::connect_configured_root(prepared)
+                                    } else {
+                                        raiun_cloudfiles_windows::connect_configured_root_with_file_delete(
+                                            prepared, authorization,
+                                            Arc::new(move |captured| captured == authorization && delete_generation.load(Ordering::Acquire) == generation),
+                                            Arc::clone(&worker_generation),
+                                        )
+                                    };
+                                    connected.map(|active| (active, custody, composite_root_identity))
                                         .map_err(|_| "Could not connect the Windows Cloud Files drive".to_owned())
                                 });
                                 match lease {
@@ -2204,6 +2211,9 @@ impl ProviderManager {
         let namespace_enabled = namespace_enabled
             || self.namespace_test_activation.load(Ordering::Acquire)
             || mixed_namespace_fixture;
+        let create_enabled = create_enabled && !backend.is_cached_only();
+        let directory_phase_enabled = directory_phase_enabled && !backend.is_cached_only();
+        let namespace_enabled = namespace_enabled && !backend.is_cached_only();
         if directory_phase_enabled && namespace_enabled {
             return Err("Directory phase and legacy fixture routes are exclusive".to_owned());
         }
@@ -2218,30 +2228,32 @@ impl ProviderManager {
         } else {
             None
         };
-        let file_rename_producer = if !namespace_enabled || shared_directory_ready {
-            file_rename_catalog
-                .map(|catalog| {
-                    windows_file_rename_producer::Producer::capture(
-                        &backend,
-                        catalog,
-                        &self.authorized_generation,
-                        generation,
-                        expected_identity,
-                        &personal_space_id,
-                        &personal_root_resource_id,
-                    )
-                    .map(Box::new)
-                    .map_err(str::to_owned)
-                })
-                .transpose()?
-        } else {
-            None
-        };
+        let file_rename_producer =
+            if !backend.is_cached_only() && (!namespace_enabled || shared_directory_ready) {
+                file_rename_catalog
+                    .map(|catalog| {
+                        windows_file_rename_producer::Producer::capture(
+                            &backend,
+                            catalog,
+                            &self.authorized_generation,
+                            generation,
+                            expected_identity,
+                            &personal_space_id,
+                            &personal_root_resource_id,
+                        )
+                        .map(Box::new)
+                        .map_err(str::to_owned)
+                    })
+                    .transpose()?
+            } else {
+                None
+            };
         let fresh_close_publisher = self
             .fresh_close_source
             .lock()
             .map_err(|_| "Fresh vault close publication is unavailable")?
             .as_ref()
+            .filter(|_| !backend.is_cached_only())
             .and_then(|source| source.publisher(generation));
         let (response, result) = std::sync::mpsc::sync_channel(1);
         self.commands
@@ -3606,7 +3618,11 @@ impl WindowsAgent {
                 Ok((self.inspect_windows_vault_create_parent(request)?, false))
             }
             "vault_list" => Ok((self.browse_windows_vault(request)?, false)),
-            "vault_pins"
+            "vault_offline_reconnect" => {
+                Ok((self.reconnect_windows_cached_provider(request)?, false))
+            }
+            "vault_cached_roots"
+            | "vault_pins"
             | "vault_pin_start"
             | "vault_pin_status"
             | "vault_pin_cancel"
@@ -3970,7 +3986,9 @@ impl WindowsAgent {
         let mut status = json!({
             "agent_version": env!("CARGO_PKG_VERSION"),
             "connected": session.is_some() && state.online_authenticated,
-            "offline": session.is_some() && !state.online_authenticated,
+            "offline": state.offline_cached || (session.is_some() && !state.online_authenticated),
+            "offline_namespace": state.offline_cached,
+            "vault_offline_supported": !mount_only(),
             "server": session.map(|value| value.server.as_str()),
             "client_id": session.map(|value| value.client_id.as_str()),
             "paused": pause.as_ref().map(|snapshot| snapshot.paused),
@@ -5682,7 +5700,7 @@ impl WindowsAgent {
                 .state
                 .lock()
                 .map_err(|_| "Account state is unavailable")?;
-            if state.retiring {
+            if state.retiring || state.offline_cached {
                 return Ok(());
             }
             let Some(session) = state.session.clone() else {
@@ -5925,6 +5943,7 @@ impl WindowsAgent {
             let generation = self.next_generation()?;
             state.active_generation = generation;
             state.authenticating = true;
+            state.offline_cached = false;
             state.error = None;
             (generation, state.root_configuration.clone())
         };
@@ -6275,6 +6294,7 @@ impl WindowsAgent {
                 .map_err(|_| "Account state is unavailable")?;
             state.active_generation = self.next_generation()?;
             state.online_authenticated = false;
+            state.offline_cached = false;
             state.logout_pending = true;
             state.needs_refresh = state.session.is_some();
             state.authenticating = false;

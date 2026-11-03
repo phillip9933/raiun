@@ -3552,6 +3552,7 @@ impl ConfiguredRootConnection {
             &backend,
             composite_root_identity,
         );
+        let cached_backend = backend.clone();
         let delete_backend = backend.clone();
         let backend: Arc<dyn PlaceholderBackend> = backend;
         if identity != lease.identity {
@@ -3566,6 +3567,14 @@ impl ConfiguredRootConnection {
             root.verify_registered()?;
         } else {
             root.register(composite_root_identity.as_bytes())?;
+        }
+
+        if cached_backend.is_cached_only() {
+            restore_cached_space_labels(
+                &root,
+                &cached_backend,
+                composite_root_identity.as_bytes(),
+            )?;
         }
 
         let mut state = CallbackState::new_for_root(
@@ -7657,6 +7666,7 @@ unsafe extern "system" fn fetch_placeholders_callback(
                 children,
                 STATUS_SUCCESS,
                 &|child| prepared.file_read_only(child),
+                prepared.completes_population(),
             );
             #[cfg(test)]
             eprintln!(
@@ -8235,13 +8245,20 @@ fn execute_transfer_placeholders(
     completion_status: i32,
     read_only: bool,
 ) -> PlaceholderExecutionOutcome {
-    execute_transfer_placeholders_with_policy(info, children, completion_status, &|_| read_only)
+    execute_transfer_placeholders_with_policy(
+        info,
+        children,
+        completion_status,
+        &|_| read_only,
+        true,
+    )
 }
 fn execute_transfer_placeholders_with_policy(
     info: &CfCallbackInfo,
     children: &[crate::PlaceholderChild],
     completion_status: i32,
     file_read_only: &dyn Fn(&crate::PlaceholderChild) -> bool,
+    completes_population: bool,
 ) -> PlaceholderExecutionOutcome {
     let names = children
         .iter()
@@ -8294,7 +8311,7 @@ fn execute_transfer_placeholders_with_policy(
     // contract. Tell Cloud Files the current directory population is finished;
     // without this terminal flag it may keep requesting pages and wait on the
     // original filesystem enumeration.
-    let flags = if completion_status == STATUS_SUCCESS {
+    let flags = if completion_status == STATUS_SUCCESS && completes_population {
         CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION
     } else {
         CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE
@@ -12303,5 +12320,72 @@ mod backend_tests {
             self.trace.lock().unwrap().read_range_calls += 1;
             Err(BackendError::Unavailable)
         }
+    }
+}
+
+// Read only existing on-disk labels. Opaque identities must already be present
+// in the account/root protected catalogue; names never grant remote authority.
+fn restore_cached_space_labels(
+    root: &OwnedConfiguredRoot,
+    backend: &crate::OpenCloudPlaceholderBackend,
+    composite: &[u8],
+) -> Result<(), Error> {
+    let children = backend
+        .enumerate(
+            composite,
+            &CancellationToken::with_timeout(crate::DEFAULT_FETCH_TIMEOUT),
+        )
+        .map_err(|_| Error::ProviderUnavailable)?;
+    let spaces = children
+        .iter()
+        .find(|c| c.name == "Spaces")
+        .ok_or(Error::ProviderUnavailable)?;
+    let (_spaces, _snapshot, _ancestors) =
+        pin_configured_directory_path(root, spaces, &["Spaces"], FILE_READ_ATTRIBUTES)?;
+    let candidates = backend
+        .cached_space_roots()
+        .map_err(|_| Error::ProviderUnavailable)?;
+    for name in native_vault_cleanup_inventory::local_names(&root.path.join("Spaces"))? {
+        let mut found = None;
+        for candidate in &candidates {
+            let mut child = candidate.clone();
+            child.name = name.clone();
+            if let Ok(pins) = pin_configured_directory_path(
+                root,
+                &child,
+                &["Spaces", &name],
+                FILE_READ_ATTRIBUTES,
+            ) {
+                if found.is_some() {
+                    return Err(Error::ConfiguredRootChanged);
+                }
+                found = Some((candidate.identity.clone(), pins));
+            }
+        }
+        if let Some((identity, _pins)) = found {
+            backend
+                .set_cached_space_label(&identity, &name)
+                .map_err(|_| Error::ProviderUnavailable)?;
+        }
+    }
+    root.verify_identity(true)?;
+    root.verify_registered()
+}
+
+impl ConfiguredRootConnection {
+    pub(super) fn refresh_cached_space_labels(
+        &self,
+        backend: &crate::OpenCloudPlaceholderBackend,
+    ) -> Result<(), Error> {
+        if !self.connected
+            || !std::ptr::eq(
+                self.state.backend.as_ref() as *const dyn PlaceholderBackend as *const (),
+                backend as *const _ as *const (),
+            )
+        {
+            return Err(Error::ConnectionStateInvalid);
+        }
+        let root = self.root.as_ref().ok_or(Error::ConnectionStateInvalid)?;
+        restore_cached_space_labels(root, backend, self.composite_root_identity.as_bytes())
     }
 }

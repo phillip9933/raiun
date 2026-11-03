@@ -366,7 +366,12 @@ impl WindowsProfiles {
             .value()
             .get("action")
             .and_then(Value::as_str)
-            .is_some_and(|action| matches!(action, "vault_unlock" | "vault_lock" | "vault_forget"));
+            .is_some_and(|action| {
+                matches!(
+                    action,
+                    "vault_unlock" | "vault_unlock_offline" | "vault_lock" | "vault_forget"
+                )
+            });
         if !session_action {
             return self.handle(request.value());
         }
@@ -453,6 +458,44 @@ impl WindowsProfiles {
             .lock()
             .map_err(|_| "Vault changes are unavailable")?;
         match request {
+            windows_vault_requests::session_requests::VaultSessionRequest::OfflineUnlock {
+                target,
+                mut password,
+                pin,
+            } => {
+                let runtime = {
+                    let state = self
+                        .state
+                        .lock()
+                        .map_err(|_| "Account state is unavailable")?;
+                    let profile = target
+                        .profile_id
+                        .as_deref()
+                        .or(state.registry.selected())
+                        .ok_or("No active account is selected")?;
+                    if state
+                        .registry
+                        .profiles()
+                        .get(profile)
+                        .is_none_or(|p| p.removed())
+                    {
+                        return Err("Account has been removed".into());
+                    }
+                    state
+                        .runtimes
+                        .get(profile)
+                        .cloned()
+                        .ok_or("Unknown profile_id")?
+                };
+                let _operation = runtime
+                    .vault_credential_operation
+                    .lock()
+                    .map_err(|_| "Vault changes are unavailable")?;
+                Ok((
+                    runtime.unlock_windows_cached_vault(&target, &mut password, pin.as_ref())?,
+                    false,
+                ))
+            }
             windows_vault_requests::session_requests::VaultSessionRequest::Unlock {
                 target,
                 mut credential,

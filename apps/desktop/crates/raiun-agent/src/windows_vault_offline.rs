@@ -12,6 +12,64 @@ impl WindowsAgent {
         &self,
         expected: u64,
     ) -> Result<WindowsVaultOfflineAccount, String> {
+        // Inventory is DPAPI authenticated metadata, never online sign-in.
+        // Only one currently registered physical root may supply this profile's
+        // offline locator; ambiguity requires the normal account configuration.
+        if self
+            .state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?
+            .root_configuration
+            .is_none()
+        {
+            let storage = DpapiSessionStore::current_user()
+                .and_then(|s| s.for_profile(&self.profile_scope))
+                .map_err(|_| "Protected root metadata is unavailable")?;
+            let inventory = storage
+                .load_root_config_inventory(&self.profile_scope)
+                .map_err(|_| "Protected root inventory is unavailable")?;
+            let mut roots = Vec::new();
+            for bytes in inventory {
+                let c = decode_root_metadata(&bytes, &self.profile_scope)?;
+                if c.valid
+                    && c.registration_ownership.as_ref().is_some_and(|o| {
+                        o.state == "registered"
+                            && o.volume_serial == c.volume_serial
+                            && o.file_index == c.file_index
+                    })
+                    && pin_registered_configured_root(
+                        Path::new(&c.path),
+                        raiun_cloudfiles_windows::ConfiguredRootIdentity {
+                            volume_serial: c.volume_serial,
+                            file_index: c.file_index,
+                        },
+                    )
+                    .is_ok()
+                {
+                    roots.push(c);
+                }
+            }
+            if roots.len() != 1 {
+                return Err("No unique registered offline account is available".into());
+            }
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| "Account state is unavailable")?;
+            if state.active_generation != expected
+                || self.generation.load(Ordering::Acquire) != expected
+                || state.session.is_some()
+                || state.authenticating
+                || state.refreshing
+                || state.retiring
+                || state.logout_pending
+            {
+                return Err("The offline account changed".into());
+            }
+            if state.root_configuration.is_none() {
+                state.root_configuration = roots.pop();
+            }
+        }
         let (configuration, generation) = {
             let state = self
                 .state
@@ -196,6 +254,7 @@ impl WindowsAgent {
             "vault_pins" => &["space_id", "root_resource_id", "after", "limit"],
             "vault_pin_status" | "vault_pin_cancel" => &["space_id", "root_resource_id", "job_id"],
             "vault_pin_remove" => &["space_id", "root_resource_id", "pin_id"],
+            "vault_cached_roots" => &["after", "limit"],
             "vault_cache_usage" => &[],
             "vault_cache_quota_set" => &["quota_bytes"],
             _ => return Err("Unsupported encrypted offline action".into()),
@@ -252,6 +311,48 @@ impl WindowsAgent {
             self.check_windows_vault_offline_account(&context)?;
             return Ok(
                 json!({"quota_bytes":usage.quota_bytes,"used_bytes":usage.used_bytes,"pinned_bytes":usage.pinned_bytes,"protected_bytes":usage.protected_bytes,"over_quota":usage.over_quota}),
+            );
+        }
+        if action == "vault_cached_roots" {
+            let parsed = fields
+                .get("after")
+                .map(|v| {
+                    let o = v
+                        .as_object()
+                        .filter(|o| o.len() == 2)
+                        .ok_or("Invalid saved location cursor")?;
+                    let s = o
+                        .get("space_id")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty() && s.len() <= 512)
+                        .ok_or("Invalid saved location cursor")?;
+                    let r = o
+                        .get("root_resource_id")
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty() && s.len() <= 512)
+                        .ok_or("Invalid saved location cursor")?;
+                    Ok::<_, String>((s.to_owned(), r.to_owned()))
+                })
+                .transpose()?;
+            let limit = fields
+                .get("limit")
+                .map(|v| v.as_u64().ok_or("Invalid saved location limit"))
+                .transpose()?
+                .unwrap_or(50);
+            let page = VaultOfflineCache::discover_cached_roots(
+                &cache,
+                &context.origin,
+                &self.profile_scope,
+                parsed.as_ref().map(|(s, r)| (s.as_str(), r.as_str())),
+                usize::try_from(limit).map_err(|_| "Invalid saved location limit")?,
+            )
+            .map_err(|_| "Saved encrypted locations are unavailable")?;
+            cache_pin
+                .verify_path()
+                .map_err(|_| "Private encrypted cache changed")?;
+            self.check_windows_vault_offline_account(&context)?;
+            return Ok(
+                json!({"roots":page.roots.into_iter().map(|r|json!({"space_id":r.space_id,"root_resource_id":r.root_resource_id,"pin_id":r.pin_id,"generation":r.generation,"snapshot_available":true})).collect::<Vec<_>>(),"next_after":page.next_after.map(|(s,r)|json!({"space_id":s,"root_resource_id":r})),"truncated":page.truncated}),
             );
         }
         let scope = raiun_vault::session::VaultSessionScope::new(
@@ -320,7 +421,12 @@ impl WindowsAgent {
                     expected,
                     Arc::new({
                         let pin = cache_pin.clone();
-                        move || pin.verify_path().is_ok()
+                        let path = PathBuf::from(&context.configuration.path);
+                        let root = context._root.identity();
+                        move || {
+                            pin.verify_path().is_ok()
+                                && pin_registered_configured_root(&path, root).is_ok()
+                        }
                     }),
                 )?;
                 json!({"accepted":true,"job_id":job})

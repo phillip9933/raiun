@@ -207,6 +207,11 @@ pub(super) mod session_requests {
         }
     }
     pub enum VaultSessionRequest {
+        OfflineUnlock {
+            target: VaultTarget,
+            password: VaultPassword,
+            pin: Option<(String, u64)>,
+        },
         Unlock {
             target: VaultTarget,
             credential: VaultUnlockCredential,
@@ -275,15 +280,23 @@ pub(super) mod session_requests {
     fn decode_owned(owned: &OwnedRequest) -> Result<VaultSessionRequest, String> {
         let fields = owned.value.as_object().ok_or_else(invalid)?;
         let action = text(fields, "action", 64)?;
-        if !matches!(action, "vault_unlock" | "vault_lock" | "vault_forget") {
+        if !matches!(
+            action,
+            "vault_unlock" | "vault_unlock_offline" | "vault_lock" | "vault_forget"
+        ) {
             return Err(invalid());
         }
-        let unlock = action == "vault_unlock";
+        let unlock = matches!(action, "vault_unlock" | "vault_unlock_offline");
+        let offline = action == "vault_unlock_offline";
+        if offline && (fields.contains_key("remember") || fields.contains_key("use_saved")) {
+            return Err(invalid());
+        }
         if fields.keys().any(|key| {
             !matches!(
                 key.as_str(),
                 "action" | "profile_id" | "space_id" | "root_path" | "root_resource_id"
             ) && !(unlock && matches!(key.as_str(), "password" | "remember" | "use_saved"))
+                && !(offline && matches!(key.as_str(), "pin_id" | "expected_generation"))
         }) {
             return Err(invalid());
         }
@@ -300,11 +313,12 @@ pub(super) mod session_requests {
         let space_id = text(fields, "space_id", 512)?;
         // The existing UI forget contract identifies a stable root by ID and
         // omits a path. This placeholder never participates in forget authority.
-        let root_path = if action == "vault_forget" && !fields.contains_key("root_path") {
-            "/"
-        } else {
-            text(fields, "root_path", 4096)?
-        };
+        let root_path =
+            if (action == "vault_forget" || offline) && !fields.contains_key("root_path") {
+                "/"
+            } else {
+                text(fields, "root_path", 4096)?
+            };
         validate_remote_path(root_path).map_err(|_| invalid())?;
         let root_resource_id = text(fields, "root_resource_id", 512)?;
         // Match VaultSessionScope identifier grammar without normalizing authority.
@@ -342,6 +356,28 @@ pub(super) mod session_requests {
             root_resource_id: root_resource_id.to_owned(),
         };
         Ok(match action {
+            "vault_unlock_offline" => {
+                let password = password.ok_or_else(invalid)?;
+                let pin = if fields.contains_key("pin_id") {
+                    Some((
+                        text(fields, "pin_id", 512)?.to_owned(),
+                        fields
+                            .get("expected_generation")
+                            .and_then(Value::as_u64)
+                            .ok_or_else(invalid)?,
+                    ))
+                } else {
+                    if fields.contains_key("expected_generation") {
+                        return Err(invalid());
+                    }
+                    None
+                };
+                VaultSessionRequest::OfflineUnlock {
+                    target,
+                    pin,
+                    password: VaultPassword(Zeroizing::new(password.as_bytes().to_vec())),
+                }
+            }
             "vault_unlock" => {
                 let credential = match password {
                     Some(password) => {
@@ -409,7 +445,7 @@ pub(super) mod session_requests {
                 ("use_saved", json!(true)),
                 ("remember", Value::Null),
                 ("space_id", json!(7)),
-                ("action", json!("vault_unlock_offline")),
+                ("action", json!("vault_unlock_unknown")),
             ] {
                 let mut v = unlock();
                 v[key] = bad;

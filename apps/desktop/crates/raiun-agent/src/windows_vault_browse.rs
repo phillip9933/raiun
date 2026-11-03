@@ -18,7 +18,7 @@ struct BrowseRequest {
 }
 fn decode(value: &Value) -> Result<BrowseRequest, String> {
     let fields = value.as_object().ok_or(INVALID)?;
-    const KEYS: [&str; 7] = [
+    const KEYS: [&str; 8] = [
         "action",
         "profile_id",
         "expected_auth_generation",
@@ -26,8 +26,10 @@ fn decode(value: &Value) -> Result<BrowseRequest, String> {
         "root_path",
         "root_resource_id",
         "path",
+        "offline",
     ];
-    if fields.len() != KEYS.len()
+    if !(fields.len() == 7
+        || (fields.len() == 8 && fields.get("offline").and_then(Value::as_bool) == Some(true)))
         || fields.keys().any(|key| !KEYS.contains(&key.as_str()))
         || fields.get("action").and_then(Value::as_str) != Some("vault_list")
     {
@@ -120,6 +122,21 @@ impl WindowsAgent {
             .vault_credential_operation
             .lock()
             .map_err(|_| REFUSED)?;
+        if self.state.lock().map_err(|_| REFUSED)?.offline_cached {
+            let context = self.windows_vault_offline_account(request.generation)?;
+            let verified = self.connect_windows_cached_provider(&context)?;
+            let entries = verified
+                .backend
+                .list_cached_vault(
+                    &request.space,
+                    &request.root,
+                    &request.resource,
+                    &request.path,
+                )
+                .map_err(|_| REFUSED)?;
+            self.check_windows_vault_offline_account(&context)?;
+            return project(&entries);
+        }
         let (session, configuration) = {
             let state = self.state.lock().map_err(|_| REFUSED)?;
             let session = state.session.clone().ok_or(REFUSED)?;

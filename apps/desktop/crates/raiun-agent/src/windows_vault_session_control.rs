@@ -26,6 +26,14 @@ impl Drop for PreparedWindowsVaultUnlock {
 }
 impl WindowsAgent {
     fn inspect_windows_vault(&self, request: &Value) -> Result<Value, String> {
+        if self
+            .state
+            .lock()
+            .map_err(|_| "Account state is unavailable")?
+            .offline_cached
+        {
+            return self.inspect_windows_cached_vault(request);
+        }
         // Disabled preparation adds no credential I/O or session observation.
         if !WINDOWS_VAULT_SESSIONS_ENABLED {
             return self.folder_request(request);
@@ -605,7 +613,8 @@ impl WindowsAgent {
         // The broker/credential operation gate excludes new admissions. Publish
         // cancellation and join before native/key revocation takes its fences.
         self.vault_copy_jobs.cancel_scope_and_wait(&scope)?;
-        self.vault_copy_serialization.cancel_scope_and_wait(&scope)?;
+        self.vault_copy_serialization
+            .cancel_scope_and_wait(&scope)?;
         let cleanup = self.provider.begin_lock_vault_route(
             binding.clone(),
             target.space_id.clone(),

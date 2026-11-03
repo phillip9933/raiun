@@ -38,7 +38,7 @@ import { isVaultPasswordValidationError, shouldAnnounceVaultCloseBlocked, vaultD
 import raiunLogo from '../src-tauri/icons/raiun.svg';
 
 type OfflineCacheSummary = { available: boolean; quota_bytes: number; used_bytes: number; pinned_bytes: number; protected_bytes: number; over_quota: boolean; unavailable_reason?: string | null };
-type Status = { connected: boolean; windows_recovery_retry_supported?: boolean; offline?: boolean; offline_namespace?: boolean; refreshing?: boolean; agent_version?: string | null; server?: string | null; client_id?: string | null; paused?: boolean; paused_space_ids?: string[]; mounted?: boolean; cloud_root?: string | null; error?: string | null; autostart?: boolean | null; recovery_folder?: string | null; encrypted_edit_recovery_available?: boolean; offline_cache?: OfflineCacheSummary | null; profile_id?: string | null; profile_label?: string | null; auth_generation?: number; root_configuration?: { valid: boolean; identity_bound: boolean; registration_state: string | null; recovery_scope_token?: unknown } | null; stopped?: boolean; authenticating?: boolean; provider_supported?: boolean; folder_sync_supported?: boolean; folder_settings_supported?: boolean; media_jobs_supported?: boolean; vaults_supported?: boolean; vault_create_supported?: boolean; vault_copy_supported?: boolean; vault_access_mode?: 'native_read_only'; vault_in_app_browse_supported?: boolean; account_switch_supported?: boolean; account_setup_requires_sign_in?: boolean; pause_supported?: boolean; bandwidth_limits_supported?: boolean; network_proxy_supported?: boolean; proxy_edit_requires_sign_out?: boolean; session_cleanup_uncertain?: boolean };
+type Status = { connected: boolean; windows_recovery_retry_supported?: boolean; offline?: boolean; offline_namespace?: boolean; refreshing?: boolean; agent_version?: string | null; server?: string | null; client_id?: string | null; paused?: boolean; paused_space_ids?: string[]; mounted?: boolean; cloud_root?: string | null; error?: string | null; autostart?: boolean | null; recovery_folder?: string | null; encrypted_edit_recovery_available?: boolean; offline_cache?: OfflineCacheSummary | null; profile_id?: string | null; profile_label?: string | null; auth_generation?: number; root_configuration?: { valid: boolean; identity_bound: boolean; registration_state: string | null; recovery_scope_token?: unknown } | null; stopped?: boolean; authenticating?: boolean; provider_supported?: boolean; folder_sync_supported?: boolean; folder_settings_supported?: boolean; media_jobs_supported?: boolean; vaults_supported?: boolean; vault_create_supported?: boolean; vault_copy_supported?: boolean; vault_access_mode?: 'native_read_only'; vault_in_app_browse_supported?: boolean; vault_offline_supported?: boolean; account_switch_supported?: boolean; account_setup_requires_sign_in?: boolean; pause_supported?: boolean; bandwidth_limits_supported?: boolean; network_proxy_supported?: boolean; proxy_edit_requires_sign_out?: boolean; session_cleanup_uncertain?: boolean };
 type Account = { id: string; label: string; status: Status; avatar_data_url?: string | null };
 type RemovedAccount = { id: string; label: string; local_data_preserved: true };
 type DesktopUpdateStatus = { state: 'idle' | 'current' | 'available' | 'unavailable' | 'downloaded' | 'dismissed' | 'error'; version: string | null; tag: string | null; release_url: string | null; notes: string | null; error: string | null; automatic_checks: boolean; channel: 'stable' | 'beta'; dismissed_tag: string | null; last_check_unix: number | null; key_configured: boolean; downloaded: boolean };
@@ -232,11 +232,11 @@ function vaultAppFeaturesAvailable() { return featureAvailable('vaults_supported
 function nativeVaultBrowseAvailable(flow = state.vaultDialog): boolean {
   const status = state.status;
   return nativeVaultAccess() && status?.vault_in_app_browse_supported === true &&
-    status.connected === true && status.offline !== true && status.mounted === true &&
+    (status.connected === true || (status.offline_namespace === true && flow?.offlineUnlockOnly === true)) && status.mounted === true &&
     Number.isSafeInteger(status.auth_generation) && status.auth_generation! >= 0 &&
     !state.accountSwitching && !!flow && isCurrentAccount(flow.accountEpoch) &&
     state.vaultGeneration === flow.generation && flow.unlocked && !flow.statusUnknown &&
-    !flow.offlineUnlockOnly && flow.vaultMountReady && !nativeVaultLockIncomplete(flow) && !!flow.rootResourceId;
+    flow.vaultMountReady && !nativeVaultLockIncomplete(flow) && !!flow.rootResourceId;
 }
 function clearVaultBrowse(flow: VaultDialogState) {
   flow.browseRevision = (flow.browseRevision ?? 0) + 1;
@@ -254,8 +254,10 @@ function invalidateUnavailableNativeVaultBrowse() {
     clearVaultBrowse(flow);
   }
 }
+const windowsVaultOfflineActions = new Set(['vault_pins','vault_pin_start','vault_pin_status','vault_pin_cancel','vault_pin_remove','vault_cache_usage','vault_cache_quota_set','vault_cached_roots','vault_offline_reconnect']);
+function nativeVaultOfflineAvailable() { return nativeVaultAccess() && state.status?.vault_offline_supported === true; }
 function nativeVaultActionAllowed(action: string) {
-  return !nativeVaultAccess() || (['vault_copy_start', 'vault_copy_status', 'vault_copy_cancel', 'vault_copy_parent'].includes(action) && copyProducerFeatureAvailable()) || (action === 'vault_create_parent' && vaultCreateAvailable()) || (action === 'vault_list' && nativeVaultBrowseAvailable()) || ((!action.startsWith('vault_') && !action.startsWith('encrypted_edit_')) || ['vault_inspect', 'vault_unlock', 'vault_lock', 'vault_forget'].includes(action));
+  return !nativeVaultAccess() || (nativeVaultOfflineAvailable() && (windowsVaultOfflineActions.has(action) || action === 'vault_unlock_offline')) || (['vault_copy_start', 'vault_copy_status', 'vault_copy_cancel', 'vault_copy_parent'].includes(action) && copyProducerFeatureAvailable()) || (action === 'vault_create_parent' && vaultCreateAvailable()) || (action === 'vault_list' && nativeVaultBrowseAvailable()) || ((!action.startsWith('vault_') && !action.startsWith('encrypted_edit_')) || ['vault_inspect', 'vault_unlock', 'vault_lock', 'vault_forget'].includes(action));
 }
 function windowsSignInPending() { return isWindowsAgentStatus(state.status) && state.status?.authenticating === true; }
 
@@ -264,7 +266,7 @@ async function request<T>(action: string, args: Record<string, unknown> = {}): P
   if (!isTauri()) throw new Error('Open Raiun Desktop to connect to the background agent. This browser view is a layout preview.');
   const epoch = state.accountEpoch;
   const profileId = state.selectedAccount;
-  const message = { action, ...args, ...(!profileIndependentActions.has(action) && profileId ? { profile_id: profileId } : {}) };
+  const message = { action, ...args, ...(nativeVaultOfflineAvailable() && windowsVaultOfflineActions.has(action) ? { expected_generation: state.status?.auth_generation } : {}), ...(!profileIndependentActions.has(action) && profileId ? { profile_id: profileId } : {}) };
   const result = await invoke<T>('request', { message });
   if (!nativeVaultActionAllowed(action)) throw new StaleAccountRequest();
   if (profileIndependentActions.has(action)) return result;
@@ -272,13 +274,13 @@ async function request<T>(action: string, args: Record<string, unknown> = {}): P
   return result;
 }
 async function vaultSecretRequest<T>(message: Record<string, unknown>): Promise<T> {
-  if (nativeVaultAccess() && message.action !== 'vault_unlock' && !(message.action === 'vault_create' && vaultCreateAvailable())) throw new Error('This encrypted-file action is unavailable in native Windows mode.');
+  if (nativeVaultAccess() && message.action !== 'vault_unlock' && !(nativeVaultOfflineAvailable() && message.action === 'vault_unlock_offline') && !(message.action === 'vault_create' && vaultCreateAvailable())) throw new Error('This encrypted-file action is unavailable in native Windows mode.');
   if (!featureAvailable('vaults_supported')) throw new Error('Encrypted files are unavailable for this agent.');
   if (!isTauri()) throw new Error('Vault encryption is available in Raiun Desktop, not in the browser preview.');
   const epoch = state.accountEpoch;
   const profileId = state.selectedAccount;
   const result = await invoke<T>('vault_secret', { message: { ...message, profile_id: profileId } });
-  if (nativeVaultAccess() && message.action !== 'vault_unlock' && !(message.action === 'vault_create' && vaultCreateAvailable())) throw new StaleAccountRequest();
+  if (nativeVaultAccess() && message.action !== 'vault_unlock' && !(nativeVaultOfflineAvailable() && message.action === 'vault_unlock_offline') && !(message.action === 'vault_create' && vaultCreateAvailable())) throw new StaleAccountRequest();
   if (!isCurrentAccount(epoch, profileId)) throw new StaleAccountRequest();
   return result;
 }
@@ -2836,7 +2838,7 @@ function encryptedAccessModal(workspace = false) {
   const onlineContent = connected
     ? `<div class="encrypted-access-divider">Open a location online</div><label class="field-label" for="encrypted-access-space">OpenCloud location</label><select id="encrypted-access-space" ${state.spacesLoading || !state.spaces.length ? 'disabled' : ''}><option value="">${state.spacesLoading ? 'Loading Spaces…' : state.spacesError ? 'Spaces unavailable' : state.spaces.length ? 'Choose a Space' : 'No Spaces available'}</option>${options}</select>${state.spacesError ? `<div class="vault-error" role="alert">${esc(state.spacesError)} <button class="text-button" data-action="retry-encrypted-access-spaces">Try again</button></div>` : ''}<p class="vault-hint">An encrypted Space opens at its root. In a regular Space, browse folders and select an encrypted folder.</p><div class="modal-actions">${workspace ? '' : '<button class="button subtle" data-action="close-encrypted-access">Cancel</button>'}<button class="button primary" data-action="browse-encrypted-space" ${canBrowse ? '' : 'disabled'}>${state.spacesLoading ? 'Loading…' : selected?.encrypted ? 'Unlock Space' : 'Browse Space'}</button></div>`
     : '<div class="vault-hint" role="status">Connect this account to browse cloud locations. Saved encrypted locations may still be available below.</div>';
-  const savedLocations = copyProducerUi.source || nativeVaultAccess() ? '' : `<section class="cached-vault-section"><div class="encrypted-access-divider">Saved encrypted locations</div>${cachedVaultRootsUi.error ? `<div class="vault-error" role="alert">${esc(cachedVaultRootsUi.error)} <button class="text-button" data-action="refresh-cached-vault-roots">Try again</button></div>` : ''}${cachedContent}<div class="cached-vault-actions"><button class="button subtle" data-action="refresh-cached-vault-roots" ${cachedVaultRootsUi.loading ? 'disabled' : ''}>Refresh saved locations</button></div></section>`;
+  const savedLocations = copyProducerUi.source || (nativeVaultAccess() && !nativeVaultOfflineAvailable()) ? '' : `<section class="cached-vault-section"><div class="encrypted-access-divider">Saved encrypted locations</div>${cachedVaultRootsUi.error ? `<div class="vault-error" role="alert">${esc(cachedVaultRootsUi.error)} <button class="text-button" data-action="refresh-cached-vault-roots">Try again</button></div>` : ''}${cachedContent}<div class="cached-vault-actions"><button class="button subtle" data-action="refresh-cached-vault-roots" ${cachedVaultRootsUi.loading ? 'disabled' : ''}>Refresh saved locations</button></div></section>`;
   const sections = `${copyProducerUi.source ? '<button class="button subtle" data-action="cancel-vault-copy">Cancel copy</button>' : ''}${savedLocations}${onlineContent}`;
   const passwordHelp = `<details class="workspace-help"><summary>How remembered passwords work</summary><p>Your vault password is not saved unless you choose “Remember on this device.” When you opt in and the unlock succeeds, Raiun stores the password in the operating system’s protected credential store for this account and vault.</p><p>Locking a vault does not remove a saved password. Use “Forget saved key” in the unlock window to remove it. Saved encrypted snapshots are read-only while offline; other operations depend on the connected drive and supported features.</p></details>`;
   if (workspace) return `<div class="page-title-row"><div><div class="eyebrow">END-TO-END ENCRYPTION</div><h1>Encrypted files</h1><p class="lede">Unlock an encrypted Space or folder. This does not add a sync folder.</p></div></div><div class="settings-stack encrypted-workspace"><section class="settings-card">${sections}</section>${passwordHelp}</div>`;
@@ -2879,8 +2881,28 @@ function mountedVaultAccessMessage(
 }
 }
 
+const encryptedCacheUi: {profile:string; usage:OfflineCacheSummary|null; busy:boolean; error:string}={profile:'',usage:null,busy:false,error:''};
+async function updateEncryptedCacheAllowance(change=false) {
+  if (!nativeVaultOfflineAvailable() || encryptedCacheUi.busy) return;
+  const epoch=state.accountEpoch, profile=state.selectedAccount;
+  const input=app.querySelector<HTMLInputElement>('#vault-cache-allowance');
+  const bytes=change ? Math.round(Number(input?.value)*1024*1024) : undefined;
+  if (change && (!Number.isSafeInteger(bytes) || bytes! < 0)) return;
+  encryptedCacheUi.busy=true; encryptedCacheUi.error=''; render();
+  try {const usage=await request<OfflineCacheSummary>(change?'vault_cache_quota_set':'vault_cache_usage',change?{quota_bytes:bytes}:{});
+    if (!isCurrentAccount(epoch,profile)) return;
+    if (![usage.used_bytes,usage.quota_bytes,usage.pinned_bytes,usage.protected_bytes].every(n=>Number.isSafeInteger(n)&&n>=0)) throw new Error('Invalid encrypted cache usage.');
+    encryptedCacheUi.profile=profile;encryptedCacheUi.usage=usage;
+  } catch(error) {if(isCurrentAccount(epoch,profile)) encryptedCacheUi.error=messageOf(error);}
+  finally {encryptedCacheUi.busy=false;render();}
+}
+function encryptedCacheAllowancePanel(){
+  if(!nativeVaultOfflineAvailable())return '';
+  const usage=encryptedCacheUi.profile===state.selectedAccount?encryptedCacheUi.usage:null;
+  return `<section class="vault-pin-panel"><b>Encrypted offline storage · this account</b>${usage?`<p>${esc(formatBytes(usage.used_bytes))} stored · ${esc(formatBytes(usage.pinned_bytes))} kept offline${usage.over_quota?' · above allowance':''}</p>`:''}<label>Cache allowance (MiB)<input id="vault-cache-allowance" type="number" min="0" step="1" value="${usage?Math.ceil(usage.quota_bytes/1048576):1024}" ${encryptedCacheUi.busy?'disabled':''}></label><button class="small-action" data-vault-cache-refresh ${encryptedCacheUi.busy?'disabled':''}>Check usage</button><button class="small-action" data-vault-cache-save ${encryptedCacheUi.busy?'disabled':''}>Save allowance</button><small>Kept-offline snapshots and protected data are preserved when the allowance is lowered.</small>${encryptedCacheUi.error?`<p role="alert">${esc(encryptedCacheUi.error)}</p>`:''}</section>`;
+}
 function vaultOfflinePinPanel(flow: VaultDialogState) {
-  if (nativeVaultAccess()) return '';
+  if (nativeVaultAccess() && !nativeVaultOfflineAvailable()) return '';
   if (!flow.unlocked || flow.statusUnknown || flow.intent === 'create') return '';
   const canStart = state.status?.connected === true && !flow.offlineUnlockOnly && !flow.loading && !flow.pinBusy && !flow.pinJob && !flow.pinsLoading;
   const rows = flow.pins.map(pin => {
@@ -2900,7 +2922,7 @@ function vaultOfflinePinPanel(flow: VaultDialogState) {
   const start = !flow.pins.length
     ? `<button class="button subtle" data-vault-pin-start ${!canStart ? 'disabled' : ''}>${flow.pinBusy ? 'Starting…' : 'Keep available offline'}</button>`
     : '';
-  const offlineNote = flow.offlineUnlockOnly
+  const offlineNote = nativeVaultAccess() ? `<small class="vault-pin-note">Saved encrypted snapshots require the vault password. Windows cached access is read-only; reconnect to refresh snapshots.</small>` : flow.offlineUnlockOnly
     ? flow.vaultMountExistingFileOverwrite
       ? '<small class="vault-pin-note">This saved snapshot is open offline. The mounted drive can queue supported file edits, file creation/rename/deletion, and folder creation; changes stay local until retry. A queued-folder rename is limited to a never-attempted subtree of at most 64 operations and 64 MiB of file data; restart, child creation, and reconciliation passed in the R28 VM gate. Remote folder deletion is unsupported, though an empty never-attempted queued folder can be canceled locally when it has no open handles or dependent operations.</small>'
       : '<small class="vault-pin-note">This location is open from its saved snapshot. It is read-only until the mounted drive and private edit storage are ready. Connect to refresh it.</small>'
@@ -2916,13 +2938,13 @@ function nativeExistingFileSaveMessage(flow = state.vaultDialog) {
 }
 
 function nativeVaultDrivePanel(flow: VaultDialogState, busy: boolean) {
-  const ready = !flow.statusUnknown && flow.unlocked && !nativeVaultLockIncomplete(flow) && flow.vaultMountReady && state.status?.mounted === true && state.status?.connected === true;
+  const ready = !flow.statusUnknown && flow.unlocked && !nativeVaultLockIncomplete(flow) && flow.vaultMountReady && state.status?.mounted === true && (state.status?.connected === true || (flow.offlineUnlockOnly && state.status?.offline_namespace === true));
   const existingFileSaves = ready && flow.vaultMountExistingFileInPlace;
-  return `<section class="vault-native-read-only"><b>${existingFileSaves ? 'Windows drive access' : 'Read-only Windows drive access'}</b><p>${nativeVaultLockIncomplete(flow) ? esc(nativeVaultLockMessage(flow.lockCleanupStatus, flow.unlocked)) : existingFileSaves ? nativeExistingFileSaveMessage() : ready ? 'Open the OpenCloud drive and navigate to this encrypted location to read its files. Files cannot be edited here.' : 'The encrypted location is unlocked, but native drive access has not been confirmed. Close and reopen this dialog to check drive access.'}</p><button class="button primary" data-vault-action="open-native" ${busy || !ready ? 'disabled' : ''}>Open OpenCloud drive</button><small>${nativeVaultBrowseAvailable(flow) ? 'In-app browsing is read-only. Encrypted offline copies are unavailable.' : 'In-app browsing and encrypted offline copies are unavailable.'} Locking denies new reads; it cannot retract copies already read by other apps.</small></section>`;
+  return `<section class="vault-native-read-only"><b>${existingFileSaves ? 'Windows drive access' : 'Read-only Windows drive access'}</b><p>${nativeVaultLockIncomplete(flow) ? esc(nativeVaultLockMessage(flow.lockCleanupStatus, flow.unlocked)) : existingFileSaves ? nativeExistingFileSaveMessage() : ready ? 'Open the OpenCloud drive and navigate to this encrypted location to read its files. Files cannot be edited here.' : 'The encrypted location is unlocked, but native drive access has not been confirmed. Close and reopen this dialog to check drive access.'}</p><button class="button primary" data-vault-action="open-native" ${busy || !ready ? 'disabled' : ''}>Open OpenCloud drive</button><small>${flow.offlineUnlockOnly ? 'Verified cached content is read-only. Missing cached files cannot be downloaded until you reconnect.' : 'In-app browsing is read-only. Use Keep available offline to save an encrypted snapshot.'} Locking denies new reads; it cannot retract copies already read by other apps.</small></section>`;
 }
 async function openNativeVaultDrive() {
   const flow = state.vaultDialog;
-  if (!nativeVaultAccess() || !featureAvailable('vaults_supported') || !flow || nativeVaultLockIncomplete(flow) || !flow.unlocked || flow.statusUnknown || !flow.vaultMountReady || flow.loading || state.status?.mounted !== true || state.status.connected !== true || !isCurrentAccount(flow.accountEpoch) || state.vaultGeneration !== flow.generation || state.accountSwitching) return;
+  if (!nativeVaultAccess() || !featureAvailable('vaults_supported') || !flow || nativeVaultLockIncomplete(flow) || !flow.unlocked || flow.statusUnknown || !flow.vaultMountReady || flow.loading || state.status?.mounted !== true || (state.status.connected !== true && state.status.offline_namespace !== true) || !isCurrentAccount(flow.accountEpoch) || state.vaultGeneration !== flow.generation || state.accountSwitching) return;
   await openAccountFolder('open_cloud_folder');
 }
 function vaultDirectoryRows(flow: VaultDialogState, busy: boolean, copyChoosingDestination: boolean) {
@@ -2945,9 +2967,9 @@ function vaultDialog() {
   const createForm = flow.intent === 'create'
     ? `<label class="field-label" for="vault-create-name">Folder name</label><input class="vault-input" id="vault-create-name" value="${esc(state.pickerFolderName)}" placeholder="For example, Private" maxlength="240" ${busy ? 'disabled' : ''}/><small class="vault-hint">Raiun adds the .vault suffix when needed. Folder creation can be partially completed by the server; if an error appears, check the remote location before retrying.</small><label class="field-label" for="vault-create-password">Vault password</label><input class="vault-input" id="vault-create-password" type="password" autocomplete="new-password" ${busy ? 'disabled' : ''}/><label class="field-label" for="vault-create-confirm">Confirm password</label><input class="vault-input" id="vault-create-confirm" type="password" autocomplete="new-password" ${busy ? 'disabled' : ''}/>`
     : !flow.unlocked && flow.initialized && !flow.statusUnknown && !nativeVaultLockIncomplete(flow)
-      ? `<label class="field-label" for="vault-password">Vault password</label><input class="vault-input" id="vault-password" type="password" autocomplete="current-password" ${vaultPasswordErrorAttributes(passwordErrorActive)} ${busy ? 'disabled' : ''}/><label class="remember-vault-choice"><input id="vault-remember" type="checkbox" ${flow.rememberOnDevice ? 'checked' : ''} ${busy || flow.rememberedStatus === 'unavailable' ? 'disabled' : ''}/><span>Remember on this device</span></label><small class="vault-hint">${flow.rememberedStatus === 'unavailable' ? 'Secure storage is unavailable, so this password cannot be remembered.' : 'Your vault password is not saved unless you choose “Remember on this device.”'}</small>`
+      ? `<label class="field-label" for="vault-password">Vault password</label><input class="vault-input" id="vault-password" type="password" autocomplete="current-password" ${vaultPasswordErrorAttributes(passwordErrorActive)} ${busy ? 'disabled' : ''}/>${nativeVaultAccess() && flow.offlineUnlockOnly ? '<small class="vault-hint">Enter the vault password to verify this saved snapshot.</small>' : `<label class="remember-vault-choice"><input id="vault-remember" type="checkbox" ${flow.rememberOnDevice ? 'checked' : ''} ${busy || flow.rememberedStatus === 'unavailable' ? 'disabled' : ''}/><span>Remember on this device</span></label><small class="vault-hint">${flow.rememberedStatus === 'unavailable' ? 'Secure storage is unavailable, so this password cannot be remembered.' : 'Your vault password is not saved unless you choose “Remember on this device.”'}</small>`}`
       : '';
-  const rememberedNoteText = flow.statusUnknown || flow.rememberedStatus === null
+  const rememberedNoteText = flow.statusUnknown || flow.rememberedStatus === null || (nativeVaultAccess() && flow.offlineUnlockOnly)
     ? ''
     : flow.rememberedStatus === 'known_saved'
       ? 'Raiun confirmed a saved key during this session. It may have changed; using it checks the key before unlocking.'
@@ -2984,7 +3006,7 @@ function vaultDialog() {
   const unlockButton = (flow.intent === 'manage' || flow.intent === 'browse' || flow.intent === 'add') && flow.initialized && !flow.unlocked && !flow.statusUnknown && !nativeVaultLockIncomplete(flow)
     ? `<button class="button primary" data-vault-action="unlock" ${busy ? 'disabled' : ''}>${busy ? 'Unlocking…' : flow.offlineUnlockOnly ? 'Unlock offline snapshot' : 'Unlock vault'}</button>`
     : '';
-  const savedUnlockButton = (flow.intent === 'manage' || flow.intent === 'browse' || flow.intent === 'add') && flow.initialized && !flow.unlocked && !flow.statusUnknown && (flow.rememberedStatus === 'known_saved' || flow.rememberedStatus === 'unknown') && !nativeVaultLockIncomplete(flow)
+  const savedUnlockButton = (flow.intent === 'manage' || flow.intent === 'browse' || flow.intent === 'add') && flow.initialized && !flow.unlocked && !flow.statusUnknown && !(nativeVaultAccess() && flow.offlineUnlockOnly) && (flow.rememberedStatus === 'known_saved' || flow.rememberedStatus === 'unknown') && !nativeVaultLockIncomplete(flow)
     ? `<button class="button primary" data-vault-action="unlock-saved" ${busy ? 'disabled' : ''}>${busy ? 'Unlocking…' : 'Unlock with saved key'}</button>`
     : '';
   const forgetButton = !flow.offlineUnlockOnly && !!flow.rootResourceId && !flow.statusUnknown && flow.rememberedStatus !== 'not_saved'
@@ -3024,7 +3046,7 @@ function vaultDialog() {
     : copyChoosingDestination && flow.unlocked && !flow.statusUnknown
       ? `<div class="vault-hint" role="status">${flow.writable ? 'A stable folder version is unavailable here, or this is the source location. Choose a different folder.' : 'This location is read-only. Choose an unlocked writable encrypted location.'}</div>`
       : '';
-  return `<div class="modal-backdrop" data-backdrop="vault"><section class="modal vault-modal" role="dialog" aria-modal="true" aria-labelledby="vault-title" tabindex="-1"><div class="modal-top"><div><div class="eyebrow">END-TO-END ENCRYPTION</div><h2 id="vault-title">${copyChoosingDestination ? 'Choose copy destination' : title}</h2></div><button class="icon-button" data-vault-action="close" aria-label="Close" ${closeDisabled || copyActive ? 'disabled' : ''}>${svg('close')}</button></div><p class="modal-lede">${copyChoosingDestination ? 'Choose an unlocked writable encrypted folder. Raiun creates a new file there and keeps the original in place.' : browseExplanation}</p><div class="vault-root">${svg('lock')}<code>${esc(flow.offlineUnlockOnly ? opaqueOfflineLabel : rootDisplay)}</code></div>${flow.error ? `<div class="vault-error" ${passwordErrorActive ? 'id="vault-password-error" ' : ''}role="alert">${svg('alert')}<span>${esc(flow.error)}</span></div>` : ''}${flow.closeBlockedNotice ? `<div class="vault-state" role="status" aria-live="polite" aria-atomic="true">${esc(flow.closeBlockedNotice)}</div>` : ''}${flow.intent !== 'create'? `<div class="vault-state ${flow.unlocked && !flow.statusUnknown ? 'unlocked' : ''}" role="status" aria-live="polite" aria-atomic="true">${liveLockState}</div>` : ''}${createForm}${rememberedNote}${flow.unlocked && !flow.statusUnknown ? nativeVaultAccess() ? `${nativeVaultDrivePanel(flow, busy)}${nativeVaultBrowseAvailable(flow) ? `<div class="vault-browse-label">Read-only encrypted folder <code>${esc(flow.path)}</code></div>${flow.loading ? '<div class="vault-empty" role="status"><span class="spinner"></span> Loading encrypted folder…</div>' : directoryRows}` : ''}${destinationAction}${copyPanel}` : `<div class="vault-browse-label">${copyChoosingDestination ? 'Destination folder' : 'Folders inside this encrypted location'} <code>${esc(flow.path)}</code></div>${flow.loading ? '<div class="vault-empty" role="status"><span class="spinner"></span> Loading encrypted folder…</div>' : directoryRows}${destinationAction}${copyPanel}${!copyChoosingDestination ? `${vaultOfflinePinPanel(flow)}${vaultEditRetryPanel(flow)}` : ''}` : copyPanel}${protectedRecoveryPanel}<div class="helper-note">Your vault password is not saved unless you choose “Remember on this device.” After an opted-in successful unlock, Raiun stores the password in the operating system’s protected credential store for this account and vault. Locking the vault does not remove it; use “Forget saved key” separately. If a vault password is lost, its encrypted cloud contents cannot be recovered by Raiun.</div>${flow.intent !== 'create' ? `<div class="helper-note">${esc(mountedAvailability)}</div>` : ''}<div class="modal-actions"><button class="button subtle" data-vault-action="close" ${closeDisabled || copyActive ? 'disabled' : ''}>Close</button>${unlockButton}${savedUnlockButton}${lockButton}${flow.offlineUnlockOnly ? '' : forgetButton}${statusButton}${useButton}${vaultCreateAvailable() && flow.intent === 'create' ? `<button class="button primary" data-vault-action="create" ${busy ? 'disabled' : ''}>${busy ? 'Creating…' : 'Create vault'}</button>` : ''}</div></section></div>`;
+  return `<div class="modal-backdrop" data-backdrop="vault"><section class="modal vault-modal" role="dialog" aria-modal="true" aria-labelledby="vault-title" tabindex="-1"><div class="modal-top"><div><div class="eyebrow">END-TO-END ENCRYPTION</div><h2 id="vault-title">${copyChoosingDestination ? 'Choose copy destination' : title}</h2></div><button class="icon-button" data-vault-action="close" aria-label="Close" ${closeDisabled || copyActive ? 'disabled' : ''}>${svg('close')}</button></div><p class="modal-lede">${copyChoosingDestination ? 'Choose an unlocked writable encrypted folder. Raiun creates a new file there and keeps the original in place.' : browseExplanation}</p><div class="vault-root">${svg('lock')}<code>${esc(flow.offlineUnlockOnly ? opaqueOfflineLabel : rootDisplay)}</code></div>${flow.error ? `<div class="vault-error" ${passwordErrorActive ? 'id="vault-password-error" ' : ''}role="alert">${svg('alert')}<span>${esc(flow.error)}</span></div>` : ''}${flow.closeBlockedNotice ? `<div class="vault-state" role="status" aria-live="polite" aria-atomic="true">${esc(flow.closeBlockedNotice)}</div>` : ''}${flow.intent !== 'create'? `<div class="vault-state ${flow.unlocked && !flow.statusUnknown ? 'unlocked' : ''}" role="status" aria-live="polite" aria-atomic="true">${liveLockState}</div>` : ''}${createForm}${rememberedNote}${flow.unlocked && !flow.statusUnknown ? nativeVaultAccess() ? `${nativeVaultDrivePanel(flow, busy)}${vaultOfflinePinPanel(flow)}${encryptedCacheAllowancePanel()}${nativeVaultBrowseAvailable(flow) ? `<div class="vault-browse-label">Read-only encrypted folder <code>${esc(flow.path)}</code></div>${flow.loading ? '<div class="vault-empty" role="status"><span class="spinner"></span> Loading encrypted folder…</div>' : directoryRows}` : ''}${destinationAction}${copyPanel}` : `<div class="vault-browse-label">${copyChoosingDestination ? 'Destination folder' : 'Folders inside this encrypted location'} <code>${esc(flow.path)}</code></div>${flow.loading ? '<div class="vault-empty" role="status"><span class="spinner"></span> Loading encrypted folder…</div>' : directoryRows}${destinationAction}${copyPanel}${!copyChoosingDestination ? `${vaultOfflinePinPanel(flow)}${vaultEditRetryPanel(flow)}` : ''}` : copyPanel}${protectedRecoveryPanel}<div class="helper-note">Your vault password is not saved unless you choose “Remember on this device.” After an opted-in successful unlock, Raiun stores the password in the operating system’s protected credential store for this account and vault. Locking the vault does not remove it; use “Forget saved key” separately. If a vault password is lost, its encrypted cloud contents cannot be recovered by Raiun.</div>${flow.intent !== 'create' ? `<div class="helper-note">${esc(mountedAvailability)}</div>` : ''}<div class="modal-actions"><button class="button subtle" data-vault-action="close" ${closeDisabled || copyActive ? 'disabled' : ''}>Close</button>${unlockButton}${savedUnlockButton}${lockButton}${flow.offlineUnlockOnly ? '' : forgetButton}${statusButton}${useButton}${vaultCreateAvailable() && flow.intent === 'create' ? `<button class="button primary" data-vault-action="create" ${busy ? 'disabled' : ''}>${busy ? 'Creating…' : 'Create vault'}</button>` : ''}</div></section></div>`;
 }
 
 function bind() {
@@ -3228,6 +3250,8 @@ function bind() {
   app.querySelectorAll<HTMLButtonElement>('[data-vault-pin-remove]').forEach(el => el.addEventListener('click', () => void removeVaultOfflinePin(el.dataset.vaultPinRemove || '')));
   app.querySelector<HTMLButtonElement>('[data-vault-edit-retry]')?.addEventListener('click', () => void startVaultEditRetry());
   app.querySelector<HTMLButtonElement>('[data-vault-edit-retry-cancel]')?.addEventListener('click', () => void cancelVaultEditRetry());
+  app.querySelector<HTMLButtonElement>('[data-vault-cache-refresh]')?.addEventListener('click',()=>void updateEncryptedCacheAllowance());
+  app.querySelector<HTMLButtonElement>('[data-vault-cache-save]')?.addEventListener('click',()=>void updateEncryptedCacheAllowance(true));
   app.querySelector<HTMLButtonElement>('[data-vault-pin-refresh-list]')?.addEventListener('click', () => { const flow = state.vaultDialog; if (flow) void loadVaultPins(flow, true); });
   app.querySelector<HTMLButtonElement>('[data-vault-pin-more]')?.addEventListener('click', () => { const flow = state.vaultDialog; if (flow) void loadVaultPins(flow, false); });
   app.querySelector<HTMLElement>('.vault-modal')?.addEventListener('keydown', event => {
@@ -3456,7 +3480,7 @@ async function restoreRemovedAccount(profileId: string) {
 }
 async function handleAction(action: string, element?: HTMLElement) {
   switch (action) {
-    case 'refresh': await refresh(true, true); break;
+    case 'refresh': if (nativeVaultOfflineAvailable() && state.status?.offline_namespace) await request('vault_offline_reconnect'); await refresh(true, true); break;
     case 'load-network-proxy': await loadNetworkProxySettings(true); break;
     case 'save-network-proxy': if (networkProxyAvailable()) await saveNetworkProxySettings(); break;
     case 'load-bandwidth-limits': await loadBandwidthSettings(true); break;
@@ -3890,7 +3914,7 @@ async function openEncryptedAccess() {
   render();
   await Promise.all([
     state.status?.connected === true ? loadSpaces(true) : Promise.resolve(),
-    copyProducerUi.source || nativeVaultAccess() ? Promise.resolve() : loadCachedVaultRoots(true)
+    copyProducerUi.source || (nativeVaultAccess() && !nativeVaultOfflineAvailable()) ? Promise.resolve() : loadCachedVaultRoots(true)
   ]);
   if (!isCurrentAccount(epoch) || !state.vaultAccessOpen) return;
 }
@@ -3906,7 +3930,7 @@ function closeEncryptedAccess() {
 }
 function cachedVaultRootKey(root: CachedVaultRoot) { return JSON.stringify([root.space_id, root.root_resource_id]); }
 async function loadCachedVaultRoots(reset: boolean) {
-  if (!vaultAppFeaturesAvailable()) return;
+  if (!vaultAppFeaturesAvailable() && !nativeVaultOfflineAvailable()) return;
   if (!state.vaultAccessOpen || cachedVaultRootsUi.loading) return;
   if (cachedVaultRootsUi.accountEpoch !== state.accountEpoch) reset = true;
   const epoch = state.accountEpoch;
@@ -4357,7 +4381,7 @@ function clearPendingOfflineWrites() {
   pendingWritesUi.exportingWrites.clear();
 }
 async function openVaultFlow(intent: VaultDialogState['intent'], spaceId: string, rootPath: string, pairId?: string, rootWritable?: boolean, rootResourceId?: string, offlineUnlockOnly = false, offlinePinId?: string, offlinePinGeneration?: number) {
-  if (nativeVaultAccess() && (intent === 'add' || offlineUnlockOnly || (intent === 'create' && (!vaultCreateAvailable() || !rootResourceId || rootWritable !== true)))) return;
+  if (nativeVaultAccess() && (intent === 'add' || (offlineUnlockOnly && !nativeVaultOfflineAvailable()) || (intent === 'create' && (!vaultCreateAvailable() || !rootResourceId || rootWritable !== true)))) return;
   if (!state.vaultDialog && !vaultDialogFocusReturn) vaultDialogFocusReturn = captureVaultDialogFocusReturn(document.activeElement);
   const accountEpoch = state.accountEpoch;
   const generation = ++state.vaultGeneration;
@@ -4397,7 +4421,7 @@ async function openVaultFlow(intent: VaultDialogState['intent'], spaceId: string
     flow.loading = false;
     if (flow.unlocked && (!nativeVaultAccess() || nativeVaultBrowseAvailable(flow))) {
       if (!nativeVaultAccess() || nativeVaultBrowseAvailable(flow)) await loadVaultPath(flow, '/');
-      if (!nativeVaultAccess() && isCurrentAccount(accountEpoch) && state.vaultDialog === flow && flow.unlocked && !flow.statusUnknown) await loadVaultPins(flow, true);
+      if ((!nativeVaultAccess() || nativeVaultOfflineAvailable()) && isCurrentAccount(accountEpoch) && state.vaultDialog === flow && flow.unlocked && !flow.statusUnknown) await loadVaultPins(flow, true);
     }
     else render();
   } catch (error) {
@@ -4881,7 +4905,7 @@ function clearVaultPinUi(flow: VaultDialogState) {
   clearVaultEditRetryUi(flow);
 }
 async function loadVaultPins(flow: VaultDialogState, reset: boolean) {
-  if (nativeVaultAccess()) return;
+  if (nativeVaultAccess() && !nativeVaultOfflineAvailable()) return;
   if (!flow.unlocked || flow.statusUnknown || !flow.rootResourceId || flow.pinsLoading) return;
   const generation = flow.pinGeneration;
   const epoch = flow.accountEpoch;
@@ -4938,7 +4962,7 @@ function scheduleVaultPinPoll(flow: VaultDialogState, jobId: string, generation:
   }, delay);
 }
 async function pollVaultPin(flow: VaultDialogState, jobId: string, generation: number) {
-  if (nativeVaultAccess()) return;
+  if (nativeVaultAccess() && !nativeVaultOfflineAvailable()) return;
   if (!vaultPinContextCurrent(flow, generation) || flow.pinJob?.job_id !== jobId) return;
   try {
     const status = await request<VaultPinJobStatus>('vault_pin_status', { space_id: flow.spaceId, root_resource_id: flow.rootResourceId, job_id: jobId });
@@ -4995,7 +5019,7 @@ async function pollVaultPin(flow: VaultDialogState, jobId: string, generation: n
   if (vaultPinContextCurrent(flow, generation)) render();
 }
 async function startVaultOfflinePin(pinId?: string) {
-  if (nativeVaultAccess()) return;
+  if (nativeVaultAccess() && !nativeVaultOfflineAvailable()) return;
   const flow = state.vaultDialog;
   if (!flow || !flow.unlocked || flow.statusUnknown || flow.loading || flow.pinBusy || flow.pinJob || flow.offlineUnlockOnly || state.status?.connected !== true || !flow.rootResourceId) return;
   if (pinId && !flow.pins.some(pin => pin.id === pinId)) return;
@@ -5028,7 +5052,7 @@ async function startVaultOfflinePin(pinId?: string) {
   }
 }
 async function cancelVaultOfflinePin() {
-  if (nativeVaultAccess()) return;
+  if (nativeVaultAccess() && !nativeVaultOfflineAvailable()) return;
   const flow = state.vaultDialog;
   if (!flow?.pinJob || flow.pinBusy || !flow.unlocked || flow.statusUnknown) return;
   const job = flow.pinJob;
@@ -5052,7 +5076,7 @@ async function cancelVaultOfflinePin() {
   }
 }
 async function removeVaultOfflinePin(pinId: string) {
-  if (nativeVaultAccess()) return;
+  if (nativeVaultAccess() && !nativeVaultOfflineAvailable()) return;
   const flow = state.vaultDialog;
   if (!flow || !pinId || flow.pinBusy || !flow.unlocked || flow.statusUnknown || flow.pinJob?.pin_id === pinId || !flow.pins.some(pin => pin.id === pinId)) return;
   const generation = flow.pinGeneration;
@@ -5125,7 +5149,7 @@ async function unlockVault(useSaved = false) {
       root_resource_id: flow.rootResourceId,
       ...(flow.offlineUnlockOnly && flow.offlinePinId ? { pin_id: flow.offlinePinId } : {}),
       ...(flow.offlineUnlockOnly && flow.offlinePinId && Number.isSafeInteger(flow.offlinePinGeneration) ? { expected_generation: flow.offlinePinGeneration } : {}),
-          ...(useSaved ? { use_saved: true } : { password, ...(flow.rememberOnDevice ? { remember: true } : {}) })
+          ...(useSaved ? { use_saved: true } : { password, ...(flow.rememberOnDevice && !(nativeVaultAccess() && flow.offlineUnlockOnly) ? { remember: true } : {}) })
         });
       } catch (error) {
         if (!useSaved) {
@@ -5169,8 +5193,9 @@ async function unlockVault(useSaved = false) {
       unlockNotice = 'The vault unlocked, but no saved key was confirmed. Check the saved-key status before relying on it.';
     }
     flow.loading = false;
+    if (nativeVaultAccess() && flow.offlineUnlockOnly) await refresh(false);
     if (!nativeVaultAccess() || nativeVaultBrowseAvailable(flow)) await loadVaultPath(flow, '/');
-    if (!nativeVaultAccess() && isCurrentAccount(accountEpoch) && state.vaultDialog === flow && flow.unlocked && !flow.statusUnknown) await loadVaultPins(flow, true);
+    if ((!nativeVaultAccess() || nativeVaultOfflineAvailable()) && isCurrentAccount(accountEpoch) && state.vaultDialog === flow && flow.unlocked && !flow.statusUnknown) await loadVaultPins(flow, true);
     if (unlockNotice && isCurrentAccount(accountEpoch) && state.vaultDialog === flow && state.vaultGeneration === generation) {
       flow.error = flow.error ? `${flow.error} ${unlockNotice}` : unlockNotice;
     }
@@ -5181,7 +5206,7 @@ async function unlockVault(useSaved = false) {
       flow.error = messageOf(error);
       if (useSaved && !flow.offlineUnlockOnly) {
         try {
-          const inspected = await request<VaultInspect>('vault_inspect', { space_id: flow.spaceId, root_path: flow.rootPath });
+          const inspected = await request<VaultInspect>('vault_inspect', { space_id: flow.spaceId, root_path: flow.rootPath, ...(nativeVaultAccess() && flow.offlineUnlockOnly ? {root_resource_id:flow.rootResourceId} : {}) });
           if (isCurrentAccount(accountEpoch) && state.vaultDialog === flow && state.vaultGeneration === generation) {
             flow.rememberedStatus = safeRememberedStatus(inspected.remembered_status) ?? flow.rememberedStatus;
           }
@@ -5347,7 +5372,7 @@ async function checkVaultLockStatus() {
 }
 async function reconcileVaultLockStatus(flow: VaultDialogState, accountEpoch: number, generation: number) {
   try {
-    const inspected = await request<VaultInspect>('vault_inspect', { space_id: flow.spaceId, root_path: flow.rootPath });
+    const inspected = await request<VaultInspect>('vault_inspect', { space_id: flow.spaceId, root_path: flow.rootPath, ...(nativeVaultAccess() && flow.offlineUnlockOnly ? {root_resource_id:flow.rootResourceId} : {}) });
     if (!isCurrentAccount(accountEpoch) || state.vaultDialog !== flow || state.vaultGeneration !== generation) return;
     if (nativeVaultAccess() && inspected.root_resource_id !== flow.rootResourceId) throw new Error('The encrypted root changed during lock inspection.');
     flow.rootPath = inspected.root_path;
@@ -5373,7 +5398,7 @@ async function reconcileVaultLockStatus(flow: VaultDialogState, accountEpoch: nu
       if (isCurrentAccount(accountEpoch) && state.vaultDialog === flow && state.vaultGeneration === generation && !flow.error) {
         flow.error = lockError;
       }
-      if (!nativeVaultAccess() && isCurrentAccount(accountEpoch) && state.vaultDialog === flow && state.vaultGeneration === generation) await loadVaultPins(flow, true);
+      if ((!nativeVaultAccess() || nativeVaultOfflineAvailable()) && isCurrentAccount(accountEpoch) && state.vaultDialog === flow && state.vaultGeneration === generation) await loadVaultPins(flow, true);
       if (nativeVaultAccess()) render();
     } else {
       clearVaultPinUi(flow);
@@ -6298,7 +6323,7 @@ function validResolvedVaultRoot(path: unknown) {
   return typeof path === 'string' && path.startsWith('/') && new TextEncoder().encode(path).length <= 4096 && !/[\u0000-\u001f\u007f]/.test(path) && !path.split('/').some(component => component === '.' || component === '..');
 }
 async function findOfflineUnlockCandidate(intent: ShellUnlockIntent): Promise<CachedVaultRoot | null> {
-  if (nativeVaultAccess()) return null;
+  if (nativeVaultAccess() && !nativeVaultOfflineAvailable()) return null;
   let cursor: CachedVaultRootsPage['next_after'] = null;
   const candidates: CachedVaultRoot[] = [];
   for (let pageIndex = 0; pageIndex < 10; pageIndex++) {

@@ -366,7 +366,7 @@ impl VaultRouteRegistry {
         }
     }
 
-    fn snapshot(&self) -> Result<Vec<Arc<VerifiedVaultRoute>>, BackendError> {
+    pub(crate) fn snapshot(&self) -> Result<Vec<Arc<VerifiedVaultRoute>>, BackendError> {
         if self.revoked.load(Ordering::Acquire) {
             return Err(BackendError::Unavailable);
         }
