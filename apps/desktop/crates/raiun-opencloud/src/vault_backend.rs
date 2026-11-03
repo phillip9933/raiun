@@ -6785,8 +6785,9 @@ impl VaultBackend {
     fn check_put_epoch(&self, epoch: Option<&VaultSessionEpoch>) -> Result<(), CloudError> {
         if let Some(epoch) = epoch {
             self.sessions
-                .with_session_epoch(&self.scope, epoch, || ())
-                .map_err(vault_error)?;
+                .try_lock_session_epoch(&self.scope, epoch)
+                .map_err(vault_error)?
+                .ok_or_else(|| conflict("original upload epoch is unavailable"))?;
         }
         Ok(())
     }

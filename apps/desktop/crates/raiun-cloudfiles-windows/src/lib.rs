@@ -38,6 +38,17 @@ mod opencloud;
 #[cfg(windows)]
 pub use opencloud::VaultCachedQueuedEdit;
 #[cfg(windows)]
+pub use opencloud::{
+    VaultCachedNamespaceDescriptor, VaultCachedNamespaceOperation, VaultCachedNamespaceQueued,
+};
+#[cfg(windows)]
+mod vault_cached_edit;
+#[cfg(windows)]
+pub use vault_cached_edit::{
+    CachedVaultEditBaselineFacts, CachedVaultEditCapture, CachedVaultEditOperation,
+    CachedVaultEditPending,
+};
+#[cfg(windows)]
 pub(crate) mod recovery_admission;
 mod recovery_provider;
 mod recovery_reconcile;

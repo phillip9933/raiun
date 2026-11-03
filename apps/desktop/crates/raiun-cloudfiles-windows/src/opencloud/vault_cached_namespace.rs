@@ -1,6 +1,7 @@
 //! Explicit local journal receipts. No value in this module proves that a
 //! remote mutation occurred or grants authority to replay one after restart.
-use crate::{VaultChildCreateDescriptor, VaultFileDeleteDescriptor, VaultFileRenameDescriptor};
+use crate::vault_file_delete::VaultFileDeleteDescriptor;
+use crate::{VaultChildCreateDescriptor, VaultFileRenameDescriptor};
 use raiun_core::backend::RemoteEntry;
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

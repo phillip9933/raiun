@@ -127,6 +127,8 @@ include!("windows_vault_offline.rs");
 include!("windows_vault_cached.rs");
 include!("windows_vault_offline_edits.rs");
 include!("windows_vault_edit_upload.rs");
+#[path = "windows_vault_cached_capture.rs"]
+mod windows_vault_cached_capture;
 #[path = "windows_vault_child_create_custody.rs"]
 mod windows_vault_child_create_custody;
 #[path = "windows_vault_file_delete_custody.rs"]

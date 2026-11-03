@@ -1505,6 +1505,77 @@ fn deterministic_capture_id(
 }
 
 impl VaultPublicationCustody for View {
+    fn retain_cached_streamed_edit(
+        &self,
+        facts: &raiun_cloudfiles_windows::CachedVaultEditBaselineFacts,
+        dispatch: FreshVaultCaptureDispatch,
+        source: &mut dyn std::io::Read,
+        verify_source: &mut dyn FnMut() -> std::result::Result<(), BackendError>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> std::result::Result<Option<Box<dyn DeferredVaultCaptureNotification>>, BackendError> {
+        facts.validate(self.root)?;
+        if facts.profile_id != self.owner.profile_id()
+            || facts.account_id != self.owner.account_id()
+            || facts.server_origin != self.owner.server_origin()
+            || facts.token_generation != self.owner.token_generation()
+        {
+            return Err(BackendError::Unavailable);
+        }
+        let vault = VaultSessionScope::new(
+            &facts.profile_id,
+            &facts.server_origin,
+            &facts.space_id,
+            &facts.root_resource_id,
+        )
+        .map_err(unavailable)?;
+        self.verify_context(&self.owner, &vault, &facts.remote_root)?;
+        let root = RootBinding::new(
+            &self.account,
+            self.root.volume_serial,
+            self.root.file_index,
+            &self.registration,
+        )
+        .map_err(unavailable)?;
+        let mut manifest = RootManifest::reopen(&self.store, &root).map_err(unavailable)?;
+        if !manifest
+            .scopes_for_reconciliation()
+            .map_err(unavailable)?
+            .contains(&self.scope)
+        {
+            return Err(BackendError::Unavailable);
+        }
+        manifest.verify_current(&self.store).map_err(unavailable)?;
+        let _serial = self.child.custody.lock().map_err(unavailable)?;
+        let capture_id = super::windows_vault_cached_capture::retain(
+            self.store.0.clone(),
+            &self.scope,
+            facts.clone(),
+            source,
+            verify_source,
+            cancelled,
+        )?;
+        manifest.verify_current(&self.store).map_err(unavailable)?;
+        self.verify_context(&self.owner, &vault, &facts.remote_root)?;
+        drop(_serial);
+        let Some(publisher) = &self.fresh_close_publisher else {
+            return Ok(None);
+        };
+        Ok(Some(Box::new(FreshCloseNotification {
+            publisher: publisher.clone(),
+            job: FreshVaultCloseJob {
+                origin: FreshCaptureOrigin {
+                    owner: self.owner.clone(),
+                    root: self.root,
+                    broker: Arc::downgrade(&self.root_failed),
+                },
+                vault,
+                remote_root: facts.remote_root.clone(),
+                capture_id,
+                dispatch,
+                expected_generation: publisher.generation(),
+            },
+        })))
+    }
     fn begin_file_delete(
         &self,
         d: &raiun_cloudfiles_windows::vault_file_delete::VaultFileDeleteDescriptor,
