@@ -132,6 +132,22 @@ pub struct VaultHydrationIntent {
     pub components: Vec<String>,
 }
 
+/// Authenticated latest native state for a queued cached vault operation.
+/// This is admission evidence only: it never authorizes clean dehydration or
+/// remote completion. `entry == None` is a locally deleted path.
+pub struct VaultPendingNativeIntent {
+    pub identity: [u8; 16],
+    pub file_index: u64,
+    pub usn: i64,
+    pub components: Vec<String>,
+    pub entry: Option<RemoteEntry>,
+    pub length: u64,
+    pub source_sha256: Option<[u8; 32]>,
+    pub terminal_verified: bool,
+    pub write_id: String,
+    pub revision: u64,
+}
+
 /// Immutable original existing-file baseline, constructed by the verified read
 /// binding inside its publication fence. Numeric generations are labels only;
 /// the caller's opaque epoch/token leases provide the actual live authority.
@@ -372,6 +388,17 @@ pub trait VaultPublishedHistorySource: Send + Sync {
         root: ConfiguredRootIdentity,
         registration: &str,
     ) -> Result<Vec<VaultHydrationIntent>, BackendError>;
+
+    /// A separate protected current-state ledger. Older implementations
+    /// refuse this admission rather than interpreting missing rows as clean.
+    fn current_native_intents(
+        &self,
+        _owner: &ProviderScope,
+        _root: ConfiguredRootIdentity,
+        _registration: &str,
+    ) -> Result<Vec<VaultPendingNativeIntent>, BackendError> {
+        Err(BackendError::Unavailable)
+    }
 }
 
 #[cfg(test)]

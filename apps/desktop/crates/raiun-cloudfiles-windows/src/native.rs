@@ -58,6 +58,8 @@ mod native_vault_directory_rename;
 pub(super) mod native_vault_file_create;
 #[path = "native_vault_file_rename.rs"]
 pub(super) mod native_vault_file_rename;
+#[path = "native_vault_pending_history.rs"]
+mod native_vault_pending_history;
 #[path = "native_vault_rename_driver.rs"]
 mod native_vault_rename_driver;
 pub(crate) use native_file_create::NativeFileCreateCompletion;
@@ -3790,12 +3792,31 @@ impl ConfiguredRootConnection {
         let rows = history
             .snapshot(owner, expected, registration)
             .map_err(|_| Error::EditRecoveryUnavailable)?;
-        if rows.len() > 100_000 {
+        let current = history
+            .current_native_intents(owner, expected, registration)
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
+        if rows.len() > 100_000 || current.len() > 100_000 {
             return Err(Error::EditRecoveryUnavailable);
         }
         let mut identities = std::collections::BTreeSet::new();
         let mut files = std::collections::BTreeSet::new();
         let mut paths = std::collections::BTreeSet::new();
+        let mut pending = std::collections::BTreeMap::new();
+        for row in &current {
+            if !identities.insert(row.identity)
+                || !files.insert(row.file_index)
+                || !paths.insert(row.components.clone())
+            {
+                return Err(Error::EditRecoveryUnavailable);
+            }
+            native_vault_pending_history::inspect(root, expected, row)?;
+            if !row.terminal_verified {
+                pending.insert(
+                    row.identity,
+                    (row.write_id.clone(), row.revision, row.file_index),
+                );
+            }
+        }
         for row in &rows {
             if row.root != expected
                 || row.identity == [0; 16]
@@ -3824,18 +3845,52 @@ impl ConfiguredRootConnection {
                 &row.identity,
             )?;
         }
+        for row in &current {
+            if row.terminal_verified && row.entry.as_ref().is_some_and(|entry| !entry.directory) {
+                let components = row
+                    .components
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                self.dehydrate_clean_vault_placeholder(
+                    &components,
+                    row.file_index,
+                    row.length,
+                    &row.identity,
+                )?;
+            }
+        }
         root.verify_identity(true)?;
         root.verify_registered()?;
         if self.state.has_unresolved_placeholder_data() {
             return Err(Error::UnresolvedPlaceholderEdits);
         }
-        let proof = HistoricalVaultCleanupProof { rows };
+        let mut admitted_rows = rows;
+        admitted_rows.extend(current.into_iter().filter_map(|row| {
+            (row.terminal_verified && row.entry.as_ref().is_some_and(|entry| !entry.directory))
+                .then_some(crate::vault_custody::VaultHydrationIntent {
+                    root: expected,
+                    identity: row.identity,
+                    file_index: row.file_index,
+                    length: row.length,
+                    components: row.components,
+                })
+        }));
+        let proof = HistoricalVaultCleanupProof {
+            rows: admitted_rows,
+        };
         self.state
             .hydrated_files
             .lock()
             .map_err(|_| Error::EditRecoveryUnavailable)?
             .admit_historical_custody(proof)
-            .map_err(|_| Error::EditRecoveryUnavailable)
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
+        *self
+            .state
+            .known_cached_pending
+            .lock()
+            .map_err(|_| Error::EditRecoveryUnavailable)? = pending;
+        Ok(())
     }
 
     pub(super) fn disconnect(&mut self) -> Result<(), Error> {
@@ -5905,6 +5960,7 @@ struct CallbackState {
     modified_placeholder_closes: AtomicUsize,
     non_vault_modified_closes: AtomicUsize,
     vault_dirty: Mutex<crate::vault_dirty::VaultDirtyFiles>,
+    known_cached_pending: Mutex<std::collections::BTreeMap<[u8; 16], (String, u64, u64)>>,
     journaled_placeholder_closes: AtomicUsize,
     unverifiable_placeholder_closes: AtomicUsize,
     close_completion_callbacks: AtomicUsize,
@@ -6024,6 +6080,7 @@ impl CallbackState {
             modified_placeholder_closes: AtomicUsize::new(0),
             non_vault_modified_closes: AtomicUsize::new(0),
             vault_dirty: Mutex::new(crate::vault_dirty::VaultDirtyFiles::default()),
+            known_cached_pending: Mutex::new(std::collections::BTreeMap::new()),
             journaled_placeholder_closes: AtomicUsize::new(0),
             unverifiable_placeholder_closes: AtomicUsize::new(0),
             close_completion_callbacks: AtomicUsize::new(0),
@@ -6080,6 +6137,11 @@ impl CallbackState {
 
     fn has_unresolved_placeholder_data(&self) -> bool {
         self.non_vault_modified_closes.load(Ordering::Acquire) != 0
+            || self
+                .known_cached_pending
+                .lock()
+                .map(|rows| !rows.is_empty())
+                .unwrap_or(true)
             || self
                 .vault_dirty
                 .lock()

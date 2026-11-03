@@ -674,6 +674,12 @@ impl OpenCloudPlaceholderBackend {
         authorization: CapturedAuthorization,
         cancellation: &CancellationToken,
     ) -> Result<CapturedDirectoryParent, BackendError> {
+        // The cached vault delete callback has its own exact encrypted route.
+        // An ordinary namespace parent must never be promoted from a cached
+        // catalogue into a live Personal/Spaces mutation authority.
+        if self.is_cached_only() {
+            return Err(BackendError::Unavailable);
+        }
         self.ensure_active()?;
         if components.is_empty()
             || components.len() > 256

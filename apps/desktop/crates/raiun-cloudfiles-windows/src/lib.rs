@@ -1351,6 +1351,15 @@ impl ConfiguredRootConnection {
             provider_generation,
         )
     }
+    /// Retire one initial known-pending guard only after durable Agent custody
+    /// has recorded the typed native completion returned by this connection.
+    #[cfg(windows)]
+    pub fn acknowledge_cached_native_durable(
+        &self,
+        completed: &VaultCachedNativeCompleted,
+    ) -> Result<(), Error> {
+        self.inner.acknowledge_cached_native_durable(completed)
+    }
     /// Exact per-file tracker observation only; never global cleanup authority.
     #[cfg(feature = "synthetic-agent-integration")]
     pub fn vault_file_pending_for_test(&self, identity: &[u8; 16]) -> Result<bool, Error> {
