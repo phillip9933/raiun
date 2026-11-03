@@ -453,9 +453,15 @@ impl OpenCloudClient {
     /// can be created, including async/conditional paths, and token replacement
     /// refuses this mode. Online reconnect must construct a fresh client.
     pub fn new_offline(server: &str) -> Result<Self, CloudError> {
-        let mut client = Self::new_with_proxy(server, String::new(), &ProxyConfig::Direct)?;
-        client.authentication = Authentication::Offline;
-        Ok(client)
+        Self::new_with_timeouts(
+            server,
+            String::new(),
+            Duration::from_secs(15),
+            Duration::from_secs(120),
+            &ProxyConfig::Direct,
+            TransferBudget::new(),
+            Authentication::Offline,
+        )
     }
     pub fn is_offline(&self) -> bool {
         matches!(self.authentication, Authentication::Offline)
@@ -503,6 +509,7 @@ impl OpenCloudClient {
             Duration::from_secs(120),
             proxy,
             transfer_budget,
+            Authentication::Bearer,
         )
     }
 
@@ -528,6 +535,7 @@ impl OpenCloudClient {
             NAMESPACE_PROBE_TIMEOUT,
             proxy,
             TransferBudget::new(),
+            Authentication::Bearer,
         )
     }
 
@@ -566,10 +574,14 @@ impl OpenCloudClient {
         request_timeout: Duration,
         proxy: &ProxyConfig,
         transfer_budget: TransferBudget,
+        authentication: Authentication,
     ) -> Result<Self, CloudError> {
         let server = Url::parse(server).map_err(|_| invalid("server URL is invalid"))?;
         validate_server(&server)?;
-        if bearer_token.trim().is_empty() || bearer_token.chars().any(char::is_control) {
+        if (!matches!(authentication, Authentication::Offline) && bearer_token.trim().is_empty())
+            || bearer_token.chars().any(char::is_control)
+            || (matches!(authentication, Authentication::Offline) && !bearer_token.is_empty())
+        {
             return Err(invalid("bearer token is empty or malformed"));
         }
         let builder = apply_proxy(Client::builder(), proxy)?
@@ -619,7 +631,7 @@ impl OpenCloudClient {
             async_http,
             body_idle_timeout: async_body::BODY_IDLE_TIMEOUT,
             token: Arc::new(Mutex::new(bearer_token)),
-            authentication: Authentication::Bearer,
+            authentication,
             token_generation: Arc::new(AtomicU64::new(1)),
             initiator_id: format!("raiun-{}", std::process::id()),
             transfer_budget,
