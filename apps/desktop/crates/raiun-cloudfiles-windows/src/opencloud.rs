@@ -162,6 +162,9 @@ impl std::fmt::Debug for ProviderScope {
 pub struct OpaqueIdentity([u8; 16]);
 
 impl OpaqueIdentity {
+    pub(crate) fn from_bytes(value: [u8; 16]) -> Self {
+        Self(value)
+    }
     pub fn as_bytes(&self) -> &[u8; 16] {
         &self.0
     }

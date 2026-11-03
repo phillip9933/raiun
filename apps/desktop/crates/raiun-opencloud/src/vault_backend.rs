@@ -51,6 +51,10 @@ use crate::{
 
 mod copy;
 mod directory_create;
+mod file_rename;
+pub use file_rename::{
+    VaultFileRenameOutcome, VaultFileRenameRequest, VaultFileRenameTarget, VaultVerifiedFileRename,
+};
 mod file_create;
 pub use directory_create::{
     VaultChildDirectoryCreateOutcome, VaultChildDirectoryCreateRequest,

@@ -126,6 +126,8 @@ include!("windows_vault_copy.rs");
 include!("windows_vault_edit_upload.rs");
 #[path = "windows_vault_child_create_custody.rs"]
 mod windows_vault_child_create_custody;
+#[path = "windows_vault_file_rename_custody.rs"]
+mod windows_vault_file_rename_custody;
 #[path = "windows_vault_streamed_edit.rs"]
 mod windows_vault_streamed_edit;
 

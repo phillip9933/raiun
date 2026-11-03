@@ -220,6 +220,30 @@ fn completed_segment_key(
     Ok(key)
 }
 impl vault_custody::Store for ProtectedStore {
+    fn verify_location_history(
+        &self,
+        scope: &Scope,
+    ) -> std::result::Result<(), vault_custody::Error> {
+        super::windows_vault_file_rename_custody::verify_no_unresolved(&self.0, scope)
+            .map_err(|_| vault_custody::Error::Persistence)
+    }
+    fn project_rename_entry(
+        &self,
+        scope: &Scope,
+        e: &Entry,
+    ) -> std::result::Result<Entry, vault_custody::Error> {
+        super::windows_vault_file_rename_custody::entry(&self.0, scope, e)
+            .map_err(|_| vault_custody::Error::Persistence)
+    }
+    fn project_rename_hydration(
+        &self,
+        scope: &Scope,
+        h: &vault_custody::Hydration,
+    ) -> std::result::Result<vault_custody::Hydration, vault_custody::Error> {
+        super::windows_vault_file_rename_custody::hydration(&self.0, scope, h)
+            .map_err(|_| vault_custody::Error::Persistence)
+    }
+
     fn load(
         &self,
         scope: &Scope,
@@ -927,12 +951,23 @@ impl VaultPublishedHistorySource for WindowsVaultCustody {
                     }
                     .map_err(|_| refused())?;
                 }
-                for row in history {
+                let scope_intents = history
+                    .iter()
+                    .map(|row| VaultHydrationIntent {
+                        root,
+                        identity: row.opaque(),
+                        file_index: row.file_index(),
+                        length: row.length(),
+                        components: row.components().to_vec(),
+                    })
+                    .collect::<Vec<_>>();
+
+                for row in scope_intents {
                     if intents.len() == 100_000
-                        || !identities.insert(row.opaque())
-                        || !files.insert(row.file_index())
+                        || !identities.insert(row.identity)
+                        || !files.insert(row.file_index)
                         || !paths.insert(
-                            row.components()
+                            row.components
                                 .iter()
                                 .map(|c| c.to_lowercase())
                                 .collect::<Vec<_>>(),
@@ -942,10 +977,10 @@ impl VaultPublishedHistorySource for WindowsVaultCustody {
                     }
                     intents.push(VaultHydrationIntent {
                         root,
-                        identity: row.opaque(),
-                        file_index: row.file_index(),
-                        length: row.length(),
-                        components: row.components().to_vec(),
+                        identity: row.identity,
+                        file_index: row.file_index,
+                        length: row.length,
+                        components: row.components.to_vec(),
                     });
                 }
                 children.insert(
@@ -1297,6 +1332,103 @@ fn deterministic_capture_id(
 }
 
 impl VaultPublicationCustody for View {
+    fn prepare_file_rename(
+        &self,
+        d: &raiun_cloudfiles_windows::VaultFileRenameDescriptor,
+    ) -> std::result::Result<Arc<dyn raiun_cloudfiles_windows::VaultFileRenameRecord>, BackendError>
+    {
+        let result = (|| {
+            d.validate()?;
+            self.verify_context(&d.owner, &d.vault, &d.remote_root)?;
+            if d.root != self.root {
+                return Err(BackendError::Unavailable);
+            }
+            let root = RootBinding::new(
+                &self.account,
+                self.root.volume_serial,
+                self.root.file_index,
+                &self.registration,
+            )
+            .map_err(unavailable)?;
+            let mut manifest = RootManifest::reopen(&self.store, &root).map_err(unavailable)?;
+            if !manifest
+                .scopes_for_reconciliation()
+                .map_err(unavailable)?
+                .contains(&self.scope)
+            {
+                return Err(BackendError::Unavailable);
+            }
+            manifest.verify_current(&self.store).map_err(unavailable)?;
+            let mut cached = self.child.custody.lock().map_err(unavailable)?;
+            let fresh = Custody::reopen(&self.store, &self.scope).map_err(unavailable)?;
+            fresh.publication_history().map_err(unavailable)?;
+            let entries = fresh
+                .entries_for_reconciliation()
+                .iter()
+                .map(|e| VaultCatalogueEntry {
+                    identity: e.opaque(),
+                    metadata: RemoteEntry {
+                        id: e.remote_id().into(),
+                        path: e.root_relative_path().into(),
+                        etag: e.etag().into(),
+                        directory: e.is_directory(),
+                        size: e.length(),
+                        modified_unix: 0,
+                        writable: false,
+                        encrypted: true,
+                    },
+                })
+                .collect::<Vec<_>>();
+
+            let f = &d.facts;
+            let source = entries
+                .iter()
+                .find(|e| e.identity == f.identity)
+                .ok_or(BackendError::Unavailable)?;
+            let parent = entries
+                .iter()
+                .find(|e| e.identity == f.parent_identity)
+                .ok_or(BackendError::Unavailable)?;
+            if source.metadata.id != f.original.id
+                || source.metadata.path != f.original.path
+                || source.metadata.etag != f.original.etag
+                || source.metadata.size != f.original.size
+                || source.metadata.directory
+                || !parent.metadata.directory
+                || parent.metadata.id != f.parent.id
+                || parent.metadata.path != f.parent.path
+            {
+                return Err(BackendError::Unavailable);
+            }
+            let child = self.child.clone();
+            let store = self.store.0.clone();
+            let refresh = Arc::new(move || {
+                child
+                    .custody
+                    .lock()
+                    .map_err(unavailable)?
+                    .refresh_completed_location(&ProtectedStore(store.clone()))
+                    .map_err(unavailable)
+            });
+            let record = super::windows_vault_file_rename_custody::prepare(
+                self.store.0.clone(),
+                &self.scope,
+                d,
+                refresh,
+            )?;
+            manifest.verify_current(&self.store).map_err(unavailable)?;
+            self.verify_context(&d.owner, &d.vault, &d.remote_root)?;
+            *cached = fresh;
+            Ok(record)
+        })();
+        if result.is_err() {
+            self.child
+                .failed
+                .store(true, std::sync::atomic::Ordering::Release)
+        }
+        result
+    }
+
     fn prepare_child_create(
         &self,
         descriptor: &raiun_cloudfiles_windows::VaultChildCreateDescriptor,
@@ -1741,7 +1873,7 @@ impl VaultPublicationCustody for View {
         {
             return Err(BackendError::Unavailable);
         }
-        Ok(child
+        let rows = child
             .entries_for_reconciliation()
             .iter()
             .map(|entry| VaultCatalogueEntry {
@@ -1757,7 +1889,9 @@ impl VaultPublicationCustody for View {
                     encrypted: true,
                 },
             })
-            .collect())
+            .collect::<Vec<_>>();
+
+        Ok(rows)
     }
     fn persist_catalogue(
         &self,

@@ -52,6 +52,10 @@ pub(super) mod native_vault_child_create;
 pub(super) mod native_vault_directory_create;
 #[path = "native_vault_file_create.rs"]
 pub(super) mod native_vault_file_create;
+#[path = "native_vault_file_rename.rs"]
+pub(super) mod native_vault_file_rename;
+#[path = "native_vault_rename_driver.rs"]
+mod native_vault_rename_driver;
 pub(crate) use native_file_create::NativeFileCreateCompletion;
 #[path = "native_file_rename.rs"]
 pub(super) mod native_file_rename;
@@ -5452,6 +5456,25 @@ mod hydration_inventory {
                 return Err(InventoryError::Conflict);
             }
             Ok(file)
+        }
+        pub(super) fn rebase_vault_rename(
+            &mut self,
+            identity: [u8; 16],
+            file: u64,
+            len: u64,
+            old: &[String],
+            new: &[String],
+        ) -> Result<(), InventoryError> {
+            if !self.is_complete() {
+                return Err(InventoryError::Conflict);
+            }
+            if let Some(row) = self.rows.get_mut(&(identity, file)) {
+                if row.length != len || row.components != old {
+                    return Err(InventoryError::Conflict);
+                }
+                row.components = new.to_vec();
+            }
+            Ok(())
         }
         pub fn mark_incomplete(&mut self) {
             self.incomplete = true;

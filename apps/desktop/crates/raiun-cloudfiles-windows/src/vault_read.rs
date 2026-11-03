@@ -301,6 +301,98 @@ impl WindowsVaultReadBinding {
         .map_err(|_| BackendError::Unavailable)
     }
     #[cfg(windows)]
+    pub(crate) fn rename_descriptor(
+        &self,
+        root: crate::ConfiguredRootIdentity,
+        facts: crate::VaultFileRenameFacts,
+    ) -> Result<crate::VaultFileRenameDescriptor, BackendError> {
+        self.with_publication(|| {
+            let mut facts = facts;
+            facts.historical_epoch = self.epoch.historical_generation();
+            let d = crate::VaultFileRenameDescriptor {
+                owner: self.trusted.clone(),
+                vault: self.scope.clone(),
+                remote_root: self.root_path.clone(),
+                root,
+                facts,
+            };
+            d.validate().map_err(|_| refused())?;
+            Ok(d)
+        })
+        .map_err(|_| BackendError::Unavailable)
+    }
+    #[cfg(windows)]
+    pub(crate) fn prepare_file_rename(
+        &self,
+        original: &RemoteEntry,
+        destination: &str,
+        parent: &RemoteEntry,
+        cancel: &crate::vault_custody::VaultUploadCancellation<'_>,
+        context: raiun_opencloud::RangeReadContext,
+    ) -> Result<raiun_opencloud::vault_backend::VaultFileRenameTarget, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancel.is_cancelled();
+        let r = raiun_opencloud::vault_backend::VaultFileRenameRequest {
+            scope: &self.scope,
+            epoch: &self.epoch,
+            vault_root_path: &self.root_path,
+            source: original,
+            destination,
+            parent,
+            context,
+            provider_generation: cancel.generation.clone(),
+            expected_provider_generation: cancel.expected,
+            cancelled: &stop,
+        };
+        let target = self.backend.prepare_file_rename_guarded(&r)?;
+        self.check_current()?;
+        if stop() {
+            return Err(refused());
+        }
+        Ok(target)
+    }
+    #[cfg(windows)]
+    pub(crate) fn send_file_rename(
+        &self,
+        original: &RemoteEntry,
+        destination: &str,
+        parent: &RemoteEntry,
+        target: raiun_opencloud::vault_backend::VaultFileRenameTarget,
+        cancel: &crate::vault_custody::VaultUploadCancellation<'_>,
+        context: raiun_opencloud::RangeReadContext,
+        before: &mut dyn FnMut() -> Result<(), CloudError>,
+    ) -> Result<raiun_opencloud::vault_backend::VaultFileRenameOutcome, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancel.is_cancelled();
+        let r = raiun_opencloud::vault_backend::VaultFileRenameRequest {
+            scope: &self.scope,
+            epoch: &self.epoch,
+            vault_root_path: &self.root_path,
+            source: original,
+            destination,
+            parent,
+            context,
+            provider_generation: cancel.generation.clone(),
+            expected_provider_generation: cancel.expected,
+            cancelled: &stop,
+        };
+        let result = self.backend.rename_file_guarded(&r, target, before)?;
+        if stop() || self.check_current().is_err() {
+            return Ok(raiun_opencloud::vault_backend::VaultFileRenameOutcome::NeedsReconciliation);
+        }
+        Ok(result)
+    }
+    #[cfg(windows)]
+    pub(crate) fn file_rename_proof_matches(
+        &self,
+        p: &raiun_opencloud::vault_backend::VaultVerifiedFileRename,
+    ) -> bool {
+        p.scope() == &self.scope
+            && p.matches_epoch(&self.epoch)
+            && p.root_path() == self.root_path
+            && p.token_generation() == self.trusted.token_generation()
+    }
+    #[cfg(windows)]
     pub(crate) fn prepare_child_file_create(
         &self,
         path: &str,

@@ -522,6 +522,96 @@ mod runtime {
         /// Original exact route owns publication. Caller closure may only
         /// verify/convert the retained native directory and persist its factual
         /// completion; no registry/token/publication reentry or HTTP.
+        pub(crate) fn file_rename_source(
+            &self,
+            parent: [u8; 16],
+            name: &str,
+        ) -> Result<([u8; 16], RemoteEntry), BackendError> {
+            let p = self.saved(&parent)?;
+            if !p.directory || !valid_windows_component(name) {
+                return Err(BackendError::Unavailable);
+            }
+            let path = format!("{}/{}", p.path.trim_end_matches('/'), name);
+            let catalogue = self
+                .catalogue
+                .lock()
+                .map_err(|_| BackendError::Unavailable)?;
+            let mut rows = catalogue
+                .entries
+                .iter()
+                .filter(|(_, e)| e.path == path && !e.directory);
+            let (id, e) = rows.next().ok_or(BackendError::Unavailable)?;
+            if rows.next().is_some() {
+                return Err(BackendError::Unavailable);
+            }
+            Ok((*id, e.clone()))
+        }
+        pub(crate) fn prepare_file_rename_record(
+            &self,
+            d: &crate::VaultFileRenameDescriptor,
+        ) -> Result<Arc<dyn crate::VaultFileRenameRecord>, BackendError> {
+            d.validate()?;
+            self.check_child_create_parent(&d.facts.parent_identity, &d.facts.parent, d.root)?;
+            // Private history may authenticate retained bodies. Keep that IO
+            // outside route/token/epoch fences; reacquire the original live
+            // binding before returning a usable fresh record.
+            let record = self.custody.prepare_file_rename(d)?;
+            self.binding
+                .with_publication(|| {
+                    self.binding
+                        .verify_custody_context(self.custody.as_ref())
+                        .map_err(|_| refused())?;
+                    Ok(())
+                })
+                .map_err(|_| BackendError::Unavailable)?;
+            Ok(record)
+        }
+        /// Exclusive original route/token/epoch; callback is native/local only.
+        pub(crate) fn publish_file_rename<T>(
+            &self,
+            p: &raiun_opencloud::vault_backend::VaultVerifiedFileRename,
+            identity: [u8; 16],
+            cancel: &crate::vault_custody::VaultUploadCancellation<'_>,
+            publish: impl FnOnce() -> Result<T, crate::Error>,
+        ) -> Result<T, crate::Error> {
+            self.binding.with_exclusive_completion(|| {
+                let no = || crate::Error::EditRecoveryUnavailable;
+                if cancel.is_cancelled()
+                    || !self.binding.file_rename_proof_matches(p)
+                    || !p.provider_current(&cancel.generation, cancel.expected)
+                {
+                    return Err(no());
+                }
+                {
+                    let c = self.catalogue.lock().map_err(|_| no())?;
+                    let old = c.entries.get(&identity).ok_or_else(no)?;
+                    if old.id != p.original().id
+                        || old.path != p.original().path
+                        || old.etag != p.original().etag
+                        || old.size != p.original().size
+                        || c.entries
+                            .values()
+                            .any(|e| e.path.eq_ignore_ascii_case(&p.entry().path))
+                    {
+                        return Err(no());
+                    }
+                }
+                let value = publish()?;
+                // Native completion + durable receipt are factual before current
+                // catalogue is advanced. Original protected rows are preserved.
+                let mut c = self.catalogue.lock().map_err(|_| no())?;
+                let old = c.entries.get(&identity).ok_or_else(no)?.clone();
+                let mut next = p.entry().clone();
+                next.writable = false;
+                c.versions.remove(&key(&old));
+                c.versions.insert(key(&next), identity);
+                c.entries.insert(identity, next);
+                if cancel.is_cancelled() {
+                    return Err(no());
+                }
+                Ok(value)
+            })
+        }
         pub(crate) fn publish_created_directory<T>(
             &self,
             proof: &raiun_opencloud::vault_backend::VaultVerifiedChildDirectory,

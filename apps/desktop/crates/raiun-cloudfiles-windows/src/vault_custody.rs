@@ -240,6 +240,13 @@ pub struct ExistingVaultStreamedEditPayload {
 /// Ok means durable protected write-through/readback, never permission to read
 /// or clear native incomplete history. Failure denies the pending publication.
 pub trait VaultPublicationCustody: Send + Sync {
+    #[cfg(windows)]
+    fn prepare_file_rename(
+        &self,
+        _descriptor: &crate::VaultFileRenameDescriptor,
+    ) -> Result<std::sync::Arc<dyn crate::VaultFileRenameRecord>, BackendError> {
+        Err(BackendError::Unavailable)
+    }
     /// Vault-specific intent/body retention only; no ordinary journal admission.
     /// All native pins and live account/epoch authority remain with the caller.
     #[cfg(windows)]

@@ -71,6 +71,12 @@ pub use vault_completion::{
     VaultUploadControl,
 };
 #[cfg(windows)]
+mod vault_file_rename;
+#[cfg(windows)]
+pub use vault_file_rename::{
+    VaultFileRenameDescriptor, VaultFileRenameFacts, VaultFileRenameRecord,
+};
+#[cfg(windows)]
 pub mod vault_custody;
 #[cfg(any(windows, test))]
 pub mod vault_placeholder;
@@ -3443,6 +3449,21 @@ pub use native::native_vault_child_create::{
 #[cfg(windows)]
 impl ConfiguredRootConnection {
     #[allow(clippy::too_many_arguments)]
+    pub fn try_reconcile_fresh_vault_file_rename(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        old: &[String],
+        new: &[String],
+        file: LocalFileIdentity,
+        auth: namespace_intent::CapturedAuthorization,
+        generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        current: std::sync::Arc<
+            dyn Fn(namespace_intent::CapturedAuthorization) -> bool + Send + Sync,
+        >,
+    ) -> Result<bool, Error> {
+        self.inner
+            .try_vault_file_rename(backend, old, new, file, auth, generation, current)
+    }
     pub fn begin_fresh_vault_child_create(
         &self,
         backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,

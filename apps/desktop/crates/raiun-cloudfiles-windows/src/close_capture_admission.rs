@@ -165,7 +165,7 @@ impl CloseCaptureAdmission {
         self.unknown.load(Ordering::Acquire)
     }
 
-    fn mark_unknown(&self) {
+    pub(crate) fn mark_unknown(&self) {
         self.unknown.store(true, Ordering::Release);
     }
 }

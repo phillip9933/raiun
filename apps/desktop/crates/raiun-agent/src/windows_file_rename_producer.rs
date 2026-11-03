@@ -253,6 +253,36 @@ mod connected {
                 }
                 return Ok(());
             }
+            let weak = self.backend.clone();
+            let generation = self.generation.clone();
+            let expected = self.auth;
+            let cancelled = self.cancelled.clone();
+            let original_root = self.root;
+            let vault_current: Arc<dyn Fn(CapturedAuthorization) -> bool + Send + Sync> =
+                Arc::new(move |auth| {
+                    auth == expected
+                        && generation.load(Ordering::Acquire) == auth.agent_generation
+                        && !(cancelled)()
+                        && root == original_root
+                        && weak.upgrade().is_some_and(|b| {
+                            !b.recovery_job_revoked()
+                                && b.scope().token_generation() == auth.token_generation
+                        })
+                });
+            if connection
+                .try_reconcile_fresh_vault_file_rename(
+                    backend,
+                    old,
+                    new,
+                    observed.local_file,
+                    self.auth,
+                    self.generation.clone(),
+                    vault_current,
+                )
+                .map_err(|_| HOLD)?
+            {
+                return Ok(());
+            }
             let candidate = backend
                 .file_rename_binding_candidate_from_hint(
                     pair,
