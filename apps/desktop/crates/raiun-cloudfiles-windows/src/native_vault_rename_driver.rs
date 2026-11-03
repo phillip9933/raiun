@@ -219,7 +219,13 @@ impl ConfiguredRootConnection {
         let (identity, original) = route
             .file_rename_source(*parent.opaque().as_bytes(), old.last().unwrap(), directory)
             .map_err(|_| no())?;
-        let original = if directory {
+        let pending_create = route.binding().is_cached_only()
+            && original.id.starts_with(if directory {
+                "raiun-pending-directory:"
+            } else {
+                "raiun-pending-create:"
+            });
+        let original = if directory && !pending_create {
             let metadata = job.cancellation().bounded_request();
             joined(|| {
                 route
@@ -247,6 +253,7 @@ impl ConfiguredRootConnection {
                 new,
                 file,
                 &rows,
+                pending_create,
             )?)
         } else {
             Pins::File(VaultFileRenamePins::pin(
@@ -263,6 +270,7 @@ impl ConfiguredRootConnection {
                 opaque,
                 file,
                 original.size,
+                pending_create,
             )?)
         };
         let mut pins = std::mem::ManuallyDrop::new(pins);
@@ -277,6 +285,150 @@ impl ConfiguredRootConnection {
                 destination_parent.metadata().path.trim_end_matches('/'),
                 new.last().unwrap()
             );
+            if pending_create {
+                let binding = route.binding();
+                let parent_ref = binding
+                    .cached_parent_ref(destination_parent.metadata(), &stop)
+                    .map_err(|_| no())?;
+                let native_rows = match &*pins {
+                    Pins::File(p) => {
+                        let digest = p.pending_body_sha256()?;
+                        vec![(
+                            original.clone(),
+                            identity,
+                            file.file_index,
+                            p.usn(),
+                            Some(digest),
+                        )]
+                    }
+                    Pins::Directory(p) => p.pending_native_bodies()?,
+                };
+                if native_rows.len() > 64 || native_rows.is_empty() {
+                    return Err(no());
+                }
+                for (entry, _, _, _, digest) in &native_rows {
+                    let prefix = if entry.directory {
+                        "raiun-pending-directory:"
+                    } else {
+                        "raiun-pending-create:"
+                    };
+                    let id = entry.id.strip_prefix(prefix).ok_or_else(no)?;
+                    let revision = entry
+                        .etag
+                        .strip_prefix(&format!("raiun-pending-v1:{id}:"))
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .ok_or_else(no)?;
+                    let sealed = binding
+                        .cached_pending_operation(id, revision, &stop)
+                        .map_err(|_| no())?;
+                    if sealed.path != entry.path
+                        || sealed.plaintext_len != entry.size
+                        || digest
+                            .as_ref()
+                            .is_some_and(|hash| sealed.plaintext_sha256.as_str() != hash.as_str())
+                        || sealed.state != raiun_cache::CiphertextWriteState::NeverAttempted
+                    {
+                        return Err(no());
+                    }
+                }
+                let (native_file, usn, parent_file, parent_usn, _, dest_file, dest_usn) =
+                    pins.facts()?;
+                let descriptor = crate::opencloud::VaultCachedRetargetDescriptor {
+                    owner: backend.scope().clone(),
+                    vault: binding.cached_vault_scope(),
+                    remote_root: parent.vault().root_path().to_owned(),
+                    root: root_id,
+                    identity,
+                    original: original.clone(),
+                    parent_identity: *parent.opaque().as_bytes(),
+                    parent: parent.metadata().clone(),
+                    destination_parent: destination_parent.metadata().clone(),
+                    destination_parent_identity: *destination_parent.opaque().as_bytes(),
+                    historical_unlock_epoch: binding.historical_unlock_epoch(),
+                    original_file: LocalFileIdentity {
+                        volume_serial: root_id.volume_serial,
+                        file_index: native_file,
+                    },
+                    original_usn: usn,
+                    parent_file: LocalFileIdentity {
+                        volume_serial: root_id.volume_serial,
+                        file_index: parent_file,
+                    },
+                    parent_usn,
+                    destination_parent_file: LocalFileIdentity {
+                        volume_serial: root_id.volume_serial,
+                        file_index: dest_file,
+                    },
+                    destination_parent_usn: dest_usn,
+                    old_components: old.to_vec(),
+                    new_components: new.to_vec(),
+                    destination_parent_ref: parent_ref.clone(),
+                };
+                descriptor.validate().map_err(|_| no())?;
+                if !admission.claim_dispatch() || stop() {
+                    return Err(no());
+                }
+                let receipt = if directory {
+                    let result = joined(|| {
+                        binding
+                            .retarget_cached_directory_subtree(
+                                &original,
+                                &destination,
+                                &parent_ref,
+                                &stop,
+                            )
+                            .map_err(|_| no())
+                    })?;
+                    published = true;
+                    crate::opencloud::VaultCachedNamespaceQueued::pending_directory_retarget(
+                        &descriptor,
+                        result,
+                    )
+                    .map_err(|_| no())?
+                } else {
+                    let result = joined(|| {
+                        binding
+                            .retarget_cached_file_create(
+                                &original,
+                                &destination,
+                                &parent_ref,
+                                &stop,
+                            )
+                            .map_err(|_| no())
+                    })?;
+                    published = true;
+                    crate::opencloud::VaultCachedNamespaceQueued::pending_file_retarget(
+                        &descriptor,
+                        result,
+                    )
+                    .map_err(|_| no())?
+                };
+                route
+                    .record_cached_retarget_queued(&receipt)
+                    .map_err(|_| no())?;
+                pins.verify(self, false)?;
+                let cancel = crate::vault_custody::VaultUploadCancellation {
+                    generation: generation.clone(),
+                    expected: auth.agent_generation,
+                    cancelled: &stop,
+                };
+                route.publish_cached_retarget(&receipt, &cancel, || {
+                    if stop() || !admission.claim_completion() {
+                        return Err(no());
+                    }
+                    let completed = match &mut *pins {
+                        Pins::File(p) => {
+                            let (file, usn) = p.complete_cached_queued(self, &|| !stop())?;
+                            vec![(identity, file, usn)]
+                        }
+                        Pins::Directory(p) => p.complete_cached_queued(self, &|| !stop())?,
+                    };
+                    route
+                        .record_cached_retarget_native(&receipt, &completed)
+                        .map_err(|_| no())
+                })?;
+                return Ok(true);
+            }
             if route.binding().is_cached_only() && !directory {
                 if original.id.starts_with("raiun-pending-") {
                     return Err(no());

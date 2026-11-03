@@ -2,6 +2,7 @@
 //! No hydration, body read, history adoption or in-sync repair is allowed.
 use super::*;
 use raiun_core::backend::{CloudError, ErrorKind};
+use sha2::{Digest, Sha256};
 
 pub(super) struct SourceParentPins {
     handle: RawOwnedHandle,
@@ -126,6 +127,7 @@ pub(super) struct VaultFileRenamePins {
     usn: i64,
     updated: Option<crate::OpaqueIdentity>,
     attempted: bool,
+    pending: bool,
     _thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 #[derive(Clone)]
@@ -185,7 +187,7 @@ pub(super) fn links_one(handle: Handle, expected: RootIdentity) -> Result<bool, 
         && ((u64::from(info.file_index_high) << 32) | u64::from(info.file_index_low))
             == expected.file_index)
 }
-fn clean(snapshot: RootSnapshot, file: LocalFileIdentity, size: u64) -> bool {
+fn clean(snapshot: RootSnapshot, file: LocalFileIdentity, size: u64, pending: bool) -> bool {
     snapshot.identity.volume_serial == file.volume_serial
         && snapshot.identity.file_index == file.file_index
         && file.file_index != 0
@@ -194,7 +196,7 @@ fn clean(snapshot: RootSnapshot, file: LocalFileIdentity, size: u64) -> bool {
         && snapshot.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
         && cleanup_cloud_reparse_tag(snapshot.reparse_tag)
         && snapshot.placeholder_state & CF_PLACEHOLDER_STATE_PLACEHOLDER != 0
-        && snapshot.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC != 0
+        && (snapshot.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC != 0) != pending
         && snapshot.placeholder_state & CF_PLACEHOLDER_STATE_SYNC_ROOT == 0
         && snapshot.placeholder_state
             & !(CF_PLACEHOLDER_STATE_PLACEHOLDER
@@ -211,20 +213,22 @@ fn inspect(
     usn: i64,
     identity: crate::OpaqueIdentity,
     destination: &Path,
+    pending: bool,
 ) -> Result<(), Error> {
     let snapshot = root_snapshot(handle)?;
     let file = LocalFileIdentity {
         volume_serial: expected.identity.volume_serial,
         file_index: expected.identity.file_index,
     };
-    if !clean(snapshot, file, expected.file_size)
+    if !clean(snapshot, file, expected.file_size, pending)
         || !same_edit_snapshot(snapshot, expected)
         || completion_basic_info(handle)? != basic
         || usn <= 0
         || completion_usn(handle, file.file_index)? != usn
         || !links_one(handle, expected.identity)?
         || native_namespace_directory::opaque_directory_identity(handle)? != *identity.as_bytes()
-        || modified_ranges_for_handle(handle).map_err(|_| Error::EditRecoveryUnavailable)?
+        || (!pending
+            && modified_ranges_for_handle(handle).map_err(|_| Error::EditRecoveryUnavailable)?)
         || !windows_paths_equal(
             &final_path_for_handle(handle).map_err(|_| Error::ConfiguredRootChanged)?,
             destination,
@@ -235,6 +239,18 @@ fn inspect(
     Ok(())
 }
 impl VaultFileRenamePins {
+    pub(super) fn pending_body_sha256(&self) -> Result<String, Error> {
+        if !self.pending || self.snapshot.file_size > 64 * 1024 * 1024 {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        self.verify_handles(self.original_identity)?;
+        let len =
+            usize::try_from(self.snapshot.file_size).map_err(|_| Error::EditRecoveryUnavailable)?;
+        let mut bytes = Zeroizing::new(vec![0u8; len]);
+        self.protected.read_complete(&mut bytes)?;
+        self.verify_handles(self.original_identity)?;
+        Ok(format!("{:x}", Sha256::digest(&*bytes)))
+    }
     #[allow(clippy::too_many_arguments)]
     pub(super) fn pin(
         connection: &ConfiguredRootConnection,
@@ -250,6 +266,7 @@ impl VaultFileRenamePins {
         original_identity: crate::OpaqueIdentity,
         expected_file: LocalFileIdentity,
         plaintext_len: u64,
+        pending: bool,
     ) -> Result<Self, Error> {
         let erased: Arc<dyn PlaceholderBackend> = backend.clone();
         if !connection.connected
@@ -342,7 +359,7 @@ impl VaultFileRenamePins {
         // no WRITE_ACCESS/FOREGROUND fallback or attribute change is attempted.
         let marker = open_root(&destination, FILE_READ_ATTRIBUTES, FILE_SHARE_READ)?;
         let snapshot = root_snapshot(marker.0)?;
-        if !clean(snapshot, expected_file, plaintext_len)
+        if !clean(snapshot, expected_file, plaintext_len, pending)
             || !links_one(marker.0, snapshot.identity)?
         {
             return Err(Error::ConfiguredRootChanged);
@@ -357,6 +374,7 @@ impl VaultFileRenamePins {
             usn,
             original_identity,
             &destination,
+            pending,
         )?;
         if !same_edit_snapshot(root_snapshot(marker.0)?, snapshot) {
             return Err(Error::ConfiguredRootChanged);
@@ -381,6 +399,7 @@ impl VaultFileRenamePins {
             usn,
             updated: None,
             attempted: false,
+            pending,
             _thread: std::marker::PhantomData,
         };
         pins.verify(connection, false)?;
@@ -453,6 +472,7 @@ impl VaultFileRenamePins {
             self.usn,
             identity,
             &path(&self.root_path, &self.components),
+            self.pending,
         )?;
         if !same_edit_snapshot(root_snapshot(self._destination.0)?, self.snapshot) {
             return Err(Error::ConfiguredRootChanged);
@@ -492,6 +512,9 @@ impl VaultFileRenamePins {
         if self.attempted {
             return Err(Error::EditRecoveryUnavailable);
         }
+        if self.pending {
+            return Err(Error::EditRecoveryUnavailable);
+        }
         self.verify_handles(self.original_identity)?;
         Ok(VaultFileRenameSendProof {
             root_path: self.root_path.clone(),
@@ -517,6 +540,14 @@ impl VaultFileRenamePins {
         claim: &dyn Fn() -> bool,
     ) -> Result<(u64, i64), Error> {
         self.verify(connection, false)?;
+        if self.pending {
+            if !claim() {
+                return Err(Error::EditRecoveryUnavailable);
+            }
+            self.verify_handles(self.original_identity)?;
+            self.attempted = true;
+            return Ok((self.file().file_index, self.usn));
+        }
         if !claim() {
             return Err(Error::EditRecoveryUnavailable);
         }
@@ -646,6 +677,7 @@ impl VaultFileRenameSendProof {
             self.usn,
             self.identity,
             &destination,
+            false,
         )?;
         native_namespace_directory::verify_reinspected_namespace_root(&lease, &self.root_path)
     }

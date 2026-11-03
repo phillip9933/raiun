@@ -38,6 +38,25 @@ impl VaultBackend {
         Ok(result)
     }
 
+    pub fn cached_parent_ref(
+        &self,
+        parent: &RemoteEntry,
+        epoch: &VaultSessionEpoch,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<VaultPendingParentRef, CloudError> {
+        self.cached_namespace_current(epoch, cancelled)?;
+        if !parent.directory {
+            return Err(conflict("cached destination parent is not a directory"));
+        }
+        let current = self.stat(self.scope.space_id(), &parent.path)?;
+        if current.id != parent.id || current.path != parent.path || current.etag != parent.etag {
+            return Err(conflict("cached destination parent changed"));
+        }
+        let result = self.parent_ref_for_directory(&parent.path, &parent.id, &parent.etag)?;
+        self.cached_namespace_current(epoch, cancelled)?;
+        Ok(result)
+    }
+
     /// Admit a clean cached FILE rename only for the live original unlock.
     /// The returned queued entry is local journal history, never a MOVE proof.
     pub fn queue_cached_file_rename(

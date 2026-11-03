@@ -4,6 +4,7 @@ use super::native_vault_file_rename::{SourceParentPins, SourceParentProof};
 use super::*;
 use crate::opencloud::vault_child_create::VaultChildCreateParent;
 use raiun_core::backend::{CloudError, ErrorKind, RemoteEntry};
+use sha2::{Digest, Sha256};
 struct Node {
     marker: RawOwnedHandle,
     protected: ProtectedCompletionFile,
@@ -17,6 +18,7 @@ struct NodeProof {
     identity: [u8; 16],
     components: Vec<String>,
     original: RemoteEntry,
+    pending: bool,
 }
 fn path(root: &Path, parts: &[String]) -> PathBuf {
     parts.iter().fold(root.to_owned(), |p, s| p.join(s))
@@ -33,7 +35,9 @@ fn inspect(h: Handle, p: &NodeProof, root: &Path) -> Result<(), Error> {
         )
         || (!p.original.directory
             && (!native_vault_file_rename::links_one(h, s.identity)?
-                || modified_ranges_for_handle(h).map_err(|_| Error::EditRecoveryUnavailable)?))
+                || (!p.pending
+                    && modified_ranges_for_handle(h)
+                        .map_err(|_| Error::EditRecoveryUnavailable)?)))
     {
         return Err(Error::ConfiguredRootChanged);
     }
@@ -76,6 +80,52 @@ pub(super) struct VaultDirectoryRenameSendProof {
     nodes: Vec<NodeProof>,
 }
 impl VaultDirectoryRenamePins {
+    pub(super) fn pending_native_bodies(
+        &self,
+    ) -> Result<Vec<(RemoteEntry, [u8; 16], u64, i64, Option<String>)>, Error> {
+        self.check_native_pending()?;
+        let mut total = 0u64;
+        let mut result = Vec::with_capacity(self.nodes.len());
+        for node in &self.nodes {
+            let p = &node.proof;
+            total = total
+                .checked_add(p.snapshot.file_size)
+                .ok_or(Error::EditRecoveryUnavailable)?;
+            if total > 64 * 1024 * 1024 {
+                return Err(Error::EditRecoveryUnavailable);
+            }
+            let sha = if p.original.directory {
+                None
+            } else {
+                let len = usize::try_from(p.snapshot.file_size)
+                    .map_err(|_| Error::EditRecoveryUnavailable)?;
+                let mut bytes = Zeroizing::new(vec![0u8; len]);
+                node.protected.read_complete(&mut bytes)?;
+                Some(format!("{:x}", Sha256::digest(&*bytes)))
+            };
+            result.push((
+                p.original.clone(),
+                p.identity,
+                p.snapshot.identity.file_index,
+                p.usn,
+                sha,
+            ));
+        }
+        self.check_native_pending()?;
+        Ok(result)
+    }
+
+    fn check_native_pending(&self) -> Result<(), Error> {
+        if self.nodes.len() > 64 || self.nodes.is_empty() {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        for node in &self.nodes {
+            if node.proof.snapshot.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC != 0 {
+                return Err(Error::ConfiguredRootChanged);
+            }
+        }
+        Ok(())
+    }
     #[allow(clippy::too_many_arguments)]
     pub(super) fn pin(
         connection: &ConfiguredRootConnection,
@@ -86,6 +136,7 @@ impl VaultDirectoryRenamePins {
         new: &[String],
         file: LocalFileIdentity,
         entries: &[crate::vault_custody::VaultCatalogueEntry],
+        cached_pending: bool,
     ) -> Result<Self, Error> {
         let erased: Arc<dyn PlaceholderBackend> = backend.clone();
         if !connection.connected
@@ -161,7 +212,7 @@ impl VaultDirectoryRenamePins {
                 || s.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
                 || !cleanup_cloud_reparse_tag(s.reparse_tag)
                 || s.placeholder_state & CF_PLACEHOLDER_STATE_PLACEHOLDER == 0
-                || s.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC == 0
+                || (s.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC != 0) == cached_pending
                 || s.placeholder_state & CF_PLACEHOLDER_STATE_SYNC_ROOT != 0
                 || s.placeholder_state & !0x3f != 0
                 || s.file_size != e.metadata.size
@@ -183,6 +234,7 @@ impl VaultDirectoryRenamePins {
                 identity: e.identity,
                 components,
                 original: e.metadata.clone(),
+                pending: cached_pending,
             };
             inspect(protected.raw, &proof, &root.path)?;
             nodes.push(Node {
@@ -328,6 +380,29 @@ impl VaultDirectoryRenamePins {
             .nodes
             .iter()
             .map(|n| (n.proof.snapshot.identity.file_index, n.proof.usn))
+            .collect())
+    }
+    pub(super) fn complete_cached_queued(
+        &mut self,
+        connection: &ConfiguredRootConnection,
+        claim: &dyn Fn() -> bool,
+    ) -> Result<Vec<([u8; 16], u64, i64)>, Error> {
+        self.check(connection, true)?;
+        if self.completed || !claim() {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        self.completed = true;
+        self.check(connection, true)?;
+        Ok(self
+            .nodes
+            .iter()
+            .map(|n| {
+                (
+                    n.proof.identity,
+                    n.proof.snapshot.identity.file_index,
+                    n.proof.usn,
+                )
+            })
             .collect())
     }
 }

@@ -1106,6 +1106,164 @@ mod runtime {
             })
         }
 
+        pub(crate) fn publish_cached_retarget<T>(
+            &self,
+            receipt: &crate::opencloud::VaultCachedNamespaceQueued,
+            cancellation: &crate::vault_custody::VaultUploadCancellation<'_>,
+            publish: impl FnOnce() -> Result<T, crate::Error>,
+        ) -> Result<T, crate::Error> {
+            self.binding.with_exclusive_completion(|| {
+                let no = || crate::Error::EditRecoveryUnavailable;
+                let crate::opencloud::VaultCachedNamespaceDescriptor::PendingRetarget(d) =
+                    receipt.descriptor()
+                else {
+                    return Err(no());
+                };
+                d.validate().map_err(|_| no())?;
+                if cancellation.is_cancelled()
+                    || !self.binding.is_cached_only()
+                    || !self.binding.cached_namespace_descriptor_current(
+                        &d.owner,
+                        &d.vault,
+                        &d.remote_root,
+                        d.historical_unlock_epoch,
+                    )
+                {
+                    return Err(no());
+                }
+                let mut next = self.catalogue.lock().map_err(|_| no())?.clone();
+                if next.entries.get(&d.identity) != Some(&d.original) {
+                    return Err(no());
+                }
+                let rows = match receipt.retarget_rows() {
+                    Some(rows) => rows.to_vec(),
+                    None => {
+                        let entry = receipt.entry().ok_or_else(no)?;
+                        if entry.id != d.original.id || entry.directory != d.original.directory {
+                            return Err(no());
+                        }
+                        let mut updated = entry.clone();
+                        updated.writable = false;
+                        next.versions.remove(&key(&d.original));
+                        next.versions.insert(key(&updated), d.identity);
+                        next.entries.insert(d.identity, updated);
+                        Vec::new()
+                    }
+                };
+                if !rows.is_empty() {
+                    for row in &rows {
+                        let id = format!(
+                            "raiun-pending-{}:{}",
+                            if row.operation
+                                == raiun_opencloud::vault_cache::VaultPendingOperationKind::CreateDirectory
+                            {
+                                "directory"
+                            } else {
+                                "create"
+                            },
+                            row.write_id
+                        );
+                        let etag = format!(
+                            "raiun-pending-v1:{}:{}",
+                            row.write_id, row.previous_revision
+                        );
+                        let mut matches = next.entries.iter().filter(|(_, entry)| {
+                            entry.path == row.old_path && entry.id == id && entry.etag == etag
+                        });
+                        let (identity, old) = matches.next().ok_or_else(no)?;
+                        if matches.next().is_some() {
+                            return Err(no());
+                        }
+                        let identity = *identity;
+                        let old = old.clone();
+                        let mut updated = old.clone();
+                        updated.path = row.path.clone();
+                        updated.etag =
+                            format!("raiun-pending-v1:{}:{}", row.write_id, row.revision);
+                        updated.writable = false;
+                        next.versions.remove(&key(&old));
+                        next.versions.insert(key(&updated), identity);
+                        next.entries.insert(identity, updated);
+                    }
+                }
+                let mut paths = HashSet::new();
+                if next
+                    .entries
+                    .values()
+                    .any(|entry| !paths.insert(entry.path.to_lowercase()))
+                {
+                    return Err(no());
+                }
+                let result = publish()?;
+                if cancellation.is_cancelled() {
+                    return Err(no());
+                }
+                let restored =
+                    Catalogue::restore(self.custody.catalogue_snapshot().map_err(|_| no())?)
+                        .map_err(|_| no())?;
+                if restored.entries != next.entries || restored.versions != next.versions {
+                    return Err(no());
+                }
+                std::mem::swap(&mut *self.catalogue.lock().map_err(|_| no())?, &mut next);
+                Ok(result)
+            })
+        }
+        pub(crate) fn record_cached_retarget_queued(
+            &self,
+            receipt: &crate::VaultCachedNamespaceQueued,
+        ) -> Result<(), BackendError> {
+            let crate::VaultCachedNamespaceDescriptor::PendingRetarget(d) = receipt.descriptor()
+            else {
+                return Err(BackendError::Unavailable);
+            };
+            d.validate()?;
+            if !self.binding.cached_namespace_descriptor_current(
+                &d.owner,
+                &d.vault,
+                &d.remote_root,
+                d.historical_unlock_epoch,
+            ) {
+                return Err(BackendError::Unavailable);
+            }
+            self.binding
+                .with_publication(|| {
+                    if self.custody.root_identity() != d.root {
+                        return Err(refused());
+                    }
+                    self.binding
+                        .verify_custody_context(self.custody.as_ref())
+                        .map_err(|_| refused())?;
+                    self.custody
+                        .record_cached_retarget_queued(receipt)
+                        .map_err(|_| refused())
+                })
+                .map_err(|_| BackendError::Unavailable)
+        }
+
+        pub(crate) fn record_cached_retarget_native(
+            &self,
+            receipt: &crate::VaultCachedNamespaceQueued,
+            nodes: &[([u8; 16], u64, i64)],
+        ) -> Result<(), BackendError> {
+            let crate::VaultCachedNamespaceDescriptor::PendingRetarget(d) = receipt.descriptor()
+            else {
+                return Err(BackendError::Unavailable);
+            };
+            d.validate()?;
+            if !self.binding.cached_namespace_descriptor_current(
+                &d.owner,
+                &d.vault,
+                &d.remote_root,
+                d.historical_unlock_epoch,
+            ) || nodes.is_empty()
+                || nodes.len() > 64
+                || self.custody.root_identity() != d.root
+            {
+                return Err(BackendError::Unavailable);
+            }
+            self.custody.record_cached_retarget_native(receipt, nodes)
+        }
+
         /// Original route/epoch catalogue publication, never ordinary identity.
         pub(crate) fn publish_created_file<T>(
             &self,

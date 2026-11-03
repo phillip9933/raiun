@@ -1016,6 +1016,17 @@ impl WindowsVaultReadBinding {
     }
 
     #[cfg(windows)]
+    pub(crate) fn cached_parent_ref(
+        &self,
+        parent: &RemoteEntry,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_cache::VaultPendingParentRef, CloudError> {
+        self.check_current()?;
+        let stop = || self.is_revoked() || cancelled();
+        self.backend.cached_parent_ref(parent, &self.epoch, &stop)
+    }
+
+    #[cfg(windows)]
     pub(crate) fn cached_namespace_descriptor_current(
         &self,
         owner: &ProviderScope,
@@ -1029,6 +1040,15 @@ impl WindowsVaultReadBinding {
             && historical_epoch == self.epoch.historical_generation()
             && self.check_current().is_ok()
             && self.client.is_offline()
+    }
+    #[cfg(windows)]
+    pub(crate) fn cached_vault_scope(&self) -> VaultSessionScope {
+        self.scope.clone()
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn historical_unlock_epoch(&self) -> u64 {
+        self.epoch.historical_generation()
     }
 
     #[cfg(windows)]
