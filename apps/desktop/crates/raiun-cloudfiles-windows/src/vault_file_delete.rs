@@ -11,6 +11,7 @@ pub struct VaultFileDeleteDescriptor {
     pub root: ConfiguredRootIdentity,
     pub original_identity: [u8; 16],
     pub original: RemoteEntry,
+    pub empty_directory: bool,
     pub parent_identity: [u8; 16],
     pub parent: RemoteEntry,
     pub historical_unlock_epoch: u64,
@@ -27,6 +28,8 @@ pub struct VaultFileDeleteFacts {
     pub root: LocalFileIdentity,
     pub original_identity: [u8; 16],
     pub original: RemoteEntry,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub empty_directory: bool,
     pub parent_identity: [u8; 16],
     pub parent: RemoteEntry,
     pub historical_unlock_epoch: u64,
@@ -58,7 +61,8 @@ impl VaultFileDeleteFacts {
             || self.original_identity == [0; 16]
             || self.parent_identity == [0; 16]
             || self.original_identity == self.parent_identity
-            || self.original.directory
+            || self.original.directory != self.empty_directory
+            || (self.empty_directory && self.original.size != 0)
             || !self.parent.directory
             || !id(&self.original.id)
             || !id(&self.parent.id)
@@ -109,6 +113,7 @@ impl VaultFileDeleteDescriptor {
             },
             original_identity: self.original_identity,
             original: self.original.clone(),
+            empty_directory: self.empty_directory,
             parent_identity: self.parent_identity,
             parent: self.parent.clone(),
             historical_unlock_epoch: self.historical_unlock_epoch,
@@ -145,7 +150,8 @@ pub trait VaultFileDeleteRecord: Send + Sync {
 /// Actual guarded SDK original-ID/strong-ETag DELETE and exact NotFound proof.
 pub struct VaultFileDeleteRemoteProof {
     pub(crate) descriptor: VaultFileDeleteDescriptor,
-    pub(crate) target: crate::ExistingVaultUploadTarget,
+    pub(crate) target: Option<crate::ExistingVaultUploadTarget>,
+    pub(crate) directory_dispatch: Option<crate::FreshVaultCaptureDispatch>,
     pub(crate) verified: raiun_opencloud::vault_backend::VaultVerifiedFileDelete,
 }
 impl VaultFileDeleteRemoteProof {

@@ -27,6 +27,7 @@ pub(super) fn execute(choice: VaultDeleteChoice<'_, '_>) -> Result<FileDeleteOut
         root: choice.shared.root,
         original_identity: choice.ticket.key.identity,
         original: choice.original_metadata().clone(),
+        empty_directory: false,
         parent_identity: *choice.parent.opaque().as_bytes(),
         parent: choice.parent.metadata().clone(),
         historical_unlock_epoch: choice.original_epoch(),
@@ -143,7 +144,8 @@ pub(super) fn execute(choice: VaultDeleteChoice<'_, '_>) -> Result<FileDeleteOut
     );
     let proof = VaultFileDeleteRemoteProof {
         descriptor,
-        target: locator,
+        target: Some(locator),
+        directory_dispatch: None,
         verified,
     };
     record

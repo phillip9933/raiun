@@ -35,6 +35,8 @@ const DELETE_REFUSED: i32 = 0xC000_CF12_u32 as i32;
 mod replacement;
 #[path = "native_vault_file_delete.rs"]
 mod vault_delete;
+#[path = "native_vault_directory_delete.rs"]
+mod vault_directory_delete;
 #[path = "native_vault_file_replace.rs"]
 mod vault_replacement;
 

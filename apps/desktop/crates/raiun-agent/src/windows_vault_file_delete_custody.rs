@@ -208,7 +208,7 @@ impl VaultFileDeleteRecord for Record {
             || v.original().path != f.original.path
             || v.original().etag != f.original.etag
             || v.original().size != f.original.size
-            || v.original().directory
+            || v.original().directory != f.empty_directory
             || v.parent().id != f.parent.id
             || v.parent().path != f.parent.path
             || v.parent().etag != f.parent.etag
@@ -291,9 +291,9 @@ pub(super) fn entry_deleted(
             e.opaque() == f.original_identity
                 && e.remote_id() == f.original.id
                 && e.root_relative_path() == f.original.path
-                && e.etag() == f.original.etag
+                && (f.empty_directory || e.etag() == f.original.etag)
                 && e.length() == f.original.size
-                && !e.is_directory()
+                && e.is_directory() == f.empty_directory
         }
     }))
 }

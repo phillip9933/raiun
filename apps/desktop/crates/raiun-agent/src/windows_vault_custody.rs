@@ -1547,14 +1547,29 @@ impl VaultPublicationCustody for View {
             .ok_or(BackendError::Unavailable)?;
         if original.remote_id() != d.original.id
             || original.root_relative_path() != d.original.path
-            || original.etag() != d.original.etag
+            || (!d.empty_directory && original.etag() != d.original.etag)
             || original.length() != d.original.size
-            || original.is_directory()
+            || original.is_directory() != d.empty_directory
             || parent.remote_id() != d.parent.id
             || parent.root_relative_path() != d.parent.path
             || !parent.is_directory()
         {
             return Err(BackendError::Unavailable);
+        }
+        if d.empty_directory {
+            for e in fresh.entries_for_reconciliation().iter().filter(|e| {
+                e.root_relative_path()
+                    .starts_with(&format!("{}/", d.original.path))
+            }) {
+                if !self
+                    .store
+                    .0
+                    .completed_entry_deleted(&self.scope, e)
+                    .map_err(unavailable)?
+                {
+                    return Err(BackendError::Unavailable);
+                }
+            }
         }
         for h in fresh
             .publication_history()

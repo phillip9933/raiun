@@ -56,7 +56,11 @@ pub enum VaultFileDeleteOutcome {
     Verified(VaultVerifiedFileDelete),
     NeedsReconciliation,
 }
-fn check(b: &VaultBackend, r: &VaultFileDeleteRequest<'_>) -> Result<(), CloudError> {
+fn check(
+    b: &VaultBackend,
+    r: &VaultFileDeleteRequest<'_>,
+    directory: bool,
+) -> Result<(), CloudError> {
     b.client.ensure_context_current(r.context)?;
     if (r.cancelled)()
         || r.expected_provider_generation == 0
@@ -83,7 +87,8 @@ fn check(b: &VaultBackend, r: &VaultFileDeleteRequest<'_>) -> Result<(), CloudEr
         .rsplit_once('/')
         .map(|(p, _)| if p.is_empty() { "/" } else { p })
         .unwrap_or("/");
-    if r.source.directory
+    if r.source.directory != directory
+        || (directory && r.source.size != 0)
         || !r.parent.directory
         || r.source.id.is_empty()
         || r.source.id == r.scope.resource_id()
@@ -105,8 +110,21 @@ impl VaultBackend {
         &self,
         r: &VaultFileDeleteRequest<'_>,
     ) -> Result<VaultFileDeleteTarget, CloudError> {
+        self.prepare_namespace_delete_guarded(r, false)
+    }
+    pub fn prepare_empty_directory_delete_guarded(
+        &self,
+        r: &VaultFileDeleteRequest<'_>,
+    ) -> Result<VaultFileDeleteTarget, CloudError> {
+        self.prepare_namespace_delete_guarded(r, true)
+    }
+    fn prepare_namespace_delete_guarded(
+        &self,
+        r: &VaultFileDeleteRequest<'_>,
+        directory: bool,
+    ) -> Result<VaultFileDeleteTarget, CloudError> {
         let _context = crate::RangeContextGuard::enter(r.context);
-        check(self, r)?;
+        check(self, r, directory)?;
         let state = self.revalidate_root()?;
         if !state.space.writable
             || self.current_parent_binding(&r.source.path)?
@@ -115,7 +133,7 @@ impl VaultBackend {
             return Err(conflict("encrypted delete parent changed"));
         }
         let source = self.stat_raw(&state, &r.source.path)?;
-        if source.directory
+        if source.directory != directory
             || !source.writable
             || source.id != r.source.id
             || source.etag != r.source.etag
@@ -123,13 +141,29 @@ impl VaultBackend {
         {
             return Err(conflict("encrypted delete source changed"));
         }
-        let encoded = self.encoded_file_target(
-            &state,
-            &r.source.path,
-            &WriteCondition::Match(r.source.etag.clone()),
-        )?;
+        let encoded = if directory {
+            let mut children = false;
+            self.list_raw(&state, &r.source.path, &mut |_| {
+                children = true;
+                Ok(())
+            })?;
+            if children {
+                return Err(conflict(
+                    "encrypted directory delete requires a fresh empty source",
+                ));
+            }
+            self.sessions
+                .encrypt_path(&self.scope, relative_virtual_path(&r.source.path)?)
+                .map_err(vault_error)?
+        } else {
+            self.encoded_file_target(
+                &state,
+                &r.source.path,
+                &WriteCondition::Match(r.source.etag.clone()),
+            )?
+        };
         let fresh = self.revalidate_root()?;
-        check(self, r)?;
+        check(self, r, directory)?;
         if fresh.integrity_token != state.integrity_token
             || self.current_parent_binding(&r.source.path)?
                 != (r.parent.id.clone(), r.parent.etag.clone())
@@ -157,8 +191,25 @@ impl VaultBackend {
         target: VaultFileDeleteTarget,
         before_send: &mut dyn FnMut() -> Result<(), CloudError>,
     ) -> Result<VaultFileDeleteOutcome, CloudError> {
+        self.delete_namespace_guarded(r, target, before_send, false)
+    }
+    pub fn delete_empty_directory_guarded(
+        &self,
+        r: &VaultFileDeleteRequest<'_>,
+        target: VaultFileDeleteTarget,
+        before_send: &mut dyn FnMut() -> Result<(), CloudError>,
+    ) -> Result<VaultFileDeleteOutcome, CloudError> {
+        self.delete_namespace_guarded(r, target, before_send, true)
+    }
+    fn delete_namespace_guarded(
+        &self,
+        r: &VaultFileDeleteRequest<'_>,
+        target: VaultFileDeleteTarget,
+        before_send: &mut dyn FnMut() -> Result<(), CloudError>,
+        directory: bool,
+    ) -> Result<VaultFileDeleteOutcome, CloudError> {
         let _context = crate::RangeContextGuard::enter(r.context);
-        check(self, r)?;
+        check(self, r, directory)?;
         if target.scope != *r.scope
             || !target.epoch.same_identity(r.epoch)
             || target.root != r.vault_root_path
@@ -166,6 +217,7 @@ impl VaultBackend {
             || target.source.path != r.source.path
             || target.source.etag != r.source.etag
             || target.source.size != r.source.size
+            || target.source.directory != directory
             || target.parent.id != r.parent.id
             || target.parent.path != r.parent.path
             || target.parent.etag != r.parent.etag
@@ -175,7 +227,7 @@ impl VaultBackend {
         {
             return Err(conflict("encrypted delete target changed"));
         }
-        let fresh = self.prepare_file_delete_guarded(r)?;
+        let fresh = self.prepare_namespace_delete_guarded(r, directory)?;
         if fresh.integrity != target.integrity || fresh.encoded != target.encoded {
             return Err(conflict("encrypted delete encoded binding changed"));
         }
@@ -205,19 +257,19 @@ impl VaultBackend {
             .header("If", format!("<{}> ([{}])", parent, target.parent.etag))
             .build()
             .map_err(network)?;
-        check(self, r)?;
+        check(self, r, directory)?;
         before_send()?;
         let result = (|| {
             // The local native/DPAPI claim can block. Recheck the original
             // context after it, keeping this claimed attempt on any refusal.
-            check(self, r)?;
+            check(self, r, directory)?;
             let response = self
                 .client
                 .conditional_http
                 .execute(request)
                 .map_err(network)?;
             checked(response, &[StatusCode::NO_CONTENT, StatusCode::OK], &token)?;
-            check(self, r)?;
+            check(self, r, directory)?;
             // Qualify absence at the exact opaque resource URL, independently
             // of the old virtual name. A missing/changed parent is not absence.
             match self.client.stat_at_dav(&source, &target.source.path) {
@@ -229,7 +281,7 @@ impl VaultBackend {
                 }
             }
             let fresh = self.revalidate_root()?;
-            check(self, r)?;
+            check(self, r, directory)?;
             if fresh.integrity_token != target.integrity
                 || !fresh.space.writable
                 || self.current_parent_binding(&target.source.path)?.0 != target.parent.id
@@ -246,7 +298,7 @@ impl VaultBackend {
             if !root_after.directory || !root_after.writable || root_after.id != root.id {
                 return Err(conflict("encrypted delete Space witness changed"));
             }
-            check(self, r)?;
+            check(self, r, directory)?;
             Ok(())
         })();
         Ok(match result {

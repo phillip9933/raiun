@@ -9,12 +9,12 @@ use crate::vault_file_replace::{
 use raiun_core::backend::RemoteEntry;
 use raiun_vault::session::VaultSessionScope;
 
-struct Original {
-    owner: crate::ProviderScope,
-    vault: VaultSessionScope,
-    remote_root: String,
-    metadata: RemoteEntry,
-    epoch: u64,
+pub(super) struct Original {
+    pub(super) owner: crate::ProviderScope,
+    pub(super) vault: VaultSessionScope,
+    pub(super) remote_root: String,
+    pub(super) metadata: RemoteEntry,
+    pub(super) epoch: u64,
 }
 /// Owner-thread only, with all original handles/admission still retained.
 /// This is a decision locator, NOT a remote-delete/send capability.
@@ -32,7 +32,11 @@ impl std::ops::DerefMut for VaultDeleteChoice<'_, '_> {
         self.local.as_mut().expect("original delete choice")
     }
 }
-impl VaultDeleteChoice<'_, '_> {
+impl<'a, 'b> VaultDeleteChoice<'a, 'b> {
+    pub(super) fn from_local(local: Local<'a, 'b>) -> Self {
+        Self { local: Some(local) }
+    }
+
     pub(super) fn confirm_absence(&self) -> Result<(), Error> {
         if self.classify()?.is_some() {
             return Err(Error::ConfiguredRootChanged);
@@ -52,7 +56,7 @@ impl VaultDeleteChoice<'_, '_> {
 impl Drop for VaultDeleteChoice<'_, '_> {
     fn drop(&mut self) {
         if let Some(local) = self.local.take() {
-            if local.acknowledged && !local.terminal {
+            if (local.acknowledged || local.published) && !local.terminal {
                 std::mem::forget(local);
             }
         }
@@ -66,19 +70,20 @@ pub(super) struct Local<'a, 'b> {
     pub(super) parent: Arc<VaultChildCreateParent>,
     pub(super) root: RootInspectionLease,
     pub(super) parent_pin: RawOwnedHandle,
-    parent_snapshot: RootSnapshot,
-    ancestors: Vec<(RawOwnedHandle, RootSnapshot)>,
-    leaf: Option<RawOwnedHandle>,
-    original_snapshot: RootSnapshot,
+    pub(super) parent_snapshot: RootSnapshot,
+    pub(super) ancestors: Vec<(RawOwnedHandle, RootSnapshot)>,
+    pub(super) leaf: Option<RawOwnedHandle>,
+    pub(super) original_snapshot: RootSnapshot,
     pub(super) original_usn: i64,
-    original: Original,
+    pub(super) original: Original,
     pub(super) components: Vec<String>,
     pub(super) job: crate::StreamedRecoveryJob,
-    acknowledged: bool,
-    removed: bool,
-    terminal: bool,
+    pub(super) acknowledged: bool,
+    pub(super) removed: bool,
+    pub(super) terminal: bool,
+    pub(super) published: bool,
 }
-struct Custody<'a, 'b>(Option<Local<'a, 'b>>);
+pub(super) struct Custody<'a, 'b>(pub(super) Option<Local<'a, 'b>>);
 impl<'a, 'b> std::ops::Deref for Custody<'a, 'b> {
     type Target = Local<'a, 'b>;
     fn deref(&self) -> &Self::Target {
@@ -93,7 +98,7 @@ impl std::ops::DerefMut for Custody<'_, '_> {
 impl Drop for Custody<'_, '_> {
     fn drop(&mut self) {
         if let Some(local) = self.0.take() {
-            if local.acknowledged && !local.terminal {
+            if (local.acknowledged || local.published) && !local.terminal {
                 std::mem::forget(local);
             }
         }
@@ -122,7 +127,7 @@ impl Drop for Body {
 // These original metadata pins were opened WITHOUT OVERLAPPED. Use the same
 // bounded synchronous USN query as native_plain_file_capture, with a real byte
 // counter and NULL OVERLAPPED. Never apply async completion to a sync handle.
-fn metadata_usn(handle: Handle, file: u64) -> Result<i64, Error> {
+pub(super) fn metadata_usn(handle: Handle, file: u64) -> Result<i64, Error> {
     let mut storage = [0u64; 8192];
     let mut returned = 0u32;
     if unsafe {
@@ -238,7 +243,7 @@ impl Local<'_, '_> {
             file_index: self.parent_snapshot.identity.file_index,
         })
     }
-    fn original_current(&self) -> Result<(), Error> {
+    pub(super) fn original_current(&self) -> Result<(), Error> {
         self.native_current()?;
         self.parent
             .check()
@@ -252,12 +257,17 @@ impl Local<'_, '_> {
             || now.identity.file_index != self.ticket.key.file
             || now.identity.volume_serial != self.ticket.key.volume
             || now.file_size != self.ticket.size
-            || now.file_attributes & (FILE_ATTRIBUTE_DIRECTORY | 1) != 0
+            || (now.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0)
+                != (self.ticket.kind == NamespaceObjectKind::Directory)
+            || (self.ticket.kind == NamespaceObjectKind::File && now.file_attributes & 1 != 0)
             || now.placeholder_state & CF_PLACEHOLDER_STATE_PLACEHOLDER == 0
             || now.placeholder_state & CF_PLACEHOLDER_STATE_IN_SYNC == 0
             || native_namespace_directory::opaque_directory_identity(leaf.0)?
                 != self.ticket.key.identity
-            || modified_ranges_for_handle(leaf.0).map_err(|_| Error::EditRecoveryUnavailable)?
+            || (self.ticket.kind == NamespaceObjectKind::File
+                && modified_ranges_for_handle(leaf.0)
+                    .map_err(|_| Error::EditRecoveryUnavailable)?)
+            || (self.ticket.kind == NamespaceObjectKind::Directory && !physically_empty(leaf.0)?)
             || metadata_usn(leaf.0, self.ticket.key.file)? != self.original_usn
             || !windows_paths_equal(
                 &final_path_for_handle(leaf.0).map_err(|_| Error::ConfiguredRootChanged)?,
@@ -274,7 +284,7 @@ impl Local<'_, '_> {
         }
         Ok(())
     }
-    fn allow_and_wait(&mut self) -> Result<(), Error> {
+    pub(super) fn allow_and_wait(&mut self) -> Result<(), Error> {
         self.original_current()?;
         if !ack_once(self.shared, self.ticket, true) {
             return Err(Error::EditRecoveryUnavailable);
@@ -410,6 +420,12 @@ pub(super) fn try_execute<'a, 'b>(
     let Some(parent) = parent else {
         return Ok(None);
     };
+    if ticket.kind == NamespaceObjectKind::Directory {
+        return super::vault_directory_delete::execute(
+            shared, ticket, state, admission, parents, name, parent, job,
+        )
+        .map(Some);
+    }
     if ticket.kind != NamespaceObjectKind::File
         || !parent.vault().backend().existing_file_saves_active()
     {
@@ -498,6 +514,7 @@ pub(super) fn try_execute<'a, 'b>(
         acknowledged: false,
         removed: false,
         terminal: false,
+        published: false,
     }));
     local.allow_and_wait()?;
     let Some(new_file) = local.classify()? else {
