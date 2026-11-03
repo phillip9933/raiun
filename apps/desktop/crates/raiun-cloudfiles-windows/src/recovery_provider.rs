@@ -1152,6 +1152,7 @@ impl InitialEditReceipt {
 /// ask the in-sync call to compare a USN. Not a remote-only receipt.
 pub struct CompletedLocalEdit {
     metadata: LocalEditMetadata,
+    authorization_generation: u64,
     job: Option<crate::StreamedRecoveryJob>,
     #[cfg(any(windows, test))]
     streamed: Option<Arc<Mutex<crate::streamed_reconcile::VerifiedStreamedReadback>>>,
@@ -1164,6 +1165,7 @@ impl CompletedLocalEdit {
     pub(crate) fn from_native_completion(metadata: &LocalEditMetadata) -> Self {
         Self {
             metadata: metadata.clone(),
+            authorization_generation: metadata.generation,
             job: None,
             streamed: None,
             streamed_key: None,
@@ -1201,10 +1203,27 @@ impl CompletedLocalEdit {
             .transpose()?;
         Ok(Self {
             metadata: proof.metadata().clone(),
+            authorization_generation: proof.metadata().generation,
             job: proof.recovery_job().cloned(),
             streamed,
             streamed_key,
         })
+    }
+
+    /// A selected historical edit keeps its immutable record generation.
+    /// Native completion may instead be authorized by the freshly admitted
+    /// current account generation after the same verified readback checks.
+    #[cfg(windows)]
+    pub(crate) fn from_verified_native_completion_for_generation(
+        proof: &crate::VerifiedEditReadback,
+        current_generation: u64,
+    ) -> Result<Self, crate::JournalError> {
+        let mut completed = Self::from_verified_native_completion(proof)?;
+        if current_generation == 0 {
+            return Err(crate::JournalError::ScopeMismatch);
+        }
+        completed.authorization_generation = current_generation;
+        Ok(completed)
     }
 }
 
@@ -1767,7 +1786,7 @@ impl PreparedEditRecovery for DurablePreparedEditRecovery {
             return Err(crate::JournalError::InvalidState);
         }
         let metadata = completion.metadata.clone();
-        if metadata.generation != self.scope.token_generation()
+        if completion.authorization_generation != self.scope.token_generation()
             || !scope_matches_provider(&metadata.scope, &self.scope, self.root_identity)
         {
             return Err(crate::JournalError::ScopeMismatch);

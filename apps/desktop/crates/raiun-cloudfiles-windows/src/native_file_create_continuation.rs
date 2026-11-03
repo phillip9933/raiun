@@ -361,7 +361,11 @@ impl ConfiguredRootConnection {
         let (published_identity, completed) =
             continuation.publish_and_complete(backend, &proof, |identity| {
                 body.convert(identity, job, &stopped, || !stopped())?;
-                let completed = crate::CompletedLocalEdit::from_verified_native_completion(&proof)
+                let completed =
+                    crate::CompletedLocalEdit::from_verified_native_completion_for_generation(
+                        &proof,
+                        authorization.token_generation,
+                    )
                     .map_err(|_| no())?;
                 Ok((*identity, completed))
             })?;
