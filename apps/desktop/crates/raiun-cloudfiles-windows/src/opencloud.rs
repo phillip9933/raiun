@@ -9,6 +9,10 @@
 #[cfg(windows)]
 mod cached;
 #[cfg(windows)]
+mod vault_cached_write;
+#[cfg(windows)]
+pub use vault_cached_write::VaultCachedQueuedEdit;
+#[cfg(windows)]
 pub(crate) mod file_create;
 #[cfg(any(windows, test))]
 mod file_delete;

@@ -764,6 +764,38 @@ impl WindowsVaultReadBinding {
         }
     }
 
+    #[cfg(windows)]
+    pub(crate) fn queue_cached_existing_capture<R: Read>(
+        &self,
+        target: &crate::ExistingVaultUploadTarget,
+        source: &mut R,
+        length: u64,
+        sha256: [u8; 32],
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<raiun_opencloud::vault_backend::VaultUploadOutcome, CloudError> {
+        self.check_current()?;
+        self.validate_upload_target(target)?;
+        if !self.client.is_offline() || cancelled() || target.dispatch().is_none() {
+            return Err(refused());
+        }
+        let result = self.backend.queue_existing_cached_reader(
+            target.original(),
+            source,
+            length,
+            sha256,
+            None,
+            &self.epoch,
+            cancelled,
+        )?;
+        // Failure after publication retains the journal and original capture.
+        // It grants neither a receipt nor remote/native completion authority.
+        self.check_current()?;
+        if cancelled() {
+            return Err(refused());
+        }
+        Ok(result)
+    }
+
     /// Complete a verified online read into an admitted private immutable file.
     /// The result stays opaque/unpublished until parent integration obtains the
     /// required provider/root/session publication lease and lock lifecycle.
