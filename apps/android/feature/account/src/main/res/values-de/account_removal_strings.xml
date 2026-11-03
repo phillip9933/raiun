@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="account_removal_pending">Ausstehende Kontobereinigungen: %1$d</string>
+    <string name="account_removal_pending_help">Die lokalen Kontodaten wurden noch nicht vollständig entfernt. Die Bereinigung wird automatisch erneut versucht. Die Anmeldung bei diesen Konten bleibt bis zum Abschluss gesperrt.</string>
+    <string name="account_removal_retry">Erneut versuchen</string>
+</resources>

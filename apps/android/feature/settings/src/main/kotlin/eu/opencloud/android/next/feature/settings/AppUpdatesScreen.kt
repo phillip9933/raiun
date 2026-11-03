@@ -34,7 +34,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -48,6 +47,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDimensions
@@ -89,7 +89,7 @@ fun AppUpdatesRoute(
     model: AppUpdatesViewModel = viewModel(),
 ) {
     val context = LocalContext.current
-    val state by model.state.collectAsState()
+    val state by model.state.collectAsStateWithLifecycle()
     AppUpdatesScreen(
         state = state,
         onNavigateBack = onNavigateBack,
@@ -235,7 +235,7 @@ fun AppUpdatesScreen(
 @Composable
 fun AppUpdateNotice(model: AppUpdatesViewModel = viewModel()) {
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) { model.checkWhenDue() }
-    val state by model.state.collectAsState()
+    val state by model.state.collectAsStateWithLifecycle()
     AppUpdateNoticeDialog(
         state = state,
         onDismiss = model.manager::dismissOffer,

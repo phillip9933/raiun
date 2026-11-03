@@ -222,21 +222,6 @@ class TransferClient(
             }
         }
 
-    private fun awaitVerificationDelay(
-        delayMillis: Long,
-        checkActive: () -> Unit,
-    ) {
-        checkActive()
-        if (delayMillis == 0L) return
-        try {
-            Thread.sleep(delayMillis)
-        } catch (cancelled: InterruptedException) {
-            Thread.currentThread().interrupt()
-            throw CancellationException("Verification cancelled").also { it.initCause(cancelled) }
-        }
-        checkActive()
-    }
-
     private fun verifyUploadBytes(
         url: String,
         authorization: String,

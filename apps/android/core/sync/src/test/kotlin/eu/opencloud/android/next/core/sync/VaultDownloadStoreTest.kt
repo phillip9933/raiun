@@ -103,4 +103,42 @@ class VaultDownloadStoreTest {
         }
         assertTrue(root.listFiles().orEmpty().isEmpty())
     }
+
+    @Test fun strictRemovalRetainsActiveAttemptUntilClosedAndPreservesOtherAccount() {
+        val job = store.create(location, source, null)
+        assertTrue(store.finishPrepared(job.id) { true })
+        val other = store.create(location.copy(accountId = "other"), source, null)
+        assertTrue(store.finishPrepared(other.id) { true })
+        store.beginAttempt(job.id, location.accountId).use { attempt ->
+            assertThrows(IllegalStateException::class.java) { store.forgetAccountForRemoval(location.accountId) }
+            assertFalse(attempt.isActive)
+            assertTrue(File(root, job.id).exists())
+        }
+        VaultDownloadStore(root).forgetAccountForRemoval(location.accountId)
+        assertFalse(File(root, job.id).exists())
+        assertEquals(other, store.read(other.id))
+    }
+
+    @Test fun strictRemovalRevokesPreparedHandoffButCannotAcknowledgeItEarly() {
+        val job = store.create(location, source, null)
+        assertThrows(IllegalStateException::class.java) { store.forgetAccountForRemoval(location.accountId) }
+        assertTrue(File(root, job.id).exists())
+        assertFalse(store.finishPrepared(job.id) { true })
+        store.forgetAccountForRemoval(location.accountId)
+        assertFalse(File(root, job.id).exists())
+    }
+
+    @Test fun strictRemovalPreservesCorruptUnknownOwnerAndRejectsUnreadableInventory() {
+        val job = store.create(location.copy(accountId = "other"), source, null)
+        assertTrue(store.finishPrepared(job.id) { true })
+        File(root, "${job.id}/manifest").writeBytes(byteArrayOf(0))
+        assertThrows(Exception::class.java) { VaultDownloadStore(root).forgetAccountForRemoval(location.accountId) }
+        assertTrue(File(root, job.id).exists())
+        val unavailable =
+            object : File(root, "unreadable") {
+                override fun listFiles(): Array<File>? = null
+            }
+        assertTrue(unavailable.mkdir())
+        assertThrows(IllegalStateException::class.java) { VaultDownloadStore(unavailable).forgetAccountForRemoval("a") }
+    }
 }

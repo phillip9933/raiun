@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="auth_account_cleanup_pending">A limpeza da conta ainda está pendente neste telemóvel. Abra Contas para verificar a limpeza antes de iniciar sessão novamente.</string>
+</resources>

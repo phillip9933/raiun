@@ -27,7 +27,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -42,6 +41,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import eu.opencloud.android.next.core.database.AccountEntity
 import eu.opencloud.android.next.core.designsystem.theme.AccountAccent
 import eu.opencloud.android.next.core.designsystem.theme.OpenCloudDarkColorScheme
@@ -61,7 +61,7 @@ import kotlinx.coroutines.withContext
 internal fun AccountColorSetting(account: AccountEntity) {
     key(account.id) {
         val context = LocalContext.current.applicationContext
-        val revision by AccountProfiles.colorRevision.collectAsState()
+        val revision by AccountProfiles.colorRevision.collectAsStateWithLifecycle()
         val scope = rememberCoroutineScope()
         var saved by remember { mutableStateOf<AccountColor?>(null) }
         var loaded by remember { mutableStateOf(false) }

@@ -1,6 +1,7 @@
 package eu.opencloud.android.next.core.database
 
 import android.content.Context
+import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Delete
@@ -55,7 +56,7 @@ import kotlinx.coroutines.flow.Flow
         VaultOfflineGroupMemberEntity::class,
         VaultOfflineGroupPublicationEntity::class,
     ],
-    version = 27,
+    version = 28,
     exportSchema = true,
 )
 @TypeConverters(FileBrowserConverters::class)
@@ -291,6 +292,7 @@ abstract class FileBrowserDatabase : RoomDatabase() {
                 MIGRATION_24_25,
                 MIGRATION_25_26,
                 MIGRATION_26_27,
+                MIGRATION_27_28,
             )
     }
 }
@@ -323,6 +325,7 @@ data class AccountEntity(
     val publicLinkExpirationSupported: Boolean = false,
     val publicLinkExpirationEnforced: Boolean = false,
     val publicLinkExpirationDays: Int? = null,
+    @ColumnInfo(defaultValue = "0") val removalPending: Boolean = false,
 )
 
 @Entity(
@@ -476,6 +479,21 @@ data class ShareEntity(
 
 @Dao
 interface AccountDao {
+    @Query("SELECT * FROM accounts WHERE removalPending = 1")
+    suspend fun pendingRemovals(): List<AccountEntity>
+
+    @Query("SELECT COUNT(*) FROM accounts WHERE removalPending = 1")
+    fun observePendingRemovalCount(): Flow<Int>
+
+    @Query("SELECT * FROM accounts WHERE id = :accountId LIMIT 1")
+    suspend fun stored(accountId: String): AccountEntity?
+
+    @Query("UPDATE accounts SET removalPending = 1, isActive = 0 WHERE id = :accountId")
+    suspend fun markRemoving(accountId: String)
+
+    @Query("SELECT * FROM accounts")
+    suspend fun all(): List<AccountEntity>
+
     @Query("SELECT id FROM accounts")
     suspend fun allIds(): List<String>
 
@@ -576,6 +594,9 @@ interface ResourceDao {
         "SELECT r.* FROM resources r JOIN spaces s ON s.accountId = r.accountId AND s.driveId = r.spaceId " +
             "JOIN accounts a ON a.id = r.accountId WHERE r.accountId = :accountId AND a.isActive = 1 " +
             "AND s.isDisabled = 0 AND s.isDeleted = 0 AND instr(lower(r.name), lower(:query)) > 0 " +
+            "AND NOT EXISTS (SELECT 1 FROM vault_exclusions v WHERE v.accountId = r.accountId " +
+            "AND v.spaceId = r.spaceId AND (v.path = '' OR v.path = rtrim(r.path, '/') " +
+            "OR substr(r.path, 1, length(v.path) + 1) = v.path || '/')) " +
             "ORDER BY r.spaceId, r.remoteId LIMIT 100",
     )
     suspend fun providerSearch(
@@ -664,7 +685,11 @@ interface ResourceDao {
     ): List<ResourceEntity>
 
     @Query(
-        "SELECT COUNT(*) FROM resources WHERE accountId = :accountId AND spaceId = :spaceId AND parentId IS :parentId",
+        "SELECT COUNT(*) FROM resources r WHERE accountId = :accountId AND spaceId = :spaceId " +
+            "AND parentId IS :parentId " +
+            "AND NOT EXISTS (SELECT 1 FROM vault_exclusions v WHERE v.accountId = r.accountId " +
+            "AND v.spaceId = r.spaceId AND (v.path = '' OR v.path = rtrim(r.path, '/') " +
+            "OR substr(r.path, 1, length(v.path) + 1) = v.path || '/')) ",
     )
     suspend fun countChildren(
         accountId: String,
@@ -673,7 +698,10 @@ interface ResourceDao {
     ): Int
 
     @Query(
-        "SELECT * FROM resources WHERE accountId = :accountId AND spaceId = :spaceId AND parentId IS :parentId " +
+        "SELECT r.* FROM resources r WHERE accountId = :accountId AND spaceId = :spaceId AND parentId IS :parentId " +
+            "AND NOT EXISTS (SELECT 1 FROM vault_exclusions v WHERE v.accountId = r.accountId " +
+            "AND v.spaceId = r.spaceId AND (v.path = '' OR v.path = rtrim(r.path, '/') " +
+            "OR substr(r.path, 1, length(v.path) + 1) = v.path || '/')) " +
             "ORDER BY CASE kind WHEN 'FOLDER' THEN 0 ELSE 1 END, name COLLATE NOCASE, remoteId LIMIT 128 OFFSET :offset",
     )
     suspend fun childrenPage(

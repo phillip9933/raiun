@@ -136,6 +136,37 @@ class ScanUploadStoreTest {
             assertTrue(otherDirectory.exists())
         }
 
+    @Test fun `account cleanup preserves unknown scanner ownership and reports incomplete removal`() =
+        runBlocking {
+            val context = RuntimeEnvironment.getApplication()
+            val store = ScanUploadStore(context) { _, _, _, _ -> }
+            val session = store.create("other-account", "space", "/Scans")
+            val output = store.outputDirectory(session)
+            File(output, "destination.json").writeText("corrupt ownership")
+            var rejected = false
+            try {
+                store.clearAccount("account-a")
+            } catch (_: org.json.JSONException) {
+                rejected = true
+            }
+            assertTrue(rejected)
+            assertTrue(output.exists())
+        }
+
+    @Test fun `stale scanner creation after account removal is rejected without new private files`() =
+        runBlocking {
+            val context = RuntimeEnvironment.getApplication()
+            var active = true
+            val store = ScanUploadStore(context, isActiveAccount = { active }) { _, _, _, _ -> }
+            val session = store.create("account", "space", "/Scans")
+            val output = store.outputDirectory(session)
+            active = false
+            store.clearAccount("account")
+            assertFalse(output.exists())
+            assertThrows(IllegalStateException::class.java) { store.create("account", "space", "/Scans") }
+            assertTrue(File(context.noBackupFilesDir, "scan-uploads").listFiles().orEmpty().isEmpty())
+        }
+
     @Test fun `cancellation preserves committed scan for retry`() =
         runBlocking {
             val context = RuntimeEnvironment.getApplication()

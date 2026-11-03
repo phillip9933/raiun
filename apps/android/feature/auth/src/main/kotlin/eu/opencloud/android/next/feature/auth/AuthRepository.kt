@@ -1,7 +1,6 @@
 package eu.opencloud.android.next.feature.auth
 
 import eu.opencloud.android.next.core.model.auth.Account
-import eu.opencloud.android.next.core.model.auth.AuthTokens
 import eu.opencloud.android.next.core.model.auth.AuthenticationType
 import eu.opencloud.android.next.core.model.auth.NEXT_OIDC_REDIRECT_URI
 import eu.opencloud.android.next.core.model.auth.OidcConfiguration
@@ -22,6 +21,7 @@ class AuthRepository(
     private val credentialStore: CredentialStore,
     private val sessions: AccountSessions = AccountSessions(credentialStore),
     private val savedAccountIdentity: (String) -> Pair<String, String>? = { null },
+    private val canSaveAccount: (String) -> Boolean = { true },
 ) {
     private val registrations = ClientRegistrationResolver(api, credentialStore)
 
@@ -60,6 +60,7 @@ class AuthRepository(
             )
         val authorization = okhttp3.Credentials.basic(username, password)
         val capabilities = api.capabilities(serverUrl, authorization)
+        requireAccountAdmission(account.id)
         credentialStore.saveBasicCredentials(account.id, username, password)
         return AuthenticatedSession(account, profile, capabilities)
     }
@@ -120,6 +121,7 @@ class AuthRepository(
                 AuthenticationType.OIDC,
             )
         val capabilities = api.capabilities(serverUrl, authorization)
+        requireAccountAdmission(account.id)
         sessions.save(account.id, tokens, registration)
         return AuthenticatedSession(
             account,
@@ -129,13 +131,11 @@ class AuthRepository(
         )
     }
 
-    suspend fun refreshIfNeeded(
-        account: Account,
-        configuration: OidcConfiguration,
-    ): AuthTokens =
-        sessions.tokens(account.id) { current ->
-            api.refresh(configuration, requireNotNull(current.refreshToken))
+    private fun requireAccountAdmission(id: String) {
+        if (!canSaveAccount(id)) {
+            throw AccountRemovalPendingException()
         }
+    }
 
     private fun accountId(
         serverUrl: String,

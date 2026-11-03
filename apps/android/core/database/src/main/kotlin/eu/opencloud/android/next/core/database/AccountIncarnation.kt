@@ -9,6 +9,7 @@ import java.util.UUID
 /** Capability/display refresh preserves ownership; replacing the security identity revokes its durable jobs. */
 internal suspend fun FileBrowserDatabase.upsertOwnedAccount(account: AccountEntity) =
     withTransaction {
+        check(accountDao().stored(account.id)?.removalPending != true) { "Account removal is still pending." }
         val previous = vaultOfflineGroupDao().storedAccount(account.id)
         if (previous != null && accountIdentityDigest(previous) != accountIdentityDigest(account)) {
             vaultOfflineGroupDao().cancelOwnerTransfers(account.id)

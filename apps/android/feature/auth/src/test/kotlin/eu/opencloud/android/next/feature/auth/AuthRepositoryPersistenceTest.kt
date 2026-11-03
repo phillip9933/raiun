@@ -1,6 +1,7 @@
 package eu.opencloud.android.next.feature.auth
 
 import eu.opencloud.android.next.core.model.auth.AuthTokens
+import eu.opencloud.android.next.core.model.auth.ClientRegistrationSource
 import eu.opencloud.android.next.core.model.auth.OidcClientRegistration
 import eu.opencloud.android.next.core.model.auth.OidcConfiguration
 import eu.opencloud.android.next.core.network.EndpointPolicy
@@ -87,6 +88,106 @@ class AuthRepositoryPersistenceTest {
         assertEquals(3, server.requestCount)
     }
 
+    @Test fun `pending legacy basic account rejects credential replacement after valid metadata`() {
+        val serverUrl = server.url("/Team").toString().trimEnd('/')
+        val legacyId = "${serverUrl.lowercase()}#alice"
+        credentials.basicPassword = "existing-password"
+        val previousTokens = AuthTokens("existing-access", "existing-refresh", Long.MAX_VALUE, "Bearer", null)
+        credentials.tokens = previousTokens
+        val admitted = mutableListOf<String>()
+        repository =
+            AuthRepository(
+                OpenCloudApi(OkHttpClient(), endpoints = EndpointPolicy(allowLoopbackHttp = true)),
+                credentials,
+                savedAccountIdentity = { id ->
+                    assertEquals(legacyId, id)
+                    // This stored identity remains available even when pending removal hides the active row.
+                    serverUrl to "alice"
+                },
+                canSaveAccount = { id ->
+                    admitted.add(id)
+                    false
+                },
+            )
+        server.enqueue(MockResponse().setBody(PROFILE))
+        server.enqueue(MockResponse().setBody(CAPABILITIES))
+
+        val failure =
+            assertThrows(AccountRemovalPendingException::class.java) {
+                repository.loginBasic(serverUrl, "alice", "replacement-password")
+            }
+
+        assertEquals("Account cleanup pending.", failure.message)
+        assertEquals(listOf(legacyId), admitted)
+        assertEquals(2, server.requestCount)
+        assertEquals("existing-password", credentials.basicPassword)
+        assertEquals(previousTokens, credentials.tokens)
+        assertEquals(0, credentials.credentialWrites)
+        assertEquals(0, credentials.removals)
+    }
+
+    @Test fun `pending oidc account rejects token replacement after valid metadata`() {
+        val serverUrl = server.url("/").toString().trimEnd('/')
+        val api = OpenCloudApi(OkHttpClient(), endpoints = EndpointPolicy(allowLoopbackHttp = true))
+        val config =
+            ClientRegistrationResolver(api, credentials).resolve(
+                serverUrl,
+                OidcConfiguration(
+                    serverUrl,
+                    "$serverUrl/authorize",
+                    "$serverUrl/token",
+                    null,
+                    "client",
+                    listOf("openid"),
+                ),
+            )
+        val previousTokens = AuthTokens("existing-access", "existing-refresh", Long.MAX_VALUE, "Bearer", null)
+        credentials.tokens = previousTokens
+        credentials.basicPassword = "existing-password"
+        val previousRegistration =
+            OidcClientRegistration(
+                serverUrl,
+                serverUrl,
+                "existing-client",
+                eu.opencloud.android.next.core.model.auth.NEXT_OIDC_REDIRECT_URI,
+                "$serverUrl/authorize",
+                "$serverUrl/token",
+                ClientRegistrationSource.STATIC,
+            )
+        credentials.sessionRegistration = previousRegistration
+        val admitted = mutableListOf<String>()
+        repository =
+            AuthRepository(
+                api,
+                credentials,
+                canSaveAccount = { id ->
+                    admitted.add(id)
+                    false
+                },
+            )
+        server.enqueue(
+            MockResponse().setBody(
+                """{"access_token":"replacement","refresh_token":"replacement-refresh","token_type":"bearer"}""",
+            ),
+        )
+        server.enqueue(MockResponse().setBody(PROFILE))
+        server.enqueue(MockResponse().setBody(CAPABILITIES))
+
+        val failure =
+            assertThrows(AccountRemovalPendingException::class.java) {
+                repository.completePkce(serverUrl, config, "code", "verifier")
+            }
+
+        assertEquals("Account cleanup pending.", failure.message)
+        assertEquals(listOf(resolveAccountId(serverUrl, "alice") { null }), admitted)
+        assertEquals(3, server.requestCount)
+        assertEquals(previousTokens, credentials.tokens)
+        assertEquals("existing-password", credentials.basicPassword)
+        assertEquals(previousRegistration, credentials.sessionRegistration)
+        assertEquals(0, credentials.credentialWrites)
+        assertEquals(0, credentials.removals)
+    }
+
     @Test fun `unsupported token scheme stops initial login before protected requests`() {
         val serverUrl = server.url("/").toString().trimEnd('/')
         val config =
@@ -118,6 +219,8 @@ class AuthRepositoryPersistenceTest {
     }
 
     private class RecordingCredentials : CredentialStore {
+        var credentialWrites = 0
+        var removals = 0
         var basicPassword: String? = null
         var tokens: AuthTokens? = null
         var sessionRegistration: OidcClientRegistration? = null
@@ -128,6 +231,7 @@ class AuthRepositoryPersistenceTest {
             username: String,
             password: String,
         ) {
+            credentialWrites++
             basicPassword = password
         }
 
@@ -149,6 +253,7 @@ class AuthRepositoryPersistenceTest {
             accountId: String,
             tokens: AuthTokens,
         ) {
+            credentialWrites++
             this.tokens = tokens
         }
 
@@ -168,11 +273,13 @@ class AuthRepositoryPersistenceTest {
             tokens: AuthTokens,
             registration: OidcClientRegistration,
         ) {
+            credentialWrites++
             this.tokens = tokens
             sessionRegistration = registration
         }
 
         override fun remove(accountId: String) {
+            removals++
             basicPassword = null
             tokens = null
             sessionRegistration = null

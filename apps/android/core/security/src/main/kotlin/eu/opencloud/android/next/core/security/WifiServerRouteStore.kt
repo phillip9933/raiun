@@ -41,7 +41,11 @@ class WifiServerRouteStore(
 
     fun remove(canonicalServerUrl: String) =
         synchronized(storeLock) {
-            AtomicFile(fileFor(key(canonicalServerUrl))).delete()
+            val target = fileFor(key(canonicalServerUrl))
+            AtomicFile(target).delete()
+            check(listOf(target, File(target.path + ".bak"), File(target.path + ".new")).none(File::exists)) {
+                "Wi-Fi route configuration could not be removed."
+            }
         }
 
     private fun key(value: String): String {

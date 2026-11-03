@@ -76,7 +76,7 @@ class BackupScanDiagnostics(
         preferences.all.keys
             .filter { it.startsWith("$prefix/") }
             .forEach(editor::remove)
-        editor.commit()
+        check(editor.commit()) { "Account scan diagnostics could not be removed." }
     }
 
     private fun key(backup: FolderBackupEntity) = "${cacheIdentity(backup.accountId)}/${cacheIdentity(backup.id)}"

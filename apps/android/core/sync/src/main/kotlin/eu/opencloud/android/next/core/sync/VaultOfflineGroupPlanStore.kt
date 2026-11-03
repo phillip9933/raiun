@@ -180,6 +180,16 @@ internal class VaultOfflineGroupPlanStore(
         }
     }
 
+    /** Removal cannot acknowledge a deferred reader/preparation cleanup as durable completion. */
+    fun forgetForAccountRemoval(owner: VaultGroupOwner) {
+        forget(owner)
+        val directory = ownerDirectory(owner)
+        if (!directory.exists()) return
+        Files.newDirectoryStream(directory.toPath()).use { remaining ->
+            check(!remaining.iterator().hasNext()) { "Account plan cleanup is still pending." }
+        }
+    }
+
     inner class Preparation internal constructor(
         val context: VaultOfflineGroupContext,
         private val directory: File,

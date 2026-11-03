@@ -52,7 +52,6 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -67,6 +66,7 @@ import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import eu.opencloud.android.next.core.database.AccountEntity
@@ -129,7 +129,7 @@ fun SharesRoute(
     modifier: Modifier = Modifier,
     viewModel: SharesViewModel = viewModel(key = "shares-$accountId"),
 ) {
-    val state by viewModel.controller.state.collectAsState()
+    val state by viewModel.controller.state.collectAsStateWithLifecycle()
     LaunchedEffect(accountId) { viewModel.controller.load(accountId) }
     SharesScreen(
         state,
@@ -160,12 +160,12 @@ fun TopLevelSharesRoute(
             eu.opencloud.android.next.core.datastore.SettingsRepository
                 .create(context)
         }
-    val preferences by settings.settings.collectAsState(
-        initial =
+    val preferences by settings.settings.collectAsStateWithLifecycle(
+        initialValue =
             eu.opencloud.android.next.core.datastore
                 .UserSettings(),
     )
-    val state by viewModel.controller.state.collectAsState()
+    val state by viewModel.controller.state.collectAsStateWithLifecycle()
     LaunchedEffect(accountId) { viewModel.controller.load(accountId) }
     LaunchedEffect(initialFolder) {
         if (initialFolder != null) viewModel.controller.selectCategory(ShareCategory.WITH_ME)
@@ -193,7 +193,7 @@ fun ResourceSharesRoute(
     modifier: Modifier = Modifier,
     viewModel: SharesViewModel = viewModel(key = "resource-shares-$accountId-${resource.remoteId}"),
 ) {
-    val state by viewModel.controller.state.collectAsState()
+    val state by viewModel.controller.state.collectAsStateWithLifecycle()
     LaunchedEffect(accountId, resource.remoteId) { viewModel.controller.load(accountId, resource) }
     var guestsOpen by rememberSaveable(accountId, resource.spaceId, resource.remoteId) { mutableStateOf(false) }
     BackHandler(enabled = guestsOpen) { guestsOpen = false }
@@ -1009,8 +1009,12 @@ private fun ShareNotice(
 }
 
 private fun Context.copyPublicLink(link: TransientPublicLink) {
-    getSystemService(ClipboardManager::class.java)
-        .setPrimaryClip(ClipData.newPlainText(getString(R.string.shares_clipboard_label), link.valueForClipboard()))
+    val clip = ClipData.newPlainText(getString(R.string.shares_clipboard_label), link.valueForClipboard())
+    clip.description.extras =
+        android.os.PersistableBundle().apply {
+            putBoolean("android.content.extra.IS_SENSITIVE", true)
+        }
+    getSystemService(ClipboardManager::class.java).setPrimaryClip(clip)
 }
 
 @Composable

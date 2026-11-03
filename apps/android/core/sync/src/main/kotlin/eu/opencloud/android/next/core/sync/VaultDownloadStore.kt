@@ -184,6 +184,29 @@ internal class VaultDownloadStore(
             }
         }
 
+    /** Do not acknowledge prepared/active payloads or delete manifests whose owner cannot be proved. */
+    fun forgetAccountForRemoval(accountId: String) =
+        synchronized(lock) {
+            val key = accountKey(accountId)
+            accountRevisions[key] = accountRevisions.getOrDefault(key, 0L) + 1
+            val running = attempts.values.flatten().filter { it.accountKey == key }
+            running.forEach { it.cancel() }
+            check(running.isEmpty()) { "Account download attempts are still active." }
+            val entries = accountRemovalInventory(root)
+            val owned =
+                entries.filter { directory ->
+                    val preparing = preparedAccounts[directory.name]
+                    if (preparing != null) {
+                        check(preparing.first != key) { "Account download preparation is still active." }
+                        false
+                    } else {
+                        check(directory.name !in prepared) { "Download ownership is not available." }
+                        read(directory.name).location.accountId == accountId
+                    }
+                }
+            owned.forEach { check(deleteVaultJobTree(it)) }
+        }
+
     private fun accountKey(accountId: String) = RegistryAccountKey(registryNamespace, accountId)
 
     private fun localFile(

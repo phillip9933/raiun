@@ -168,7 +168,9 @@ class IncomingShareStore(
         sources.forEachIndexed { index, uri ->
             checkActive()
             armDeadline()
-            require(uri.scheme == "content" && uri.authority != "${context.packageName}.documents") {
+            // A URI is a read capability, not reliable evidence of the original sender.
+            // Never let another app select one of our private providers for privileged intake.
+            require(uri.scheme == "content" && !isOwnProvider(uri)) {
                 "Share readable files from another app."
             }
             val name = displayName(uri, signal)
@@ -283,6 +285,18 @@ class IncomingShareStore(
                     payload,
                 )
             }.also { manifest.baseFile.setLastModified(System.currentTimeMillis()) }
+    }
+
+    private fun isOwnProvider(uri: Uri): Boolean {
+        // Android may qualify a content authority with a user/profile ID.
+        val authority = uri.authority?.substringAfterLast('@') ?: return true
+        val own = context.packageName
+        return authority in setOf("$own.documents", "$own.vault-export", "$own.android-updates") ||
+            context.packageManager
+                .getPackageInfo(own, android.content.pm.PackageManager.GET_PROVIDERS)
+                .providers
+                .orEmpty()
+                .any { provider -> authority in provider.authority.orEmpty().split(';') }
     }
 
     private fun displayName(

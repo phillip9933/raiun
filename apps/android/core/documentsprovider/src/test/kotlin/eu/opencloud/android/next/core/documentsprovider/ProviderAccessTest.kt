@@ -130,6 +130,125 @@ class ProviderAccessTest {
         provider.querySearchDocuments(rootId, "match", null).use { assertEquals(0, it.count) }
     }
 
+    @Test fun `stale excluded rows are hidden from search children metadata and reads`() {
+        val context = RuntimeEnvironment.getApplication()
+        val database = FileBrowserDatabase.create(context)
+        runBlocking(Dispatchers.IO) {
+            database.clearAllTables()
+            database.accountDao().upsert(AccountEntity("a", "https://cloud.example", "user", "User", "BASIC", false))
+            database.spaceDao().insert(
+                SpaceEntity(
+                    "a",
+                    "s",
+                    "Space",
+                    "project",
+                    null,
+                    null,
+                    "root",
+                    "https://cloud.example/dav/s",
+                    null,
+                    null,
+                ),
+            )
+            database.spaceDao().insert(
+                SpaceEntity(
+                    "a",
+                    "vault",
+                    "Vault",
+                    "project",
+                    null,
+                    null,
+                    "root",
+                    "https://cloud.example/dav/v",
+                    null,
+                    null,
+                ),
+            )
+            database.vaultExclusionDao().record(
+                eu.opencloud.android.next.core.database
+                    .VaultExclusion("a", "s", "/private%_"),
+            )
+            database.vaultExclusionDao().record(
+                eu.opencloud.android.next.core.database
+                    .VaultExclusion("a", "vault", ""),
+            )
+            // Deliberately retain metadata after exclusion, including a descendant and a path lookalike.
+            listOf("/private%_", "/private%_/child", "/private%_other").forEachIndexed { index, path ->
+                database.resourceDao().insert(
+                    ResourceEntity(
+                        "a",
+                        "s",
+                        "stale-$index",
+                        null,
+                        path,
+                        "match-$index",
+                        ResourceKind.FILE,
+                        "text/plain",
+                        0,
+                        null,
+                        0,
+                        0,
+                    ),
+                )
+            }
+            database.resourceDao().insert(
+                ResourceEntity(
+                    "a",
+                    "vault",
+                    "stale",
+                    null,
+                    "/match",
+                    "match-vault",
+                    ResourceKind.FILE,
+                    "text/plain",
+                    0,
+                    null,
+                    0,
+                    0,
+                ),
+            )
+        }
+        val provider = OpenCloudDocumentsProvider()
+        provider.attachInfo(
+            context,
+            ProviderInfo().apply {
+                authority = "${context.packageName}.documents"
+                exported = true
+                grantUriPermissions = true
+                readPermission = "android.permission.MANAGE_DOCUMENTS"
+                writePermission = "android.permission.MANAGE_DOCUMENTS"
+            },
+        )
+        val root = DocumentId.Account("a").encode()
+        provider.querySearchDocuments(root, "match", null).use {
+            assertEquals(1, it.count)
+            assertTrue(it.moveToFirst())
+            assertEquals(
+                "match-2",
+                it.getString(it.getColumnIndex(android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME)),
+            )
+        }
+        provider.queryChildDocuments(root, null, sortOrder = null).use {
+            assertEquals(2, it.count) // Space and shared collection.
+        }
+        runBlocking(Dispatchers.IO) {
+            assertEquals(1, database.resourceDao().countChildren("a", "s", null))
+            assertEquals(listOf("stale-2"), database.resourceDao().childrenPage("a", "s", null, 0).map { it.remoteId })
+        }
+        listOf(
+            DocumentId.Resource("a", "s", "stale-0"),
+            DocumentId.Resource("a", "s", "stale-1"),
+            DocumentId.Resource("a", "vault", "stale"),
+        ).forEach { resource ->
+            val id = resource.encode()
+            assertThrows(FileNotFoundException::class.java) { provider.queryDocument(id, null) }
+            assertThrows(FileNotFoundException::class.java) { provider.queryChildDocuments(id, null, sortOrder = null) }
+            assertThrows(FileNotFoundException::class.java) { provider.getDocumentType(id) }
+            assertThrows(FileNotFoundException::class.java) { provider.openDocument(id, "r", null) }
+            assertThrows(FileNotFoundException::class.java) { provider.isChildDocument(root, id) }
+        }
+    }
+
     @Test fun lockedProviderHidesAccountsAndRejectsMetadataAndContent() {
         val context = RuntimeEnvironment.getApplication()
         val lock =

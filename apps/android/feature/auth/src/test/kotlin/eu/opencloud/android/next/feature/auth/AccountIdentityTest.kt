@@ -24,6 +24,17 @@ class AccountIdentityTest {
         )
     }
 
+    @Test fun `stored pending identity retains legacy id while active lookup is empty`() {
+        val server = "https://cloud.example/Team"
+        val legacyId = "https://cloud.example/team#alice"
+        val activeIdentities = emptyMap<String, Pair<String, String>>()
+        val storedIdentities = mapOf(legacyId to (server to "alice"))
+        val hiddenLookupResult = resolveAccountId(server, "alice", activeIdentities::get)
+        val storedLookupResult = resolveAccountId(server, "alice", storedIdentities::get)
+        assertNotEquals(legacyId, hiddenLookupResult)
+        assertEquals(legacyId, storedLookupResult)
+    }
+
     @Test fun `another deployment cannot adopt the legacy credential slot`() {
         val server = "https://cloud.example/team"
         val expected = resolveAccountId(server, "alice") { null }

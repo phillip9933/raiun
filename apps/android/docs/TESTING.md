@@ -2,6 +2,12 @@
 
 Run commands from the Android project root (`apps/android`) after the [development setup](../CONTRIBUTING.md#development). Use `./gradlew` on Linux/macOS and `./gradlew.bat` on Windows. Python 3 and PowerShell (`pwsh` in CI) are required for the helper checks below.
 
+## How to use this guide
+
+The command sections are the current starting point: [build and quality checks](#build-and-quality-checks), [emulator gates](#android-emulator-gates), [translations](#translations) and [recording results](#record-results). [Updater acceptance](#android-updater-acceptance) and the feature sections describe additional scoped checks. See [current architecture](CURRENT-ARCHITECTURE.md) for module ownership and runtime boundaries.
+
+This file also retains chronological release/candidate evidence, including dated subsections interleaved with commands. Those entries describe the named source and environment only; their counts and outcomes are not a current validation summary. Existing headings and anchors remain available for audit links. For a new candidate, record the exact source and fresh results separately, including failed attempts and unrun checks.
+
 ## Build and quality checks
 
 ```sh
@@ -696,3 +702,21 @@ timed out without a completed sync report. Its unchanged-revision retry passed,
 as did both native matrices. That historical CI stall's exact cause was not
 established and is not claimed proven by the transaction fix. Final release
 artifacts must use the subsequent complete candidate and its own CI evidence.
+
+
+## Local 1.3.2 maintenance candidate
+
+The unpublished 1.3.2/code 52 maintenance source passed 2,036 host cases with zero failures, errors or skips, formatting/static checks, screenshot verification, release lint and debug/release/instrumentation assembly. Native acceptance passed 85 cases on each of API 26 and API 35, with 7 and 8 explicit platform/opt-in skips respectively. The files module has no native cases.
+
+The native run covers the real WorkManager account-removal request and worker, actual Android Keystore fake credentials, target private-file deletion, preservation of another account, and framework-SQLite schema 27 to Room schema 28 migration and reopen. Initial screenshot-output and exported-schema fixture-loading failures were retained and corrected; they are not passing attempts. Unchanged crypto/security module results were reused across test-fixture corrections; affected suites were rerun.
+
+Phone acceptance remains separate. Removal deliberately stays pending when private recovery ownership cannot be established or active data cannot yet be deleted. Existing credential envelopes and aliases remain compatible; slot-AAD migration and incoming-share sender provenance are tracked on the public roadmap. Older app builds cannot open the schema-28 database.
+
+
+## Android 1.3.2 release acceptance — 3 November 2026
+
+The owner tested the production-signed 1.3.2/code52 maintenance candidate and reported that it looked good, then authorized publication. This is general phone acceptance, not a claim that every scenario was exercised. The release APK is byte-identical to that tested candidate.
+
+Local validation passed 2,036 host tests with no failures/errors/skips, formatting/static analysis, screenshot checks, release lint and APK assembly. The accepted API26 and API35 native matrices each executed 85 passing cases, with seven and eight explicit platform/optional skips respectively. Unchanged-module results were retained across test-fixture corrections; affected suites were rerun. Production-signed upgrades from official1.3.1 retained a synthetic private file through bounded launch on both APIs. A separate native test validates the Room27-to28 migration. Synthetic upgrade results do not establish retention of real owner accounts or database contents.
+
+Account removal can remain pending when private files are active or recovery ownership cannot be established; the UI exposes retry rather than reporting incomplete cleanup as finished. The database migration is forward-only. Large-folder physical-device performance is not benchmarked. Further component cleanup, typed transfer states, release shrinking, credential slot binding and incoming-share sender provenance are tracked in public issues#51–55.
