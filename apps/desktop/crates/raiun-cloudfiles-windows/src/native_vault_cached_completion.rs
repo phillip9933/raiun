@@ -48,6 +48,22 @@ impl ConfiguredRootConnection {
         if !Arc::ptr_eq(&current, route) {
             return Err(no());
         }
+        let observed_dirty = self
+            .state
+            .vault_dirty
+            .lock()
+            .map_err(|_| no())?
+            .snapshot_optional(&expected.identity)
+            .map_err(|_| no())?;
+        if observed_dirty.as_ref().is_some_and(|dirty| {
+            dirty.file.volume_serial != expected.root.volume_serial
+                || dirty.file.file_index != expected.file
+                || dirty.length != expected.plaintext_len
+                || dirty.components != expected.components
+                || expected.source_sha256 != Some(dirty.sha256)
+        }) {
+            return Err(no());
+        }
         // Hash large local bodies while retaining the same protected native
         // handle, before taking the short route/token/unlock publication fence.
         // The fence below rechecks this exact FI, USN, size and opaque identity
@@ -178,6 +194,7 @@ impl ConfiguredRootConnection {
                     file: expected.file,
                     usn: expected.usn,
                     entry: None,
+                    observed_dirty,
                 });
             }
             let pending = expected.entry.as_ref().ok_or_else(no)?;
@@ -188,7 +205,7 @@ impl ConfiguredRootConnection {
             let snapshot = root_snapshot(protected.raw)?;
             if snapshot.identity.volume_serial != expected.root.volume_serial
                 || snapshot.identity.file_index != expected.file
-                || snapshot.file_size != expected.plaintext_len
+                || (!pending.directory && snapshot.file_size != expected.plaintext_len)
                 || (snapshot.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0) != pending.directory
                 || snapshot.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
                 || !cleanup_cloud_reparse_tag(snapshot.reparse_tag)
@@ -258,6 +275,7 @@ impl ConfiguredRootConnection {
                 file: expected.file,
                 usn,
                 entry: proof.entry().cloned(),
+                observed_dirty,
             })
         })
     }

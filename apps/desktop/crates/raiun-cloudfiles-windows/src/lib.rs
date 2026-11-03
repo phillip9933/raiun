@@ -70,6 +70,7 @@ pub struct VaultCachedNativeCompleted {
     pub(crate) file: u64,
     pub(crate) usn: i64,
     pub(crate) entry: Option<raiun_core::backend::RemoteEntry>,
+    pub(crate) observed_dirty: Option<vault_dirty::Observation>,
 }
 #[cfg(windows)]
 impl VaultCachedNativeCompleted {
@@ -1359,6 +1360,39 @@ impl ConfiguredRootConnection {
         completed: &VaultCachedNativeCompleted,
     ) -> Result<(), Error> {
         self.inner.acknowledge_cached_native_durable(completed)
+    }
+    /// Factual retained-root audit for a cached-only disconnect decision.
+    /// This does not authorize cleanup, unregister, or clearing queued data.
+    #[cfg(windows)]
+    pub fn audit_cached_pending_for_disconnect(
+        &self,
+        history: &dyn vault_custody::VaultPublishedHistorySource,
+        owner: &ProviderScope,
+        registration: &str,
+    ) -> Result<bool, Error> {
+        self.inner
+            .audit_cached_pending_for_disconnect(history, owner, registration)
+    }
+    /// Dehydrate disjoint clean published files while retaining exact queued
+    /// cached objects and the registration for ordinary disconnect.
+    #[cfg(windows)]
+    pub fn cleanup_retired_vault_route_preserving_cached_pending(
+        &self,
+        route: &vault_routes::VerifiedVaultRoute,
+        history: &dyn vault_custody::VaultPublishedHistorySource,
+        owner: &ProviderScope,
+        registration: &str,
+    ) -> Result<bool, Error> {
+        let owned = route
+            .revoke_and_cleanup_identities()
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
+        self.inner.cleanup_clean_history_preserving_cached_pending(
+            route.local_root(),
+            &owned,
+            history,
+            owner,
+            registration,
+        )
     }
     /// Exact per-file tracker observation only; never global cleanup authority.
     #[cfg(feature = "synthetic-agent-integration")]

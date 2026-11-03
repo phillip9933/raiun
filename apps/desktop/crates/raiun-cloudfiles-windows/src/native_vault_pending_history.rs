@@ -140,6 +140,165 @@ pub(super) fn inspect(
 }
 
 impl ConfiguredRootConnection {
+    /// Clean only disjoint, already published read-only files. Pending rows are
+    /// retained in place and never passed through clean dehydration. The
+    /// ordinary connection disconnect subsequently leaves registration live.
+    pub(crate) fn cleanup_clean_history_preserving_cached_pending(
+        &self,
+        route_root: crate::ConfiguredRootIdentity,
+        route_owned: &std::collections::BTreeSet<[u8; 16]>,
+        history: &dyn crate::vault_custody::VaultPublishedHistorySource,
+        owner: &crate::ProviderScope,
+        registration: &str,
+    ) -> Result<bool, Error> {
+        if !self.audit_cached_pending_for_disconnect(history, owner, registration)? {
+            return Ok(false);
+        }
+        let inventory = self
+            .state
+            .hydrated_files
+            .lock()
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
+        if !inventory.is_complete() {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        let clean = inventory.snapshot(route_owned);
+        drop(inventory);
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        let identity = crate::ConfiguredRootIdentity {
+            volume_serial: root.identity.volume_serial,
+            file_index: root.identity.file_index,
+        };
+        if route_root != identity {
+            return Err(Error::ConfiguredRootChanged);
+        }
+        let current = history
+            .current_native_intents(owner, identity, registration)
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
+        let current_ids = current
+            .iter()
+            .filter(|row| !row.terminal_verified)
+            .map(|row| row.identity)
+            .collect::<std::collections::BTreeSet<_>>();
+        let clean_ids = clean
+            .iter()
+            .map(|row| *row.identity())
+            .collect::<std::collections::BTreeSet<_>>();
+        if clean.iter().any(|row| current_ids.contains(row.identity()))
+            || current.iter().any(|row| {
+                row.terminal_verified
+                    && row.entry.as_ref().is_some_and(|entry| !entry.directory)
+                    && route_owned.contains(&row.identity)
+                    && !clean_ids.contains(&row.identity)
+            })
+        {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        for row in &clean {
+            let components = row
+                .components()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            self.dehydrate_clean_vault_placeholder_inner(
+                &components,
+                row.file_index(),
+                row.length(),
+                row.identity(),
+                true,
+            )?;
+        }
+        self.audit_cached_pending_for_disconnect(history, owner, registration)
+    }
+
+    /// A factual pre-disconnect audit. It permits retaining a registered root
+    /// with known queued bytes; it grants no cleanup or remote authority.
+    pub(crate) fn audit_cached_pending_for_disconnect(
+        &self,
+        history: &dyn crate::vault_custody::VaultPublishedHistorySource,
+        owner: &crate::ProviderScope,
+        registration: &str,
+    ) -> Result<bool, Error> {
+        let no = || Error::EditRecoveryUnavailable;
+        if !self.connected
+            || self.state.readiness.load(Ordering::Acquire) != CALLBACK_READY
+            || self.state.non_vault_modified_closes.load(Ordering::Acquire) != 0
+            || self
+                .state
+                .unverifiable_placeholder_closes
+                .load(Ordering::Acquire)
+                != 0
+            || self
+                .state
+                .recovery
+                .as_ref()
+                .is_some_and(|recovery| recovery.has_unresolved().unwrap_or(true))
+        {
+            return Err(no());
+        }
+        let root = self.root.as_ref().ok_or_else(no)?;
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        let expected = crate::ConfiguredRootIdentity {
+            volume_serial: root.identity.volume_serial,
+            file_index: root.identity.file_index,
+        };
+        let rows = history
+            .current_native_intents(owner, expected, registration)
+            .map_err(|_| no())?;
+        if rows.is_empty() || rows.len() > 100_000 {
+            return Ok(false);
+        }
+        let mut current = std::collections::BTreeMap::new();
+        let mut files = std::collections::BTreeSet::new();
+        let mut paths = std::collections::BTreeSet::new();
+        for row in &rows {
+            if current.insert(row.identity, row).is_some()
+                || !files.insert(row.file_index)
+                || !paths.insert(&row.components)
+            {
+                return Err(no());
+            }
+            if !row.terminal_verified {
+                inspect(root, expected, row)?;
+            }
+        }
+        let dirty = self
+            .state
+            .vault_dirty
+            .lock()
+            .map_err(|_| no())?
+            .snapshot_all()
+            .map_err(|_| no())?;
+        for observed in &dirty {
+            let row = current.get(&observed.identity).ok_or_else(no)?;
+            if row.terminal_verified
+                || row.entry.as_ref().is_none_or(|entry| entry.directory)
+                || observed.file.volume_serial != expected.volume_serial
+                || observed.file.file_index != row.file_index
+                || observed.length != row.length
+                || observed.components != row.components
+                || row.source_sha256 != Some(observed.sha256)
+            {
+                return Err(no());
+            }
+        }
+        let known = self.state.known_cached_pending.lock().map_err(|_| no())?;
+        for (identity, (write_id, revision, file)) in known.iter() {
+            let row = current.get(identity).ok_or_else(no)?;
+            if row.terminal_verified
+                || row.write_id != *write_id
+                || row.revision != *revision
+                || row.file_index != *file
+            {
+                return Err(no());
+            }
+        }
+        root.verify_identity(true)?;
+        root.verify_registered()?;
+        Ok(rows.iter().any(|row| !row.terminal_verified))
+    }
+
     /// Called only after the Agent has durably recorded this typed native
     /// completion. Exact mismatch never retires another queued identity.
     pub(crate) fn acknowledge_cached_native_durable(
@@ -159,8 +318,16 @@ impl ConfiguredRootConnection {
             {
                 return Err(Error::EditRecoveryUnavailable);
             }
-            rows.remove(&completed.identity);
         }
+        if let Some(observed) = completed.observed_dirty.as_ref() {
+            self.state
+                .vault_dirty
+                .lock()
+                .map_err(|_| Error::EditRecoveryUnavailable)?
+                .resolve(observed)
+                .map_err(|_| Error::EditRecoveryUnavailable)?;
+        }
+        rows.remove(&completed.identity);
         Ok(())
     }
 }

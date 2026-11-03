@@ -2481,7 +2481,24 @@ impl ConfiguredRootConnection {
         expected_length: u64,
         expected_identity: &[u8; 16],
     ) -> Result<(), Error> {
-        if self.state.has_unresolved_placeholder_data() {
+        self.dehydrate_clean_vault_placeholder_inner(
+            local_components,
+            expected_file_index,
+            expected_length,
+            expected_identity,
+            false,
+        )
+    }
+
+    fn dehydrate_clean_vault_placeholder_inner(
+        &self,
+        local_components: &[&str],
+        expected_file_index: u64,
+        expected_length: u64,
+        expected_identity: &[u8; 16],
+        qualified_cached_pending: bool,
+    ) -> Result<(), Error> {
+        if !qualified_cached_pending && self.state.has_unresolved_placeholder_data() {
             return Err(Error::UnresolvedPlaceholderEdits);
         }
         if !self.connected
@@ -2572,7 +2589,7 @@ impl ConfiguredRootConnection {
             #[cfg(feature = "synthetic-agent-integration")]
             eprintln!("synthetic cleanup refusal stage=preupdate_registration");
         })?;
-        if self.state.has_unresolved_placeholder_data() {
+        if !qualified_cached_pending && self.state.has_unresolved_placeholder_data() {
             return Err(Error::UnresolvedPlaceholderEdits);
         }
         #[cfg(feature = "synthetic-agent-integration")]
