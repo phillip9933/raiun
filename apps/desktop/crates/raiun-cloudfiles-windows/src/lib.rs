@@ -40,6 +40,58 @@ pub use opencloud::{
     VaultCachedNamespaceDescriptor, VaultCachedNamespaceOperation, VaultCachedNamespaceQueued,
     VaultCachedRetargetDescriptor,
 };
+
+/// Expected current local presentation, supplied by authenticated custody.
+/// This value is never authority without the guarded SDK proof and a fresh
+/// physical-root inspection in `complete_cached_vault_pending`.
+#[cfg(windows)]
+pub struct VaultCachedNativeExpectation {
+    pub root: ConfiguredRootIdentity,
+    pub operation: raiun_opencloud::vault_cache::VaultPendingOperationKind,
+    pub write_id: String,
+    pub revision: u64,
+    pub identity: [u8; 16],
+    pub file: u64,
+    pub usn: i64,
+    pub components: Vec<String>,
+    pub original: Option<raiun_core::backend::RemoteEntry>,
+    pub entry: Option<raiun_core::backend::RemoteEntry>,
+    pub plaintext_len: u64,
+    pub source_sha256: Option<[u8; 32]>,
+}
+
+/// One-use factual native readback. Only the native owner constructs it from
+/// a real guarded SDK proof; serialized pending rows cannot create this type.
+#[cfg(windows)]
+pub struct VaultCachedNativeCompleted {
+    pub(crate) write_id: String,
+    pub(crate) revision: u64,
+    pub(crate) identity: [u8; 16],
+    pub(crate) file: u64,
+    pub(crate) usn: i64,
+    pub(crate) entry: Option<raiun_core::backend::RemoteEntry>,
+}
+#[cfg(windows)]
+impl VaultCachedNativeCompleted {
+    pub fn write_id(&self) -> &str {
+        &self.write_id
+    }
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub fn identity(&self) -> [u8; 16] {
+        self.identity
+    }
+    pub fn file(&self) -> u64 {
+        self.file
+    }
+    pub fn usn(&self) -> i64 {
+        self.usn
+    }
+    pub fn entry(&self) -> Option<&raiun_core::backend::RemoteEntry> {
+        self.entry.as_ref()
+    }
+}
 #[cfg(windows)]
 pub use opencloud::{VaultCachedQueuedCapture, VaultCachedQueuedEdit};
 #[cfg(windows)]
@@ -1276,6 +1328,28 @@ impl ConfiguredRootConnection {
         store: &mut dyn VaultLocalCompletionStore,
     ) -> Result<(), Error> {
         self.inner.complete_writable_vault_upload(upload, store)
+    }
+
+    /// Complete only the original current native object after guarded SDK
+    /// reconciliation. The proof and physical inspection must both succeed.
+    #[cfg(windows)]
+    pub fn complete_cached_vault_pending(
+        &self,
+        backend: &std::sync::Arc<OpenCloudPlaceholderBackend>,
+        route: &std::sync::Arc<vault_routes::VerifiedVaultRoute>,
+        proof: &raiun_opencloud::vault_backend::VaultReconciledPending,
+        expected: &VaultCachedNativeExpectation,
+        provider: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+        provider_generation: u64,
+    ) -> Result<VaultCachedNativeCompleted, Error> {
+        self.inner.complete_cached_vault_pending(
+            backend,
+            route,
+            proof,
+            expected,
+            provider,
+            provider_generation,
+        )
     }
     /// Exact per-file tracker observation only; never global cleanup authority.
     #[cfg(feature = "synthetic-agent-integration")]

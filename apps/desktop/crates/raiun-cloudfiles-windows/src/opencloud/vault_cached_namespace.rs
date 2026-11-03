@@ -259,6 +259,7 @@ impl VaultCachedNamespaceQueued {
     pub(crate) fn file_rename(
         descriptor: &VaultFileRenameDescriptor,
         result: raiun_opencloud::vault_backend::VaultRenameOutcome,
+        source_sha256: [u8; 32],
     ) -> Result<Self, crate::BackendError> {
         descriptor.validate()?;
         if descriptor.facts.original.directory || descriptor.facts.children.is_some() {
@@ -295,7 +296,7 @@ impl VaultCachedNamespaceQueued {
                 .map(|p| p.parent.clone())
                 .unwrap_or_else(|| facts.parent.clone()),
             entry: Some(entry),
-            source_sha256: None,
+            source_sha256: Some(source_sha256),
             plaintext_len: facts.original.size,
             retarget_rows: None,
         })

@@ -212,7 +212,7 @@ mod runtime {
     use raiun_core::backend::{CloudError, ErrorKind};
     use std::{
         ffi::OsStr,
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex, atomic::AtomicU64},
     };
     use zeroize::Zeroizing;
 
@@ -1331,6 +1331,23 @@ mod runtime {
         }
         pub(crate) fn binding(&self) -> &Arc<WindowsVaultReadBinding> {
             &self.binding
+        }
+        pub fn reconcile_cached_pending_guarded(
+            &self,
+            id: &str,
+            revision: u64,
+            provider: Arc<AtomicU64>,
+            expected_generation: u64,
+            cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+        ) -> Result<raiun_opencloud::vault_backend::VaultPendingReconcileOutcome, CloudError>
+        {
+            self.binding.reconcile_cached_pending_guarded(
+                id,
+                revision,
+                provider,
+                expected_generation,
+                cancelled,
+            )
         }
         pub(crate) fn cleanup_identities(
             &self,

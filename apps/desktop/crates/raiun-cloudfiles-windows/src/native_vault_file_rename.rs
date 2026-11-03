@@ -239,6 +239,22 @@ fn inspect(
     Ok(())
 }
 impl VaultFileRenamePins {
+    pub(super) fn body_sha256(&self) -> Result<[u8; 32], Error> {
+        self.verify_handles(self.original_identity)?;
+        let mut hash = Sha256::new();
+        let mut offset = 0u64;
+        let mut buffer = Zeroizing::new(vec![0u8; 64 * 1024]);
+        while offset < self.snapshot.file_size {
+            let len = usize::try_from((self.snapshot.file_size - offset).min(buffer.len() as u64))
+                .map_err(|_| Error::EditRecoveryUnavailable)?;
+            self.protected
+                .read_complete_at(offset, &mut buffer[..len])?;
+            hash.update(&buffer[..len]);
+            offset += len as u64;
+        }
+        self.verify_handles(self.original_identity)?;
+        Ok(hash.finalize().into())
+    }
     pub(super) fn pending_body_sha256(&self) -> Result<String, Error> {
         if !self.pending || self.snapshot.file_size > 64 * 1024 * 1024 {
             return Err(Error::EditRecoveryUnavailable);

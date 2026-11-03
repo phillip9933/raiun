@@ -433,6 +433,10 @@ impl ConfiguredRootConnection {
                 if original.id.starts_with("raiun-pending-") {
                     return Err(no());
                 }
+                let source_sha256 = match &*pins {
+                    Pins::File(p) => p.body_sha256()?,
+                    Pins::Directory(_) => return Err(no()),
+                };
                 let (native_file, usn, parent_file, parent_usn, _, dest_file, dest_usn) =
                     pins.facts()?;
                 if !admission.claim_dispatch() || stop() {
@@ -499,9 +503,12 @@ impl ConfiguredRootConnection {
                     .binding()
                     .rename_descriptor(root_id, facts)
                     .map_err(|_| no())?;
-                let receipt =
-                    crate::opencloud::VaultCachedNamespaceQueued::file_rename(&descriptor, outcome)
-                        .map_err(|_| no())?;
+                let receipt = crate::opencloud::VaultCachedNamespaceQueued::file_rename(
+                    &descriptor,
+                    outcome,
+                    source_sha256,
+                )
+                .map_err(|_| no())?;
                 let record = route
                     .prepare_file_rename_record(&descriptor)
                     .map_err(|_| no())?;

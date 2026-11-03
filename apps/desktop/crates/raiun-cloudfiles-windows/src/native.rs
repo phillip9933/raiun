@@ -46,6 +46,8 @@ pub(super) mod native_file_delete;
 
 #[path = "native_file_create.rs"]
 pub(super) mod native_file_create;
+#[path = "native_vault_cached_completion.rs"]
+mod native_vault_cached_completion;
 #[path = "native_vault_child_create.rs"]
 pub(super) mod native_vault_child_create;
 #[path = "native_vault_directory_create.rs"]
@@ -10058,6 +10060,28 @@ impl ProtectedCompletionFile {
         let mut io = CompletionIo::new()?;
         // SAFETY: reference and caller buffer remain live until wait completes;
         // offset zero, exact bounded length, distinct owned manual-reset event.
+        let result = unsafe {
+            ReadFile(
+                self.raw,
+                bytes.as_mut_ptr().cast(),
+                length,
+                null_mut(),
+                &mut io.overlapped,
+            )
+        };
+        if io.finish(self.raw, result)? != length {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        Ok(())
+    }
+    fn read_complete_at(&self, offset: u64, bytes: &mut [u8]) -> Result<(), Error> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let length = u32::try_from(bytes.len()).map_err(|_| Error::EditRecoveryUnavailable)?;
+        let mut io = CompletionIo::new()?;
+        io.overlapped.offset = offset as u32;
+        io.overlapped.offset_high = (offset >> 32) as u32;
         let result = unsafe {
             ReadFile(
                 self.raw,

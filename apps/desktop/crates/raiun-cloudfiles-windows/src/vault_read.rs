@@ -1047,6 +1047,43 @@ impl WindowsVaultReadBinding {
     }
 
     #[cfg(windows)]
+    pub(crate) fn reconcile_cached_pending_guarded(
+        &self,
+        id: &str,
+        revision: u64,
+        provider: Arc<AtomicU64>,
+        expected_generation: u64,
+        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<raiun_opencloud::vault_backend::VaultPendingReconcileOutcome, CloudError> {
+        self.check_current()?;
+        if self.client.is_offline() {
+            return Err(refused());
+        }
+        self.backend.reconcile_pending_operation_guarded(
+            id,
+            revision,
+            &self.epoch,
+            provider,
+            expected_generation,
+            cancelled,
+        )
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn matches_cached_reconciliation(
+        &self,
+        proof: &raiun_opencloud::vault_backend::VaultReconciledPending,
+        provider: &Arc<AtomicU64>,
+        generation: u64,
+    ) -> bool {
+        proof.scope() == &self.scope
+            && proof.matches_epoch(&self.epoch)
+            && proof.matches_client(&self.client)
+            && proof.matches_provider(provider, generation)
+            && self.check_current().is_ok()
+    }
+
+    #[cfg(windows)]
     pub(crate) fn historical_unlock_epoch(&self) -> u64 {
         self.epoch.historical_generation()
     }
