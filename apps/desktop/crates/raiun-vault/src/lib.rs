@@ -345,6 +345,39 @@ impl VaultCipher {
         Ok(plaintext)
     }
 
+    // Authenticate one already-local rclone content block at its exact index.
+    // File identity, canonical total length and whole-file verification belong
+    // to the caller; a single block is never proof that a file is complete.
+    fn decrypt_authenticated_block_at(
+        &self,
+        header: &[u8; HEADER_LEN],
+        block_index: u64,
+        ciphertext: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+        if header[..8] != MAGIC || !(16..=BLOCK_CIPHER_LEN).contains(&ciphertext.len()) {
+            return Err(invalid("invalid local encrypted content block"));
+        }
+        let mut nonce = Zeroizing::new([0u8; NONCE_LEN]);
+        nonce.copy_from_slice(&header[8..]);
+        // rclone increments the complete 192-bit nonce in little-endian order.
+        // Add the index in bounded time, rejecting carry beyond the nonce.
+        let mut carry = block_index;
+        for byte in nonce.iter_mut() {
+            let sum = u64::from(*byte) + (carry & 0xff);
+            *byte = sum as u8;
+            carry = (carry >> 8) + (sum >> 8);
+        }
+        if carry != 0 {
+            return Err(invalid("rclone vault nonce exhausted"));
+        }
+        let cipher = XSalsa20Poly1305::new_from_slice(&self.keys[..32])
+            .map_err(|_| invalid("invalid content key"))?;
+        cipher
+            .decrypt(crypto_secretbox::Nonce::from_slice(&*nonce), ciphertext)
+            .map(Zeroizing::new)
+            .map_err(|_| invalid("vault block authentication failed"))
+    }
+
     /// Decrypt only the first independently authenticated content blocks.
     ///
     /// This is intended for small encrypted metadata prefixes. It reads at
@@ -642,6 +675,20 @@ impl VerifiedVaultSession {
     ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
         self.cipher
             .decrypt_file_to_bytes(input, maximum_plaintext_bytes, expected_len)
+    }
+
+    /// Authenticate one bounded local content block at its exact rclone index.
+    /// This does not prove file completeness, expected identity or total size.
+    /// Callers must retain immutable ciphertext and validate the complete file
+    /// before treating decoded metadata/body as a verified saved operation.
+    pub fn decrypt_authenticated_block_at(
+        &self,
+        header: &[u8; HEADER_LEN],
+        block_index: u64,
+        ciphertext: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+        self.cipher
+            .decrypt_authenticated_block_at(header, block_index, ciphertext)
     }
 
     /// Decrypt one independently authenticated prefix block. The remainder
@@ -1066,6 +1113,50 @@ mod encryption_tests {
             };
             assert_eq!(ciphertext, expected, "size {size}");
         }
+    }
+
+    #[test]
+    fn random_access_blocks_match_web_fixture_and_refuse_wrong_index() {
+        use super::HEADER_LEN;
+        let cipher = password_cipher();
+        let encrypted = include_bytes!("../tests/fixtures/web-65537.bin");
+        let header: &[u8; HEADER_LEN] = encrypted[..HEADER_LEN].try_into().unwrap();
+        let expected = pattern(BLOCK_PLAIN_LEN + 1);
+        let first = &encrypted[HEADER_LEN..HEADER_LEN + BLOCK_CIPHER_LEN];
+        let last = &encrypted[HEADER_LEN + BLOCK_CIPHER_LEN..];
+        assert_eq!(
+            cipher
+                .decrypt_authenticated_block_at(header, 0, first)
+                .unwrap()
+                .as_slice(),
+            &expected[..BLOCK_PLAIN_LEN]
+        );
+        assert_eq!(
+            cipher
+                .decrypt_authenticated_block_at(header, 1, last)
+                .unwrap()
+                .as_slice(),
+            &expected[BLOCK_PLAIN_LEN..]
+        );
+        assert!(
+            cipher
+                .decrypt_authenticated_block_at(header, 0, last)
+                .is_err()
+        );
+        let mut changed = last.to_vec();
+        changed[0] ^= 1;
+        assert!(
+            cipher
+                .decrypt_authenticated_block_at(header, 1, &changed)
+                .is_err()
+        );
+        let mut exhausted = *header;
+        exhausted[8..].fill(0xff);
+        assert!(
+            cipher
+                .decrypt_authenticated_block_at(&exhausted, 1, last)
+                .is_err()
+        );
     }
 
     #[test]

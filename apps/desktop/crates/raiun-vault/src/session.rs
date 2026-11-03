@@ -999,6 +999,23 @@ impl VaultSessionCoordinator {
         self.registry
             .with_exact_epoch_crypto(scope, epoch, |session| session.decrypt_path(encoded))
     }
+    /// Authenticate one already-local bounded block under the original opaque
+    /// unlock. No file/network I/O or key/session handle crosses this boundary.
+    /// The caller still owes immutable-file, length and full-content validation.
+    pub fn decrypt_authenticated_block_at_epoch(
+        &self,
+        scope: &VaultSessionScope,
+        epoch: &VaultSessionEpoch,
+        header: &[u8; 32],
+        block_index: u64,
+        ciphertext: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
+        self.registry
+            .with_exact_epoch_crypto(scope, epoch, |session| {
+                session.decrypt_authenticated_block_at(header, block_index, ciphertext)
+            })
+    }
+
     /// Authenticate an already-local bounded ciphertext spool into private
     /// unpublished output. No network reader, callback or session handle escapes.
     pub fn decrypt_file_to_private_writer_at_epoch<R: Read, W: Write + ?Sized>(
