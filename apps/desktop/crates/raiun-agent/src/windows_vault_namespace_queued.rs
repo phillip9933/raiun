@@ -1062,6 +1062,8 @@ pub(super) struct CatalogueDelta {
     pub entry: Option<RemoteEntry>,
     pub plaintext_len: u64,
     pub source_sha256: Option<[u8; 32]>,
+    /// Only a separate typed SDK+native terminal receipt may set this.
+    pub verified_native: bool,
 }
 impl From<PendingFacts> for CatalogueDelta {
     fn from(f: PendingFacts) -> Self {
@@ -1076,6 +1078,7 @@ impl From<PendingFacts> for CatalogueDelta {
             entry: f.entry,
             plaintext_len: f.plaintext_len,
             source_sha256: f.source_sha256,
+            verified_native: false,
         }
     }
 }
@@ -1102,6 +1105,7 @@ fn retarget_catalogue_deltas(
                 entry: Some(node.entry.clone()),
                 plaintext_len: node.entry.size,
                 source_sha256: node.source_sha256,
+                verified_native: false,
             });
         }
     }
@@ -1130,6 +1134,9 @@ fn all_catalogue_deltas(
             .map(CatalogueDelta::from),
     );
     rows.extend(retarget_catalogue_deltas(store, scope)?);
+    if extra.iter().any(|row| row.verified_native) {
+        return Err(no());
+    }
     rows.extend_from_slice(extra);
     if rows.len() > 4096 {
         return Err(no());
@@ -1145,6 +1152,13 @@ fn all_catalogue_deltas(
         }
     }
     Ok(unique.into_values().collect())
+}
+pub(super) fn protected_catalogue_deltas(
+    store: &Arc<dyn Storage>,
+    scope: &Scope,
+) -> Result<Vec<CatalogueDelta>, BackendError> {
+    let extra = super::windows_vault_cached_capture::catalogue_updates(store, scope)?;
+    all_catalogue_deltas(store, scope, &extra)
 }
 fn same_presentation(a: &RemoteEntry, b: &RemoteEntry) -> bool {
     a.id == b.id
@@ -1186,11 +1200,12 @@ fn validate_delta(d: &CatalogueDelta) -> Result<(), BackendError> {
         || d.original.is_none() && d.entry.is_none()
         || d.original.as_ref().is_some_and(|e| !entry(e))
         || d.entry.as_ref().is_some_and(|e| !entry(e))
-        || d.entry.as_ref().is_some_and(|e| {
-            e.path == "/"
-                || e.size != d.plaintext_len
-                || e.etag != format!("raiun-pending-v1:{}:{}", d.write_id, d.revision)
-        })
+        || !d.verified_native
+            && d.entry.as_ref().is_some_and(|e| {
+                e.path == "/"
+                    || e.size != d.plaintext_len
+                    || e.etag != format!("raiun-pending-v1:{}:{}", d.write_id, d.revision)
+            })
         || d.entry.is_none()
             && d.original
                 .as_ref()
@@ -1198,6 +1213,15 @@ fn validate_delta(d: &CatalogueDelta) -> Result<(), BackendError> {
         || d.source_sha256 == Some([0; 32])
     {
         return Err(no());
+    }
+    if d.verified_native {
+        if d.entry
+            .as_ref()
+            .is_some_and(|e| !super::vault_edit_capture::strong_etag(&e.etag))
+        {
+            return Err(no());
+        }
+        return Ok(());
     }
     if let Some(original) = &d.original {
         if let Some(entry) = &d.entry {
@@ -1244,7 +1268,27 @@ pub(super) fn current_catalogue(
         return Err(no());
     }
     unique_catalogue_paths(&current)?;
-    let mut remaining = all_catalogue_deltas(store, scope, extra)?;
+    let mut remaining = Vec::new();
+    for delta in all_catalogue_deltas(store, scope, extra)? {
+        if !super::windows_vault_reconciled_custody::is_reconciled(
+            store,
+            scope,
+            &delta.write_id,
+            delta.revision,
+            delta.identity,
+            delta.file,
+        )? {
+            remaining.push(delta);
+        }
+    }
+    let terminal = super::windows_vault_reconciled_custody::catalogue_updates(store, scope)?;
+    if terminal.iter().any(|done| {
+        remaining
+            .iter()
+            .any(|pending| pending.identity == done.identity)
+    }) {
+        return Err(no());
+    }
     let mut files = std::collections::BTreeMap::<[u8; 16], u64>::new();
     let mut seen_revisions = std::collections::BTreeMap::<String, u64>::new();
     let mut tombstones = std::collections::BTreeSet::new();
@@ -1298,6 +1342,39 @@ pub(super) fn current_catalogue(
             return Err(no());
         }
     }
+    for delta in terminal {
+        validate_delta(&delta)?;
+        if !delta.verified_native {
+            return Err(no());
+        }
+        let already = match (current.get(&delta.identity), delta.entry.as_ref()) {
+            (Some(now), Some(target)) => same_presentation(now, target),
+            (None, None) => true,
+            _ => false,
+        };
+        if already {
+            continue;
+        }
+        let source = match (&delta.original, current.get(&delta.identity)) {
+            (None, None) => true,
+            (Some(original), Some(now)) => same_presentation(original, now),
+            _ => false,
+        };
+        if !source {
+            return Err(no());
+        }
+        if let Some(mut entry) = delta.entry {
+            entry.writable = false;
+            entry.encrypted = true;
+            current.insert(delta.identity, entry);
+        } else {
+            current.remove(&delta.identity);
+        }
+        unique_catalogue_paths(&current)?;
+        if current.len() > super::vault_custody::MAX_CATALOGUE {
+            return Err(no());
+        }
+    }
     Ok(current
         .into_iter()
         .map(
@@ -1327,8 +1404,18 @@ pub(super) fn pending_identities(
     scope: &Scope,
     extra: &[CatalogueDelta],
 ) -> Result<std::collections::BTreeSet<[u8; 16]>, BackendError> {
-    Ok(all_catalogue_deltas(store, scope, extra)?
-        .into_iter()
-        .map(|d| d.identity)
-        .collect())
+    let mut identities = std::collections::BTreeSet::new();
+    for delta in all_catalogue_deltas(store, scope, extra)? {
+        if !super::windows_vault_reconciled_custody::is_reconciled(
+            store,
+            scope,
+            &delta.write_id,
+            delta.revision,
+            delta.identity,
+            delta.file,
+        )? {
+            identities.insert(delta.identity);
+        }
+    }
+    Ok(identities)
 }
