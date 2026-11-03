@@ -195,6 +195,10 @@ impl ConfiguredRootConnection {
                     usn: expected.usn,
                     entry: None,
                     observed_dirty,
+                    root: expected.root,
+                    components: expected.components.clone(),
+                    length: expected.plaintext_len,
+                    source_sha256: expected.source_sha256,
                 });
             }
             let pending = expected.entry.as_ref().ok_or_else(no)?;
@@ -276,6 +280,10 @@ impl ConfiguredRootConnection {
                 usn,
                 entry: proof.entry().cloned(),
                 observed_dirty,
+                root: expected.root,
+                components: expected.components.clone(),
+                length: expected.plaintext_len,
+                source_sha256: proof.plaintext_sha256().or(expected.source_sha256),
             })
         })
     }

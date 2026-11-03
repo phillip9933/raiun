@@ -5628,6 +5628,50 @@ mod hydration_inventory {
             }
             Ok(())
         }
+        /// Typed cached completion has already been re-inspected on the same
+        /// native FI/USN/body. Preserve exact uniqueness before making a
+        /// terminal file eligible for later clean dehydration.
+        pub(super) fn admit_cached_verified_file(
+            &mut self,
+            identity: [u8; 16],
+            file_index: u64,
+            length: u64,
+            components: &[String],
+        ) -> Result<(), InventoryError> {
+            if !self.is_complete()
+                || identity == [0; 16]
+                || file_index == 0
+                || components.is_empty()
+                || self.rows.values().any(|row| {
+                    (row.identity == identity && row.file_index != file_index)
+                        || (row.components.as_slice() == components && row.identity != identity)
+                })
+            {
+                return Err(InventoryError::Conflict);
+            }
+            if let Some(row) = self.rows.get_mut(&(identity, file_index)) {
+                row.length = length;
+                row.components = components.to_vec();
+                return Ok(());
+            }
+            self.record(identity, file_index, length, components.to_vec())
+        }
+        pub(super) fn retire_cached_verified_absence(
+            &mut self,
+            identity: [u8; 16],
+            file_index: u64,
+        ) -> Result<(), InventoryError> {
+            if !self.is_complete()
+                || self
+                    .rows
+                    .values()
+                    .any(|row| row.identity == identity && row.file_index != file_index)
+            {
+                return Err(InventoryError::Conflict);
+            }
+            self.rows.remove(&(identity, file_index));
+            Ok(())
+        }
         pub fn mark_incomplete(&mut self) {
             self.incomplete = true;
         }

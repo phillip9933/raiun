@@ -305,6 +305,27 @@ impl ConfiguredRootConnection {
         &self,
         completed: &crate::VaultCachedNativeCompleted,
     ) -> Result<(), Error> {
+        let root = self.root.as_ref().ok_or(Error::ConfiguredRootChanged)?;
+        if !self.connected
+            || self.state.readiness.load(Ordering::Acquire) != CALLBACK_READY
+            || root.identity.volume_serial != completed.root.volume_serial
+            || root.identity.file_index != completed.root.file_index
+        {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        let terminal = VaultPendingNativeIntent {
+            identity: completed.identity,
+            file_index: completed.file,
+            usn: completed.usn,
+            components: completed.components.clone(),
+            entry: completed.entry.clone(),
+            length: completed.length,
+            source_sha256: completed.source_sha256,
+            terminal_verified: true,
+            write_id: completed.write_id.clone(),
+            revision: completed.revision,
+        };
+        inspect(root, completed.root, &terminal)?;
         let mut rows = self
             .state
             .known_cached_pending
@@ -319,11 +340,39 @@ impl ConfiguredRootConnection {
                 return Err(Error::EditRecoveryUnavailable);
             }
         }
+        let mut dirty = self
+            .state
+            .vault_dirty
+            .lock()
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
+        if dirty
+            .snapshot_optional(&completed.identity)
+            .map_err(|_| Error::EditRecoveryUnavailable)?
+            != completed.observed_dirty
+        {
+            return Err(Error::EditRecoveryUnavailable);
+        }
+        let mut inventory = self
+            .state
+            .hydrated_files
+            .lock()
+            .map_err(|_| Error::EditRecoveryUnavailable)?;
+        match completed.entry.as_ref() {
+            Some(entry) if !entry.directory => inventory
+                .admit_cached_verified_file(
+                    completed.identity,
+                    completed.file,
+                    completed.length,
+                    &completed.components,
+                )
+                .map_err(|_| Error::EditRecoveryUnavailable)?,
+            None => inventory
+                .retire_cached_verified_absence(completed.identity, completed.file)
+                .map_err(|_| Error::EditRecoveryUnavailable)?,
+            Some(_) => {}
+        }
         if let Some(observed) = completed.observed_dirty.as_ref() {
-            self.state
-                .vault_dirty
-                .lock()
-                .map_err(|_| Error::EditRecoveryUnavailable)?
+            dirty
                 .resolve(observed)
                 .map_err(|_| Error::EditRecoveryUnavailable)?;
         }

@@ -71,6 +71,10 @@ pub struct VaultCachedNativeCompleted {
     pub(crate) usn: i64,
     pub(crate) entry: Option<raiun_core::backend::RemoteEntry>,
     pub(crate) observed_dirty: Option<vault_dirty::Observation>,
+    pub(crate) root: ConfiguredRootIdentity,
+    pub(crate) components: Vec<String>,
+    pub(crate) length: u64,
+    pub(crate) source_sha256: Option<[u8; 32]>,
 }
 #[cfg(windows)]
 impl VaultCachedNativeCompleted {
