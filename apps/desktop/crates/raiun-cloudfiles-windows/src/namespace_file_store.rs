@@ -660,7 +660,23 @@ impl FileCreateStore {
             let edit = continued_edit
                 .as_ref()
                 .ok_or(StoreError::IncompleteEvidence)?;
-            self.validate_continued_edit(&joined, report, edit, budget, true)?;
+            if scope == &self.base.scope {
+                self.validate_continued_edit(&joined, report, edit, budget, true)?;
+            } else {
+                // Discovery authenticates every retained scope before filtering
+                // the caller's rows. Decode this foreign continuation against
+                // its own authenticated scope under the same pinned root and
+                // cumulative scan budget; never reinterpret it as our scope.
+                let decoder = FileCreateStore {
+                    base: SnapshotStore::from_directory(
+                        Arc::clone(&self.base.root),
+                        scope.clone(),
+                        Arc::clone(&self.base.protector),
+                        self.base.policy,
+                    )?,
+                };
+                decoder.validate_continued_edit(&joined, report, edit, budget, true)?;
+            }
         }
         #[cfg(not(windows))]
         if progress.continued {

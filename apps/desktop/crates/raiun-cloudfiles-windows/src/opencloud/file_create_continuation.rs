@@ -184,7 +184,6 @@ impl ContinuationAdmission {
             || binding.local_file != self.report.destination.local_file
             || binding.remote.as_ref() != Some(&self.report.remote)
             || binding.relative_path != self.binding.virtual_path.trim_start_matches('/')
-            || key.generation() != self.admission.auth.token_generation
             || recovery.provider_scope() != backend.scope()
             || recovery.root_identity() != self.admission.catalog_scope.local_root()
         {
@@ -195,42 +194,53 @@ impl ContinuationAdmission {
             &self.admission.parent.scope,
             Some(&self.admission.job),
             |session| {
-                if matches!(
+                let inner = session
+                    .remote()
+                    .streamed_remote_for_job(&self.admission.job)
+                    .ok_or(BackendError::Unavailable)?;
+                // Only this selected immutable key keeps its historical
+                // generation. Every HTTP call retains the freshly admitted
+                // current token/root authorization through the inner adapter.
+                let remote = CurrentContinuationRemote {
+                    inner,
+                    scope: key.scope(),
+                    path: &self.binding.virtual_path[1..],
+                    baseline: &self.report.remote,
+                    record_generation: key.generation(),
+                    current_generation: self.admission.auth.token_generation,
+                };
+                let job = self.admission.job.clone();
+                let cancelled: Arc<dyn Fn() -> bool + Send + Sync> =
+                    Arc::new(move || job.is_stopped());
+                let verified = if matches!(
                     state,
                     crate::streamed_store::StreamedAttemptState::LocallyAcknowledged { .. }
                 ) {
-                    let remote = session
-                        .remote()
-                        .streamed_remote_for_job(&self.admission.job)
-                        .ok_or(BackendError::Unavailable)?;
-                    let job = self.admission.job.clone();
-                    let proof = crate::streamed_reconcile::verify_acknowledged_streamed_edit(
+                    crate::streamed_reconcile::verify_acknowledged_streamed_edit(
+                        store, key, &remote, cancelled,
+                    )
+                    .map_err(|_| BackendError::Unavailable)?
+                } else {
+                    let result = crate::streamed_reconcile::reconcile_recovered_streamed_edit(
                         store,
                         key,
-                        remote.as_ref(),
-                        Arc::new(move || job.is_stopped()),
+                        key.scope(),
+                        &remote,
+                        crate::ExplicitRecoveryApproval::user_reviewed(),
+                        cancelled,
                     )
                     .map_err(|_| BackendError::Unavailable)?;
-                    crate::VerifiedEditReadback::from_streamed(proof)
-                        .map(|proof| proof.with_recovery_job(self.admission.job.clone()))
-                        .map_err(|_| BackendError::Unavailable)
-                } else {
-                    let (outcome, proof) = recovery
-                        .dispatch_recovered_edit_verified(
-                            key.record_id(),
-                            key.generation(),
-                            session.remote(),
-                            crate::ExplicitRecoveryApproval::user_reviewed(),
-                        )
-                        .map_err(|_| BackendError::Unavailable)?;
                     if !matches!(
-                        outcome,
+                        result.outcome,
                         crate::ReconciliationOutcome::VerifiedApplied { .. }
                     ) {
                         return Err(BackendError::Unavailable);
                     }
-                    proof.ok_or(BackendError::Unavailable)
-                }
+                    result.verified.ok_or(BackendError::Unavailable)?
+                };
+                crate::VerifiedEditReadback::from_streamed(verified)
+                    .map(|proof| proof.with_recovery_job(self.admission.job.clone()))
+                    .map_err(|_| BackendError::Unavailable)
             },
         )??;
         self.check_proof(backend, &proof)?;
@@ -254,7 +264,6 @@ impl ContinuationAdmission {
             || metadata.local_file != self.report.destination.local_file
             || metadata.relative_path != self.binding.virtual_path.trim_start_matches('/')
             || metadata.remote.as_ref() != Some(&self.report.remote)
-            || metadata.generation != self.admission.auth.token_generation
             || metadata.record_id == self.original.snapshot_id()
             || metadata.content_len != version.size
             || version.resource_id != self.report.remote.resource_id
@@ -365,5 +374,96 @@ impl ContinuationAdmission {
         self.check_proof(backend, proof)
             .map_err(|_| unavailable())?;
         Ok(result)
+    }
+}
+
+/// Selection-bound generation adaptation for explicit interrupted-create
+/// recovery only. It does not rewrite persisted keys, weaken current HTTP
+/// authorization or provide a general historical-token route.
+struct CurrentContinuationRemote<'a> {
+    inner: Box<dyn crate::streamed_reconcile::StreamedRecoveryRemote + 'a>,
+    scope: &'a crate::EditJournalScope,
+    path: &'a str,
+    baseline: &'a crate::RemoteEditBaseline,
+    record_generation: u64,
+    current_generation: u64,
+}
+impl crate::streamed_reconcile::StreamedRecoveryRemote for CurrentContinuationRemote<'_> {
+    fn server_origin(&self) -> &str {
+        self.inner.server_origin()
+    }
+    fn ensure_authorized(
+        &self,
+        scope: &crate::EditJournalScope,
+        generation: u64,
+    ) -> Result<(), raiun_core::backend::CloudError> {
+        if scope != self.scope || generation != self.record_generation || generation == 0 {
+            return Err(raiun_core::backend::CloudError::new(
+                ErrorKind::Unauthorized,
+                "The selected recovery scope changed",
+            ));
+        }
+        self.inner.ensure_authorized(scope, self.current_generation)
+    }
+    fn stat(
+        &self,
+        scope: &crate::EditJournalScope,
+        path: &str,
+    ) -> Result<crate::RecoveryRemoteVersion, raiun_core::backend::CloudError> {
+        self.ensure_authorized(scope, self.record_generation)?;
+        self.check_path(path)?;
+        self.inner.stat(scope, path)
+    }
+    fn conditional_upload(
+        &self,
+        scope: &crate::EditJournalScope,
+        path: &str,
+        source: Box<dyn std::io::Read + Send>,
+        baseline: &crate::RemoteEditBaseline,
+        len: u64,
+        sha: [u8; 32],
+    ) -> Result<crate::streamed_reconcile::StreamedRemoteDigest, raiun_core::backend::CloudError>
+    {
+        self.ensure_authorized(scope, self.record_generation)?;
+        self.check_path(path)?;
+        if baseline != self.baseline {
+            return Err(raiun_core::backend::CloudError::new(
+                ErrorKind::Forbidden,
+                "The selected recovery baseline changed",
+            ));
+        }
+        self.inner
+            .conditional_upload(scope, path, source, baseline, len, sha)
+    }
+    fn read_digest(
+        &self,
+        scope: &crate::EditJournalScope,
+        path: &str,
+        id: &str,
+        etag: &str,
+        len: u64,
+        sha: [u8; 32],
+    ) -> Result<crate::streamed_reconcile::StreamedRemoteDigest, raiun_core::backend::CloudError>
+    {
+        self.ensure_authorized(scope, self.record_generation)?;
+        self.check_path(path)?;
+        if id != self.baseline.resource_id {
+            return Err(raiun_core::backend::CloudError::new(
+                ErrorKind::Forbidden,
+                "The selected recovery resource changed",
+            ));
+        }
+        self.inner.read_digest(scope, path, id, etag, len, sha)
+    }
+}
+impl CurrentContinuationRemote<'_> {
+    fn check_path(&self, path: &str) -> Result<(), raiun_core::backend::CloudError> {
+        if path != self.path {
+            return Err(raiun_core::backend::CloudError::new(
+                ErrorKind::Forbidden,
+                "The selected recovery path changed",
+            ));
+        }
+        Ok(())
     }
 }
